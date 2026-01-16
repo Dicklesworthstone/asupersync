@@ -64,9 +64,6 @@ combine(b1, b2) = {
   cost_quota: min_opt(b1.cost_quota, b2.cost_quota),
   priority:   max(b1.priority, b2.priority)
 }
-
-For hard latency and backlog bounds, budgets are refined into arrival/service curves
-using min-plus network calculus (Section 14).
 ```
 
 ### 1.5 Task States
@@ -136,9 +133,6 @@ Two traces are equivalent (`~`) when they are related by a finite sequence of ad
 Asupersync’s “observational equivalence” (`≃`) is intended to respect this quotient:
 we care about equivalence classes (partial orders), not raw interleavings.
 
-This trace-based view is made canonical via event structures and higher-dimensional
-automata in Section 10.
-
 This is the semantic backbone for “optimal DPOR” and stable trace replay (§8).
 
 ### 1.9 Linear resources (obligations) as a discipline
@@ -154,9 +148,7 @@ Held(t) = { o ∈ dom(O) | O[o].holder = t ∧ O[o].state = Reserved }
 The intended rule is: reaching `Completed(_)` with `Held(t) ≠ ∅` is a semantic error (a leak).
 The operational rule `LEAK` below is the runtime witness of this linearity violation.
 
-The graded typing and WSTS/VASS projections that make this checkable are in Sections 12 and 13.
-
-### 1.10 Distributed time as causal partial order
+### 1.10 (Optional extension) Distributed time as causal partial order
 
 For distributed structured concurrency, traces should be **causally ordered**, not totally ordered.
 A standard representation is a vector clock:
@@ -168,9 +160,6 @@ e1 ∥ e2  iff  neither VC(e1) ≤ VC(e2) nor VC(e2) ≤ VC(e1)
 ```
 
 This lets remote traces remain honest: concurrent events stay unordered until causality forces an order.
-
-Distributed commit consistency is strengthened with sheaf-theoretic gluing and cohomology
-obstruction checks (Section 15).
 
 ---
 
@@ -377,8 +366,6 @@ For reasoning (and eventually mechanized proofs), it is useful to interpret canc
 Winning condition: System wins iff every cancellation request is eventually acknowledged and the task reaches a terminal state within the provided budget under fairness assumptions.
 
 This perspective turns “bounded masking” into a mathematical promise: if every primitive has a known bound on its cancellation deferrals (mask depth) and checkpoint frequency, then there exists a computable budget that makes System’s winning strategy guaranteed.
-
-See Section 11 for a full game-semantic formulation.
 
 #### CANCEL-DRAIN — Task finishes cleanup
 
@@ -940,117 +927,7 @@ CancelRequest(r, reason) == ...
 
 ---
 
-## 10. Event Structures and Higher-Dimensional Automata
-
-To make "true concurrency" canonical, lift traces to an **event structure**:
-
-```
-E = (Ev, ≤, #, λ)
-```
-
-* `Ev`: events
-* `≤`: causality (partial order)
-* `#`: conflict (irreflexive, symmetric) -- cancellation induces conflict
-* `λ`: labeling into observable actions
-
-A **configuration** `C ⊆ Ev` is finite, downward-closed, and conflict-free.
-Operational traces correspond to **linearizations** of configurations.
-
-This embeds the interleaving semantics into a **higher-dimensional automaton (HDA)**:
-independent events form `n`-cubes; schedules are **directed paths** in the cubical complex.
-Schedule equivalence is **directed homotopy** (d-homotopy), not merely adjacent swaps.
-
-*Payoff:* DPOR targets one configuration per equivalence class; replay can normalize to
-canonical representatives (geodesic or Foata-like normal forms).
-
----
-
-## 11. Cancellation as a Quantitative Concurrent Game
-
-Define a two-player arena:
-
-```
-System moves: schedule(t), cancel(r, reason, budget)
-Task moves:   work, checkpoint, mask(k), complete(outcome)
-```
-
-Strategies:
-* System strategy must be **fair**.
-* Task strategy must be **bounded**: max mask depth `M`, max polls between checkpoints `C`.
-
-**Winning condition:** System wins iff the task reaches a terminal state within the
-budget after cancellation is requested.
-
-**Completeness theorem (sketch):**
-If `budget >= M * C * poll_cost`, then for any bounded Task strategy, there exists a fair
-System strategy that forces termination.
-
-This formalizes the cancellation bound as a **winning-strategy guarantee**, not a heuristic.
-
----
-
-## 12. Quantitative / Graded Typing for Obligations
-
-Let `R` be a resource semiring. A graded obligation type:
-
-```
-Obligation<K, r>  where r in R
-reserve : Cx -> Obligation<K, 1>
-commit  : Obligation<K, 1> -> Cx -> ()
-abort   : Obligation<K, 1> -> Cx -> ()
-```
-
-Typing judgment (sketch):
-
-```
-Γ ⊢^r t : A
-```
-
-meaning "term `t` uses resource `r`."
-
-*Payoff:* linearity becomes a type discipline; "no leaks" is a static error for code that
-opts into the graded surface. The cancellation bound becomes a type-level inequality.
-
----
-
-## 13. Obligations as VASS/WSTS
-
-Project the obligation registry into a **vector addition system**:
-
-```
-marking(r, k) = count of reserved obligations of kind k in region r
-```
-
-Transitions are monotone on markings (reserve +1, commit/abort -1), yielding a
-**well-structured transition system (WSTS)**. This enables coverability-style analyses:
-"Can a leak state be reached?" becomes algorithmically checkable in bounded models.
-
----
-
-## 14. Min-Plus Network Calculus for Budgets
-
-Replace scalar budgets with **arrival curves** `α(t)` and **service curves** `β(t)` in the
-min-plus semiring. Backlog and delay bounds follow from min-plus convolution:
-
-```
-(f ⊗ g)(t) = inf_{0 <= s <= t} (f(s) + g(t - s))
-```
-
-This yields provable buffer sizing and latency bounds, rather than runtime tuning.
-
----
-
-## 15. Sheaf-Theoretic Consistency (Distributed)
-
-For distributed sagas, model local state as a presheaf over network topology. A
-**global section** corresponds to a globally consistent commit. Nontrivial cohomology
-(`H^1 != 0`) signals an obstruction to commit, even when local overlaps agree.
-
-This provides a principled "global inconsistency detector" for split-brain-like scenarios.
-
----
-
-## 16. Summary
+## 10. Summary
 
 This semantics provides:
 

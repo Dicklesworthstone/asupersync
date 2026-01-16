@@ -187,97 +187,6 @@ This is Floyd-Warshall in the tropical semiring `(ℝ∪{∞}, min, +)`. Critica
 
 ---
 
-### 3.4 Advanced mathematical lenses (mandatory foundations)
-
-These are part of the full system specification. Phase-0 can implement only the operational
-core, but it must preserve these semantics so later phases can make them explicit and enforced.
-
-#### 3.4.1 Event structures and higher-dimensional automata (true concurrency)
-
-Mazurkiewicz traces are the right starting point; **event structures** make them canonical.
-Model concurrency with:
-
-```
-E = (Ev, ≤, #, λ)
-```
-
-where `≤` is causality, `#` is conflict (cancellation), and `λ` labels events.
-A **configuration** is a finite, conflict-free, downward-closed set of events.
-
-*Payoff:* independence is *defined*, not guessed; DPOR can be specified as "one configuration
-per equivalence class." Cancellation becomes "introduce conflict."
-
-#### 3.4.2 Directed topology / HDA / cubical sets
-
-Replace "interleavings" with a **directed cubical complex** where an `n`-cube means `n` events
-can occur independently. Schedules are **d-paths**; schedule equivalence is **directed homotopy**.
-
-*Payoff:* you can normalize schedules by geodesic representatives and explain "impossible interleavings"
-as topological holes. This gives principled coverage metrics for schedule exploration.
-
-#### 3.4.3 Quantitative / graded types for budgets and obligations
-
-Budgets and obligations already live in semirings. **Quantitative type theory** makes that
-resource algebra explicit at the type level (graded modalities). Sketch:
-
-```
-Obligation<K, r>     // r in a resource semiring
-reserve : Cx -> Obligation<K, 1>
-commit  : Obligation<K, 1> -> Cx -> ()
-abort   : Obligation<K, 1> -> Cx -> ()
-```
-
-*Payoff:* "no obligation leaks" can be a **type error** (at least in a linted, opt-in surface).
-The cancellation completeness bound becomes a type-level inequality rather than a runtime hope.
-
-#### 3.4.4 Polynomial functors for compositional dynamics
-
-Treat tasks/regions as **polynomial functors** `p(y) = Σ_{i∈I} y^{B_i}`.
-Parallel composition is the monoidal product, sequential composition is functor composition,
-and feedback is a trace.
-
-*Payoff:* join/race/timeout laws follow from categorical structure, not ad-hoc axioms.
-
-#### 3.4.5 Dialectica categories for two-phase effects
-
-Two-phase effects are naturally **Dialectica morphisms** (forward value + backward obligation).
-
-*Payoff:* linearity and "no leaks" are categorical invariants, not merely runtime checks.
-
-#### 3.4.6 Guarded recursion for actors and leases
-
-Use the "later" modality `▷` to define long-lived behaviors:
-
-```
-Actor = fix(λself. Msg -> (State × ▷self))
-```
-
-*Payoff:* coinductive reasoning for actors, and time-indexed leases as first-class types.
-
-#### 3.4.7 Cancellation as a quantitative concurrent game
-
-Model cancellation as a **resource game**:
-System moves = schedule + cancel; Task moves = work/checkpoint/mask.
-The system wins iff quiescence is forced within budget.
-
-*Payoff:* "bounded cleanup is achievable" becomes a theorem about winning strategies.
-
-#### 3.4.8 Tropical geometry and network calculus for budgets
-
-Tropical algebra already appears in budgets. **Network calculus** (min-plus convolution)
-upgrades this from static budgets to arrival/service curves.
-
-*Payoff:* provable backlog and latency bounds; buffer sizes derived by calculation, not tuning.
-
-#### 3.4.9 Sheaf-theoretic consistency for distributed structure
-
-Distributed sagas can be modeled as a **sheaf** of local states over the network topology.
-Obstructions to global commit live in cohomology (`H^1 != 0`).
-
-*Payoff:* principled detection of "split-brain-like" inconsistencies that are invisible to local checks.
-
----
-
 ## 4. Non-negotiable invariants
 
 ### I1. Tree ownership of live work
@@ -562,12 +471,6 @@ Even without a full type system, we can build a sound static check:
 
 This is an **abstract interpretation** in the Cousot–Cousot sense: sound, possibly conservative, and extremely valuable as the codebase grows.
 
-### 8.9 Quantitative typing (required for static budget guarantees)
-
-Adopt a **graded/quantitative type layer** so obligations and budgets carry compile-time
-resource annotations. This upgrades "no obligation leaks" from a runtime invariant to a
-type error (for code that opts into the stricter surface).
-
 ---
 
 ## 9. Resource management and finalization
@@ -636,12 +539,6 @@ Under standard assumptions (cooperative checkpoints, bounded masking, fairness),
 
 `plan` module builds DAG nodes, applies rewrites, dedupes shared work, schedules locally or remotely.
 
-### 11.7 Network calculus view (required for hard bounds)
-
-Replace static "budget values" with **arrival and service curves** in the min-plus semiring.
-This yields analytic bounds for backlog and latency (no tuning by trial-and-error) and
-makes buffer sizing a provable consequence of declared workloads.
-
 ---
 
 ## 12. Derived combinators
@@ -708,11 +605,6 @@ Distributed semantics needs two additional mathematical commitments:
 
 This makes “distributed structured concurrency” honest: we get determinism where possible (causal ordering), and explicit, detectable protocol violations where not.
 
-**Sheaf-theoretic consistency (Phase 4+)**. Model local state as a presheaf
-over the network topology; global commit corresponds to a global section. A nontrivial `H^1`
-signals a topological obstruction to commit (split-brain-like inconsistency), even when
-pairwise checks look fine.
-
 ---
 
 ## 17. Observability
@@ -742,14 +634,6 @@ For schedule exploration, “DPOR-class” should mean **optimal DPOR**:
 * use wakeup trees / source sets / sleep sets to avoid redundancy.
 
 Longer-term, directed topological methods (dihomotopy classes of execution paths) can subsume some POR cases, but optimal DPOR is the practical, proven sweet spot.
-
-Required research-grade upgrades (Phase 5):
-* **HDA/cubical normalization**: treat schedules as geodesics in a directed cubical complex to
-  minimize redundant context switches while preserving equivalence.
-* **Persistent (directed) homology**: prioritize schedule classes that probe topologically
-  essential "holes" (likely deadlocks or subtle order constraints).
-* **Large-deviation/HMC exploration**: bias sampling toward low-probability, high-contention
-  schedules to find black-swan concurrency bugs.
 
 ---
 

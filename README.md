@@ -239,18 +239,6 @@ Asupersync has formal semantics backing its engineering.
 
 See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) for the complete operational semantics.
 
-### Mathematical Backbone (Ultra-Deep)
-
-For those who care about the deepest foundations, the design is also compatible with:
-- **Event structures + higher-dimensional automata** for true concurrency (cancellation as conflict, schedules as d-paths).
-- **Quantitative/graded types** for budgets and obligations (compile-time resource bounds, not just runtime checks).
-- **Concurrent/quantitative game semantics** for cancellation (bounded cleanup as a winning strategy).
-- **Min-plus network calculus** for buffer sizing and latency bounds (arrival/service curves).
-- **Sheaf-theoretic consistency** for distributed sagas (cohomological obstruction to commit).
-
-These are part of the design contract. They do not change the everyday API, but they sharpen
-proofs, testing oracles, and optimizer laws.
-
 ---
 
 ## Documentation
