@@ -226,10 +226,7 @@ mod tests {
         .with_jitter(0.0); // Disable jitter for predictable test
 
         assert_eq!(backoff.backoff_duration(0), Duration::from_millis(10));
-        // Even with 0.0 jitter, the deterministic variation adds 0 or 1ms
-        // attempt 1: 20ms base + (1*31)%2 = 21ms
-        assert_eq!(backoff.backoff_duration(1), Duration::from_millis(21));
-        // attempt 2: 40ms base + (2*31)%2 = 40ms
+        assert_eq!(backoff.backoff_duration(1), Duration::from_millis(20));
         assert_eq!(backoff.backoff_duration(2), Duration::from_millis(40));
     }
 
