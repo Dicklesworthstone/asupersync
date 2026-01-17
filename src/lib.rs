@@ -49,6 +49,7 @@ pub mod error;
 pub mod lab;
 pub mod record;
 pub mod runtime;
+pub mod sync;
 pub mod trace;
 pub mod types;
 pub mod util;
