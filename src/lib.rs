@@ -31,6 +31,7 @@
 //! - [`observability`]: Structured logging, metrics, and diagnostic context
 //! - [`security`]: Symbol authentication and security primitives
 //! - [`time`]: Sleep and timeout primitives for time-based operations
+//! - [`io`]: Async I/O traits and adapters
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -49,6 +50,7 @@ pub mod channel;
 pub mod combinator;
 pub mod cx;
 pub mod error;
+pub mod io;
 pub mod lab;
 pub mod observability;
 pub mod record;
