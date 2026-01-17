@@ -544,16 +544,13 @@ pub fn pipeline_n_outcomes<T, E>(
                 last_ok_value = Some(v);
             }
             Outcome::Err(e) => {
-                return PipelineResult::failed(
-                    PipelineError::StageError(e),
-                    FailedStage { index, total_stages },
-                );
+                return PipelineResult::failed(e, FailedStage::new(index, total_stages));
             }
             Outcome::Cancelled(r) => {
-                return PipelineResult::cancelled(r, FailedStage { index, total_stages });
+                return PipelineResult::cancelled(r, FailedStage::new(index, total_stages));
             }
             Outcome::Panicked(p) => {
-                return PipelineResult::panicked(p, FailedStage { index, total_stages });
+                return PipelineResult::panicked(p, FailedStage::new(index, total_stages));
             }
         }
     }
