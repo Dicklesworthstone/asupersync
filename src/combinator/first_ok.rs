@@ -187,7 +187,12 @@ pub struct FirstOkSuccess<T> {
 impl<T, E> FirstOkResult<T, E> {
     /// Creates a new first_ok result with a success.
     #[must_use]
-    pub fn success(index: usize, value: T, failures: Vec<(usize, FirstOkFailure<E>)>, total: usize) -> Self {
+    pub fn success(
+        index: usize,
+        value: T,
+        failures: Vec<(usize, FirstOkFailure<E>)>,
+        total: usize,
+    ) -> Self {
         Self {
             success: Some(FirstOkSuccess { index, value }),
             failures,
@@ -225,10 +230,9 @@ impl<T, E> FirstOkResult<T, E> {
     /// Returns the number of operations attempted before success (or total if no success).
     #[must_use]
     pub fn attempts(&self) -> usize {
-        match &self.success {
-            Some(s) => s.index + 1,
-            None => self.failures.len(),
-        }
+        self.success
+            .as_ref()
+            .map_or(self.failures.len(), |s| s.index + 1)
     }
 }
 
@@ -380,7 +384,11 @@ pub fn first_ok_to_result<T, E: Clone>(result: FirstOkResult<T, E>) -> Result<T,
 /// # Returns
 /// `true` if first_ok can still succeed, `false` if impossible.
 #[must_use]
-pub const fn first_ok_still_possible(was_cancelled: bool, had_panic: bool, remaining: usize) -> bool {
+pub const fn first_ok_still_possible(
+    was_cancelled: bool,
+    had_panic: bool,
+    remaining: usize,
+) -> bool {
     !was_cancelled && !had_panic && remaining > 0
 }
 
@@ -496,8 +504,7 @@ mod tests {
 
     #[test]
     fn first_ok_to_result_success() {
-        let outcomes: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Err("e1"), Outcome::Ok(42)];
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Err("e1"), Outcome::Ok(42)];
         let result = first_ok_outcomes(outcomes);
         let value = first_ok_to_result(result);
 
@@ -507,8 +514,7 @@ mod tests {
 
     #[test]
     fn first_ok_to_result_all_failed() {
-        let outcomes: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Err("e1"), Outcome::Err("e2")];
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Err("e1"), Outcome::Err("e2")];
         let result = first_ok_outcomes(outcomes);
         let value = first_ok_to_result(result);
 
@@ -547,8 +553,7 @@ mod tests {
 
     #[test]
     fn first_ok_to_result_panicked() {
-        let outcomes: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Panicked(PanicPayload::new("boom"))];
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Panicked(PanicPayload::new("boom"))];
         let result = first_ok_outcomes(outcomes);
         let value = first_ok_to_result(result);
 
@@ -615,8 +620,7 @@ mod tests {
         assert_eq!(result.attempts(), 2);
 
         // All fail means attempts == failures.len()
-        let outcomes: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Err("e1"), Outcome::Err("e2")];
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Err("e1"), Outcome::Err("e2")];
         let result = first_ok_outcomes(outcomes);
         assert_eq!(result.attempts(), 2);
     }
@@ -646,8 +650,14 @@ mod tests {
         let r2 = first_ok_outcomes(outcomes2);
 
         // Both should have same success
-        assert_eq!(r1.success.as_ref().unwrap().value, r2.success.as_ref().unwrap().value);
-        assert_eq!(r1.success.as_ref().unwrap().index, r2.success.as_ref().unwrap().index);
+        assert_eq!(
+            r1.success.as_ref().unwrap().value,
+            r2.success.as_ref().unwrap().value
+        );
+        assert_eq!(
+            r1.success.as_ref().unwrap().index,
+            r2.success.as_ref().unwrap().index
+        );
     }
 
     #[test]
@@ -666,8 +676,7 @@ mod tests {
     fn first_ok_vs_race_semantic_difference() {
         // In first_ok, a failing operation before success doesn't win
         // This is different from race where first completion wins
-        let outcomes: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Err("fast_error"), Outcome::Ok(42)];
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Err("fast_error"), Outcome::Ok(42)];
 
         let result = first_ok_outcomes(outcomes);
 

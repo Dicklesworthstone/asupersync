@@ -44,13 +44,19 @@ use core::fmt;
 use std::marker::PhantomData;
 
 /// Configuration for a pipeline operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineConfig {
     /// Whether to check cancellation between stages.
     pub check_cancellation: bool,
     /// Whether to continue after recoverable errors (vs short-circuit).
     /// Default is false (short-circuit on first error).
     pub continue_on_error: bool,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PipelineConfig {
@@ -415,20 +421,14 @@ pub fn pipeline2_outcomes<T, E>(
 
     // First stage succeeded, check second
     match o2 {
+        Some(Outcome::Ok(v)) => PipelineResult::completed(v, TOTAL_STAGES),
         Some(outcome) => {
-            if let Some(result) = stage_outcome_to_result(outcome, 1, TOTAL_STAGES) {
-                return result;
-            }
-            // Both stages succeeded - but we need the final value
-            // This path means o2 was Ok, extract it
-            match outcome {
-                Outcome::Ok(v) => PipelineResult::completed(v, TOTAL_STAGES),
-                _ => unreachable!("stage_outcome_to_result should have caught non-Ok"),
-            }
+            // Second stage failed - convert to result
+            stage_outcome_to_result(outcome, 1, TOTAL_STAGES)
+                .expect("non-Ok should return Some result")
         }
         None => {
             // Second stage was never executed (shouldn't happen in normal use)
-            // This indicates a bug in the caller
             panic!("o2 must be provided when o1 succeeds")
         }
     }
@@ -487,14 +487,11 @@ pub fn pipeline3_outcomes<T, E>(
 
     // Check third stage
     match o3 {
+        Some(Outcome::Ok(v)) => PipelineResult::completed(v, TOTAL_STAGES),
         Some(outcome) => {
-            if let Some(result) = stage_outcome_to_result(outcome, 2, TOTAL_STAGES) {
-                return result;
-            }
-            match outcome {
-                Outcome::Ok(v) => PipelineResult::completed(v, TOTAL_STAGES),
-                _ => unreachable!("stage_outcome_to_result should have caught non-Ok"),
-            }
+            // Third stage failed - convert to result
+            stage_outcome_to_result(outcome, 2, TOTAL_STAGES)
+                .expect("non-Ok should return Some result")
         }
         None => panic!("o3 must be provided when o1 and o2 succeed"),
     }
@@ -530,7 +527,10 @@ pub fn pipeline3_outcomes<T, E>(
 /// assert!(result.is_failed());
 /// ```
 #[must_use]
-pub fn pipeline_n_outcomes<T, E>(outcomes: Vec<Outcome<T, E>>, total_stages: usize) -> PipelineResult<T, E> {
+pub fn pipeline_n_outcomes<T, E>(
+    outcomes: Vec<Outcome<T, E>>,
+    total_stages: usize,
+) -> PipelineResult<T, E> {
     assert!(!outcomes.is_empty(), "outcomes must not be empty");
     assert!(outcomes.len() <= total_stages, "more outcomes than stages");
 
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn pipeline2_both_ok() {
-        let result = pipeline2_outcomes(Outcome::Ok(1), Some(Outcome::Ok(2)));
+        let result = pipeline2_outcomes::<i32, &str>(Outcome::Ok(1), Some(Outcome::Ok(2)));
 
         assert!(result.is_completed());
         if let PipelineResult::Completed {
@@ -909,10 +909,8 @@ mod tests {
 
     #[test]
     fn pipeline2_first_cancelled() {
-        let result = pipeline2_outcomes::<i32, &str>(
-            Outcome::Cancelled(CancelReason::shutdown()),
-            None,
-        );
+        let result =
+            pipeline2_outcomes::<i32, &str>(Outcome::Cancelled(CancelReason::shutdown()), None);
 
         assert!(result.is_cancelled());
     }
@@ -929,8 +927,8 @@ mod tests {
 
     #[test]
     fn pipeline3_all_ok() {
-        let result = pipeline3_outcomes(
-            Outcome::Ok(1),
+        let result = pipeline3_outcomes::<i32, &str>(
+            Outcome::<i32, &str>::Ok(1),
             Some(Outcome::Ok(2)),
             Some(Outcome::Ok(3)),
         );
@@ -960,11 +958,8 @@ mod tests {
 
     #[test]
     fn pipeline3_second_fails() {
-        let result = pipeline3_outcomes::<i32, &str>(
-            Outcome::Ok(1),
-            Some(Outcome::Err("s2")),
-            None,
-        );
+        let result =
+            pipeline3_outcomes::<i32, &str>(Outcome::Ok(1), Some(Outcome::Err("s2")), None);
 
         assert!(result.is_failed());
         if let PipelineResult::Failed { failed_at, .. } = result {
@@ -1016,8 +1011,7 @@ mod tests {
 
     #[test]
     fn pipeline_with_final_intermediate_fails() {
-        let intermediates: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Ok(1), Outcome::Err("mid fail")];
+        let intermediates: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1), Outcome::Err("mid fail")];
         let result = pipeline_with_final(intermediates, Outcome::Ok(42), 3);
 
         assert!(result.is_failed());

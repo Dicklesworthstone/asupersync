@@ -11,11 +11,15 @@
 //! - [`hedge`]: Latency hedging - start backup after delay, first wins
 //! - [`first_ok`]: Try operations sequentially until one succeeds
 //! - [`pipeline`]: Chain transformations with staged processing
+//! - [`map_reduce`]: Parallel map followed by monoid-based reduction
+//! - [`circuit_breaker`]: Failure detection and prevention
 
 pub mod bracket;
+pub mod circuit_breaker;
 pub mod first_ok;
 pub mod hedge;
 pub mod join;
+pub mod map_reduce;
 pub mod pipeline;
 pub mod quorum;
 pub mod race;
@@ -33,6 +37,10 @@ pub use hedge::{
 pub use join::{
     aggregate_outcomes, join2_outcomes, join2_to_result, join_all_outcomes, join_all_to_result,
     make_join_all_result, Join, Join2Result, JoinAll, JoinAllError, JoinAllResult, JoinError,
+};
+pub use map_reduce::{
+    make_map_reduce_result, map_reduce_outcomes, map_reduce_to_result, reduce_successes, MapReduce,
+    MapReduceError, MapReduceResult,
 };
 pub use pipeline::{
     pipeline2_outcomes, pipeline3_outcomes, pipeline_n_outcomes, pipeline_to_result,
@@ -55,4 +63,9 @@ pub use retry::{
 pub use timeout::{
     effective_deadline, make_timed_result, TimedError, TimedResult, Timeout, TimeoutConfig,
     TimeoutError,
+};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerError, CircuitBreakerMetrics, CircuitBreakerPolicy,
+    CircuitBreakerPolicyBuilder, FailurePredicate, Permit, SlidingWindowConfig, State,
+    StateChangeCallback,
 };
