@@ -37,8 +37,14 @@ use std::time::Duration;
 
 pub mod logging;
 pub mod runner;
+pub mod bench;
 pub mod tests;
 
+pub use bench::{
+    default_benchmarks, run_benchmark_comparison, BenchCategory, BenchComparisonResult,
+    BenchComparisonSummary, BenchConfig, BenchOutput, BenchRunResult, BenchRunSummary, BenchRunner,
+    Benchmark, Comparison, ComparisonConfidence, Stats, StatsError,
+};
 pub use logging::{LogCollector, LogConfig, LogEntry, LogLevel};
 pub use runner::{
     compare_results, run_comparison, ComparisonResult, ComparisonStatus, ComparisonSummary,

@@ -465,6 +465,9 @@ mod tests {
         // Verify task was added (proving the bug)
         let region_record = state.regions.get(region.arena_index()).expect("region");
         // TODO: This assertion should be inverted once the bug is fixed
-        assert!(region_record.task_ids().contains(&handle.task_id()), "Task should have been added (demonstrating bug)");
+        assert!(
+            region_record.task_ids().contains(&handle.task_id()),
+            "Task should have been added (demonstrating bug)"
+        );
     }
 }
