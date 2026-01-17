@@ -718,6 +718,7 @@ impl<T, E: Into<Error>> ResultExt<T> for core::result::Result<T, E> {
 }
 
 /// A specialized Result type for Asupersync operations.
+#[allow(clippy::result_large_err)]
 pub type Result<T> = core::result::Result<T, Error>;
 
 #[cfg(test)]

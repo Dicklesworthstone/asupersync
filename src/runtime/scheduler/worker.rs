@@ -77,6 +77,7 @@ impl Worker {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn execute(&self, _task: TaskId) {
         // Placeholder for execution logic.
         // In real implementation, this would:
@@ -95,6 +96,7 @@ pub struct Parker {
 
 impl Parker {
     /// Creates a new parker.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Arc::new((Mutex::new(false), Condvar::new())),
@@ -123,8 +125,10 @@ impl Parker {
     /// Unparks a parked thread.
     pub fn unpark(&self) {
         let (lock, cvar) = &*self.inner;
-        let mut notified = lock.lock().unwrap();
-        *notified = true;
+        {
+            let mut notified = lock.lock().unwrap();
+            *notified = true;
+        }
         cvar.notify_one();
     }
 }

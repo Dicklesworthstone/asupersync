@@ -53,30 +53,29 @@ impl TcpSocket {
 
     /// Sets the SO_REUSEADDR option on this socket.
     pub fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()> {
-        let mut state = self.state.lock().expect("tcp socket lock poisoned");
-        state.reuseaddr = reuseaddr;
+        self.state.lock().expect("tcp socket lock poisoned").reuseaddr = reuseaddr;
         Ok(())
     }
 
     /// Sets the SO_REUSEPORT option on this socket (Unix only).
     #[cfg(unix)]
     pub fn set_reuseport(&self, reuseport: bool) -> io::Result<()> {
-        let mut state = self.state.lock().expect("tcp socket lock poisoned");
-        state.reuseport = reuseport;
+        self.state.lock().expect("tcp socket lock poisoned").reuseport = reuseport;
         Ok(())
     }
 
     /// Binds this socket to the given local address.
     pub fn bind(&self, addr: SocketAddr) -> io::Result<()> {
-        let mut state = self.state.lock().expect("tcp socket lock poisoned");
-        if !family_matches(state.family, addr) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "address family does not match socket",
-            ));
+        {
+            let mut state = self.state.lock().expect("tcp socket lock poisoned");
+            if !family_matches(state.family, addr) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "address family does not match socket",
+                ));
+            }
+            state.bound = Some(addr);
         }
-        state.bound = Some(addr);
-        drop(state);
         Ok(())
     }
 

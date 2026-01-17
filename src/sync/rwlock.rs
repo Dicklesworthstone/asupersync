@@ -239,6 +239,7 @@ impl<T> RwLock<T> {
         }
 
         state.readers += 1;
+        drop(state);
         Ok(())
     }
 
@@ -293,6 +294,7 @@ impl<T> RwLock<T> {
         }
 
         state.writer_active = true;
+        drop(state);
         Ok(())
     }
 
@@ -469,6 +471,7 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
 }
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use crate::util::ArenaIndex;

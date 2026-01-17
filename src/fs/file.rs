@@ -20,19 +20,19 @@ impl File {
     /// Opens a file in read-only mode.
     ///
     /// See [`OpenOptions::open`] for more options.
-    pub async fn open(path: impl AsRef<Path>) -> io::Result<File> {
+    pub async fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
         let file = std::fs::File::open(path)?;
-        Ok(File { inner: file })
+        Ok(Self { inner: file })
     }
 
     /// Opens a file in write-only mode.
     ///
     /// This function will create a file if it does not exist, and will truncate it if it does.
-    pub async fn create(path: impl AsRef<Path>) -> io::Result<File> {
+    pub async fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
         let file = std::fs::File::create(path)?;
-        Ok(File { inner: file })
+        Ok(Self { inner: file })
     }
 
     /// Returns a new `OpenOptions` object.
@@ -66,9 +66,9 @@ impl File {
     }
 
     /// Creates a new `File` instance that shares the same underlying file handle.
-    pub async fn try_clone(&self) -> io::Result<File> {
+    pub async fn try_clone(&self) -> io::Result<Self> {
         let file = self.inner.try_clone()?;
-        Ok(File { inner: file })
+        Ok(Self { inner: file })
     }
 
     /// Changes the permissions on the underlying file.

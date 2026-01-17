@@ -57,6 +57,7 @@ impl SharedChannel {
 }
 
 /// Create a connected in-memory channel pair.
+#[must_use]
 pub fn channel(capacity: usize) -> (sink::ChannelSink, stream::ChannelStream) {
     let shared = Arc::new(SharedChannel::new(capacity));
     (

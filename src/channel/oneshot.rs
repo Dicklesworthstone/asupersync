@@ -331,7 +331,7 @@ pub struct RecvFuture<'a, T> {
     cx: &'a Cx,
 }
 
-impl<'a, T> Future for RecvFuture<'a, T> {
+impl<T> Future for RecvFuture<'_, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -389,6 +389,7 @@ impl<T> Receiver<T> {
     /// # Errors
     ///
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
+    #[must_use]
     pub fn recv<'a>(&'a self, cx: &'a Cx) -> RecvFuture<'a, T> {
         RecvFuture { receiver: self, cx }
     }

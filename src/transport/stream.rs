@@ -76,6 +76,7 @@ pub trait SymbolStreamExt: SymbolStream {
     }
 
     /// Take only symbols for a specific block.
+    #[allow(clippy::type_complexity)]
     fn for_block(self, sbn: u8) -> FilterStream<Self, Box<dyn FnMut(&AuthenticatedSymbol) -> bool + Send>>
     where
         Self: Sized + 'static,
@@ -248,6 +249,7 @@ pub struct MergedStream<S> {
 
 impl<S> MergedStream<S> {
     /// Creates a merged stream from the provided streams.
+    #[must_use]
     pub fn new(streams: Vec<S>) -> Self {
         Self { streams, current: 0 }
     }
@@ -286,7 +288,6 @@ impl<S: SymbolStream + Unpin> SymbolStream for MergedStream<S> {
                     if self.current >= self.streams.len() {
                         self.current = 0;
                     }
-                    continue;
                 }
                 Poll::Pending => {
                     idx += 1;
@@ -337,19 +338,21 @@ impl SymbolStream for ChannelStream {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
-        let mut queue = self.shared.queue.lock().unwrap();
-        
-        if let Some(symbol) = queue.pop_front() {
-            // Wake sender if we freed space
-            let mut wakers = self.shared.send_wakers.lock().unwrap();
-            if let Some(w) = wakers.pop() {
-                w.wake();
-            }
-            return Poll::Ready(Some(Ok(symbol)));
-        }
+        {
+            let mut queue = self.shared.queue.lock().unwrap();
 
-        if self.shared.closed.load(Ordering::SeqCst) {
-            return Poll::Ready(None);
+            if let Some(symbol) = queue.pop_front() {
+                // Wake sender if we freed space
+                let mut wakers = self.shared.send_wakers.lock().unwrap();
+                if let Some(w) = wakers.pop() {
+                    w.wake();
+                }
+                return Poll::Ready(Some(Ok(symbol)));
+            }
+
+            if self.shared.closed.load(Ordering::SeqCst) {
+                return Poll::Ready(None);
+            }
         }
 
         // Register waker
@@ -366,6 +369,7 @@ pub struct VecStream {
 
 impl VecStream {
     /// Creates a stream from a vector of symbols.
+    #[must_use]
     pub fn new(symbols: Vec<AuthenticatedSymbol>) -> Self {
         Self {
             symbols: symbols.into_iter(),

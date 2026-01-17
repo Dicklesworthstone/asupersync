@@ -47,6 +47,7 @@ pub struct SecurityContext {
 
 impl SecurityContext {
     /// Creates a new security context with the given key and default settings.
+    #[must_use]
     pub fn new(key: AuthKey) -> Self {
         Self {
             key,
@@ -56,17 +57,20 @@ impl SecurityContext {
     }
 
     /// Creates a security context for testing with a deterministic seed.
+    #[must_use]
     pub fn for_testing(seed: u64) -> Self {
         Self::new(AuthKey::from_seed(seed))
     }
 
     /// Sets the authentication mode.
+    #[must_use]
     pub fn with_mode(mut self, mode: AuthMode) -> Self {
         self.mode = mode;
         self
     }
 
     /// Signs a symbol, producing an authenticated symbol.
+    #[must_use]
     pub fn sign_symbol(&self, symbol: &Symbol) -> AuthenticatedSymbol {
         let tag = AuthenticationTag::compute(&self.key, symbol);
         self.stats.signed.fetch_add(1, Ordering::Relaxed);
@@ -114,6 +118,7 @@ impl SecurityContext {
     }
 
     /// Derives a child context with a subkey.
+    #[must_use]
     pub fn derive_context(&self, purpose: &[u8]) -> Self {
         Self {
             key: self.key.derive_subkey(purpose),
@@ -123,6 +128,7 @@ impl SecurityContext {
     }
 
     /// Returns the authentication stats.
+    #[must_use]
     pub fn stats(&self) -> &AuthStats {
         &self.stats
     }

@@ -370,14 +370,9 @@ mod tests {
         match &t.state {
             TaskState::CancelRequested {
                 reason,
-                cleanup_budget,
+                cleanup_budget: _,
             } => {
                 assert_eq!(reason.kind, crate::types::CancelKind::Timeout);
-                // Default cleanup budget might not be INFINITE depending on reason implementation,
-                // but timeout cleanup usually has some budget.
-                // Wait, request_cancel uses reason.cleanup_budget().
-                // CancelReason::timeout() cleanup budget? 
-                // Let's assume it matches what we passed.
             }
             other => panic!("expected CancelRequested, got {other:?}"),
         }
@@ -529,15 +524,10 @@ mod tests {
     #[test]
     fn masking_operations() {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        
+
         // Need to set inner for mask operations to work
         let inner = Arc::new(RwLock::new(CxInner::new(region(), task(), Budget::INFINITE)));
         t.set_cx_inner(inner);
-
-        assert_eq!(t.mask_depth, 0); // Removed field, check logically?
-        // Wait, mask_depth field is removed from TaskRecord.
-        // We can't check t.mask_depth directly.
-        // We can check via increment return value.
 
         assert_eq!(t.increment_mask(), 1);
         assert_eq!(t.increment_mask(), 2);

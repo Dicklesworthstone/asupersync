@@ -40,7 +40,7 @@ pub trait SymbolSink: Send {
 /// Extension methods for SymbolSink.
 pub trait SymbolSinkExt: SymbolSink {
     /// Send a symbol.
-    fn send<'a>(&'a mut self, symbol: AuthenticatedSymbol) -> SendFuture<'a, Self>
+    fn send(&mut self, symbol: AuthenticatedSymbol) -> SendFuture<'_, Self>
     where
         Self: Unpin,
     {
@@ -48,7 +48,7 @@ pub trait SymbolSinkExt: SymbolSink {
     }
 
     /// Send all symbols from an iterator.
-    fn send_all<'a, I>(&'a mut self, symbols: I) -> SendAllFuture<'a, Self, I::IntoIter>
+    fn send_all<I>(&mut self, symbols: I) -> SendAllFuture<'_, Self, I::IntoIter>
     where
         Self: Unpin,
         I: IntoIterator<Item = AuthenticatedSymbol>,
@@ -341,18 +341,20 @@ impl SymbolSink for ChannelSink {
         _cx: &mut Context<'_>,
         symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
-        let mut queue = self.shared.queue.lock().unwrap();
-        
-        if self.shared.closed.load(Ordering::SeqCst) {
-            return Poll::Ready(Err(SinkError::Closed));
-        }
+        {
+            let mut queue = self.shared.queue.lock().unwrap();
 
-        // We assume poll_ready checked capacity, but we check again for safety
-        if queue.len() >= self.shared.capacity {
-            return Poll::Ready(Err(SinkError::BufferFull));
-        }
+            if self.shared.closed.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(SinkError::Closed));
+            }
 
-        queue.push_back(symbol);
+            // We assume poll_ready checked capacity, but we check again for safety
+            if queue.len() >= self.shared.capacity {
+                return Poll::Ready(Err(SinkError::BufferFull));
+            }
+
+            queue.push_back(symbol);
+        }
         
         // Wake receiver
         let mut wakers = self.shared.recv_wakers.lock().unwrap();
@@ -386,16 +388,19 @@ pub struct CollectingSink {
 
 impl CollectingSink {
     /// Creates an empty collecting sink.
+    #[must_use]
     pub fn new() -> Self {
         Self { symbols: Vec::new() }
     }
     
     /// Returns the collected symbols.
+    #[must_use]
     pub fn symbols(&self) -> &[AuthenticatedSymbol] {
         &self.symbols
     }
     
     /// Consumes the sink and returns the collected symbols.
+    #[must_use]
     pub fn into_symbols(self) -> Vec<AuthenticatedSymbol> {
         self.symbols
     }

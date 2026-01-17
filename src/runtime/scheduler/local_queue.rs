@@ -17,6 +17,7 @@ pub struct LocalQueue {
 
 impl LocalQueue {
     /// Creates a new local queue.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Worker::new_fifo(),
@@ -29,11 +30,13 @@ impl LocalQueue {
     }
 
     /// Pops a task from the local queue (LIFO).
+    #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
         self.inner.pop()
     }
 
     /// Creates a stealer for this queue.
+    #[must_use]
     pub fn stealer(&self) -> Stealer {
         Stealer {
             inner: self.inner.stealer(),
@@ -55,6 +58,7 @@ pub struct Stealer {
 
 impl Stealer {
     /// Steals a task from the queue.
+    #[must_use]
     pub fn steal(&self) -> Option<TaskId> {
         match self.inner.steal() {
             Steal::Success(task) => Some(task),
@@ -67,7 +71,7 @@ impl Stealer {
                     match self.inner.steal() {
                         Steal::Success(task) => return Some(task),
                         Steal::Empty => return None,
-                        Steal::Retry => continue,
+                        Steal::Retry => {},
                     }
                 }
             }
@@ -76,13 +80,14 @@ impl Stealer {
     }
 
     /// Steals a batch of tasks.
+    #[must_use]
     pub fn steal_batch(&self, dest: &LocalQueue) -> bool {
         // We steal into the destination worker's local queue
         loop {
             match self.inner.steal_batch(&dest.inner) {
-                Steal::Success(_) => return true,
+                Steal::Success(()) => return true,
                 Steal::Empty => return false,
-                Steal::Retry => continue,
+                Steal::Retry => {},
             }
         }
     }

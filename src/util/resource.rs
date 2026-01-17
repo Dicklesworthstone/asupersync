@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]
-pub(crate) struct PoolConfig {
+pub struct PoolConfig {
     /// Symbol size in bytes.
     pub symbol_size: u16,
     /// Initial pool size (number of buffers).
@@ -49,7 +49,7 @@ impl Default for PoolConfig {
 
 /// A pre-allocated buffer for symbol data.
 #[derive(Debug)]
-pub(crate) struct SymbolBuffer {
+pub struct SymbolBuffer {
     data: Box<[u8]>,
     in_use: bool,
 }
@@ -96,7 +96,7 @@ impl SymbolBuffer {
 
 /// Pool usage statistics.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PoolStats {
+pub struct PoolStats {
     pub allocations: u64,
     pub deallocations: u64,
     pub pool_hits: u64,
@@ -108,7 +108,7 @@ pub(crate) struct PoolStats {
 
 /// Error returned when a pool cannot allocate.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct PoolExhausted;
+pub struct PoolExhausted;
 
 impl std::fmt::Display for PoolExhausted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -120,7 +120,7 @@ impl std::error::Error for PoolExhausted {}
 
 /// Symbol memory pool for efficient allocation.
 #[derive(Debug)]
-pub(crate) struct SymbolPool {
+pub struct SymbolPool {
     free_list: Vec<SymbolBuffer>,
     allocated: usize,
     config: PoolConfig,
@@ -235,7 +235,8 @@ impl SymbolPool {
 
 /// Global resource limits.
 #[derive(Debug, Clone)]
-pub(crate) struct ResourceLimits {
+#[allow(clippy::struct_field_names)]
+pub struct ResourceLimits {
     /// Maximum total memory for symbol buffers.
     pub max_symbol_memory: usize,
     /// Maximum concurrent encoding operations.
@@ -262,7 +263,7 @@ impl Default for ResourceLimits {
 
 /// Current resource usage.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ResourceUsage {
+pub struct ResourceUsage {
     pub symbol_memory: usize,
     pub encoding_ops: usize,
     pub decoding_ops: usize,
@@ -270,7 +271,7 @@ pub(crate) struct ResourceUsage {
 }
 
 impl ResourceUsage {
-    fn add(&mut self, other: ResourceUsage) {
+    fn add(&mut self, other: Self) {
         self.symbol_memory = self.symbol_memory.saturating_add(other.symbol_memory);
         self.encoding_ops = self.encoding_ops.saturating_add(other.encoding_ops);
         self.decoding_ops = self.decoding_ops.saturating_add(other.decoding_ops);
@@ -279,7 +280,7 @@ impl ResourceUsage {
             .saturating_add(other.symbols_in_flight);
     }
 
-    fn sub(&mut self, other: ResourceUsage) {
+    fn sub(&mut self, other: Self) {
         self.symbol_memory = self.symbol_memory.saturating_sub(other.symbol_memory);
         self.encoding_ops = self.encoding_ops.saturating_sub(other.encoding_ops);
         self.decoding_ops = self.decoding_ops.saturating_sub(other.decoding_ops);
@@ -291,12 +292,12 @@ impl ResourceUsage {
 
 /// Resource request for acquisition checks.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ResourceRequest {
+pub struct ResourceRequest {
     pub usage: ResourceUsage,
 }
 
 /// Observer for resource pressure events.
-pub(crate) trait ResourceObserver: Send + Sync {
+pub trait ResourceObserver: Send + Sync {
     /// Called when overall pressure changes.
     fn on_pressure_change(&self, pressure: f64);
     /// Called when a specific resource is approaching its limit.
@@ -307,7 +308,7 @@ pub(crate) trait ResourceObserver: Send + Sync {
 
 /// Resource kinds for observer callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResourceKind {
+pub enum ResourceKind {
     SymbolMemory,
     EncodingOps,
     DecodingOps,
@@ -316,7 +317,7 @@ pub(crate) enum ResourceKind {
 
 /// Error returned when resource limits are exceeded.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ResourceExhausted;
+pub struct ResourceExhausted;
 
 impl std::fmt::Display for ResourceExhausted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -335,7 +336,7 @@ struct ResourceTrackerInner {
 
 /// Resource tracker for enforcing limits.
 #[derive(Clone)]
-pub(crate) struct ResourceTracker {
+pub struct ResourceTracker {
     inner: Arc<Mutex<ResourceTrackerInner>>,
 }
 
@@ -408,17 +409,19 @@ impl ResourceTracker {
 
     /// Attempts to acquire a resource request.
     pub fn try_acquire(&self, usage: ResourceUsage) -> Result<ResourceGuard, ResourceExhausted> {
-        let mut inner = self.inner.lock().expect("lock poisoned");
-        let mut projected = inner.current;
-        projected.add(usage);
+        {
+            let mut inner = self.inner.lock().expect("lock poisoned");
+            let mut projected = inner.current;
+            projected.add(usage);
 
-        if !within_limits(&projected, &inner.limits) {
-            notify_limit_exceeded(&inner, &projected);
-            return Err(ResourceExhausted);
+            if !within_limits(&projected, &inner.limits) {
+                notify_limit_exceeded(&inner, &projected);
+                return Err(ResourceExhausted);
+            }
+
+            inner.current = projected;
+            notify_pressure(&mut inner);
         }
-
-        inner.current = projected;
-        notify_pressure(&mut inner);
 
         Ok(ResourceGuard {
             inner: Arc::clone(&self.inner),
@@ -428,7 +431,7 @@ impl ResourceTracker {
 }
 
 /// RAII guard that releases resources on drop.
-pub(crate) struct ResourceGuard {
+pub struct ResourceGuard {
     inner: Arc<Mutex<ResourceTrackerInner>>,
     acquired: ResourceUsage,
 }
@@ -458,10 +461,11 @@ fn compute_pressure(usage: &ResourceUsage, limits: &ResourceLimits) -> f64 {
     ];
     ratios
         .into_iter()
-        .fold(0.0_f64, |acc, v| acc.max(v))
+        .fold(0.0_f64, f64::max)
         .clamp(0.0, 1.0)
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn ratio(value: usize, limit: usize) -> f64 {
     if limit == 0 {
         if value == 0 { 0.0 } else { 1.0 }

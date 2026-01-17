@@ -53,6 +53,7 @@ pub mod channel;
 pub mod combinator;
 pub mod cx;
 pub mod error;
+pub mod fs;
 pub mod io;
 pub mod lab;
 pub mod net;

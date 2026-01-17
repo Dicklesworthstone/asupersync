@@ -140,9 +140,8 @@ impl Scheduler {
     /// This is the key operation for ensuring cancelled tasks get priority:
     /// the cancel lane is always drained before timed and ready lanes.
     pub fn move_to_cancel_lane(&mut self, task: TaskId, priority: u8) {
-        if !self.scheduled.contains(&task) {
+        if self.scheduled.insert(task) {
             // Not scheduled, add directly to cancel lane
-            self.scheduled.insert(task);
             insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
             return;
         }

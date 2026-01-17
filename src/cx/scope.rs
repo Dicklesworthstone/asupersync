@@ -571,6 +571,11 @@ mod tests {
         use std::task::{Context, Poll, Waker};
         use std::sync::Arc;
 
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
@@ -584,10 +589,6 @@ mod tests {
         let mut join_fut = Box::pin(handle.join(&cx));
 
         // Create waker context
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut ctx = Context::from_waker(&waker);
 

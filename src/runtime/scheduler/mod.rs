@@ -27,7 +27,7 @@ impl WorkStealingScheduler {
     /// Creates a new scheduler with the given number of workers.
     ///
     /// This also creates the workers and their local queues.
-    pub fn new(worker_count: usize, state: std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>) -> Self {
+    pub fn new(worker_count: usize, state: &std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>) -> Self {
         let global = Arc::new(GlobalQueue::new());
         let mut workers = Vec::with_capacity(worker_count);
         let mut stealers = Vec::with_capacity(worker_count);

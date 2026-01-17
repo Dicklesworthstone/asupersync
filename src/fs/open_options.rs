@@ -25,6 +25,7 @@ use std::path::Path;
 ///     .await?;
 /// ```
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OpenOptions {
     read: bool,
     write: bool,
@@ -126,15 +127,7 @@ impl OpenOptions {
     }
 
     /// Opens a file at `path` with the options specified by `self`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be opened with the specified options.
-    ///
-    /// # Cancel Safety
-    ///
-    /// This method is cancel-safe. If the operation is cancelled, no file
-    /// handle will be returned and no partial state is created.
+    #[allow(clippy::unused_async)]
     pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         let path = path.as_ref().to_owned();
         let opts = self.clone();
