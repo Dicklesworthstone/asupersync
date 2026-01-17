@@ -38,7 +38,7 @@
 //! tx.send(new_config)?;
 //! ```
 
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 
 use crate::cx::Cx;
 
@@ -97,6 +97,8 @@ struct WatchInner<T> {
     receiver_count: Mutex<usize>,
     /// Whether the sender has been dropped.
     sender_dropped: Mutex<bool>,
+    /// Notification for value changes.
+    notify: Condvar,
 }
 
 impl<T> WatchInner<T> {
@@ -105,6 +107,7 @@ impl<T> WatchInner<T> {
             value: RwLock::new((initial, 0)),
             receiver_count: Mutex::new(1), // Sender starts with one implicit receiver
             sender_dropped: Mutex::new(false),
+            notify: Condvar::new(),
         }
     }
 
@@ -181,8 +184,10 @@ impl<T> Sender<T> {
             guard.1 += 1;
         }
 
-        // In full implementation: wake all waiting receivers via condvar/waker
-        // For Phase 0: receivers spin-wait and will see the new version
+        // Notify all waiting receivers
+        // We take the lock briefly to coordinate with condvar
+        let _guard = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        self.inner.notify.notify_all();
 
         Ok(())
     }
@@ -214,6 +219,10 @@ impl<T> Sender<T> {
             f(&mut guard.0);
             guard.1 += 1;
         }
+
+        // Notify all waiting receivers
+        let _guard = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        self.inner.notify.notify_all();
 
         Ok(())
     }
@@ -276,7 +285,9 @@ impl<T> Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         self.inner.mark_sender_dropped();
-        // In full implementation: wake all waiting receivers so they see Closed
+        // Wake all waiting receivers so they see Closed
+        let _guard = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        self.inner.notify.notify_all();
     }
 }
 
@@ -308,6 +319,8 @@ impl<T> Receiver<T> {
     pub fn changed(&mut self, cx: &Cx) -> Result<(), RecvError> {
         cx.trace("watch::changed starting wait");
 
+        let mut lock = self.inner.receiver_count.lock().expect("watch lock poisoned");
+
         loop {
             // Check if sender dropped
             if self.inner.is_sender_dropped() {
@@ -335,9 +348,14 @@ impl<T> Receiver<T> {
                 return Err(RecvError::Closed);
             }
 
-            // Phase 0: Simple spin-wait with yield
-            // Future: integrate with scheduler via proper waker/condvar
-            std::thread::yield_now();
+            // Wait for notification
+            // Use wait_timeout to allow periodic cancellation checks
+            let (guard, _timeout) = self
+                .inner
+                .notify
+                .wait_timeout(lock, std::time::Duration::from_millis(10))
+                .expect("watch lock poisoned");
+            lock = guard;
         }
     }
 

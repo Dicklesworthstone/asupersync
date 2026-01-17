@@ -39,15 +39,21 @@
 //! - **Phase 1+**: Use `spawn_blocking` for thread pool offload
 //! - **Future**: io_uring on Linux for true async I/O
 
+mod buf_reader;
+mod buf_writer;
 mod dir;
 mod file;
+mod lines;
 mod metadata;
 mod open_options;
 mod path_ops;
 mod read_dir;
 
+pub use buf_reader::BufReader;
+pub use buf_writer::BufWriter;
 pub use dir::{create_dir, create_dir_all, remove_dir, remove_dir_all};
 pub use file::File;
+pub use lines::Lines;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
 pub use path_ops::{

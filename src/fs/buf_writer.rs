@@ -172,12 +172,50 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin> Drop for BufWriter<W> {
-    fn drop(&mut self) {
-        // Can't async flush in drop. 
-        // Typically we warn if buffer not empty.
-        if !self.buf.is_empty() {
-            // tracing::warn!("BufWriter dropped with unflushed data");
-        }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::File;
+    use crate::io::AsyncWriteExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_buf_writer_basic() {
+        futures_lite::future::block_on(async {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("test_write.txt");
+
+            let file = File::create(&path).await.unwrap();
+            let mut writer = BufWriter::new(file);
+
+            writer.write_all(b"hello ").await.unwrap();
+            writer.write_all(b"world").await.unwrap();
+            writer.flush().await.unwrap();
+
+            let contents = crate::fs::read_to_string(&path).await.unwrap();
+            assert_eq!(contents, "hello world");
+        });
+    }
+
+    #[test]
+    fn test_buf_writer_large() {
+        futures_lite::future::block_on(async {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("test_large.txt");
+
+            let file = File::create(&path).await.unwrap();
+            let mut writer = BufWriter::with_capacity(1024, file);
+
+            // Write more than buffer capacity
+            let data = vec![b'x'; 10000];
+            writer.write_all(&data).await.unwrap();
+            writer.flush().await.unwrap();
+
+            let contents = crate::fs::read(&path).await.unwrap();
+            assert_eq!(contents.len(), 10000);
+            assert!(contents.iter().all(|&b| b == b'x'));
+        });
     }
 }

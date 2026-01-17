@@ -324,14 +324,20 @@ impl Cx {
             inner.mask_depth += 1;
         }
 
-        let result = f();
-
-        {
-            let mut inner = self.inner.write().expect("lock poisoned");
-            inner.mask_depth = inner.mask_depth.saturating_sub(1);
+        // RAII guard ensures mask_depth is decremented even on panic
+        struct MaskGuard<'a> {
+            inner: &'a Arc<std::sync::RwLock<CxInner>>,
         }
 
-        result
+        impl<'a> Drop for MaskGuard<'a> {
+            fn drop(&mut self) {
+                let mut inner = self.inner.write().expect("lock poisoned");
+                inner.mask_depth = inner.mask_depth.saturating_sub(1);
+            }
+        }
+
+        let _guard = MaskGuard { inner: &self.inner };
+        f()
     }
 
     /// Traces an event for observability.
@@ -439,6 +445,32 @@ mod tests {
         assert!(
             cx.checkpoint().is_err(),
             "checkpoint should fail after unmasking"
+        );
+    }
+
+    #[test]
+    fn masked_panic_safety() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        
+        // Ensure initial state is cancelled (unmasked)
+        assert!(cx.checkpoint().is_err());
+
+        // Run a masked block that panics
+        let cx_clone = cx.clone();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            cx_clone.masked(|| {
+                panic!("oops");
+            });
+        }));
+
+        // After panic, mask depth should have been restored.
+        // If it leaked, checkpoint() will return Ok(()) because it thinks it's still masked.
+        assert!(
+            cx.checkpoint().is_err(), 
+            "Cx remains masked after panic! mask_depth leaked."
         );
     }
 }

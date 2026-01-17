@@ -17,6 +17,7 @@ pub mod outcome;
 pub mod policy;
 pub mod resource;
 pub mod symbol;
+pub mod symbol_set;
 pub mod task_context;
 
 pub use budget::Budget;
@@ -25,4 +26,5 @@ pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;
 pub use symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind, DEFAULT_SYMBOL_SIZE};
+pub use symbol_set::{BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig};
 pub use task_context::CxInner;
