@@ -7,10 +7,125 @@
 //! - **Cost quota**: Abstract cost units (for priority scheduling)
 //! - **Priority**: Scheduling priority (higher = more urgent)
 //!
-//! Budgets combine using product semantics:
-//! - Deadlines: take minimum (earlier deadline wins)
-//! - Quotas: take minimum (tighter constraint wins)
-//! - Priority: take maximum (higher priority wins)
+//! # Semiring Semantics
+//!
+//! Budgets form a product semiring with two key operations:
+//!
+//! | Operation | Deadline | Poll/Cost Quota | Priority |
+//! |-----------|----------|-----------------|----------|
+//! | `meet` (∧) | min (earlier wins) | min (tighter wins) | max (higher wins) |
+//! | identity  | None (no deadline) | u32::MAX / None | 128 (neutral) |
+//!
+//! The **meet** operation (`combine`/`meet`) computes the tightest constraints
+//! from two budgets. This is used when nesting regions or combining timeout
+//! requirements:
+//!
+//! ```
+//! # use asupersync::Budget;
+//! # use asupersync::types::id::Time;
+//! let outer = Budget::new().with_deadline(Time::from_secs(30));
+//! let inner = Budget::new().with_deadline(Time::from_secs(10));
+//!
+//! // Inner timeout is tighter, so it wins
+//! let combined = outer.meet(inner);
+//! assert_eq!(combined.deadline, Some(Time::from_secs(10)));
+//! ```
+//!
+//! # HTTP Timeout Integration
+//!
+//! Budget maps directly to HTTP request timeout management. The pattern is:
+//!
+//! 1. Create a budget from the request timeout configuration
+//! 2. Attach it to the request's capability context (`Cx`)
+//! 3. All downstream operations inherit and respect the budget
+//! 4. When budget is exhausted, operations return `Outcome::Cancelled`
+//!
+//! ## Example: Request Timeout Middleware
+//!
+//! ```ignore
+//! use asupersync::{Budget, Cx, Outcome, Time};
+//! use std::time::Duration;
+//!
+//! // Server configuration
+//! struct ServerConfig {
+//!     request_timeout: Duration,
+//! }
+//!
+//! // Middleware creates budget from config
+//! async fn timeout_middleware<B>(
+//!     req: Request<B>,
+//!     next: Next<B>,
+//!     config: &ServerConfig,
+//! ) -> Outcome<Response, TimeoutError> {
+//!     // Convert wall-clock timeout to lab-compatible Time
+//!     let deadline = Time::from_secs(config.request_timeout.as_secs());
+//!     let budget = Budget::new().with_deadline(deadline);
+//!
+//!     // Get or create Cx, attach budget
+//!     let cx = req.extensions()
+//!         .get::<Cx>()
+//!         .cloned()
+//!         .unwrap_or_else(Cx::new);
+//!     let cx = cx.with_budget(budget);
+//!
+//!     // All downstream operations now respect the timeout
+//!     match next.run_with_cx(req, &cx).await {
+//!         Outcome::Cancelled(reason) if reason.is_deadline() => {
+//!             Outcome::Err(TimeoutError::RequestTimeout)
+//!         }
+//!         other => other,
+//!     }
+//! }
+//! ```
+//!
+//! ## Budget Propagation Through Regions
+//!
+//! Budget flows through the region tree, with each nested region inheriting
+//! and potentially tightening the parent's constraints:
+//!
+//! ```text
+//! Request Region (budget: 30s deadline)
+//! ├── DB Query Region
+//! │   └── Inherits 30s, operation takes 5s
+//! │       Budget remaining: 25s
+//! ├── External API Call
+//! │   └── Has own 10s timeout, meets with parent: min(25s, 10s) = 10s effective
+//! │       Budget remaining: ~15s after completion
+//! └── Response Serialization
+//!     └── Uses remaining ~15s budget
+//! ```
+//!
+//! ## Exhaustion Behavior
+//!
+//! When a budget is exhausted:
+//!
+//! | Resource | Trigger | Result |
+//! |----------|---------|--------|
+//! | Deadline | `now >= deadline` | `Outcome::Cancelled(CancelReason::deadline())` |
+//! | Poll quota | `poll_quota == 0` | `Outcome::Cancelled(CancelReason::budget())` |
+//! | Cost quota | `cost_quota == Some(0)` | `Outcome::Cancelled(CancelReason::budget())` |
+//!
+//! The runtime checks these conditions at scheduling points and propagates
+//! cancellation through the region tree.
+//!
+//! # Creating Budgets
+//!
+//! ```
+//! # use asupersync::Budget;
+//! # use asupersync::types::id::Time;
+//! // Unlimited budget (default)
+//! let unlimited = Budget::unlimited();
+//!
+//! // With specific deadline
+//! let timed = Budget::with_deadline_secs(30);
+//!
+//! // Builder pattern for multiple constraints
+//! let complex = Budget::new()
+//!     .with_deadline(Time::from_secs(30))
+//!     .with_poll_quota(1000)
+//!     .with_cost_quota(10_000)
+//!     .with_priority(200);
+//! ```
 
 use super::id::Time;
 use core::fmt;
@@ -49,10 +164,68 @@ impl Budget {
         priority: 0,
     };
 
-    /// Creates a new budget with default values.
+    /// Creates a new budget with default values (unlimited).
     #[must_use]
     pub const fn new() -> Self {
         Self::INFINITE
+    }
+
+    /// Creates an unlimited budget (alias for [`INFINITE`](Self::INFINITE)).
+    ///
+    /// This is the identity element for the meet operation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let budget = Budget::unlimited();
+    /// assert!(!budget.is_exhausted());
+    /// ```
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self::INFINITE
+    }
+
+    /// Creates a budget with only a deadline constraint (in seconds).
+    ///
+    /// This is a convenience constructor for HTTP timeout scenarios.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let budget = Budget::with_deadline_secs(30);
+    /// assert_eq!(budget.deadline, Some(Time::from_secs(30)));
+    /// ```
+    #[must_use]
+    pub const fn with_deadline_secs(secs: u64) -> Self {
+        Self {
+            deadline: Some(Time::from_secs(secs)),
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 128,
+        }
+    }
+
+    /// Creates a budget with only a deadline constraint (in nanoseconds).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let budget = Budget::with_deadline_ns(30_000_000_000); // 30 seconds
+    /// assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
+    /// ```
+    #[must_use]
+    pub const fn with_deadline_ns(nanos: u64) -> Self {
+        Self {
+            deadline: Some(Time::from_nanos(nanos)),
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 128,
+        }
     }
 
     /// Sets the deadline.
@@ -110,11 +283,32 @@ impl Budget {
         }
     }
 
-    /// Combines two budgets using product semantics.
+    /// Combines two budgets using product semiring semantics.
     ///
     /// - Deadlines: min (earlier wins)
     /// - Quotas: min (tighter wins)
     /// - Priority: max (higher wins)
+    ///
+    /// This is also known as the "meet" operation (∧) in lattice terminology.
+    /// See also: [`meet`](Self::meet).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let outer = Budget::new()
+    ///     .with_deadline(Time::from_secs(30))
+    ///     .with_poll_quota(1000);
+    ///
+    /// let inner = Budget::new()
+    ///     .with_deadline(Time::from_secs(10))  // tighter
+    ///     .with_poll_quota(5000);              // looser
+    ///
+    /// let combined = outer.combine(inner);
+    /// assert_eq!(combined.deadline, Some(Time::from_secs(10))); // min
+    /// assert_eq!(combined.poll_quota, 1000);                    // min
+    /// ```
     #[must_use]
     pub fn combine(self, other: Self) -> Self {
         Self {
@@ -133,6 +327,138 @@ impl Budget {
             },
             priority: self.priority.max(other.priority),
         }
+    }
+
+    /// Meet operation (∧) - alias for [`combine`](Self::combine).
+    ///
+    /// Computes the tightest constraints from two budgets. This is the
+    /// fundamental operation for nesting budget scopes.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let parent = Budget::with_deadline_secs(30);
+    /// let child = Budget::with_deadline_secs(10);
+    ///
+    /// // Child deadline is tighter, so it wins
+    /// let effective = parent.meet(child);
+    /// assert_eq!(effective.deadline, Some(Time::from_secs(10)));
+    /// ```
+    #[must_use]
+    pub fn meet(self, other: Self) -> Self {
+        self.combine(other)
+    }
+
+    /// Consumes cost quota, returning `true` if successful.
+    ///
+    /// Returns `false` (and does not modify quota) if there isn't enough
+    /// remaining cost quota. If no cost quota is set, always succeeds.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let mut budget = Budget::new().with_cost_quota(100);
+    ///
+    /// assert!(budget.consume_cost(30));   // 70 remaining
+    /// assert!(budget.consume_cost(70));   // 0 remaining
+    /// assert!(!budget.consume_cost(1));   // fails, quota exhausted
+    /// ```
+    pub fn consume_cost(&mut self, cost: u64) -> bool {
+        match self.cost_quota {
+            None => true, // No quota means unlimited
+            Some(remaining) if remaining >= cost => {
+                self.cost_quota = Some(remaining - cost);
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Returns the remaining time until the deadline, if any.
+    ///
+    /// Returns `None` if there is no deadline or if the deadline has passed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let budget = Budget::with_deadline_secs(30);
+    /// let now = Time::from_secs(10);
+    ///
+    /// let remaining = budget.remaining_time(now);
+    /// assert_eq!(remaining, Some(Time::from_secs(20)));
+    /// ```
+    #[must_use]
+    pub fn remaining_time(&self, now: Time) -> Option<Time> {
+        self.deadline.and_then(|d| {
+            if now < d {
+                Some(Time::from_nanos(d.as_nanos().saturating_sub(now.as_nanos())))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the remaining poll quota.
+    ///
+    /// Returns the current poll quota value. A value of `u32::MAX` indicates
+    /// effectively unlimited polls.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let budget = Budget::new().with_poll_quota(100);
+    /// assert_eq!(budget.remaining_polls(), 100);
+    /// ```
+    #[must_use]
+    pub const fn remaining_polls(&self) -> u32 {
+        self.poll_quota
+    }
+
+    /// Returns the remaining cost quota, if any.
+    ///
+    /// Returns `None` if no cost quota is set (unlimited).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let budget = Budget::new().with_cost_quota(1000);
+    /// assert_eq!(budget.remaining_cost(), Some(1000));
+    ///
+    /// let unlimited = Budget::unlimited();
+    /// assert_eq!(unlimited.remaining_cost(), None);
+    /// ```
+    #[must_use]
+    pub const fn remaining_cost(&self) -> Option<u64> {
+        self.cost_quota
+    }
+
+    /// Converts the deadline to a timeout duration from the given time.
+    ///
+    /// Returns the same value as [`remaining_time`](Self::remaining_time).
+    /// This method is provided for API compatibility with timeout-based systems.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let budget = Budget::with_deadline_secs(30);
+    /// let now = Time::from_secs(5);
+    ///
+    /// // 25 seconds remaining
+    /// let timeout = budget.to_timeout(now);
+    /// assert_eq!(timeout, Some(Time::from_secs(25)));
+    /// ```
+    #[must_use]
+    pub fn to_timeout(&self, now: Time) -> Option<Time> {
+        self.remaining_time(now)
     }
 }
 
