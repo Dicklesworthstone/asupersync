@@ -140,28 +140,44 @@ impl Scheduler {
     /// This is the key operation for ensuring cancelled tasks get priority:
     /// the cancel lane is always drained before timed and ready lanes.
     pub fn move_to_cancel_lane(&mut self, task: TaskId, priority: u8) {
-        if self.scheduled.contains(&task) {
-            // Remove from other lanes first
-            self.timed_lane.retain(|e| e.task != task);
-            self.ready_lane.retain(|e| e.task != task);
-
-            // Check if already in cancel lane
-            if let Some(pos) = self.cancel_lane.iter().position(|e| e.task == task) {
-                // Update priority if needed (monotonicity check could be added here)
-                // For now, we trust the caller knows the correct priority
-                if self.cancel_lane[pos].priority < priority {
-                    self.cancel_lane.remove(pos);
-                    insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
-                }
-            } else {
-                // Add to cancel lane
-                insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
-            }
-        } else {
+        if !self.scheduled.contains(&task) {
             // Not scheduled, add directly to cancel lane
             self.scheduled.insert(task);
             insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+            return;
         }
+
+        // Task is scheduled. Check where it is.
+        // We optimize by returning early once found.
+
+        // 1. Check Cancel Lane (target destination)
+        if let Some(pos) = self.cancel_lane.iter().position(|e| e.task == task) {
+            // Update priority if new priority is higher
+            if self.cancel_lane[pos].priority < priority {
+                self.cancel_lane.remove(pos);
+                insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+            }
+            return;
+        }
+
+        // 2. Check Timed Lane
+        if let Some(pos) = self.timed_lane.iter().position(|e| e.task == task) {
+            self.timed_lane.remove(pos);
+            insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+            return;
+        }
+
+        // 3. Check Ready Lane
+        if let Some(pos) = self.ready_lane.iter().position(|e| e.task == task) {
+            self.ready_lane.remove(pos);
+            insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+            return;
+        }
+        
+        // If we reach here, the task is in `scheduled` set but not in any lane.
+        // This should not happen if invariants are maintained.
+        // We'll re-add it to be safe, but this implies a bug elsewhere.
+        insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
     }
 
     /// Returns true if a task is in the cancel lane.
@@ -213,6 +229,20 @@ mod tests {
         let mut sched = Scheduler::new();
         sched.schedule(task(1), 50);
         sched.schedule(task(2), 100);
+
+        // Move task 2 to cancel lane
+        sched.move_to_cancel_lane(task(2), 100);
+
+        // Task 2 should come first now (cancel lane priority)
+        assert_eq!(sched.pop(), Some(task(2)));
+        assert_eq!(sched.pop(), Some(task(1)));
+    }
+
+    #[test]
+    fn move_to_cancel_lane_from_timed() {
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_timed(task(2), Time::from_secs(10));
 
         // Move task 2 to cancel lane
         sched.move_to_cancel_lane(task(2), 100);

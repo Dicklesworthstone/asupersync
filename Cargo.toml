@@ -23,6 +23,8 @@ path = "src/lib.rs"
 [dev-dependencies]
 proptest = "1.4"
 criterion = { version = "0.5", features = ["html_reports"] }
+futures-lite = "2.0"
+conformance = { package = "asupersync-conformance", path = "conformance" }
 
 [[bench]]
 name = "phase0_baseline"

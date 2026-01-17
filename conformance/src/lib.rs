@@ -210,6 +210,18 @@ pub trait RuntimeInterface: Sized {
         + Send
         + 'static;
 
+    /// Broadcast sender.
+    type BroadcastSender<T: Send + Clone + 'static>: BroadcastSender<T> + 'static;
+
+    /// Broadcast receiver.
+    type BroadcastReceiver<T: Send + Clone + 'static>: BroadcastReceiver<T> + 'static;
+
+    /// Watch sender.
+    type WatchSender<T: Send + Sync + 'static>: WatchSender<T> + 'static;
+
+    /// Watch receiver.
+    type WatchReceiver<T: Send + Sync + Clone + 'static>: WatchReceiver<T> + 'static;
+
     /// Async file handle.
     type File: AsyncFile + 'static;
 
@@ -238,11 +250,11 @@ pub trait RuntimeInterface: Sized {
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 
     /// Run a future with a timeout.
-    fn timeout<F: Future + Send>(
-        &self,
+    fn timeout<'a, F: Future + Send + 'a>(
+        &'a self,
         duration: Duration,
         future: F,
-    ) -> Pin<Box<dyn Future<Output = Result<F::Output, TimeoutError>> + Send + '_>>
+    ) -> Pin<Box<dyn Future<Output = Result<F::Output, TimeoutError>> + Send + 'a>>
     where
         F::Output: Send;
 
@@ -257,6 +269,18 @@ pub trait RuntimeInterface: Sized {
     fn oneshot_channel<T: Send + 'static>(
         &self,
     ) -> (Self::OneshotSender<T>, Self::OneshotReceiver<T>);
+
+    /// Create a broadcast channel.
+    fn broadcast_channel<T: Send + Clone + 'static>(
+        &self,
+        capacity: usize,
+    ) -> (Self::BroadcastSender<T>, Self::BroadcastReceiver<T>);
+
+    /// Create a watch channel.
+    fn watch_channel<T: Send + Sync + Clone + 'static>(
+        &self,
+        initial: T,
+    ) -> (Self::WatchSender<T>, Self::WatchReceiver<T>);
 
     // ---- File I/O ----
     /// Create a file for writing.
@@ -323,6 +347,68 @@ pub trait MpscReceiver<T: Send>: Send {
 pub trait OneshotSender<T: Send>: Send {
     /// Send a value. Can only be called once.
     fn send(self, value: T) -> Result<(), T>;
+}
+
+/// Error when receiving from a closed broadcast channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastRecvError {
+    /// The receiver lagged too far behind.
+    Lagged(u64),
+    /// The sender was dropped.
+    Closed,
+}
+
+impl fmt::Display for BroadcastRecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lagged(n) => write!(f, "receiver lagged by {n} messages"),
+            Self::Closed => write!(f, "broadcast channel closed"),
+        }
+    }
+}
+
+impl std::error::Error for BroadcastRecvError {}
+
+/// Broadcast sender trait.
+pub trait BroadcastSender<T: Send + Clone>: Clone + Send + Sync {
+    /// Send a value to all receivers.
+    fn send(&self, value: T) -> Result<usize, T>;
+    
+    /// Create a new receiver.
+    fn subscribe(&self) -> Box<dyn BroadcastReceiver<T>>;
+}
+
+/// Broadcast receiver trait.
+pub trait BroadcastReceiver<T: Send + Clone>: Send {
+    /// Receive a value.
+    fn recv(&mut self) -> Pin<Box<dyn Future<Output = Result<T, BroadcastRecvError>> + Send + '_>>;
+}
+
+/// Error when receiving from a closed watch channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchRecvError;
+
+impl fmt::Display for WatchRecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "watch channel closed")
+    }
+}
+
+impl std::error::Error for WatchRecvError {}
+
+/// Watch sender trait.
+pub trait WatchSender<T: Send + Sync>: Send + Sync {
+    /// Send a new value.
+    fn send(&self, value: T) -> Result<(), T>;
+}
+
+/// Watch receiver trait.
+pub trait WatchReceiver<T: Send + Sync>: Clone + Send + Sync {
+    /// Wait for a change.
+    fn changed(&mut self) -> Pin<Box<dyn Future<Output = Result<(), WatchRecvError>> + Send + '_>>;
+    
+    /// Get the current value.
+    fn borrow_and_clone(&self) -> T;
 }
 
 // ============================================================================

@@ -35,7 +35,10 @@
 //!
 //! - [`mpsc`]: Multi-producer, single-consumer bounded channel
 //! - [`oneshot`]: Single-use channel for exactly one value
+//! - [`broadcast`]: Multi-producer, multi-consumer broadcast channel
+//! - [`watch`]: Single-producer, multi-consumer state observation
 
+pub mod broadcast;
 pub mod mpsc;
 pub mod oneshot;
 pub mod watch;
