@@ -262,15 +262,15 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
-    fn poll_ready<F: Future>(fut: &mut Pin<&mut F>) -> F::Output {
+    fn poll_ready<F: Future>(fut: &mut Pin<&mut F>) -> Option<F::Output> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         for _ in 0..32 {
             if let Poll::Ready(output) = fut.as_mut().poll(&mut cx) {
-                return output;
+                return Some(output);
             }
         }
-        panic!("future did not resolve");
+        None
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
         let mut buf = [0u8; 4];
         let mut fut = reader.read_exact(&mut buf);
         let mut fut = Pin::new(&mut fut);
-        let result = poll_ready(&mut fut);
+        let result = poll_ready(&mut fut).expect("future did not resolve");
         assert!(result.is_ok());
         assert_eq!(&buf, b"abcd");
     }
@@ -290,7 +290,9 @@ mod tests {
         let mut buf = [0u8; 4];
         let mut fut = reader.read_exact(&mut buf);
         let mut fut = Pin::new(&mut fut);
-        let err = poll_ready(&mut fut).unwrap_err();
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
@@ -300,7 +302,9 @@ mod tests {
         let mut buf = Vec::new();
         let mut fut = reader.read_to_end(&mut buf);
         let mut fut = Pin::new(&mut fut);
-        let n = poll_ready(&mut fut).unwrap();
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
         assert_eq!(n, 5);
         assert_eq!(buf, b"hello");
     }
@@ -311,7 +315,9 @@ mod tests {
         let mut buf = String::new();
         let mut fut = reader.read_to_string(&mut buf);
         let mut fut = Pin::new(&mut fut);
-        let n = poll_ready(&mut fut).unwrap();
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
         assert_eq!(n, 2);
         assert_eq!(buf, "hi");
     }
@@ -322,7 +328,9 @@ mod tests {
         let mut buf = String::new();
         let mut fut = reader.read_to_string(&mut buf);
         let mut fut = Pin::new(&mut fut);
-        let err = poll_ready(&mut fut).unwrap_err();
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(buf.is_empty());
     }
@@ -334,7 +342,9 @@ mod tests {
         let mut buf = String::new();
         let mut fut = reader.read_to_string(&mut buf);
         let mut fut = Pin::new(&mut fut);
-        let err = poll_ready(&mut fut).unwrap_err();
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(buf.is_empty());
     }
@@ -344,7 +354,9 @@ mod tests {
         let mut reader: &[u8] = b"z";
         let mut fut = reader.read_u8();
         let mut fut = Pin::new(&mut fut);
-        let byte = poll_ready(&mut fut).unwrap();
+        let byte = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
         assert_eq!(byte, b'z');
     }
 
