@@ -13,6 +13,7 @@ pub mod scheduler;
 pub mod state;
 pub mod stored_task;
 pub mod task_handle;
+pub mod timer;
 pub mod waker;
 
 pub use scheduler::Scheduler;
