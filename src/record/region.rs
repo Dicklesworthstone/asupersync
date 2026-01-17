@@ -223,11 +223,25 @@ impl RegionRecord {
     }
 
     /// Adds a child region.
-    pub fn add_child(&self, child: RegionId) {
+    ///
+    /// Returns `true` if the child was added, `false` if the region is not accepting work.
+    pub fn add_child(&self, child: RegionId) -> bool {
+        // Optimistic check (atomic)
+        if !self.state.load().can_accept_work() {
+            return false;
+        }
+
         let mut inner = self.inner.write().expect("lock poisoned");
+
+        // Double check under lock (though state is atomic, consistency matters)
+        if !self.state.load().can_accept_work() {
+            return false;
+        }
+
         if !inner.children.contains(&child) {
             inner.children.push(child);
         }
+        true
     }
 
     /// Removes a child region.
@@ -237,11 +251,25 @@ impl RegionRecord {
     }
 
     /// Adds a task to this region.
-    pub fn add_task(&self, task: TaskId) {
+    ///
+    /// Returns `true` if the task was added, `false` if the region is not accepting work.
+    pub fn add_task(&self, task: TaskId) -> bool {
+        // Optimistic check
+        if !self.state.load().can_accept_work() {
+            return false;
+        }
+
         let mut inner = self.inner.write().expect("lock poisoned");
+
+        // Double check
+        if !self.state.load().can_accept_work() {
+            return false;
+        }
+
         if !inner.tasks.contains(&task) {
             inner.tasks.push(task);
         }
+        true
     }
 
     /// Removes a task from this region.
