@@ -3,6 +3,7 @@
 use crate::io::{AsyncRead, Chain, ReadBuf, Take};
 use std::future::Future;
 use std::io;
+use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -25,7 +26,12 @@ pub trait AsyncReadExt: AsyncRead {
     where
         Self: Unpin,
     {
-        ReadToEnd { reader: self, buf }
+        let start_len = buf.len();
+        ReadToEnd {
+            reader: self,
+            buf,
+            start_len,
+        }
     }
 
     /// Read the entire reader into `buf` as UTF-8.
@@ -36,7 +42,8 @@ pub trait AsyncReadExt: AsyncRead {
         ReadToString {
             reader: self,
             buf,
-            bytes: Vec::new(),
+            pending_utf8: Vec::new(),
+            read: 0,
         }
     }
 
@@ -106,6 +113,7 @@ where
 pub struct ReadToEnd<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut Vec<u8>,
+    start_len: usize,
 }
 
 impl<R> Future for ReadToEnd<'_, R>
@@ -117,7 +125,6 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         const CHUNK: usize = 1024;
         let this = self.get_mut();
-        let start_len = this.buf.len();
 
         loop {
             let mut local = [0u8; CHUNK];
@@ -128,7 +135,7 @@ where
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
-                        return Poll::Ready(Ok(this.buf.len() - start_len));
+                        return Poll::Ready(Ok(this.buf.len().saturating_sub(this.start_len)));
                     }
                     this.buf.extend_from_slice(read_buf.filled());
                 }
@@ -141,7 +148,36 @@ where
 pub struct ReadToString<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut String,
-    bytes: Vec<u8>,
+    pending_utf8: Vec<u8>,
+    read: usize,
+}
+
+impl<R: ?Sized> ReadToString<'_, R> {
+    fn push_valid_prefix(&mut self) -> io::Result<()> {
+        match std::str::from_utf8(&self.pending_utf8) {
+            Ok(s) => {
+                self.buf.push_str(s);
+                self.pending_utf8.clear();
+                Ok(())
+            }
+            Err(err) => {
+                if err.error_len().is_some() {
+                    return Err(io::Error::new(ErrorKind::InvalidData, "invalid utf-8"));
+                }
+
+                let valid_up_to = err.valid_up_to();
+                if valid_up_to == 0 {
+                    return Ok(());
+                }
+                let valid = &self.pending_utf8[..valid_up_to];
+                let valid_str = std::str::from_utf8(valid)
+                    .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid utf-8"))?;
+                self.buf.push_str(valid_str);
+                self.pending_utf8 = self.pending_utf8[valid_up_to..].to_vec();
+                Ok(())
+            }
+        }
+    }
 }
 
 impl<R> Future for ReadToString<'_, R>
@@ -163,13 +199,17 @@ where
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
-                        let string = String::from_utf8(std::mem::take(&mut this.bytes))
-                            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-                        let added = string.len();
-                        this.buf.push_str(&string);
-                        return Poll::Ready(Ok(added));
+                        if this.pending_utf8.is_empty() {
+                            return Poll::Ready(Ok(this.read));
+                        }
+                        return Poll::Ready(Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            "incomplete utf-8 sequence",
+                        )));
                     }
-                    this.bytes.extend_from_slice(read_buf.filled());
+                    this.read += n;
+                    this.pending_utf8.extend_from_slice(read_buf.filled());
+                    this.push_valid_prefix()?;
                 }
             }
         }
@@ -277,11 +317,126 @@ mod tests {
     }
 
     #[test]
+    fn read_to_string_invalid_utf8_errors() {
+        let mut reader: &[u8] = &[0xff, 0xfe];
+        let mut buf = String::new();
+        let mut fut = reader.read_to_string(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let err = poll_ready(&mut fut).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn read_to_string_incomplete_utf8_errors() {
+        // 4-byte UTF-8 sequence, missing the final byte.
+        let mut reader: &[u8] = &[0xF0, 0x9F, 0x92];
+        let mut buf = String::new();
+        let mut fut = reader.read_to_string(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let err = poll_ready(&mut fut).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
     fn read_u8_reads_byte() {
         let mut reader: &[u8] = b"z";
         let mut fut = reader.read_u8();
         let mut fut = Pin::new(&mut fut);
         let byte = poll_ready(&mut fut).unwrap();
         assert_eq!(byte, b'z');
+    }
+
+    #[derive(Debug)]
+    struct YieldingReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+        yield_next: bool,
+    }
+
+    impl<'a> YieldingReader<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Self {
+                data,
+                pos: 0,
+                yield_next: false,
+            }
+        }
+    }
+
+    impl AsyncRead for YieldingReader<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.yield_next {
+                self.yield_next = false;
+                return Poll::Pending;
+            }
+
+            if self.pos >= self.data.len() {
+                return Poll::Ready(Ok(()));
+            }
+
+            if buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+
+            buf.put_slice(&self.data[self.pos..=self.pos]);
+            self.pos += 1;
+            self.yield_next = true;
+
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn cancel_safety_read_exact_is_not_cancel_safe() {
+        let mut reader = YieldingReader::new(b"abc");
+        let mut buf = [0u8; 3];
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = {
+            let mut fut = reader.read_exact(&mut buf);
+            let mut pinned = Pin::new(&mut fut);
+            pinned.as_mut().poll(&mut cx)
+        };
+        assert!(matches!(poll, Poll::Pending));
+        assert_eq!(buf[0], b'a');
+    }
+
+    #[test]
+    fn cancel_safety_read_to_end_preserves_bytes() {
+        let mut reader = YieldingReader::new(b"abc");
+        let mut out = Vec::new();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = {
+            let mut fut = reader.read_to_end(&mut out);
+            let mut pinned = Pin::new(&mut fut);
+            pinned.as_mut().poll(&mut cx)
+        };
+        assert!(matches!(poll, Poll::Pending));
+        assert_eq!(out, b"a");
+    }
+
+    #[test]
+    fn cancel_safety_read_to_string_preserves_prefix() {
+        let mut reader = YieldingReader::new(b"abc");
+        let mut out = String::new();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = {
+            let mut fut = reader.read_to_string(&mut out);
+            let mut pinned = Pin::new(&mut fut);
+            pinned.as_mut().poll(&mut cx)
+        };
+        assert!(matches!(poll, Poll::Pending));
+        assert_eq!(out, "a");
     }
 }
