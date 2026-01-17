@@ -28,7 +28,7 @@ pub mod race;
 pub mod retry;
 pub mod timeout;
 
-pub use bracket::{bracket, bracket_move, commit_section, try_commit_section, Bracket};
+pub use bracket::{bracket, bracket_move, commit_section, try_commit_section};
 pub use bulkhead::{
     Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy,
     BulkheadPolicyBuilder, BulkheadRegistry, FullCallback,

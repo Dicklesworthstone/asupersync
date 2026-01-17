@@ -7,82 +7,7 @@
 use crate::cx::Cx;
 use std::future::Future;
 use std::pin::Pin;
-
-/// The bracket pattern for resource safety.
-///
-/// Acquires a resource, uses it, and guarantees release even on error/cancel.
-///
-/// # Type Parameters
-/// * `A` - The acquire future
-/// * `U` - The use function (takes resource, returns future)
-/// * `R` - The release function (takes resource, returns future)
-/// * `T` - The value type
-/// * `E` - The error type
-///
-/// # Example
-/// ```ignore
-/// let result = bracket(
-///     open_file("data.txt"),
-///     |file| async { file.read_all().await },
-///     |file| async { file.close().await },
-/// ).await;
-/// ```
-pub struct Bracket<A, U, R, T, E, Res>
-where
-    A: Future<Output = Result<Res, E>>,
-    U: FnOnce(Res) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
-    R: FnOnce(Res) -> Pin<Box<dyn Future<Output = ()> + Send>>,
-{
-    state: BracketState<A, U, R, T, E, Res>,
-}
-
-enum BracketState<A, U, R, T, E, Res>
-where
-    A: Future<Output = Result<Res, E>>,
-    U: FnOnce(Res) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
-    R: FnOnce(Res) -> Pin<Box<dyn Future<Output = ()> + Send>>,
-{
-    /// Acquiring the resource.
-    Acquiring {
-        acquire: A,
-        use_fn: Option<U>,
-        release_fn: Option<R>,
-    },
-    /// Using the resource.
-    Using {
-        use_future: Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
-        resource: Option<Res>,
-        release_fn: Option<R>,
-    },
-    /// Releasing the resource (always runs, even on error).
-    Releasing {
-        release_future: Pin<Box<dyn Future<Output = ()> + Send>>,
-        result: Option<Result<T, E>>,
-    },
-    /// Terminal state.
-    Done,
-}
-
-impl<A, U, R, T, E, Res> Bracket<A, U, R, T, E, Res>
-where
-    A: Future<Output = Result<Res, E>>,
-    U: FnOnce(Res) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
-    R: FnOnce(Res) -> Pin<Box<dyn Future<Output = ()> + Send>>,
-{
-    /// Creates a new bracket combinator.
-    pub fn new(acquire: A, use_fn: U, release_fn: R) -> Self {
-        Self {
-            state: BracketState::Acquiring {
-                acquire,
-                use_fn: Some(use_fn),
-                release_fn: Some(release_fn),
-            },
-        }
-    }
-}
-
-// Note: Full implementation requires pinning and unsafe code for the state machine.
-// For Phase 0, we provide a simpler async function instead.
+use std::task::{Context, Poll};
 
 /// Executes the bracket pattern: acquire, use, release.
 ///
@@ -120,13 +45,54 @@ where
     // Clone for release (resource is used by both use_fn and release)
     let resource_for_release = resource.clone();
 
-    // Use the resource, catching any result
-    let result = use_fn(resource).await;
+    // Use the resource, catching any panic
+    let result = CatchPanic(Box::pin(use_fn(resource))).await;
 
     // Always release (this should run under cancel mask in full implementation)
     release(resource_for_release).await;
 
-    result
+    match result {
+        Ok(val) => val,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// A `Future` wrapper for the bracket pattern.
+///
+/// This is a convenience type that stores the bracket future and
+/// implements `Future` directly.
+pub struct Bracket<F> {
+    inner: Pin<Box<F>>,
+}
+
+impl<F> Bracket<F> {
+    /// Constructs a new `Bracket` future from acquire/use/release functions.
+    #[must_use]
+    pub fn new<Res, T, E, A, U, UF, R, RF>(
+        acquire: A,
+        use_fn: U,
+        release: R,
+    ) -> Bracket<impl Future<Output = Result<T, E>>>
+    where
+        A: Future<Output = Result<Res, E>>,
+        U: FnOnce(Res) -> UF,
+        UF: Future<Output = Result<T, E>>,
+        R: FnOnce(Res) -> RF,
+        RF: Future<Output = ()>,
+        Res: Clone,
+    {
+        Bracket {
+            inner: Box::pin(bracket(acquire, use_fn, release)),
+        }
+    }
+}
+
+impl<F: Future> Future for Bracket<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.inner.as_mut().poll(cx)
+    }
 }
 
 /// A simpler bracket that doesn't require Clone on the resource.
@@ -144,12 +110,43 @@ where
     let resource = acquire.await?;
 
     // Use the resource
-    let (value, leftover) = use_fn(resource);
+    // use_fn is not a future here, it's FnOnce -> T. So it runs synchronously.
+    // If it panics, we must catch it to run release.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| use_fn(resource)));
 
-    // Always release
-    release(leftover).await;
+    match result {
+        Ok((value, leftover)) => {
+            release(leftover).await;
+            Ok(value)
+        }
+        Err(payload) => {
+            // Resource was moved into use_fn. If use_fn panicked, we assume resource is lost/dropped?
+            // Wait, use_fn takes Res by value. If it panics, Res is dropped.
+            // So we can't release it (it's gone).
+            // We pass None to release.
+            release(None).await;
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
 
-    Ok(value)
+/// Helper future to catch panics during polling.
+struct CatchPanic<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchPanic<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+
+        match result {
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
 }
 
 /// Commit section: runs a future with bounded cancel masking.
@@ -238,28 +235,6 @@ mod tests {
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )
-    }
-
-    // =========================================================================
-    // Bracket Struct Tests
-    // =========================================================================
-
-    #[test]
-    fn bracket_struct_creation() {
-        let _bracket = Bracket::new(
-            async { Ok::<_, ()>(42) },
-            |x: i32| Box::pin(async move { Ok::<_, ()>(x * 2) }),
-            |_x: i32| Box::pin(async {}),
-        );
-    }
-
-    #[test]
-    fn bracket_struct_with_string_resource() {
-        let _bracket = Bracket::new(
-            async { Ok::<_, &str>("resource".to_string()) },
-            |s: String| Box::pin(async move { Ok::<_, &str>(s.len()) }),
-            |_s: String| Box::pin(async {}),
-        );
     }
 
     // =========================================================================
