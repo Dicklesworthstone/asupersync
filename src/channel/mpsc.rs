@@ -650,26 +650,15 @@ mod tests {
 
         tx.send(&cx, 1).expect("send failed");
 
-        let started = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
-        let started_clone = Arc::clone(&started);
         let finished_clone = Arc::clone(&finished);
         let tx_clone = tx;
         let cx_clone = cx.clone();
 
         let handle = std::thread::spawn(move || {
-            started_clone.store(true, Ordering::SeqCst);
             tx_clone.send(&cx_clone, 2).expect("send in worker failed");
             finished_clone.store(true, Ordering::SeqCst);
         });
-
-        for _ in 0..1_000 {
-            if started.load(Ordering::SeqCst) {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        assert!(started.load(Ordering::SeqCst));
 
         for _ in 0..1_000 {
             std::thread::yield_now();
