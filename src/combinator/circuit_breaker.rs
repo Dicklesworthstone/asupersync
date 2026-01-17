@@ -467,6 +467,7 @@ impl CircuitBreaker {
     }
 
     /// Record a successful call.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn record_success(&self, permit: Permit, now: Time) {
         let now_millis = now.as_millis();
 
@@ -490,15 +491,22 @@ impl CircuitBreaker {
             }
         }
 
-        if let Some(ref window) = self.sliding_window {
-            window
-                .write()
-                .expect("lock poisoned")
-                .record_success(now_millis);
+        // Check sliding window after recording success - may trigger open
+        // if failure rate threshold is exceeded once minimum_calls is reached
+        let window_triggered = self.sliding_window.as_ref().map_or(false, |window| {
+            let mut w = window.write().expect("lock poisoned");
+            w.record_success(now_millis);
+            w.should_open()
+        });
+
+        if window_triggered {
+            let mut metrics = self.metrics.write().expect("lock poisoned");
+            self.transition_to_open(now_millis, &mut metrics);
         }
     }
 
     /// Record a failed call.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn record_failure(&self, permit: Permit, error: &str, now: Time) {
         let now_millis = now.as_millis();
 
