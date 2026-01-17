@@ -1,5 +1,9 @@
 //! Asupersync Conformance Test Suite
 //!
+// Allow type complexity for trait method return types - these are intentionally
+// verbose to be explicit about the async behavior and lifetimes
+#![allow(clippy::type_complexity)]
+//!
 //! This crate provides a conformance test suite for async runtime implementations.
 //! Tests are designed to verify that runtimes correctly implement the expected
 //! semantics for spawning, channels, I/O, synchronization, and cancellation.
@@ -176,31 +180,33 @@ pub struct TestMeta {
 pub trait RuntimeInterface: Sized {
     // ---- Core Types ----
     /// Join handle for spawned tasks.
-    type JoinHandle<T: Send + 'static>: Future<Output = T> + Send;
+    type JoinHandle<T: Send + 'static>: Future<Output = T> + Send + 'static;
 
     /// MPSC sender.
-    type MpscSender<T: Send + 'static>: MpscSender<T>;
+    type MpscSender<T: Send + 'static>: MpscSender<T> + 'static;
 
     /// MPSC receiver.
-    type MpscReceiver<T: Send + 'static>: MpscReceiver<T>;
+    type MpscReceiver<T: Send + 'static>: MpscReceiver<T> + 'static;
 
     /// Oneshot sender.
-    type OneshotSender<T: Send + 'static>: OneshotSender<T>;
+    type OneshotSender<T: Send + 'static>: OneshotSender<T> + 'static;
 
     /// Oneshot receiver.
-    type OneshotReceiver<T: Send + 'static>: Future<Output = Result<T, OneshotRecvError>> + Send;
+    type OneshotReceiver<T: Send + 'static>: Future<Output = Result<T, OneshotRecvError>>
+        + Send
+        + 'static;
 
     /// Async file handle.
-    type File: AsyncFile;
+    type File: AsyncFile + 'static;
 
     /// TCP listener.
-    type TcpListener: TcpListener<Stream = Self::TcpStream>;
+    type TcpListener: TcpListener<Stream = Self::TcpStream> + 'static;
 
     /// TCP stream.
-    type TcpStream: TcpStream;
+    type TcpStream: TcpStream + 'static;
 
     /// UDP socket.
-    type UdpSocket: UdpSocket;
+    type UdpSocket: UdpSocket + 'static;
 
     // ---- Spawn ----
     /// Spawn an async task.
@@ -234,7 +240,9 @@ pub trait RuntimeInterface: Sized {
     ) -> (Self::MpscSender<T>, Self::MpscReceiver<T>);
 
     /// Create a oneshot channel.
-    fn oneshot_channel<T: Send + 'static>(&self) -> (Self::OneshotSender<T>, Self::OneshotReceiver<T>);
+    fn oneshot_channel<T: Send + 'static>(
+        &self,
+    ) -> (Self::OneshotSender<T>, Self::OneshotReceiver<T>);
 
     // ---- File I/O ----
     /// Create a file for writing.
@@ -365,7 +373,9 @@ pub trait TcpListener: Send {
     fn local_addr(&self) -> io::Result<SocketAddr>;
 
     /// Accept a connection.
-    fn accept(&self) -> Pin<Box<dyn Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>;
+    fn accept(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>;
 }
 
 /// TCP stream trait.
