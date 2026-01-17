@@ -28,6 +28,8 @@
 //! - [`util`]: Internal utilities (deterministic RNG, arenas)
 //! - [`error`]: Error types
 //! - [`channel`]: Two-phase channel primitives (MPSC, etc.)
+//! - [`observability`]: Structured logging, metrics, and diagnostic context
+//! - [`security`]: Symbol authentication and security primitives
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -47,8 +49,10 @@ pub mod combinator;
 pub mod cx;
 pub mod error;
 pub mod lab;
+pub mod observability;
 pub mod record;
 pub mod runtime;
+pub mod security;
 pub mod sync;
 pub mod trace;
 pub mod types;
@@ -56,7 +60,12 @@ pub mod util;
 
 // Re-exports for convenient access to core types
 pub use cx::{Cx, Scope};
+pub use error::{
+    AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, RecoveryAction, Recoverability,
+    RecvError, Result, ResultExt, SendError,
+};
 pub use lab::{LabConfig, LabRuntime};
 pub use types::{
-    Budget, CancelKind, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
+    join_outcomes, Budget, CancelKind, CancelReason, ObligationId, Outcome, OutcomeError,
+    PanicPayload, Policy, RegionId, Severity, TaskId, Time,
 };

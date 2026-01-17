@@ -30,7 +30,7 @@ use asupersync::combinator::join::{join2_outcomes, join_all_outcomes};
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::outcome::{join_outcomes, PanicPayload};
-use asupersync::types::{Budget, Outcome, Time};
+use asupersync::types::{Budget, Outcome, Severity, Time};
 use proptest::prelude::*;
 
 // ============================================================================
@@ -147,7 +147,7 @@ proptest! {
     fn outcome_panicked_is_maximal(x in arb_outcome()) {
         let panicked: Outcome<i32, i32> = Outcome::Panicked(PanicPayload::new("test"));
         let result = join_outcomes(panicked, x);
-        prop_assert_eq!(result.severity(), 3);
+        prop_assert_eq!(result.severity(), Severity::Panicked);
     }
 }
 
@@ -415,15 +415,15 @@ proptest! {
     /// The aggregate decision reflects the worst outcome.
     #[test]
     fn join_all_takes_worst_severity(outcomes in proptest::collection::vec(arb_outcome(), 1..10)) {
-        let max_severity = outcomes.iter().map(Outcome::severity).max().unwrap_or(0);
+        let max_severity = outcomes.iter().map(Outcome::severity).max().unwrap_or(Severity::Ok);
         let (decision, _) = join_all_outcomes(outcomes);
 
         // The decision severity should match the worst input
         let decision_severity = match &decision {
-            asupersync::types::policy::AggregateDecision::AllOk => 0,
-            asupersync::types::policy::AggregateDecision::FirstError(_) => 1,
-            asupersync::types::policy::AggregateDecision::Cancelled(_) => 2,
-            asupersync::types::policy::AggregateDecision::Panicked(_) => 3,
+            asupersync::types::policy::AggregateDecision::AllOk => Severity::Ok,
+            asupersync::types::policy::AggregateDecision::FirstError(_) => Severity::Err,
+            asupersync::types::policy::AggregateDecision::Cancelled(_) => Severity::Cancelled,
+            asupersync::types::policy::AggregateDecision::Panicked(_) => Severity::Panicked,
         };
 
         prop_assert_eq!(decision_severity, max_severity);

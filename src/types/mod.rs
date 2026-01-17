@@ -19,6 +19,6 @@ pub mod symbol;
 pub use budget::Budget;
 pub use cancel::{CancelKind, CancelReason};
 pub use id::{ObligationId, RegionId, TaskId, Time};
-pub use outcome::Outcome;
+pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;
 pub use symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind, DEFAULT_SYMBOL_SIZE};

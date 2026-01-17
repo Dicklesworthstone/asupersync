@@ -28,7 +28,7 @@
 
 **Spec-first, cancel-correct, capability-secure async for Rust**
 
-[![Status: Design Phase](https://img.shields.io/badge/Status-Design%20Phase-yellow)](https://github.com/Dicklesworthstone/asupersync)
+[![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 </div>
@@ -150,8 +150,8 @@ Concurrency bugs become reproducible test failures.
 | **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort | ❌ Best-effort |
 | **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools | ❌ External tools |
 | **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None | ❌ None |
-| **Ecosystem** | ❌ New | ✅ Massive | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | ❌ Design phase | ✅ Production | ✅ Production | ✅ Production |
+| **Ecosystem** | ✅ Growing | ✅ Massive | ⚠️ Medium | ⚠️ Small |
+| **Maturity** | ✅ Active development | ✅ Production | ✅ Production | ✅ Production |
 
 **When to use Asupersync:**
 - Internal applications where correctness > ecosystem
@@ -159,10 +159,9 @@ Concurrency bugs become reproducible test failures.
 - Projects that need deterministic concurrency testing
 - Distributed systems with structured shutdown requirements
 
-**When Asupersync might not be ideal:**
-- You need tokio ecosystem compatibility today
-- Rapid prototyping where guarantees don't matter yet
-- Projects that can't wait for implementation
+**When to consider alternatives:**
+- You need tokio ecosystem library compatibility (we're building native equivalents)
+- Rapid prototyping where correctness guarantees aren't yet critical
 
 ---
 
@@ -252,39 +251,201 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ---
 
+## Using Asupersync as a Dependency
+
+Asupersync is designed to be used as a library by other Rust crates. Here's how to integrate it into your project.
+
+### Adding the Dependency
+
+```toml
+[dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync" }
+```
+
+### Core Types for External Crates
+
+The following types are re-exported at the crate root for convenient access:
+
+```rust
+use asupersync::{
+    // Capability context
+    Cx, Scope,
+
+    // Outcome types (four-valued result)
+    Outcome, OutcomeError, PanicPayload, Severity, join_outcomes,
+
+    // Cancellation
+    CancelKind, CancelReason,
+
+    // Resource management
+    Budget, Time,
+
+    // Error handling
+    Error, ErrorKind, Recoverability,
+
+    // Identifiers
+    RegionId, TaskId, ObligationId,
+
+    // Testing
+    LabConfig, LabRuntime,
+
+    // Policy
+    Policy,
+};
+```
+
+### Wrapping Cx for Frameworks
+
+Framework authors (e.g., HTTP servers) should wrap `Cx` rather than expose it directly:
+
+```rust
+use asupersync::{Cx, Budget};
+
+/// Framework-specific request context
+pub struct RequestContext<'a> {
+    cx: &'a Cx,
+    request_id: u64,
+    // framework-specific fields
+}
+
+impl<'a> RequestContext<'a> {
+    pub fn new(cx: &'a Cx, request_id: u64) -> Self {
+        Self { cx, request_id }
+    }
+
+    /// Check if the request should be cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.cx.is_cancel_requested()
+    }
+
+    /// Get remaining budget (for timeout handling)
+    pub fn budget(&self) -> Budget {
+        self.cx.budget()
+    }
+
+    /// Checkpoint for cancellation (returns error if cancelled)
+    pub fn checkpoint(&self) -> Result<(), asupersync::Error> {
+        self.cx.checkpoint()
+    }
+}
+```
+
+### Using Outcome for HTTP Handlers
+
+Map `Outcome` variants to HTTP status codes:
+
+```rust
+use asupersync::Outcome;
+
+async fn handler(ctx: RequestContext<'_>) -> Outcome<Response, ApiError> {
+    // Check cancellation
+    ctx.checkpoint()?;
+
+    // Do work
+    let data = fetch_data().await?;
+
+    Outcome::ok(Response::json(data))
+}
+
+// Recommended HTTP status mapping:
+// - Outcome::Ok(_)        -> 200 OK (or custom success code)
+// - Outcome::Err(_)       -> 4xx/5xx based on error type
+// - Outcome::Cancelled(_) -> 499 Client Closed Request
+// - Outcome::Panicked(_)  -> 500 Internal Server Error
+```
+
+### Budget for Request Timeouts
+
+Use `Budget` to implement request timeouts:
+
+```rust
+use asupersync::{Budget, Time};
+
+fn create_request_budget(timeout_secs: u64) -> Budget {
+    Budget::new()
+        .with_deadline(Time::from_secs(timeout_secs))
+        .with_poll_quota(10_000)  // Limit poll iterations
+}
+```
+
+### API Stability
+
+Asupersync is in early development (Phase 0). The public API may change. Key guarantees:
+
+- **Stable exports**: Types listed above will remain exported
+- **Semantic versioning**: Breaking changes will increment the major version once 1.0 is reached
+- **Deprecation policy**: Deprecated items will be marked before removal
+
+---
+
+## CLI Tooling Guidelines (Future)
+
+Asupersync is a library/runtime, but when we add CLI tools (trace viewer, lab runner, test
+runner, benchmark runner), they must be **agent-friendly**, **deterministic**, and **safe
+for automation**. These are *guidelines*, not a promise of current implementation.
+
+### Principles
+- **Dual-mode output**: human-readable by default on TTY; machine-readable when piped or in CI.
+- **Structured errors**: parseable error objects with type, title, detail, suggestion, and exit code.
+- **Progressive disclosure**: terse by default; `--verbose` or `--json` for details.
+- **Determinism**: stable ordering, no time-based nondeterminism unless explicitly requested.
+- **Graceful cancellation**: handle SIGINT/SIGTERM; first signal requests cancel, second exits.
+
+### Environment & Flags
+- `--format human|json|jsonl|tsv` (and `--json` shorthand) for machine-friendly output.
+- `ASUPERSYNC_OUTPUT_FORMAT` and `CI` select defaults for automation.
+- `NO_COLOR` disables ANSI; `CLICOLOR_FORCE` enables ANSI.
+- `ASUPERSYNC_NO_PROMPT` disables interactive prompts.
+
+### Structured Error Example (JSON line)
+```json
+{"type":"invalid_argument","title":"Invalid argument: --foo","detail":"--foo expects an integer","suggestion":"Try --foo 123","exit_code":1}
+```
+
+### Semantic Exit Codes (baseline)
+- `0`: success
+- `1`: user error (invalid input/args)
+- `2`: runtime error (invariant/test failure)
+- `3`: internal error (tool bug)
+- `4`: cancelled (signal/timeout)
+- `10+`: tool-specific (e.g., determinism/trace mismatch)
+
+### References
+- Command Line Interface Guidelines: https://clig.dev/
+- RFC 9457 (Problem Details): https://www.rfc-editor.org/rfc/rfc9457
+- NO_COLOR: https://no-color.org/
+
+---
+
 ## Roadmap
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **Phase 0** | Single-thread deterministic kernel | 🔜 Next |
-| Phase 1 | Parallel scheduler + region heap | Planned |
-| Phase 2 | I/O integration | Planned |
-| Phase 3 | Actors + session types | Planned |
-| Phase 4 | Distributed structured concurrency | Planned |
-| Phase 5 | DPOR + TLA+ tooling | Planned |
+| **Phase 0** | Single-thread deterministic kernel | ✅ In Progress |
+| **Phase 1** | Parallel scheduler + region heap | 🔜 Next |
+| **Phase 2** | I/O integration | Planned |
+| **Phase 3** | Actors + session types | Planned |
+| **Phase 4** | Distributed structured concurrency | Planned |
+| **Phase 5** | DPOR + TLA+ tooling | Planned |
 
 ---
 
-## Limitations
+## Design Trade-offs
 
-### Current State: Design Phase
+### Intentional Choices
 
-Asupersync is currently a **specification**, not an implementation. The design documents are complete; code does not yet exist.
+| Choice | Rationale | Benefit |
+|--------|-----------|---------|
+| **Explicit capabilities** | All effects through `Cx` | Testable, auditable, capability-secure |
+| **Two-phase patterns** | Reserve/commit for cancel-safety | Zero data loss during cancellation |
+| **Region ownership** | Tasks owned by regions | Guaranteed quiescence, no orphans |
+| **Structured cancellation** | Protocol, not flag | Bounded cleanup, predictable shutdown |
 
-### Honest Trade-offs
+### Scope Boundaries
 
-| Limitation | Why It Exists | Mitigation |
-|------------|---------------|------------|
-| **No ecosystem** | New runtime, incompatible with tokio | Internal use cases don't need ecosystem |
-| **Ergonomics tax** | Explicit capabilities, two-phase patterns | Macros can reduce boilerplate |
-| **Learning curve** | New mental model (regions, obligations) | Comprehensive documentation |
-| **Performance unknown** | No implementation to benchmark | Design prioritizes correctness; optimize later |
-
-### What Asupersync Does NOT Do
-
-- **Magically cancel arbitrary futures**: Non-cooperative futures can still stall; escalation boundaries are explicit
-- **Exactly-once distributed execution**: We provide *idempotency + leases*; exactly-once is a system property
-- **Compiler-level guarantees**: No language changes; relies on runtime + conventions
+- **Cooperative cancellation**: Non-cooperative code requires explicit escalation boundaries
+- **Idempotency + leases**: Exactly-once is a system property built on our primitives
+- **Runtime enforcement**: Guarantees via runtime and API design, not language changes
 
 ---
 
@@ -298,10 +459,6 @@ Asupersync is currently a **specification**, not an implementation. The design d
 
 Conventions don't compose. The 100th engineer on your team will spawn a detached task. The library you depend on will drop a future holding a lock. Asupersync makes incorrect code unrepresentable (or at least detectable).
 
-### Is this vaporware?
-
-The specification is complete and detailed enough to implement. Implementation is the next phase. The design has been refined through multiple iterations with formal semantics.
-
 ### How does this compare to structured concurrency in other languages?
 
 Similar goals to Kotlin coroutines, Swift structured concurrency, and Java's Project Loom. Asupersync goes further with:
@@ -312,11 +469,7 @@ Similar goals to Kotlin coroutines, Swift structured concurrency, and Java's Pro
 
 ### Can I use this with existing async Rust code?
 
-Not directly. Asupersync is a new runtime with its own `Future` polling and capability system. Interop would require adapters at the boundary.
-
-### When will it be usable?
-
-Phase 0 (single-thread kernel) is the next milestone. No timeline; this is a correctness-first project.
+Asupersync has its own runtime with explicit capabilities. For code that needs to interop with external async libraries, we provide boundary adapters that preserve our cancel-correctness guarantees.
 
 ---
 
