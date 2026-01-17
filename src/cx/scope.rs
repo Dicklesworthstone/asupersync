@@ -393,7 +393,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42 });
+        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 });
 
         // Task should exist in state
         let task = state.tasks.get(handle.task_id().arena_index());
@@ -411,7 +411,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42);
+        let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42_i32);
 
         // Task should exist
         let task = state.tasks.get(handle.task_id().arena_index());
@@ -428,7 +428,7 @@ mod tests {
 
         // In Phase 0, spawn_local requires Send bounds
         // In Phase 1+, this will work with !Send futures
-        let (handle, _stored) = scope.spawn_local(&mut state, &cx, |_| async move { 42 });
+        let (handle, _stored) = scope.spawn_local(&mut state, &cx, |_| async move { 42_i32 });
 
         // Task should exist
         let task = state.tasks.get(handle.task_id().arena_index());
@@ -443,7 +443,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42 });
+        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 });
 
         // Check region has the task
         let region_record = state.regions.get(region.arena_index()).unwrap();
@@ -457,9 +457,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle1, _) = scope.spawn(&mut state, &cx, |_| async { 1 });
-        let (handle2, _) = scope.spawn(&mut state, &cx, |_| async { 2 });
-        let (handle3, _) = scope.spawn(&mut state, &cx, |_| async { 3 });
+        let (handle1, _) = scope.spawn(&mut state, &cx, |_| async { 1_i32 });
+        let (handle2, _) = scope.spawn(&mut state, &cx, |_| async { 2_i32 });
+        let (handle3, _) = scope.spawn(&mut state, &cx, |_| async { 3_i32 });
 
         // All task IDs should be different
         assert_ne!(handle1.task_id(), handle2.task_id());
