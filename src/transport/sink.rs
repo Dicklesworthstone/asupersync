@@ -57,6 +57,7 @@ pub trait SymbolSinkExt: SymbolSink {
             sink: self,
             iter: symbols.into_iter(),
             buffered: None,
+            count: 0,
         }
     }
 
@@ -110,7 +111,14 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for SendFuture<'_, S> {
 
         // Then send
         if let Some(symbol) = this.symbol.take() {
-            Pin::new(&mut *this.sink).poll_send(cx, symbol)
+            match Pin::new(&mut *this.sink).poll_send(cx, symbol.clone()) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => {
+                    this.symbol = Some(symbol);
+                    Poll::Pending
+                }
+            }
         } else {
             Poll::Ready(Ok(()))
         }
@@ -122,6 +130,7 @@ pub struct SendAllFuture<'a, S: ?Sized, I> {
     sink: &'a mut S,
     iter: I,
     buffered: Option<AuthenticatedSymbol>,
+    count: usize,
 }
 
 impl<S, I> Future for SendAllFuture<'_, S, I>
@@ -132,7 +141,6 @@ where
     type Output = Result<usize, SinkError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut count = 0;
         loop {
             // Try to send buffered item
             if let Some(symbol) = self.buffered.take() {
@@ -144,14 +152,11 @@ where
                         return Poll::Pending;
                     }
                 }
-                match Pin::new(&mut *self.sink).poll_send(cx, symbol) {
-                    Poll::Ready(Ok(())) => count += 1,
+                match Pin::new(&mut *self.sink).poll_send(cx, symbol.clone()) {
+                    Poll::Ready(Ok(())) => self.count += 1,
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => {
-                        // This technically shouldn't happen if ready returned Ok,
-                        // but if it does, we lost the symbol. 
-                        // Simplified: assume poll_send returns Ready if poll_ready did.
-                        // Or if poll_send buffers.
+                        self.buffered = Some(symbol);
                         return Poll::Pending;
                     }
                 }
@@ -163,7 +168,7 @@ where
                 None => {
                     // Flush
                     match Pin::new(&mut *self.sink).poll_flush(cx) {
-                        Poll::Ready(Ok(())) => return Poll::Ready(Ok(count)),
+                        Poll::Ready(Ok(())) => return Poll::Ready(Ok(self.count)),
                         Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                         Poll::Pending => return Poll::Pending,
                     }
@@ -264,9 +269,14 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
                 Poll::Pending => return Poll::Pending,
             }
             
-            let symbol = this.buffer.remove(0); // Inefficient for Vec, but simple
+            let symbol = match this.buffer.first() {
+                Some(symbol) => symbol.clone(),
+                None => break,
+            };
             match Pin::new(&mut this.inner).poll_send(cx, symbol) {
-                Poll::Ready(Ok(())) => {},
+                Poll::Ready(Ok(())) => {
+                    this.buffer.remove(0);
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
                     return Poll::Pending;

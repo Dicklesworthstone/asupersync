@@ -73,6 +73,13 @@ impl DetRng {
         }
     }
 
+    /// Shuffles a slice in place using the Fisher-Yates algorithm.
+    pub fn shuffle<T>(&mut self, slice: &mut [T]) {
+        for i in (1..slice.len()).rev() {
+            let j = self.next_usize(i + 1);
+            slice.swap(i, j);
+        }
+    }
 }
 
 #[cfg(test)]

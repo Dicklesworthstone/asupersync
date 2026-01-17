@@ -1,14 +1,22 @@
 //! Symbol stream traits and implementations.
 
+use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;
+use crate::time::{Sleep, TimeSource, WallClock};
 use crate::transport::error::StreamError;
 use crate::transport::{SharedChannel, SymbolSet};
+use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    CLOCK.get_or_init(WallClock::new).now()
+}
 
 /// A stream of incoming symbols.
 pub trait SymbolStream: Send {
@@ -75,6 +83,22 @@ pub trait SymbolStreamExt: SymbolStream {
         let f = Box::new(move |s: &AuthenticatedSymbol| s.symbol().sbn() == sbn);
         FilterStream { inner: self, f }
     }
+
+    /// Timeout on symbol reception.
+    fn timeout(self, duration: Duration) -> TimeoutStream<Self>
+    where
+        Self: Sized,
+    {
+        TimeoutStream::new(self, duration)
+    }
+
+    /// Receive the next symbol with cancellation support.
+    fn next_with_cancel<'a>(&'a mut self, cx: &'a Cx) -> NextWithCancelFuture<'a, Self>
+    where
+        Self: Unpin,
+    {
+        NextWithCancelFuture { stream: self, cx }
+    }
 }
 
 impl<S: SymbolStream + ?Sized> SymbolStreamExt for S {}
@@ -112,6 +136,35 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
                 Poll::Ready(None) => return Poll::Ready(Ok(self.set.len())),
                 Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Future for `next_with_cancel()`.
+pub struct NextWithCancelFuture<'a, S: ?Sized> {
+    stream: &'a mut S,
+    cx: &'a Cx,
+}
+
+impl<S: SymbolStream + Unpin + ?Sized> Future for NextWithCancelFuture<'_, S> {
+    type Output = Result<Option<AuthenticatedSymbol>, StreamError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.cx.is_cancel_requested() {
+            return Poll::Ready(Err(StreamError::Cancelled));
+        }
+
+        match Pin::new(&mut *self.stream).poll_next(cx) {
+            Poll::Ready(Some(Ok(symbol))) => Poll::Ready(Ok(Some(symbol))),
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Err(err)),
+            Poll::Ready(None) => Poll::Ready(Ok(None)),
+            Poll::Pending => {
+                if self.cx.is_cancel_requested() {
+                    Poll::Ready(Err(StreamError::Cancelled))
+                } else {
+                    Poll::Pending
+                }
             }
         }
     }
@@ -184,6 +237,84 @@ where
                 other => return other,
             }
         }
+    }
+}
+
+/// Stream that merges multiple streams in round-robin order.
+pub struct MergedStream<S> {
+    streams: Vec<S>,
+    current: usize,
+}
+
+impl<S> MergedStream<S> {
+    pub fn new(streams: Vec<S>) -> Self {
+        Self { streams, current: 0 }
+    }
+}
+
+impl<S: SymbolStream + Unpin> SymbolStream for MergedStream<S> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+        if self.streams.is_empty() {
+            return Poll::Ready(None);
+        }
+
+        let mut checked = 0;
+        let mut idx = self.current;
+
+        while checked < self.streams.len() {
+            if idx >= self.streams.len() {
+                idx = 0;
+            }
+
+            match Pin::new(&mut self.streams[idx]).poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    self.current = (idx + 1) % self.streams.len();
+                    return Poll::Ready(Some(item));
+                }
+                Poll::Ready(None) => {
+                    self.streams.remove(idx);
+                    if self.streams.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    if idx < self.current && self.current > 0 {
+                        self.current -= 1;
+                    }
+                    if self.current >= self.streams.len() {
+                        self.current = 0;
+                    }
+                    continue;
+                }
+                Poll::Pending => {
+                    idx += 1;
+                    checked += 1;
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let mut lower: usize = 0;
+        let mut upper = Some(0usize);
+
+        for stream in &self.streams {
+            let (l, u) = stream.size_hint();
+            lower = lower.saturating_add(l);
+            match (upper, u) {
+                (Some(acc), Some(u)) => upper = acc.checked_add(u),
+                _ => upper = None,
+            }
+        }
+
+        (lower, upper)
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.streams.iter().all(SymbolStream::is_exhausted)
     }
 }
 
@@ -263,65 +394,53 @@ impl SymbolStream for VecStream {
 pub struct TimeoutStream<S> {
     inner: S,
     duration: Duration,
-    sleep: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    sleep: Sleep,
+    time_getter: fn() -> Time,
 }
 
 impl<S> TimeoutStream<S> {
     pub fn new(inner: S, duration: Duration) -> Self {
+        Self::with_time_getter(inner, duration, wall_clock_now)
+    }
+
+    pub fn with_time_getter(inner: S, duration: Duration, time_getter: fn() -> Time) -> Self {
+        let now = time_getter();
+        let deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
+        let sleep = Sleep::with_time_getter(deadline, time_getter);
         Self {
             inner,
             duration,
-            sleep: None,
+            sleep,
+            time_getter,
         }
     }
-}
 
-// Note: This requires linking to `asupersync::time` or runtime.
-// If `asupersync::time::sleep` works without runtime (it does checks), we can use it.
-// But `Sleep` needs polling.
+    fn reset_timer(&mut self) {
+        let now = (self.time_getter)();
+        self.sleep.reset_after(now, self.duration);
+    }
+}
 
 impl<S: SymbolStream + Unpin> SymbolStream for TimeoutStream<S> {
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
-        // 1. Poll inner
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(v) => {
-                self.sleep = None; // Reset timer on activity
-                return Poll::Ready(v);
+            Poll::Ready(Some(item)) => {
+                self.reset_timer();
+                return Poll::Ready(Some(item));
             }
+            Poll::Ready(None) => return Poll::Ready(None),
             Poll::Pending => {}
         }
 
-        // 2. Setup/Poll timer
-        if self.sleep.is_none() {
-            // Using asupersync::time::sleep if available, or just assume we can use it
-            // Note: `asupersync::time::sleep` returns a `Sleep` struct which implements Future.
-            // We need to import it.
-            // Let's assume we can use `crate::time::sleep`.
-            // Ideally we should use the runtime's timer, but `crate::time::sleep` is the public API.
-            // We need a `now`. `crate::time::Time::now()` is not available directly?
-            // `crate::time::sleep` takes `(now, duration)`.
-            // We don't have `now`.
-            // Phase 0: we can use `std::time::Instant` but `Sleep` uses `crate::types::Time`.
-            // `crate::types::Time` corresponds to wall clock in production.
-            // This suggests we might need a runtime context to get time.
-            // Without it, implementing `timeout` combinator purely as a struct is hard if we depend on `asupersync` time.
-            // I'll skip implementing `TimeoutStream` logic for now or use `std` sleep if I can wrap it?
-            // But I need to return `Poll`.
-            // I'll mark it as TODO or return Pending.
-            return Poll::Pending;
+        let now = (self.time_getter)();
+        if self.sleep.poll_with_time(now).is_ready() {
+            self.reset_timer();
+            return Poll::Ready(Some(Err(StreamError::Timeout)));
         }
-        
-        /* 
-        if let Some(ref mut sleep) = self.sleep {
-            if sleep.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(Some(Err(StreamError::Timeout)));
-            }
-        }
-        */
-        
+
         Poll::Pending
     }
 }

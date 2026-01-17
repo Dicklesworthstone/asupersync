@@ -2,15 +2,27 @@
 mod tests {
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
+    use crate::transport::error::{SinkError, StreamError};
+    use crate::transport::stream::{MergedStream, VecStream};
     use crate::transport::{channel, SymbolSet, SymbolSinkExt, SymbolStreamExt};
     use crate::types::{Symbol, SymbolId, SymbolKind};
+    use crate::Cx;
     use futures_lite::future;
+    use std::time::Duration;
 
     fn create_symbol(i: u32) -> AuthenticatedSymbol {
         let id = SymbolId::new_for_test(1, 0, i);
         let data = vec![i as u8];
         let symbol = Symbol::new(id, data, SymbolKind::Source);
         // Fake tag for testing transport (we don't check validity here, just transport)
+        let tag = AuthenticationTag::zero();
+        AuthenticatedSymbol::new_verified(symbol, tag)
+    }
+
+    fn create_symbol_with_sbn(sbn: u8, esi: u32) -> AuthenticatedSymbol {
+        let id = SymbolId::new_for_test(1, sbn, esi);
+        let data = vec![sbn, esi as u8];
+        let symbol = Symbol::new(id, data, SymbolKind::Source);
         let tag = AuthenticationTag::zero();
         AuthenticatedSymbol::new_verified(symbol, tag)
     }
@@ -127,6 +139,63 @@ mod tests {
             assert!(filtered.next().await.is_none());
         });
     }
+
+    #[test]
+    fn test_stream_for_block() {
+        let (mut sink, stream) = channel(10);
+
+        future::block_on(async {
+            sink.send(create_symbol_with_sbn(0, 1)).await.unwrap();
+            sink.send(create_symbol_with_sbn(1, 2)).await.unwrap();
+            sink.send(create_symbol_with_sbn(1, 3)).await.unwrap();
+            sink.close().await.unwrap();
+
+            let mut filtered = stream.for_block(1);
+            let r1 = filtered.next().await.unwrap().unwrap();
+            assert_eq!(r1.symbol().sbn(), 1);
+            let r2 = filtered.next().await.unwrap().unwrap();
+            assert_eq!(r2.symbol().sbn(), 1);
+            assert!(filtered.next().await.is_none());
+        });
+    }
+
+    #[test]
+    fn test_stream_timeout() {
+        let (_sink, stream) = channel(10);
+        let mut timed = stream.timeout(Duration::ZERO);
+
+        future::block_on(async {
+            let res = timed.next().await;
+            assert!(matches!(res, Some(Err(StreamError::Timeout))));
+        });
+    }
+
+    #[test]
+    fn test_merged_stream() {
+        let s1 = VecStream::new(vec![create_symbol(1), create_symbol(3)]);
+        let s2 = VecStream::new(vec![create_symbol(2), create_symbol(4)]);
+        let mut merged = MergedStream::new(vec![s1, s2]);
+
+        future::block_on(async {
+            let mut out = Vec::new();
+            while let Some(item) = merged.next().await {
+                out.push(item.unwrap().symbol().esi());
+            }
+            assert_eq!(out, vec![1, 2, 3, 4]);
+        });
+    }
+
+    #[test]
+    fn test_stream_cancellation() {
+        let (_sink, mut stream) = channel(10);
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        future::block_on(async {
+            let res = stream.next_with_cancel(&cx).await;
+            assert!(matches!(res, Err(StreamError::Cancelled)));
+        });
+    }
     
     #[test]
     fn test_sink_buffer() {
@@ -162,6 +231,34 @@ mod tests {
             // Now stream should have items
             let r1 = stream.next().await.unwrap().unwrap();
             assert_eq!(r1.symbol().id().esi(), 0);
+        });
+    }
+
+    #[test]
+    fn test_sink_send_all() {
+        let (mut sink, mut stream) = channel(10);
+        let symbols = vec![create_symbol(1), create_symbol(2), create_symbol(3)];
+
+        future::block_on(async {
+            let count = sink.send_all(symbols.clone()).await.unwrap();
+            assert_eq!(count, symbols.len());
+            sink.close().await.unwrap();
+
+            for expected in symbols {
+                let got = stream.next().await.unwrap().unwrap();
+                assert_eq!(got, expected);
+            }
+        });
+    }
+
+    #[test]
+    fn test_sink_after_close() {
+        let (mut sink, _stream) = channel(10);
+
+        future::block_on(async {
+            sink.close().await.unwrap();
+            let err = sink.send(create_symbol(1)).await.unwrap_err();
+            assert!(matches!(err, SinkError::Closed));
         });
     }
 }

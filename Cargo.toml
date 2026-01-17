@@ -20,6 +20,9 @@ path = "src/lib.rs"
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
 # Dependencies added here must preserve determinism in the lab runtime.
 thiserror = "1.0"
+crossbeam-deque = "0.8"
+crossbeam-queue = "0.3"
+parking_lot = "0.12"
 
 [dev-dependencies]
 proptest = "1.4"

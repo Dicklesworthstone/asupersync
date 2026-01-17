@@ -535,7 +535,18 @@ mod tests {
         }
 
         // New readers should be blocked while a writer is waiting.
-        assert!(matches!(lock.try_read(), Err(TryReadError::Locked)));
+        // We loop because setting the flag happens before the writer actually
+        // registers itself in the lock state.
+        let mut success = false;
+        for _ in 0..100 {
+            if matches!(lock.try_read(), Err(TryReadError::Locked)) {
+                success = true;
+                break;
+            }
+            std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(success, "writer did not block new readers");
 
         drop(read_guard);
         let _ = handle.join();
