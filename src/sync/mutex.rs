@@ -39,8 +39,9 @@
 //! });
 //! ```
 
+use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex as StdMutex, RwLock};
 
 use crate::cx::Cx;
@@ -104,17 +105,22 @@ impl std::error::Error for TryLockError {}
 /// - Design patterns (lock ordering) prevent in application
 #[derive(Debug)]
 pub struct Mutex<T> {
-    /// Whether the mutex is currently locked.
-    locked: AtomicBool,
-    /// Whether the mutex is poisoned (panic occurred while holding).
-    poisoned: AtomicBool,
     /// The protected data (wrapped in RwLock for safe interior mutability).
     data: RwLock<T>,
-    /// Number of waiters (for debugging/stats).
-    waiters: AtomicUsize,
-    /// FIFO queue position counter for fairness.
-    queue_head: StdMutex<u64>,
-    queue_tail: AtomicUsize,
+    /// Whether the mutex is poisoned (panic occurred while holding).
+    poisoned: AtomicBool,
+    /// Internal state for fairness and locking.
+    state: StdMutex<MutexState>,
+}
+
+#[derive(Debug)]
+struct MutexState {
+    /// Whether the mutex is currently locked.
+    locked: bool,
+    /// Queue of waiters (unique IDs).
+    waiters: VecDeque<u64>,
+    /// Counter for generating waiter IDs.
+    next_waiter_id: u64,
 }
 
 impl<T> Mutex<T> {
@@ -129,19 +135,21 @@ impl<T> Mutex<T> {
     #[must_use]
     pub fn new(value: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
-            poisoned: AtomicBool::new(false),
             data: RwLock::new(value),
-            waiters: AtomicUsize::new(0),
-            queue_head: StdMutex::new(0),
-            queue_tail: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            state: StdMutex::new(MutexState {
+                locked: false,
+                waiters: VecDeque::new(),
+                next_waiter_id: 0,
+            }),
         }
     }
 
     /// Returns true if the mutex is currently locked.
     #[must_use]
     pub fn is_locked(&self) -> bool {
-        self.locked.load(Ordering::Acquire)
+        let state = self.state.lock().expect("mutex state lock poisoned");
+        state.locked
     }
 
     /// Returns true if the mutex is poisoned.
@@ -155,7 +163,8 @@ impl<T> Mutex<T> {
     /// Returns the number of tasks currently waiting for the lock.
     #[must_use]
     pub fn waiters(&self) -> usize {
-        self.waiters.load(Ordering::Acquire)
+        let state = self.state.lock().expect("mutex state lock poisoned");
+        state.waiters.len()
     }
 
     /// Acquires the mutex, waiting if necessary.
@@ -178,74 +187,58 @@ impl<T> Mutex<T> {
             return Err(LockError::Poisoned);
         }
 
-        // Get our position in the queue for FIFO fairness
-        let our_position = {
-            let mut head = self.queue_head.lock().expect("queue lock poisoned");
-            let pos = *head;
-            *head += 1;
-            pos
+        // Register as waiter
+        let waiter_id = {
+            let mut state = self.state.lock().expect("mutex state lock poisoned");
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.waiters.push_back(id);
+            id
         };
 
-        // Mark ourselves as waiting
-        self.waiters.fetch_add(1, Ordering::AcqRel);
-
-        // Wait for our turn and the lock to be available
+        // Wait loop
         loop {
-            // Check if poisoned
-            if self.is_poisoned() {
-                self.waiters.fetch_sub(1, Ordering::AcqRel);
-                // Advance queue to not block others
-                self.queue_tail.fetch_add(1, Ordering::AcqRel);
-                cx.trace("mutex::lock failed: poisoned while waiting");
-                return Err(LockError::Poisoned);
-            }
-
-            // Check if it's our turn (FIFO)
-            let current_tail = self.queue_tail.load(Ordering::Acquire) as u64;
-            if current_tail != our_position {
-                // Not our turn yet, check cancellation and yield
-                if cx.checkpoint().is_err() {
-                    self.waiters.fetch_sub(1, Ordering::AcqRel);
-                    cx.trace("mutex::lock cancelled while waiting for turn");
-                    return Err(LockError::Cancelled);
+            // Check cancellation
+            if let Err(e) = cx.checkpoint() {
+                // Remove ourselves from queue
+                let mut state = self.state.lock().expect("mutex state lock poisoned");
+                if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                    state.waiters.remove(pos);
                 }
-                std::thread::yield_now();
-                continue;
-            }
-
-            // It's our turn - try to acquire the lock
-            if self
-                .locked
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                // Success! Advance the queue and return guard
-                self.queue_tail.fetch_add(1, Ordering::AcqRel);
-                self.waiters.fetch_sub(1, Ordering::AcqRel);
-                cx.trace("mutex::lock succeeded");
-
-                // Acquire the write guard from the internal RwLock
-                // This should not block since we've already acquired the logical lock
-                let guard = self.data.write().expect("internal lock poisoned");
-
-                return Ok(MutexGuard { mutex: self, guard });
-            }
-
-            // Lock is held by someone else (shouldn't happen if it's our turn,
-            // but handle it gracefully)
-            // Check cancellation before waiting
-            if cx.checkpoint().is_err() {
-                self.waiters.fetch_sub(1, Ordering::AcqRel);
-                // Advance queue to not block others
-                self.queue_tail.fetch_add(1, Ordering::AcqRel);
-                cx.trace("mutex::lock cancelled while waiting for lock");
+                cx.trace("mutex::lock cancelled while waiting");
                 return Err(LockError::Cancelled);
             }
 
-            // Phase 0: Simple spin-wait with yield
-            // Future: integrate with scheduler via proper waker/condvar
+            // Check if poisoned
+            if self.is_poisoned() {
+                let mut state = self.state.lock().expect("mutex state lock poisoned");
+                if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                    state.waiters.remove(pos);
+                }
+                return Err(LockError::Poisoned);
+            }
+
+            // Check if we can acquire
+            {
+                let mut state = self.state.lock().expect("mutex state lock poisoned");
+                if !state.locked && state.waiters.front() == Some(&waiter_id) {
+                    // Success!
+                    state.locked = true;
+                    state.waiters.pop_front();
+                    break; // Exit loop, drop state lock
+                }
+            }
+
+            // Not ready, yield
             std::thread::yield_now();
         }
+
+        cx.trace("mutex::lock succeeded");
+
+        // Acquire the write guard from the internal RwLock
+        let guard = self.data.write().expect("internal lock poisoned");
+
+        Ok(MutexGuard { mutex: self, guard })
     }
 
     /// Tries to acquire the mutex without waiting.
@@ -259,17 +252,23 @@ impl<T> Mutex<T> {
             return Err(TryLockError::Poisoned);
         }
 
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            // Acquire the write guard from the internal RwLock
-            let guard = self.data.write().expect("internal lock poisoned");
-            Ok(MutexGuard { mutex: self, guard })
-        } else {
-            Err(TryLockError::Locked)
+        let mut state = self.state.lock().expect("mutex state lock poisoned");
+        if state.locked {
+            return Err(TryLockError::Locked);
         }
+
+        // Even for try_lock, we should respect fairness?
+        // Standard try_lock usually allows barging, but strict FIFO would require empty queue.
+        // Let's enforce strict FIFO for consistency with `lock`.
+        if !state.waiters.is_empty() {
+             return Err(TryLockError::Locked);
+        }
+
+        state.locked = true;
+        drop(state);
+
+        let guard = self.data.write().expect("internal lock poisoned");
+        Ok(MutexGuard { mutex: self, guard })
     }
 
     /// Returns a mutable reference to the underlying data.
@@ -306,7 +305,8 @@ impl<T> Mutex<T> {
     ///
     /// This is called by `MutexGuard::drop()`.
     fn unlock(&self) {
-        self.locked.store(false, Ordering::Release);
+        let mut state = self.state.lock().expect("mutex state lock poisoned");
+        state.locked = false;
         // In full implementation: wake next waiter
     }
 }
@@ -411,56 +411,48 @@ impl<T> OwnedMutexGuard<T> {
             return Err(LockError::Poisoned);
         }
 
-        // Get our position in the queue for FIFO fairness
-        let our_position = {
-            let mut head = mutex.queue_head.lock().expect("queue lock poisoned");
-            let pos = *head;
-            *head += 1;
-            pos
+        // Register as waiter
+        let waiter_id = {
+            let mut state = mutex.state.lock().expect("mutex state lock poisoned");
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.waiters.push_back(id);
+            id
         };
 
-        // Mark ourselves as waiting
-        mutex.waiters.fetch_add(1, Ordering::AcqRel);
-
-        // Wait for our turn
         loop {
+            if let Err(e) = cx.checkpoint() {
+                let mut state = mutex.state.lock().expect("mutex state lock poisoned");
+                if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                    state.waiters.remove(pos);
+                }
+                return Err(LockError::Cancelled);
+            }
+
             if mutex.is_poisoned() {
-                mutex.waiters.fetch_sub(1, Ordering::AcqRel);
-                mutex.queue_tail.fetch_add(1, Ordering::AcqRel);
+                let mut state = mutex.state.lock().expect("mutex state lock poisoned");
+                if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                    state.waiters.remove(pos);
+                }
                 return Err(LockError::Poisoned);
             }
 
-            let current_tail = mutex.queue_tail.load(Ordering::Acquire) as u64;
-            if current_tail != our_position {
-                if cx.checkpoint().is_err() {
-                    mutex.waiters.fetch_sub(1, Ordering::AcqRel);
-                    return Err(LockError::Cancelled);
-                }
-                std::thread::yield_now();
-                continue;
-            }
-
-            if mutex
-                .locked
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
             {
-                mutex.queue_tail.fetch_add(1, Ordering::AcqRel);
-                mutex.waiters.fetch_sub(1, Ordering::AcqRel);
-                return Ok(Self {
-                    mutex,
-                    _marker: std::marker::PhantomData,
-                });
-            }
-
-            if cx.checkpoint().is_err() {
-                mutex.waiters.fetch_sub(1, Ordering::AcqRel);
-                mutex.queue_tail.fetch_add(1, Ordering::AcqRel);
-                return Err(LockError::Cancelled);
+                let mut state = mutex.state.lock().expect("mutex state lock poisoned");
+                if !state.locked && state.waiters.front() == Some(&waiter_id) {
+                    state.locked = true;
+                    state.waiters.pop_front();
+                    break;
+                }
             }
 
             std::thread::yield_now();
         }
+
+        Ok(Self {
+            mutex,
+            _marker: std::marker::PhantomData,
+        })
     }
 
     /// Tries to acquire an owned guard without waiting.
@@ -473,18 +465,18 @@ impl<T> OwnedMutexGuard<T> {
             return Err(TryLockError::Poisoned);
         }
 
-        if mutex
-            .locked
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            Ok(Self {
-                mutex,
-                _marker: std::marker::PhantomData,
-            })
-        } else {
-            Err(TryLockError::Locked)
+        let mut state = mutex.state.lock().expect("mutex state lock poisoned");
+        if state.locked || !state.waiters.is_empty() {
+            return Err(TryLockError::Locked);
         }
+
+        state.locked = true;
+        drop(state);
+
+        Ok(Self {
+            mutex,
+            _marker: std::marker::PhantomData,
+        })
     }
 
     /// Executes a closure with read access to the locked data.

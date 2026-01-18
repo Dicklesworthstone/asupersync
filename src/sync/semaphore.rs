@@ -43,7 +43,7 @@
 //! }
 //! ```
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::cx::Cx;
@@ -92,17 +92,22 @@ impl std::error::Error for TryAcquireError {}
 /// This prevents starvation and ensures deterministic behavior in the lab runtime.
 #[derive(Debug)]
 pub struct Semaphore {
-    /// Number of available permits.
-    permits: AtomicUsize,
+    /// Internal state for permits and waiters.
+    state: Mutex<SemaphoreState>,
     /// Maximum permits (initial count).
     max_permits: usize,
+}
+
+#[derive(Debug)]
+struct SemaphoreState {
+    /// Number of available permits.
+    permits: usize,
     /// Whether the semaphore is closed.
-    closed: AtomicUsize, // 0 = open, 1 = closed
-    /// Number of waiters (for debugging/stats).
-    waiters: AtomicUsize,
-    /// FIFO queue position counter for fairness.
-    queue_head: Mutex<u64>,
-    queue_tail: AtomicUsize,
+    closed: bool,
+    /// Queue of waiters (unique IDs).
+    waiters: VecDeque<u64>,
+    /// Counter for generating waiter IDs.
+    next_waiter_id: u64,
 }
 
 impl Semaphore {
@@ -117,19 +122,20 @@ impl Semaphore {
     #[must_use]
     pub fn new(permits: usize) -> Self {
         Self {
-            permits: AtomicUsize::new(permits),
+            state: Mutex::new(SemaphoreState {
+                permits,
+                closed: false,
+                waiters: VecDeque::new(),
+                next_waiter_id: 0,
+            }),
             max_permits: permits,
-            closed: AtomicUsize::new(0),
-            waiters: AtomicUsize::new(0),
-            queue_head: Mutex::new(0),
-            queue_tail: AtomicUsize::new(0),
         }
     }
 
     /// Returns the number of currently available permits.
     #[must_use]
     pub fn available_permits(&self) -> usize {
-        self.permits.load(Ordering::Acquire)
+        self.state.lock().expect("semaphore lock poisoned").permits
     }
 
     /// Returns the maximum number of permits (initial count).
@@ -141,13 +147,13 @@ impl Semaphore {
     /// Returns true if the semaphore is closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire) != 0
+        self.state.lock().expect("semaphore lock poisoned").closed
     }
 
     /// Returns the number of tasks currently waiting for permits.
     #[must_use]
     pub fn waiters(&self) -> usize {
-        self.waiters.load(Ordering::Acquire)
+        self.state.lock().expect("semaphore lock poisoned").waiters.len()
     }
 
     /// Closes the semaphore.
@@ -155,7 +161,7 @@ impl Semaphore {
     /// After closing, all pending and future acquire operations will fail
     /// with `AcquireError::Closed`.
     pub fn close(&self) {
-        self.closed.store(1, Ordering::Release);
+        self.state.lock().expect("semaphore lock poisoned").closed = true;
         // In full implementation: wake all waiters
     }
 
@@ -183,79 +189,53 @@ impl Semaphore {
 
         cx.trace("semaphore::acquire starting");
 
-        // Get our position in the queue for FIFO fairness
-        let our_position = {
-            let mut head = self.queue_head.lock().expect("semaphore lock poisoned");
-            let pos = *head;
-            *head += 1;
-            pos
-        };
-
-        // Mark ourselves as waiting
-        self.waiters.fetch_add(1, Ordering::AcqRel);
-
-        // Wait for our turn and available permits
-        loop {
-            // Check if closed
-            if self.is_closed() {
-                self.waiters.fetch_sub(1, Ordering::AcqRel);
-                cx.trace("semaphore::acquire closed");
+        // Register as waiter
+        let waiter_id = {
+            let mut state = self.state.lock().expect("semaphore lock poisoned");
+            if state.closed {
                 return Err(AcquireError::Closed);
             }
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.waiters.push_back(id);
+            id
+        };
 
-            // Check if it's our turn (FIFO)
-            let current_tail = self.queue_tail.load(Ordering::Acquire) as u64;
-            if current_tail != our_position {
-                // Not our turn yet, check cancellation and yield
-                if cx.checkpoint().is_err() {
-                    self.waiters.fetch_sub(1, Ordering::AcqRel);
-                    cx.trace("semaphore::acquire cancelled while waiting for turn");
-                    return Err(AcquireError::Cancelled);
+        // Wait loop
+        loop {
+            // Check cancellation
+            if let Err(_e) = cx.checkpoint() {
+                let mut state = self.state.lock().expect("semaphore lock poisoned");
+                if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                    state.waiters.remove(pos);
                 }
-                std::thread::yield_now();
-                continue;
-            }
-
-            // It's our turn - try to acquire
-            let available = self.permits.load(Ordering::Acquire);
-            if available >= count {
-                // Try to claim the permits atomically
-                match self.permits.compare_exchange(
-                    available,
-                    available - count,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        // Success! Advance the queue and return permit
-                        self.queue_tail.fetch_add(1, Ordering::AcqRel);
-                        self.waiters.fetch_sub(1, Ordering::AcqRel);
-                        cx.trace("semaphore::acquire succeeded");
-
-                        return Ok(SemaphorePermit {
-                            semaphore: self,
-                            count,
-                        });
-                    }
-                    Err(_) => {
-                        // Lost race, retry
-                        continue;
-                    }
-                }
-            }
-
-            // Not enough permits available
-            // Check cancellation before waiting
-            if cx.checkpoint().is_err() {
-                self.waiters.fetch_sub(1, Ordering::AcqRel);
-                // Advance queue to not block others
-                self.queue_tail.fetch_add(1, Ordering::AcqRel);
-                cx.trace("semaphore::acquire cancelled while waiting for permits");
+                cx.trace("semaphore::acquire cancelled while waiting");
                 return Err(AcquireError::Cancelled);
             }
 
-            // Phase 0: Simple spin-wait with yield
-            // Future: integrate with scheduler via proper waker/condvar
+            // Check acquire
+            {
+                let mut state = self.state.lock().expect("semaphore lock poisoned");
+                
+                if state.closed {
+                    if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                        state.waiters.remove(pos);
+                    }
+                    return Err(AcquireError::Closed);
+                }
+
+                if state.permits >= count && state.waiters.front() == Some(&waiter_id) {
+                    // Success!
+                    state.permits -= count;
+                    state.waiters.pop_front();
+                    cx.trace("semaphore::acquire succeeded");
+                    return Ok(SemaphorePermit {
+                        semaphore: self,
+                        count,
+                    });
+                }
+            }
+
             std::thread::yield_now();
         }
     }
@@ -276,32 +256,24 @@ impl Semaphore {
             "cannot acquire more permits than semaphore capacity"
         );
 
-        if self.is_closed() {
+        let mut state = self.state.lock().expect("semaphore lock poisoned");
+        if state.closed {
             return Err(TryAcquireError);
         }
 
-        loop {
-            let available = self.permits.load(Ordering::Acquire);
-            if available < count {
-                return Err(TryAcquireError);
-            }
+        // Strict FIFO: fail if anyone is waiting ahead of us
+        if !state.waiters.is_empty() {
+            return Err(TryAcquireError);
+        }
 
-            if self
-                .permits
-                .compare_exchange(
-                    available,
-                    available - count,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return Ok(SemaphorePermit {
-                    semaphore: self,
-                    count,
-                });
-            }
-            // Lost race, retry (loop continues automatically)
+        if state.permits >= count {
+            state.permits -= count;
+            Ok(SemaphorePermit {
+                semaphore: self,
+                count,
+            })
+        } else {
+            Err(TryAcquireError)
         }
     }
 
@@ -314,7 +286,8 @@ impl Semaphore {
     ///
     /// This can increase permits beyond `max_permits`. Use with caution.
     pub fn add_permits(&self, count: usize) {
-        self.permits.fetch_add(count, Ordering::AcqRel);
+        let mut state = self.state.lock().expect("semaphore lock poisoned");
+        state.permits += count;
         // In full implementation: wake waiters
     }
 }
@@ -392,12 +365,52 @@ impl OwnedSemaphorePermit {
         cx: &Cx,
         count: usize,
     ) -> Result<Self, AcquireError> {
-        let permit = semaphore.acquire(cx, count)?;
-        // The acquire succeeded and decremented permits
-        // Forget the temporary permit so it doesn't release permits on drop
-        // We'll release them when OwnedSemaphorePermit is dropped
-        std::mem::forget(permit);
-        Ok(Self { semaphore, count })
+        // Register as waiter
+        let waiter_id = {
+            let mut state = semaphore.state.lock().expect("semaphore lock poisoned");
+            if state.closed {
+                return Err(AcquireError::Closed);
+            }
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.waiters.push_back(id);
+            id
+        };
+
+        loop {
+            if let Err(_e) = cx.checkpoint() {
+                let mut state = semaphore.state.lock().expect("semaphore lock poisoned");
+                if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                    state.waiters.remove(pos);
+                }
+                return Err(AcquireError::Cancelled);
+            }
+
+            let success = {
+                let mut state = semaphore.state.lock().expect("semaphore lock poisoned");
+                
+                if state.closed {
+                    if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
+                        state.waiters.remove(pos);
+                    }
+                    return Err(AcquireError::Closed);
+                }
+
+                if state.permits >= count && state.waiters.front() == Some(&waiter_id) {
+                    state.permits -= count;
+                    state.waiters.pop_front();
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if success {
+                return Ok(Self { semaphore, count });
+            }
+
+            std::thread::yield_now();
+        }
     }
 
     /// Tries to acquire an owned permit without waiting.
