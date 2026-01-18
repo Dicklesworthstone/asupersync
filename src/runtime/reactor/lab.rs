@@ -238,6 +238,15 @@ impl Reactor for LabReactor {
                 "token not registered",
             ));
         }
+
+        // Clean up any scheduled events for this token.
+        // Since BinaryHeap doesn't support retain, we rebuild without the token's events.
+        let old_pending = std::mem::take(&mut inner.pending);
+        inner.pending = old_pending
+            .into_iter()
+            .filter(|te| te.event.token != token)
+            .collect();
+
         Ok(())
     }
 
@@ -569,5 +578,125 @@ mod tests {
         reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
 
         assert_eq!(events.iter().count(), 1);
+    }
+
+    #[test]
+    fn deregister_cleans_up_scheduled_events() {
+        let reactor = LabReactor::new();
+        let source = MockSource;
+
+        let token1 = Token::new(1);
+        let token2 = Token::new(2);
+
+        reactor.register(&source, token1, Interest::READABLE).unwrap();
+        reactor.register(&source, token2, Interest::READABLE).unwrap();
+
+        // Schedule events for both tokens
+        reactor.schedule_event(token1, Event::readable(token1), Duration::from_millis(10));
+        reactor.schedule_event(token2, Event::readable(token2), Duration::from_millis(10));
+        reactor.schedule_event(token1, Event::readable(token1), Duration::from_millis(20));
+
+        // Deregister token1
+        reactor.deregister(token1).unwrap();
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+
+        // Advance time past all scheduled events
+        reactor.poll(&mut events, Some(Duration::from_millis(25))).unwrap();
+
+        // Should only have token2's event (token1's events were cleaned up)
+        let collected: Vec<_> = events.iter().collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].token, token2);
+    }
+
+    /// Integration test verifying IoDriver correctly dispatches wakers with LabReactor.
+    mod io_driver_integration {
+        use super::*;
+        use crate::runtime::io_driver::IoDriver;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::task::{Wake, Waker};
+
+        struct FlagWaker {
+            flag: AtomicBool,
+            count: AtomicUsize,
+        }
+
+        impl Wake for FlagWaker {
+            fn wake(self: Arc<Self>) {
+                self.flag.store(true, Ordering::SeqCst);
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.flag.store(true, Ordering::SeqCst);
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn create_test_waker() -> (Waker, Arc<FlagWaker>) {
+            let state = Arc::new(FlagWaker {
+                flag: AtomicBool::new(false),
+                count: AtomicUsize::new(0),
+            });
+            (Waker::from(state.clone()), state)
+        }
+
+        #[test]
+        fn io_driver_with_lab_reactor_dispatches_wakers() {
+            let reactor = Arc::new(LabReactor::new());
+            let mut driver = IoDriver::new(reactor.clone());
+            let source = MockSource;
+
+            // Register with IoDriver
+            let (waker, waker_state) = create_test_waker();
+            let token = driver
+                .register(&source, Interest::READABLE, waker)
+                .expect("register");
+
+            // Waker should not be woken yet
+            assert!(!waker_state.flag.load(Ordering::SeqCst));
+
+            // Inject an event for our token
+            reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+
+            // Turn the driver - should dispatch the waker
+            let count = driver
+                .turn(Some(Duration::from_millis(10)))
+                .expect("turn");
+
+            assert!(count >= 1);
+            assert!(waker_state.flag.load(Ordering::SeqCst));
+            assert_eq!(waker_state.count.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn io_driver_with_lab_reactor_multiple_wakers() {
+            let reactor = Arc::new(LabReactor::new());
+            let mut driver = IoDriver::new(reactor.clone());
+            let source = MockSource;
+
+            // Register multiple wakers
+            let (waker1, state1) = create_test_waker();
+            let (waker2, state2) = create_test_waker();
+            let (waker3, state3) = create_test_waker();
+
+            let token1 = driver.register(&source, Interest::READABLE, waker1).unwrap();
+            let _token2 = driver.register(&source, Interest::READABLE, waker2).unwrap();
+            let token3 = driver.register(&source, Interest::READABLE, waker3).unwrap();
+
+            // Inject events for tokens 1 and 3 only
+            reactor.inject_event(token1, Event::readable(token1), Duration::ZERO);
+            reactor.inject_event(token3, Event::readable(token3), Duration::ZERO);
+
+            // Turn should dispatch wakers 1 and 3
+            let count = driver.turn(Some(Duration::from_millis(10))).unwrap();
+
+            assert_eq!(count, 2);
+            assert!(state1.flag.load(Ordering::SeqCst));
+            assert!(!state2.flag.load(Ordering::SeqCst)); // Not woken
+            assert!(state3.flag.load(Ordering::SeqCst));
+        }
     }
 }
