@@ -92,7 +92,9 @@ where
         let lower = lower1.min(lower2);
         let upper = match (upper1, upper2) {
             (Some(a), Some(b)) => Some(a.min(b)),
-            _ => None,
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
         };
 
         (lower, upper)

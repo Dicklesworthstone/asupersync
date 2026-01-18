@@ -114,6 +114,7 @@ pub struct Cx {
     observability: Arc<std::sync::RwLock<ObservabilityState>>,
 }
 
+/// Internal observability state shared by `Cx` clones.
 #[derive(Debug, Clone)]
 pub struct ObservabilityState {
     collector: Option<LogCollector>,
@@ -418,16 +419,17 @@ impl Cx {
     /// This is currently a placeholder. The full implementation will write
     /// to the trace buffer maintained by the runtime.
     pub fn trace(&self, message: &str) {
-        self.log(LogEntry::trace(message))
+        self.log(LogEntry::trace(message));
     }
 
     /// Logs a structured entry to the attached collector, if present.
     pub fn log(&self, entry: LogEntry) {
         let obs = self.observability.read().expect("lock poisoned");
-        let Some(collector) = obs.collector.as_ref() else {
+        let Some(collector) = obs.collector.as_ref().cloned() else {
             return;
         };
-        let entry = entry.with_context(&obs.context);
+        drop(obs);
+        let entry = entry.with_context(&self.diagnostic_context());
         collector.log(entry);
     }
 

@@ -58,14 +58,14 @@ pub trait Stream {
 impl<P> Stream for Pin<P>
 where
     P: DerefMut + Unpin,
-    P::Target: Stream + Unpin,
+    P::Target: Stream,
 {
     type Item = <P::Target as Stream>::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // self is Pin<&mut Pin<P>>
         // self.get_mut() returns &mut Pin<P>
-        // as_mut() returns Pin<&mut P::Target> which is already the correct type
+        // as_mut() returns Pin<&mut P::Target>
         self.get_mut().as_mut().poll_next(cx)
     }
 
