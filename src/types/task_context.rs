@@ -23,6 +23,7 @@ pub struct CxInner {
 
 impl CxInner {
     /// Creates a new CxInner.
+    #[must_use]
     pub fn new(region: RegionId, task: TaskId, budget: Budget) -> Self {
         Self {
             region,

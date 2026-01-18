@@ -170,10 +170,7 @@ mod tests {
 
     #[test]
     fn open_options_builder() {
-        let opts = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true);
+        let opts = OpenOptions::new().read(true).write(true).create(true);
 
         assert!(opts.read);
         assert!(opts.write);
@@ -200,9 +197,7 @@ mod tests {
         let path = dir.path().join("test.txt");
 
         // Create a file using our options
-        let opts = OpenOptions::new()
-            .write(true)
-            .create(true);
+        let opts = OpenOptions::new().write(true).create(true);
         let std_opts = opts.to_std_options();
 
         // Should succeed
@@ -213,10 +208,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mode_option_unix() {
-        let opts = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .mode(0o600);
+        let opts = OpenOptions::new().write(true).create(true).mode(0o600);
 
         assert_eq!(opts.mode, Some(0o600));
     }

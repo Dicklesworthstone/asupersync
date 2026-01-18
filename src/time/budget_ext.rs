@@ -49,7 +49,7 @@ pub async fn budget_sleep(cx: &Cx, duration: Duration, now: Time) -> Result<(), 
     // Use shorter of requested duration or remaining budget
     // Use BudgetTimeExt::remaining_duration explicit call
     let remaining = BudgetTimeExt::remaining_duration(&budget, now);
-    
+
     let effective_duration = match remaining {
         Some(rem) if rem < duration => rem,
         _ => duration,
@@ -65,9 +65,9 @@ pub async fn budget_sleep(cx: &Cx, duration: Duration, now: Time) -> Result<(), 
     // Check if we were cut short by budget
     if let Some(rem) = BudgetTimeExt::remaining_duration(&budget, now) {
         if rem < duration {
-             // We slept for 'remaining', which means deadline is hit.
-             let deadline = budget.deadline.unwrap_or(now);
-             return Err(Elapsed::new(deadline));
+            // We slept for 'remaining', which means deadline is hit.
+            let deadline = budget.deadline.unwrap_or(now);
+            return Err(Elapsed::new(deadline));
         }
     }
 

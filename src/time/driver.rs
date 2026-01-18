@@ -1,13 +1,15 @@
 //! Timer driver for managing sleep/timeout registration.
 //!
-//! The timer driver provides the time source and manages timer registrations.
-//! It supports both production (wall clock) and virtual (lab) time.
+//! The timer driver provides the time source and manages timer registrations
+//! using a hierarchical timing wheel. It supports both production (wall clock)
+//! and virtual (lab) time.
 
 use crate::types::Time;
-use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::task::Waker;
+
+use super::wheel::TimerWheel;
 
 /// Time source abstraction for getting the current time.
 ///
@@ -134,72 +136,11 @@ impl TimeSource for VirtualClock {
     }
 }
 
-/// A handle to a registered timer.
-///
-/// When dropped, the timer registration is invalidated (though the entry
-/// may remain in the heap until it naturally expires and gets cleaned up).
-#[derive(Debug)]
-pub struct TimerHandle {
-    /// Unique ID for this timer registration.
-    id: u64,
-    /// Generation to detect stale handles.
-    generation: u64,
-}
-
-impl TimerHandle {
-    /// Returns the timer ID.
-    #[must_use]
-    pub const fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Returns the generation.
-    #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-}
-
-/// Entry in the timer heap.
-#[derive(Debug)]
-struct TimerEntry {
-    /// When this timer fires.
-    deadline: Time,
-    /// Waker to call when timer fires.
-    waker: Waker,
-    /// Unique ID.
-    id: u64,
-    /// Generation for cancellation.
-    generation: u64,
-}
-
-impl std::cmp::Eq for TimerEntry {}
-
-impl std::cmp::PartialEq for TimerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.generation == other.generation
-    }
-}
-
-impl std::cmp::Ord for TimerEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse for min-heap (earliest deadline first)
-        other
-            .deadline
-            .cmp(&self.deadline)
-            .then_with(|| other.generation.cmp(&self.generation))
-    }
-}
-
-impl std::cmp::PartialOrd for TimerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+pub use super::wheel::TimerHandle;
 
 /// Timer driver that manages timer registrations and fires them.
 ///
-/// The driver maintains a min-heap of timer entries ordered by deadline.
+/// The driver maintains a hierarchical timing wheel ordered by deadline.
 /// When `process_timers` is called, all expired timers have their wakers called.
 ///
 /// # Thread Safety
@@ -223,11 +164,11 @@ impl std::cmp::PartialOrd for TimerEntry {
 pub struct TimerDriver<T: TimeSource = VirtualClock> {
     /// The time source.
     clock: std::sync::Arc<T>,
-    /// Timer heap (protected by mutex for thread safety).
-    heap: Mutex<BinaryHeap<TimerEntry>>,
-    /// Next timer ID.
+    /// Timing wheel (protected by mutex for thread safety).
+    wheel: Mutex<TimerWheel>,
+    /// Next timer ID (legacy; wheel also tracks ids internally).
     next_id: AtomicU64,
-    /// Current generation (increments on each registration).
+    /// Current generation (legacy; wheel also tracks generations internally).
     generation: AtomicU64,
 }
 
@@ -235,9 +176,10 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Creates a new timer driver with the given time source.
     #[must_use]
     pub fn with_clock(clock: std::sync::Arc<T>) -> Self {
+        let now = clock.now();
         Self {
             clock,
-            heap: Mutex::new(BinaryHeap::new()),
+            wheel: Mutex::new(TimerWheel::new_at(now)),
             next_id: AtomicU64::new(0),
             generation: AtomicU64::new(0),
         }
@@ -255,35 +197,32 @@ impl<T: TimeSource> TimerDriver<T> {
     /// The waker will be called when `process_timers` is called
     /// and the deadline has passed.
     pub fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
-
-        let entry = TimerEntry {
-            deadline,
-            waker,
-            id,
-            generation,
-        };
-
-        self.heap.lock().unwrap().push(entry);
-
-        TimerHandle { id, generation }
+        let _ = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.generation.fetch_add(1, Ordering::Relaxed);
+        self.wheel.lock().unwrap().register(deadline, waker)
     }
 
     /// Updates an existing timer registration with a new deadline and waker.
     ///
     /// This doesn't actually remove the old entry (to avoid O(n) removal),
     /// but registers a new one. Stale entries are cleaned up on pop.
-    pub fn update(&self, _handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
-        // Just register a new timer; old one will be ignored when it fires
-        // because the generation won't match
-        self.register(deadline, waker)
+    pub fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
+        let mut wheel = self.wheel.lock().unwrap();
+        wheel.cancel(handle);
+        wheel.register(deadline, waker)
+    }
+
+    /// Cancels an existing timer registration.
+    ///
+    /// Returns true if the timer was active and is now cancelled.
+    pub fn cancel(&self, handle: &TimerHandle) -> bool {
+        self.wheel.lock().unwrap().cancel(handle)
     }
 
     /// Returns the next deadline that will fire, if any.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
-        self.heap.lock().unwrap().peek().map(|e| e.deadline)
+        self.wheel.lock().unwrap().next_deadline()
     }
 
     /// Processes all expired timers, calling their wakers.
@@ -309,34 +248,24 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Helper to collect expired wakers while holding the lock.
     #[allow(clippy::significant_drop_tightening)]
     fn collect_expired(&self, now: Time) -> Vec<Waker> {
-        let mut expired = Vec::new();
-        let mut heap = self.heap.lock().unwrap();
-        while let Some(entry) = heap.peek() {
-            if entry.deadline <= now {
-                let entry = heap.pop().unwrap();
-                expired.push(entry.waker);
-            } else {
-                break;
-            }
-        }
-        expired
+        self.wheel.lock().unwrap().collect_expired(now)
     }
 
     /// Returns the number of pending timers.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.heap.lock().unwrap().len()
+        self.wheel.lock().unwrap().len()
     }
 
     /// Returns true if there are no pending timers.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.heap.lock().unwrap().is_empty()
+        self.wheel.lock().unwrap().is_empty()
     }
 
     /// Clears all pending timers without firing them.
     pub fn clear(&self) {
-        self.heap.lock().unwrap().clear();
+        self.wheel.lock().unwrap().clear();
     }
 }
 
@@ -520,6 +449,27 @@ mod tests {
         assert_eq!(driver.process_timers(), 2);
         assert_eq!(count.load(Ordering::SeqCst), 5);
         assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn timer_driver_update_cancels_old_handle() {
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock(clock.clone());
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let waker = waker_that_increments(counter.clone());
+        let handle = driver.register(Time::from_secs(5), waker);
+
+        let waker2 = waker_that_increments(counter.clone());
+        let _new_handle = driver.update(&handle, Time::from_secs(2), waker2);
+
+        clock.set(Time::from_secs(3));
+        assert_eq!(driver.process_timers(), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        clock.set(Time::from_secs(10));
+        assert_eq!(driver.process_timers(), 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -297,7 +297,7 @@ pub enum ResourceKind {
 }
 
 /// Limits for symbol-heavy workloads.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     /// Maximum total memory for symbol buffers.
     pub max_symbol_memory: usize,
@@ -320,18 +320,6 @@ impl ResourceLimits {
             && self.max_decoding_ops == 0
             && self.max_symbols_in_flight == 0
             && self.max_per_object_memory == 0
-    }
-}
-
-impl Default for ResourceLimits {
-    fn default() -> Self {
-        Self {
-            max_symbol_memory: 0,
-            max_encoding_ops: 0,
-            max_decoding_ops: 0,
-            max_symbols_in_flight: 0,
-            max_per_object_memory: 0,
-        }
     }
 }
 
@@ -473,9 +461,18 @@ impl ResourceTracker {
     #[must_use]
     pub fn pressure(&self) -> f64 {
         let mut max_ratio: f64 = 0.0;
-        max_ratio = max_ratio.max(ratio(self.current.symbol_memory, self.limits.max_symbol_memory));
-        max_ratio = max_ratio.max(ratio(self.current.encoding_ops, self.limits.max_encoding_ops));
-        max_ratio = max_ratio.max(ratio(self.current.decoding_ops, self.limits.max_decoding_ops));
+        max_ratio = max_ratio.max(ratio(
+            self.current.symbol_memory,
+            self.limits.max_symbol_memory,
+        ));
+        max_ratio = max_ratio.max(ratio(
+            self.current.encoding_ops,
+            self.limits.max_encoding_ops,
+        ));
+        max_ratio = max_ratio.max(ratio(
+            self.current.decoding_ops,
+            self.limits.max_decoding_ops,
+        ));
         max_ratio = max_ratio.max(ratio(
             self.current.symbols_in_flight,
             self.limits.max_symbols_in_flight,
@@ -603,9 +600,21 @@ impl ResourceTracker {
             observer.on_pressure_change(pressure);
         }
 
-        self.notify_limit(ResourceKind::SymbolMemory, self.current.symbol_memory, self.limits.max_symbol_memory);
-        self.notify_limit(ResourceKind::EncodingOps, self.current.encoding_ops, self.limits.max_encoding_ops);
-        self.notify_limit(ResourceKind::DecodingOps, self.current.decoding_ops, self.limits.max_decoding_ops);
+        self.notify_limit(
+            ResourceKind::SymbolMemory,
+            self.current.symbol_memory,
+            self.limits.max_symbol_memory,
+        );
+        self.notify_limit(
+            ResourceKind::EncodingOps,
+            self.current.encoding_ops,
+            self.limits.max_encoding_ops,
+        );
+        self.notify_limit(
+            ResourceKind::DecodingOps,
+            self.current.decoding_ops,
+            self.limits.max_decoding_ops,
+        );
         self.notify_limit(
             ResourceKind::SymbolsInFlight,
             self.current.symbols_in_flight,
@@ -618,6 +627,7 @@ impl ResourceTracker {
         );
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn notify_limit(&self, kind: ResourceKind, usage: usize, limit: usize) {
         if limit == 0 {
             if usage > 0 {
@@ -666,8 +676,7 @@ impl Drop for ResourceGuard {
 }
 
 fn exceeds(limit: usize, requested: usize) -> bool {
-    limit == 0 && requested > 0
-        || (limit > 0 && requested > limit)
+    limit == 0 && requested > 0 || (limit > 0 && requested > limit)
 }
 
 fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool {
@@ -677,6 +686,7 @@ fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool 
     current.saturating_add(requested) > limit
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn ratio(usage: usize, limit: usize) -> f64 {
     if limit == 0 {
         if usage == 0 {
@@ -770,8 +780,8 @@ mod tests {
             max_per_object_memory: 100,
         };
         let tracker = ResourceTracker::shared(limits);
-        let guard = ResourceTracker::try_acquire_encoding(&tracker, 50)
-            .expect("expected acquisition");
+        let guard =
+            ResourceTracker::try_acquire_encoding(&tracker, 50).expect("expected acquisition");
         drop(guard);
         let usage = tracker.lock().expect("lock").usage().clone();
         assert_eq!(usage.symbol_memory, 0);
@@ -803,8 +813,7 @@ mod tests {
         };
         let tracker = ResourceTracker::shared(limits);
         {
-            let _guard = ResourceTracker::try_acquire_encoding(&tracker, 10)
-                .expect("acquire");
+            let _guard = ResourceTracker::try_acquire_encoding(&tracker, 10).expect("acquire");
         }
         let usage = tracker.lock().expect("lock").usage().clone();
         assert_eq!(usage.symbol_memory, 0);
@@ -821,8 +830,7 @@ mod tests {
             max_per_object_memory: 0,
         };
         let tracker = ResourceTracker::shared(limits);
-        let err = ResourceTracker::try_acquire_encoding(&tracker, 1)
-            .expect_err("expected failure");
+        let err = ResourceTracker::try_acquire_encoding(&tracker, 1).expect_err("expected failure");
         assert_eq!(err, ResourceExhausted::PerObjectMemory);
     }
 
@@ -870,12 +878,8 @@ mod tests {
             Arc::clone(&pressure_calls),
             Arc::clone(&limit_calls),
         ));
-        tracker
-            .lock()
-            .expect("lock")
-            .add_observer(observer);
-        let _guard = ResourceTracker::try_acquire_encoding(&tracker, 9)
-            .expect("acquire");
+        tracker.lock().expect("lock").add_observer(observer);
+        let _guard = ResourceTracker::try_acquire_encoding(&tracker, 9).expect("acquire");
         assert!(pressure_calls.load(Ordering::Relaxed) > 0);
         assert!(limit_calls.load(Ordering::Relaxed) > 0);
     }

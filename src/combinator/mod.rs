@@ -66,8 +66,7 @@ pub use quorum::{
 };
 pub use race::{
     make_race_all_result, race2_outcomes, race2_to_result, race_all_outcomes, race_all_to_result,
-    Race, Race2Result, RaceAll, RaceAllError, RaceAllResult, RaceError, RaceResult,
-    RaceWinner,
+    Race, Race2Result, RaceAll, RaceAllError, RaceAllResult, RaceError, RaceResult, RaceWinner,
 };
 pub use retry::{
     calculate_deadline as retry_deadline, calculate_delay, make_retry_result, total_delay_budget,

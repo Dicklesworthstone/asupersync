@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Recoverability};
 use crate::types::Time;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
 /// Strategy for recovering from transient errors.
@@ -63,11 +63,15 @@ impl RecoveryStrategy for ExponentialBackoff {
         error.recoverability() == Recoverability::Transient
     }
 
-    #[allow(clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
     fn backoff_duration(&self, attempt: u32) -> Duration {
         let factor = self.multiplier.powi(attempt as i32);
         let mut base_ms = (self.initial.as_millis() as f64 * factor) as u64;
-        
+
         // Apply max clamp
         if base_ms > self.max.as_millis() as u64 {
             base_ms = self.max.as_millis() as u64;
@@ -78,13 +82,15 @@ impl RecoveryStrategy for ExponentialBackoff {
         // In real prod, we'd use thread_rng.
         // For Phase 0, we'll just vary slightly based on attempt to avoid strict lockstep.
         let jitter_amount = (base_ms as f64 * self.jitter) as u64;
-        
+
         let with_jitter = if jitter_amount == 0 {
             base_ms
         } else {
             // Simple deterministic variation
             let variation = u64::from(attempt).wrapping_mul(31) % (jitter_amount * 2);
-            base_ms.saturating_sub(jitter_amount).saturating_add(variation)
+            base_ms
+                .saturating_sub(jitter_amount)
+                .saturating_add(variation)
         };
 
         Duration::from_millis(with_jitter)
@@ -100,9 +106,9 @@ impl RecoveryStrategy for ExponentialBackoff {
 #[repr(u8)]
 pub enum CircuitState {
     /// Normal operation; requests flow through.
-    Closed = 0,   // Normal operation
+    Closed = 0, // Normal operation
     /// Circuit is open; requests are rejected.
-    Open = 1,     // Failing, reject requests
+    Open = 1, // Failing, reject requests
     /// Half-open probing state.
     HalfOpen = 2, // Testing recovery
 }
@@ -170,8 +176,9 @@ impl CircuitBreaker {
 
     /// Records a failure.
     pub fn record_failure(&self, now: Time) {
-        self.last_failure_time.store(now.as_nanos(), Ordering::Relaxed);
-        
+        self.last_failure_time
+            .store(now.as_nanos(), Ordering::Relaxed);
+
         match self.state() {
             CircuitState::Closed => {
                 let failures = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
@@ -197,16 +204,14 @@ impl CircuitBreaker {
     }
 
     fn transition(&self, from: CircuitState, to: CircuitState) -> bool {
-        self.state.compare_exchange(
-            from as u8,
-            to as u8,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ).is_ok()
+        self.state
+            .compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
     }
 
     fn reset(&self) {
-        self.state.store(CircuitState::Closed as u8, Ordering::SeqCst);
+        self.state
+            .store(CircuitState::Closed as u8, Ordering::SeqCst);
         self.failures.store(0, Ordering::Relaxed);
     }
 }
@@ -217,13 +222,9 @@ mod tests {
 
     #[test]
     fn backoff_increases() {
-        let backoff = ExponentialBackoff::new(
-            Duration::from_millis(10),
-            Duration::from_secs(1),
-            2.0,
-            5,
-        )
-        .with_jitter(0.0); // Disable jitter for predictable test
+        let backoff =
+            ExponentialBackoff::new(Duration::from_millis(10), Duration::from_secs(1), 2.0, 5)
+                .with_jitter(0.0); // Disable jitter for predictable test
 
         assert_eq!(backoff.backoff_duration(0), Duration::from_millis(10));
         assert_eq!(backoff.backoff_duration(1), Duration::from_millis(20));

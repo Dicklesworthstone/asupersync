@@ -83,6 +83,12 @@ impl SymbolBuffer {
         self.data.len()
     }
 
+    /// Returns true if the buffer is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     /// Marks the buffer as in use.
     fn mark_in_use(&mut self) {
         self.in_use = true;
@@ -97,12 +103,19 @@ impl SymbolBuffer {
 /// Pool usage statistics.
 #[derive(Debug, Clone, Default)]
 pub struct PoolStats {
+    /// Total number of allocations.
     pub allocations: u64,
+    /// Total number of deallocations.
     pub deallocations: u64,
+    /// Allocations satisfied from the free list.
     pub pool_hits: u64,
+    /// Allocation attempts that could not use the free list.
     pub pool_misses: u64,
+    /// Peak number of simultaneously allocated buffers.
     pub peak_usage: usize,
+    /// Current number of allocated buffers.
     pub current_usage: usize,
+    /// Number of times the pool grew.
     pub growth_events: u64,
 }
 
@@ -264,9 +277,13 @@ impl Default for ResourceLimits {
 /// Current resource usage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResourceUsage {
+    /// Bytes of symbol memory in use.
     pub symbol_memory: usize,
+    /// Active encoding operations.
     pub encoding_ops: usize,
+    /// Active decoding operations.
     pub decoding_ops: usize,
+    /// Symbols currently in flight.
     pub symbols_in_flight: usize,
 }
 
@@ -293,6 +310,7 @@ impl ResourceUsage {
 /// Resource request for acquisition checks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResourceRequest {
+    /// Requested usage amounts.
     pub usage: ResourceUsage,
 }
 
@@ -309,9 +327,13 @@ pub trait ResourceObserver: Send + Sync {
 /// Resource kinds for observer callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
+    /// Symbol buffer memory.
     SymbolMemory,
+    /// Encoding operation slots.
     EncodingOps,
+    /// Decoding operation slots.
     DecodingOps,
+    /// In-flight symbol slots.
     SymbolsInFlight,
 }
 
@@ -368,7 +390,11 @@ impl ResourceTracker {
 
     /// Adds a resource observer.
     pub fn add_observer(&self, observer: Box<dyn ResourceObserver>) {
-        self.inner.lock().expect("lock poisoned").observers.push(observer);
+        self.inner
+            .lock()
+            .expect("lock poisoned")
+            .observers
+            .push(observer);
     }
 
     /// Returns the current pressure level (0.0 - 1.0).
@@ -388,7 +414,10 @@ impl ResourceTracker {
     }
 
     /// Attempts to acquire resources for encoding.
-    pub fn try_acquire_encoding(&self, memory_needed: usize) -> Result<ResourceGuard, ResourceExhausted> {
+    pub fn try_acquire_encoding(
+        &self,
+        memory_needed: usize,
+    ) -> Result<ResourceGuard, ResourceExhausted> {
         self.try_acquire(ResourceUsage {
             symbol_memory: memory_needed,
             encoding_ops: 1,
@@ -398,7 +427,10 @@ impl ResourceTracker {
     }
 
     /// Attempts to acquire resources for decoding.
-    pub fn try_acquire_decoding(&self, memory_needed: usize) -> Result<ResourceGuard, ResourceExhausted> {
+    pub fn try_acquire_decoding(
+        &self,
+        memory_needed: usize,
+    ) -> Result<ResourceGuard, ResourceExhausted> {
         self.try_acquire(ResourceUsage {
             symbol_memory: memory_needed,
             encoding_ops: 0,
@@ -416,11 +448,13 @@ impl ResourceTracker {
 
             if !within_limits(&projected, &inner.limits) {
                 notify_limit_exceeded(&inner, &projected);
+                drop(inner);
                 return Err(ResourceExhausted);
             }
 
             inner.current = projected;
             notify_pressure(&mut inner);
+            drop(inner);
         }
 
         Ok(ResourceGuard {
@@ -441,6 +475,7 @@ impl Drop for ResourceGuard {
         let mut inner = self.inner.lock().expect("lock poisoned");
         inner.current.sub(self.acquired);
         notify_pressure(&mut inner);
+        drop(inner);
     }
 }
 
@@ -459,16 +494,17 @@ fn compute_pressure(usage: &ResourceUsage, limits: &ResourceLimits) -> f64 {
         ratio(usage.decoding_ops, limits.max_decoding_ops),
         ratio(usage.symbols_in_flight, limits.max_symbols_in_flight),
     ];
-    ratios
-        .into_iter()
-        .fold(0.0_f64, f64::max)
-        .clamp(0.0, 1.0)
+    ratios.into_iter().fold(0.0_f64, f64::max).clamp(0.0, 1.0)
 }
 
 #[allow(clippy::cast_precision_loss)]
 fn ratio(value: usize, limit: usize) -> f64 {
     if limit == 0 {
-        if value == 0 { 0.0 } else { 1.0 }
+        if value == 0 {
+            0.0
+        } else {
+            1.0
+        }
     } else {
         (value as f64 / limit as f64).min(1.0)
     }
@@ -492,10 +528,25 @@ fn notify_limit_approached(inner: &ResourceTrackerInner, pressure: f64) {
     }
 
     let ratios = [
-        (ResourceKind::SymbolMemory, ratio(inner.current.symbol_memory, inner.limits.max_symbol_memory)),
-        (ResourceKind::EncodingOps, ratio(inner.current.encoding_ops, inner.limits.max_encoding_ops)),
-        (ResourceKind::DecodingOps, ratio(inner.current.decoding_ops, inner.limits.max_decoding_ops)),
-        (ResourceKind::SymbolsInFlight, ratio(inner.current.symbols_in_flight, inner.limits.max_symbols_in_flight)),
+        (
+            ResourceKind::SymbolMemory,
+            ratio(inner.current.symbol_memory, inner.limits.max_symbol_memory),
+        ),
+        (
+            ResourceKind::EncodingOps,
+            ratio(inner.current.encoding_ops, inner.limits.max_encoding_ops),
+        ),
+        (
+            ResourceKind::DecodingOps,
+            ratio(inner.current.decoding_ops, inner.limits.max_decoding_ops),
+        ),
+        (
+            ResourceKind::SymbolsInFlight,
+            ratio(
+                inner.current.symbols_in_flight,
+                inner.limits.max_symbols_in_flight,
+            ),
+        ),
     ];
 
     for (kind, ratio) in ratios {
@@ -587,15 +638,15 @@ mod tests {
 
         let g1 = tracker.try_acquire_encoding(100).expect("1");
         assert_eq!(tracker.usage().encoding_ops, 1);
-        
-        let g2 = tracker.try_acquire_encoding(100).expect("2");
+
+        let _g2 = tracker.try_acquire_encoding(100).expect("2");
         assert_eq!(tracker.usage().encoding_ops, 2);
 
         assert!(tracker.try_acquire_encoding(100).is_err());
 
         drop(g1);
         assert_eq!(tracker.usage().encoding_ops, 1);
-        
+
         let _g3 = tracker.try_acquire_encoding(100).expect("3");
     }
 
@@ -607,12 +658,22 @@ mod tests {
         };
         let tracker = ResourceTracker::new(limits);
 
-        assert_eq!(tracker.pressure(), 0.0);
+        assert!((tracker.pressure() - 0.0).abs() < f64::EPSILON);
 
-        let _g1 = tracker.try_acquire(ResourceUsage { symbol_memory: 50, ..Default::default() }).unwrap();
-        assert_eq!(tracker.pressure(), 0.5);
+        let _g1 = tracker
+            .try_acquire(ResourceUsage {
+                symbol_memory: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!((tracker.pressure() - 0.5).abs() < f64::EPSILON);
 
-        let _g2 = tracker.try_acquire(ResourceUsage { symbol_memory: 50, ..Default::default() }).unwrap();
-        assert_eq!(tracker.pressure(), 1.0);
+        let _g2 = tracker
+            .try_acquire(ResourceUsage {
+                symbol_memory: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!((tracker.pressure() - 1.0).abs() < f64::EPSILON);
     }
 }

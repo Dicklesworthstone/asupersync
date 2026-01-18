@@ -16,7 +16,7 @@ pub fn with_deadline(scope: Scope<'_>, deadline: Time) -> Scope<'_> {
         None => deadline,
     };
     let new_budget = current_budget.with_deadline(new_deadline);
-    
+
     // Create new scope with updated budget
     Scope::new(scope.region_id(), new_budget)
 }

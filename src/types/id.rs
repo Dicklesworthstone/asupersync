@@ -228,7 +228,7 @@ impl Time {
 }
 
 impl Add<Duration> for Time {
-    type Output = Time;
+    type Output = Self;
 
     fn add(self, rhs: Duration) -> Self::Output {
         self.saturating_add_nanos(rhs.as_nanos() as u64)

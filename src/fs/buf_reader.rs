@@ -3,11 +3,11 @@
 //! This is a thin wrapper around the core `io::BufReader` to provide
 //! a convenient `fs`-scoped type for file operations.
 
-use crate::io::{self, AsyncBufRead, AsyncRead, ReadBuf};
 use crate::fs::Lines;
+use crate::io::{self, AsyncBufRead, AsyncRead, ReadBuf};
+use std::io::Result;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io::Result;
 
 /// Buffered async reader.
 #[derive(Debug)]
@@ -84,7 +84,6 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
 mod tests {
     use super::*;
     use crate::fs::File;
-    use futures_lite::stream::StreamExt;
     use crate::stream::StreamExt as _;
     use tempfile::tempdir;
 
@@ -96,7 +95,7 @@ mod tests {
             crate::fs::write(&path, b"hello\nworld\n").await.unwrap();
 
             let file = File::open(&path).await.unwrap();
-            let mut reader = BufReader::new(file);
+            let reader = BufReader::new(file);
 
             let mut lines = reader.lines();
             assert_eq!(lines.next().await.unwrap().unwrap(), "hello");
@@ -109,7 +108,9 @@ mod tests {
         futures_lite::future::block_on(async {
             let temp = tempdir().unwrap();
             let path = temp.path().join("test_lines.txt");
-            crate::fs::write(&path, b"line1\nline2\nline3").await.unwrap();
+            crate::fs::write(&path, b"line1\nline2\nline3")
+                .await
+                .unwrap();
 
             let file = File::open(&path).await.unwrap();
             let reader = BufReader::new(file);

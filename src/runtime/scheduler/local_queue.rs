@@ -71,7 +71,7 @@ impl Stealer {
                     match self.inner.steal() {
                         Steal::Success(task) => return Some(task),
                         Steal::Empty => return None,
-                        Steal::Retry => {},
+                        Steal::Retry => {}
                     }
                 }
             }
@@ -87,7 +87,7 @@ impl Stealer {
             match self.inner.steal_batch(&dest.inner) {
                 Steal::Success(()) => return true,
                 Steal::Empty => return false,
-                Steal::Retry => {},
+                Steal::Retry => {}
             }
         }
     }

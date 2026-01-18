@@ -172,7 +172,7 @@ impl Scheduler {
             insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
             return;
         }
-        
+
         // If we reach here, the task is in `scheduled` set but not in any lane.
         // This should not happen if invariants are maintained.
         // We'll re-add it to be safe, but this implies a bug elsewhere.

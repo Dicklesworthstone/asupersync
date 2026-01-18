@@ -77,7 +77,10 @@ pub trait SymbolStreamExt: SymbolStream {
 
     /// Take only symbols for a specific block.
     #[allow(clippy::type_complexity)]
-    fn for_block(self, sbn: u8) -> FilterStream<Self, Box<dyn FnMut(&AuthenticatedSymbol) -> bool + Send>>
+    fn for_block(
+        self,
+        sbn: u8,
+    ) -> FilterStream<Self, Box<dyn FnMut(&AuthenticatedSymbol) -> bool + Send>>
     where
         Self: Sized + 'static,
     {
@@ -133,7 +136,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
             match Pin::new(&mut *self.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(symbol))) => {
                     self.set.insert(symbol.into_symbol());
-                },
+                }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
                 Poll::Ready(None) => return Poll::Ready(Ok(self.set.len())),
                 Poll::Pending => return Poll::Pending,
@@ -251,7 +254,10 @@ impl<S> MergedStream<S> {
     /// Creates a merged stream from the provided streams.
     #[must_use]
     pub fn new(streams: Vec<S>) -> Self {
-        Self { streams, current: 0 }
+        Self {
+            streams,
+            current: 0,
+        }
     }
 }
 
@@ -338,21 +344,31 @@ impl SymbolStream for ChannelStream {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+        let mut symbol = None;
+        let mut closed = false;
         {
             let mut queue = self.shared.queue.lock().unwrap();
+            if let Some(entry) = queue.pop_front() {
+                symbol = Some(entry);
+            } else if self.shared.closed.load(Ordering::SeqCst) {
+                closed = true;
+            }
+        }
 
-            if let Some(symbol) = queue.pop_front() {
-                // Wake sender if we freed space
+        if let Some(symbol) = symbol {
+            // Wake sender if we freed space.
+            let waker = {
                 let mut wakers = self.shared.send_wakers.lock().unwrap();
-                if let Some(w) = wakers.pop() {
-                    w.wake();
-                }
-                return Poll::Ready(Some(Ok(symbol)));
+                wakers.pop()
+            };
+            if let Some(w) = waker {
+                w.wake();
             }
+            return Poll::Ready(Some(Ok(symbol)));
+        }
 
-            if self.shared.closed.load(Ordering::SeqCst) {
-                return Poll::Ready(None);
-            }
+        if closed {
+            return Poll::Ready(None);
         }
 
         // Register waker
@@ -384,7 +400,7 @@ impl SymbolStream for VecStream {
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         Poll::Ready(self.get_mut().symbols.next().map(Ok))
     }
-    
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.symbols.size_hint()
     }

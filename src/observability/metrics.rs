@@ -1,5 +1,5 @@
 //! Runtime metrics.
-//! 
+//!
 //! Provides counters, gauges, and histograms for runtime statistics.
 
 use std::collections::HashMap;
@@ -297,7 +297,7 @@ mod tests {
         let mut metrics = Metrics::new();
         let c1 = metrics.counter("c1");
         c1.increment();
-        
+
         let c2 = metrics.counter("c1"); // Same counter
         assert_eq!(c2.get(), 1);
     }
@@ -307,7 +307,7 @@ mod tests {
         let mut metrics = Metrics::new();
         metrics.counter("requests").add(10);
         metrics.gauge("memory").set(1024);
-        
+
         let output = metrics.export_prometheus();
         assert!(output.contains("requests 10"));
         assert!(output.contains("memory 1024"));

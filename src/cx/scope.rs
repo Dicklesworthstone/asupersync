@@ -93,7 +93,7 @@ impl<P: Policy> Scope<'_, P> {
     pub fn spawn<F, Fut>(
         &self,
         state: &mut RuntimeState,
-        _cx: &Cx,
+        cx: &Cx,
         f: F,
     ) -> (TaskHandle<Fut::Output>, StoredTask)
     where
@@ -108,7 +108,13 @@ impl<P: Policy> Scope<'_, P> {
         let task_id = self.create_task_record(state);
 
         // Create the child task's capability context
-        let child_cx = Cx::new(self.region, task_id, self.budget);
+        let child_observability = cx.child_observability(self.region, task_id);
+        let child_cx = Cx::new_with_observability(
+            self.region,
+            task_id,
+            self.budget,
+            Some(child_observability),
+        );
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -230,7 +236,7 @@ impl<P: Policy> Scope<'_, P> {
     pub fn spawn_blocking<F, R>(
         &self,
         state: &mut RuntimeState,
-        _cx: &Cx, // Parent Cx
+        cx: &Cx, // Parent Cx
         f: F,
     ) -> (TaskHandle<R>, StoredTask)
     where
@@ -244,7 +250,13 @@ impl<P: Policy> Scope<'_, P> {
         let task_id = self.create_task_record(state);
 
         // Create the child task's capability context
-        let child_cx = Cx::new(self.region, task_id, self.budget);
+        let child_observability = cx.child_observability(self.region, task_id);
+        let child_cx = Cx::new_with_observability(
+            self.region,
+            task_id,
+            self.budget,
+            Some(child_observability),
+        );
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -569,8 +581,8 @@ mod tests {
 
     #[test]
     fn test_join_manual_poll() {
-        use std::task::{Context, Poll, Waker};
         use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
 
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
@@ -608,8 +620,8 @@ mod tests {
 
     #[test]
     fn spawn_abort_cancels_task() {
-        use std::task::{Context, Poll, Waker};
         use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
 
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
@@ -639,7 +651,7 @@ mod tests {
 
         // Task should run, see cancellation, and return "cancelled"
         match stored_task.poll(&mut ctx) {
-            Poll::Ready(()) => {},
+            Poll::Ready(()) => {}
             Poll::Pending => panic!("Task should have completed"),
         }
 

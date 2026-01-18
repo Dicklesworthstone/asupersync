@@ -54,12 +54,14 @@ impl LogCollector {
     }
 
     /// Drains all entries from the collector.
+    #[must_use]
     pub fn drain(&self) -> Vec<LogEntry> {
         let mut inner = self.inner.lock().expect("collector lock poisoned");
         inner.entries.drain(..).collect()
     }
 
     /// Returns a copy of the current entries without clearing them.
+    #[must_use]
     pub fn peek(&self) -> Vec<LogEntry> {
         let inner = self.inner.lock().expect("collector lock poisoned");
         inner.entries.iter().cloned().collect()
@@ -72,23 +74,27 @@ impl LogCollector {
     }
 
     /// Returns the number of entries currently stored.
+    #[must_use]
     pub fn len(&self) -> usize {
         let inner = self.inner.lock().expect("collector lock poisoned");
         inner.entries.len()
     }
 
     /// Returns true if the collector is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the configured capacity.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         let inner = self.inner.lock().expect("collector lock poisoned");
         inner.capacity
     }
 
     /// Returns the configured minimum level.
+    #[must_use]
     pub fn min_level(&self) -> LogLevel {
         self.min_level
     }
@@ -138,7 +144,7 @@ mod tests {
     fn test_collector_drain_clears() {
         let collector = LogCollector::new(10);
         collector.log(LogEntry::info("msg"));
-        
+
         let drained = collector.drain();
         assert_eq!(drained.len(), 1);
         assert_eq!(collector.len(), 0);
@@ -148,7 +154,7 @@ mod tests {
     fn test_collector_peek_does_not_clear() {
         let collector = LogCollector::new(10);
         collector.log(LogEntry::info("msg"));
-        
+
         let peeked = collector.peek();
         assert_eq!(peeked.len(), 1);
         assert_eq!(collector.len(), 1);
@@ -158,10 +164,12 @@ mod tests {
     fn test_collector_thread_safe() {
         let collector = LogCollector::new(100);
         let c1 = collector.clone();
-        
+
         std::thread::spawn(move || {
             c1.log(LogEntry::info("thread"));
-        }).join().unwrap();
+        })
+        .join()
+        .unwrap();
 
         assert_eq!(collector.len(), 1);
     }

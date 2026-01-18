@@ -334,23 +334,6 @@ impl Buf for &[u8] {
     }
 }
 
-impl<const N: usize> Buf for &[u8; N] {
-    #[inline]
-    fn remaining(&self) -> usize {
-        N
-    }
-
-    #[inline]
-    fn chunk(&self) -> &[u8] {
-        self.as_slice()
-    }
-
-    #[inline]
-    fn advance(&mut self, _cnt: usize) {
-        panic!("cannot advance a fixed array reference");
-    }
-}
-
 impl Buf for std::io::Cursor<&[u8]> {
     fn remaining(&self) -> usize {
         let pos = self.position() as usize;

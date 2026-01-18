@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn test_stream_exhaustion() {
         let (mut sink, mut stream) = channel(10);
-        
+
         future::block_on(async {
             sink.close().await.unwrap();
             let res = stream.next().await;
@@ -64,22 +64,22 @@ mod tests {
 
         future::block_on(async {
             sink.send(s1).await.unwrap();
-            
+
             // Channel full (capacity 1). Next send should block or return pending?
-            // futures_lite::future::poll_fn ... poll_ready ... 
+            // futures_lite::future::poll_fn ... poll_ready ...
             // In our ChannelSink, poll_ready checks len < capacity.
             // So if len == 1, poll_ready returns Pending.
             // We can't easily test blocking in single-thread block_on without spawning.
             // But we can test that we can receive then send.
-            
+
             let recv_task = async {
                 stream.next().await.unwrap().unwrap();
             };
-            
+
             let send_task = async {
                 sink.send(s2).await.unwrap();
             };
-            
+
             // Join them
             futures_lite::future::zip(recv_task, send_task).await;
         });
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_collect_to_set() {
         let (mut sink, mut stream) = channel(10);
-        
+
         future::block_on(async {
             for i in 0..5 {
                 sink.send(create_symbol(i)).await.unwrap();
@@ -97,7 +97,7 @@ mod tests {
 
             let mut set = SymbolSet::new();
             let count = stream.collect_to_set(&mut set).await.unwrap();
-            
+
             assert_eq!(count, 5);
             assert_eq!(set.len(), 5);
         });
@@ -107,11 +107,11 @@ mod tests {
     fn test_stream_map() {
         let (mut sink, stream) = channel(10);
         let s1 = create_symbol(1);
-        
+
         future::block_on(async {
             sink.send(s1).await.unwrap();
             sink.close().await.unwrap();
-            
+
             let mut mapped = stream.map(|s| s); // Identity map for now
             let r1 = mapped.next().await.unwrap().unwrap();
             assert_eq!(r1.symbol().id().esi(), 1);
@@ -121,21 +121,21 @@ mod tests {
     #[test]
     fn test_stream_filter() {
         let (mut sink, stream) = channel(10);
-        
+
         future::block_on(async {
             sink.send(create_symbol(1)).await.unwrap(); // Keep
             sink.send(create_symbol(2)).await.unwrap(); // Drop
             sink.send(create_symbol(3)).await.unwrap(); // Keep
             sink.close().await.unwrap();
-            
+
             let mut filtered = stream.filter(|s| s.symbol().id().esi() % 2 != 0);
-            
+
             let r1 = filtered.next().await.unwrap().unwrap();
             assert_eq!(r1.symbol().id().esi(), 1);
-            
+
             let r2 = filtered.next().await.unwrap().unwrap();
             assert_eq!(r2.symbol().id().esi(), 3);
-            
+
             assert!(filtered.next().await.is_none());
         });
     }
@@ -196,20 +196,20 @@ mod tests {
             assert!(matches!(res, Err(StreamError::Cancelled)));
         });
     }
-    
+
     #[test]
     fn test_sink_buffer() {
         let (sink, mut stream) = channel(10);
         // Buffer capacity 5. Inner capacity 10.
         let mut buffered = sink.buffer(5);
-        
+
         future::block_on(async {
             // Send 3 items (should be buffered)
             for i in 0..3 {
                 buffered.send(create_symbol(i)).await.unwrap();
             }
-            
-            // Should not be in stream yet? 
+
+            // Should not be in stream yet?
             // Our BufferedSink flushes if inner is ready.
             // ChannelSink is always ready if not full.
             // poll_send in BufferedSink:
@@ -220,14 +220,14 @@ mod tests {
             // fn poll_send(...) { ... self.get_mut().buffer.push(symbol); Poll::Ready(Ok(())) }
             // It only pushes to buffer. It does NOT flush to inner unless buffer is full.
             // So stream should be empty.
-            
+
             // Verify stream empty?
             // Can't check is_empty synchronously easily on stream.
             // We can check if next() hangs. But we don't want to hang.
-            
+
             // Flush
             buffered.flush().await.unwrap();
-            
+
             // Now stream should have items
             let r1 = stream.next().await.unwrap().unwrap();
             assert_eq!(r1.symbol().id().esi(), 0);

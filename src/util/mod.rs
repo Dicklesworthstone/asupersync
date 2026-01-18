@@ -9,4 +9,6 @@ pub mod resource;
 
 pub use arena::{Arena, ArenaIndex};
 pub use det_rng::DetRng;
-pub use resource::{PoolConfig, PoolExhausted, ResourceLimits, ResourceTracker, SymbolBuffer, SymbolPool};
+pub use resource::{
+    PoolConfig, PoolExhausted, ResourceLimits, ResourceTracker, SymbolBuffer, SymbolPool,
+};

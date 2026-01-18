@@ -14,6 +14,7 @@ pub struct IoDriver {
 
 impl IoDriver {
     /// Creates a new I/O driver.
+    #[must_use]
     pub fn new(reactor: Box<dyn Reactor>) -> Self {
         Self {
             reactor,

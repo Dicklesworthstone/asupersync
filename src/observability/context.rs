@@ -5,6 +5,7 @@
 
 use crate::types::{RegionId, TaskId};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A unique identifier for a span within a trace.
@@ -23,6 +24,12 @@ impl SpanId {
 impl Default for SpanId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Display for SpanId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "S{}", self.0)
     }
 }
 
@@ -130,6 +137,7 @@ impl DiagnosticContext {
     ///
     /// (For Phase 0, this is a placeholder as we don't have thread-local
     /// context storage yet).
+    #[must_use]
     pub fn enter(&self) -> ContextGuard<'_> {
         ContextGuard { _ctx: self }
     }
@@ -169,7 +177,12 @@ impl DiagnosticContext {
     /// Gets a custom field.
     #[must_use]
     pub fn custom(&self, key: &str) -> Option<&str> {
-        self.custom.get(key).map(|s| s.as_str())
+        self.custom.get(key).map(String::as_str)
+    }
+
+    /// Returns an iterator over custom fields.
+    pub fn custom_fields(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.custom.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 }
 
@@ -222,6 +235,10 @@ mod tests {
         assert_eq!(ctx.custom("key"), Some("value"));
         assert_eq!(ctx.custom("num"), Some("42"));
         assert_eq!(ctx.custom("missing"), None);
+
+        let mut fields: Vec<_> = ctx.custom_fields().collect();
+        fields.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(fields, vec![("key", "value"), ("num", "42")]);
     }
 
     #[test]
@@ -241,7 +258,7 @@ mod tests {
         let ctx1 = DiagnosticContext::new()
             .with_task_id(tid)
             .with_custom("a", "1");
-        
+
         let ctx2 = DiagnosticContext::new()
             .with_custom("b", "2")
             .with_custom("a", "override"); // Should override

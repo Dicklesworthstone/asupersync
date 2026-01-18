@@ -424,13 +424,13 @@ mod tests {
 
         let mut next = stream.next();
         assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(1)));
-        
+
         let mut next = stream.next();
         assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(2)));
-        
+
         let mut next = stream.next();
         assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(3)));
-        
+
         let mut next = stream.next();
         assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(None));
     }
@@ -442,9 +442,18 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut mapped).poll_next(&mut cx), Poll::Ready(Some(2)));
-        assert_eq!(Pin::new(&mut mapped).poll_next(&mut cx), Poll::Ready(Some(4)));
-        assert_eq!(Pin::new(&mut mapped).poll_next(&mut cx), Poll::Ready(Some(6)));
+        assert_eq!(
+            Pin::new(&mut mapped).poll_next(&mut cx),
+            Poll::Ready(Some(2))
+        );
+        assert_eq!(
+            Pin::new(&mut mapped).poll_next(&mut cx),
+            Poll::Ready(Some(4))
+        );
+        assert_eq!(
+            Pin::new(&mut mapped).poll_next(&mut cx),
+            Poll::Ready(Some(6))
+        );
         assert_eq!(Pin::new(&mut mapped).poll_next(&mut cx), Poll::Ready(None));
     }
 
@@ -455,10 +464,22 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut filtered).poll_next(&mut cx), Poll::Ready(Some(2)));
-        assert_eq!(Pin::new(&mut filtered).poll_next(&mut cx), Poll::Ready(Some(4)));
-        assert_eq!(Pin::new(&mut filtered).poll_next(&mut cx), Poll::Ready(Some(6)));
-        assert_eq!(Pin::new(&mut filtered).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(
+            Pin::new(&mut filtered).poll_next(&mut cx),
+            Poll::Ready(Some(2))
+        );
+        assert_eq!(
+            Pin::new(&mut filtered).poll_next(&mut cx),
+            Poll::Ready(Some(4))
+        );
+        assert_eq!(
+            Pin::new(&mut filtered).poll_next(&mut cx),
+            Poll::Ready(Some(6))
+        );
+        assert_eq!(
+            Pin::new(&mut filtered).poll_next(&mut cx),
+            Poll::Ready(None)
+        );
     }
 
     #[test]
@@ -468,8 +489,14 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut parsed).poll_next(&mut cx), Poll::Ready(Some(1)));
-        assert_eq!(Pin::new(&mut parsed).poll_next(&mut cx), Poll::Ready(Some(3)));
+        assert_eq!(
+            Pin::new(&mut parsed).poll_next(&mut cx),
+            Poll::Ready(Some(1))
+        );
+        assert_eq!(
+            Pin::new(&mut parsed).poll_next(&mut cx),
+            Poll::Ready(Some(3))
+        );
         assert_eq!(Pin::new(&mut parsed).poll_next(&mut cx), Poll::Ready(None));
     }
 
@@ -480,9 +507,18 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut taken).poll_next(&mut cx), Poll::Ready(Some(1)));
-        assert_eq!(Pin::new(&mut taken).poll_next(&mut cx), Poll::Ready(Some(2)));
-        assert_eq!(Pin::new(&mut taken).poll_next(&mut cx), Poll::Ready(Some(3)));
+        assert_eq!(
+            Pin::new(&mut taken).poll_next(&mut cx),
+            Poll::Ready(Some(1))
+        );
+        assert_eq!(
+            Pin::new(&mut taken).poll_next(&mut cx),
+            Poll::Ready(Some(2))
+        );
+        assert_eq!(
+            Pin::new(&mut taken).poll_next(&mut cx),
+            Poll::Ready(Some(3))
+        );
         assert_eq!(Pin::new(&mut taken).poll_next(&mut cx), Poll::Ready(None));
     }
 
@@ -493,9 +529,18 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut skipped).poll_next(&mut cx), Poll::Ready(Some(3)));
-        assert_eq!(Pin::new(&mut skipped).poll_next(&mut cx), Poll::Ready(Some(4)));
-        assert_eq!(Pin::new(&mut skipped).poll_next(&mut cx), Poll::Ready(Some(5)));
+        assert_eq!(
+            Pin::new(&mut skipped).poll_next(&mut cx),
+            Poll::Ready(Some(3))
+        );
+        assert_eq!(
+            Pin::new(&mut skipped).poll_next(&mut cx),
+            Poll::Ready(Some(4))
+        );
+        assert_eq!(
+            Pin::new(&mut skipped).poll_next(&mut cx),
+            Poll::Ready(Some(5))
+        );
         assert_eq!(Pin::new(&mut skipped).poll_next(&mut cx), Poll::Ready(None));
     }
 
@@ -506,10 +551,22 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut enumerated).poll_next(&mut cx), Poll::Ready(Some((0, "a"))));
-        assert_eq!(Pin::new(&mut enumerated).poll_next(&mut cx), Poll::Ready(Some((1, "b"))));
-        assert_eq!(Pin::new(&mut enumerated).poll_next(&mut cx), Poll::Ready(Some((2, "c"))));
-        assert_eq!(Pin::new(&mut enumerated).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(
+            Pin::new(&mut enumerated).poll_next(&mut cx),
+            Poll::Ready(Some((0, "a")))
+        );
+        assert_eq!(
+            Pin::new(&mut enumerated).poll_next(&mut cx),
+            Poll::Ready(Some((1, "b")))
+        );
+        assert_eq!(
+            Pin::new(&mut enumerated).poll_next(&mut cx),
+            Poll::Ready(Some((2, "c")))
+        );
+        assert_eq!(
+            Pin::new(&mut enumerated).poll_next(&mut cx),
+            Poll::Ready(None)
+        );
     }
 
     #[test]
@@ -517,7 +574,7 @@ mod tests {
         // We need a runtime or manual polling for async map.
         // But Then combinator returns a Stream.
         // We can poll it manually.
-        
+
         let stream = iter(vec![1, 2]);
         let mut processed = stream.then(|x| async move { x * 10 });
         let waker = noop_waker();
@@ -529,7 +586,7 @@ mod tests {
             // First poll starts the future, but future might be ready immediately
             Poll::Ready(Some(10)) => {}
             Poll::Pending => {
-                // If pending, poll again? 
+                // If pending, poll again?
                 // async move { x * 10 } is ready immediately.
                 // But Then implementation:
                 // 1. polls stream -> Ready(1). Creates future.
@@ -545,7 +602,7 @@ mod tests {
         // Second item
         let mut next = processed.next();
         assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(20)));
-        
+
         // End
         let mut next = processed.next();
         assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(None));
@@ -560,15 +617,27 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(Pin::new(&mut inspected).poll_next(&mut cx), Poll::Ready(Some(1)));
+        assert_eq!(
+            Pin::new(&mut inspected).poll_next(&mut cx),
+            Poll::Ready(Some(1))
+        );
         assert_eq!(*items.borrow(), vec![1]);
-        
-        assert_eq!(Pin::new(&mut inspected).poll_next(&mut cx), Poll::Ready(Some(2)));
+
+        assert_eq!(
+            Pin::new(&mut inspected).poll_next(&mut cx),
+            Poll::Ready(Some(2))
+        );
         assert_eq!(*items.borrow(), vec![1, 2]);
-        
-        assert_eq!(Pin::new(&mut inspected).poll_next(&mut cx), Poll::Ready(Some(3)));
+
+        assert_eq!(
+            Pin::new(&mut inspected).poll_next(&mut cx),
+            Poll::Ready(Some(3))
+        );
         assert_eq!(*items.borrow(), vec![1, 2, 3]);
-        
-        assert_eq!(Pin::new(&mut inspected).poll_next(&mut cx), Poll::Ready(None));
+
+        assert_eq!(
+            Pin::new(&mut inspected).poll_next(&mut cx),
+            Poll::Ready(None)
+        );
     }
 }

@@ -39,11 +39,13 @@ impl AuthError {
     }
 
     /// Returns the kind of error.
+    #[must_use]
     pub const fn kind(&self) -> AuthErrorKind {
         self.kind
     }
 
     /// Returns true if this is an invalid tag error.
+    #[must_use]
     pub const fn is_invalid_tag(&self) -> bool {
         matches!(self.kind, AuthErrorKind::InvalidTag)
     }

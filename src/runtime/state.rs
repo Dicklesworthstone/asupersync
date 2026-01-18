@@ -144,7 +144,7 @@ impl RuntimeState {
         // Create the task's capability context
         let cx = crate::cx::Cx::new(region, task_id, budget);
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
-        
+
         // Link the shared state to the TaskRecord
         if let Some(record) = self.tasks.get_mut(idx) {
             record.set_cx_inner(cx.inner.clone());

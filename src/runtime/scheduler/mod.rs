@@ -27,7 +27,10 @@ impl WorkStealingScheduler {
     /// Creates a new scheduler with the given number of workers.
     ///
     /// This also creates the workers and their local queues.
-    pub fn new(worker_count: usize, state: &std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>) -> Self {
+    pub fn new(
+        worker_count: usize,
+        state: &std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>,
+    ) -> Self {
         let global = Arc::new(GlobalQueue::new());
         let mut workers = Vec::with_capacity(worker_count);
         let mut stealers = Vec::with_capacity(worker_count);
@@ -37,21 +40,22 @@ impl WorkStealingScheduler {
         // We create local queues first?
         // LocalQueue::new() -> (LocalQueue, Stealer) ?
         // LocalQueue has .stealer().
-        
+
         // We'll create workers then extract stealers?
         // No, Worker owns LocalQueue.
         // We'll create LocalQueues first.
         let local_queues: Vec<LocalQueue> = (0..worker_count).map(|_| LocalQueue::new()).collect();
-        
+
         for q in &local_queues {
             stealers.push(q.stealer());
         }
 
         for (id, local) in local_queues.into_iter().enumerate() {
             let worker_stealers = stealers.clone(); // All stealers (including self? stealing from self is weird but ok)
-            // Ideally filter out self.
-            let my_stealers: Vec<_> = worker_stealers.into_iter()
-                // .filter(|s| ...) // Stealer doesn't have ID. 
+                                                    // Ideally filter out self.
+            let my_stealers: Vec<_> = worker_stealers
+                .into_iter()
+                // .filter(|s| ...) // Stealer doesn't have ID.
                 .collect();
 
             workers.push(Worker {
@@ -65,10 +69,7 @@ impl WorkStealingScheduler {
             });
         }
 
-        Self {
-            workers,
-            global,
-        }
+        Self { workers, global }
     }
 
     /// Spawns a task.

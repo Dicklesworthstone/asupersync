@@ -104,7 +104,7 @@ impl Events {
     pub(crate) fn push(&mut self, event: Event) {
         self.inner.push(event);
     }
-    
+
     /// Returns true if empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -101,6 +101,7 @@ impl RuntimeBuilder {
     }
 
     /// Build a runtime from this configuration.
+    #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<Runtime, Error> {
         Runtime::with_config(self.config)
     }
@@ -147,6 +148,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// Construct a runtime from the given configuration.
+    #[allow(clippy::result_large_err)]
     pub fn with_config(mut config: RuntimeConfig) -> Result<Self, Error> {
         config.normalize();
         Ok(Self {

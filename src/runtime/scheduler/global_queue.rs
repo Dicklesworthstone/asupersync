@@ -14,6 +14,7 @@ pub struct GlobalQueue {
 
 impl GlobalQueue {
     /// Creates a new global queue.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: SegQueue::new(),

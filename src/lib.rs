@@ -50,7 +50,9 @@
 
 pub mod bytes;
 pub mod channel;
+pub mod codec;
 pub mod combinator;
+pub mod config;
 pub mod cx;
 pub mod error;
 pub mod fs;
@@ -70,6 +72,11 @@ pub mod types;
 pub mod util;
 
 // Re-exports for convenient access to core types
+pub use config::{
+    AdaptiveConfig, BackoffConfig, ConfigError, ConfigLoader, EncodingConfig,
+    PathSelectionStrategy, RaptorQConfig, ResourceConfig, RuntimeProfile, SecurityConfig,
+    TimeoutConfig, TransportConfig,
+};
 pub use cx::{Cx, Scope};
 pub use error::{
     AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, Recoverability, RecoveryAction,

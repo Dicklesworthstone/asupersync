@@ -26,5 +26,7 @@ pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;
 pub use symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind, DEFAULT_SYMBOL_SIZE};
-pub use symbol_set::{BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig};
+pub use symbol_set::{
+    BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
+};
 pub use task_context::CxInner;

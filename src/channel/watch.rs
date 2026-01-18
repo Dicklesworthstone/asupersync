@@ -186,7 +186,11 @@ impl<T> Sender<T> {
 
         // Notify all waiting receivers
         // We take the lock briefly to coordinate with condvar
-        let _guard = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let _guard = self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
         self.inner.notify.notify_all();
 
         Ok(())
@@ -221,7 +225,11 @@ impl<T> Sender<T> {
         }
 
         // Notify all waiting receivers
-        let _guard = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let _guard = self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
         self.inner.notify.notify_all();
 
         Ok(())
@@ -286,7 +294,11 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         self.inner.mark_sender_dropped();
         // Wake all waiting receivers so they see Closed
-        let _guard = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let _guard = self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
         self.inner.notify.notify_all();
     }
 }
@@ -319,7 +331,11 @@ impl<T> Receiver<T> {
     pub fn changed(&mut self, cx: &Cx) -> Result<(), RecvError> {
         cx.trace("watch::changed starting wait");
 
-        let mut lock = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let mut lock = self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
 
         loop {
             // Check if sender dropped

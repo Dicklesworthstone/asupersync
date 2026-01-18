@@ -64,16 +64,16 @@ impl TcpStream {
     /// Set keepalive.
     pub fn set_keepalive(&self, _keepalive: Option<Duration>) -> io::Result<()> {
         // Not supported in std
-        Err(io::Error::new(io::ErrorKind::Unsupported, "set_keepalive not supported"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "set_keepalive not supported",
+        ))
     }
 
     /// Split into borrowed halves.
     #[must_use]
     pub fn split(&self) -> (ReadHalf<'_>, WriteHalf<'_>) {
-        (
-            ReadHalf::new(&self.inner),
-            WriteHalf::new(&self.inner),
-        )
+        (ReadHalf::new(&self.inner), WriteHalf::new(&self.inner))
     }
 
     /// Split into owned halves.

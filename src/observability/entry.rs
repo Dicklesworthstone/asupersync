@@ -3,6 +3,7 @@
 //! Log entries combine a message, severity level, timestamp, and
 //! structured key-value fields for rich, queryable logging.
 
+use super::context::DiagnosticContext;
 use super::level::LogLevel;
 use crate::types::Time;
 use core::fmt;
@@ -103,6 +104,27 @@ impl LogEntry {
     #[must_use]
     pub fn with_target(mut self, target: impl Into<String>) -> Self {
         self.target = Some(target.into());
+        self
+    }
+
+    /// Adds diagnostic context fields to the entry.
+    #[must_use]
+    pub fn with_context(mut self, ctx: &DiagnosticContext) -> Self {
+        if let Some(task_id) = ctx.task_id() {
+            self = self.with_field("task_id", task_id.to_string());
+        }
+        if let Some(region_id) = ctx.region_id() {
+            self = self.with_field("region_id", region_id.to_string());
+        }
+        if let Some(span_id) = ctx.span_id() {
+            self = self.with_field("span_id", span_id.to_string());
+        }
+        if let Some(parent_span_id) = ctx.parent_span_id() {
+            self = self.with_field("parent_span_id", parent_span_id.to_string());
+        }
+        for (k, v) in ctx.custom_fields() {
+            self = self.with_field(k, v);
+        }
         self
     }
 
@@ -335,5 +357,25 @@ mod tests {
 
         let fields: Vec<_> = entry.fields().collect();
         assert_eq!(fields, vec![("a", "1"), ("b", "2")]);
+    }
+
+    #[test]
+    fn entry_with_context() {
+        use crate::observability::SpanId;
+        use crate::types::{RegionId, TaskId};
+        use crate::util::ArenaIndex;
+
+        let ctx = DiagnosticContext::new()
+            .with_task_id(TaskId::from_arena(ArenaIndex::new(3, 0)))
+            .with_region_id(RegionId::from_arena(ArenaIndex::new(2, 0)))
+            .with_span_id(SpanId::new())
+            .with_custom("request_id", "abc123");
+
+        let entry = LogEntry::info("hello").with_context(&ctx);
+
+        assert_eq!(entry.get_field("task_id"), Some("T3"));
+        assert_eq!(entry.get_field("region_id"), Some("R2"));
+        assert!(entry.get_field("span_id").is_some());
+        assert_eq!(entry.get_field("request_id"), Some("abc123"));
     }
 }

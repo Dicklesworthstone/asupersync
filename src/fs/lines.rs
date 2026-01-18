@@ -1,7 +1,7 @@
 //! Async line iterator for files.
 
 use crate::fs::buf_reader::BufReader;
-use crate::io::{AsyncRead, AsyncBufRead};
+use crate::io::AsyncRead;
 use crate::stream::Stream;
 use std::io;
 use std::pin::Pin;

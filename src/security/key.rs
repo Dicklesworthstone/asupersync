@@ -22,6 +22,7 @@ impl AuthKey {
     /// Creates a new key from a 64-bit seed.
     ///
     /// This uses a deterministic expansion to generate 32 bytes from the seed.
+    #[must_use]
     pub fn from_seed(seed: u64) -> Self {
         let mut bytes = [0u8; AUTH_KEY_SIZE];
         let mut rng = DetRng::new(seed);
@@ -30,6 +31,7 @@ impl AuthKey {
     }
 
     /// Creates a new key from a deterministic RNG.
+    #[must_use]
     pub fn from_rng(rng: &mut DetRng) -> Self {
         let mut bytes = [0u8; AUTH_KEY_SIZE];
         rng.fill_bytes(&mut bytes);
@@ -37,11 +39,13 @@ impl AuthKey {
     }
 
     /// Creates a new key from raw bytes.
+    #[must_use]
     pub const fn from_bytes(bytes: [u8; AUTH_KEY_SIZE]) -> Self {
         Self { bytes }
     }
 
     /// Returns the raw bytes of the key.
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; AUTH_KEY_SIZE] {
         &self.bytes
     }
@@ -52,15 +56,16 @@ impl AuthKey {
     /// `H(key || purpose)`.
     ///
     /// In Phase 0, this is simulated by XORing the key with the purpose hash.
+    #[must_use]
     pub fn derive_subkey(&self, purpose: &[u8]) -> Self {
         let mut derived = self.bytes;
-        
+
         // Simple non-cryptographic mixing for Phase 0
         // Mix in the purpose
         for (i, &b) in purpose.iter().enumerate() {
             derived[i % AUTH_KEY_SIZE] ^= b.wrapping_mul(31).wrapping_add(17);
         }
-        
+
         // One round of mixing to avalanche
         for i in 0..AUTH_KEY_SIZE {
             derived[i] = derived[i].wrapping_add(derived[(i + 1) % AUTH_KEY_SIZE]);

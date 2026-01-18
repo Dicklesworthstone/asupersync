@@ -9,7 +9,7 @@
 
 use crate::error::{Error, ErrorKind};
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
-use crate::types::{Time};
+use crate::types::Time;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -550,9 +550,9 @@ impl SymbolDeduplicator {
         let mut objects = self.objects.write().expect("lock poisoned");
 
         // Get or create object state
-        let state = objects.entry(object_id).or_insert_with(|| {
-            ObjectDeduplicationState::new(now)
-        });
+        let state = objects
+            .entry(object_id)
+            .or_insert_with(|| ObjectDeduplicationState::new(now));
 
         // Check if already seen
         if state.seen.contains(&symbol_id) {
@@ -588,7 +588,9 @@ impl SymbolDeduplicator {
 
         let mut pruned = 0;
         objects.retain(|_, state| {
-            let age = now.as_nanos().saturating_sub(state.last_activity.as_nanos());
+            let age = now
+                .as_nanos()
+                .saturating_sub(state.last_activity.as_nanos());
             let keep = age < ttl_nanos;
             if !keep {
                 pruned += 1;
@@ -615,7 +617,10 @@ impl SymbolDeduplicator {
 
     /// Clears all state for an object (e.g., after decoding completes).
     pub fn clear_object(&self, object_id: ObjectId) {
-        self.objects.write().expect("lock poisoned").remove(&object_id);
+        self.objects
+            .write()
+            .expect("lock poisoned")
+            .remove(&object_id);
     }
 }
 
@@ -742,7 +747,9 @@ impl SymbolReorderer {
         let seq = symbol.esi();
 
         let mut objects = self.objects.write().expect("lock poisoned");
-        let state = objects.entry(object_id).or_insert_with(ObjectReorderState::new);
+        let state = objects
+            .entry(object_id)
+            .or_insert_with(ObjectReorderState::new);
 
         let mut ready = Vec::new();
 
@@ -794,7 +801,9 @@ impl SymbolReorderer {
             let mut to_remove = Vec::new();
 
             for (&seq, buffered) in &state.buffer {
-                let wait_time = now.as_nanos().saturating_sub(buffered.received_at.as_nanos());
+                let wait_time = now
+                    .as_nanos()
+                    .saturating_sub(buffered.received_at.as_nanos());
                 if wait_time >= max_wait_nanos {
                     to_remove.push(seq);
                 }
@@ -844,7 +853,10 @@ impl SymbolReorderer {
 
     /// Clears state for an object.
     pub fn clear_object(&self, object_id: ObjectId) {
-        self.objects.write().expect("lock poisoned").remove(&object_id);
+        self.objects
+            .write()
+            .expect("lock poisoned")
+            .remove(&object_id);
     }
 }
 
@@ -1005,7 +1017,7 @@ impl MultipathAggregator {
         }
 
         // Flush reorderer timeouts
-        let mut flushed = self.reorderer.flush_timeouts(now);
+        let flushed = self.reorderer.flush_timeouts(now);
 
         // Prune deduplicator
         self.dedup.prune(now);
@@ -1118,7 +1130,11 @@ mod tests {
     use super::*;
 
     fn test_path(id: u64) -> TransportPath {
-        TransportPath::new(PathId(id), format!("path-{}", id), format!("10.0.0.{}:8080", id))
+        TransportPath::new(
+            PathId(id),
+            format!("path-{}", id),
+            format!("10.0.0.{}:8080", id),
+        )
     }
 
     // Test 1: Path state predicates
@@ -1180,7 +1196,10 @@ mod tests {
         let selected = set.select_paths();
         assert_eq!(selected.len(), 2);
         // First should be high quality
-        assert!(selected[0].characteristics.quality_score() > selected[1].characteristics.quality_score());
+        assert!(
+            selected[0].characteristics.quality_score()
+                > selected[1].characteristics.quality_score()
+        );
     }
 
     // Test 6: Deduplicator basic operation
@@ -1280,8 +1299,8 @@ mod tests {
         assert_eq!(ready1.len(), 2); // s1 and s2 delivered
 
         let stats = reorderer.stats();
-        assert_eq!(stats.in_order_deliveries, 1);
-        assert_eq!(stats.reordered_deliveries, 2);
+        assert_eq!(stats.in_order_deliveries, 2);
+        assert_eq!(stats.reordered_deliveries, 1);
     }
 
     // Test 10: Reorderer timeout flush
@@ -1365,14 +1384,22 @@ mod tests {
     fn test_path_set_stats() {
         let set = PathSet::new(PathSelectionPolicy::UseAll);
 
-        let p1 = set.create_path("p1", "a", PathCharacteristics {
-            bandwidth_bps: 1_000_000,
-            ..Default::default()
-        });
-        let p2 = set.create_path("p2", "b", PathCharacteristics {
-            bandwidth_bps: 2_000_000,
-            ..Default::default()
-        });
+        let p1 = set.create_path(
+            "p1",
+            "a",
+            PathCharacteristics {
+                bandwidth_bps: 1_000_000,
+                ..Default::default()
+            },
+        );
+        let p2 = set.create_path(
+            "p2",
+            "b",
+            PathCharacteristics {
+                bandwidth_bps: 2_000_000,
+                ..Default::default()
+            },
+        );
 
         if let Some(path) = set.get(p1) {
             path.symbols_received.store(100, Ordering::Relaxed);

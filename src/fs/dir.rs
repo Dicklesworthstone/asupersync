@@ -53,7 +53,7 @@ mod tests {
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("asupersync_test_{}_{}", name, id));
+        path.push(format!("asupersync_test_{name}_{id}"));
         path
     }
 

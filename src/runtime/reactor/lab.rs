@@ -1,6 +1,6 @@
 //! Deterministic lab reactor for testing.
 
-use super::{Event, Interest, Reactor, Token, Source}; // Added Source to import
+use super::{Event, Interest, Reactor, Source, Token}; // Added Source to import
 use crate::types::Time;
 use std::collections::{BinaryHeap, HashMap};
 use std::io;
@@ -77,7 +77,11 @@ impl Default for LabReactor {
 
 impl Reactor for LabReactor {
     fn register(&self, _source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
-        self.inner.lock().unwrap().sockets.insert(token, VirtualSocket { interest });
+        self.inner
+            .lock()
+            .unwrap()
+            .sockets
+            .insert(token, VirtualSocket { interest });
         Ok(())
     }
 
@@ -88,7 +92,7 @@ impl Reactor for LabReactor {
 
     fn poll(&self, events: &mut super::Events, timeout: Option<Duration>) -> io::Result<usize> {
         let mut inner = self.inner.lock().unwrap();
-        
+
         // Advance time if timeout provided (simulated)
         if let Some(d) = timeout {
             inner.time = inner.time.saturating_add_nanos(d.as_nanos() as u64);
@@ -107,7 +111,7 @@ impl Reactor for LabReactor {
                 break;
             }
         }
-        
+
         Ok(count)
     }
 }
@@ -118,7 +122,9 @@ mod tests {
 
     struct MockSource;
     impl std::os::fd::AsRawFd for MockSource {
-        fn as_raw_fd(&self) -> std::os::fd::RawFd { 0 }
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            0
+        }
     }
 
     #[test]
@@ -126,19 +132,25 @@ mod tests {
         let reactor = LabReactor::new();
         let token = Token::new(1);
         let source = MockSource;
-        
-        reactor.register(&source, token, Interest::readable()).unwrap();
-        
+
+        reactor
+            .register(&source, token, Interest::readable())
+            .unwrap();
+
         reactor.inject_event(token, Event::readable(token), Duration::from_millis(10));
-        
+
         let mut events = crate::runtime::reactor::Events::with_capacity(10);
-        
+
         // Poll before time - should be empty
-        reactor.poll(&mut events, Some(Duration::from_millis(5))).unwrap();
+        reactor
+            .poll(&mut events, Some(Duration::from_millis(5)))
+            .unwrap();
         assert!(events.is_empty());
-        
+
         // Poll after time - should have event
-        reactor.poll(&mut events, Some(Duration::from_millis(10))).unwrap();
+        reactor
+            .poll(&mut events, Some(Duration::from_millis(10)))
+            .unwrap();
         assert_eq!(events.iter().count(), 1);
     }
 }

@@ -13,7 +13,9 @@ pub struct Fuse<S> {
 
 impl<S> Fuse<S> {
     pub(crate) fn new(stream: S) -> Self {
-        Self { stream: Some(stream) }
+        Self {
+            stream: Some(stream),
+        }
     }
 }
 

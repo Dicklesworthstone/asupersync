@@ -13,9 +13,7 @@
 
 use crate::stream::Stream;
 use std::io;
-use std::net::{
-    Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket,
-};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -44,9 +42,7 @@ impl UdpSocket {
         // TODO: Async send
         match self.inner.send_to(buf, target) {
             Ok(n) => Ok(n),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                std::future::pending().await
-            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => std::future::pending().await,
             Err(e) => Err(e),
         }
     }
@@ -69,9 +65,7 @@ impl UdpSocket {
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         match self.inner.send(buf) {
             Ok(n) => Ok(n),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                std::future::pending().await
-            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => std::future::pending().await,
             Err(e) => Err(e),
         }
     }

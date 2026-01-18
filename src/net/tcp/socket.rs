@@ -53,14 +53,20 @@ impl TcpSocket {
 
     /// Sets the SO_REUSEADDR option on this socket.
     pub fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()> {
-        self.state.lock().expect("tcp socket lock poisoned").reuseaddr = reuseaddr;
+        self.state
+            .lock()
+            .expect("tcp socket lock poisoned")
+            .reuseaddr = reuseaddr;
         Ok(())
     }
 
     /// Sets the SO_REUSEPORT option on this socket (Unix only).
     #[cfg(unix)]
     pub fn set_reuseport(&self, reuseport: bool) -> io::Result<()> {
-        self.state.lock().expect("tcp socket lock poisoned").reuseport = reuseport;
+        self.state
+            .lock()
+            .expect("tcp socket lock poisoned")
+            .reuseport = reuseport;
         Ok(())
     }
 
@@ -91,10 +97,10 @@ impl TcpSocket {
                 "SO_REUSEADDR/SO_REUSEPORT not supported in Phase 0",
             ));
         }
-        let addr = state.bound.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound")
-        })?;
-        
+        let addr = state
+            .bound
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound"))?;
+
         // Use blocking bind for Phase 0
         // We can't use async bind here because this method is synchronous.
         // We can construct TcpListener using std::net::TcpListener directly.
@@ -109,10 +115,10 @@ impl TcpSocket {
         // No, `TcpSocket` is in `socket.rs`. `TcpListener` in `listener.rs`.
         // They are siblings.
         // So `inner` needs to be `pub(crate)`.
-        
+
         let listener = net::TcpListener::bind(addr)?;
         listener.set_nonblocking(true)?;
-        
+
         Ok(TcpListener { inner: listener })
     }
 
@@ -134,7 +140,7 @@ impl TcpSocket {
                 "address family does not match socket",
             ));
         }
-        
+
         // Async connect using TcpStream::connect
         TcpStream::connect(addr).await
     }

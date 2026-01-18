@@ -18,6 +18,7 @@ pub struct ReadDir {
 
 impl ReadDir {
     /// Returns the next directory entry.
+    #[allow(clippy::unused_async)]
     pub async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
         match self.inner.next() {
             Some(Ok(entry)) => Ok(Some(DirEntry { inner: entry })),
@@ -60,11 +61,13 @@ impl DirEntry {
     }
 
     /// Returns the metadata for the entry.
+    #[allow(clippy::unused_async)]
     pub async fn metadata(&self) -> io::Result<Metadata> {
         self.inner.metadata()
     }
 
     /// Returns the file type for the entry.
+    #[allow(clippy::unused_async)]
     pub async fn file_type(&self) -> io::Result<FileType> {
         self.inner.file_type()
     }
@@ -96,7 +99,7 @@ mod tests {
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         let mut path = std::env::temp_dir();
-        path.push(format!("asupersync_test_{}_{}", name, id));
+        path.push(format!("asupersync_test_{name}_{id}"));
         path
     }
 

@@ -218,10 +218,7 @@ mod tests {
         let result = block_on(handle.join(&cx));
         match result {
             Err(JoinError::Cancelled(r)) => {
-                assert!(matches!(
-                    r.kind,
-                    crate::types::CancelKind::RaceLost
-                ));
+                assert!(matches!(r.kind, crate::types::CancelKind::RaceLost));
             }
             _ => panic!("expected Cancelled"),
         }

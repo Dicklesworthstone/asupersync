@@ -3,9 +3,9 @@
 use asupersync::channel::{broadcast, mpsc, oneshot, watch};
 use asupersync::cx::Cx;
 use conformance::{
-    BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
-    OneshotSender, RuntimeInterface, TimeoutError,
-    WatchReceiver, WatchRecvError, WatchSender, AsyncFile, TcpListener, TcpStream, UdpSocket
+    AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
+    OneshotSender, RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket,
+    WatchReceiver, WatchRecvError, WatchSender,
 };
 use std::future::Future;
 use std::io;
@@ -56,10 +56,7 @@ impl<T: Send + 'static> MpscReceiver<T> for MpscReceiverWrapper<T> {
         let receiver = &self.0;
         Box::pin(async move {
             let cx = Cx::for_testing();
-            match receiver.recv(&cx) {
-                Ok(val) => Some(val),
-                Err(_) => None,
-            }
+            receiver.recv(&cx).ok()
         })
     }
 }
@@ -70,10 +67,9 @@ impl<T: Send + 'static> OneshotSender<T> for OneshotSenderWrapper<T> {
     fn send(mut self, value: T) -> Result<(), T> {
         if let Some(tx) = self.0.take() {
             let cx = Cx::for_testing();
-            match tx.send(&cx, value) {
-                Ok(_) => Ok(()),
-                Err(asupersync::channel::oneshot::SendError::Disconnected(v)) => Err(v),
-            }
+            tx.send(&cx, value).map_err(|e| match e {
+                asupersync::channel::oneshot::SendError::Disconnected(v) => v,
+            })
         } else {
             Err(value)
         }
@@ -142,10 +138,7 @@ impl<T: Send + Sync + Clone + 'static> WatchReceiver<T> for WatchReceiverWrapper
         let receiver = &mut self.0;
         Box::pin(async move {
             let cx = Cx::for_testing();
-            match receiver.changed(&cx) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(WatchRecvError),
-            }
+            receiver.changed(&cx).map_err(|_| WatchRecvError)
         })
     }
 
@@ -157,16 +150,28 @@ impl<T: Send + Sync + Clone + 'static> WatchReceiver<T> for WatchReceiverWrapper
 // Dummy File implementation for now
 struct DummyFile;
 impl AsyncFile for DummyFile {
-    fn write_all<'a>(&'a mut self, _buf: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+    fn write_all<'a>(
+        &'a mut self,
+        _buf: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
-    fn read_exact<'a>(&'a mut self, _buf: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+    fn read_exact<'a>(
+        &'a mut self,
+        _buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
-    fn read_to_end<'a>(&'a mut self, _buf: &'a mut Vec<u8>) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+    fn read_to_end<'a>(
+        &'a mut self,
+        _buf: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async { Ok(0) })
     }
-    fn seek<'a>(&'a mut self, _pos: io::SeekFrom) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'a>> {
+    fn seek<'a>(
+        &'a mut self,
+        _pos: io::SeekFrom,
+    ) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'a>> {
         Box::pin(async { Ok(0) })
     }
     fn sync_all(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
@@ -181,21 +186,38 @@ impl AsyncFile for DummyFile {
 struct DummyTcpListener;
 impl TcpListener for DummyTcpListener {
     type Stream = DummyTcpStream;
-    fn local_addr(&self) -> io::Result<SocketAddr> { Err(io::Error::from(io::ErrorKind::Unsupported)) }
-    fn accept(&self) -> Pin<Box<dyn Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send + '_>> {
-        Box::pin(async { loop { std::future::pending::<()>().await; } })
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+    fn accept(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send + '_>> {
+        Box::pin(async {
+            loop {
+                std::future::pending::<()>().await;
+            }
+        })
     }
 }
 
 struct DummyTcpStream;
 impl TcpStream for DummyTcpStream {
-    fn read<'a>(&'a mut self, _buf: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+    fn read<'a>(
+        &'a mut self,
+        _buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async { Ok(0) })
     }
-    fn read_exact<'a>(&'a mut self, _buf: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+    fn read_exact<'a>(
+        &'a mut self,
+        _buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
-    fn write_all<'a>(&'a mut self, _buf: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+    fn write_all<'a>(
+        &'a mut self,
+        _buf: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
     fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
@@ -205,12 +227,25 @@ impl TcpStream for DummyTcpStream {
 
 struct DummyUdpSocket;
 impl UdpSocket for DummyUdpSocket {
-    fn local_addr(&self) -> io::Result<SocketAddr> { Err(io::Error::from(io::ErrorKind::Unsupported)) }
-    fn send_to<'a>(&'a self, _buf: &'a [u8], _addr: SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+    fn send_to<'a>(
+        &'a self,
+        _buf: &'a [u8],
+        _addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async { Ok(0) })
     }
-    fn recv_from<'a>(&'a self, _buf: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>> {
-        Box::pin(async { loop { std::future::pending::<()>().await; } })
+    fn recv_from<'a>(
+        &'a self,
+        _buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>> {
+        Box::pin(async {
+            loop {
+                std::future::pending::<()>().await;
+            }
+        })
     }
 }
 
@@ -219,7 +254,8 @@ impl RuntimeInterface for AsupersyncRuntime {
     type MpscSender<T: Send + 'static> = MpscSenderWrapper<T>;
     type MpscReceiver<T: Send + 'static> = MpscReceiverWrapper<T>;
     type OneshotSender<T: Send + 'static> = OneshotSenderWrapper<T>;
-    type OneshotReceiver<T: Send + 'static> = Pin<Box<dyn Future<Output = Result<T, conformance::OneshotRecvError>> + Send>>;
+    type OneshotReceiver<T: Send + 'static> =
+        Pin<Box<dyn Future<Output = Result<T, conformance::OneshotRecvError>> + Send>>;
     type BroadcastSender<T: Send + Clone + 'static> = BroadcastSenderWrapper<T>;
     type BroadcastReceiver<T: Send + Clone + 'static> = BroadcastReceiverWrapper<T>;
     type WatchSender<T: Send + Sync + 'static> = WatchSenderWrapper<T>;
@@ -234,13 +270,9 @@ impl RuntimeInterface for AsupersyncRuntime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let handle = std::thread::spawn(move || {
-            futures_lite::future::block_on(future)
-        });
-        
-        Box::pin(async move {
-            handle.join().unwrap()
-        })
+        let handle = std::thread::spawn(move || futures_lite::future::block_on(future));
+
+        Box::pin(async move { handle.join().unwrap() })
     }
 
     fn block_on<F: Future>(&self, future: F) -> F::Output {
@@ -264,9 +296,7 @@ impl RuntimeInterface for AsupersyncRuntime {
                 Err(TimeoutError)
             };
 
-            let ok_future = async {
-                Ok(future.await)
-            };
+            let ok_future = async { Ok(future.await) };
 
             futures_lite::future::or(timeout, ok_future).await
         })
@@ -286,7 +316,9 @@ impl RuntimeInterface for AsupersyncRuntime {
         let (tx, rx) = oneshot::channel();
         let rx_wrapped = Box::pin(async move {
             let cx = Cx::for_testing();
-            rx.recv(&cx).await.map_err(|_| conformance::OneshotRecvError)
+            rx.recv(&cx)
+                .await
+                .map_err(|_| conformance::OneshotRecvError)
         });
         (OneshotSenderWrapper(Some(tx)), rx_wrapped)
     }
@@ -308,19 +340,34 @@ impl RuntimeInterface for AsupersyncRuntime {
     }
 
     // Dummy implementations for File/Net
-    fn file_create<'a>(&'a self, _path: &'a Path) -> Pin<Box<dyn Future<Output = io::Result<Self::File>> + Send + 'a>> {
+    fn file_create<'a>(
+        &'a self,
+        _path: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Self::File>> + Send + 'a>> {
         Box::pin(async { Ok(DummyFile) })
     }
-    fn file_open<'a>(&'a self, _path: &'a Path) -> Pin<Box<dyn Future<Output = io::Result<Self::File>> + Send + 'a>> {
+    fn file_open<'a>(
+        &'a self,
+        _path: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Self::File>> + Send + 'a>> {
         Box::pin(async { Ok(DummyFile) })
     }
-    fn tcp_listen<'a>(&'a self, _addr: &'a str) -> Pin<Box<dyn Future<Output = io::Result<Self::TcpListener>> + Send + 'a>> {
+    fn tcp_listen<'a>(
+        &'a self,
+        _addr: &'a str,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Self::TcpListener>> + Send + 'a>> {
         Box::pin(async { Ok(DummyTcpListener) })
     }
-    fn tcp_connect<'a>(&'a self, _addr: SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<Self::TcpStream>> + Send + 'a>> {
+    fn tcp_connect<'a>(
+        &'a self,
+        _addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Self::TcpStream>> + Send + 'a>> {
         Box::pin(async { Ok(DummyTcpStream) })
     }
-    fn udp_bind<'a>(&'a self, _addr: &'a str) -> Pin<Box<dyn Future<Output = io::Result<Self::UdpSocket>> + Send + 'a>> {
+    fn udp_bind<'a>(
+        &'a self,
+        _addr: &'a str,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Self::UdpSocket>> + Send + 'a>> {
         Box::pin(async { Ok(DummyUdpSocket) })
     }
 }
@@ -329,12 +376,15 @@ impl RuntimeInterface for AsupersyncRuntime {
 fn run_channel_conformance_tests() {
     let runtime = AsupersyncRuntime::new();
     let tests = conformance::tests::channels::collect_tests::<AsupersyncRuntime>();
-    
+
     for test in tests {
         println!("Running test: {}", test.meta.name);
         let result = test.run(&runtime);
-        if !result.passed {
-            panic!("Test {} failed: {}", test.meta.name, result.message.unwrap_or_default());
-        }
+        assert!(
+            result.passed,
+            "Test {} failed: {}",
+            test.meta.name,
+            result.message.unwrap_or_default()
+        );
     }
 }

@@ -184,9 +184,7 @@ impl Cx {
         observability: Option<ObservabilityState>,
     ) -> Self {
         Self {
-            inner: Arc::new(std::sync::RwLock::new(CxInner::new(
-                region, task, budget,
-            ))),
+            inner: Arc::new(std::sync::RwLock::new(CxInner::new(region, task, budget))),
             observability: Arc::new(std::sync::RwLock::new(
                 observability.unwrap_or_else(|| ObservabilityState::new(region, task)),
             )),
@@ -466,11 +464,7 @@ impl Cx {
     }
 
     /// Derives an observability state for a child task.
-    pub(crate) fn child_observability(
-        &self,
-        region: RegionId,
-        task: TaskId,
-    ) -> ObservabilityState {
+    pub(crate) fn child_observability(&self, region: RegionId, task: TaskId) -> ObservabilityState {
         let obs = self.observability.read().expect("lock poisoned");
         obs.derive_child(region, task)
     }

@@ -88,7 +88,7 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![], SymbolKind::Source);
         let tag = AuthenticationTag::zero();
-        
+
         let auth = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
         assert!(auth.is_verified());
         assert_eq!(auth.symbol(), &symbol);
@@ -100,7 +100,7 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![], SymbolKind::Source);
         let tag = AuthenticationTag::zero();
-        
+
         let auth = AuthenticatedSymbol::from_parts(symbol, tag);
         assert!(!auth.is_verified());
     }
@@ -110,10 +110,10 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2], SymbolKind::Source);
         let tag = AuthenticationTag::zero();
-        
+
         let auth = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
         let unwrapped = auth.into_symbol();
-        
+
         assert_eq!(unwrapped, symbol);
     }
 }

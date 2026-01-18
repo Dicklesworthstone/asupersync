@@ -636,6 +636,37 @@ mod tests {
     }
 
     #[test]
+    fn cancel_while_waiting_returns_cancelled() {
+        use std::sync::{mpsc, Arc};
+
+        let mutex = Arc::new(Mutex::new(0i32));
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let holder = {
+            let mutex = Arc::clone(&mutex);
+            std::thread::spawn(move || {
+                let cx = test_cx();
+                let _guard = mutex.lock(&cx).expect("lock failed");
+                locked_tx.send(()).expect("notify locked");
+                release_rx.recv().expect("wait for release");
+            })
+        };
+
+        locked_rx.recv().expect("wait for lock acquisition");
+
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        assert!(
+            matches!(mutex.lock(&cx), Err(LockError::Cancelled)),
+            "expected cancellation while waiting"
+        );
+
+        release_tx.send(()).expect("release holder");
+        holder.join().expect("holder thread panicked");
+    }
+
+    #[test]
     fn get_mut_access() {
         let mut mutex = Mutex::new(42);
 

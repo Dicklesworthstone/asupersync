@@ -1,7 +1,7 @@
 //! TCP listener implementation.
 
-use crate::stream::Stream;
 use crate::net::tcp::stream::TcpStream;
+use crate::stream::Stream;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
@@ -18,7 +18,7 @@ impl TcpListener {
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
         let inner = net::TcpListener::bind(addr)?;
         inner.set_nonblocking(true)?;
-        
+
         // TODO: Register with reactor
         // let handle = Handle::current().expect("no runtime");
         // handle.reactor().register(&inner, Token::new(...), Interest::READABLE)?;
@@ -30,7 +30,7 @@ impl TcpListener {
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         // TODO: Wait for readability using reactor
         // self.registration.async_readable().await?;
-        
+
         match self.inner.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(true)?;
@@ -76,7 +76,7 @@ impl Stream for Incoming<'_> {
         // We can't poll a future easily here without boxing or storing it.
         // For Phase 0 wrappers, we might need a different approach.
         // But `accept` is async.
-        Poll::Pending 
+        Poll::Pending
     }
 }
 
@@ -89,7 +89,7 @@ mod tests {
     fn test_bind() {
         // We can't await in a sync test without a runtime, but we can check if bind returns a future.
         // Or we can use `futures_lite::future::block_on`.
-        
+
         futures_lite::future::block_on(async {
             let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
             let listener = TcpListener::bind(addr).await.expect("bind failed");

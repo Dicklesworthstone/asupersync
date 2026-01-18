@@ -43,15 +43,15 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        
+
         if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
             return Poll::Ready(Either::Left(val));
         }
-        
+
         if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
             return Poll::Ready(Either::Right(val));
         }
-        
+
         Poll::Pending
     }
 }

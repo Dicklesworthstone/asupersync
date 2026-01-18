@@ -62,7 +62,7 @@ impl<W: AsyncWrite + Unpin> BufWriter<W> {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             };
-            
+
             if n == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -84,55 +84,55 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.as_mut().get_mut();
-        
+
         // If buffer + new data <= capacity, just buffer it
         if this.buf.len() + buf.len() <= this.capacity {
             this.buf.extend_from_slice(buf);
             return Poll::Ready(Ok(buf.len()));
         }
-        
+
         // Flush buffer first
         if !this.buf.is_empty() {
             match this.poll_flush_buf(cx) {
-                Poll::Ready(Ok(())) => {},
+                Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }
         }
-        
+
         // If larger than capacity, bypass buffer
         if buf.len() >= this.capacity {
             return Pin::new(&mut this.inner).poll_write(cx, buf);
         }
-        
+
         this.buf.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
-        
+
         match this.poll_flush_buf(cx) {
-            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Pending => return Poll::Pending,
         }
-        
+
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
-        
+
         match this.poll_flush_buf(cx) {
-            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Pending => return Poll::Pending,
         }
-        
+
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
-    
+
     fn poll_write_vectored(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -140,39 +140,37 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
     ) -> Poll<io::Result<usize>> {
         let this = self.as_mut().get_mut();
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        
+
         if this.buf.len() + total_len <= this.capacity {
             for b in bufs {
                 this.buf.extend_from_slice(b);
             }
             return Poll::Ready(Ok(total_len));
         }
-        
+
         if !this.buf.is_empty() {
             match this.poll_flush_buf(cx) {
-                Poll::Ready(Ok(())) => {},
+                Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }
         }
-        
+
         if total_len >= this.capacity {
             return Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
         }
-        
+
         for b in bufs {
             this.buf.extend_from_slice(b);
         }
         Poll::Ready(Ok(total_len))
     }
-    
+
     fn is_write_vectored(&self) -> bool {
         // We support vectored writing into buffer
         true
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

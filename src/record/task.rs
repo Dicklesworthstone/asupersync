@@ -84,7 +84,7 @@ pub struct TaskRecord {
     /// This is shared with the `Cx` held by the user code.
     /// It is `None` only during initial construction or testing if not provided.
     pub cx_inner: Option<Arc<RwLock<CxInner>>>,
-    
+
     /// Number of polls remaining (for budget tracking).
     pub polls_remaining: u32,
     /// Lab-only: last step this task was polled (for futurelock detection).
@@ -129,7 +129,7 @@ impl TaskRecord {
     /// Returns true if the request was new (not already pending).
     /// This also updates the shared `CxInner` to notify the user code.
     pub fn request_cancel(&mut self, reason: CancelReason) -> bool {
-        // Need to get current budget from somewhere. 
+        // Need to get current budget from somewhere.
         // If we removed `budget` field, we should get it from `CxInner` or use default?
         // `request_cancel_with_budget` takes explicit budget.
         // `request_cancel` assumes a default cleanup budget?
@@ -526,7 +526,11 @@ mod tests {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
 
         // Need to set inner for mask operations to work
-        let inner = Arc::new(RwLock::new(CxInner::new(region(), task(), Budget::INFINITE)));
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
         t.set_cx_inner(inner);
 
         assert_eq!(t.increment_mask(), 1);
@@ -551,17 +555,21 @@ mod tests {
         let budget = t.cleanup_budget().expect("should have cleanup budget");
         assert_eq!(budget.poll_quota, 500);
     }
-    
+
     #[test]
     fn request_cancel_updates_shared_cx() {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let inner = Arc::new(RwLock::new(CxInner::new(region(), task(), Budget::INFINITE)));
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
         t.set_cx_inner(inner.clone());
-        
+
         assert!(!inner.read().unwrap().cancel_requested);
-        
+
         t.request_cancel(CancelReason::timeout());
-        
+
         assert!(inner.read().unwrap().cancel_requested);
         assert!(matches!(t.state, TaskState::CancelRequested { .. }));
     }

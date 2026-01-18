@@ -161,7 +161,8 @@ mod tests {
         assert!(!received.is_verified());
 
         // Verify
-        ctx.verify_authenticated_symbol(&mut received).expect("verification failed");
+        ctx.verify_authenticated_symbol(&mut received)
+            .expect("verification failed");
         assert!(received.is_verified());
     }
 
@@ -173,8 +174,9 @@ mod tests {
         let tag = AuthenticationTag::zero(); // Invalid tag
 
         let mut auth = AuthenticatedSymbol::from_parts(symbol, tag);
-        
-        ctx.verify_authenticated_symbol(&mut auth).expect("disabled mode should not error");
+
+        ctx.verify_authenticated_symbol(&mut auth)
+            .expect("disabled mode should not error");
         assert!(!auth.is_verified()); // Should not be marked verified
         assert_eq!(ctx.stats().skipped.load(Ordering::Relaxed), 1);
     }
@@ -187,7 +189,7 @@ mod tests {
         let tag = AuthenticationTag::zero(); // Invalid tag
 
         let mut auth = AuthenticatedSymbol::from_parts(symbol, tag);
-        
+
         let result = ctx.verify_authenticated_symbol(&mut auth);
         assert!(result.is_err());
         assert!(result.unwrap_err().is_invalid_tag());
@@ -203,7 +205,7 @@ mod tests {
         let tag = AuthenticationTag::zero(); // Invalid tag
 
         let mut auth = AuthenticatedSymbol::from_parts(symbol, tag);
-        
+
         let result = ctx.verify_authenticated_symbol(&mut auth);
         assert!(result.is_ok());
         assert!(!auth.is_verified());
@@ -216,7 +218,7 @@ mod tests {
         let ctx = SecurityContext::for_testing(123);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
-        
+
         // Sign
         let auth = ctx.sign_symbol(&symbol);
         assert_eq!(ctx.stats().signed.load(Ordering::Relaxed), 1);

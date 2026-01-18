@@ -77,7 +77,7 @@ impl File {
     }
 
     // Helper methods that match std::fs::File but async
-    
+
     /// Reads a number of bytes starting from a given offset.
     /// Note: using seek + read
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
@@ -152,7 +152,7 @@ mod tests {
         // I'll use futures_lite::future::block_on if available, or just tokio if test supports it?
         // The project has `conformance` with `block_on`.
         // Or I can use `futures_lite::future::block_on` since I added it to dev-dependencies.
-        
+
         futures_lite::future::block_on(async {
             let dir = tempdir().unwrap();
             let path = dir.path().join("test.txt");
@@ -184,7 +184,7 @@ mod tests {
                 .open(&path)
                 .await
                 .unwrap();
-                
+
             file.write_all(b"0123456789").await.unwrap();
 
             file.seek(SeekFrom::Start(5)).await.unwrap();

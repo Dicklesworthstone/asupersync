@@ -30,9 +30,9 @@
 //! assert_eq!(rx2.recv(&cx).await?, 10);
 //! ```
 
-use std::sync::{Arc, Mutex, Condvar};
-use std::collections::VecDeque;
 use crate::cx::Cx;
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,12 +200,12 @@ impl<T: Clone> Sender<T> {
             inner.receiver_count += 1;
             inner.total_sent
         };
-        
+
         // New receiver starts at the *current* tail of the buffer?
         // Typically broadcast receivers start seeing *future* messages.
         // Or they can see buffered messages.
         // Tokio's subscribe sees future messages.
-        
+
         Receiver {
             channel: Arc::clone(&self.channel),
             next_index: total_sent,
@@ -215,7 +215,11 @@ impl<T: Clone> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.channel.inner.lock().expect("broadcast lock poisoned").sender_count += 1;
+        self.channel
+            .inner
+            .lock()
+            .expect("broadcast lock poisoned")
+            .sender_count += 1;
         Self {
             channel: Arc::clone(&self.channel),
         }
@@ -245,8 +249,13 @@ impl<T: Clone> SendPermit<'_, T> {
     ///
     /// Returns the number of receivers that will see this message.
     pub fn send(self, msg: T) -> usize {
-        let mut inner = self.sender.channel.inner.lock().expect("broadcast lock poisoned");
-        
+        let mut inner = self
+            .sender
+            .channel
+            .inner
+            .lock()
+            .expect("broadcast lock poisoned");
+
         if inner.buffer.len() == inner.capacity {
             inner.buffer.pop_front();
         }
@@ -258,7 +267,7 @@ impl<T: Clone> SendPermit<'_, T> {
         let receiver_count = inner.receiver_count;
         drop(inner);
         self.sender.channel.notify.notify_all();
-        
+
         receiver_count
     }
 }
@@ -284,7 +293,7 @@ impl<T: Clone> Receiver<T> {
             // 1. Check for lag
             // The earliest available index is:
             let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
-            
+
             if self.next_index < earliest {
                 let missed = earliest - self.next_index;
                 self.next_index = earliest;
@@ -295,7 +304,7 @@ impl<T: Clone> Receiver<T> {
             // We want the message with index == self.next_index
             // Since buffer is ordered, we can calculate offset
             let offset = self.next_index.saturating_sub(earliest) as usize;
-            
+
             if let Some(slot) = inner.buffer.get(offset) {
                 // Found it
                 self.next_index += 1;
@@ -314,7 +323,9 @@ impl<T: Clone> Receiver<T> {
                 return Err(RecvError::Closed); // Or some Cancelled error if we had one in RecvError
             }
 
-            let (guard, _) = self.channel.notify
+            let (guard, _) = self
+                .channel
+                .notify
                 .wait_timeout(inner, std::time::Duration::from_millis(10))
                 .expect("broadcast lock poisoned");
             inner = guard;
@@ -324,7 +335,11 @@ impl<T: Clone> Receiver<T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.channel.inner.lock().expect("broadcast lock poisoned").receiver_count += 1;
+        self.channel
+            .inner
+            .lock()
+            .expect("broadcast lock poisoned")
+            .receiver_count += 1;
         Self {
             channel: Arc::clone(&self.channel),
             next_index: self.next_index,
@@ -405,21 +420,21 @@ mod tests {
         drop(tx);
         assert!(matches!(rx.recv(&cx), Err(RecvError::Closed)));
     }
-    
+
     #[test]
     fn subscribe_sees_future() {
         let cx = test_cx();
         let (tx, mut rx1) = channel(10);
-        
+
         tx.send(&cx, 1).unwrap();
-        
+
         let mut rx2 = tx.subscribe();
-        
+
         tx.send(&cx, 2).unwrap();
-        
+
         assert_eq!(rx1.recv(&cx).unwrap(), 1);
         assert_eq!(rx1.recv(&cx).unwrap(), 2);
-        
+
         // rx2 should skip 1
         assert_eq!(rx2.recv(&cx).unwrap(), 2);
     }
