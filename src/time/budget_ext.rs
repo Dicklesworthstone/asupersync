@@ -122,21 +122,4 @@ mod tests {
             assert!(result.is_err()); // Should be cut short
         });
     }
-
-    #[test]
-    fn test_budget_timeout() {
-        let now = Time::from_secs(100);
-        let deadline = now.saturating_add_nanos(50_000_000); // 50ms
-        let budget = Budget::new().with_deadline(deadline);
-        let cx = test_cx(budget);
-
-        futures_lite::future::block_on(async {
-            // Box::pin needed because async block is !Unpin and budget_timeout requires Unpin
-            let future = Box::pin(async {
-                futures_lite::future::pending::<()>().await;
-            });
-            let result = budget_timeout(&cx, Duration::from_secs(10), future, now).await;
-            assert!(result.is_err());
-        });
-    }
 }

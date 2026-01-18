@@ -104,11 +104,7 @@ impl EpochId {
     /// Returns the difference between epochs.
     #[must_use]
     pub const fn distance(self, other: Self) -> u64 {
-        if self.0 > other.0 {
-            self.0 - other.0
-        } else {
-            other.0 - self.0
-        }
+        self.0.abs_diff(other.0)
     }
 
     /// Returns the raw epoch value.
@@ -209,18 +205,18 @@ impl EpochConfig {
     }
 
     /// Validates the configuration.
-    pub fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Box<Error>> {
         if self.min_duration > self.target_duration {
-            return Err(Error::new(ErrorKind::InvalidEncodingParams)
-                .with_message("min_duration must not exceed target_duration"));
+            return Err(Box::new(Error::new(ErrorKind::InvalidEncodingParams)
+                .with_message("min_duration must not exceed target_duration")));
         }
         if self.target_duration > self.max_duration {
-            return Err(Error::new(ErrorKind::InvalidEncodingParams)
-                .with_message("target_duration must not exceed max_duration"));
+            return Err(Box::new(Error::new(ErrorKind::InvalidEncodingParams)
+                .with_message("target_duration must not exceed max_duration")));
         }
         if self.require_quorum && self.quorum_size == 0 {
-            return Err(Error::new(ErrorKind::InvalidEncodingParams)
-                .with_message("quorum_size must be > 0 when require_quorum is true"));
+            return Err(Box::new(Error::new(ErrorKind::InvalidEncodingParams)
+                .with_message("quorum_size must be > 0 when require_quorum is true")));
         }
         Ok(())
     }
@@ -358,20 +354,20 @@ impl Epoch {
     }
 
     /// Begins the ending phase (grace period).
-    pub fn begin_ending(&mut self, _now: Time) -> Result<(), Error> {
+    pub fn begin_ending(&mut self, _now: Time) -> Result<(), Box<Error>> {
         if self.state != EpochState::Active {
-            return Err(Error::new(ErrorKind::InvalidStateTransition)
-                .with_message(format!("Cannot end epoch in state {:?}", self.state)));
+            return Err(Box::new(Error::new(ErrorKind::InvalidStateTransition)
+                .with_message(format!("Cannot end epoch in state {:?}", self.state))));
         }
         self.state = EpochState::Ending;
         Ok(())
     }
 
     /// Completes the epoch.
-    pub fn complete(&mut self, now: Time) -> Result<(), Error> {
+    pub fn complete(&mut self, now: Time) -> Result<(), Box<Error>> {
         if !matches!(self.state, EpochState::Active | EpochState::Ending) {
-            return Err(Error::new(ErrorKind::InvalidStateTransition)
-                .with_message(format!("Cannot complete epoch in state {:?}", self.state)));
+            return Err(Box::new(Error::new(ErrorKind::InvalidStateTransition)
+                .with_message(format!("Cannot complete epoch in state {:?}", self.state))));
         }
         self.state = EpochState::Ended;
         self.ended_at = Some(now);
@@ -650,11 +646,11 @@ impl EpochBarrier {
     ///
     /// Returns `Ok(Some(result))` if this arrival triggered the barrier,
     /// `Ok(None)` if still waiting for more arrivals.
-    pub fn arrive(&self, participant_id: &str, now: Time) -> Result<Option<BarrierResult>, Error> {
+    pub fn arrive(&self, participant_id: &str, now: Time) -> Result<Option<BarrierResult>, Box<Error>> {
         // Check if already triggered
         if self.is_triggered() {
-            return Err(Error::new(ErrorKind::InvalidStateTransition)
-                .with_message("Barrier already triggered"));
+            return Err(Box::new(Error::new(ErrorKind::InvalidStateTransition)
+                .with_message("Barrier already triggered")));
         }
 
         // Check for timeout
@@ -676,8 +672,8 @@ impl EpochBarrier {
         {
             let mut participants = self.participants.write().expect("lock poisoned");
             if participants.contains(&participant_id.to_string()) {
-                return Err(Error::new(ErrorKind::InvalidStateTransition)
-                    .with_message("Participant already arrived"));
+                return Err(Box::new(Error::new(ErrorKind::InvalidStateTransition)
+                    .with_message("Participant already arrived")));
             }
             participants.push(participant_id.to_string());
         }
@@ -685,7 +681,7 @@ impl EpochBarrier {
         let arrived = self.arrived.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Check if all arrived
-        if arrived >= self.expected as u64 {
+        if arrived >= u64::from(self.expected) {
             let result = BarrierResult {
                 trigger: BarrierTrigger::AllArrived,
                 arrived: arrived as u32,
@@ -802,14 +798,14 @@ impl EpochClock {
     /// Advances to the next epoch.
     ///
     /// Returns the new epoch ID.
-    pub fn advance(&self, now: Time) -> Result<EpochId, Error> {
+    pub fn advance(&self, now: Time) -> Result<EpochId, Box<Error>> {
         let mut active = self.active_epoch.write().expect("lock poisoned");
 
         // Complete current epoch if exists
         if let Some(ref mut epoch) = *active {
             if !epoch.can_transition(now) && !epoch.is_overdue(now) {
-                return Err(Error::new(ErrorKind::InvalidStateTransition)
-                    .with_message("Epoch has not met minimum duration"));
+                return Err(Box::new(Error::new(ErrorKind::InvalidStateTransition)
+                    .with_message("Epoch has not met minimum duration")));
             }
             epoch.complete(now)?;
 
@@ -829,6 +825,7 @@ impl EpochClock {
         let new_id = EpochId(self.current.fetch_add(1, Ordering::SeqCst) + 1);
         let new_epoch = Epoch::new(new_id, now, self.config.clone());
         *active = Some(new_epoch);
+        drop(active); // Explicit drop to avoid significant drop warning
 
         Ok(new_id)
     }
@@ -931,10 +928,9 @@ impl EpochContext {
     /// Returns true if the operation budget is exhausted.
     #[must_use]
     pub fn is_budget_exhausted(&self) -> bool {
-        match self.operation_budget {
-            Some(limit) => self.operations_used.load(Ordering::Acquire) >= limit,
-            None => false,
-        }
+        self.operation_budget.map_or(false, |limit| {
+            self.operations_used.load(Ordering::Acquire) >= limit
+        })
     }
 
     /// Attempts to record an operation.
@@ -1001,9 +997,10 @@ impl EpochContext {
 }
 
 /// Behavior when an epoch transition occurs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EpochTransitionBehavior {
     /// Abort all pending operations immediately.
+    #[default]
     AbortAll,
     /// Allow currently-executing operations to complete.
     DrainExecuting,
@@ -1011,12 +1008,6 @@ pub enum EpochTransitionBehavior {
     Fail,
     /// Ignore epoch transitions (epoch-agnostic operations).
     Ignore,
-}
-
-impl Default for EpochTransitionBehavior {
-    fn default() -> Self {
-        Self::AbortAll
-    }
 }
 
 /// Policy for epoch-aware combinators.
@@ -1117,10 +1108,9 @@ impl<F, TS: TimeSource, ES: EpochSource> EpochScoped<F, TS, ES> {
 }
 
 fn effective_deadline(deadline: Time, grace: Option<Time>) -> Time {
-    match grace {
-        Some(grace) => Time::from_nanos(deadline.as_nanos().saturating_add(grace.as_nanos())),
-        None => deadline,
-    }
+    grace.map_or(deadline, |grace| {
+        Time::from_nanos(deadline.as_nanos().saturating_add(grace.as_nanos()))
+    })
 }
 
 fn check_epoch<TS: TimeSource, ES: EpochSource>(
@@ -1142,7 +1132,9 @@ fn check_epoch<TS: TimeSource, ES: EpochSource>(
     }
 
     let current = epoch_source.current();
-    if current != epoch_ctx.epoch_id {
+    if current == epoch_ctx.epoch_id {
+        Ok(())
+    } else {
         match policy.on_transition {
             EpochTransitionBehavior::Ignore => Ok(()),
             EpochTransitionBehavior::DrainExecuting => {
@@ -1162,8 +1154,6 @@ fn check_epoch<TS: TimeSource, ES: EpochSource>(
                 })
             }
         }
-    } else {
-        Ok(())
     }
 }
 
@@ -1683,22 +1673,22 @@ impl From<EpochError> for Error {
     fn from(e: EpochError) -> Self {
         match e {
             EpochError::Expired { .. } => {
-                Error::new(ErrorKind::LeaseExpired).with_message(e.to_string())
+                Self::new(ErrorKind::LeaseExpired).with_message(e.to_string())
             }
             EpochError::BudgetExhausted { .. } => {
-                Error::new(ErrorKind::PollQuotaExhausted).with_message(e.to_string())
+                Self::new(ErrorKind::PollQuotaExhausted).with_message(e.to_string())
             }
             EpochError::TransitionOccurred { .. } => {
-                Error::new(ErrorKind::Cancelled).with_message(e.to_string())
+                Self::new(ErrorKind::Cancelled).with_message(e.to_string())
             }
             EpochError::Mismatch { .. } => {
-                Error::new(ErrorKind::InvalidStateTransition).with_message(e.to_string())
+                Self::new(ErrorKind::InvalidStateTransition).with_message(e.to_string())
             }
             EpochError::ValidityViolation { .. } => {
-                Error::new(ErrorKind::ObjectMismatch).with_message(e.to_string())
+                Self::new(ErrorKind::ObjectMismatch).with_message(e.to_string())
             }
             EpochError::BarrierTimeout { .. } => {
-                Error::new(ErrorKind::ThresholdTimeout).with_message(e.to_string())
+                Self::new(ErrorKind::ThresholdTimeout).with_message(e.to_string())
             }
         }
     }
@@ -1959,7 +1949,7 @@ mod tests {
     #[test]
     fn test_epoch_error_display() {
         let expired = EpochError::Expired { epoch: EpochId(5) };
-        assert!(expired.to_string().contains("5"));
+        assert!(expired.to_string().contains('5'));
         assert!(expired.to_string().contains("expired"));
 
         let transition = EpochError::TransitionOccurred {

@@ -238,9 +238,10 @@ impl EncodingPipeline {
 
                     let Ok(mut buf) = pool.allocate() else {
                         // Cleanup allocated so far
-                        for b in symbols.drain(..) {
+                        for b in symbols {
                             pool.deallocate(b);
                         }
+                        drop(pool);
                         return Err(EncodingError::PoolExhausted);
                     };
 

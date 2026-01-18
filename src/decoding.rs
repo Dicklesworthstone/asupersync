@@ -66,19 +66,17 @@ impl From<DecodingError> for Error {
     fn from(err: DecodingError) -> Self {
         match &err {
             DecodingError::AuthenticationFailed { .. } => {
-                Error::new(ErrorKind::CorruptedSymbol)
+                Self::new(ErrorKind::CorruptedSymbol)
             }
             DecodingError::InsufficientSymbols { .. } => {
-                Error::new(ErrorKind::InsufficientSymbols)
+                Self::new(ErrorKind::InsufficientSymbols)
             }
             DecodingError::MatrixInversionFailed { .. }
-            | DecodingError::InconsistentMetadata { .. } => {
-                Error::new(ErrorKind::DecodingFailed)
+            | DecodingError::InconsistentMetadata { .. }
+            | DecodingError::SymbolSizeMismatch { .. } => {
+                Self::new(ErrorKind::DecodingFailed)
             }
-            DecodingError::BlockTimeout { .. } => Error::new(ErrorKind::ThresholdTimeout),
-            DecodingError::SymbolSizeMismatch { .. } => {
-                Error::new(ErrorKind::DecodingFailed)
-            }
+            DecodingError::BlockTimeout { .. } => Self::new(ErrorKind::ThresholdTimeout),
         }
         .with_message(err.to_string())
     }
@@ -281,7 +279,7 @@ impl DecodingPipeline {
             params.object_size as usize,
             usize::from(params.symbol_size),
             self.config.max_block_size,
-        ));
+        )?);
         self.configure_block_k();
         Ok(())
     }
@@ -297,12 +295,12 @@ impl DecodingPipeline {
             let Some(ctx) = &self.auth_context else {
                 return Err(DecodingError::AuthenticationFailed { symbol_id });
             };
-            if !auth_symbol.is_verified() {
-                if ctx.verify_authenticated_symbol(&mut auth_symbol).is_err() {
-                    return Ok(SymbolAcceptResult::Rejected(
-                        RejectReason::AuthenticationFailed,
-                    ));
-                }
+            if !auth_symbol.is_verified()
+                && ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
+            {
+                return Ok(SymbolAcceptResult::Rejected(
+                    RejectReason::AuthenticationFailed,
+                ));
             }
         }
 
@@ -349,8 +347,7 @@ impl DecodingPipeline {
                 }
                 let needed = block_progress
                     .k
-                    .map(|k| required_symbols(k, self.config.repair_overhead, self.config.min_overhead))
-                    .unwrap_or(0);
+                    .map_or(0, |k| required_symbols(k, self.config.repair_overhead, self.config.min_overhead));
                 let received = block_progress.total();
 
                 if threshold_reached {
@@ -394,18 +391,20 @@ impl DecodingPipeline {
     /// Returns decoding progress.
     #[must_use]
     pub fn progress(&self) -> DecodingProgress {
-        let blocks_total = self.block_plans.as_ref().map(|plans| plans.len());
+        let blocks_total = self.block_plans.as_ref().map(Vec::len);
         let symbols_received = self.symbols.len();
-        let symbols_needed_estimate = if let Some(plans) = &self.block_plans {
+        let symbols_needed_estimate = self.block_plans.as_ref().map_or(0, |plans| {
             plans
                 .iter()
                 .map(|plan| {
-                    required_symbols(plan.k as u16, self.config.repair_overhead, self.config.min_overhead)
+                    required_symbols(
+                        plan.k as u16,
+                        self.config.repair_overhead,
+                        self.config.min_overhead,
+                    )
                 })
                 .sum()
-        } else {
-            0
-        };
+        });
 
         DecodingProgress {
             blocks_complete: self.completed_blocks.len(),
@@ -422,18 +421,16 @@ impl DecodingPipeline {
         let state = self
             .blocks
             .get(&sbn)
-            .map(|block| match block.state {
+            .map_or(BlockStateKind::Collecting, |block| match block.state {
                 BlockDecodingState::Collecting => BlockStateKind::Collecting,
                 BlockDecodingState::Decoding => BlockStateKind::Decoding,
                 BlockDecodingState::Decoded => BlockStateKind::Decoded,
                 BlockDecodingState::Failed => BlockStateKind::Failed,
-            })
-            .unwrap_or(BlockStateKind::Collecting);
+            });
 
         let symbols_needed = progress
             .k
-            .map(|k| required_symbols(k, self.config.repair_overhead, self.config.min_overhead))
-            .unwrap_or(0);
+            .map_or(0, |k| required_symbols(k, self.config.repair_overhead, self.config.min_overhead));
 
         Some(BlockStatus {
             sbn,
@@ -503,8 +500,10 @@ impl DecodingPipeline {
 
         let decoded_symbols = match decode_block(block_plan, &symbols) {
             Ok(symbols) => symbols,
-            Err(DecodingError::MatrixInversionFailed { .. })
-            | Err(DecodingError::InsufficientSymbols { .. }) => {
+            Err(
+                DecodingError::MatrixInversionFailed { .. }
+                | DecodingError::InsufficientSymbols { .. },
+            ) => {
                 return None;
             }
             Err(_err) => {
@@ -557,10 +556,24 @@ impl BlockPlan {
     }
 }
 
-fn plan_blocks(object_size: usize, symbol_size: usize, max_block_size: usize) -> Vec<BlockPlan> {
+fn plan_blocks(
+    object_size: usize,
+    symbol_size: usize,
+    max_block_size: usize,
+) -> Result<Vec<BlockPlan>, DecodingError> {
     if object_size == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+
+    let max_blocks = u8::MAX as usize + 1;
+    let max_total = max_block_size.saturating_mul(max_blocks);
+    if object_size > max_total {
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: format!("object size {object_size} exceeds limit {max_total}"),
+        });
+    }
+
     let mut blocks = Vec::new();
     let mut offset = 0;
     let mut sbn: u8 = 0;
@@ -578,7 +591,7 @@ fn plan_blocks(object_size: usize, symbol_size: usize, max_block_size: usize) ->
         sbn = sbn.wrapping_add(1);
     }
 
-    blocks
+    Ok(blocks)
 }
 
 fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
@@ -612,8 +625,7 @@ fn decode_block(plan: &BlockPlan, symbols: &[Symbol]) -> Result<Vec<Symbol>, Dec
     let solved = gaussian_elimination(rows, k)?;
     let object_id = symbols
         .first()
-        .map(|symbol| symbol.object_id())
-        .unwrap_or(ObjectId::NIL);
+        .map_or(ObjectId::NIL, Symbol::object_id);
 
     let mut decoded = Vec::with_capacity(k);
     for (esi, data) in solved.into_iter().enumerate() {
@@ -636,7 +648,7 @@ fn build_coeffs(plan: &BlockPlan, symbol: &Symbol) -> Result<Vec<u8>, DecodingEr
             if esi >= k {
                 return Err(DecodingError::InconsistentMetadata {
                     sbn: plan.sbn,
-                    details: format!("source esi {} >= k {}", esi, k),
+                    details: format!("source esi {esi} >= k {k}"),
                 });
             }
             coeffs[esi] = 1;
@@ -684,6 +696,7 @@ impl Row {
         self.coeffs.iter().position(|&c| c == 1)
     }
 
+    #[allow(clippy::naive_bytecount)]
     fn ones_count(&self) -> usize {
         self.coeffs.iter().filter(|&&c| c == 1).count()
     }
@@ -723,7 +736,7 @@ fn gaussian_elimination(rows: Vec<Row>, k: usize) -> Result<Vec<Vec<u8>>, Decodi
         }
     }
 
-    if solution.iter().any(|entry| entry.is_none()) {
+    if solution.iter().any(Option::is_none) {
         return Err(DecodingError::MatrixInversionFailed {
             reason: "insufficient rank".to_string(),
         });
@@ -731,7 +744,7 @@ fn gaussian_elimination(rows: Vec<Row>, k: usize) -> Result<Vec<Vec<u8>>, Decodi
 
     Ok(solution
         .into_iter()
-        .map(|entry| entry.unwrap_or_default())
+        .map(Option::unwrap_or_default)
         .collect())
 }
 
@@ -813,8 +826,8 @@ mod tests {
             let _ = decoder.feed(auth).unwrap();
         }
 
-        let decoded = decoder.into_data().expect("decoded");
-        assert_eq!(decoded, data);
+        let decoded_data = decoder.into_data().expect("decoded");
+        assert_eq!(decoded_data, data);
     }
 
     #[test]
@@ -841,8 +854,8 @@ mod tests {
             let _ = decoder.feed(auth).expect("feed");
         }
 
-        let decoded = decoder.into_data().expect("decoded");
-        assert_eq!(decoded, data);
+        let decoded_data = decoder.into_data().expect("decoded");
+        assert_eq!(decoded_data, data);
     }
 
     #[test]

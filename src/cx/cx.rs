@@ -425,7 +425,7 @@ impl Cx {
     /// Logs a structured entry to the attached collector, if present.
     pub fn log(&self, entry: LogEntry) {
         let obs = self.observability.read().expect("lock poisoned");
-        let Some(collector) = obs.collector.as_ref().cloned() else {
+        let Some(collector) = obs.collector.clone() else {
             return;
         };
         drop(obs);

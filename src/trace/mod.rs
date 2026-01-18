@@ -7,6 +7,7 @@
 //! - Mazurkiewicz trace semantics for DPOR
 
 pub mod buffer;
+pub mod distributed;
 pub mod event;
 pub mod format;
 

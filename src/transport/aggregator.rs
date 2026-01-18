@@ -172,6 +172,7 @@ pub struct TransportPath {
 
 impl TransportPath {
     /// Creates a new transport path.
+    #[must_use]
     pub fn new(id: PathId, name: impl Into<String>, remote: impl Into<String>) -> Self {
         Self {
             id,
@@ -783,6 +784,7 @@ impl SymbolReorderer {
         }
         // else: seq < next_expected - this is a late duplicate, ignore
 
+        drop(objects);
         ready
     }
 
@@ -814,7 +816,7 @@ impl SymbolReorderer {
             }
 
             // Advance next_expected if we flushed waiting symbols
-            while state.buffer.get(&state.next_expected).is_none() {
+            while !state.buffer.contains_key(&state.next_expected) {
                 if state.buffer.is_empty()
                     || *state.buffer.keys().next().unwrap() > state.next_expected
                 {
@@ -830,6 +832,7 @@ impl SymbolReorderer {
             }
         }
 
+        drop(objects);
         flushed
     }
 
@@ -944,6 +947,7 @@ pub struct MultipathAggregator {
 
 impl MultipathAggregator {
     /// Creates a new aggregator.
+    #[must_use]
     pub fn new(config: AggregatorConfig) -> Self {
         let paths = Arc::new(PathSet::new(config.path_policy));
 
@@ -1094,10 +1098,10 @@ pub enum AggregationError {
 impl std::fmt::Display for AggregationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PathNotFound { path } => write!(f, "path {} not found", path),
-            Self::PathUnavailable { path } => write!(f, "path {} unavailable", path),
+            Self::PathNotFound { path } => write!(f, "path {path} not found"),
+            Self::PathUnavailable { path } => write!(f, "path {path} unavailable"),
             Self::BufferOverflow { object_id } => {
-                write!(f, "buffer overflow for object {:?}", object_id)
+                write!(f, "buffer overflow for object {object_id:?}")
             }
             Self::InvalidSequence {
                 object_id,
@@ -1106,8 +1110,7 @@ impl std::fmt::Display for AggregationError {
             } => {
                 write!(
                     f,
-                    "invalid sequence for object {:?}: expected {}, got {}",
-                    object_id, expected, received
+                    "invalid sequence for object {object_id:?}: expected {expected}, got {received}"
                 )
             }
         }
@@ -1118,7 +1121,7 @@ impl std::error::Error for AggregationError {}
 
 impl From<AggregationError> for Error {
     fn from(e: AggregationError) -> Self {
-        Error::new(ErrorKind::StreamEnded).with_message(e.to_string())
+        Self::new(ErrorKind::StreamEnded).with_message(e.to_string())
     }
 }
 
@@ -1129,8 +1132,8 @@ mod tests {
     fn test_path(id: u64) -> TransportPath {
         TransportPath::new(
             PathId(id),
-            format!("path-{}", id),
-            format!("10.0.0.{}:8080", id),
+            format!("path-{id}"),
+            format!("10.0.0.{id}:8080"),
         )
     }
 
