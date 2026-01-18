@@ -8,6 +8,8 @@
 
 use crate::record::finalizer::Finalizer;
 use crate::record::{ObligationRecord, RegionRecord, TaskRecord};
+use crate::runtime::io_driver::IoDriver;
+use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
 use crate::trace::TraceBuffer;
 use crate::types::policy::PolicyAction;
@@ -15,6 +17,7 @@ use crate::types::{Budget, CancelReason, Outcome, Policy, RegionId, TaskId, Time
 use crate::util::Arena;
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 
 /// Errors that can occur when spawning a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +64,18 @@ pub struct RuntimeState {
     /// Maps task IDs to their pollable futures. When a task is created via
     /// `spawn()`, its wrapped future is stored here for the executor to poll.
     pub(crate) stored_futures: HashMap<TaskId, StoredTask>,
+    /// I/O driver for reactor integration.
+    ///
+    /// When present, the runtime can wait on I/O events via the reactor.
+    /// When `None`, the runtime operates in pure Lab mode without real I/O.
+    io_driver: Option<IoDriver>,
 }
 
 impl RuntimeState {
-    /// Creates a new empty runtime state.
+    /// Creates a new empty runtime state without a reactor.
+    ///
+    /// This is equivalent to [`without_reactor()`](Self::without_reactor) and creates
+    /// a runtime suitable for Lab mode or pure computation without I/O.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -76,7 +87,71 @@ impl RuntimeState {
             trace: TraceBuffer::new(4096),
             trace_seq: 0,
             stored_futures: HashMap::new(),
+            io_driver: None,
         }
+    }
+
+    /// Creates a runtime state with a real reactor for production use.
+    ///
+    /// The provided reactor will be wrapped in an [`IoDriver`] to handle
+    /// waker dispatch. Use this constructor when you need real I/O support.
+    ///
+    /// # Arguments
+    ///
+    /// * `reactor` - The platform-specific reactor (e.g., `EpollReactor` on Linux)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::runtime::{RuntimeState, EpollReactor};
+    /// use std::sync::Arc;
+    ///
+    /// let reactor = Arc::new(EpollReactor::new()?);
+    /// let state = RuntimeState::with_reactor(reactor);
+    /// ```
+    #[must_use]
+    pub fn with_reactor(reactor: Arc<dyn Reactor>) -> Self {
+        Self {
+            regions: Arena::new(),
+            tasks: Arena::new(),
+            obligations: Arena::new(),
+            now: Time::ZERO,
+            root_region: None,
+            trace: TraceBuffer::new(4096),
+            trace_seq: 0,
+            stored_futures: HashMap::new(),
+            io_driver: Some(IoDriver::new(reactor)),
+        }
+    }
+
+    /// Creates a runtime state without a reactor (Lab mode).
+    ///
+    /// Use this for deterministic testing or pure computation without I/O.
+    /// This is equivalent to [`new()`](Self::new).
+    #[must_use]
+    pub fn without_reactor() -> Self {
+        Self::new()
+    }
+
+    /// Returns a reference to the I/O driver, if present.
+    ///
+    /// Returns `None` if the runtime was created without a reactor.
+    #[must_use]
+    pub fn io_driver(&self) -> Option<&IoDriver> {
+        self.io_driver.as_ref()
+    }
+
+    /// Returns a mutable reference to the I/O driver, if present.
+    ///
+    /// Returns `None` if the runtime was created without a reactor.
+    pub fn io_driver_mut(&mut self) -> Option<&mut IoDriver> {
+        self.io_driver.as_mut()
+    }
+
+    /// Returns `true` if this runtime has an I/O driver.
+    #[must_use]
+    pub fn has_io_driver(&self) -> bool {
+        self.io_driver.is_some()
     }
 
     /// Creates a root region and returns its ID.
@@ -236,9 +311,17 @@ impl RuntimeState {
     }
 
     /// Returns true if the runtime is quiescent (no live work).
+    ///
+    /// A runtime is quiescent when:
+    /// - No live tasks are running
+    /// - No pending obligations exist
+    /// - No I/O sources are registered (if I/O driver is present)
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.live_task_count() == 0 && self.pending_obligation_count() == 0
+        let no_tasks = self.live_task_count() == 0;
+        let no_obligations = self.pending_obligation_count() == 0;
+        let no_io = self.io_driver.as_ref().is_none_or(IoDriver::is_empty);
+        no_tasks && no_obligations && no_io
     }
 
     /// Applies the region policy when a child reaches a terminal outcome.
@@ -1175,5 +1258,170 @@ mod tests {
         // Verify spawning is rejected with error (not panic)
         let result = state.create_task(region, Budget::INFINITE, async { 42 });
         assert!(matches!(result, Err(SpawnError::RegionClosed(_))));
+    }
+
+    // =========================================================================
+    // IoDriver Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn new_creates_state_without_io_driver() {
+        let state = RuntimeState::new();
+        assert!(!state.has_io_driver());
+        assert!(state.io_driver().is_none());
+    }
+
+    #[test]
+    fn without_reactor_creates_state_without_io_driver() {
+        let state = RuntimeState::without_reactor();
+        assert!(!state.has_io_driver());
+        assert!(state.io_driver().is_none());
+    }
+
+    #[test]
+    fn with_reactor_creates_state_with_io_driver() {
+        use crate::runtime::reactor::LabReactor;
+        use std::sync::Arc;
+
+        let reactor = Arc::new(LabReactor::new());
+        let state = RuntimeState::with_reactor(reactor);
+
+        assert!(state.has_io_driver());
+        assert!(state.io_driver().is_some());
+
+        // Verify the driver is functional
+        let driver = state.io_driver().unwrap();
+        assert!(driver.is_empty());
+        assert_eq!(driver.waker_count(), 0);
+    }
+
+    #[test]
+    fn io_driver_mut_allows_modification() {
+        use crate::runtime::reactor::LabReactor;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct TestWaker(AtomicBool);
+        impl Wake for TestWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let reactor = Arc::new(LabReactor::new());
+        let mut state = RuntimeState::with_reactor(reactor);
+
+        // Mutably access driver to register a waker
+        let driver = state.io_driver_mut().unwrap();
+        let waker_state = Arc::new(TestWaker(AtomicBool::new(false)));
+        let waker = Waker::from(waker_state);
+        let _key = driver.register_waker(waker);
+
+        // Verify registration
+        assert_eq!(state.io_driver().unwrap().waker_count(), 1);
+        assert!(!state.io_driver().unwrap().is_empty());
+    }
+
+    #[test]
+    fn is_quiescent_considers_io_driver() {
+        use crate::runtime::reactor::LabReactor;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct TestWaker(AtomicBool);
+        impl Wake for TestWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let reactor = Arc::new(LabReactor::new());
+        let mut state = RuntimeState::with_reactor(reactor);
+
+        // Initially quiescent (no tasks, no I/O registrations)
+        assert!(state.is_quiescent());
+
+        // Register a waker
+        let driver = state.io_driver_mut().unwrap();
+        let waker_state = Arc::new(TestWaker(AtomicBool::new(false)));
+        let waker = Waker::from(waker_state);
+        let key = driver.register_waker(waker);
+
+        // No longer quiescent due to I/O registration
+        assert!(!state.is_quiescent());
+
+        // Deregister
+        state.io_driver_mut().unwrap().deregister_waker(key);
+
+        // Quiescent again
+        assert!(state.is_quiescent());
+    }
+
+    #[test]
+    fn is_quiescent_without_io_driver_ignores_io() {
+        let state = RuntimeState::new();
+
+        // Quiescent without I/O driver
+        assert!(state.is_quiescent());
+    }
+
+    /// Integration test with real epoll reactor.
+    #[cfg(target_os = "linux")]
+    mod epoll_integration {
+        use super::*;
+        use crate::runtime::reactor::{EpollReactor, Interest};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Wake, Waker};
+        use std::os::unix::net::UnixStream;
+        use std::io::Write;
+        use std::time::Duration;
+
+        struct FlagWaker(AtomicBool);
+        impl Wake for FlagWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn runtime_state_with_epoll_reactor() {
+            let reactor = Arc::new(EpollReactor::new().expect("create reactor"));
+            let mut state = RuntimeState::with_reactor(reactor);
+
+            assert!(state.has_io_driver());
+            assert!(state.is_quiescent());
+
+            // Create a socket pair
+            let (sock_read, mut sock_write) = UnixStream::pair().expect("socket pair");
+
+            // Register with the driver
+            let waker_state = Arc::new(FlagWaker(AtomicBool::new(false)));
+            let waker = Waker::from(waker_state.clone());
+
+            let driver = state.io_driver_mut().unwrap();
+            let token = driver.register(&sock_read, Interest::READABLE, waker)
+                .expect("register");
+
+            // Not quiescent due to I/O registration
+            assert!(!state.is_quiescent());
+
+            // Make socket readable
+            sock_write.write_all(b"hello").expect("write");
+
+            // Turn the driver to dispatch waker
+            let count = state.io_driver_mut().unwrap()
+                .turn(Some(Duration::from_millis(100)))
+                .expect("turn");
+
+            assert!(count >= 1);
+            assert!(waker_state.0.load(Ordering::SeqCst));
+
+            // Deregister and verify quiescence
+            state.io_driver_mut().unwrap().deregister(token).expect("deregister");
+            assert!(state.is_quiescent());
+        }
     }
 }
