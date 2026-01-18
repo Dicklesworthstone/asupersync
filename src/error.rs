@@ -663,6 +663,8 @@ pub enum SendError<T> {
     Disconnected(T),
     /// Would block (bounded channel is full).
     Full(T),
+    /// The send operation was cancelled.
+    Cancelled(T),
 }
 
 /// Error when receiving from a channel.
@@ -672,6 +674,8 @@ pub enum RecvError {
     Disconnected,
     /// Would block (channel empty).
     Empty,
+    /// The receive operation was cancelled.
+    Cancelled,
 }
 
 /// Error when acquiring a semaphore-like permit.
@@ -686,6 +690,7 @@ impl From<RecvError> for Error {
         match e {
             RecvError::Disconnected => Self::new(ErrorKind::ChannelClosed),
             RecvError::Empty => Self::new(ErrorKind::ChannelEmpty),
+            RecvError::Cancelled => Self::new(ErrorKind::Cancelled),
         }
     }
 }
@@ -695,6 +700,7 @@ impl<T> From<SendError<T>> for Error {
         match e {
             SendError::Disconnected(_) => Self::new(ErrorKind::ChannelClosed),
             SendError::Full(_) => Self::new(ErrorKind::ChannelFull),
+            SendError::Cancelled(_) => Self::new(ErrorKind::Cancelled),
         }
     }
 }

@@ -65,7 +65,7 @@ impl<T> Stream for ReceiverStream<T> {
                 this.cx.trace("stream::ReceiverStream yielded item");
                 Poll::Ready(Some(item))
             }
-            Err(RecvError::Disconnected) => Poll::Ready(None),
+            Err(RecvError::Disconnected | RecvError::Cancelled) => Poll::Ready(None),
             Err(RecvError::Empty) => Poll::Pending,
         }
     }

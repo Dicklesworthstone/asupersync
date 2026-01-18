@@ -175,7 +175,7 @@ impl<T> Sender<T> {
             // Check cancellation before waiting
             if cx.checkpoint().is_err() {
                 cx.trace("mpsc::reserve cancelled while waiting for capacity");
-                return Err(SendError::Disconnected(()));
+                return Err(SendError::Cancelled(()));
             }
 
             // Wait for space to become available using condvar
@@ -205,6 +205,7 @@ impl<T> Sender<T> {
             }
             Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             Err(SendError::Full(())) => Err(SendError::Full(value)),
+            Err(SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
         }
     }
 
@@ -247,6 +248,7 @@ impl<T> Sender<T> {
             }
             Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             Err(SendError::Full(())) => Err(SendError::Full(value)),
+            Err(SendError::Cancelled(())) => unreachable!("try_reserve does not check cancellation"),
         }
     }
 
@@ -497,7 +499,7 @@ impl<T> Receiver<T> {
             // Check cancellation before waiting
             if let Err(_e) = cx.checkpoint() {
                 cx.trace("mpsc::recv cancelled while waiting for message");
-                return Err(RecvError::Disconnected);
+                return Err(RecvError::Cancelled);
             }
 
             // Wait for a message to become available using condvar
