@@ -396,6 +396,61 @@ impl<P: Policy> Scope<'_, P> {
         }
     }
 
+    /// Races multiple tasks, waiting for the first to complete.
+    ///
+    /// The winner's result is returned. Losers are cancelled and drained.
+    ///
+    /// # Arguments
+    /// * `cx` - The capability context
+    /// * `handles` - Vector of task handles to race
+    ///
+    /// # Returns
+    /// `Ok((value, index))` if the winner succeeded.
+    /// `Err(e)` if the winner failed (error/cancel/panic).
+    pub async fn race_all<T>(
+        &self,
+        cx: &Cx,
+        handles: Vec<TaskHandle<T>>,
+    ) -> Result<(T, usize), JoinError> {
+        use crate::combinator::select::SelectAll;
+
+        assert!(!handles.is_empty(), "race_all called with empty handles");
+
+        let futures: Vec<_> = handles.iter().map(|h| Box::pin(h.join(cx))).collect();
+
+        let (result, winner_idx) = SelectAll::new(futures).await;
+
+        // Cancel and drain losers
+        for (i, handle) in handles.iter().enumerate() {
+            if i != winner_idx {
+                handle.abort();
+            }
+        }
+
+        for (i, handle) in handles.iter().enumerate() {
+            if i != winner_idx {
+                let _ = handle.join(cx).await;
+            }
+        }
+
+        result.map(|val| (val, winner_idx))
+    }
+
+    /// Joins multiple tasks, waiting for all to complete.
+    ///
+    /// Returns a vector of results in the same order as the input handles.
+    pub async fn join_all<T>(
+        &self,
+        cx: &Cx,
+        handles: Vec<TaskHandle<T>>,
+    ) -> Vec<Result<T, JoinError>> {
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.join(cx).await);
+        }
+        results
+    }
+
     /// Creates a task record in the runtime state.
     ///
     /// This is a helper method used by all spawn variants.
@@ -742,6 +797,134 @@ mod tests {
                 assert_eq!(p.message(), "oops");
             }
             res => panic!("Expected Panicked, got {:?}", res),
+        }
+    }
+
+    #[test]
+    fn join_all_success() {
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1 }).unwrap();
+        let (h2, mut t2) = scope.spawn(&mut state, &cx, |_| async { 2 }).unwrap();
+
+        // Drive tasks to completion
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut ctx = Context::from_waker(&waker);
+        assert!(t1.poll(&mut ctx).is_ready());
+        assert!(t2.poll(&mut ctx).is_ready());
+
+        let handles = vec![h1, h2];
+        let mut fut = Box::pin(scope.join_all(&cx, handles));
+
+        match fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(results) => {
+                assert_eq!(results.len(), 2);
+                assert_eq!(results[0].as_ref().unwrap(), &1);
+                assert_eq!(results[1].as_ref().unwrap(), &2);
+            }
+            Poll::Pending => panic!("join_all should be ready"),
+        }
+    }
+
+    #[test]
+    fn race_all_interleaving() {
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Task 1: completes immediately
+        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1 }).unwrap();
+        
+        // Task 2: yields once, checking for cancellation
+        let (h2, mut t2) = scope.spawn(&mut state, &cx, |cx| async move {
+            // Yield once to simulate running
+            struct YieldOnce(bool);
+            impl std::future::Future for YieldOnce {
+                type Output = ();
+                fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+                    if self.0 {
+                        std::task::Poll::Ready(())
+                    } else {
+                        self.0 = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                }
+            }
+            YieldOnce(false).await;
+            
+            // Check cancellation
+            if cx.checkpoint().is_err() {
+                return 0; // Cancelled
+            }
+            2
+        }).unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut ctx = Context::from_waker(&waker);
+
+        // Drive t1 to completion (winner)
+        assert!(t1.poll(&mut ctx).is_ready());
+
+        // Initialize race_all
+        let handles = vec![h1, h2];
+        let mut race_fut = Box::pin(scope.race_all(&cx, handles));
+
+        // Poll race_all.
+        // It sees h1 ready. Winner=0.
+        // It aborts h2.
+        // It awaits h2 drain.
+        // h2 is still pending (hasn't run), so h2.join() returns Pending.
+        // race_fut returns Pending.
+        assert!(race_fut.as_mut().poll(&mut ctx).is_pending());
+
+        // Now drive t2. It was aborted, so it should see cancellation if checked?
+        // Wait, handle.abort() sets inner.cancel_requested.
+        // But my t2 closure yields first.
+        // So first poll of t2 -> YieldOnce returns Pending.
+        assert!(t2.poll(&mut ctx).is_pending());
+
+        // Poll race_fut again. Still waiting for h2 drain.
+        assert!(race_fut.as_mut().poll(&mut ctx).is_pending());
+
+        // Poll t2 again. YieldOnce finishes. 
+        // Then it hits checkpoint(). cancel_requested is true.
+        // It returns 0 (simulated cancellation return).
+        // Actually, normally tasks return Result or are wrapped. 
+        // Here spawn returns Result<i32>.
+        // My closure returns i32.
+        // So h2.join() will return Ok(0).
+        // This counts as "drained".
+        assert!(t2.poll(&mut ctx).is_ready());
+
+        // Now poll race_fut. h2 drain complete.
+        // Should return (1, 0).
+        match race_fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(Ok((val, idx))) => {
+                assert_eq!(val, 1);
+                assert_eq!(idx, 0);
+            }
+            res => panic!("Expected Ready(Ok((1, 0))), got {:?}", res),
         }
     }
 }

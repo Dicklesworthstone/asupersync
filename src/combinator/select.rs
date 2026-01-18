@@ -55,3 +55,29 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
         Poll::Pending
     }
 }
+
+/// Future for the `select_all` combinator.
+pub struct SelectAll<F> {
+    futures: Vec<F>,
+}
+
+impl<F> SelectAll<F> {
+    /// Creates a new select_all combinator.
+    #[must_use]
+    pub fn new(futures: Vec<F>) -> Self {
+        Self { futures }
+    }
+}
+
+impl<F: Future + Unpin> Future for SelectAll<F> {
+    type Output = (F::Output, usize);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        for (i, f) in self.futures.iter_mut().enumerate() {
+            if let Poll::Ready(v) = Pin::new(f).poll(cx) {
+                return Poll::Ready((v, i));
+            }
+        }
+        Poll::Pending
+    }
+}

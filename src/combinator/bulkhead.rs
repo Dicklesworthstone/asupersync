@@ -313,7 +313,7 @@ impl Bulkhead {
 
         // Clean up old completed entries (only those that have been processed)
         // Keep rejected entries so check_entry can return the proper error
-        queue.retain(|e| !matches!(e.result, Some(Ok(()))));
+        // queue.retain(|e| !matches!(e.result, Some(Ok(()))));
 
         None
     }

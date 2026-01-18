@@ -152,13 +152,8 @@ impl TaskRecord {
         if let Some(inner) = &self.cx_inner {
             if let Ok(mut guard) = inner.write() {
                 guard.cancel_requested = true;
-                // We might also want to update the budget in CxInner to the cleanup budget?
-                // Or maybe cleanup budget is separate?
-                // Typically cleanup runs with a *fresh* budget or remaining budget?
-                // The task description says "Budget for bounded cleanup".
-                // If we replace the budget in CxInner, user code sees it.
-                // Yes, that's the point.
-                guard.budget = cleanup_budget;
+                // Budget update is deferred to acknowledge_cancel to prevent
+                // pre-empting the cancellation check with a budget exhaustion error.
             }
         }
 
@@ -242,6 +237,15 @@ impl TaskRecord {
             } => {
                 let reason = reason.clone();
                 let budget = *cleanup_budget;
+
+                // Apply cleanup budget now that we are entering cleanup phase
+                if let Some(inner) = &self.cx_inner {
+                    if let Ok(mut guard) = inner.write() {
+                        guard.budget = budget;
+                    }
+                }
+                self.polls_remaining = budget.poll_quota;
+
                 self.state = TaskState::Cancelling {
                     reason: reason.clone(),
                     cleanup_budget: budget,

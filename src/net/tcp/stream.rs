@@ -93,10 +93,9 @@ impl AsyncRead for TcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         use std::io::Read;
-        let inner = &*self.inner;
-        // This fails because inner is Arc and we need &mut for Read trait?
-        // std::net::TcpStream implement Read for &TcpStream.
-        match inner.read(buf.unfilled()) {
+        let inner: &net::TcpStream = &self.inner;
+        // std::net::TcpStream implements Read for &TcpStream
+        match (&*inner).read(buf.unfilled()) {
             Ok(n) => {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
@@ -117,8 +116,8 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         use std::io::Write;
-        let inner = &*self.inner;
-        match inner.write(buf) {
+        let inner: &net::TcpStream = &self.inner;
+        match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 cx.waker().wake_by_ref();
@@ -130,8 +129,8 @@ impl AsyncWrite for TcpStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::io::Write;
-        let inner = &*self.inner;
-        match inner.flush() {
+        let inner: &net::TcpStream = &self.inner;
+        match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 cx.waker().wake_by_ref();

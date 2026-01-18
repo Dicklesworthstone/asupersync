@@ -208,59 +208,68 @@ where
         let this = self.get_mut();
 
         loop {
-            match &mut this.state {
+            let state = std::mem::replace(&mut this.state, RetryState::Done);
+
+            match state {
                 RetryState::PollReady {
-                    service,
-                    policy: _,
-                    request,
+                    mut service,
+                    policy,
+                    mut request,
                 } => {
                     match service.poll_ready(cx) {
-                        Poll::Pending => return Poll::Pending,
+                        Poll::Pending => {
+                            this.state = RetryState::PollReady {
+                                service,
+                                policy,
+                                request,
+                            };
+                            return Poll::Pending;
+                        }
                         Poll::Ready(Err(e)) => {
                             this.state = RetryState::Done;
                             return Poll::Ready(Err(e));
                         }
                         Poll::Ready(Ok(())) => {
                             let req = request.take().expect("request already taken");
+                            
+                            // Try to clone the request for potential retry
+                            let backup = policy.clone_request(&req);
+                            
                             let future = service.call(req);
 
-                            // Move to calling state - need to take ownership
-                            let old_state =
-                                std::mem::replace(&mut this.state, RetryState::Done);
-                            if let RetryState::PollReady {
+                            this.state = RetryState::Calling {
                                 service,
                                 policy,
-                                request,
-                            } = old_state
-                            {
-                                this.state = RetryState::Calling {
-                                    service,
-                                    policy,
-                                    request,
-                                    future,
-                                };
-                            }
+                                request: backup,
+                                future,
+                            };
                         }
                     }
                 }
                 RetryState::Calling {
-                    service: _,
+                    service,
                     policy,
                     request,
-                    future,
-                } => match Pin::new(future).poll(cx) {
-                    Poll::Pending => return Poll::Pending,
+                    mut future,
+                } => match Pin::new(&mut future).poll(cx) {
+                    Poll::Pending => {
+                        this.state = RetryState::Calling {
+                            service,
+                            policy,
+                            request,
+                            future,
+                        };
+                        return Poll::Pending;
+                    }
                     Poll::Ready(result) => {
                         // Check if we should retry
-                        let retry_decision = match &result {
-                            Ok(res) => policy.retry(
-                                request.as_ref().expect("request should exist"),
-                                Ok(res),
-                            ),
-                            Err(e) => policy.retry(
-                                request.as_ref().expect("request should exist"),
-                                Err(e),
-                            ),
+                        let retry_decision = if let Some(req_ref) = request.as_ref() {
+                            match &result {
+                                Ok(res) => policy.retry(req_ref, Ok(res)),
+                                Err(e) => policy.retry(req_ref, Err(e)),
+                            }
+                        } else {
+                            None
                         };
 
                         match retry_decision {
@@ -270,20 +279,12 @@ where
                                 return Poll::Ready(result);
                             }
                             Some(retry_future) => {
-                                // Move to checking state
-                                let old_state =
-                                    std::mem::replace(&mut this.state, RetryState::Done);
-                                if let RetryState::Calling {
-                                    service, request, ..
-                                } = old_state
-                                {
-                                    this.state = RetryState::Checking {
-                                        service,
-                                        request,
-                                        result: Some(result),
-                                        retry_future,
-                                    };
-                                }
+                                this.state = RetryState::Checking {
+                                    service,
+                                    request,
+                                    result: Some(result),
+                                    retry_future,
+                                };
                             }
                         }
                     }
@@ -291,26 +292,29 @@ where
                 RetryState::Checking {
                     service,
                     request,
-                    result,
-                    retry_future,
+                    mut result,
+                    mut retry_future,
                 } => {
-                    match Pin::new(retry_future).poll(cx) {
-                        Poll::Pending => return Poll::Pending,
+                    match Pin::new(&mut retry_future).poll(cx) {
+                        Poll::Pending => {
+                            this.state = RetryState::Checking {
+                                service,
+                                request,
+                                result,
+                                retry_future,
+                            };
+                            return Poll::Pending;
+                        }
                         Poll::Ready(new_policy) => {
                             // Try to clone the request for retry
                             let req_ref = request.as_ref().expect("request should exist");
                             match new_policy.clone_request(req_ref) {
                                 Some(new_request) => {
-                                    // Move to poll_ready state with cloned request
-                                    let old_state =
-                                        std::mem::replace(&mut this.state, RetryState::Done);
-                                    if let RetryState::Checking { service, .. } = old_state {
-                                        this.state = RetryState::PollReady {
-                                            service,
-                                            policy: new_policy,
-                                            request: Some(new_request),
-                                        };
-                                    }
+                                    this.state = RetryState::PollReady {
+                                        service,
+                                        policy: new_policy,
+                                        request: Some(new_request),
+                                    };
                                 }
                                 None => {
                                     // Cannot clone request - return original result
@@ -513,21 +517,22 @@ mod tests {
     #[test]
     fn limited_retry_clones_request() {
         let policy = LimitedRetry::<i32>::new(3);
-        let cloned = policy.clone_request(&42);
+        // Specify generic types for Policy trait: Request=i32, Res=(), E=()
+        let cloned = Policy::<i32, (), ()>::clone_request(&policy, &42);
         assert_eq!(cloned, Some(42));
     }
 
     #[test]
     fn limited_retry_returns_none_on_success() {
         let policy = LimitedRetry::<i32>::new(3);
-        let result: Option<_> = policy.retry(&42, Ok(&100));
+        let result: Option<_> = policy.retry(&42, Ok::<&i32, &String>(&100));
         assert!(result.is_none());
     }
 
     #[test]
     fn limited_retry_returns_some_on_error() {
         let policy = LimitedRetry::<i32>::new(3);
-        let result: Option<_> = policy.retry(&42, Err(&"error"));
+        let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
         assert!(result.is_some());
     }
 
@@ -536,27 +541,28 @@ mod tests {
         let mut policy = LimitedRetry::<i32>::new(2);
 
         // First retry
-        let result: Option<_> = policy.retry(&42, Err(&"error"));
+        let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
         assert!(result.is_some());
         policy.current_attempt = 1;
 
         // Second retry
-        let result: Option<_> = policy.retry(&42, Err(&"error"));
+        let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
         assert!(result.is_some());
         policy.current_attempt = 2;
 
         // Third attempt - should fail (max_retries reached)
-        let result: Option<_> = policy.retry(&42, Err(&"error"));
+        let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
         assert!(result.is_none());
     }
 
     #[test]
     fn no_retry_policy() {
         let policy = NoRetry::new();
-        let result: Option<std::future::Pending<NoRetry>> = policy.retry(&42, Err(&"error"));
+        let result: Option<std::future::Pending<NoRetry>> =
+            Policy::<i32, (), &str>::retry(&policy, &42, Err(&"error"));
         assert!(result.is_none());
 
-        let cloned: Option<i32> = policy.clone_request(&42);
+        let cloned: Option<i32> = Policy::<i32, (), ()>::clone_request(&policy, &42);
         assert!(cloned.is_none());
     }
 

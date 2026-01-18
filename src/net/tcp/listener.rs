@@ -68,13 +68,18 @@ pub struct Incoming<'a> {
 impl Stream for Incoming<'_> {
     type Item = io::Result<TcpStream>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // TODO: proper polling
-        let _fut = self.listener.accept();
-        // We can't poll a future easily here without boxing or storing it.
-        // For Phase 0 wrappers, we might need a different approach.
-        // But `accept` is async.
-        Poll::Pending
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.listener.inner.accept() {
+            Ok((stream, _addr)) => {
+                stream.set_nonblocking(true)?;
+                Poll::Ready(Some(Ok(TcpStream::from_std(stream))))
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Some(Err(e))),
+        }
     }
 }
 

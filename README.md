@@ -26,10 +26,18 @@
     ╚═══════════════════════════════════════════════════════════════╝
 ```
 
+[![CI](https://github.com/Dicklesworthstone/asupersync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dicklesworthstone/asupersync/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org/)
+[![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
+
 **Spec-first, cancel-correct, capability-secure async for Rust**
 
-[![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+<h3>Quick Install</h3>
+
+```bash
+cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
+```
 
 </div>
 
@@ -54,36 +62,55 @@
 
 ---
 
-## The Core Idea
-
-Most async runtimes are "spawn and pray":
+## Quick Example
 
 ```rust
-// Tokio: what happens when this scope exits?
-tokio::spawn(async { /* orphaned? cancelled? who knows */ });
+use asupersync::{Cx, Scope, Outcome, Budget};
+
+// Structured concurrency: scope guarantees quiescence
+async fn main_task(cx: &mut Cx) -> Outcome<(), Error> {
+    cx.region(|scope| async {
+        // Spawn owned tasks - they cannot orphan
+        scope.spawn(worker_a);
+        scope.spawn(worker_b);
+
+        // When scope exits: waits for BOTH tasks,
+        // runs finalizers, resolves obligations
+    }).await;
+
+    // Guaranteed: nothing from inside is still running
+    Outcome::ok(())
+}
+
+// Cancellation is a protocol, not a flag
+async fn worker_a(cx: &mut Cx) -> Outcome<(), Error> {
+    loop {
+        // Checkpoint for cancellation - explicit, not implicit
+        cx.checkpoint()?;
+
+        // Two-phase send: cancel-safe
+        let permit = tx.reserve(cx).await?;  // Can cancel here
+        permit.send(message);                 // Linear: must happen
+    }
+}
+
+// Lab runtime: deterministic testing
+#[test]
+fn test_cancellation_is_bounded() {
+    let lab = LabRuntime::new(LabConfig::default().seed(42));
+
+    lab.run(|cx| async {
+        // Same seed = same execution = reproducible bugs
+        cx.region(|scope| async {
+            scope.spawn(task_under_test);
+        }).await
+    });
+
+    // Oracles verify invariants
+    assert!(lab.obligation_leak_oracle().is_ok());
+    assert!(lab.quiescence_oracle().is_ok());
+}
 ```
-
-Asupersync enforces structured concurrency:
-
-```rust
-// Asupersync: scope guarantees quiescence
-scope.region(|sub| async {
-    sub.spawn(task_a);
-    sub.spawn(task_b);
-    // ← region close: waits for BOTH tasks, runs finalizers, resolves obligations
-}).await;
-// ← guaranteed: nothing from inside is still running
-```
-
-**Cancellation works as a protocol, not a flag:**
-
-```
-Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
-            ↓                    ↓             ↓
-         (bounded)          (cleanup)    (finalizers)
-```
-
-Every step is explicit, budgeted, and driven to completion.
 
 ---
 
@@ -93,9 +120,28 @@ Every step is explicit, budgeted, and driven to completion.
 
 Tasks don't float free. Every task is owned by a region. Regions form a tree. When a region closes, it *guarantees* all children are complete, all finalizers have run, all obligations are resolved. This is the "no orphans" invariant, enforced by the type system and runtime rather than by discipline.
 
+```rust
+// Tokio: what happens when this scope exits?
+tokio::spawn(async { /* orphaned? cancelled? who knows */ });
+
+// Asupersync: scope guarantees quiescence
+scope.region(|sub| async {
+    sub.spawn(task_a);
+    sub.spawn(task_b);
+}).await;
+// ← guaranteed: nothing from inside is still running
+```
+
 ### 2. Cancellation as a First-Class Protocol
 
 Cancellation operates as a multi-phase protocol, not a silent `drop`:
+
+```
+Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
+            ↓                    ↓             ↓
+         (bounded)          (cleanup)    (finalizers)
+```
+
 - **Request**: propagates down the tree
 - **Drain**: tasks run to cleanup points (bounded by budgets)
 - **Finalize**: finalizers run (masked, budgeted)
@@ -119,7 +165,7 @@ Dropping a permit aborts cleanly. Message never partially sent.
 All effects flow through explicit capability tokens:
 
 ```rust
-async fn my_task(cx: &mut Cx<'_>) {
+async fn my_task(cx: &mut Cx) {
     cx.spawn(...);        // ← need spawn capability
     cx.sleep_until(...);  // ← need time capability
     cx.trace(...);        // ← need trace capability
@@ -150,8 +196,8 @@ Concurrency bugs become reproducible test failures.
 | **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort | ❌ Best-effort |
 | **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools | ❌ External tools |
 | **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None | ❌ None |
-| **Ecosystem** | ✅ Growing | ✅ Massive | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | ✅ Active development | ✅ Production | ✅ Production | ✅ Production |
+| **Ecosystem** | 🔜 Growing | ✅ Massive | ⚠️ Medium | ⚠️ Small |
+| **Maturity** | 🔜 Active dev | ✅ Production | ✅ Production | ✅ Production |
 
 **When to use Asupersync:**
 - Internal applications where correctness > ecosystem
@@ -162,6 +208,96 @@ Concurrency bugs become reproducible test failures.
 **When to consider alternatives:**
 - You need tokio ecosystem library compatibility (we're building native equivalents)
 - Rapid prototyping where correctness guarantees aren't yet critical
+
+---
+
+## Installation
+
+### From Git (Recommended)
+
+```bash
+# Add to Cargo.toml
+cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
+
+# Or manually add:
+# [dependencies]
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync" }
+```
+
+### From Source
+
+```bash
+git clone https://github.com/Dicklesworthstone/asupersync.git
+cd asupersync
+cargo build --release
+```
+
+### Minimum Supported Rust Version
+
+Asupersync requires **Rust 1.75+** and uses Edition 2021.
+
+---
+
+## Core Types Reference
+
+### Outcome — Four-Valued Result
+
+```rust
+pub enum Outcome<T, E> {
+    Ok(T),                    // Success
+    Err(E),                   // Application error
+    Cancelled(CancelReason),  // External cancellation
+    Panicked(PanicPayload),   // Task panicked
+}
+
+// Severity lattice: Ok < Err < Cancelled < Panicked
+// HTTP mapping: Ok→200, Err→4xx/5xx, Cancelled→499, Panicked→500
+```
+
+### Budget — Resource Constraints
+
+```rust
+pub struct Budget {
+    pub deadline: Option<Time>,   // Absolute deadline
+    pub poll_quota: u32,          // Max poll calls
+    pub cost_quota: Option<u64>,  // Abstract cost units
+    pub priority: u8,             // Scheduling priority (0-255)
+}
+
+// Semiring: meet(a, b) = tighter constraint wins
+let effective = outer_budget.meet(inner_budget);
+```
+
+### CancelReason — Structured Context
+
+```rust
+pub enum CancelKind {
+    User,             // Explicit cancellation
+    Timeout,          // Deadline exceeded
+    FailFast,         // Sibling failed
+    RaceLost,         // Lost a race
+    ParentCancelled,  // Parent region cancelled
+    Shutdown,         // Runtime shutdown
+}
+
+// Severity: User < Timeout < FailFast < ParentCancelled < Shutdown
+// Cleanup budgets scale inversely with severity
+```
+
+### Cx — Capability Context
+
+```rust
+pub struct Cx { /* ... */ }
+
+impl Cx {
+    pub fn spawn<F>(&self, f: F) -> TaskHandle;
+    pub fn checkpoint(&self) -> Result<(), Cancelled>;
+    pub fn mask(&self) -> MaskGuard;  // Defer cancellation
+    pub fn trace(&self, event: TraceEvent);
+    pub fn budget(&self) -> Budget;
+    pub fn is_cancel_requested(&self) -> bool;
+}
+```
 
 ---
 
@@ -221,6 +357,14 @@ Concurrency bugs become reproducible test failures.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Scheduler Priority Lanes
+
+| Lane | Purpose | Priority |
+|------|---------|----------|
+| **Cancel Lane** | Tasks in cancellation states | 200-255 (highest) |
+| **Timed Lane** | Deadline-driven tasks (EDF) | Based on deadline |
+| **Ready Lane** | Normal runnable tasks | Default priority |
+
 ---
 
 ## Mathematical Foundations
@@ -240,31 +384,9 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ---
 
-## Documentation
-
-| Document | Purpose |
-|----------|---------|
-| [`asupersync_plan_v4.md`](./asupersync_plan_v4.md) | **Design Bible**: Complete specification, invariants, philosophy |
-| [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
-| [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
-| [`AGENTS.md`](./AGENTS.md) | **AI Guidelines**: Rules for AI coding agents |
-
----
-
 ## Using Asupersync as a Dependency
 
-Asupersync is designed to be used as a library by other Rust crates. Here's how to integrate it into your project.
-
-### Adding the Dependency
-
-```toml
-[dependencies]
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync" }
-```
-
-### Core Types for External Crates
-
-The following types are re-exported at the crate root for convenient access:
+### Core Exports
 
 ```rust
 use asupersync::{
@@ -296,131 +418,161 @@ use asupersync::{
 
 ### Wrapping Cx for Frameworks
 
-Framework authors (e.g., HTTP servers) should wrap `Cx` rather than expose it directly:
+Framework authors (e.g., HTTP servers) should wrap `Cx`:
 
 ```rust
-use asupersync::{Cx, Budget};
-
 /// Framework-specific request context
 pub struct RequestContext<'a> {
     cx: &'a Cx,
     request_id: u64,
-    // framework-specific fields
 }
 
 impl<'a> RequestContext<'a> {
-    pub fn new(cx: &'a Cx, request_id: u64) -> Self {
-        Self { cx, request_id }
-    }
-
-    /// Check if the request should be cancelled
     pub fn is_cancelled(&self) -> bool {
         self.cx.is_cancel_requested()
     }
 
-    /// Get remaining budget (for timeout handling)
     pub fn budget(&self) -> Budget {
         self.cx.budget()
     }
 
-    /// Checkpoint for cancellation (returns error if cancelled)
     pub fn checkpoint(&self) -> Result<(), asupersync::Error> {
         self.cx.checkpoint()
     }
 }
 ```
 
-### Using Outcome for HTTP Handlers
-
-Map `Outcome` variants to HTTP status codes:
+### HTTP Status Mapping
 
 ```rust
-use asupersync::Outcome;
-
-async fn handler(ctx: RequestContext<'_>) -> Outcome<Response, ApiError> {
-    // Check cancellation
-    ctx.checkpoint()?;
-
-    // Do work
-    let data = fetch_data().await?;
-
-    Outcome::ok(Response::json(data))
-}
-
 // Recommended HTTP status mapping:
-// - Outcome::Ok(_)        -> 200 OK (or custom success code)
-// - Outcome::Err(_)       -> 4xx/5xx based on error type
-// - Outcome::Cancelled(_) -> 499 Client Closed Request
-// - Outcome::Panicked(_)  -> 500 Internal Server Error
+// - Outcome::Ok(_)        → 200 OK
+// - Outcome::Err(_)       → 4xx/5xx based on error type
+// - Outcome::Cancelled(_) → 499 Client Closed Request
+// - Outcome::Panicked(_)  → 500 Internal Server Error
 ```
-
-### Budget for Request Timeouts
-
-Use `Budget` to implement request timeouts:
-
-```rust
-use asupersync::{Budget, Time};
-
-fn create_request_budget(timeout_secs: u64) -> Budget {
-    Budget::new()
-        .with_deadline(Time::from_secs(timeout_secs))
-        .with_poll_quota(10_000)  // Limit poll iterations
-}
-```
-
-### API Stability
-
-Asupersync is in early development (Phase 0). The public API may change. Key guarantees:
-
-- **Stable exports**: Types listed above will remain exported
-- **Semantic versioning**: Breaking changes will increment the major version once 1.0 is reached
-- **Deprecation policy**: Deprecated items will be marked before removal
 
 ---
 
-## CLI Tooling Guidelines (Future)
+## Configuration
 
-Asupersync is a library/runtime, but when we add CLI tools (trace viewer, lab runner, test
-runner, benchmark runner), they must be **agent-friendly**, **deterministic**, and **safe
-for automation**. These are *guidelines*, not a promise of current implementation.
+### Lab Runtime Configuration
 
-### Principles
-- **Dual-mode output**: human-readable by default on TTY; machine-readable when piped or in CI.
-- **Structured errors**: parseable error objects with type, title, detail, suggestion, and exit code.
-- **Progressive disclosure**: terse by default; `--verbose` or `--json` for details.
-- **Determinism**: stable ordering, no time-based nondeterminism unless explicitly requested.
-- **Graceful cancellation**: handle SIGINT/SIGTERM; first signal requests cancel, second exits.
+```rust
+let config = LabConfig::default()
+    // Seed for deterministic scheduling (same seed = same execution)
+    .seed(42)
 
-### Environment & Flags
-- `--format human|json|jsonl|tsv` (and `--json` shorthand) for machine-friendly output.
-- `ASUPERSYNC_OUTPUT_FORMAT` and `CI` select defaults for automation.
-- `NO_COLOR` disables ANSI; `CLICOLOR_FORCE` enables ANSI.
-- `ASUPERSYNC_NO_PROMPT` disables interactive prompts.
+    // Maximum steps before timeout (prevents infinite loops)
+    .max_steps(100_000)
 
-### Agent-Friendly Output Contract
-- **Auto-detect defaults**: if `CI=true` or stdout is not a TTY, default to JSON (or JSONL for streaming).
-- **JSONL streaming**: one object per line, flushed per line for incremental consumption.
-- **Errors on stderr**: in machine modes, emit structured errors as JSON lines to stderr.
-- **Stable ordering**: deterministic record ordering and stable key sets for diffability.
-- **No ambient prompts**: prompts only when explicitly requested; honor `ASUPERSYNC_NO_PROMPT`.
+    // Enable futurelock detection (tasks holding obligations without progress)
+    .futurelock_max_idle_steps(1000)
 
-### Structured Error Example (JSON line)
-```json
-{"type":"invalid_argument","title":"Invalid argument: --foo","detail":"--foo expects an integer","suggestion":"Try --foo 123","exit_code":1}
+    // Enable trace capture for replay
+    .capture_trace(true);
+
+let lab = LabRuntime::new(config);
 ```
 
-### Semantic Exit Codes (baseline)
-- `0`: success
-- `1`: user error (invalid input/args)
-- `2`: runtime error (invariant/test failure)
-- `3`: internal error (tool bug)
-- `4`: cancelled (signal/timeout)
-- `10+`: tool-specific (e.g., determinism/trace mismatch)
+### Budget Configuration
 
-### References
-- Command Line Interface Guidelines: https://clig.dev/
-- RFC 9457 (Problem Details): https://www.rfc-editor.org/rfc/rfc9457
-- NO_COLOR: https://no-color.org/
+```rust
+// Request timeout with poll budget
+let request_budget = Budget::new()
+    .with_deadline_secs(30)       // 30 second timeout
+    .with_poll_quota(10_000)      // Max 10k polls
+    .with_priority(100);          // Normal priority
+
+// Cleanup budget (tighter for faster shutdown)
+let cleanup_budget = Budget::new()
+    .with_deadline_secs(5)
+    .with_poll_quota(500);
+```
+
+---
+
+## Troubleshooting
+
+### "ObligationLeak detected"
+
+Your task completed while holding an obligation (permit, ack, lease).
+
+```rust
+// Wrong: permit dropped without send/abort
+let permit = tx.reserve(cx).await?;
+return Outcome::ok(());  // Leak!
+
+// Right: always resolve obligations
+let permit = tx.reserve(cx).await?;
+permit.send(message);  // Resolved
+```
+
+### "RegionCloseTimeout"
+
+A region is stuck waiting for children that won't complete.
+
+```rust
+// Check for: infinite loops without checkpoints
+loop {
+    cx.checkpoint()?;  // Add checkpoints in loops
+    // ... work ...
+}
+```
+
+### "FuturelockViolation"
+
+A task is holding obligations but not making progress.
+
+```rust
+// Check for: awaiting something that will never resolve
+// while holding a permit/lock
+let permit = tx.reserve(cx).await?;
+other_thing.await;  // If this blocks forever → futurelock
+permit.send(msg);
+```
+
+### Deterministic test failures
+
+Same seed should give same execution. If not:
+
+```rust
+// Check for: time-based operations
+// WRONG: uses wall-clock time
+let now = std::time::Instant::now();
+
+// RIGHT: uses virtual time through Cx
+let now = cx.now();
+```
+
+---
+
+## Limitations
+
+### Current Phase (0-1) Constraints
+
+| Capability | Current State | Planned |
+|------------|---------------|---------|
+| Multi-threaded runtime | 🔜 In progress | Phase 1 |
+| I/O reactor integration | ❌ Not yet | Phase 2 |
+| Actor supervision | ❌ Planned | Phase 3 |
+| Distributed runtime | ❌ Designed | Phase 4 |
+| DPOR exploration | ⚠️ Hooks exist | Phase 5 |
+
+### What Asupersync Doesn't Do
+
+- **Cooperative cancellation only**: Non-cooperative code requires explicit escalation boundaries
+- **Not a drop-in tokio replacement**: Different API, different guarantees
+- **No ecosystem compatibility**: Can't directly use tokio-based libraries (adapters planned)
+
+### Design Trade-offs
+
+| Choice | Trade-off |
+|--------|-----------|
+| Explicit checkpoints | More verbose, but cancellation is observable |
+| Capability tokens | Extra parameter threading, but testable and auditable |
+| Two-phase effects | More complex primitives, but no data loss |
+| Region ownership | Can't detach tasks, but no orphans |
 
 ---
 
@@ -428,31 +580,12 @@ for automation**. These are *guidelines*, not a promise of current implementatio
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **Phase 0** | Single-thread deterministic kernel | ✅ In Progress |
-| **Phase 1** | Parallel scheduler + region heap | 🔜 Next |
+| **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
+| **Phase 1** | Parallel scheduler + region heap | 🔜 In Progress |
 | **Phase 2** | I/O integration | Planned |
 | **Phase 3** | Actors + session types | Planned |
 | **Phase 4** | Distributed structured concurrency | Planned |
 | **Phase 5** | DPOR + TLA+ tooling | Planned |
-
----
-
-## Design Trade-offs
-
-### Intentional Choices
-
-| Choice | Rationale | Benefit |
-|--------|-----------|---------|
-| **Explicit capabilities** | All effects through `Cx` | Testable, auditable, capability-secure |
-| **Two-phase patterns** | Reserve/commit for cancel-safety | Zero data loss during cancellation |
-| **Region ownership** | Tasks owned by regions | Guaranteed quiescence, no orphans |
-| **Structured cancellation** | Protocol, not flag | Bounded cleanup, predictable shutdown |
-
-### Scope Boundaries
-
-- **Cooperative cancellation**: Non-cooperative code requires explicit escalation boundaries
-- **Idempotency + leases**: Exactly-once is a system property built on our primitives
-- **Runtime enforcement**: Guarantees via runtime and API design, not language changes
 
 ---
 
@@ -478,6 +611,25 @@ Similar goals to Kotlin coroutines, Swift structured concurrency, and Java's Pro
 
 Asupersync has its own runtime with explicit capabilities. For code that needs to interop with external async libraries, we provide boundary adapters that preserve our cancel-correctness guarantees.
 
+### Is this production-ready?
+
+Phase 0 (single-threaded deterministic kernel) is complete and tested. Phase 1 (multi-threaded) is in progress. Use for internal applications where correctness matters more than ecosystem breadth.
+
+### How do I report bugs?
+
+Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [`asupersync_plan_v4.md`](./asupersync_plan_v4.md) | **Design Bible**: Complete specification, invariants, philosophy |
+| [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
+| [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
+| [`AGENTS.md`](./AGENTS.md) | **AI Guidelines**: Rules for AI coding agents |
+
 ---
 
 ## Contributing
@@ -488,4 +640,4 @@ Asupersync has its own runtime with explicit capabilities. For code that needs t
 
 ## License
 
-MIT (pending final decision)
+MIT

@@ -464,12 +464,19 @@ pub fn join_all_to_result<T, E: Clone>(
             Ok(values.into_iter().flatten().collect())
         }
         AggregateDecision::FirstError(e) => {
-            // Find the first error index (any index not in successes)
-            let success_indices: std::collections::HashSet<usize> =
-                result.successes.iter().map(|(i, _)| *i).collect();
-            let first_error_index = (0..result.total_count)
-                .find(|i| !success_indices.contains(i))
-                .unwrap_or(0);
+            // Find the first error index (the first index gap in successes).
+            // Since successes is sorted by index (populated in iteration order),
+            // we can just find the first missing sequence number.
+            let mut first_error_index = 0;
+            for (idx, _) in &result.successes {
+                if *idx == first_error_index {
+                    first_error_index += 1;
+                } else {
+                    // Gap found: first_error_index is missing
+                    break;
+                }
+            }
+            
             let total_failures = result.total_count - result.successes.len();
             Err(JoinAllError::Error {
                 error: e,

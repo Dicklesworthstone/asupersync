@@ -207,7 +207,7 @@ impl<'a> RecvStream<'a> {
 impl Stream for RecvStream<'_> {
     type Item = io::Result<(Vec<u8>, SocketAddr)>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let mut buf = vec![0u8; this.buf_size];
         match this.socket.inner.recv_from(&mut buf) {
@@ -215,7 +215,10 @@ impl Stream for RecvStream<'_> {
                 buf.truncate(n);
                 Poll::Ready(Some(Ok((buf, addr))))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(err) => Poll::Ready(Some(Err(err))),
         }
     }

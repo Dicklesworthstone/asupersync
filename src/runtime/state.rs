@@ -172,9 +172,9 @@ impl RuntimeState {
 
         // Wrap the future to send the result through the channel
         let wrapped_future = async move {
-            let _result = future.await;
+            let result = future.await;
             // Send the result - ignore error if TaskHandle was dropped
-            let _ = result_tx.send(&cx, Ok::<_, JoinError>(_result));
+            let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
         };
 
         // Store the wrapped future
@@ -245,23 +245,34 @@ impl RuntimeState {
     ///
     /// This is the core hook for fail-fast behavior: the policy decides whether
     /// siblings should be cancelled.
+    ///
+    /// Returns the policy action taken and a list of tasks that need to be
+    /// moved to the cancel lane in the scheduler.
     pub fn apply_policy_on_child_outcome<P: Policy<Error = crate::error::Error>>(
         &mut self,
         region: RegionId,
         child: TaskId,
         outcome: &Outcome<(), crate::error::Error>,
         policy: &P,
-    ) -> PolicyAction {
+    ) -> (PolicyAction, Vec<(TaskId, u8)>) {
         let action = policy.on_child_outcome(child, outcome);
-        if let PolicyAction::CancelSiblings(reason) = &action {
-            self.cancel_sibling_tasks(region, child, reason);
-        }
-        action
+        let tasks_to_schedule = if let PolicyAction::CancelSiblings(reason) = &action {
+            self.cancel_sibling_tasks(region, child, reason)
+        } else {
+            Vec::new()
+        };
+        (action, tasks_to_schedule)
     }
 
-    fn cancel_sibling_tasks(&mut self, region: RegionId, child: TaskId, reason: &CancelReason) {
+    fn cancel_sibling_tasks(
+        &mut self,
+        region: RegionId,
+        child: TaskId,
+        reason: &CancelReason,
+    ) -> Vec<(TaskId, u8)> {
+        let mut tasks_to_cancel = Vec::new();
         let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return;
+            return tasks_to_cancel;
         };
 
         for task_id in region_record.task_ids() {
@@ -271,8 +282,15 @@ impl RuntimeState {
             let Some(task_record) = self.tasks.get_mut(task_id.arena_index()) else {
                 continue;
             };
-            task_record.request_cancel(reason.clone());
+
+            let budget = reason.cleanup_budget();
+            if task_record.request_cancel_with_budget(reason.clone(), budget) {
+                tasks_to_cancel.push((task_id, budget.priority));
+            } else if task_record.state.is_cancelling() {
+                tasks_to_cancel.push((task_id, budget.priority));
+            }
         }
+        tasks_to_cancel
     }
 
     /// Requests cancellation for a region and all its descendants.
@@ -683,7 +701,13 @@ mod tests {
         let outcome = Outcome::<(), crate::error::Error>::Err(crate::error::Error::new(
             crate::error::ErrorKind::User,
         ));
-        let action = state.apply_policy_on_child_outcome(region, child, &outcome, &policy);
+        let (action, tasks) = state.apply_policy_on_child_outcome(region, child, &outcome, &policy);
+
+        assert_eq!(
+            action,
+            PolicyAction::CancelSiblings(CancelReason::sibling_failed())
+        );
+        assert_eq!(tasks.len(), 2);
 
         assert_eq!(
             action,
@@ -713,7 +737,7 @@ mod tests {
 
         let policy = crate::types::policy::FailFast;
         let outcome = Outcome::<(), crate::error::Error>::Cancelled(CancelReason::timeout());
-        let action = state.apply_policy_on_child_outcome(region, child, &outcome, &policy);
+        let (action, _) = state.apply_policy_on_child_outcome(region, child, &outcome, &policy);
 
         assert_eq!(action, PolicyAction::Continue);
         let sib_record = state.tasks.get(sib.arena_index()).expect("sib missing");

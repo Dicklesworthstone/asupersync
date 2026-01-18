@@ -10,6 +10,7 @@
 //! - `poll_read` is cancel-safe (partial data is discarded by the caller).
 //! - `read_exact` is **not** cancel-safe (partial state is retained).
 //! - `read_to_end` is cancel-safe (collected bytes remain in the buffer).
+//! - `read_to_string` is **not** fully cancel-safe (bytes are preserved, but a partial UTF-8 sequence at the end may be lost if cancelled).
 //!
 //! ## Write operations
 //! - `poll_write` is cancel-safe (partial writes are OK).
