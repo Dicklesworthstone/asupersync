@@ -76,10 +76,13 @@ impl AwaitPoint {
     }
 }
 
-/// Strategy for when to inject cancellation.
+/// Strategy for selecting which await points to inject cancellation at.
+///
+/// This controls which points are selected for injection during a test run.
+/// Use with [`InjectionRunner::run_with_injection`] for automated test execution.
 #[derive(Debug, Clone)]
 pub enum InjectionStrategy {
-    /// Never inject cancellation (recording mode).
+    /// Never inject cancellation (recording mode only).
     Never,
     /// Inject at a specific await point sequence number.
     AtSequence(u64),
@@ -87,11 +90,431 @@ pub enum InjectionStrategy {
     AtPoint(AwaitPoint),
     /// Inject at every Nth await point.
     EveryNth(u64),
+    /// Test every await point (most thorough, N+1 runs for N await points).
+    AllPoints,
+    /// Test n randomly-selected await points using deterministic RNG.
+    RandomSample(usize),
+    /// Test only specified await points.
+    SpecificPoints(Vec<u64>),
+    /// Test first n await points.
+    FirstN(usize),
+    /// Each await point has probability p (0.0-1.0) of injection.
+    Probabilistic(f64),
 }
 
 impl Default for InjectionStrategy {
     fn default() -> Self {
         Self::Never
+    }
+}
+
+impl InjectionStrategy {
+    /// Selects the await points to test based on this strategy.
+    ///
+    /// # Arguments
+    /// * `recorded` - The await points recorded during the recording run
+    /// * `seed` - Deterministic seed for random selection
+    ///
+    /// # Returns
+    /// A vector of await point sequence numbers to test
+    #[must_use]
+    pub fn select_points(&self, recorded: &[u64], seed: u64) -> Vec<u64> {
+        match self {
+            Self::Never => vec![],
+            Self::AtSequence(seq) => {
+                if recorded.contains(seq) {
+                    vec![*seq]
+                } else {
+                    vec![]
+                }
+            }
+            Self::AtPoint(point) => {
+                if recorded.contains(&point.sequence) {
+                    vec![point.sequence]
+                } else {
+                    vec![]
+                }
+            }
+            Self::EveryNth(n) => {
+                if *n == 0 {
+                    return vec![];
+                }
+                recorded
+                    .iter()
+                    .filter(|seq| *seq % n == 0)
+                    .copied()
+                    .collect()
+            }
+            Self::AllPoints => recorded.to_vec(),
+            Self::RandomSample(n) => {
+                if *n == 0 || recorded.is_empty() {
+                    return vec![];
+                }
+                // Deterministic selection using linear congruential generator
+                let mut selected = Vec::with_capacity((*n).min(recorded.len()));
+                let mut rng_state = seed;
+                let mut indices: Vec<usize> = (0..recorded.len()).collect();
+
+                // Fisher-Yates shuffle with deterministic RNG
+                for i in (1..indices.len()).rev() {
+                    // LCG: state = (a * state + c) mod m
+                    rng_state = rng_state.wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let j = (rng_state as usize) % (i + 1);
+                    indices.swap(i, j);
+                }
+
+                for &idx in indices.iter().take(*n) {
+                    selected.push(recorded[idx]);
+                }
+                selected.sort_unstable();
+                selected
+            }
+            Self::SpecificPoints(points) => points
+                .iter()
+                .filter(|p| recorded.contains(p))
+                .copied()
+                .collect(),
+            Self::FirstN(n) => recorded.iter().take(*n).copied().collect(),
+            Self::Probabilistic(p) => {
+                if *p <= 0.0 {
+                    return vec![];
+                }
+                if *p >= 1.0 {
+                    return recorded.to_vec();
+                }
+                // Deterministic selection based on seed
+                let mut selected = Vec::new();
+                let mut rng_state = seed;
+                for &seq in recorded {
+                    rng_state = rng_state.wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    // Use upper bits for better distribution
+                    let rand_val = (rng_state >> 32) as f64 / (u32::MAX as f64);
+                    if rand_val < *p {
+                        selected.push(seq);
+                    }
+                }
+                selected
+            }
+        }
+    }
+}
+
+/// Mode of operation for the injector during a test run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionMode {
+    /// Recording await points without injecting.
+    Recording,
+    /// Injecting cancellation at a specific target point.
+    Injecting {
+        /// The await point sequence to inject at.
+        target: u64,
+    },
+}
+
+impl Default for InjectionMode {
+    fn default() -> Self {
+        Self::Recording
+    }
+}
+
+/// The outcome of a single injection test run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InjectionOutcome {
+    /// The test completed successfully (cancellation was handled correctly).
+    Success,
+    /// The test panicked during execution.
+    Panic(String),
+    /// An assertion failed during the test.
+    AssertionFailed(String),
+    /// The test timed out.
+    Timeout,
+    /// The test detected a resource leak after cancellation.
+    ResourceLeak(String),
+}
+
+/// Result of injecting cancellation at a specific await point.
+#[derive(Debug, Clone)]
+pub struct InjectionResult {
+    /// The await point where cancellation was injected.
+    pub injection_point: u64,
+    /// The outcome of this injection test.
+    pub outcome: InjectionOutcome,
+    /// Number of await points reached before injection.
+    pub await_points_before: usize,
+}
+
+impl InjectionResult {
+    /// Creates a new successful injection result.
+    #[must_use]
+    pub fn success(injection_point: u64, await_points_before: usize) -> Self {
+        Self {
+            injection_point,
+            outcome: InjectionOutcome::Success,
+            await_points_before,
+        }
+    }
+
+    /// Creates a new panic injection result.
+    #[must_use]
+    pub fn panic(injection_point: u64, message: String, await_points_before: usize) -> Self {
+        Self {
+            injection_point,
+            outcome: InjectionOutcome::Panic(message),
+            await_points_before,
+        }
+    }
+
+    /// Returns true if this result indicates success.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        matches!(self.outcome, InjectionOutcome::Success)
+    }
+}
+
+/// Report summarizing all injection test runs.
+#[derive(Debug, Clone)]
+pub struct InjectionReport {
+    /// Total number of await points discovered during recording.
+    pub total_await_points: usize,
+    /// Number of injection tests performed.
+    pub tests_run: usize,
+    /// Number of successful tests.
+    pub successes: usize,
+    /// Number of failures.
+    pub failures: usize,
+    /// Individual results for each injection point.
+    pub results: Vec<InjectionResult>,
+    /// The strategy used for this test run.
+    pub strategy: String,
+}
+
+impl InjectionReport {
+    /// Creates a new report from a list of results.
+    #[must_use]
+    pub fn from_results(
+        results: Vec<InjectionResult>,
+        total_await_points: usize,
+        strategy: &str,
+    ) -> Self {
+        let successes = results.iter().filter(|r| r.is_success()).count();
+        let failures = results.len() - successes;
+        Self {
+            total_await_points,
+            tests_run: results.len(),
+            successes,
+            failures,
+            results,
+            strategy: strategy.to_string(),
+        }
+    }
+
+    /// Returns true if all tests passed.
+    #[must_use]
+    pub fn all_passed(&self) -> bool {
+        self.failures == 0
+    }
+
+    /// Returns the failed results.
+    #[must_use]
+    pub fn failures(&self) -> Vec<&InjectionResult> {
+        self.results.iter().filter(|r| !r.is_success()).collect()
+    }
+}
+
+/// Runner that orchestrates recording and injection test cycles.
+///
+/// The runner performs a two-phase test:
+/// 1. **Recording run**: Execute the test once to discover all await points
+/// 2. **Injection runs**: Re-run the test for each selected await point,
+///    injecting cancellation and verifying correct handling
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::lab::instrumented_future::{InjectionRunner, InjectionStrategy};
+///
+/// let runner = InjectionRunner::new(42); // seed for determinism
+/// let report = runner.run_with_injection(
+///     InjectionStrategy::AllPoints,
+///     || async { my_async_operation().await },
+///     |result| result.is_ok(), // success check
+/// );
+///
+/// assert!(report.all_passed(), "Cancellation handling failed");
+/// ```
+#[derive(Debug)]
+pub struct InjectionRunner {
+    /// Deterministic seed for random selection strategies.
+    seed: u64,
+    /// Mode tracking for current run.
+    current_mode: InjectionMode,
+}
+
+impl InjectionRunner {
+    /// Creates a new injection runner with the given seed.
+    #[must_use]
+    pub const fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            current_mode: InjectionMode::Recording,
+        }
+    }
+
+    /// Returns the current injection mode.
+    #[must_use]
+    pub const fn current_mode(&self) -> InjectionMode {
+        self.current_mode
+    }
+
+    /// Returns the seed used for deterministic selection.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Runs a cancellation injection test with the given strategy.
+    ///
+    /// This method performs:
+    /// 1. A recording run to discover all await points
+    /// 2. Injection runs at points selected by the strategy
+    /// 3. Collection of results into a report
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy` - The strategy for selecting injection points
+    /// * `test_fn` - A closure that creates the future to test
+    /// * `poll_fn` - A closure that polls the instrumented future to completion
+    ///   and returns an `InjectionOutcome`
+    ///
+    /// # Returns
+    ///
+    /// An `InjectionReport` summarizing all test runs.
+    pub fn run_with_injection<F, Fut, P>(
+        &mut self,
+        strategy: InjectionStrategy,
+        test_fn: F,
+        poll_fn: P,
+    ) -> InjectionReport
+    where
+        F: Fn(Arc<CancellationInjector>) -> Fut,
+        Fut: Future,
+        P: Fn(Fut) -> InjectionOutcome,
+    {
+        // Phase 1: Recording run
+        self.current_mode = InjectionMode::Recording;
+        let recording_injector = CancellationInjector::recording();
+        let future = test_fn(recording_injector.clone());
+        let _ = poll_fn(future);
+
+        let recorded_points = recording_injector.recorded_points();
+        let total_await_points = recorded_points.len();
+
+        // Phase 2: Select injection points based on strategy
+        let injection_points = strategy.select_points(&recorded_points, self.seed);
+
+        // Phase 3: Injection runs
+        let mut results = Vec::with_capacity(injection_points.len());
+
+        for point in injection_points {
+            self.current_mode = InjectionMode::Injecting { target: point };
+            let injector = CancellationInjector::inject_at(point);
+            let future = test_fn(injector.clone());
+            let outcome = poll_fn(future);
+
+            let await_points_before = injector.recorded_points().len().saturating_sub(1);
+            results.push(InjectionResult {
+                injection_point: point,
+                outcome,
+                await_points_before,
+            });
+        }
+
+        // Phase 4: Generate report
+        let strategy_name = format!("{strategy:?}");
+        InjectionReport::from_results(results, total_await_points, &strategy_name)
+    }
+
+    /// Runs injection tests using a simpler interface for basic futures.
+    ///
+    /// This is a convenience method that handles the common case where:
+    /// - The future's output can be checked for success
+    /// - No special polling logic is needed
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy` - The strategy for selecting injection points
+    /// * `test_fn` - A closure that creates the instrumented future
+    /// * `check_fn` - A closure that checks if an instrumented poll result indicates success
+    pub fn run_simple<F, Fut, T, C>(
+        &mut self,
+        strategy: InjectionStrategy,
+        test_fn: F,
+        check_fn: C,
+    ) -> InjectionReport
+    where
+        F: Fn(Arc<CancellationInjector>) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T>,
+        T: std::fmt::Debug,
+        C: Fn(&InstrumentedPollResult<T>) -> bool,
+    {
+        self.run_with_injection(
+            strategy,
+            test_fn,
+            |instrumented: InstrumentedFuture<Fut>| {
+                // Poll to completion using catch_unwind for panic detection
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::poll_instrumented_to_completion(instrumented)
+                }));
+
+                match result {
+                    Ok(poll_result) => {
+                        if check_fn(&poll_result) {
+                            InjectionOutcome::Success
+                        } else {
+                            InjectionOutcome::AssertionFailed(format!(
+                                "Check function returned false for result: {poll_result:?}"
+                            ))
+                        }
+                    }
+                    Err(e) => {
+                        let message = if let Some(s) = e.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        InjectionOutcome::Panic(message)
+                    }
+                }
+            },
+        )
+    }
+
+    /// Polls an instrumented future to completion.
+    fn poll_instrumented_to_completion<F: Future>(
+        future: InstrumentedFuture<F>,
+    ) -> InstrumentedPollResult<F::Output> {
+        use std::task::{Wake, Waker};
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut pinned = Box::pin(future);
+
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(output) => return output,
+                std::task::Poll::Pending => {}
+            }
+        }
     }
 }
 
@@ -211,6 +634,14 @@ impl CancellationInjector {
                     false
                 }
             }
+            // The following strategies are "selection" strategies used by InjectionRunner.
+            // They determine which points to test at the runner level, not at the
+            // individual injector level. When used directly, they don't inject.
+            InjectionStrategy::AllPoints
+            | InjectionStrategy::RandomSample(_)
+            | InjectionStrategy::SpecificPoints(_)
+            | InjectionStrategy::FirstN(_)
+            | InjectionStrategy::Probabilistic(_) => false,
         }
     }
 
@@ -565,5 +996,246 @@ mod tests {
         injector.clear_recorded();
 
         assert!(injector.recorded_points().is_empty());
+    }
+
+    // ========== Tests for extended strategies ==========
+
+    #[test]
+    fn strategy_all_points_selects_all() {
+        let recorded = vec![1, 2, 3, 4, 5];
+        let strategy = InjectionStrategy::AllPoints;
+        let selected = strategy.select_points(&recorded, 42);
+        assert_eq!(selected, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn strategy_first_n_selects_first() {
+        let recorded = vec![1, 2, 3, 4, 5];
+        let strategy = InjectionStrategy::FirstN(3);
+        let selected = strategy.select_points(&recorded, 42);
+        assert_eq!(selected, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn strategy_first_n_handles_overflow() {
+        let recorded = vec![1, 2];
+        let strategy = InjectionStrategy::FirstN(5);
+        let selected = strategy.select_points(&recorded, 42);
+        assert_eq!(selected, vec![1, 2]);
+    }
+
+    #[test]
+    fn strategy_specific_points_filters() {
+        let recorded = vec![1, 2, 3, 4, 5];
+        let strategy = InjectionStrategy::SpecificPoints(vec![2, 4, 6]);
+        let selected = strategy.select_points(&recorded, 42);
+        // 6 is not in recorded, so only 2 and 4
+        assert_eq!(selected, vec![2, 4]);
+    }
+
+    #[test]
+    fn strategy_random_sample_is_deterministic() {
+        let recorded = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let strategy = InjectionStrategy::RandomSample(3);
+
+        // Same seed should give same results
+        let selected1 = strategy.select_points(&recorded, 12345);
+        let selected2 = strategy.select_points(&recorded, 12345);
+        assert_eq!(selected1, selected2);
+
+        // Different seed should (likely) give different results
+        let selected3 = strategy.select_points(&recorded, 99999);
+        // With high probability they differ; we check the length at least
+        assert_eq!(selected3.len(), 3);
+    }
+
+    #[test]
+    fn strategy_random_sample_respects_count() {
+        let recorded = vec![1, 2, 3, 4, 5];
+        let strategy = InjectionStrategy::RandomSample(3);
+        let selected = strategy.select_points(&recorded, 42);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn strategy_probabilistic_is_deterministic() {
+        let recorded: Vec<u64> = (1..=20).collect();
+        let strategy = InjectionStrategy::Probabilistic(0.5);
+
+        let selected1 = strategy.select_points(&recorded, 42);
+        let selected2 = strategy.select_points(&recorded, 42);
+        assert_eq!(selected1, selected2);
+    }
+
+    #[test]
+    fn strategy_probabilistic_respects_probability() {
+        let recorded: Vec<u64> = (1..=100).collect();
+
+        // With p=1.0, should select all
+        let strategy_all = InjectionStrategy::Probabilistic(1.0);
+        let selected_all = strategy_all.select_points(&recorded, 42);
+        assert_eq!(selected_all.len(), 100);
+
+        // With p=0.0, should select none
+        let strategy_none = InjectionStrategy::Probabilistic(0.0);
+        let selected_none = strategy_none.select_points(&recorded, 42);
+        assert!(selected_none.is_empty());
+    }
+
+    #[test]
+    fn strategy_every_nth_selects_multiples() {
+        let recorded = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let strategy = InjectionStrategy::EveryNth(3);
+        let selected = strategy.select_points(&recorded, 42);
+        // 3, 6, 9 are multiples of 3
+        assert_eq!(selected, vec![3, 6, 9]);
+    }
+
+    // ========== Tests for InjectionRunner ==========
+
+    #[test]
+    fn injection_runner_recording_phase() {
+        let mut runner = InjectionRunner::new(42);
+
+        let report = runner.run_with_injection(
+            InjectionStrategy::Never,
+            |injector| {
+                let future = YieldingFuture::new(3, 42);
+                InstrumentedFuture::new(future, injector)
+            },
+            |instrumented| {
+                let _ = poll_to_completion(instrumented);
+                InjectionOutcome::Success
+            },
+        );
+
+        // Recording run with Never strategy = no injection runs
+        assert_eq!(report.total_await_points, 4); // 3 yields + 1 completion
+        assert_eq!(report.tests_run, 0);
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn injection_runner_all_points_strategy() {
+        let mut runner = InjectionRunner::new(42);
+
+        let report = runner.run_with_injection(
+            InjectionStrategy::AllPoints,
+            |injector| {
+                let future = YieldingFuture::new(3, 42);
+                InstrumentedFuture::new(future, injector)
+            },
+            |instrumented| {
+                let result = poll_to_completion(instrumented);
+                // Both completion and cancellation are acceptable
+                match result {
+                    InstrumentedPollResult::Inner(_) => InjectionOutcome::Success,
+                    InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
+                }
+            },
+        );
+
+        // Should run injection at all 4 await points
+        assert_eq!(report.total_await_points, 4);
+        assert_eq!(report.tests_run, 4);
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn injection_runner_first_n_strategy() {
+        let mut runner = InjectionRunner::new(42);
+
+        let report = runner.run_with_injection(
+            InjectionStrategy::FirstN(2),
+            |injector| {
+                let future = YieldingFuture::new(5, 42);
+                InstrumentedFuture::new(future, injector)
+            },
+            |instrumented| {
+                let _ = poll_to_completion(instrumented);
+                InjectionOutcome::Success
+            },
+        );
+
+        // Should only run at first 2 points
+        assert_eq!(report.tests_run, 2);
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn injection_runner_tracks_failures() {
+        let mut runner = InjectionRunner::new(42);
+
+        let report = runner.run_with_injection(
+            InjectionStrategy::AllPoints,
+            |injector| {
+                let future = YieldingFuture::new(3, 42);
+                InstrumentedFuture::new(future, injector)
+            },
+            |instrumented| {
+                let result = poll_to_completion(instrumented);
+                // Fail on cancellation at point 2
+                match result {
+                    InstrumentedPollResult::CancellationInjected(2) => {
+                        InjectionOutcome::AssertionFailed("Failed at point 2".to_string())
+                    }
+                    _ => InjectionOutcome::Success,
+                }
+            },
+        );
+
+        // Should have 1 failure
+        assert_eq!(report.failures, 1);
+        assert!(!report.all_passed());
+
+        let failures = report.failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].injection_point, 2);
+    }
+
+    #[test]
+    fn injection_report_from_results() {
+        let results = vec![
+            InjectionResult::success(1, 0),
+            InjectionResult::success(2, 1),
+            InjectionResult::panic(3, "test panic".to_string(), 2),
+        ];
+
+        let report = InjectionReport::from_results(results, 5, "AllPoints");
+
+        assert_eq!(report.total_await_points, 5);
+        assert_eq!(report.tests_run, 3);
+        assert_eq!(report.successes, 2);
+        assert_eq!(report.failures, 1);
+        assert!(!report.all_passed());
+    }
+
+    #[test]
+    fn injection_mode_default_is_recording() {
+        let runner = InjectionRunner::new(42);
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
+    }
+
+    #[test]
+    fn run_simple_with_success_check() {
+        let mut runner = InjectionRunner::new(42);
+
+        let report = runner.run_simple(
+            InjectionStrategy::FirstN(2),
+            |injector| {
+                let future = YieldingFuture::new(3, 42);
+                InstrumentedFuture::new(future, injector)
+            },
+            |result| {
+                // Accept both completion and cancellation
+                match result {
+                    InstrumentedPollResult::Inner(val) => *val == 42,
+                    InstrumentedPollResult::CancellationInjected(_) => true,
+                }
+            },
+        );
+
+        assert_eq!(report.tests_run, 2);
+        assert!(report.all_passed());
     }
 }

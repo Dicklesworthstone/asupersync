@@ -17,7 +17,8 @@ pub mod runtime;
 
 pub use config::LabConfig;
 pub use instrumented_future::{
-    AwaitPoint, CancellationInjector, InjectionStrategy, InstrumentedFuture, InstrumentedPollResult,
+    AwaitPoint, CancellationInjector, InjectionMode, InjectionOutcome, InjectionReport,
+    InjectionResult, InjectionRunner, InjectionStrategy, InstrumentedFuture, InstrumentedPollResult,
 };
 pub use oracle::{
     assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,
