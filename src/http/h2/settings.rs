@@ -283,7 +283,9 @@ mod tests {
     fn test_apply_invalid_initial_window_size() {
         let mut settings = Settings::default();
         // Value too large
-        assert!(settings.apply(Setting::InitialWindowSize(0x8000_0000)).is_err());
+        assert!(settings
+            .apply(Setting::InitialWindowSize(0x8000_0000))
+            .is_err());
     }
 
     #[test]

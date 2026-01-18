@@ -238,8 +238,10 @@ mod tests {
 
     #[test]
     fn test_service_descriptor() {
-        static METHODS: &[MethodDescriptor] =
-            &[MethodDescriptor::unary("SayHello", "/helloworld.Greeter/SayHello")];
+        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::unary(
+            "SayHello",
+            "/helloworld.Greeter/SayHello",
+        )];
 
         let desc = ServiceDescriptor::new("Greeter", "helloworld", METHODS);
         assert_eq!(desc.full_name(), "helloworld.Greeter");

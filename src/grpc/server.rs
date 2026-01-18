@@ -127,8 +127,7 @@ impl ServerBuilder {
     where
         S: NamedService + ServiceHandler + 'static,
     {
-        self.services
-            .insert(S::NAME.to_string(), Arc::new(service));
+        self.services.insert(S::NAME.to_string(), Arc::new(service));
         self
     }
 
@@ -406,7 +405,9 @@ mod tests {
         assert!(interceptor.intercept_request(&mut request).is_err());
 
         // Request with auth
-        request.metadata_mut().insert("authorization", "Bearer token");
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer token");
         assert!(interceptor.intercept_request(&mut request).is_ok());
     }
 }

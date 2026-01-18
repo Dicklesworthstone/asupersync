@@ -103,7 +103,7 @@ impl Barrier {
                 // Actually, decreasing arrived means we are further from target.
                 // We typically don't need to notify because nobody is waiting for *less* people.
                 // However, if we were the last one and we leave, we aren't the last one anymore.
-                
+
                 cx.trace("barrier::wait cancelled");
                 return Err(BarrierWaitError::Cancelled);
             }

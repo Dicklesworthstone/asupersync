@@ -180,10 +180,7 @@ impl Metadata {
 
     /// Get a value by key.
     pub fn get(&self, key: &str) -> Option<&MetadataValue> {
-        self.entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     /// Iterate over entries.
@@ -353,9 +350,7 @@ impl<Req, Resp> Default for Bidirectional<Req, Resp> {
 pub type StreamingResult<T> = Result<Response<T>, Status>;
 
 /// Unary call future.
-pub trait UnaryFuture:
-    Future<Output = Result<Response<Self::Response>, Status>> + Send
-{
+pub trait UnaryFuture: Future<Output = Result<Response<Self::Response>, Status>> + Send {
     /// The response type.
     type Response;
 }

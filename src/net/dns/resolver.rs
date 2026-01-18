@@ -60,10 +60,7 @@ impl ResolverConfig {
     #[must_use]
     pub fn google() -> Self {
         Self {
-            nameservers: vec![
-                "8.8.8.8:53".parse().unwrap(),
-                "8.8.4.4:53".parse().unwrap(),
-            ],
+            nameservers: vec!["8.8.8.8:53".parse().unwrap(), "8.8.4.4:53".parse().unwrap()],
             ..Default::default()
         }
     }
@@ -72,10 +69,7 @@ impl ResolverConfig {
     #[must_use]
     pub fn cloudflare() -> Self {
         Self {
-            nameservers: vec![
-                "1.1.1.1:53".parse().unwrap(),
-                "1.0.0.1:53".parse().unwrap(),
-            ],
+            nameservers: vec!["1.1.1.1:53".parse().unwrap(), "1.0.0.1:53".parse().unwrap()],
             ..Default::default()
         }
     }
@@ -223,10 +217,8 @@ impl Resolver {
         }
 
         // Sort: IPv6 first, then IPv4
-        let mut sorted_addrs: Vec<SocketAddr> = addrs
-            .iter()
-            .map(|ip| SocketAddr::new(*ip, port))
-            .collect();
+        let mut sorted_addrs: Vec<SocketAddr> =
+            addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
         sorted_addrs.sort_by_key(|a| if a.is_ipv6() { 0 } else { 1 });
 
         // If Happy Eyeballs is disabled, just try sequentially
@@ -249,9 +241,8 @@ impl Resolver {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            DnsError::Connection("no addresses to connect to".to_string())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| DnsError::Connection("no addresses to connect to".to_string())))
     }
 
     /// Connects using Happy Eyeballs algorithm.
@@ -302,8 +293,8 @@ impl Resolver {
     ) -> Result<TcpStream, DnsError> {
         // Phase 0: Synchronous connect
         // TODO: Implement proper async connect with timeout in Phase 1
-        let stream = StdTcpStream::connect(addr)
-            .map_err(|e| DnsError::Connection(e.to_string()))?;
+        let stream =
+            StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
 
         stream
             .set_nonblocking(true)
@@ -411,10 +402,7 @@ mod tests {
         let _ = resolver1.query_ip_sync("localhost");
         resolver1.cache.put_ip(
             "test.example",
-            &LookupIp::new(
-                vec!["192.0.2.1".parse().unwrap()],
-                Duration::from_secs(300),
-            ),
+            &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_secs(300)),
         );
 
         // Should be visible on resolver2 (shared cache)

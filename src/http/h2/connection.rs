@@ -14,7 +14,7 @@ use super::frame::{
 };
 use super::hpack::{self, Header};
 use super::settings::Settings;
-use super::stream::{Stream, StreamStore, StreamState};
+use super::stream::{Stream, StreamState, StreamStore};
 
 /// Connection preface that clients must send.
 pub const CLIENT_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -143,7 +143,10 @@ pub enum PendingOp {
         end_stream: bool,
     },
     /// RST_STREAM to send.
-    RstStream { stream_id: u32, error_code: ErrorCode },
+    RstStream {
+        stream_id: u32,
+        error_code: ErrorCode,
+    },
     /// GOAWAY to send.
     GoAway {
         last_stream_id: u32,
@@ -320,10 +323,9 @@ impl Connection {
         data: Bytes,
         end_stream: bool,
     ) -> Result<(), H2Error> {
-        let stream = self
-            .streams
-            .get_mut(stream_id)
-            .ok_or_else(|| H2Error::stream(stream_id, ErrorCode::StreamClosed, "stream not found"))?;
+        let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
+            H2Error::stream(stream_id, ErrorCode::StreamClosed, "stream not found")
+        })?;
 
         stream.send_data(end_stream)?;
 
@@ -343,10 +345,9 @@ impl Connection {
         headers: Vec<Header>,
         end_stream: bool,
     ) -> Result<(), H2Error> {
-        let stream = self
-            .streams
-            .get_mut(stream_id)
-            .ok_or_else(|| H2Error::stream(stream_id, ErrorCode::StreamClosed, "stream not found"))?;
+        let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
+            H2Error::stream(stream_id, ErrorCode::StreamClosed, "stream not found")
+        })?;
 
         stream.send_headers(end_stream)?;
 

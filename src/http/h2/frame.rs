@@ -124,9 +124,7 @@ impl FrameHeader {
             return Err(H2Error::protocol("insufficient bytes for frame header"));
         }
 
-        let length = ((u32::from(src[0])) << 16)
-            | ((u32::from(src[1])) << 8)
-            | u32::from(src[2]);
+        let length = ((u32::from(src[0])) << 16) | ((u32::from(src[1])) << 8) | u32::from(src[2]);
         let frame_type = src[3];
         let flags = src[4];
         let stream_id = ((u32::from(src[5]) & 0x7f) << 24)
@@ -259,7 +257,9 @@ impl DataFrame {
         // Handle padding
         if header.has_flag(data_flags::PADDED) {
             if data.is_empty() {
-                return Err(H2Error::protocol("PADDED DATA frame with no padding length"));
+                return Err(H2Error::protocol(
+                    "PADDED DATA frame with no padding length",
+                ));
             }
             let pad_length = data[0] as usize;
             data = data.slice(1..);
@@ -338,7 +338,9 @@ impl HeadersFrame {
         let mut pad_length = 0;
         if padded {
             if payload.is_empty() {
-                return Err(H2Error::protocol("PADDED HEADERS frame with no padding length"));
+                return Err(H2Error::protocol(
+                    "PADDED HEADERS frame with no padding length",
+                ));
             }
             pad_length = payload[0] as usize;
             payload = payload.slice(1..);
@@ -368,7 +370,9 @@ impl HeadersFrame {
         // Remove padding
         if padded {
             if pad_length >= payload.len() {
-                return Err(H2Error::protocol("HEADERS frame padding exceeds data length"));
+                return Err(H2Error::protocol(
+                    "HEADERS frame padding exceeds data length",
+                ));
             }
             payload = payload.slice(..payload.len() - pad_length);
         }
@@ -579,7 +583,9 @@ impl SettingsFrame {
         }
 
         if payload.len() % 6 != 0 {
-            return Err(H2Error::frame_size("SETTINGS frame length not multiple of 6"));
+            return Err(H2Error::frame_size(
+                "SETTINGS frame length not multiple of 6",
+            ));
         }
 
         let mut settings = Vec::new();
@@ -708,7 +714,9 @@ impl PushPromiseFrame {
         let mut pad_length = 0;
         if padded {
             if payload.is_empty() {
-                return Err(H2Error::protocol("PADDED PUSH_PROMISE frame with no padding length"));
+                return Err(H2Error::protocol(
+                    "PADDED PUSH_PROMISE frame with no padding length",
+                ));
             }
             pad_length = payload[0] as usize;
             payload = payload.slice(1..);
@@ -727,7 +735,9 @@ impl PushPromiseFrame {
         // Remove padding
         if padded {
             if pad_length >= payload.len() {
-                return Err(H2Error::protocol("PUSH_PROMISE frame padding exceeds data length"));
+                return Err(H2Error::protocol(
+                    "PUSH_PROMISE frame padding exceeds data length",
+                ));
             }
             payload = payload.slice(..payload.len() - pad_length);
         }
@@ -996,12 +1006,21 @@ pub fn parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2Erro
         Some(FrameType::Priority) => Ok(Frame::Priority(PriorityFrame::parse(header, payload)?)),
         Some(FrameType::RstStream) => Ok(Frame::RstStream(RstStreamFrame::parse(header, payload)?)),
         Some(FrameType::Settings) => Ok(Frame::Settings(SettingsFrame::parse(header, payload)?)),
-        Some(FrameType::PushPromise) => Ok(Frame::PushPromise(PushPromiseFrame::parse(header, payload)?)),
+        Some(FrameType::PushPromise) => Ok(Frame::PushPromise(PushPromiseFrame::parse(
+            header, payload,
+        )?)),
         Some(FrameType::Ping) => Ok(Frame::Ping(PingFrame::parse(header, payload)?)),
         Some(FrameType::GoAway) => Ok(Frame::GoAway(GoAwayFrame::parse(header, payload)?)),
-        Some(FrameType::WindowUpdate) => Ok(Frame::WindowUpdate(WindowUpdateFrame::parse(header, payload)?)),
-        Some(FrameType::Continuation) => Ok(Frame::Continuation(ContinuationFrame::parse(header, payload)?)),
-        None => Err(H2Error::protocol(format!("unknown frame type: {}", header.frame_type))),
+        Some(FrameType::WindowUpdate) => Ok(Frame::WindowUpdate(WindowUpdateFrame::parse(
+            header, payload,
+        )?)),
+        Some(FrameType::Continuation) => Ok(Frame::Continuation(ContinuationFrame::parse(
+            header, payload,
+        )?)),
+        None => Err(H2Error::protocol(format!(
+            "unknown frame type: {}",
+            header.frame_type
+        ))),
     }
 }
 

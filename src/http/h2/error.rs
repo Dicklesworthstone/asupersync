@@ -162,7 +162,11 @@ impl fmt::Display for H2Error {
                 stream_id, self.code, self.message
             )
         } else {
-            write!(f, "HTTP/2 connection error ({}): {}", self.code, self.message)
+            write!(
+                f,
+                "HTTP/2 connection error ({}): {}",
+                self.code, self.message
+            )
         }
     }
 }

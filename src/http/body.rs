@@ -19,7 +19,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::bytes::{Buf, BytesCursor, Bytes};
+use crate::bytes::{Buf, Bytes, BytesCursor};
 
 /// A frame of body content: either data or trailers.
 ///
@@ -145,10 +145,7 @@ impl HeaderMap {
     /// Gets the first value for a header name.
     #[must_use]
     pub fn get(&self, name: &HeaderName) -> Option<&HeaderValue> {
-        self.headers
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v)
+        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
     /// Returns an iterator over the headers.
@@ -478,9 +475,7 @@ impl<D: Buf + Unpin> Body for Full<D> {
         // Full<D> is Unpin when D: Unpin, so we can use get_mut()
         let this = self.get_mut();
         match this.data.take() {
-            Some(data) if data.remaining() > 0 => {
-                Poll::Ready(Some(Ok(Frame::Data(data))))
-            }
+            Some(data) if data.remaining() > 0 => Poll::Ready(Some(Ok(Frame::Data(data)))),
             _ => Poll::Ready(None),
         }
     }

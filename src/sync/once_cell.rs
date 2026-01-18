@@ -121,12 +121,10 @@ impl<T> OnceCell<T> {
     ///
     /// Returns `Err(value)` if the cell is already initialized.
     pub fn set(&self, value: T) -> Result<(), T> {
-        match self.state.compare_exchange(
-            UNINIT,
-            INITIALIZING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .state
+            .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => {
                 // We are the initializer. Store the value.
                 let _ = self.value.set(value);
@@ -154,12 +152,10 @@ impl<T> OnceCell<T> {
         }
 
         // Try to become the initializer.
-        match self.state.compare_exchange(
-            UNINIT,
-            INITIALIZING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .state
+            .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => {
                 // We are the initializer.
                 let value = f();
@@ -203,12 +199,10 @@ impl<T> OnceCell<T> {
         }
 
         // Try to become the initializer.
-        match self.state.compare_exchange(
-            UNINIT,
-            INITIALIZING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .state
+            .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => {
                 // We are the initializer.
                 // Create a guard to reset state if we're cancelled.
@@ -261,12 +255,10 @@ impl<T> OnceCell<T> {
         }
 
         // Try to become the initializer.
-        match self.state.compare_exchange(
-            UNINIT,
-            INITIALIZING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .state
+            .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => {
                 // We are the initializer.
                 // Create a guard to reset state if we're cancelled or fail.

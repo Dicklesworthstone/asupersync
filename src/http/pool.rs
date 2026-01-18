@@ -131,8 +131,12 @@ impl PoolConfigBuilder {
     pub fn build(self) -> PoolConfig {
         let defaults = PoolConfig::default();
         PoolConfig {
-            max_connections_per_host: self.max_connections_per_host.unwrap_or(defaults.max_connections_per_host),
-            max_total_connections: self.max_total_connections.unwrap_or(defaults.max_total_connections),
+            max_connections_per_host: self
+                .max_connections_per_host
+                .unwrap_or(defaults.max_connections_per_host),
+            max_total_connections: self
+                .max_total_connections
+                .unwrap_or(defaults.max_total_connections),
             idle_timeout: self.idle_timeout.unwrap_or(defaults.idle_timeout),
             cleanup_interval: self.cleanup_interval.unwrap_or(defaults.cleanup_interval),
         }
@@ -362,7 +366,11 @@ impl Pool {
     #[must_use]
     pub fn can_create_connection(&self, key: &PoolKey) -> bool {
         // Check total connection limit
-        let total = self.hosts.values().map(HostPool::connection_count).sum::<usize>();
+        let total = self
+            .hosts
+            .values()
+            .map(HostPool::connection_count)
+            .sum::<usize>();
         if total >= self.config.max_total_connections {
             return false;
         }

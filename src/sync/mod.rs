@@ -36,7 +36,7 @@ mod semaphore;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
-pub use notify::{Notify, Notified};
+pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, OnceCellError};
 pub use rwlock::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockError, RwLockReadGuard,

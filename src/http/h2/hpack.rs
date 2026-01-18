@@ -299,8 +299,7 @@ impl Encoder {
         let value = header.value.as_str();
 
         // Try to find exact match in tables
-        if let Some(idx) = find_static(name, value)
-            .or_else(|| self.dynamic_table.find(name, value))
+        if let Some(idx) = find_static(name, value).or_else(|| self.dynamic_table.find(name, value))
         {
             // Indexed header field
             encode_integer(dst, idx, 7, 0x80);
@@ -308,8 +307,7 @@ impl Encoder {
         }
 
         // Try to find name match
-        let name_idx = find_static_name(name)
-            .or_else(|| self.dynamic_table.find_name(name));
+        let name_idx = find_static_name(name).or_else(|| self.dynamic_table.find_name(name));
 
         if index {
             // Literal with incremental indexing
@@ -430,7 +428,11 @@ impl Decoder {
     }
 
     /// Decode a literal header field.
-    fn decode_literal(&self, src: &mut Bytes, prefix_bits: u8) -> Result<(String, String), H2Error> {
+    fn decode_literal(
+        &self,
+        src: &mut Bytes,
+        prefix_bits: u8,
+    ) -> Result<(String, String), H2Error> {
         let index = decode_integer(src, prefix_bits)?;
 
         let name = if index == 0 {
@@ -451,8 +453,8 @@ impl Decoder {
         }
 
         if index <= STATIC_TABLE.len() {
-            let (name, value) = get_static(index)
-                .ok_or_else(|| H2Error::compression("invalid static index"))?;
+            let (name, value) =
+                get_static(index).ok_or_else(|| H2Error::compression("invalid static index"))?;
             Ok(Header::new(name, value))
         } else {
             let dyn_index = index - STATIC_TABLE.len();
@@ -924,7 +926,10 @@ mod tests {
         let mut table = DynamicTable::new();
         table.insert(Header::new("custom-header", "custom-value"));
 
-        assert_eq!(table.size(), "custom-header".len() + "custom-value".len() + 32);
+        assert_eq!(
+            table.size(),
+            "custom-header".len() + "custom-value".len() + 32
+        );
         assert!(table.get(1).is_some());
     }
 

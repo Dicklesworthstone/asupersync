@@ -248,7 +248,9 @@ impl<T> Sender<T> {
             }
             Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             Err(SendError::Full(())) => Err(SendError::Full(value)),
-            Err(SendError::Cancelled(())) => unreachable!("try_reserve does not check cancellation"),
+            Err(SendError::Cancelled(())) => {
+                unreachable!("try_reserve does not check cancellation")
+            }
         }
     }
 

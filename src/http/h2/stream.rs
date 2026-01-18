@@ -323,7 +323,11 @@ impl Stream {
     }
 
     /// Process CONTINUATION frame.
-    pub fn recv_continuation(&mut self, header_block: Bytes, end_headers: bool) -> Result<(), H2Error> {
+    pub fn recv_continuation(
+        &mut self,
+        header_block: Bytes,
+        end_headers: bool,
+    ) -> Result<(), H2Error> {
         if self.headers_complete {
             return Err(H2Error::stream(
                 self.id,
@@ -408,7 +412,8 @@ impl Stream {
 
     /// Queue data for sending (when flow control blocks).
     pub fn queue_data(&mut self, data: Bytes, end_stream: bool) {
-        self.pending_data.push_back(PendingData { data, end_stream });
+        self.pending_data
+            .push_back(PendingData { data, end_stream });
     }
 
     /// Take pending data that fits in the window.
@@ -524,7 +529,11 @@ impl StreamStore {
 
     /// Allocate a new stream ID.
     pub fn allocate_stream_id(&mut self) -> Result<u32, H2Error> {
-        let active_count = self.streams.values().filter(|s| !s.state.is_closed()).count() as u32;
+        let active_count = self
+            .streams
+            .values()
+            .filter(|s| !s.state.is_closed())
+            .count() as u32;
         if active_count >= self.max_concurrent_streams {
             return Err(H2Error::protocol("max concurrent streams exceeded"));
         }
@@ -562,7 +571,10 @@ impl StreamStore {
     /// Get count of active streams.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.streams.values().filter(|s| !s.state.is_closed()).count()
+        self.streams
+            .values()
+            .filter(|s| !s.state.is_closed())
+            .count()
     }
 }
 

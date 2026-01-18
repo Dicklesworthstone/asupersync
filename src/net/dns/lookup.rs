@@ -301,10 +301,7 @@ mod tests {
     #[test]
     fn lookup_ip_accessors() {
         let lookup = LookupIp::new(
-            vec![
-                "192.0.2.1".parse().unwrap(),
-                "2001:db8::1".parse().unwrap(),
-            ],
+            vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
             Duration::from_secs(300),
         );
 
