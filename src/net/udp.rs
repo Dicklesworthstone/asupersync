@@ -39,11 +39,16 @@ impl UdpSocket {
 
     /// Send a datagram to the specified target.
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
-        // TODO: Async send
-        match self.inner.send_to(buf, target) {
-            Ok(n) => Ok(n),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => std::future::pending().await,
-            Err(e) => Err(e),
+        let addrs: Vec<_> = target.to_socket_addrs()?.collect();
+        loop {
+            for addr in &addrs {
+                match self.inner.send_to(buf, addr) {
+                    Ok(n) => return Ok(n),
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            crate::runtime::yield_now().await;
         }
     }
 
@@ -54,7 +59,7 @@ impl UdpSocket {
             match self.inner.recv_from(buf) {
                 Ok(res) => return Ok(res),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::future::pending::<()>().await;
+                    crate::runtime::yield_now().await;
                 }
                 Err(e) => return Err(e),
             }
@@ -63,10 +68,14 @@ impl UdpSocket {
 
     /// Send a datagram to the connected peer.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        match self.inner.send(buf) {
-            Ok(n) => Ok(n),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => std::future::pending().await,
-            Err(e) => Err(e),
+        loop {
+            match self.inner.send(buf) {
+                Ok(n) => return Ok(n),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    crate::runtime::yield_now().await;
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -76,7 +85,7 @@ impl UdpSocket {
             match self.inner.recv(buf) {
                 Ok(n) => return Ok(n),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::future::pending::<()>().await;
+                    crate::runtime::yield_now().await;
                 }
                 Err(e) => return Err(e),
             }
@@ -89,7 +98,7 @@ impl UdpSocket {
             match self.inner.peek_from(buf) {
                 Ok(res) => return Ok(res),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::future::pending::<()>().await;
+                    crate::runtime::yield_now().await;
                 }
                 Err(e) => return Err(e),
             }

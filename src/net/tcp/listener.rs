@@ -28,19 +28,17 @@ impl TcpListener {
 
     /// Accept connection.
     pub async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
-        // TODO: Wait for readability using reactor
-        // self.registration.async_readable().await?;
-
-        match self.inner.accept() {
-            Ok((stream, addr)) => {
-                stream.set_nonblocking(true)?;
-                Ok((TcpStream::from_std(stream), addr))
+        loop {
+            match self.inner.accept() {
+                Ok((stream, addr)) => {
+                    stream.set_nonblocking(true)?;
+                    return Ok((TcpStream::from_std(stream), addr));
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    crate::runtime::yield_now().await;
+                }
+                Err(e) => return Err(e),
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Pending
-                std::future::pending().await
-            }
-            Err(e) => Err(e),
         }
     }
 

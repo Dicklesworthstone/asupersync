@@ -89,12 +89,11 @@ impl TcpStream {
 impl AsyncRead for TcpStream {
     fn poll_read(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         use std::io::Read;
-        // TODO: check readiness
-        let mut inner = &*self.inner;
+        let inner = &*self.inner;
         // This fails because inner is Arc and we need &mut for Read trait?
         // std::net::TcpStream implement Read for &TcpStream.
         match inner.read(buf.unfilled()) {
@@ -102,7 +101,10 @@ impl AsyncRead for TcpStream {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
@@ -111,24 +113,30 @@ impl AsyncRead for TcpStream {
 impl AsyncWrite for TcpStream {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         use std::io::Write;
-        let mut inner = &*self.inner;
+        let inner = &*self.inner;
         match inner.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::io::Write;
-        let mut inner = &*self.inner;
+        let inner = &*self.inner;
         match inner.flush() {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
