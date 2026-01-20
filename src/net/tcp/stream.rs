@@ -34,7 +34,10 @@ impl TcpStream {
         inner: Arc<net::TcpStream>,
         registration: Option<IoRegistration>,
     ) -> Self {
-        Self { inner, registration }
+        Self {
+            inner,
+            registration,
+        }
     }
 
     /// Connect to address.

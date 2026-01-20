@@ -107,7 +107,7 @@ impl AsyncWrite for WriteHalf<'_> {
 ///
 /// Both [`OwnedReadHalf`] and [`OwnedWriteHalf`] share this state via `Arc`,
 /// ensuring proper reactor registration sharing and cleanup.
-struct TcpStreamInner {
+pub(crate) struct TcpStreamInner {
     /// The underlying TCP stream.
     stream: Arc<net::TcpStream>,
     /// Shared reactor registration with interior mutability.
@@ -154,7 +154,7 @@ impl OwnedReadHalf {
             registration: Mutex::new(registration),
         });
         (
-            OwnedReadHalf {
+            Self {
                 inner: inner.clone(),
             },
             OwnedWriteHalf {
@@ -513,7 +513,12 @@ mod tests {
 
         // Try to reunite mismatched halves
         let result = read_half1.reunite(write_half2);
-        crate::assert_with_log!(result.is_err(), "reunite fails for mismatch", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "reunite fails for mismatch",
+            true,
+            result.is_err()
+        );
 
         crate::test_complete!("owned_split_reunite_mismatch");
     }

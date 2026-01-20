@@ -35,7 +35,7 @@ use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process as std_process;
@@ -393,7 +393,7 @@ impl Command {
         cmd.stdout(self.stdout.to_std());
         cmd.stderr(self.stderr.to_std());
 
-        let child = cmd.spawn().map_err(|e| match e.kind() {
+        let mut child = cmd.spawn().map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => {
                 ProcessError::NotFound(self.program.to_string_lossy().into_owned())
             }
@@ -403,10 +403,10 @@ impl Command {
             _ => ProcessError::Io(e),
         })?;
 
-        // Extract the I/O handles before wrapping
-        let stdin = child.stdin.map(|s| ChildStdin::from_std(s));
-        let stdout = child.stdout.map(|s| ChildStdout::from_std(s));
-        let stderr = child.stderr.map(|s| ChildStderr::from_std(s));
+        // Extract the I/O handles before wrapping (use take() to avoid partial move)
+        let stdin = child.stdin.take().map(ChildStdin::from_std);
+        let stdout = child.stdout.take().map(ChildStdout::from_std);
+        let stderr = child.stderr.take().map(ChildStderr::from_std);
 
         Ok(Child {
             inner: Some(child),
@@ -753,7 +753,7 @@ impl AsyncRead for ChildStdout {
     ) -> Poll<io::Result<()>> {
         // For now, use blocking read
         // TODO: Use non-blocking I/O with reactor
-        let unfilled = buf.initialize_unfilled();
+        let unfilled = buf.unfilled();
         match self.inner.read(unfilled) {
             Ok(n) => {
                 buf.advance(n);
@@ -809,7 +809,7 @@ impl AsyncRead for ChildStderr {
     ) -> Poll<io::Result<()>> {
         // For now, use blocking read
         // TODO: Use non-blocking I/O with reactor
-        let unfilled = buf.initialize_unfilled();
+        let unfilled = buf.unfilled();
         match self.inner.read(unfilled) {
             Ok(n) => {
                 buf.advance(n);
@@ -946,12 +946,12 @@ mod tests {
     fn test_command_exit_code() {
         init_test("test_command_exit_code");
 
-        let status = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg("exit 42")
             .spawn()
-            .expect("spawn failed")
-            .wait();
+            .expect("spawn failed");
+        let status = child.wait();
 
         let result = futures_lite::future::block_on(status).expect("wait failed");
 
@@ -1029,7 +1029,7 @@ mod tests {
                 .write_all(b"hello from stdin")
                 .expect("write failed");
         }
-        drop(child.stdin); // Close stdin to signal EOF
+        // stdin is automatically closed when dropped after the if block
 
         let output =
             futures_lite::future::block_on(child.wait_with_output()).expect("output failed");
@@ -1121,7 +1121,7 @@ mod tests {
             .spawn()
             .expect("spawn failed");
 
-        let pid = child.id().expect("no pid");
+        let _pid = child.id().expect("no pid");
 
         // Drop the child - should kill it
         drop(child);
