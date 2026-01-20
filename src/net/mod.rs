@@ -19,7 +19,7 @@ pub mod unix;
 pub use resolve::{lookup_all, lookup_one};
 pub use tcp::listener::{Incoming, TcpListener};
 pub use tcp::socket::TcpSocket;
-pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};
 pub use tcp::stream::TcpStream;
 pub use udp::{RecvStream, SendSink, UdpSocket};
 #[cfg(unix)]

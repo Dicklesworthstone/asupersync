@@ -29,6 +29,14 @@ impl TcpStream {
         }
     }
 
+    /// Reconstruct a TcpStream from its parts (used by reunite).
+    pub(crate) fn from_parts(
+        inner: Arc<net::TcpStream>,
+        registration: Option<IoRegistration>,
+    ) -> Self {
+        Self { inner, registration }
+    }
+
     /// Connect to address.
     pub async fn connect<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
         // 1. Resolve and create socket
@@ -99,12 +107,15 @@ impl TcpStream {
     }
 
     /// Split into owned halves.
+    ///
+    /// The owned halves share the reactor registration, allowing proper
+    /// async I/O with wakeup notifications. Use [`reunite`] to reconstruct
+    /// the original stream.
+    ///
+    /// [`reunite`]: OwnedReadHalf::reunite
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        (
-            OwnedReadHalf::new(self.inner.clone()),
-            OwnedWriteHalf::new(self.inner),
-        )
+        OwnedReadHalf::new_pair(self.inner, self.registration)
     }
 
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
