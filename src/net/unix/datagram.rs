@@ -32,6 +32,10 @@
 //! - **Connected sockets** have a default destination and can use [`send`](UnixDatagram::send)
 //!   instead of [`send_to`](UnixDatagram::send_to).
 
+use crate::cx::Cx;
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
+use std::cell::RefCell;
 use std::io;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -52,6 +56,10 @@ use std::task::{Context, Poll};
 /// When dropped, a bound listener removes the socket file from the filesystem
 /// (unless it was created with [`from_std`](Self::from_std) or is an abstract
 /// namespace socket).
+/// A Unix domain socket datagram.
+///
+/// Uses interior mutability for reactor registration to allow async methods
+/// to take `&self` rather than `&mut self`, enabling concurrent use patterns.
 #[derive(Debug)]
 pub struct UnixDatagram {
     /// The underlying standard library datagram socket.
@@ -59,8 +67,9 @@ pub struct UnixDatagram {
     /// Path to the socket file (for cleanup on drop).
     /// None for abstract namespace sockets, unbound sockets, or from_std().
     path: Option<PathBuf>,
-    // TODO: Add Registration when reactor integration is complete
-    // registration: Option<Registration>,
+    /// Reactor registration for async I/O wakeup.
+    /// Uses RefCell for interior mutability since async methods take &self.
+    registration: RefCell<Option<IoRegistration>>,
 }
 
 impl UnixDatagram {
@@ -97,6 +106,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: Some(path.to_path_buf()),
+            registration: RefCell::new(None),
         })
     }
 
@@ -129,6 +139,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: None, // No filesystem path for abstract sockets
+            registration: RefCell::new(None),
         })
     }
 
@@ -152,7 +163,11 @@ impl UnixDatagram {
         let inner = net::UnixDatagram::unbound()?;
         inner.set_nonblocking(true)?;
 
-        Ok(Self { inner, path: None })
+        Ok(Self {
+            inner,
+            path: None,
+            registration: RefCell::new(None),
+        })
     }
 
     /// Creates a pair of connected Unix datagram sockets.
@@ -183,10 +198,12 @@ impl UnixDatagram {
             Self {
                 inner: s1,
                 path: None,
+                registration: RefCell::new(None),
             },
             Self {
                 inner: s2,
                 path: None,
+                registration: RefCell::new(None),
             },
         ))
     }
@@ -234,6 +251,52 @@ impl UnixDatagram {
         self.inner.connect_addr(&addr)
     }
 
+    /// Register interest with the reactor for async wakeup.
+    ///
+    /// Uses interior mutability via RefCell since async methods take &self.
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let mut reg = self.registration.borrow_mut();
+
+        if let Some(registration) = reg.as_mut() {
+            let combined = registration.interest() | interest;
+            if combined != registration.interest() {
+                if let Err(err) = registration.set_interest(combined) {
+                    if err.kind() == io::ErrorKind::NotConnected {
+                        *reg = None;
+                        cx.waker().wake_by_ref();
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+            }
+            if registration.update_waker(cx.waker().clone()) {
+                return Ok(());
+            }
+            *reg = None;
+        }
+
+        let Some(current) = Cx::current() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+
+        match driver.register(&self.inner, interest, cx.waker().clone()) {
+            Ok(registration) => {
+                *reg = Some(registration);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                cx.waker().wake_by_ref();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Sends data to the specified address.
     ///
     /// # Cancel-Safety
@@ -264,16 +327,17 @@ impl UnixDatagram {
     /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
     /// ```
     pub async fn send_to<P: AsRef<Path>>(&self, buf: &[u8], path: P) -> io::Result<usize> {
-        loop {
-            match self.inner.send_to(buf, &path) {
-                Ok(n) => return Ok(n),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // TODO: Replace with proper reactor wait when integration is complete
-                    crate::runtime::yield_now().await;
+        std::future::poll_fn(|cx| match self.inner.send_to(buf, &path) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
                 }
-                Err(e) => return Err(e),
+                Poll::Pending
             }
-        }
+            Err(e) => Poll::Ready(Err(e)),
+        })
+        .await
     }
 
     /// Receives data and the source address.
@@ -304,16 +368,17 @@ impl UnixDatagram {
     /// println!("Received {} bytes from {:?}", n, addr);
     /// ```
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        loop {
-            match self.inner.recv_from(buf) {
-                Ok((n, addr)) => return Ok((n, addr)),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // TODO: Replace with proper reactor wait when integration is complete
-                    crate::runtime::yield_now().await;
+        std::future::poll_fn(|cx| match self.inner.recv_from(buf) {
+            Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
                 }
-                Err(e) => return Err(e),
+                Poll::Pending
             }
-        }
+            Err(e) => Poll::Ready(Err(e)),
+        })
+        .await
     }
 
     /// Sends data to the connected peer.
@@ -348,16 +413,17 @@ impl UnixDatagram {
     /// let n = a.send(b"hello").await?;
     /// ```
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        loop {
-            match self.inner.send(buf) {
-                Ok(n) => return Ok(n),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // TODO: Replace with proper reactor wait when integration is complete
-                    crate::runtime::yield_now().await;
+        std::future::poll_fn(|cx| match self.inner.send(buf) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
                 }
-                Err(e) => return Err(e),
+                Poll::Pending
             }
-        }
+            Err(e) => Poll::Ready(Err(e)),
+        })
+        .await
     }
 
     /// Receives data from the connected peer.
@@ -391,16 +457,17 @@ impl UnixDatagram {
     /// let n = b.recv(&mut buf).await?;
     /// ```
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            match self.inner.recv(buf) {
-                Ok(n) => return Ok(n),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // TODO: Replace with proper reactor wait when integration is complete
-                    crate::runtime::yield_now().await;
+        std::future::poll_fn(|cx| match self.inner.recv(buf) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
                 }
-                Err(e) => return Err(e),
+                Poll::Pending
             }
-        }
+            Err(e) => Poll::Ready(Err(e)),
+        })
+        .await
     }
 
     /// Returns the local socket address.
@@ -434,6 +501,7 @@ impl UnixDatagram {
         Ok(Self {
             inner: socket,
             path: None, // Don't clean up sockets we didn't create
+            registration: RefCell::new(None),
         })
     }
 
@@ -454,7 +522,6 @@ impl UnixDatagram {
     /// Polls for read readiness.
     ///
     /// This is useful for implementing custom poll loops.
-    #[allow(unused)]
     pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::os::unix::io::AsRawFd;
 
@@ -475,7 +542,9 @@ impl UnixDatagram {
         } else {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::WouldBlock {
-                cx.waker().wake_by_ref();
+                if let Err(e) = self.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             } else {
                 Poll::Ready(Err(err))
@@ -486,12 +555,33 @@ impl UnixDatagram {
     /// Polls for write readiness.
     ///
     /// This is useful for implementing custom poll loops.
-    #[allow(unused)]
     pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // For datagrams, we just check if we'd block
-        // TODO: Use proper reactor registration
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        use std::os::unix::io::AsRawFd;
+
+        // Try a zero-byte send to check write readiness
+        // SAFETY: send with zero length is a well-defined syscall
+        let ret = unsafe {
+            libc::send(
+                self.inner.as_raw_fd(),
+                std::ptr::null(),
+                0, // zero-length to check readiness
+                libc::MSG_DONTWAIT,
+            )
+        };
+
+        if ret >= 0 {
+            Poll::Ready(Ok(()))
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                if let Err(e) = self.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending
+            } else {
+                Poll::Ready(Err(err))
+            }
+        }
     }
 
     /// Peeks at incoming data without consuming it.
@@ -500,7 +590,7 @@ impl UnixDatagram {
     pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
-        loop {
+        std::future::poll_fn(|cx| {
             // SAFETY: recv with MSG_PEEK is a well-defined syscall
             let ret = unsafe {
                 libc::recv(
@@ -512,16 +602,20 @@ impl UnixDatagram {
             };
 
             if ret >= 0 {
-                return Ok(ret as usize);
-            }
-
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                crate::runtime::yield_now().await;
+                Poll::Ready(Ok(ret as usize))
             } else {
-                return Err(err);
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    if let Err(e) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Err(err))
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Peeks at incoming data and returns the source address.
@@ -530,7 +624,7 @@ impl UnixDatagram {
     pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         use std::os::unix::io::AsRawFd;
 
-        loop {
+        std::future::poll_fn(|cx| {
             let mut addr_storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
             let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
 
@@ -557,16 +651,20 @@ impl UnixDatagram {
                         panic!("failed to create placeholder socket address")
                     })
                 });
-                return Ok((ret as usize, addr));
-            }
-
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                crate::runtime::yield_now().await;
+                Poll::Ready(Ok((ret as usize, addr)))
             } else {
-                return Err(err);
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    if let Err(e) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Err(err))
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Sets the read timeout on the socket.
@@ -832,5 +930,128 @@ mod tests {
             crate::assert_with_log!(n == 5, "received bytes", 5, n);
         });
         crate::test_complete!("test_datagram_abstract_socket");
+    }
+
+    #[test]
+    fn test_datagram_registers_on_wouldblock() {
+        use crate::cx::Cx;
+        use crate::runtime::io_driver::IoDriverHandle;
+        use crate::runtime::LabReactor;
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::sync::Arc;
+        use std::task::{Context, Wake, Waker};
+
+        init_test("test_datagram_registers_on_wouldblock");
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+        fn noop_waker() -> Waker {
+            Waker::from(Arc::new(NoopWaker))
+        }
+
+        // Create a pair and drain the socket to ensure WouldBlock on recv
+        let (a, b) = UnixDatagram::pair().expect("pair failed");
+
+        // Set up reactor context
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Try to poll recv when no data available - should return Pending and register
+        let poll = b.poll_recv_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Pending),
+            "poll is Pending",
+            "Poll::Pending",
+            format!("{:?}", poll)
+        );
+        let has_registration = b.registration.borrow().is_some();
+        crate::assert_with_log!(
+            has_registration,
+            "registration present",
+            true,
+            has_registration
+        );
+
+        // Now send some data
+        futures_lite::future::block_on(async {
+            a.send(b"test").await.expect("send failed");
+        });
+
+        // Poll should succeed
+        let poll = b.poll_recv_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Ready(Ok(()))),
+            "poll is Ready",
+            "Poll::Ready(Ok(()))",
+            format!("{:?}", poll)
+        );
+
+        crate::test_complete!("test_datagram_registers_on_wouldblock");
+    }
+
+    #[test]
+    fn test_datagram_send_registers_on_wouldblock() {
+        use crate::cx::Cx;
+        use crate::runtime::io_driver::IoDriverHandle;
+        use crate::runtime::LabReactor;
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::sync::Arc;
+        use std::task::{Context, Wake, Waker};
+
+        init_test("test_datagram_send_registers_on_wouldblock");
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+        fn noop_waker() -> Waker {
+            Waker::from(Arc::new(NoopWaker))
+        }
+
+        // Create a pair
+        let (a, _b) = UnixDatagram::pair().expect("pair failed");
+
+        // Set up reactor context
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // poll_send_ready should work without blocking for an empty socket
+        let poll = a.poll_send_ready(&mut poll_cx);
+        // Either ready or pending with registration is acceptable
+        if matches!(poll, Poll::Pending) {
+            let has_registration = a.registration.borrow().is_some();
+            crate::assert_with_log!(
+                has_registration,
+                "registration present on Pending",
+                true,
+                has_registration
+            );
+        }
+
+        crate::test_complete!("test_datagram_send_registers_on_wouldblock");
     }
 }
