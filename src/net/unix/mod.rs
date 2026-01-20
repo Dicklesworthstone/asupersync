@@ -43,11 +43,15 @@
 //! Unix domain sockets are available on all Unix-like platforms. Abstract
 //! namespace sockets (via [`UnixListener::bind_abstract`]) are Linux-only.
 
+pub mod ancillary;
 pub mod datagram;
 pub mod listener;
 pub mod split;
 pub mod stream;
 
+pub use ancillary::{
+    ancillary_space_for_fds, AncillaryMessage, AncillaryMessages, ScmRights, SocketAncillary,
+};
 pub use datagram::UnixDatagram;
 pub use listener::{Incoming, UnixListener};
 pub use split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};

@@ -427,7 +427,260 @@ lab(42)
 
 ## API Reference
 
-See the rustdoc for:
-- [`lab::injection`](../src/lab/injection.rs) - Lab integration
-- [`lab::instrumented_future`](../src/lab/instrumented_future.rs) - Core instrumentation
-- [`lab::oracle`](../src/lab/oracle.rs) - Oracle verification
+### Key Types
+
+#### AwaitPoint
+
+Identifies a specific await point within a task:
+
+```rust
+pub struct AwaitPoint {
+    /// The task this await point belongs to (optional).
+    pub task_id: Option<TaskId>,
+    /// The sequential number of this await point (1-based).
+    pub sequence: u64,
+    /// Optional source location (file:line) for debugging.
+    pub source_location: Option<String>,
+}
+
+// Creation
+let point = AwaitPoint::new(Some(task_id), 5);
+let anonymous = AwaitPoint::anonymous(10);  // No task association
+let with_location = AwaitPoint::anonymous(5).with_source("src/lib.rs:42");
+```
+
+#### InstrumentedFuture
+
+Wraps any future to track await points:
+
+```rust
+pub struct InstrumentedFuture<F> {
+    inner: F,
+    injector: Arc<CancellationInjector>,
+    await_counter: u64,
+    // ...
+}
+
+// Creation
+let instrumented = InstrumentedFuture::new(my_future, injector);
+let recording = InstrumentedFuture::recording(my_future);
+
+// Inspection
+instrumented.await_count()      // Current await counter
+instrumented.was_cancelled()    // Whether cancellation was injected
+instrumented.injection_point()  // Which point was injected (if any)
+instrumented.injector()         // Reference to the injector
+```
+
+Output type wraps the inner future's result:
+
+```rust
+pub enum InstrumentedPollResult<T> {
+    /// The inner future returned this result.
+    Inner(T),
+    /// Cancellation was injected at this await point.
+    CancellationInjected(u64),
+}
+```
+
+#### CancellationInjector
+
+Controls when and where cancellation is injected:
+
+```rust
+// Recording mode - tracks await points without injecting
+let injector = CancellationInjector::recording();
+
+// Inject at specific sequence number
+let injector = CancellationInjector::inject_at(3);
+
+// Inject at specific await point (task-aware)
+let injector = CancellationInjector::inject_at_point(await_point);
+
+// Inject at every Nth await point
+let injector = CancellationInjector::inject_every_nth(4);
+
+// Custom strategy
+let injector = CancellationInjector::with_strategy(InjectionStrategy::FirstN(5));
+
+// Query recorded points
+let points: Vec<u64> = injector.recorded_points();
+let count: u64 = injector.injection_count();
+injector.clear_recorded();  // Reset for reuse
+```
+
+#### InjectionRunner (Low-Level)
+
+Orchestrates recording and injection phases without Lab integration:
+
+```rust
+let mut runner = InjectionRunner::new(42);  // seed
+
+// Full control over polling
+let report = runner.run_with_injection(
+    InjectionStrategy::AllPoints,
+    |injector| InstrumentedFuture::new(my_future(), injector),
+    |instrumented| {
+        // Custom poll logic
+        let result = poll_to_completion(instrumented);
+        match result {
+            InstrumentedPollResult::Inner(_) => InjectionOutcome::Success,
+            InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
+        }
+    },
+);
+
+// Simpler interface
+let report = runner.run_simple(
+    InjectionStrategy::FirstN(5),
+    |injector| InstrumentedFuture::new(my_future(), injector),
+    |result| matches!(result, InstrumentedPollResult::Inner(_) | InstrumentedPollResult::CancellationInjected(_)),
+);
+```
+
+#### LabInjectionConfig
+
+Configuration for Lab-integrated injection testing:
+
+```rust
+let config = LabInjectionConfig::new(42)       // seed
+    .with_strategy(InjectionStrategy::AllPoints)
+    .with_all_oracles()                         // Enable oracle verification
+    .stop_on_failure(true)                      // Stop at first failure
+    .max_steps_per_run(10_000);                 // Prevent infinite loops
+
+// Query
+config.seed()       // u64
+config.strategy()   // &InjectionStrategy
+```
+
+#### LabInjectionRunner
+
+Runner with Lab runtime and oracle integration:
+
+```rust
+let mut runner = LabInjectionRunner::new(config);
+
+// Simple interface
+let report = runner.run_simple(|injector| {
+    InstrumentedFuture::new(my_future(), injector)
+});
+
+// Full Lab access
+let report = runner.run_with_lab(|injector, runtime, oracles| {
+    // Access runtime state, register with oracles
+    InstrumentedFuture::new(my_future(), injector)
+});
+
+runner.current_mode()  // InjectionMode::Recording or InjectionMode::Injecting
+runner.config()        // &LabInjectionConfig
+```
+
+#### LabInjectionReport
+
+Extended report with oracle violations:
+
+```rust
+pub struct LabInjectionReport {
+    pub total_await_points: usize,
+    pub tests_run: usize,
+    pub successes: usize,
+    pub failures: usize,
+    pub results: Vec<LabInjectionResult>,
+    pub strategy: String,
+    pub seed: u64,
+}
+
+// Query
+report.all_passed()         // bool
+report.failures()           // Vec<&LabInjectionResult>
+report.categorize_failures() // (injection_failures, oracle_failures)
+
+// Output
+report.to_json()       // serde_json::Value
+report.to_junit_xml()  // String
+report.display()       // LabInjectionReportDisplay (implements Display)
+format!("{}", report)  // Human-readable output
+```
+
+#### LabInjectionResult
+
+Individual test result with oracle information:
+
+```rust
+pub struct LabInjectionResult {
+    pub injection: InjectionResult,
+    pub oracle_violations: Vec<OracleViolation>,
+}
+
+result.is_success()  // Both injection and oracles passed
+result.reproduction_code(seed)  // Rust code to reproduce this failure
+```
+
+#### InjectionOutcome
+
+Classification of test results:
+
+```rust
+pub enum InjectionOutcome {
+    Success,                    // Handled correctly
+    Panic(String),              // Panicked
+    AssertionFailed(String),    // Assertion failed
+    Timeout,                    // Timed out
+    ResourceLeak(String),       // Resource leaked
+}
+```
+
+### Module Structure
+
+```
+asupersync::lab
+├── mod.rs                      # Re-exports
+├── instrumented_future.rs      # Core injection framework
+│   ├── AwaitPoint
+│   ├── InstrumentedFuture<F>
+│   ├── InstrumentedPollResult<T>
+│   ├── CancellationInjector
+│   ├── InjectionStrategy
+│   ├── InjectionMode
+│   ├── InjectionRunner
+│   ├── InjectionReport
+│   ├── InjectionResult
+│   └── InjectionOutcome
+├── injection.rs                # Lab runtime integration
+│   ├── LabInjectionConfig
+│   ├── LabInjectionRunner
+│   ├── LabInjectionReport
+│   ├── LabInjectionResult
+│   ├── LabBuilder
+│   └── lab()
+└── oracle/                     # Verification oracles
+    ├── OracleSuite
+    ├── TaskLeakOracle
+    ├── QuiescenceOracle
+    ├── LoserDrainOracle
+    ├── ObligationLeakOracle
+    ├── FinalizerOracle
+    └── DeterminismOracle
+```
+
+### Fluent API Quick Reference
+
+```rust
+use asupersync::lab::injection::lab;
+
+lab(seed)                                           // Create builder
+    .with_cancellation_injection(strategy)          // Set strategy
+    .with_all_oracles()                             // Enable oracles
+    .stop_on_failure(true)                          // Stop on first failure
+    .max_steps(10_000)                              // Prevent hangs
+    .run(|injector| /* ... */)                      // Simple run
+    .run_with_lab(|injector, runtime, oracles| /* ... */) // Full Lab access
+```
+
+## See Also
+
+- [Macro DSL](./macro-dsl.md) - Structured concurrency macros
+- Source: [`lab::injection`](../src/lab/injection.rs)
+- Source: [`lab::instrumented_future`](../src/lab/instrumented_future.rs)
+- Source: [`lab::oracle`](../src/lab/oracle/mod.rs)

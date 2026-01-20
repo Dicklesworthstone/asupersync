@@ -236,6 +236,125 @@ impl UnixStream {
         peer_cred_impl(&self.inner)
     }
 
+    /// Sends data along with ancillary data (control messages).
+    ///
+    /// This method is primarily used for passing file descriptors between
+    /// processes using `SCM_RIGHTS`.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The data to send
+    /// * `ancillary` - The ancillary data to send with the message
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes from `buf` that were sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the send fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::net::unix::{UnixStream, SocketAncillary};
+    /// use std::os::unix::io::AsRawFd;
+    ///
+    /// let (tx, rx) = UnixStream::pair()?;
+    /// let file = std::fs::File::open("/etc/passwd")?;
+    ///
+    /// let mut ancillary_buf = [0u8; 128];
+    /// let mut ancillary = SocketAncillary::new(&mut ancillary_buf);
+    /// ancillary.add_fds(&[file.as_raw_fd()]);
+    ///
+    /// let n = tx.send_with_ancillary(b"file attached", &mut ancillary).await?;
+    /// ```
+    pub async fn send_with_ancillary(
+        &self,
+        buf: &[u8],
+        ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+    ) -> io::Result<usize> {
+        use std::os::unix::io::AsRawFd;
+
+        loop {
+            let result = send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary);
+            match result {
+                Ok(n) => return Ok(n),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // TODO: Replace with proper reactor wait when integration is complete
+                    crate::runtime::yield_now().await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Receives data along with ancillary data (control messages).
+    ///
+    /// This method is primarily used for receiving file descriptors passed
+    /// between processes using `SCM_RIGHTS`.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Buffer to receive data into
+    /// * `ancillary` - Buffer to receive ancillary data into
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes received into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the receive fails.
+    ///
+    /// # Safety
+    ///
+    /// When file descriptors are received, the caller is responsible for
+    /// managing their lifetimes. See [`SocketAncillary::messages`] for details.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::net::unix::{UnixStream, SocketAncillary, AncillaryMessage};
+    /// use std::os::unix::io::FromRawFd;
+    ///
+    /// let mut buf = [0u8; 64];
+    /// let mut ancillary_buf = [0u8; 128];
+    /// let mut ancillary = SocketAncillary::new(&mut ancillary_buf);
+    ///
+    /// let n = rx.recv_with_ancillary(&mut buf, &mut ancillary).await?;
+    ///
+    /// for msg in ancillary.messages() {
+    ///     if let AncillaryMessage::ScmRights(fds) = msg {
+    ///         for fd in fds {
+    ///             let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    ///             // Use the file...
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// [`SocketAncillary::messages`]: crate::net::unix::SocketAncillary::messages
+    pub async fn recv_with_ancillary(
+        &self,
+        buf: &mut [u8],
+        ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+    ) -> io::Result<usize> {
+        use std::os::unix::io::AsRawFd;
+
+        loop {
+            let result = recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary);
+            match result {
+                Ok(n) => return Ok(n),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // TODO: Replace with proper reactor wait when integration is complete
+                    crate::runtime::yield_now().await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Splits the stream into borrowed read and write halves.
     ///
     /// The halves borrow the stream and can be used concurrently for
@@ -434,6 +553,79 @@ fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
     }
 }
 
+// Ancillary data send/receive implementations using sendmsg/recvmsg
+
+/// Sends data with ancillary data using sendmsg.
+fn send_with_ancillary_impl(
+    fd: std::os::unix::io::RawFd,
+    buf: &[u8],
+    ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+) -> io::Result<usize> {
+    use std::mem::MaybeUninit;
+
+    let mut iov = libc::iovec {
+        iov_base: buf.as_ptr() as *mut libc::c_void,
+        iov_len: buf.len(),
+    };
+
+    let mut msg: libc::msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+
+    if ancillary.len() > 0 {
+        msg.msg_control = ancillary.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = ancillary.len();
+    }
+
+    // SAFETY: sendmsg is a well-defined syscall and we've set up the
+    // msghdr correctly with valid pointers and lengths.
+    let ret = unsafe { libc::sendmsg(fd, &msg, 0) };
+
+    if ret >= 0 {
+        // Clear the ancillary data after successful send
+        ancillary.clear();
+        Ok(ret as usize)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Receives data with ancillary data using recvmsg.
+fn recv_with_ancillary_impl(
+    fd: std::os::unix::io::RawFd,
+    buf: &mut [u8],
+    ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+) -> io::Result<usize> {
+    use std::mem::MaybeUninit;
+
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+        iov_len: buf.len(),
+    };
+
+    let mut msg: libc::msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ancillary.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = ancillary.capacity();
+
+    // SAFETY: recvmsg is a well-defined syscall and we've set up the
+    // msghdr correctly with valid pointers and lengths.
+    let ret = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+
+    if ret >= 0 {
+        let truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
+        // SAFETY: recvmsg has written msg_controllen bytes of valid
+        // control message data to the buffer.
+        unsafe {
+            ancillary.set_len(msg.msg_controllen, truncated);
+        }
+        Ok(ret as usize)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,7 +709,9 @@ mod tests {
     fn test_from_std() {
         init_test("test_from_std");
         let (std_s1, _std_s2) = net::UnixStream::pair().expect("pair failed");
-        std_s1.set_nonblocking(true).expect("set_nonblocking failed");
+        std_s1
+            .set_nonblocking(true)
+            .expect("set_nonblocking failed");
 
         let _stream = UnixStream::from_std(std_s1);
         crate::test_complete!("test_from_std");
