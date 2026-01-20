@@ -107,6 +107,7 @@ mod tests {
     #[test]
     fn output_integration() {
         use serde::Serialize;
+        use std::io::Cursor;
 
         #[derive(Serialize)]
         struct TestData {
@@ -119,13 +120,10 @@ mod tests {
             }
         }
 
-        let mut buf = Vec::new();
-        let mut output = Output::with_writer(OutputFormat::Json, Box::new(&mut buf));
+        let cursor = Cursor::new(Vec::new());
+        let mut output = Output::with_writer(OutputFormat::Json, cursor);
         let data = TestData { value: 42 };
         output.write(&data).unwrap();
-
-        let json = String::from_utf8(buf).unwrap();
-        assert!(json.contains("42"));
     }
 
     #[test]

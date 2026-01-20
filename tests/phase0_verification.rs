@@ -11,6 +11,7 @@ use asupersync::lab::oracle::{
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
+use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 
@@ -279,6 +280,11 @@ fn determinism_two_phase_obligation_trace() {
             TraceData::Obligation {
                 obligation,
                 task: worker,
+                region: region_id,
+                kind: ObligationKind::SendPermit,
+                state: ObligationState::Reserved,
+                duration_ns: None,
+                abort_reason: None,
             },
             t(1),
         );
@@ -288,6 +294,11 @@ fn determinism_two_phase_obligation_trace() {
             TraceData::Obligation {
                 obligation,
                 task: worker,
+                region: region_id,
+                kind: ObligationKind::SendPermit,
+                state: ObligationState::Committed,
+                duration_ns: Some(1),
+                abort_reason: None,
             },
             t(2),
         );

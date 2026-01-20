@@ -109,6 +109,7 @@ impl SignalHandler {
     /// Record a signal reception.
     ///
     /// Returns true if this is a force-quit situation.
+    #[must_use]
     pub fn record_signal(&self) -> bool {
         self.cancelled.store(true, Ordering::SeqCst);
         let count = self.signal_count.fetch_add(1, Ordering::SeqCst) + 1;

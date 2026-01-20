@@ -77,31 +77,31 @@ impl Shell {
     pub fn install_instructions(&self, command_name: &str) -> String {
         match self {
             Self::Bash => format!(
-                r#"# Add to ~/.bashrc or ~/.bash_profile:
+                r" Add to ~/.bashrc or ~/.bash_profile:
 source <({command_name} completions bash)
 
 # Or install system-wide:
-{command_name} completions bash > /etc/bash_completion.d/{command_name}"#
+{command_name} completions bash > /etc/bash_completion.d/{command_name}"
             ),
             Self::Zsh => format!(
-                r#"# Add to ~/.zshrc (before compinit):
+                r" Add to ~/.zshrc (before compinit):
 source <({command_name} completions zsh)
 
 # Or add to fpath:
 {command_name} completions zsh > ~/.zsh/completions/_{command_name}
-# Then add ~/.zsh/completions to fpath"#
+# Then add ~/.zsh/completions to fpath"
             ),
             Self::Fish => format!(
-                r#"# Install completions:
-{command_name} completions fish > ~/.config/fish/completions/{command_name}.fish"#
+                r" Install completions:
+{command_name} completions fish > ~/.config/fish/completions/{command_name}.fish"
             ),
             Self::PowerShell => format!(
-                r#"# Add to $PROFILE:
-{command_name} completions powershell | Out-String | Invoke-Expression"#
+                r" Add to $PROFILE:
+{command_name} completions powershell | Out-String | Invoke-Expression"
             ),
             Self::Elvish => format!(
-                r#"# Add to ~/.elvish/rc.elv:
-eval ({command_name} completions elvish | slurp)"#
+                r" Add to ~/.elvish/rc.elv:
+eval ({command_name} completions elvish | slurp)"
             ),
         }
     }
@@ -181,7 +181,7 @@ fn generate_bash_completions<W: Write, C: Completable>(
         .map(|c| c.value.clone())
         .collect();
 
-    writeln!(writer, "# Bash completion for {cmd}")?;
+    writeln!(writer, " Bash completion for {cmd}")?;
     writeln!(writer, "_{cmd}_completions() {{")?;
     writeln!(writer, "    local cur prev")?;
     writeln!(writer, "    cur=\"${{COMP_WORDS[COMP_CWORD]}}\"")?;
@@ -220,7 +220,7 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, "#compdef {cmd}")?;
+    writeln!(writer, "compdef {cmd}")?;
     writeln!(writer)?;
     writeln!(writer, "_{cmd}() {{")?;
     writeln!(writer, "    local -a commands options")?;
@@ -272,7 +272,7 @@ fn generate_fish_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, "# Fish completion for {cmd}")?;
+    writeln!(writer, " Fish completion for {cmd}")?;
     writeln!(writer)?;
 
     for item in &subcommands {
@@ -321,7 +321,7 @@ fn generate_powershell_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, "# PowerShell completion for {cmd}")?;
+    writeln!(writer, " PowerShell completion for {cmd}")?;
     writeln!(writer)?;
     writeln!(
         writer,
@@ -365,7 +365,7 @@ fn generate_elvish_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, "# Elvish completion for {cmd}")?;
+    writeln!(writer, " Elvish completion for {cmd}")?;
     writeln!(writer)?;
     writeln!(writer, "edit:completion:arg-completer[{cmd}] = {{|@args|")?;
     writeln!(writer, "    var commands = [")?;
@@ -482,7 +482,7 @@ mod tests {
         generate_completions(Shell::Zsh, &TestCompletable, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("#compdef testcmd"));
+        assert!(output.contains("compdef testcmd"));
         assert!(output.contains("_testcmd"));
         assert!(output.contains("run:Run the program"));
     }

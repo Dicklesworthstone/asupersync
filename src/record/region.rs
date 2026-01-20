@@ -4,6 +4,7 @@
 //! When a region closes, it waits for all children to complete.
 
 use crate::record::finalizer::{Finalizer, FinalizerStack};
+use crate::tracing_compat::{debug, info_span, Span};
 use crate::types::{Budget, CancelReason, RegionId, TaskId};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
@@ -151,12 +152,38 @@ pub struct RegionRecord {
     state: AtomicRegionState,
     /// Inner mutable state (guarded by a lock).
     inner: RwLock<RegionInner>,
+    /// Tracing span for region lifecycle (only active with tracing-integration feature).
+    #[cfg(feature = "tracing-integration")]
+    span: Span,
+    /// Placeholder for when tracing is disabled.
+    #[cfg(not(feature = "tracing-integration"))]
+    span: Span,
 }
 
 impl RegionRecord {
     /// Creates a new region record.
     #[must_use]
     pub fn new(id: RegionId, parent: Option<RegionId>, budget: Budget) -> Self {
+        // Create a tracing span for the region lifecycle
+        let span = info_span!(
+            "region",
+            region_id = ?id,
+            parent_region_id = ?parent,
+            state = "Open",
+            initial_budget_deadline = ?budget.deadline,
+            initial_budget_poll_quota = budget.poll_quota,
+        );
+
+        debug!(
+            parent: &span,
+            region_id = ?id,
+            parent_region_id = ?parent,
+            state = "Open",
+            budget_deadline = ?budget.deadline,
+            budget_poll_quota = budget.poll_quota,
+            "region created"
+        );
+
         Self {
             id,
             parent,
@@ -168,6 +195,7 @@ impl RegionRecord {
                 finalizers: FinalizerStack::new(),
                 cancel_reason: None,
             }),
+            span,
         }
     }
 
@@ -320,7 +348,20 @@ impl RegionRecord {
             .transition(RegionState::Open, RegionState::Closing)
         {
             let mut inner = self.inner.write().expect("lock poisoned");
-            inner.cancel_reason = reason;
+            inner.cancel_reason = reason.clone();
+
+            // Record state transition with tracing
+            self.span.record("state", "Closing");
+            debug!(
+                parent: &self.span,
+                region_id = ?self.id,
+                from_state = "Open",
+                to_state = "Closing",
+                trigger = ?reason.as_ref().map(|r| r.kind),
+                cancel_reason = ?reason,
+                "region state transition"
+            );
+
             true
         } else {
             false
@@ -332,8 +373,23 @@ impl RegionRecord {
     /// Called after cancellation has been issued to all children.
     /// Returns true if the state changed.
     pub fn begin_drain(&self) -> bool {
-        self.state
+        if self
+            .state
             .transition(RegionState::Closing, RegionState::Draining)
+        {
+            self.span.record("state", "Draining");
+            debug!(
+                parent: &self.span,
+                region_id = ?self.id,
+                from_state = "Closing",
+                to_state = "Draining",
+                trigger = "children_cancelled",
+                "region state transition"
+            );
+            true
+        } else {
+            false
+        }
     }
 
     /// Transitions from Draining to Finalizing (or Closing to Finalizing if no children).
@@ -341,14 +397,41 @@ impl RegionRecord {
     /// Called when all children have completed.
     /// Returns true if the state changed.
     pub fn begin_finalize(&self) -> bool {
+        // Try transition from Closing (skip Draining if no children)
         if self
             .state
             .transition(RegionState::Closing, RegionState::Finalizing)
         {
+            self.span.record("state", "Finalizing");
+            debug!(
+                parent: &self.span,
+                region_id = ?self.id,
+                from_state = "Closing",
+                to_state = "Finalizing",
+                trigger = "no_children",
+                "region state transition"
+            );
             return true;
         }
-        self.state
+
+        // Try transition from Draining (normal path with children)
+        if self
+            .state
             .transition(RegionState::Draining, RegionState::Finalizing)
+        {
+            self.span.record("state", "Finalizing");
+            debug!(
+                parent: &self.span,
+                region_id = ?self.id,
+                from_state = "Draining",
+                to_state = "Finalizing",
+                trigger = "children_complete",
+                "region state transition"
+            );
+            return true;
+        }
+
+        false
     }
 
     /// Transitions to Closed.
@@ -356,8 +439,37 @@ impl RegionRecord {
     /// Called when all finalizers have run and obligations resolved.
     /// Returns true if the state changed.
     pub fn complete_close(&self) -> bool {
-        self.state
+        if self
+            .state
             .transition(RegionState::Finalizing, RegionState::Closed)
+        {
+            let inner = self.inner.read().expect("lock poisoned");
+            let _child_count = inner.children.len();
+            let _task_count = inner.tasks.len();
+            drop(inner);
+
+            self.span.record("state", "Closed");
+            debug!(
+                parent: &self.span,
+                region_id = ?self.id,
+                from_state = "Finalizing",
+                to_state = "Closed",
+                final_child_count = _child_count,
+                final_task_count = _task_count,
+                "region closed"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns a reference to the region's tracing span.
+    ///
+    /// This can be used to associate child events with the region's lifecycle.
+    #[must_use]
+    pub fn span(&self) -> &Span {
+        &self.span
     }
 }
 

@@ -150,7 +150,8 @@ impl CliError {
             }
             out.push_str("Context:\n");
             for (k, v) in &self.context {
-                out.push_str(&format!("  {k}: {v}\n"));
+                use std::fmt::Write;
+                let _ = writeln!(out, "  {k}: {v}");
             }
             if color {
                 out.push_str("\x1b[0m");
@@ -183,7 +184,7 @@ impl std::error::Error for CliError {}
 
 /// Standard error constructors.
 pub mod errors {
-    use super::*;
+    use super::{CliError, ExitCode};
 
     /// Invalid argument error.
     #[must_use]
@@ -280,7 +281,7 @@ pub mod errors {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{errors, CliError, ExitCode};
 
     #[test]
     fn error_serializes_to_json() {

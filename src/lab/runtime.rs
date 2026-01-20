@@ -498,7 +498,7 @@ where
 mod tests {
     use super::*;
     use crate::record::TaskRecord;
-    use crate::record::{ObligationKind, ObligationRecord};
+    use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord};
     use crate::types::{Budget, ObligationId, Outcome, TaskId};
     use crate::util::ArenaIndex;
 
@@ -702,5 +702,150 @@ mod tests {
                 .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. })),
             "resolved obligations should not report leaks"
         );
+    }
+
+    #[test]
+    fn obligation_trace_events_emitted() {
+        let mut runtime = LabRuntime::with_seed(21);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            root,
+            Budget::INFINITE,
+        ));
+        let task_id = TaskId::from_arena(task_idx);
+        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+
+        runtime.advance_time_to(Time::from_nanos(10));
+        let ob1 = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None);
+
+        runtime.advance_time_to(Time::from_nanos(25));
+        runtime.state.commit_obligation(ob1).unwrap();
+
+        runtime.advance_time_to(Time::from_nanos(30));
+        let ob2 =
+            runtime
+                .state
+                .create_obligation(ObligationKind::Ack, task_id, root, None);
+
+        runtime.advance_time_to(Time::from_nanos(50));
+        runtime
+            .state
+            .abort_obligation(ob2, ObligationAbortReason::Cancel)
+            .unwrap();
+
+        let commit_event = runtime
+            .trace()
+            .iter()
+            .find(|e| e.kind == TraceEventKind::ObligationCommit)
+            .expect("commit event");
+        match &commit_event.data {
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => {
+                assert_eq!(*obligation, ob1);
+                assert_eq!(*task, task_id);
+                assert_eq!(*region, root);
+                assert_eq!(*kind, ObligationKind::SendPermit);
+                assert_eq!(*state, crate::record::ObligationState::Committed);
+                assert_eq!(duration_ns, &Some(15));
+                assert_eq!(abort_reason, &None);
+            }
+            other => panic!("unexpected commit data: {other:?}"),
+        }
+
+        let abort_event = runtime
+            .trace()
+            .iter()
+            .find(|e| e.kind == TraceEventKind::ObligationAbort)
+            .expect("abort event");
+        match &abort_event.data {
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => {
+                assert_eq!(*obligation, ob2);
+                assert_eq!(*task, task_id);
+                assert_eq!(*region, root);
+                assert_eq!(*kind, ObligationKind::Ack);
+                assert_eq!(*state, crate::record::ObligationState::Aborted);
+                assert_eq!(duration_ns, &Some(20));
+                assert_eq!(abort_reason, &Some(ObligationAbortReason::Cancel));
+            }
+            other => panic!("unexpected abort data: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn obligation_leak_emits_trace_event() {
+        let mut runtime = LabRuntime::with_seed(22);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            root,
+            Budget::INFINITE,
+        ));
+        let task_id = TaskId::from_arena(task_idx);
+        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+
+        runtime.advance_time_to(Time::from_nanos(100));
+        let obligation =
+            runtime
+                .state
+                .create_obligation(ObligationKind::Lease, task_id, root, None);
+
+        runtime.advance_time_to(Time::from_nanos(140));
+        runtime
+            .state
+            .tasks
+            .get_mut(task_idx)
+            .unwrap()
+            .complete(Outcome::Ok(()));
+
+        let violations = runtime.check_invariants();
+        assert!(violations
+            .iter()
+            .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. })));
+
+        let leak_event = runtime
+            .trace()
+            .iter()
+            .find(|e| e.kind == TraceEventKind::ObligationLeak)
+            .expect("leak event");
+        match &leak_event.data {
+            TraceData::Obligation {
+                obligation: leaked,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => {
+                assert_eq!(*leaked, obligation);
+                assert_eq!(*task, task_id);
+                assert_eq!(*region, root);
+                assert_eq!(*kind, ObligationKind::Lease);
+                assert_eq!(*state, crate::record::ObligationState::Leaked);
+                assert_eq!(duration_ns, &Some(40));
+                assert_eq!(abort_reason, &None);
+            }
+            other => panic!("unexpected leak data: {other:?}"),
+        }
     }
 }

@@ -154,7 +154,7 @@ pub fn parse_color_choice(s: &str) -> Result<ColorChoice, String> {
 }
 
 /// Standard help text for common arguments.
-pub const COMMON_ARGS_HELP: &str = r#"Common Options:
+pub const COMMON_ARGS_HELP: &str = r"Common Options:
   -f, --format <FORMAT>    Output format: json, json-pretty, stream-json, tsv, human
   -c, --color <WHEN>       Color output: auto, always, never
   -v, --verbose            Increase verbosity (-v, -vv, -vvv)
@@ -167,7 +167,7 @@ Environment Variables:
   NO_COLOR                  Disable colors (https://no-color.org/)
   CLICOLOR_FORCE            Force colors even when not a TTY
   CI                        Automatically use JSON output in CI environments
-"#;
+";
 
 #[cfg(test)]
 mod tests {

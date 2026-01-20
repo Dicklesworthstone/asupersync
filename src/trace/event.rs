@@ -254,6 +254,7 @@ impl TraceEvent {
 
     /// Creates an obligation abort event.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn obligation_abort(
         seq: u64,
         time: Time,
@@ -345,7 +346,7 @@ impl fmt::Display for TraceEvent {
                     " {obligation} {kind:?} {state:?} holder={task} region={region}"
                 )?;
                 if let Some(duration) = duration_ns {
-                    write!(f, " duration={}ns", duration)?;
+                    write!(f, " duration={duration}ns")?;
                 }
                 if let Some(reason) = abort_reason {
                     write!(f, " abort_reason={reason}")?;

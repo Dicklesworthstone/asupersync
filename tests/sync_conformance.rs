@@ -17,6 +17,7 @@
 
 use asupersync::sync::{Mutex, Semaphore};
 use asupersync::Cx;
+use futures_lite::future::block_on;
 
 /// SYNC-001: Mutex Basic Lock/Unlock
 ///
@@ -29,7 +30,7 @@ fn sync_001_mutex_basic_lock_unlock() {
 
     // Lock the mutex
     {
-        let guard = mutex.lock(&cx).expect("lock should succeed");
+        let guard = block_on(mutex.lock(&cx)).expect("lock should succeed");
         assert_eq!(*guard, 42, "should read initial value");
     }
 
@@ -41,14 +42,14 @@ fn sync_001_mutex_basic_lock_unlock() {
 
     // Lock again and modify
     {
-        let mut guard = mutex.lock(&cx).expect("second lock should succeed");
+        let mut guard = block_on(mutex.lock(&cx)).expect("second lock should succeed");
         *guard = 100;
         assert_eq!(*guard, 100, "should read modified value");
     }
 
     // Verify the modification persisted
     {
-        let guard = mutex.lock(&cx).expect("third lock should succeed");
+        let guard = block_on(mutex.lock(&cx)).expect("third lock should succeed");
         assert_eq!(*guard, 100, "modification should persist");
     }
 }
@@ -100,7 +101,7 @@ fn sync_002_mutex_contention_correctness() {
             thread::spawn(move || {
                 let cx = Cx::for_testing();
                 for _ in 0..iterations {
-                    let mut guard = mutex.lock(&cx).expect("lock should succeed");
+                    let mut guard = block_on(mutex.lock(&cx)).expect("lock should succeed");
                     *guard += 1;
                 }
             })
@@ -112,7 +113,7 @@ fn sync_002_mutex_contention_correctness() {
     }
 
     let cx = Cx::for_testing();
-    let final_value = *mutex.lock(&cx).expect("final lock should succeed");
+    let final_value = *block_on(mutex.lock(&cx)).expect("final lock should succeed");
     assert_eq!(
         final_value,
         i64::from(num_threads * iterations),
@@ -133,7 +134,7 @@ fn sync_002b_mutex_cancellation() {
     let cx_main = Cx::for_testing();
 
     // Hold the lock
-    let _guard = mutex.lock(&cx_main).expect("lock should succeed");
+    let _guard = block_on(mutex.lock(&cx_main)).expect("lock should succeed");
 
     // Spawn a thread that will try to lock with a cancelled context
     let mutex_clone = Arc::clone(&mutex);
@@ -141,7 +142,7 @@ fn sync_002b_mutex_cancellation() {
         let cx = Cx::for_testing();
         cx.set_cancel_requested(true);
         // Return whether the lock was cancelled (don't return the guard)
-        matches!(mutex_clone.lock(&cx), Err(LockError::Cancelled))
+        matches!(block_on(mutex_clone.lock(&cx)), Err(LockError::Cancelled))
     });
 
     // The spawned thread should get a Cancelled error
@@ -190,11 +191,11 @@ fn sync_005_semaphore_permit_limiting() {
     assert_eq!(sem.max_permits(), 3);
 
     // Acquire one permit
-    let permit1 = sem.acquire(&cx, 1).expect("first acquire should succeed");
+    let permit1 = block_on(sem.acquire(&cx, 1)).expect("first acquire should succeed");
     assert_eq!(sem.available_permits(), 2);
 
     // Acquire two more permits
-    let permit2 = sem.acquire(&cx, 2).expect("second acquire should succeed");
+    let permit2 = block_on(sem.acquire(&cx, 2)).expect("second acquire should succeed");
     assert_eq!(sem.available_permits(), 0);
 
     // try_acquire should fail when no permits available
@@ -240,7 +241,7 @@ fn sync_005b_semaphore_concurrent_access() {
             let current = Arc::clone(&current);
             thread::spawn(move || {
                 let cx = Cx::for_testing();
-                let _permit = sem.acquire(&cx, 1).expect("acquire should succeed");
+                let _permit = block_on(sem.acquire(&cx, 1)).expect("acquire should succeed");
 
                 // Track concurrent access
                 let prev = current.fetch_add(1, Ordering::SeqCst);
