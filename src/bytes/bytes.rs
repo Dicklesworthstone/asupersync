@@ -456,30 +456,48 @@ impl Bytes {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_bytes_new() {
+        init_test("test_bytes_new");
         let b = Bytes::new();
-        assert!(b.is_empty());
-        assert_eq!(b.len(), 0);
+        let empty = b.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        let len = b.len();
+        crate::assert_with_log!(len == 0, "len", 0, len);
+        crate::test_complete!("test_bytes_new");
     }
 
     #[test]
     fn test_bytes_from_static() {
+        init_test("test_bytes_from_static");
         let b = Bytes::from_static(b"hello world");
-        assert_eq!(b.len(), 11);
-        assert_eq!(&b[..], b"hello world");
+        let len = b.len();
+        crate::assert_with_log!(len == 11, "len", 11, len);
+        let ok = &b[..] == b"hello world";
+        crate::assert_with_log!(ok, "contents", b"hello world", &b[..]);
+        crate::test_complete!("test_bytes_from_static");
     }
 
     #[test]
     fn test_bytes_copy_from_slice() {
+        init_test("test_bytes_copy_from_slice");
         let data = vec![1u8, 2, 3, 4, 5];
         let b = Bytes::copy_from_slice(&data);
-        assert_eq!(b.len(), 5);
-        assert_eq!(&b[..], &data[..]);
+        let len = b.len();
+        crate::assert_with_log!(len == 5, "len", 5, len);
+        let ok = &b[..] == &data[..];
+        crate::assert_with_log!(ok, "contents", &data[..], &b[..]);
+        crate::test_complete!("test_bytes_copy_from_slice");
     }
 
     #[test]
     fn test_bytes_clone_is_cheap() {
+        init_test("test_bytes_clone_is_cheap");
         let b1 = Bytes::copy_from_slice(&vec![0u8; 1_000_000]);
         let start = std::time::Instant::now();
         for _ in 0..1000 {
@@ -487,79 +505,105 @@ mod tests {
         }
         let elapsed = start.elapsed();
         // Should be very fast (reference counting)
-        assert!(
-            elapsed.as_millis() < 50,
-            "Clone should be O(1), took {elapsed:?}"
-        );
+        let fast = elapsed.as_millis() < 50;
+        crate::assert_with_log!(fast, "clone fast", true, fast);
+        crate::test_complete!("test_bytes_clone_is_cheap");
     }
 
     #[test]
     fn test_bytes_slice() {
+        init_test("test_bytes_slice");
         let b = Bytes::from_static(b"hello world");
 
         let hello = b.slice(0..5);
-        assert_eq!(&hello[..], b"hello");
+        let ok = &hello[..] == b"hello";
+        crate::assert_with_log!(ok, "hello", b"hello", &hello[..]);
 
         let world = b.slice(6..);
-        assert_eq!(&world[..], b"world");
+        let ok = &world[..] == b"world";
+        crate::assert_with_log!(ok, "world", b"world", &world[..]);
 
         let middle = b.slice(3..8);
-        assert_eq!(&middle[..], b"lo wo");
+        let ok = &middle[..] == b"lo wo";
+        crate::assert_with_log!(ok, "middle", b"lo wo", &middle[..]);
+        crate::test_complete!("test_bytes_slice");
     }
 
     #[test]
     fn test_bytes_split_off() {
+        init_test("test_bytes_split_off");
         let mut b = Bytes::from_static(b"hello world");
         let world = b.split_off(6);
 
-        assert_eq!(&b[..], b"hello ");
-        assert_eq!(&world[..], b"world");
+        let ok = &b[..] == b"hello ";
+        crate::assert_with_log!(ok, "left", b"hello ", &b[..]);
+        let ok = &world[..] == b"world";
+        crate::assert_with_log!(ok, "world", b"world", &world[..]);
+        crate::test_complete!("test_bytes_split_off");
     }
 
     #[test]
     fn test_bytes_split_to() {
+        init_test("test_bytes_split_to");
         let mut b = Bytes::from_static(b"hello world");
         let hello = b.split_to(6);
 
-        assert_eq!(&hello[..], b"hello ");
-        assert_eq!(&b[..], b"world");
+        let ok = &hello[..] == b"hello ";
+        crate::assert_with_log!(ok, "left", b"hello ", &hello[..]);
+        let ok = &b[..] == b"world";
+        crate::assert_with_log!(ok, "world", b"world", &b[..]);
+        crate::test_complete!("test_bytes_split_to");
     }
 
     #[test]
     fn test_bytes_truncate() {
+        init_test("test_bytes_truncate");
         let mut b = Bytes::from_static(b"hello world");
         b.truncate(5);
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "truncate", b"hello", &b[..]);
 
         // Truncate to larger has no effect
         b.truncate(100);
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "truncate unchanged", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_truncate");
     }
 
     #[test]
     fn test_bytes_clear() {
+        init_test("test_bytes_clear");
         let mut b = Bytes::from_static(b"hello world");
         b.clear();
-        assert!(b.is_empty());
+        let empty = b.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        crate::test_complete!("test_bytes_clear");
     }
 
     #[test]
     fn test_bytes_from_vec() {
+        init_test("test_bytes_from_vec");
         let v = vec![1u8, 2, 3];
         let b: Bytes = v.into();
-        assert_eq!(&b[..], &[1, 2, 3]);
+        let ok = &b[..] == &[1, 2, 3];
+        crate::assert_with_log!(ok, "from vec", &[1, 2, 3], &b[..]);
+        crate::test_complete!("test_bytes_from_vec");
     }
 
     #[test]
     fn test_bytes_from_string() {
+        init_test("test_bytes_from_string");
         let s = String::from("hello");
         let b: Bytes = s.into();
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "from string", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_from_string");
     }
 
     #[test]
     #[should_panic(expected = "slice bounds out of range")]
     fn test_bytes_slice_panic() {
+        init_test("test_bytes_slice_panic");
         let b = Bytes::from_static(b"hello");
         let _bad = b.slice(0..100);
     }
@@ -567,16 +611,22 @@ mod tests {
     #[test]
     #[should_panic(expected = "out of bounds")]
     fn test_bytes_split_off_panic() {
+        init_test("test_bytes_split_off_panic");
         let mut b = Bytes::from_static(b"hello");
         let _bad = b.split_off(100);
     }
 
     #[test]
     fn test_bytes_equality() {
+        init_test("test_bytes_equality");
         let b1 = Bytes::from_static(b"hello");
         let b2 = Bytes::copy_from_slice(b"hello");
-        assert_eq!(b1, b2);
-        assert_eq!(b1, b"hello"[..]);
-        assert_eq!(b"hello"[..], b1);
+        let ok = b1 == b2;
+        crate::assert_with_log!(ok, "b1 == b2", b2, b1);
+        let ok = b1 == b"hello"[..];
+        crate::assert_with_log!(ok, "b1 == slice", b"hello".as_slice(), b1);
+        let ok = b"hello"[..] == b1;
+        crate::assert_with_log!(ok, "slice == b1", b1, b"hello".as_slice());
+        crate::test_complete!("test_bytes_equality");
     }
 }

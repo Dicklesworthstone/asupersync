@@ -97,75 +97,107 @@ impl<T: Buf, U: Buf> Buf for Chain<T, U> {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_chain_remaining() {
+        init_test("test_chain_remaining");
         let a: &[u8] = &[1, 2, 3];
         let b: &[u8] = &[4, 5, 6];
         let chain = Chain::new(a, b);
-        assert_eq!(chain.remaining(), 6);
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 6, "remaining", 6, remaining);
+        crate::test_complete!("test_chain_remaining");
     }
 
     #[test]
     fn test_chain_chunk() {
+        init_test("test_chain_chunk");
         let a: &[u8] = &[1, 2, 3];
         let b: &[u8] = &[4, 5, 6];
         let chain = Chain::new(a, b);
-        assert_eq!(chain.chunk(), &[1, 2, 3]);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == &[1, 2, 3], "chunk", &[1, 2, 3], chunk);
+        crate::test_complete!("test_chain_chunk");
     }
 
     #[test]
     fn test_chain_advance() {
+        init_test("test_chain_advance");
         let a: &[u8] = &[1, 2, 3];
         let b: &[u8] = &[4, 5, 6];
         let mut chain = Chain::new(a, b);
 
         chain.advance(2);
-        assert_eq!(chain.remaining(), 4);
-        assert_eq!(chain.chunk(), &[3]);
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 4, "remaining", 4, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == &[3], "chunk", &[3], chunk);
 
         chain.advance(1);
-        assert_eq!(chain.remaining(), 3);
-        assert_eq!(chain.chunk(), &[4, 5, 6]);
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == &[4, 5, 6], "chunk", &[4, 5, 6], chunk);
 
         chain.advance(2);
-        assert_eq!(chain.remaining(), 1);
-        assert_eq!(chain.chunk(), &[6]);
+        let remaining = chain.remaining();
+        crate::assert_with_log!(remaining == 1, "remaining", 1, remaining);
+        let chunk = chain.chunk();
+        crate::assert_with_log!(chunk == &[6], "chunk", &[6], chunk);
+        crate::test_complete!("test_chain_advance");
     }
 
     #[test]
     fn test_chain_copy_to_slice() {
+        init_test("test_chain_copy_to_slice");
         let a: &[u8] = &[1, 2, 3];
         let b: &[u8] = &[4, 5, 6];
         let mut chain = Chain::new(a, b);
 
         let mut dst = [0u8; 6];
         chain.copy_to_slice(&mut dst);
-        assert_eq!(dst, [1, 2, 3, 4, 5, 6]);
+        let ok = dst == [1, 2, 3, 4, 5, 6];
+        crate::assert_with_log!(ok, "dst", [1, 2, 3, 4, 5, 6], dst);
+        crate::test_complete!("test_chain_copy_to_slice");
     }
 
     #[test]
     fn test_chain_getters() {
+        init_test("test_chain_getters");
         let a: &[u8] = &[1, 2, 3];
         let b: &[u8] = &[4, 5, 6];
         let mut chain = Chain::new(a, b);
 
-        assert_eq!(*chain.first_ref(), &[1, 2, 3][..]);
-        assert_eq!(*chain.last_ref(), &[4, 5, 6][..]);
+        let first = *chain.first_ref();
+        crate::assert_with_log!(first == &[1, 2, 3][..], "first", &[1, 2, 3][..], first);
+        let last = *chain.last_ref();
+        crate::assert_with_log!(last == &[4, 5, 6][..], "last", &[4, 5, 6][..], last);
 
         // Advance and check
         chain.advance(4);
-        assert_eq!(*chain.first_ref(), b"");
-        assert_eq!(*chain.last_ref(), &[5, 6][..]);
+        let first = *chain.first_ref();
+        crate::assert_with_log!(first == b"", "first", b"", first);
+        let last = *chain.last_ref();
+        crate::assert_with_log!(last == &[5, 6][..], "last", &[5, 6][..], last);
+        crate::test_complete!("test_chain_getters");
     }
 
     #[test]
     fn test_chain_into_inner() {
+        init_test("test_chain_into_inner");
         let a: &[u8] = &[1, 2, 3];
         let b: &[u8] = &[4, 5, 6];
         let chain = Chain::new(a, b);
 
         let (a_out, b_out) = chain.into_inner();
-        assert_eq!(a_out, &[1, 2, 3]);
-        assert_eq!(b_out, &[4, 5, 6]);
+        let ok = a_out == &[1, 2, 3];
+        crate::assert_with_log!(ok, "a_out", &[1, 2, 3], a_out);
+        let ok = b_out == &[4, 5, 6];
+        crate::assert_with_log!(ok, "b_out", &[4, 5, 6], b_out);
+        crate::test_complete!("test_chain_into_inner");
     }
 }

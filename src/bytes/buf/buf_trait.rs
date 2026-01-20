@@ -384,70 +384,110 @@ impl Buf for std::io::Cursor<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_buf_slice_remaining() {
+        init_test("test_buf_slice_remaining");
         let buf: &[u8] = &[1, 2, 3, 4, 5];
-        assert_eq!(buf.remaining(), 5);
+        let remaining = buf.remaining();
+        crate::assert_with_log!(remaining == 5, "remaining", 5, remaining);
+        crate::test_complete!("test_buf_slice_remaining");
     }
 
     #[test]
     fn test_buf_slice_get_u8() {
+        init_test("test_buf_slice_get_u8");
         let mut buf: &[u8] = &[1, 2, 3, 4, 5];
-        assert_eq!(buf.get_u8(), 1);
-        assert_eq!(buf.get_u8(), 2);
-        assert_eq!(buf.remaining(), 3);
+        let v = buf.get_u8();
+        crate::assert_with_log!(v == 1, "get_u8", 1, v);
+        let v = buf.get_u8();
+        crate::assert_with_log!(v == 2, "get_u8", 2, v);
+        let remaining = buf.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+        crate::test_complete!("test_buf_slice_get_u8");
     }
 
     #[test]
     fn test_buf_get_u16() {
+        init_test("test_buf_get_u16");
         let mut buf: &[u8] = &[0x12, 0x34];
-        assert_eq!(buf.get_u16(), 0x1234);
+        let v = buf.get_u16();
+        crate::assert_with_log!(v == 0x1234, "get_u16", 0x1234, v);
+        crate::test_complete!("test_buf_get_u16");
     }
 
     #[test]
     fn test_buf_get_u16_le() {
+        init_test("test_buf_get_u16_le");
         let mut buf: &[u8] = &[0x34, 0x12];
-        assert_eq!(buf.get_u16_le(), 0x1234);
+        let v = buf.get_u16_le();
+        crate::assert_with_log!(v == 0x1234, "get_u16_le", 0x1234, v);
+        crate::test_complete!("test_buf_get_u16_le");
     }
 
     #[test]
     fn test_buf_get_u32() {
+        init_test("test_buf_get_u32");
         let mut buf: &[u8] = &[0x12, 0x34, 0x56, 0x78];
-        assert_eq!(buf.get_u32(), 0x1234_5678);
+        let v = buf.get_u32();
+        crate::assert_with_log!(v == 0x1234_5678, "get_u32", 0x1234_5678, v);
+        crate::test_complete!("test_buf_get_u32");
     }
 
     #[test]
     fn test_buf_get_u64() {
+        init_test("test_buf_get_u64");
         let mut buf: &[u8] = &[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
-        assert_eq!(buf.get_u64(), 0x1234_5678_9ABC_DEF0);
+        let v = buf.get_u64();
+        crate::assert_with_log!(
+            v == 0x1234_5678_9ABC_DEF0,
+            "get_u64",
+            0x1234_5678_9ABC_DEF0u64,
+            v
+        );
+        crate::test_complete!("test_buf_get_u64");
     }
 
     #[test]
     fn test_buf_copy_to_slice() {
+        init_test("test_buf_copy_to_slice");
         let mut buf: &[u8] = &[1, 2, 3, 4, 5];
         let mut dst = [0u8; 3];
         buf.copy_to_slice(&mut dst);
-        assert_eq!(dst, [1, 2, 3]);
-        assert_eq!(buf.remaining(), 2);
+        let ok = dst == [1, 2, 3];
+        crate::assert_with_log!(ok, "dst", [1, 2, 3], dst);
+        let remaining = buf.remaining();
+        crate::assert_with_log!(remaining == 2, "remaining", 2, remaining);
+        crate::test_complete!("test_buf_copy_to_slice");
     }
 
     #[test]
     fn test_buf_get_f32() {
+        init_test("test_buf_get_f32");
         let mut buf = Vec::new();
         let expected = std::f32::consts::PI;
         buf.extend_from_slice(&expected.to_be_bytes());
         let mut slice: &[u8] = &buf;
         let val = slice.get_f32();
-        assert!((val - expected).abs() < 0.0001);
+        let ok = (val - expected).abs() < 0.0001;
+        crate::assert_with_log!(ok, "f32", true, ok);
+        crate::test_complete!("test_buf_get_f32");
     }
 
     #[test]
     fn test_buf_get_f64() {
+        init_test("test_buf_get_f64");
         let mut buf = Vec::new();
         buf.extend_from_slice(&std::f64::consts::PI.to_be_bytes());
         let mut slice: &[u8] = &buf;
         let val = slice.get_f64();
-        assert!((val - std::f64::consts::PI).abs() < 1e-10);
+        let ok = (val - std::f64::consts::PI).abs() < 1e-10;
+        crate::assert_with_log!(ok, "f64", true, ok);
+        crate::test_complete!("test_buf_get_f64");
     }
 
     #[test]
@@ -459,15 +499,21 @@ mod tests {
 
     #[test]
     fn test_buf_cursor() {
+        init_test("test_buf_cursor");
         let data = vec![1u8, 2, 3, 4, 5];
         let mut cursor = std::io::Cursor::new(data);
-        assert_eq!(cursor.remaining(), 5);
-        assert_eq!(cursor.get_u8(), 1);
-        assert_eq!(cursor.remaining(), 4);
+        let remaining = cursor.remaining();
+        crate::assert_with_log!(remaining == 5, "remaining", 5, remaining);
+        let v = cursor.get_u8();
+        crate::assert_with_log!(v == 1, "get_u8", 1, v);
+        let remaining = cursor.remaining();
+        crate::assert_with_log!(remaining == 4, "remaining", 4, remaining);
+        crate::test_complete!("test_buf_cursor");
     }
 
     #[test]
     fn test_roundtrip_all_integers() {
+        init_test("test_roundtrip_all_integers");
         // Write all types
         let mut write_buf = Vec::new();
         write_buf.extend_from_slice(&0x12u8.to_be_bytes());
@@ -483,15 +529,36 @@ mod tests {
 
         // Read all types
         let mut read: &[u8] = &write_buf;
-        assert_eq!(read.get_u8(), 0x12);
-        assert_eq!(read.get_i8(), -5);
-        assert_eq!(read.get_u16(), 0x1234);
-        assert_eq!(read.get_u16_le(), 0x5678);
-        assert_eq!(read.get_i16(), -1000);
-        assert_eq!(read.get_u32(), 0x1234_5678);
-        assert_eq!(read.get_u32_le(), 0x9ABC_DEF0);
-        assert_eq!(read.get_i32(), -100_000);
-        assert_eq!(read.get_u64(), 0x1234_5678_9ABC_DEF0);
-        assert_eq!(read.get_u64_le(), 0xFEDC_BA98_7654_3210);
+        let v = read.get_u8();
+        crate::assert_with_log!(v == 0x12, "u8", 0x12, v);
+        let v = read.get_i8();
+        crate::assert_with_log!(v == -5, "i8", -5, v);
+        let v = read.get_u16();
+        crate::assert_with_log!(v == 0x1234, "u16", 0x1234, v);
+        let v = read.get_u16_le();
+        crate::assert_with_log!(v == 0x5678, "u16_le", 0x5678, v);
+        let v = read.get_i16();
+        crate::assert_with_log!(v == -1000, "i16", -1000, v);
+        let v = read.get_u32();
+        crate::assert_with_log!(v == 0x1234_5678, "u32", 0x1234_5678, v);
+        let v = read.get_u32_le();
+        crate::assert_with_log!(v == 0x9ABC_DEF0, "u32_le", 0x9ABC_DEF0u32, v);
+        let v = read.get_i32();
+        crate::assert_with_log!(v == -100_000, "i32", -100_000, v);
+        let v = read.get_u64();
+        crate::assert_with_log!(
+            v == 0x1234_5678_9ABC_DEF0,
+            "u64",
+            0x1234_5678_9ABC_DEF0u64,
+            v
+        );
+        let v = read.get_u64_le();
+        crate::assert_with_log!(
+            v == 0xFEDC_BA98_7654_3210,
+            "u64_le",
+            0xFEDC_BA98_7654_3210u64,
+            v
+        );
+        crate::test_complete!("test_roundtrip_all_integers");
     }
 }

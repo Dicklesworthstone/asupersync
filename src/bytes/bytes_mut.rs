@@ -428,135 +428,188 @@ impl BufMut for BytesMut {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_bytes_mut_new() {
+        init_test("test_bytes_mut_new");
         let b = BytesMut::new();
-        assert!(b.is_empty());
-        assert_eq!(b.len(), 0);
+        let empty = b.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        let len = b.len();
+        crate::assert_with_log!(len == 0, "len", 0, len);
+        crate::test_complete!("test_bytes_mut_new");
     }
 
     #[test]
     fn test_bytes_mut_with_capacity() {
+        init_test("test_bytes_mut_with_capacity");
         let b = BytesMut::with_capacity(100);
-        assert!(b.is_empty());
-        assert!(b.capacity() >= 100);
+        let empty = b.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        let cap_ok = b.capacity() >= 100;
+        crate::assert_with_log!(cap_ok, "capacity >= 100", true, cap_ok);
+        crate::test_complete!("test_bytes_mut_with_capacity");
     }
 
     #[test]
     fn test_bytes_mut_put_slice() {
+        init_test("test_bytes_mut_put_slice");
         let mut b = BytesMut::new();
         b.put_slice(b"hello");
         b.put_slice(b" ");
         b.put_slice(b"world");
 
-        assert_eq!(&b[..], b"hello world");
+        let ok = &b[..] == b"hello world";
+        crate::assert_with_log!(ok, "contents", b"hello world", &b[..]);
+        crate::test_complete!("test_bytes_mut_put_slice");
     }
 
     #[test]
     fn test_bytes_mut_reserve_and_grow() {
+        init_test("test_bytes_mut_reserve_and_grow");
         let mut b = BytesMut::new();
 
         // Small write
         b.put_slice(b"hello");
-        assert_eq!(b.len(), 5);
+        let len = b.len();
+        crate::assert_with_log!(len == 5, "len", 5, len);
 
         // Reserve more
         b.reserve(1000);
-        assert!(b.capacity() >= 1005);
+        let cap_ok = b.capacity() >= 1005;
+        crate::assert_with_log!(cap_ok, "capacity >= 1005", true, cap_ok);
 
         // Data should be preserved
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "contents", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_mut_reserve_and_grow");
     }
 
     #[test]
     fn test_bytes_mut_freeze() {
+        init_test("test_bytes_mut_freeze");
         let mut b = BytesMut::new();
         b.put_slice(b"hello world");
 
         let frozen = b.freeze();
-        assert_eq!(&frozen[..], b"hello world");
+        let ok = &frozen[..] == b"hello world";
+        crate::assert_with_log!(ok, "frozen", b"hello world", &frozen[..]);
 
         // Should be able to clone cheaply
         let clone = frozen.clone();
         drop(frozen);
-        assert_eq!(&clone[..], b"hello world");
+        let ok = &clone[..] == b"hello world";
+        crate::assert_with_log!(ok, "clone", b"hello world", &clone[..]);
+        crate::test_complete!("test_bytes_mut_freeze");
     }
 
     #[test]
     fn test_bytes_mut_split_off() {
+        init_test("test_bytes_mut_split_off");
         let mut b = BytesMut::new();
         b.put_slice(b"hello world");
 
         let world = b.split_off(6);
 
-        assert_eq!(&b[..], b"hello ");
-        assert_eq!(&world[..], b"world");
+        let ok = &b[..] == b"hello ";
+        crate::assert_with_log!(ok, "left", b"hello ", &b[..]);
+        let ok = &world[..] == b"world";
+        crate::assert_with_log!(ok, "right", b"world", &world[..]);
+        crate::test_complete!("test_bytes_mut_split_off");
     }
 
     #[test]
     fn test_bytes_mut_split_to() {
+        init_test("test_bytes_mut_split_to");
         let mut b = BytesMut::new();
         b.put_slice(b"hello world");
 
         let hello = b.split_to(6);
 
-        assert_eq!(&hello[..], b"hello ");
-        assert_eq!(&b[..], b"world");
+        let ok = &hello[..] == b"hello ";
+        crate::assert_with_log!(ok, "left", b"hello ", &hello[..]);
+        let ok = &b[..] == b"world";
+        crate::assert_with_log!(ok, "right", b"world", &b[..]);
+        crate::test_complete!("test_bytes_mut_split_to");
     }
 
     #[test]
     fn test_bytes_mut_resize() {
+        init_test("test_bytes_mut_resize");
         let mut b = BytesMut::new();
         b.put_slice(b"hello");
 
         // Grow
         b.resize(10, b'!');
-        assert_eq!(&b[..], b"hello!!!!!");
+        let ok = &b[..] == b"hello!!!!!";
+        crate::assert_with_log!(ok, "grown", b"hello!!!!!", &b[..]);
 
         // Shrink
         b.resize(5, 0);
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "shrunk", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_mut_resize");
     }
 
     #[test]
     fn test_bytes_mut_truncate() {
+        init_test("test_bytes_mut_truncate");
         let mut b = BytesMut::new();
         b.put_slice(b"hello world");
         b.truncate(5);
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "truncate", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_mut_truncate");
     }
 
     #[test]
     fn test_bytes_mut_clear() {
+        init_test("test_bytes_mut_clear");
         let mut b = BytesMut::new();
         b.put_slice(b"hello world");
         b.clear();
-        assert!(b.is_empty());
+        let empty = b.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        crate::test_complete!("test_bytes_mut_clear");
     }
 
     #[test]
     fn test_bytes_mut_from_vec() {
+        init_test("test_bytes_mut_from_vec");
         let v = vec![1u8, 2, 3];
         let b: BytesMut = v.into();
-        assert_eq!(&b[..], &[1, 2, 3]);
+        let ok = &b[..] == &[1, 2, 3];
+        crate::assert_with_log!(ok, "from vec", &[1, 2, 3], &b[..]);
+        crate::test_complete!("test_bytes_mut_from_vec");
     }
 
     #[test]
     fn test_bytes_mut_from_slice() {
+        init_test("test_bytes_mut_from_slice");
         let b: BytesMut = b"hello".as_slice().into();
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "from slice", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_mut_from_slice");
     }
 
     #[test]
     fn test_bytes_mut_from_string() {
+        init_test("test_bytes_mut_from_string");
         let s = String::from("hello");
         let b: BytesMut = s.into();
-        assert_eq!(&b[..], b"hello");
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "from string", b"hello", &b[..]);
+        crate::test_complete!("test_bytes_mut_from_string");
     }
 
     #[test]
     #[should_panic(expected = "out of bounds")]
     fn test_bytes_mut_split_off_panic() {
+        init_test("test_bytes_mut_split_off_panic");
         let mut b = BytesMut::new();
         b.put_slice(b"hello");
         let _bad = b.split_off(100);
@@ -565,6 +618,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "out of bounds")]
     fn test_bytes_mut_split_to_panic() {
+        init_test("test_bytes_mut_split_to_panic");
         let mut b = BytesMut::new();
         b.put_slice(b"hello");
         let _bad = b.split_to(100);

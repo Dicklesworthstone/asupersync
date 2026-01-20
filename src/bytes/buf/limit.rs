@@ -98,51 +98,73 @@ impl<T: BufMut> BufMut for Limit<T> {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_limit_remaining_mut() {
+        init_test("test_limit_remaining_mut");
         let mut data = [0u8; 10];
         let buf: &mut [u8] = &mut data;
         let limit = Limit::new(buf, 5);
-        assert_eq!(limit.remaining_mut(), 5);
+        let remaining = limit.remaining_mut();
+        crate::assert_with_log!(remaining == 5, "remaining", 5, remaining);
+        crate::test_complete!("test_limit_remaining_mut");
     }
 
     #[test]
     fn test_limit_remaining_mut_when_inner_smaller() {
+        init_test("test_limit_remaining_mut_when_inner_smaller");
         let mut data = [0u8; 3];
         let buf: &mut [u8] = &mut data;
         let limit = Limit::new(buf, 10);
-        assert_eq!(limit.remaining_mut(), 3);
+        let remaining = limit.remaining_mut();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+        crate::test_complete!("test_limit_remaining_mut_when_inner_smaller");
     }
 
     #[test]
     fn test_limit_put_slice() {
+        init_test("test_limit_put_slice");
         let mut data = [0u8; 10];
         {
             let buf: &mut [u8] = &mut data;
             let mut limit = Limit::new(buf, 5);
             limit.put_slice(&[1, 2, 3]);
-            assert_eq!(limit.remaining_mut(), 2);
+            let remaining = limit.remaining_mut();
+            crate::assert_with_log!(remaining == 2, "remaining", 2, remaining);
         }
-        assert_eq!(&data[..5], &[1, 2, 3, 0, 0]);
+        let ok = &data[..5] == &[1, 2, 3, 0, 0];
+        crate::assert_with_log!(ok, "data", &[1, 2, 3, 0, 0], &data[..5]);
+        crate::test_complete!("test_limit_put_slice");
     }
 
     #[test]
     fn test_limit_accessors() {
+        init_test("test_limit_accessors");
         let mut data = [0u8; 10];
         let buf: &mut [u8] = &mut data;
         let mut limit = Limit::new(buf, 5);
 
-        assert_eq!(Limit::limit(&limit), 5);
+        let current = Limit::limit(&limit);
+        crate::assert_with_log!(current == 5, "limit", 5, current);
         limit.set_limit(3);
-        assert_eq!(Limit::limit(&limit), 3);
+        let current = Limit::limit(&limit);
+        crate::assert_with_log!(current == 3, "limit", 3, current);
+        crate::test_complete!("test_limit_accessors");
     }
 
     #[test]
     fn test_limit_into_inner() {
+        init_test("test_limit_into_inner");
         let mut data = [0u8; 10];
         let buf: &mut [u8] = &mut data;
         let limit = Limit::new(buf, 5);
         let inner = limit.into_inner();
-        assert_eq!(inner.len(), 10);
+        let len = inner.len();
+        crate::assert_with_log!(len == 10, "len", 10, len);
+        crate::test_complete!("test_limit_into_inner");
     }
 }
