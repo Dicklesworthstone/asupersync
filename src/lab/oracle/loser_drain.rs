@@ -381,7 +381,12 @@ mod tests {
         crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        crate::assert_with_log!(violation.race_id == race2, "race_id", race2, violation.race_id);
+        crate::assert_with_log!(
+            violation.race_id == race2,
+            "race_id",
+            race2,
+            violation.race_id
+        );
         crate::test_complete!("multiple_races_independent");
     }
 

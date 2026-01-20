@@ -4,11 +4,25 @@ mod tests {
     use crate::security::tag::AuthenticationTag;
     use crate::transport::error::{SinkError, StreamError};
     use crate::transport::stream::{MergedStream, VecStream};
-    use crate::transport::{channel, SymbolSet, SymbolSinkExt, SymbolStreamExt};
+    use crate::transport::{channel, SymbolSet, SymbolSink, SymbolSinkExt, SymbolStreamExt};
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use crate::Cx;
     use futures_lite::future;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
 
     fn create_symbol(i: u32) -> AuthenticatedSymbol {
         let id = SymbolId::new_for_test(1, 0, i);
@@ -83,6 +97,35 @@ mod tests {
             // Join them
             futures_lite::future::zip(recv_task, send_task).await;
         });
+    }
+
+    #[test]
+    fn test_sink_backpressure_pending() {
+        let (mut sink, mut stream) = channel(1);
+        let s1 = create_symbol(1);
+        let s2 = create_symbol(2);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = Pin::new(&mut sink).poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let send = Pin::new(&mut sink).poll_send(&mut cx, s1);
+        assert!(matches!(send, Poll::Ready(Ok(()))));
+
+        let ready = Pin::new(&mut sink).poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Pending));
+
+        future::block_on(async {
+            let _ = stream.next().await;
+        });
+
+        let ready = Pin::new(&mut sink).poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let send = Pin::new(&mut sink).poll_send(&mut cx, s2);
+        assert!(matches!(send, Poll::Ready(Ok(()))));
     }
 
     #[test]
@@ -195,6 +238,25 @@ mod tests {
             let res = stream.next_with_cancel(&cx).await;
             assert!(matches!(res, Err(StreamError::Cancelled)));
         });
+    }
+
+    #[test]
+    fn test_stream_cancellation_after_pending() {
+        let (_sink, mut stream) = channel(10);
+        let cx = Cx::for_testing();
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let mut fut = stream.next_with_cancel(&cx);
+        let mut fut = Pin::new(&mut fut);
+
+        let first = fut.as_mut().poll(&mut context);
+        assert!(matches!(first, Poll::Pending));
+
+        cx.set_cancel_requested(true);
+        let second = fut.as_mut().poll(&mut context);
+        assert!(matches!(second, Poll::Ready(Err(StreamError::Cancelled))));
     }
 
     #[test]

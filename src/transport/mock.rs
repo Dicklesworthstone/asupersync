@@ -119,9 +119,12 @@ impl MockNetwork {
         for &from in &nodes {
             for &to in &nodes {
                 if from != to {
-                    links.insert((from, to), MockLink {
-                        config: config.clone(),
-                    });
+                    links.insert(
+                        (from, to),
+                        MockLink {
+                            config: config.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -150,12 +153,18 @@ impl MockNetwork {
         for i in 0..n {
             let from = i as NodeId;
             let to = ((i + 1) % n) as NodeId;
-            links.insert((from, to), MockLink {
-                config: config.clone(),
-            });
-            links.insert((to, from), MockLink {
-                config: config.clone(),
-            });
+            links.insert(
+                (from, to),
+                MockLink {
+                    config: config.clone(),
+                },
+            );
+            links.insert(
+                (to, from),
+                MockLink {
+                    config: config.clone(),
+                },
+            );
         }
         Self {
             nodes,
@@ -182,12 +191,18 @@ impl MockNetwork {
                     continue;
                 }
                 if self.nodes.contains(&a) && self.nodes.contains(&b) {
-                    self.links.insert((a, b), MockLink {
-                        config: self.default_config.clone(),
-                    });
-                    self.links.insert((b, a), MockLink {
-                        config: self.default_config.clone(),
-                    });
+                    self.links.insert(
+                        (a, b),
+                        MockLink {
+                            config: self.default_config.clone(),
+                        },
+                    );
+                    self.links.insert(
+                        (b, a),
+                        MockLink {
+                            config: self.default_config.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -486,7 +501,7 @@ impl SymbolSink for MockSymbolSink {
         symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
-        
+
         let mut delay_ready = false;
         if let Some(delay) = this.delay.as_ref() {
             if delay.poll(cx).is_pending() {

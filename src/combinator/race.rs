@@ -274,10 +274,7 @@ impl<E: fmt::Display> fmt::Display for RaceAllError<E> {
                 payload,
                 winner_index,
             } => {
-                write!(
-                    f,
-                    "race winner at index {winner_index} panicked: {payload}"
-                )
+                write!(f, "race winner at index {winner_index} panicked: {payload}")
             }
         }
     }

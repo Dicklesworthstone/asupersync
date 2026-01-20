@@ -762,12 +762,7 @@ mod tests {
         );
         let r1 = oracle.get_deadline(region(1));
         let r1_unbounded = matches!(r1, Some(None));
-        crate::assert_with_log!(
-            r1_unbounded,
-            "deadline r1 unbounded",
-            true,
-            r1_unbounded
-        );
+        crate::assert_with_log!(r1_unbounded, "deadline r1 unbounded", true, r1_unbounded);
         let r99 = oracle.get_deadline(region(99));
         crate::assert_with_log!(r99.is_none(), "deadline r99", true, r99.is_none());
         crate::test_complete!("get_deadline_returns_tracked_value");
@@ -793,12 +788,7 @@ mod tests {
             has_violation
         );
         let has_parent = s.contains("cannot exceed parent");
-        crate::assert_with_log!(
-            has_parent,
-            "message contains parent",
-            true,
-            has_parent
-        );
+        crate::assert_with_log!(has_parent, "message contains parent", true, has_parent);
         crate::test_complete!("violation_display");
     }
 
@@ -832,43 +822,23 @@ mod tests {
     fn test_is_deadline_monotone() {
         init_test("test_is_deadline_monotone");
         // Both bounded - normal comparison
-        let bounded_ok = DeadlineMonotoneOracle::is_deadline_monotone(
-            Some(t(100)),
-            Some(t(200)),
-        );
+        let bounded_ok = DeadlineMonotoneOracle::is_deadline_monotone(Some(t(100)), Some(t(200)));
         crate::assert_with_log!(bounded_ok, "100 <= 200", true, bounded_ok);
-        let equal_ok = DeadlineMonotoneOracle::is_deadline_monotone(
-            Some(t(200)),
-            Some(t(200)),
-        );
+        let equal_ok = DeadlineMonotoneOracle::is_deadline_monotone(Some(t(200)), Some(t(200)));
         crate::assert_with_log!(equal_ok, "200 <= 200", true, equal_ok);
-        let looser_bad = DeadlineMonotoneOracle::is_deadline_monotone(
-            Some(t(300)),
-            Some(t(200)),
-        );
+        let looser_bad = DeadlineMonotoneOracle::is_deadline_monotone(Some(t(300)), Some(t(200)));
         crate::assert_with_log!(!looser_bad, "300 <= 200", false, looser_bad);
 
         // Bounded child, unbounded parent - always ok
-        let bounded_unbounded = DeadlineMonotoneOracle::is_deadline_monotone(
-            Some(t(100)),
-            None,
-        );
+        let bounded_unbounded = DeadlineMonotoneOracle::is_deadline_monotone(Some(t(100)), None);
         crate::assert_with_log!(
             bounded_unbounded,
             "bounded under unbounded",
             true,
             bounded_unbounded
         );
-        let bounded_max = DeadlineMonotoneOracle::is_deadline_monotone(
-            Some(t(u64::MAX)),
-            None,
-        );
-        crate::assert_with_log!(
-            bounded_max,
-            "max under unbounded",
-            true,
-            bounded_max
-        );
+        let bounded_max = DeadlineMonotoneOracle::is_deadline_monotone(Some(t(u64::MAX)), None);
+        crate::assert_with_log!(bounded_max, "max under unbounded", true, bounded_max);
 
         // Both unbounded - ok
         let both_unbounded = DeadlineMonotoneOracle::is_deadline_monotone(None, None);
@@ -882,16 +852,8 @@ mod tests {
         // Unbounded child, bounded parent - VIOLATION
         let unbounded_bad = DeadlineMonotoneOracle::is_deadline_monotone(None, Some(t(100)));
         crate::assert_with_log!(!unbounded_bad, "unbounded <= 100", false, unbounded_bad);
-        let unbounded_max = DeadlineMonotoneOracle::is_deadline_monotone(
-            None,
-            Some(t(u64::MAX)),
-        );
-        crate::assert_with_log!(
-            !unbounded_max,
-            "unbounded <= max",
-            false,
-            unbounded_max
-        );
+        let unbounded_max = DeadlineMonotoneOracle::is_deadline_monotone(None, Some(t(u64::MAX)));
+        crate::assert_with_log!(!unbounded_max, "unbounded <= max", false, unbounded_max);
         crate::test_complete!("test_is_deadline_monotone");
     }
 }

@@ -305,7 +305,10 @@ impl Budget {
             }
             Some(old)
         } else {
-            trace!(polls_remaining = 0, "budget poll consume failed: already exhausted");
+            trace!(
+                polls_remaining = 0,
+                "budget poll consume failed: already exhausted"
+            );
             None
         }
     }
@@ -356,8 +359,10 @@ impl Budget {
         };
 
         // Trace when budget is tightened (any constraint becomes stricter)
-        let deadline_tightened = combined.deadline < self.deadline || combined.deadline < other.deadline;
-        let poll_tightened = combined.poll_quota < self.poll_quota || combined.poll_quota < other.poll_quota;
+        let deadline_tightened =
+            combined.deadline < self.deadline || combined.deadline < other.deadline;
+        let poll_tightened =
+            combined.poll_quota < self.poll_quota || combined.poll_quota < other.poll_quota;
         let cost_tightened = match (combined.cost_quota, self.cost_quota, other.cost_quota) {
             (Some(c), Some(s), _) if c < s => true,
             (Some(c), _, Some(o)) if c < o => true,
@@ -429,7 +434,11 @@ impl Budget {
     pub fn consume_cost(&mut self, cost: u64) -> bool {
         match self.cost_quota {
             None => {
-                trace!(cost_consumed = cost, cost_remaining = "unlimited", "budget cost consumed (unlimited)");
+                trace!(
+                    cost_consumed = cost,
+                    cost_remaining = "unlimited",
+                    "budget cost consumed (unlimited)"
+                );
                 true // No quota means unlimited
             }
             Some(remaining) if remaining >= cost => {

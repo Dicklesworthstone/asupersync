@@ -162,12 +162,7 @@ mod tests {
                 contents
             );
             let bytes = read(&file_path).await.unwrap();
-            crate::assert_with_log!(
-                bytes == b"hello world",
-                "bytes",
-                b"hello world",
-                bytes
-            );
+            crate::assert_with_log!(bytes == b"hello world", "bytes", b"hello world", bytes);
         });
         crate::test_complete!("read_write_roundtrip");
     }
@@ -188,12 +183,7 @@ mod tests {
             let exists = dst.exists();
             crate::assert_with_log!(!exists, "dst removed", false, exists);
             let contents = read(&renamed).await.unwrap();
-            crate::assert_with_log!(
-                contents == b"copy me",
-                "contents",
-                b"copy me",
-                contents
-            );
+            crate::assert_with_log!(contents == b"copy me", "contents", b"copy me", contents);
             remove_file(&renamed).await.unwrap();
             let exists = renamed.exists();
             crate::assert_with_log!(!exists, "renamed removed", false, exists);

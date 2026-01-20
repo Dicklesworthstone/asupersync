@@ -773,12 +773,7 @@ mod tests {
 
         // rx2 inherits seen_version from rx1, so no pending change
         let changed = rx2.has_changed();
-        crate::assert_with_log!(
-            !changed,
-            "rx2 inherits version",
-            false,
-            changed
-        );
+        crate::assert_with_log!(!changed, "rx2 inherits version", false, changed);
         crate::test_complete!("cloned_receiver_inherits_version");
     }
 

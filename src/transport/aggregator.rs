@@ -1219,6 +1219,28 @@ mod tests {
         crate::test_complete!("test_path_set_use_all");
     }
 
+    // Test 4.1: PathSet selection skips unusable paths
+    #[test]
+    fn test_path_set_skips_unusable() {
+        init_test("test_path_set_skips_unusable");
+        let set = PathSet::new(PathSelectionPolicy::UseAll);
+
+        let mut down = test_path(1);
+        down.state = PathState::Unavailable;
+        let mut up = test_path(2);
+        up.state = PathState::Active;
+
+        set.register(down);
+        set.register(up);
+
+        let selected = set.select_paths();
+        let len = selected.len();
+        crate::assert_with_log!(len == 1, "selected len", 1, len);
+        let id = selected[0].id;
+        crate::assert_with_log!(id == PathId(2), "selected path id", PathId(2), id);
+        crate::test_complete!("test_path_set_skips_unusable");
+    }
+
     // Test 5: PathSet selection - BestQuality
     #[test]
     fn test_path_set_best_quality() {
@@ -1240,6 +1262,40 @@ mod tests {
         crate::test_complete!("test_path_set_best_quality");
     }
 
+    // Test 5.1: PathSet selection - ByPriority
+    #[test]
+    fn test_path_set_by_priority() {
+        init_test("test_path_set_by_priority");
+        let set = PathSet::new(PathSelectionPolicy::ByPriority { count: 2 });
+
+        set.register(test_path(1).with_characteristics(PathCharacteristics {
+            priority: 50,
+            ..Default::default()
+        }));
+        set.register(test_path(2).with_characteristics(PathCharacteristics {
+            priority: 10,
+            ..Default::default()
+        }));
+        set.register(test_path(3).with_characteristics(PathCharacteristics {
+            priority: 30,
+            ..Default::default()
+        }));
+
+        let selected = set.select_paths();
+        let mut priorities: Vec<u32> = selected
+            .iter()
+            .map(|p| p.characteristics.priority)
+            .collect();
+        priorities.sort_unstable();
+        crate::assert_with_log!(
+            priorities == vec![10, 30],
+            "priority selection",
+            vec![10, 30],
+            priorities
+        );
+        crate::test_complete!("test_path_set_by_priority");
+    }
+
     // Test 6: Deduplicator basic operation
     #[test]
     fn test_deduplicator_basic() {
@@ -1259,7 +1315,12 @@ mod tests {
         crate::assert_with_log!(!second, "second duplicate", false, second);
 
         let stats = dedup.stats();
-        crate::assert_with_log!(stats.unique_symbols == 1, "unique_symbols", 1, stats.unique_symbols);
+        crate::assert_with_log!(
+            stats.unique_symbols == 1,
+            "unique_symbols",
+            1,
+            stats.unique_symbols
+        );
         crate::assert_with_log!(
             stats.duplicates_detected == 1,
             "duplicates_detected",
@@ -1448,6 +1509,63 @@ mod tests {
         let ready_empty = result2.ready.is_empty();
         crate::assert_with_log!(ready_empty, "ready empty", true, ready_empty);
         crate::test_complete!("test_aggregator_basic");
+    }
+
+    // Test 11.1: MultipathAggregator deduplicates across paths
+    #[test]
+    fn test_aggregator_multi_path_dedup() {
+        init_test("test_aggregator_multi_path_dedup");
+        let config = AggregatorConfig::default();
+        let aggregator = MultipathAggregator::new(config);
+
+        let p1 =
+            aggregator
+                .paths()
+                .create_path("p1", "localhost:1", PathCharacteristics::default());
+        let p2 = aggregator
+            .paths()
+            .create_path("p2", "localhost:2", PathCharacteristics::backup());
+
+        let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+
+        let first = aggregator.process(symbol.clone(), p1, Time::ZERO);
+        crate::assert_with_log!(
+            !first.was_duplicate,
+            "first unique",
+            false,
+            first.was_duplicate
+        );
+
+        let second = aggregator.process(symbol.clone(), p2, Time::ZERO);
+        crate::assert_with_log!(
+            second.was_duplicate,
+            "duplicate across paths",
+            true,
+            second.was_duplicate
+        );
+
+        let stats = aggregator.dedup.stats();
+        crate::assert_with_log!(
+            stats.unique_symbols == 1,
+            "unique symbols",
+            1,
+            stats.unique_symbols
+        );
+        crate::assert_with_log!(
+            stats.duplicates_detected == 1,
+            "duplicates detected",
+            1,
+            stats.duplicates_detected
+        );
+
+        if let Some(path) = aggregator.paths().get(p2) {
+            let duplicates = path.duplicates_received.load(Ordering::Relaxed);
+            crate::assert_with_log!(duplicates == 1, "path duplicates", 1, duplicates);
+        } else {
+            panic!("expected path to exist");
+        }
+
+        crate::test_complete!("test_aggregator_multi_path_dedup");
     }
 
     // Test 12: MultipathAggregator object completion

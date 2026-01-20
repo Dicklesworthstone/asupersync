@@ -467,12 +467,7 @@ mod tests {
             false,
             cell.is_initialized()
         );
-        crate::assert_with_log!(
-            cell.get().is_none(),
-            "get none",
-            true,
-            cell.get().is_none()
-        );
+        crate::assert_with_log!(cell.get().is_none(), "get none", true, cell.get().is_none());
         crate::test_complete!("new_cell_is_uninitialized");
     }
 
@@ -486,12 +481,7 @@ mod tests {
             true,
             cell.is_initialized()
         );
-        crate::assert_with_log!(
-            cell.get() == Some(&42),
-            "get value",
-            Some(&42),
-            cell.get()
-        );
+        crate::assert_with_log!(cell.get() == Some(&42), "get value", Some(&42), cell.get());
         crate::test_complete!("with_value_is_initialized");
     }
 
@@ -507,12 +497,7 @@ mod tests {
             true,
             cell.is_initialized()
         );
-        crate::assert_with_log!(
-            cell.get() == Some(&42),
-            "get value",
-            Some(&42),
-            cell.get()
-        );
+        crate::assert_with_log!(cell.get() == Some(&42), "get value", Some(&42), cell.get());
         crate::test_complete!("set_initializes_cell");
     }
 
@@ -611,12 +596,7 @@ mod tests {
             false,
             cell.is_initialized()
         );
-        crate::assert_with_log!(
-            cell.get().is_none(),
-            "get none",
-            true,
-            cell.get().is_none()
-        );
+        crate::assert_with_log!(cell.get().is_none(), "get none", true, cell.get().is_none());
         crate::test_complete!("take_resets_cell");
     }
 

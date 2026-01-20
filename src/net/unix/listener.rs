@@ -417,12 +417,7 @@ mod tests {
 
             // Take the path
             let taken = listener.take_path();
-            crate::assert_with_log!(
-                taken.is_some(),
-                "taken some",
-                true,
-                taken.is_some()
-            );
+            crate::assert_with_log!(taken.is_some(), "taken some", true, taken.is_some());
             let taken = taken.unwrap();
             crate::assert_with_log!(taken == path, "taken path", path, taken);
 
@@ -444,7 +439,9 @@ mod tests {
         init_test("test_abstract_socket");
         futures_lite::future::block_on(async {
             let name = b"asupersync_test_abstract_socket";
-            let listener = UnixListener::bind_abstract(name).await.expect("bind failed");
+            let listener = UnixListener::bind_abstract(name)
+                .await
+                .expect("bind failed");
             let addr = listener.local_addr().expect("local_addr failed");
 
             // Should be an abstract socket

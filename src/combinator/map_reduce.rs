@@ -453,7 +453,10 @@ pub fn map_reduce_to_result<T, E: Clone>(
             })
         }
         AggregateDecision::Cancelled(r) => Err(MapReduceError::Cancelled(r)),
-        AggregateDecision::Panicked { payload, first_panic_index } => Err(MapReduceError::Panicked {
+        AggregateDecision::Panicked {
+            payload,
+            first_panic_index,
+        } => Err(MapReduceError::Panicked {
             payload,
             index: first_panic_index,
         }),
@@ -657,7 +660,10 @@ mod tests {
         let (decision, reduced, successes) = map_reduce_outcomes(outcomes, |a, b| a + b);
 
         match decision {
-            AggregateDecision::Panicked { payload: _, first_panic_index } => assert_eq!(first_panic_index, 1),
+            AggregateDecision::Panicked {
+                payload: _,
+                first_panic_index,
+            } => assert_eq!(first_panic_index, 1),
             _ => panic!("Expected Panicked decision"),
         }
         // All successful values collected and reduced (join semantics: all branches complete)

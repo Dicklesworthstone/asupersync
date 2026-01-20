@@ -440,24 +440,14 @@ mod tests {
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"hello ");
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"world");
         let buffer = buf_writer.buffer();
-        crate::assert_with_log!(
-            buffer == b"hello world",
-            "buffer",
-            b"hello world",
-            buffer
-        );
+        crate::assert_with_log!(buffer == b"hello world", "buffer", b"hello world", buffer);
         let inner_empty = buf_writer.get_ref().is_empty();
         crate::assert_with_log!(inner_empty, "inner empty", true, inner_empty);
 
         // Flush
         let _ = Pin::new(&mut buf_writer).poll_flush(&mut cx);
         let inner = buf_writer.get_ref();
-        crate::assert_with_log!(
-            inner == b"hello world",
-            "inner",
-            b"hello world",
-            inner
-        );
+        crate::assert_with_log!(inner == b"hello world", "inner", b"hello world", inner);
         crate::test_complete!("buf_writer_multiple_writes");
     }
 
@@ -494,12 +484,7 @@ mod tests {
         let ready = matches!(poll, Poll::Ready(Ok(11)));
         crate::assert_with_log!(ready, "write 11", true, ready);
         let buffer = buf_writer.buffer();
-        crate::assert_with_log!(
-            buffer == b"hello world",
-            "buffer",
-            b"hello world",
-            buffer
-        );
+        crate::assert_with_log!(buffer == b"hello world", "buffer", b"hello world", buffer);
         crate::test_complete!("buf_writer_vectored_write_buffered");
     }
 

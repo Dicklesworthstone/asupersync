@@ -472,7 +472,10 @@ mod tests {
         oracle.on_region_create(region(3), Some(region(2)), t(40));
 
         let result = oracle.check();
-        let is_multiple = matches!(result.unwrap_err(), RegionTreeViolation::MultipleRoots { .. });
+        let is_multiple = matches!(
+            result.unwrap_err(),
+            RegionTreeViolation::MultipleRoots { .. }
+        );
         crate::assert_with_log!(is_multiple, "multiple roots", true, is_multiple);
         crate::test_complete!("multiple_roots_with_children_fails");
     }
@@ -538,7 +541,12 @@ mod tests {
                 claimed_parent,
             } => {
                 crate::assert_with_log!(r == region(1), "region", region(1), r);
-                crate::assert_with_log!(claimed_parent == region(99), "parent", region(99), claimed_parent);
+                crate::assert_with_log!(
+                    claimed_parent == region(99),
+                    "parent",
+                    region(99),
+                    claimed_parent
+                );
             }
             other => panic!("Expected InvalidParent, got {other:?}"),
         }

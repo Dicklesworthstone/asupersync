@@ -296,7 +296,12 @@ mod tests {
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         let compressed = decoded.compressed;
         crate::assert_with_log!(!compressed, "not compressed", false, compressed);
-        crate::assert_with_log!(decoded.data == original.data, "data", original.data, decoded.data);
+        crate::assert_with_log!(
+            decoded.data == original.data,
+            "data",
+            original.data,
+            decoded.data
+        );
         crate::test_complete!("test_grpc_codec_roundtrip");
     }
 

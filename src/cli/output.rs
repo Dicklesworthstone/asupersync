@@ -357,12 +357,7 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        crate::assert_with_log!(
-            parsed["id"] == 42,
-            "id",
-            42,
-            parsed["id"].clone()
-        );
+        crate::assert_with_log!(parsed["id"] == 42, "id", 42, parsed["id"].clone());
         crate::assert_with_log!(
             parsed["name"] == "test",
             "name",

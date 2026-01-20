@@ -476,12 +476,7 @@ mod tests {
         let early = wheel.collect_expired(Time::from_millis(2));
         crate::assert_with_log!(early.is_empty(), "no early fire", true, early.len());
         let wakers = wheel.collect_expired(Time::from_millis(5));
-        crate::assert_with_log!(
-            wakers.len() == 1,
-            "fires at deadline",
-            1,
-            wakers.len()
-        );
+        crate::assert_with_log!(wakers.len() == 1, "fires at deadline", 1, wakers.len());
 
         for waker in wakers {
             waker.wake();
@@ -489,12 +484,7 @@ mod tests {
 
         let count = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 1, "counter", 1, count);
-        crate::assert_with_log!(
-            wheel.is_empty(),
-            "wheel empty",
-            true,
-            wheel.is_empty()
-        );
+        crate::assert_with_log!(wheel.is_empty(), "wheel empty", true, wheel.is_empty());
         crate::test_complete!("wheel_register_and_fire");
     }
 
@@ -568,23 +558,13 @@ mod tests {
         let wakers = wheel.collect_expired(one_hour);
 
         // Should fire
-        crate::assert_with_log!(
-            wakers.len() == 1,
-            "fires after large jump",
-            1,
-            wakers.len()
-        );
+        crate::assert_with_log!(wakers.len() == 1, "fires after large jump", 1, wakers.len());
         for waker in wakers {
             waker.wake();
         }
         let count = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 1, "counter", 1, count);
-        crate::assert_with_log!(
-            wheel.is_empty(),
-            "wheel empty",
-            true,
-            wheel.is_empty()
-        );
+        crate::assert_with_log!(wheel.is_empty(), "wheel empty", true, wheel.is_empty());
         crate::test_complete!("wheel_advance_large_jump");
     }
 }

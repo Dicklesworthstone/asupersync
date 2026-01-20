@@ -959,7 +959,12 @@ mod tests {
 
         // Should fail for non-existent token
         let result = reactor.modify(Token::new(999), Interest::READABLE);
-        crate::assert_with_log!(result.is_err(), "modify missing fails", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "modify missing fails",
+            true,
+            result.is_err()
+        );
         crate::test_complete!("modify_interest");
     }
 
@@ -990,7 +995,12 @@ mod tests {
 
         // Deregister again should fail
         let result = reactor.deregister(token);
-        crate::assert_with_log!(result.is_err(), "deregister missing fails", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "deregister missing fails",
+            true,
+            result.is_err()
+        );
         crate::test_complete!("deregister_by_token");
     }
 
@@ -1226,12 +1236,7 @@ mod tests {
 
         // Should have 3 events in order
         let collected: Vec<_> = events.iter().collect();
-        crate::assert_with_log!(
-            collected.len() == 3,
-            "event count",
-            3usize,
-            collected.len()
-        );
+        crate::assert_with_log!(collected.len() == 3, "event count", 3usize, collected.len());
         crate::assert_with_log!(
             collected[0].token == token1,
             "first token",
@@ -1288,12 +1293,7 @@ mod tests {
 
         // Should be in time order: token3, token1, token2
         let collected: Vec<_> = events.iter().collect();
-        crate::assert_with_log!(
-            collected.len() == 3,
-            "event count",
-            3usize,
-            collected.len()
-        );
+        crate::assert_with_log!(collected.len() == 3, "event count", 3usize, collected.len());
         crate::assert_with_log!(
             collected[0].token == token3,
             "first token",
@@ -1399,12 +1399,7 @@ mod tests {
 
         // Should only have token2's event (token1's events were cleaned up)
         let collected: Vec<_> = events.iter().collect();
-        crate::assert_with_log!(
-            collected.len() == 1,
-            "event count",
-            1usize,
-            collected.len()
-        );
+        crate::assert_with_log!(collected.len() == 1, "event count", 1usize, collected.len());
         crate::assert_with_log!(
             collected[0].token == token2,
             "remaining token",
@@ -1434,12 +1429,7 @@ mod tests {
         reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
 
         let event = events.iter().next().expect("event");
-        crate::assert_with_log!(
-            event.is_error(),
-            "event is error",
-            true,
-            event.is_error()
-        );
+        crate::assert_with_log!(event.is_error(), "event is error", true, event.is_error());
 
         let last_kind = reactor
             .inner
@@ -1504,10 +1494,7 @@ mod tests {
         init_test("io_chaos_is_deterministic_with_same_seed");
         let config = ChaosConfig::new(123)
             .with_io_error_probability(0.5)
-            .with_io_error_kinds(vec![
-                io::ErrorKind::WouldBlock,
-                io::ErrorKind::TimedOut,
-            ]);
+            .with_io_error_kinds(vec![io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut]);
 
         let reactor_a = LabReactor::with_chaos(config.clone());
         let reactor_b = LabReactor::with_chaos(config);
@@ -1602,12 +1589,7 @@ mod tests {
 
             // Waker should not be woken yet
             let initial = waker_state.flag.load(Ordering::SeqCst);
-            crate::assert_with_log!(
-                !initial,
-                "waker not yet woken",
-                false,
-                initial
-            );
+            crate::assert_with_log!(!initial, "waker not yet woken", false, initial);
 
             // Inject an event for our token
             reactor.inject_event(token, Event::readable(token), Duration::ZERO);
@@ -1673,7 +1655,10 @@ mod tests {
 
             let config = FaultConfig::new()
                 .with_error_probability(0.5)
-                .with_error_kinds(vec![io::ErrorKind::BrokenPipe, io::ErrorKind::ConnectionReset])
+                .with_error_kinds(vec![
+                    io::ErrorKind::BrokenPipe,
+                    io::ErrorKind::ConnectionReset,
+                ])
                 .with_partitioned(true)
                 .with_closed(true)
                 .with_pending_error(io::ErrorKind::TimedOut);

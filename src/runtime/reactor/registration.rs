@@ -359,12 +359,7 @@ mod tests {
         drop(reactor);
 
         let active_after = reg.is_active();
-        crate::assert_with_log!(
-            !active_after,
-            "inactive after drop",
-            false,
-            active_after
-        );
+        crate::assert_with_log!(!active_after, "inactive after drop", false, active_after);
         crate::test_complete!("is_active");
     }
 

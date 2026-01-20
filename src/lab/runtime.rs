@@ -13,8 +13,8 @@ use crate::runtime::RuntimeState;
 use crate::trace::event::TraceEventKind;
 use crate::trace::TraceBuffer;
 use crate::trace::{TraceData, TraceEvent};
-use crate::types::{ObligationId, TaskId};
 use crate::types::Time;
+use crate::types::{ObligationId, TaskId};
 use crate::util::DetRng;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -56,7 +56,9 @@ impl LabRuntime {
         state.trace = TraceBuffer::new(config.trace_capacity);
         Self {
             state,
-            scheduler: Arc::new(Mutex::new(crate::runtime::scheduler::PriorityScheduler::new())),
+            scheduler: Arc::new(Mutex::new(
+                crate::runtime::scheduler::PriorityScheduler::new(),
+            )),
             config,
             rng,
             virtual_time: Time::ZERO,
@@ -717,7 +719,12 @@ mod tests {
 
         runtime.advance_time(1_000_000);
         let now = runtime.now();
-        crate::assert_with_log!(now == Time::from_millis(1), "now", Time::from_millis(1), now);
+        crate::assert_with_log!(
+            now == Time::from_millis(1),
+            "now",
+            Time::from_millis(1),
+            now
+        );
         crate::test_complete!("advance_time");
     }
 
@@ -881,18 +888,8 @@ mod tests {
                     ObligationKind::SendPermit,
                     leak.kind
                 );
-                crate::assert_with_log!(
-                    leak.holder == task_id,
-                    "holder",
-                    task_id,
-                    leak.holder
-                );
-                crate::assert_with_log!(
-                    leak.region == root,
-                    "region",
-                    root,
-                    leak.region
-                );
+                crate::assert_with_log!(leak.holder == task_id, "holder", task_id, leak.holder);
+                crate::assert_with_log!(leak.region == root, "region", root, leak.region);
             }
         }
         crate::assert_with_log!(found, "found leak", true, found);
@@ -941,12 +938,7 @@ mod tests {
         let has_leak = violations
             .iter()
             .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. }));
-        crate::assert_with_log!(
-            !has_leak,
-            "no leak",
-            false,
-            has_leak
-        );
+        crate::assert_with_log!(!has_leak, "no leak", false, has_leak);
         crate::test_complete!("obligation_leak_ignored_when_resolved");
     }
 
@@ -973,10 +965,9 @@ mod tests {
         runtime.state.commit_obligation(ob1).unwrap();
 
         runtime.advance_time_to(Time::from_nanos(30));
-        let ob2 =
-            runtime
-                .state
-                .create_obligation(ObligationKind::Ack, task_id, root, None);
+        let ob2 = runtime
+            .state
+            .create_obligation(ObligationKind::Ack, task_id, root, None);
 
         runtime.advance_time_to(Time::from_nanos(50));
         runtime

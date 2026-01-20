@@ -286,12 +286,7 @@ mod tests {
         let mut fut = reader.read_exact(&mut buf);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut).expect("future did not resolve");
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::assert_with_log!(&buf == b"abcd", "buf", b"abcd", buf);
         crate::test_complete!("read_exact_ok");
     }

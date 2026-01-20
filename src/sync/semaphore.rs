@@ -139,11 +139,7 @@ impl Semaphore {
     }
 
     /// Acquires the given number of permits asynchronously.
-    pub fn acquire<'a, 'b>(
-        &'a self,
-        cx: &'b Cx,
-        count: usize,
-    ) -> AcquireFuture<'a, 'b> {
+    pub fn acquire<'a, 'b>(&'a self, cx: &'b Cx, count: usize) -> AcquireFuture<'a, 'b> {
         assert!(count > 0, "cannot acquire 0 permits");
         assert!(
             count <= self.max_permits,
@@ -207,7 +203,11 @@ pub struct AcquireFuture<'a, 'b> {
 impl Drop for AcquireFuture<'_, '_> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+            let mut state = self
+                .semaphore
+                .state
+                .lock()
+                .expect("semaphore lock poisoned");
             state.waiters.retain(|waiter| waiter.id != waiter_id);
         }
     }
@@ -219,7 +219,11 @@ impl<'a, 'b> Future for AcquireFuture<'a, 'b> {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if let Err(_) = self.cx.checkpoint() {
             if let Some(waiter_id) = self.waiter_id {
-                let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+                let mut state = self
+                    .semaphore
+                    .state
+                    .lock()
+                    .expect("semaphore lock poisoned");
                 state.waiters.retain(|waiter| waiter.id != waiter_id);
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
@@ -229,7 +233,11 @@ impl<'a, 'b> Future for AcquireFuture<'a, 'b> {
             id
         } else {
             let id = {
-                let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+                let mut state = self
+                    .semaphore
+                    .state
+                    .lock()
+                    .expect("semaphore lock poisoned");
                 let id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 id
@@ -238,7 +246,11 @@ impl<'a, 'b> Future for AcquireFuture<'a, 'b> {
             id
         };
 
-        let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+        let mut state = self
+            .semaphore
+            .state
+            .lock()
+            .expect("semaphore lock poisoned");
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
@@ -253,7 +265,7 @@ impl<'a, 'b> Future for AcquireFuture<'a, 'b> {
             // Simplified: if we are polled, we try to acquire.
             // If waiters exist and we are new, we should queue.
             // But here we rely on the waker system.
-            
+
             // Just acquire if available. Fairness is best-effort with this simple waker queue.
             // Actually, if we just acquired, we jumped the queue if we weren't at front.
             // But for now, correctness (async) > strict fairness perfection.
@@ -265,7 +277,11 @@ impl<'a, 'b> Future for AcquireFuture<'a, 'b> {
             }));
         }
 
-        if let Some(existing) = state.waiters.iter_mut().find(|waiter| waiter.id == waiter_id) {
+        if let Some(existing) = state
+            .waiters
+            .iter_mut()
+            .find(|waiter| waiter.id == waiter_id)
+        {
             existing.waker = context.waker().clone();
         } else {
             state.waiters.push_back(Waiter {
@@ -363,7 +379,11 @@ struct OwnedAcquireFuture {
 impl Drop for OwnedAcquireFuture {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+            let mut state = self
+                .semaphore
+                .state
+                .lock()
+                .expect("semaphore lock poisoned");
             state.waiters.retain(|waiter| waiter.id != waiter_id);
         }
     }
@@ -375,7 +395,11 @@ impl Future for OwnedAcquireFuture {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if let Err(_) = self.cx.checkpoint() {
             if let Some(waiter_id) = self.waiter_id {
-                let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+                let mut state = self
+                    .semaphore
+                    .state
+                    .lock()
+                    .expect("semaphore lock poisoned");
                 state.waiters.retain(|waiter| waiter.id != waiter_id);
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
@@ -385,7 +409,11 @@ impl Future for OwnedAcquireFuture {
             id
         } else {
             let id = {
-                let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+                let mut state = self
+                    .semaphore
+                    .state
+                    .lock()
+                    .expect("semaphore lock poisoned");
                 let id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 id
@@ -394,7 +422,11 @@ impl Future for OwnedAcquireFuture {
             id
         };
 
-        let mut state = self.semaphore.state.lock().expect("semaphore lock poisoned");
+        let mut state = self
+            .semaphore
+            .state
+            .lock()
+            .expect("semaphore lock poisoned");
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
@@ -410,7 +442,11 @@ impl Future for OwnedAcquireFuture {
             }));
         }
 
-        if let Some(existing) = state.waiters.iter_mut().find(|waiter| waiter.id == waiter_id) {
+        if let Some(existing) = state
+            .waiters
+            .iter_mut()
+            .find(|waiter| waiter.id == waiter_id)
+        {
             existing.waker = context.waker().clone();
         } else {
             state.waiters.push_back(Waiter {
@@ -479,7 +515,9 @@ mod tests {
         let sem = Semaphore::new(5);
 
         let mut fut = sem.acquire(&cx, 2);
-        let _permit = poll_once(&mut fut).expect("acquire failed").expect("acquire failed");
+        let _permit = poll_once(&mut fut)
+            .expect("acquire failed")
+            .expect("acquire failed");
         crate::assert_with_log!(
             sem.available_permits() == 3,
             "available permits after acquire",
@@ -500,24 +538,14 @@ mod tests {
         let pending = poll_once(&mut fut).is_none();
         crate::assert_with_log!(pending, "acquire pending", true, pending);
         let waiter_len = sem.state.lock().unwrap().waiters.len();
-        crate::assert_with_log!(
-            waiter_len == 1,
-            "waiter queued",
-            1usize,
-            waiter_len
-        );
+        crate::assert_with_log!(waiter_len == 1, "waiter queued", 1usize, waiter_len);
 
         cx.set_cancel_requested(true);
         let result = poll_once(&mut fut).expect("cancel poll");
         let cancelled = matches!(result, Err(AcquireError::Cancelled));
         crate::assert_with_log!(cancelled, "cancelled error", true, cancelled);
         let waiter_len = sem.state.lock().unwrap().waiters.len();
-        crate::assert_with_log!(
-            waiter_len == 0,
-            "waiter removed",
-            0usize,
-            waiter_len
-        );
+        crate::assert_with_log!(waiter_len == 0, "waiter removed", 0usize, waiter_len);
         crate::test_complete!("cancel_removes_waiter");
     }
 
@@ -532,21 +560,11 @@ mod tests {
         let pending = poll_once(&mut fut).is_none();
         crate::assert_with_log!(pending, "acquire pending", true, pending);
         let waiter_len = sem.state.lock().unwrap().waiters.len();
-        crate::assert_with_log!(
-            waiter_len == 1,
-            "waiter queued",
-            1usize,
-            waiter_len
-        );
+        crate::assert_with_log!(waiter_len == 1, "waiter queued", 1usize, waiter_len);
 
         drop(fut);
         let waiter_len = sem.state.lock().unwrap().waiters.len();
-        crate::assert_with_log!(
-            waiter_len == 0,
-            "waiter removed",
-            0usize,
-            waiter_len
-        );
+        crate::assert_with_log!(waiter_len == 0, "waiter removed", 0usize, waiter_len);
         crate::test_complete!("drop_removes_waiter");
     }
 }

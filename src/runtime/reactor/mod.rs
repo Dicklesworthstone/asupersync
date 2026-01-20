@@ -639,12 +639,7 @@ mod tests {
             false,
             event.is_writable()
         );
-        crate::assert_with_log!(
-            event.is_error(),
-            "error flag",
-            true,
-            event.is_error()
-        );
+        crate::assert_with_log!(event.is_error(), "error flag", true, event.is_error());
         crate::assert_with_log!(
             !event.is_hangup(),
             "hangup flag unset",
@@ -676,12 +671,7 @@ mod tests {
             false,
             event.is_error()
         );
-        crate::assert_with_log!(
-            event.is_hangup(),
-            "hangup flag",
-            true,
-            event.is_hangup()
-        );
+        crate::assert_with_log!(event.is_hangup(), "hangup flag", true, event.is_hangup());
         crate::test_complete!("event_hangup");
     }
 
@@ -704,18 +694,8 @@ mod tests {
             false,
             event.is_writable()
         );
-        crate::assert_with_log!(
-            event.is_error(),
-            "error flag",
-            true,
-            event.is_error()
-        );
-        crate::assert_with_log!(
-            event.is_hangup(),
-            "hangup flag",
-            true,
-            event.is_hangup()
-        );
+        crate::assert_with_log!(event.is_error(), "error flag", true, event.is_error());
+        crate::assert_with_log!(event.is_hangup(), "hangup flag", true, event.is_hangup());
         crate::test_complete!("event_combined_flags");
     }
 
@@ -731,12 +711,7 @@ mod tests {
             events.capacity()
         );
         crate::assert_with_log!(events.len() == 0, "len", 0usize, events.len());
-        crate::assert_with_log!(
-            events.is_empty(),
-            "is_empty",
-            true,
-            events.is_empty()
-        );
+        crate::assert_with_log!(events.is_empty(), "is_empty", true, events.is_empty());
         crate::test_complete!("events_with_capacity");
     }
 
@@ -749,12 +724,7 @@ mod tests {
         events.push(Event::errored(Token::new(3)));
 
         crate::assert_with_log!(events.len() == 3, "len", 3usize, events.len());
-        crate::assert_with_log!(
-            !events.is_empty(),
-            "not empty",
-            false,
-            events.is_empty()
-        );
+        crate::assert_with_log!(!events.is_empty(), "not empty", false, events.is_empty());
 
         let tokens: Vec<usize> = events.iter().map(|e| e.token.0).collect();
         crate::assert_with_log!(

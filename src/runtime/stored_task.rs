@@ -146,12 +146,7 @@ mod tests {
         crate::test_section!("poll");
         let result = task.poll(&mut cx);
         let ready = matches!(result, Poll::Ready(()));
-        crate::assert_with_log!(
-            ready,
-            "poll should complete immediately",
-            true,
-            ready
-        );
+        crate::assert_with_log!(ready, "poll should complete immediately", true, ready);
         let completed_value = completed.load(Ordering::SeqCst);
         crate::assert_with_log!(
             completed_value,

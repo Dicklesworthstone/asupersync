@@ -279,18 +279,8 @@ mod tests {
         let mut fut = output.write_all(b"hello world");
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
-        crate::assert_with_log!(
-            output == b"hello world",
-            "output",
-            b"hello world",
-            output
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::assert_with_log!(output == b"hello world", "output", b"hello world", output);
         crate::test_complete!("write_all_ok");
     }
 
@@ -301,18 +291,8 @@ mod tests {
         let mut fut = output.write_u8(0x42);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
-        crate::assert_with_log!(
-            output == vec![0x42],
-            "output",
-            vec![0x42],
-            output
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::assert_with_log!(output == vec![0x42], "output", vec![0x42], output);
         crate::test_complete!("write_u8_ok");
     }
 
@@ -323,12 +303,7 @@ mod tests {
         let mut fut = output.flush();
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::test_complete!("flush_ok");
     }
 
@@ -339,12 +314,7 @@ mod tests {
         let mut fut = output.shutdown();
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::test_complete!("shutdown_ok");
     }
 
@@ -372,20 +342,10 @@ mod tests {
         let mut fut = output.write_all_buf(&mut input);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         let empty = input.is_empty();
         crate::assert_with_log!(empty, "input empty", true, empty);
-        crate::assert_with_log!(
-            output == b"buffered",
-            "output",
-            b"buffered",
-            output
-        );
+        crate::assert_with_log!(output == b"buffered", "output", b"buffered", output);
         crate::test_complete!("write_all_buf_ok");
     }
 }

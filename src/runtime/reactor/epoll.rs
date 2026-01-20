@@ -506,12 +506,7 @@ mod tests {
                 break;
             }
         }
-        crate::assert_with_log!(
-            found,
-            "expected writable event for token",
-            true,
-            found
-        );
+        crate::assert_with_log!(found, "expected writable event for token", true, found);
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("poll_writable");
@@ -548,12 +543,7 @@ mod tests {
                 break;
             }
         }
-        crate::assert_with_log!(
-            found,
-            "expected readable event for token",
-            true,
-            found
-        );
+        crate::assert_with_log!(found, "expected readable event for token", true, found);
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("poll_readable");

@@ -194,12 +194,7 @@ mod tests {
         let suite = OracleSuite::new();
         let violations = suite.check_all(Time::ZERO);
         let empty = violations.is_empty();
-        crate::assert_with_log!(
-            empty,
-            "suite clean",
-            true,
-            empty
-        );
+        crate::assert_with_log!(empty, "suite clean", true, empty);
         crate::test_complete!("oracle_suite_default_is_clean");
     }
 }

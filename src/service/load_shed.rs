@@ -357,10 +357,7 @@ mod tests {
         // call should return overloaded error
         let mut future = svc.call(42);
         let result = Pin::new(&mut future).poll(&mut cx);
-        let overloaded = matches!(
-            result,
-            Poll::Ready(Err(LoadShedError::Overloaded(_)))
-        );
+        let overloaded = matches!(result, Poll::Ready(Err(LoadShedError::Overloaded(_))));
         crate::assert_with_log!(overloaded, "overloaded error", true, overloaded);
         crate::test_complete!("load_shed_sheds_when_not_ready");
     }

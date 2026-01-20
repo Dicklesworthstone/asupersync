@@ -77,8 +77,8 @@ impl Wake for TaskWaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::ArenaIndex;
     use crate::test_utils::init_test_logging;
+    use crate::util::ArenaIndex;
 
     fn task(n: u32) -> TaskId {
         TaskId::from_arena(ArenaIndex::new(n, 0))

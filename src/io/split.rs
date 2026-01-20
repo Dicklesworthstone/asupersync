@@ -231,10 +231,10 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
     }
-}
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -297,7 +297,12 @@ mod tests {
         // Check the underlying stream - use _ = to drop without triggering clippy
         let _ = write_half;
         let inner = wrapper.get_ref();
-        crate::assert_with_log!(inner.written == b"world", "written", b"world", inner.written);
+        crate::assert_with_log!(
+            inner.written == b"world",
+            "written",
+            b"world",
+            inner.written
+        );
         crate::test_complete!("write_half_writes");
     }
 
@@ -327,7 +332,12 @@ mod tests {
         let stream = TestStream::new(b"test");
         let wrapper = SplitStream::new(stream);
         let stream = wrapper.into_inner();
-        crate::assert_with_log!(stream.read_data == b"test", "read_data", b"test", stream.read_data);
+        crate::assert_with_log!(
+            stream.read_data == b"test",
+            "read_data",
+            b"test",
+            stream.read_data
+        );
         crate::test_complete!("into_inner_works");
     }
 }

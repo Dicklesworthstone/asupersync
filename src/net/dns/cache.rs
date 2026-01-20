@@ -228,12 +228,7 @@ mod tests {
 
         // Miss
         let miss = cache.get_ip("example.com");
-        crate::assert_with_log!(
-            miss.is_none(),
-            "cache miss",
-            true,
-            miss.is_none()
-        );
+        crate::assert_with_log!(miss.is_none(), "cache miss", true, miss.is_none());
         let misses = cache.stats().misses;
         crate::assert_with_log!(misses == 1, "misses", 1, misses);
         let hits = cache.stats().hits;
@@ -248,12 +243,7 @@ mod tests {
 
         // Hit
         let result = cache.get_ip("example.com");
-        crate::assert_with_log!(
-            result.is_some(),
-            "cache hit",
-            true,
-            result.is_some()
-        );
+        crate::assert_with_log!(result.is_some(), "cache hit", true, result.is_some());
         let hits = cache.stats().hits;
         crate::assert_with_log!(hits == 1, "hits", 1, hits);
         crate::test_complete!("cache_hit_miss");
@@ -289,12 +279,7 @@ mod tests {
 
         // Should be expired
         let expired = cache.get_ip("example.com");
-        crate::assert_with_log!(
-            expired.is_none(),
-            "expired",
-            true,
-            expired.is_none()
-        );
+        crate::assert_with_log!(expired.is_none(), "expired", true, expired.is_none());
         crate::test_complete!("cache_expiration");
     }
 
@@ -336,12 +321,7 @@ mod tests {
 
         // Entry should exist
         let result = cache.get_ip("example.com");
-        crate::assert_with_log!(
-            result.is_some(),
-            "entry exists",
-            true,
-            result.is_some()
-        );
+        crate::assert_with_log!(result.is_some(), "entry exists", true, result.is_some());
         crate::test_complete!("cache_ttl_clamping");
     }
 }

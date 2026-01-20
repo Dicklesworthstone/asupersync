@@ -1,4 +1,8 @@
+#![allow(unsafe_code)]
 //! Unix socket ancillary data for file descriptor passing.
+//!
+//! This module uses unsafe code for interfacing with libc socket control
+//! message functions (CMSG_SPACE, CMSG_LEN, CMSG_DATA).
 //!
 //! This module provides [`SocketAncillary`] for sending and receiving ancillary
 //! data (control messages) over Unix domain sockets, including file descriptor passing.
@@ -52,7 +56,6 @@
 //! wrapped in a type that implements `Drop` (like `File` or `OwnedFd`) to
 //! ensure they are closed when no longer needed.
 
-use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::os::unix::io::RawFd;

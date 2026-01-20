@@ -326,7 +326,12 @@ mod tests {
         let ready = matches!(&poll, Poll::Ready(Ok(_)));
         crate::assert_with_log!(ready, "poll ready", true, ready);
         if let Poll::Ready(Ok(buf)) = poll {
-            crate::assert_with_log!(buf == b"buffered content", "buffer", b"buffered content", buf);
+            crate::assert_with_log!(
+                buf == b"buffered content",
+                "buffer",
+                b"buffered content",
+                buf
+            );
         }
         crate::test_complete!("buf_reader_poll_fill_buf");
     }

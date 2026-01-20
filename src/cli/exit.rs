@@ -102,12 +102,7 @@ mod tests {
         let unique: HashSet<_> = codes.iter().collect();
         let len = codes.len();
         let unique_len = unique.len();
-        crate::assert_with_log!(
-            len == unique_len,
-            "unique codes",
-            len,
-            unique_len
-        );
+        crate::assert_with_log!(len == unique_len, "unique codes", len, unique_len);
         crate::test_complete!("exit_codes_are_distinct");
     }
 
@@ -129,12 +124,7 @@ mod tests {
 
         for code in codes {
             let in_range = (0..=125).contains(&code);
-            crate::assert_with_log!(
-                in_range,
-                "code in range",
-                "0..=125",
-                code
-            );
+            crate::assert_with_log!(in_range, "code in range", "0..=125", code);
         }
         crate::test_complete!("exit_codes_in_valid_range");
     }
@@ -145,12 +135,7 @@ mod tests {
         let codes = [0, 1, 2, 3, 4, 5, 10, 11, 12, 13];
         for code in codes {
             let desc = ExitCode::description(code);
-            crate::assert_with_log!(
-                !desc.is_empty(),
-                "description not empty",
-                "non-empty",
-                desc
-            );
+            crate::assert_with_log!(!desc.is_empty(), "description not empty", "non-empty", desc);
             crate::assert_with_log!(
                 desc != "unknown",
                 "description not unknown",

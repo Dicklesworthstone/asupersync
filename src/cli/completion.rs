@@ -174,7 +174,11 @@ fn generate_bash_completions<W: Write, C: Completable>(
     writer: &mut W,
 ) -> io::Result<()> {
     let cmd = completable.command_name();
-    let subcommands: Vec<_> = completable.subcommands().iter().map(|c| c.value.clone()).collect();
+    let subcommands: Vec<_> = completable
+        .subcommands()
+        .iter()
+        .map(|c| c.value.clone())
+        .collect();
     let options: Vec<_> = completable
         .global_options()
         .iter()
@@ -251,7 +255,10 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     writeln!(writer)?;
     writeln!(writer, "    case $state in")?;
     writeln!(writer, "        command)")?;
-    writeln!(writer, "            _describe -t commands 'commands' commands")?;
+    writeln!(
+        writer,
+        "            _describe -t commands 'commands' commands"
+    )?;
     writeln!(writer, "            ;;")?;
     writeln!(writer, "        args)")?;
     writeln!(writer, "            _describe -t options 'options' options")?;
@@ -327,7 +334,10 @@ fn generate_powershell_completions<W: Write, C: Completable>(
         writer,
         "Register-ArgumentCompleter -Native -CommandName {cmd} -ScriptBlock {{"
     )?;
-    writeln!(writer, "    param($wordToComplete, $commandAst, $cursorPosition)")?;
+    writeln!(
+        writer,
+        "    param($wordToComplete, $commandAst, $cursorPosition)"
+    )?;
     writeln!(writer)?;
     writeln!(writer, "    $commands = @(")?;
     for item in &subcommands {
@@ -414,12 +424,7 @@ mod tests {
         let fish = Shell::Fish.name();
         crate::assert_with_log!(fish == "fish", "fish name", "fish", fish);
         let pwsh = Shell::PowerShell.name();
-        crate::assert_with_log!(
-            pwsh == "powershell",
-            "powershell name",
-            "powershell",
-            pwsh
-        );
+        crate::assert_with_log!(pwsh == "powershell", "powershell name", "powershell", pwsh);
         let elvish = Shell::Elvish.name();
         crate::assert_with_log!(elvish == "elvish", "elvish name", "elvish", elvish);
         crate::test_complete!("shell_names");
@@ -449,7 +454,12 @@ mod tests {
             pwsh_short
         );
         let elvish = Shell::parse("elvish").unwrap();
-        crate::assert_with_log!(elvish == Shell::Elvish, "parse elvish", Shell::Elvish, elvish);
+        crate::assert_with_log!(
+            elvish == Shell::Elvish,
+            "parse elvish",
+            Shell::Elvish,
+            elvish
+        );
         crate::test_complete!("shell_parse_valid");
     }
 

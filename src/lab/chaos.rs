@@ -876,8 +876,10 @@ mod tests {
 
     #[test]
     fn rng_io_error_kind() {
-        let config = ChaosConfig::new(42)
-            .with_io_error_kinds(vec![io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut]);
+        let config = ChaosConfig::new(42).with_io_error_kinds(vec![
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::TimedOut,
+        ]);
 
         let mut rng = config.rng();
         for _ in 0..100 {

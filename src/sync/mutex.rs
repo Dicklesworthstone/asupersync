@@ -126,7 +126,11 @@ impl<T> Mutex<T> {
     /// Returns the number of tasks currently waiting for the lock.
     #[must_use]
     pub fn waiters(&self) -> usize {
-        self.state.lock().expect("mutex state lock poisoned").waiters.len()
+        self.state
+            .lock()
+            .expect("mutex state lock poisoned")
+            .waiters
+            .len()
     }
 
     /// Acquires the mutex asynchronously.
@@ -215,18 +219,18 @@ impl<'a, 'b, T> Future for LockFuture<'a, 'b, T> {
         }
 
         // Register waker if not already done (or replace existing)
-        // Simple strategy: always push to back. A better strategy for cancel correctness 
-        // might track IDs, but for Phase 0 simplicity and because `poll` is called 
+        // Simple strategy: always push to back. A better strategy for cancel correctness
+        // might track IDs, but for Phase 0 simplicity and because `poll` is called
         // when woken, we can just ensure we are in the queue.
         // Actually, to avoid duplicates, we could track registration state.
         // But for strict FIFO, we should only push once?
         // If we wake up spurious, we need to re-register.
-        
-        // Simpler: Just push. Waker handling handles spurious wakes naturally 
-        // (will re-poll, find locked, push again). 
-        // Optimization: Don't push if already waiting? 
+
+        // Simpler: Just push. Waker handling handles spurious wakes naturally
+        // (will re-poll, find locked, push again).
+        // Optimization: Don't push if already waiting?
         // `Waker` comparison is tricky.
-        
+
         // Let's allow spurious pushes for now, or use a better structure later.
         // The standard pattern is to register on every poll if pending.
         state.waiters.push_back(context.waker().clone());
@@ -247,9 +251,7 @@ unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}
 
 impl<T: std::fmt::Debug> std::fmt::Debug for MutexGuard<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MutexGuard")
-            .field("data", &**self)
-            .finish()
+        f.debug_struct("MutexGuard").field("data", &**self).finish()
     }
 }
 
@@ -289,15 +291,15 @@ impl<T> OwnedMutexGuard<T> {
     /// Acquires the mutex asynchronously (owned).
     pub async fn lock(mutex: Arc<Mutex<T>>, cx: &Cx) -> Result<Self, LockError> {
         // Reuse the logic from LockFuture or reimplement?
-        // Since we need to return OwnedMutexGuard, we can't use LockFuture directly 
+        // Since we need to return OwnedMutexGuard, we can't use LockFuture directly
         // unless we change it to be generic over the guard type or use a helper.
         // Re-implementing for simplicity (or use a shared internal lock async fn).
-        
+
         struct OwnedLockFuture<T> {
             mutex: Arc<Mutex<T>>,
             cx: Cx, // clone of cx
         }
-        
+
         impl<T> Future for OwnedLockFuture<T> {
             type Output = Result<OwnedMutexGuard<T>, LockError>;
             fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
@@ -310,14 +312,20 @@ impl<T> OwnedMutexGuard<T> {
                 let mut state = self.mutex.state.lock().expect("mutex state poisoned");
                 if !state.locked {
                     state.locked = true;
-                    return Poll::Ready(Ok(OwnedMutexGuard { mutex: self.mutex.clone() }));
+                    return Poll::Ready(Ok(OwnedMutexGuard {
+                        mutex: self.mutex.clone(),
+                    }));
                 }
                 state.waiters.push_back(context.waker().clone());
                 Poll::Pending
             }
         }
-        
-        OwnedLockFuture { mutex, cx: cx.clone() }.await
+
+        OwnedLockFuture {
+            mutex,
+            cx: cx.clone(),
+        }
+        .await
     }
 
     /// Tries to acquire the mutex without waiting.
@@ -407,7 +415,9 @@ mod tests {
         let mutex = Mutex::new(42);
 
         let mut future = mutex.lock(&cx);
-        let guard = poll_once(&mut future).expect("should complete immediately").expect("lock failed");
+        let guard = poll_once(&mut future)
+            .expect("should complete immediately")
+            .expect("lock failed");
         crate::assert_with_log!(*guard == 42, "guard should read value", 42, *guard);
         crate::test_complete!("lock_acquires_mutex");
     }

@@ -313,27 +313,57 @@ mod tests {
     fn obligation_state_predicates() {
         init_test("obligation_state_predicates");
         let reserved_terminal = ObligationState::Reserved.is_terminal();
-        crate::assert_with_log!(!reserved_terminal, "reserved terminal", false, reserved_terminal);
+        crate::assert_with_log!(
+            !reserved_terminal,
+            "reserved terminal",
+            false,
+            reserved_terminal
+        );
         let committed_terminal = ObligationState::Committed.is_terminal();
-        crate::assert_with_log!(committed_terminal, "committed terminal", true, committed_terminal);
+        crate::assert_with_log!(
+            committed_terminal,
+            "committed terminal",
+            true,
+            committed_terminal
+        );
         let aborted_terminal = ObligationState::Aborted.is_terminal();
         crate::assert_with_log!(aborted_terminal, "aborted terminal", true, aborted_terminal);
         let leaked_terminal = ObligationState::Leaked.is_terminal();
         crate::assert_with_log!(leaked_terminal, "leaked terminal", true, leaked_terminal);
 
         let reserved_resolved = ObligationState::Reserved.is_resolved();
-        crate::assert_with_log!(!reserved_resolved, "reserved resolved", false, reserved_resolved);
+        crate::assert_with_log!(
+            !reserved_resolved,
+            "reserved resolved",
+            false,
+            reserved_resolved
+        );
         let committed_resolved = ObligationState::Committed.is_resolved();
-        crate::assert_with_log!(committed_resolved, "committed resolved", true, committed_resolved);
+        crate::assert_with_log!(
+            committed_resolved,
+            "committed resolved",
+            true,
+            committed_resolved
+        );
         let aborted_resolved = ObligationState::Aborted.is_resolved();
         crate::assert_with_log!(aborted_resolved, "aborted resolved", true, aborted_resolved);
         let leaked_resolved = ObligationState::Leaked.is_resolved();
         crate::assert_with_log!(leaked_resolved, "leaked resolved", true, leaked_resolved);
 
         let reserved_success = ObligationState::Reserved.is_success();
-        crate::assert_with_log!(!reserved_success, "reserved success", false, reserved_success);
+        crate::assert_with_log!(
+            !reserved_success,
+            "reserved success",
+            false,
+            reserved_success
+        );
         let committed_success = ObligationState::Committed.is_success();
-        crate::assert_with_log!(committed_success, "committed success", true, committed_success);
+        crate::assert_with_log!(
+            committed_success,
+            "committed success",
+            true,
+            committed_success
+        );
         let aborted_success = ObligationState::Aborted.is_success();
         crate::assert_with_log!(aborted_success, "aborted success", true, aborted_success);
         let leaked_success = ObligationState::Leaked.is_success();
@@ -342,7 +372,12 @@ mod tests {
         let reserved_leaked = ObligationState::Reserved.is_leaked();
         crate::assert_with_log!(!reserved_leaked, "reserved leaked", false, reserved_leaked);
         let committed_leaked = ObligationState::Committed.is_leaked();
-        crate::assert_with_log!(!committed_leaked, "committed leaked", false, committed_leaked);
+        crate::assert_with_log!(
+            !committed_leaked,
+            "committed leaked",
+            false,
+            committed_leaked
+        );
         let aborted_leaked = ObligationState::Aborted.is_leaked();
         crate::assert_with_log!(!aborted_leaked, "aborted leaked", false, aborted_leaked);
         let leaked_leaked = ObligationState::Leaked.is_leaked();
@@ -355,13 +390,7 @@ mod tests {
         init_test("obligation_lifecycle_commit");
         let (oid, tid, rid) = test_ids();
         let reserved_at = Time::from_nanos(10);
-        let mut ob = ObligationRecord::new(
-            oid,
-            ObligationKind::SendPermit,
-            tid,
-            rid,
-            reserved_at,
-        );
+        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, reserved_at);
 
         let pending = ob.is_pending();
         crate::assert_with_log!(pending, "pending", true, pending);
@@ -452,13 +481,7 @@ mod tests {
     fn double_commit_panics() {
         init_test("double_commit_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(
-            oid,
-            ObligationKind::IoOp,
-            tid,
-            rid,
-            Time::ZERO,
-        );
+        let mut ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid, Time::ZERO);
         ob.commit(Time::ZERO);
         ob.commit(Time::ZERO); // Should panic
     }
@@ -468,13 +491,7 @@ mod tests {
     fn double_abort_panics() {
         init_test("double_abort_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(
-            oid,
-            ObligationKind::IoOp,
-            tid,
-            rid,
-            Time::ZERO,
-        );
+        let mut ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid, Time::ZERO);
         ob.abort(Time::ZERO, ObligationAbortReason::Explicit);
         ob.abort(Time::ZERO, ObligationAbortReason::Explicit); // Should panic
     }
@@ -484,13 +501,7 @@ mod tests {
     fn commit_after_abort_panics() {
         init_test("commit_after_abort_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(
-            oid,
-            ObligationKind::SendPermit,
-            tid,
-            rid,
-            Time::ZERO,
-        );
+        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::ZERO);
         ob.abort(Time::ZERO, ObligationAbortReason::Cancel);
         ob.commit(Time::ZERO); // Should panic
     }
@@ -500,13 +511,7 @@ mod tests {
     fn mark_leaked_after_commit_panics() {
         init_test("mark_leaked_after_commit_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(
-            oid,
-            ObligationKind::SendPermit,
-            tid,
-            rid,
-            Time::ZERO,
-        );
+        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::ZERO);
         ob.commit(Time::ZERO);
         ob.mark_leaked(Time::ZERO); // Should panic
     }

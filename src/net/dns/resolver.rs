@@ -369,12 +369,7 @@ mod tests {
 
         // Create a simple blocking test for IP passthrough
         let result = resolver.query_ip_sync("127.0.0.1");
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         let lookup = result.unwrap();
         let len = lookup.len();
         crate::assert_with_log!(len == 1, "len", 1, len);
@@ -391,12 +386,7 @@ mod tests {
 
         // Localhost should resolve
         let result = resolver.query_ip_sync("localhost");
-        crate::assert_with_log!(
-            result.is_ok(),
-            "result ok",
-            true,
-            result.is_ok()
-        );
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         let lookup = result.unwrap();
         let empty = lookup.is_empty();
         crate::assert_with_log!(!empty, "not empty", false, empty);

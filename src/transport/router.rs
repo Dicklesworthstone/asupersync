@@ -1433,6 +1433,30 @@ mod tests {
         assert_eq!(result.unwrap().endpoint.id, EndpointId(1));
     }
 
+    // Test 10.1: SymbolRouter failover to healthy endpoint
+    #[test]
+    fn test_symbol_router_failover() {
+        let table = Arc::new(RoutingTable::new());
+
+        let mut primary = test_endpoint(1);
+        primary.state = EndpointState::Unhealthy;
+        let mut backup = test_endpoint(2);
+        backup.state = EndpointState::Healthy;
+
+        let primary = table.register_endpoint(primary);
+        let backup = table.register_endpoint(backup);
+
+        let entry = RoutingEntry::new(vec![primary, backup.clone()], Time::ZERO)
+            .with_strategy(LoadBalanceStrategy::FirstAvailable);
+        table.add_route(RouteKey::Default, entry);
+
+        let router = SymbolRouter::new(table);
+        let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+        let result = router.route(&symbol).expect("route");
+
+        assert_eq!(result.endpoint.id, backup.id);
+    }
+
     // Test 11: SymbolRouter multicast
     #[test]
     fn test_symbol_router_multicast() {

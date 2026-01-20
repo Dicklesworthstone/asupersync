@@ -2,8 +2,8 @@
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::net::lookup_one;
+use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -33,7 +33,11 @@ impl TcpStream {
     pub async fn connect<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
         // 1. Resolve and create socket
         let addr = lookup_one(addr).await?;
-        let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
         socket.set_nonblocking(true)?;
 
@@ -146,7 +150,10 @@ impl TcpStream {
 }
 
 fn connect_in_progress(err: &io::Error) -> bool {
-    matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
 }
 
 async fn wait_for_connect(socket: &Socket) -> io::Result<()> {

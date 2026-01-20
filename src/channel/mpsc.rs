@@ -633,12 +633,7 @@ mod tests {
     fn channel_capacity_must_be_nonzero() {
         init_test("channel_capacity_must_be_nonzero");
         let result = std::panic::catch_unwind(|| channel::<i32>(0));
-        crate::assert_with_log!(
-            result.is_err(),
-            "capacity 0 panics",
-            true,
-            result.is_err()
-        );
+        crate::assert_with_log!(result.is_err(), "capacity 0 panics", true, result.is_err());
         crate::test_complete!("channel_capacity_must_be_nonzero");
     }
 
@@ -848,12 +843,7 @@ mod tests {
 
         // Slot should be released
         let permit = tx.reserve(&cx);
-        crate::assert_with_log!(
-            permit.is_ok(),
-            "reserve after drop",
-            true,
-            permit.is_ok()
-        );
+        crate::assert_with_log!(permit.is_ok(), "reserve after drop", true, permit.is_ok());
         crate::test_complete!("permit_drop_releases_slot");
     }
 
@@ -949,12 +939,7 @@ mod tests {
         // Now should get Disconnected
         let disconnected = rx.try_recv();
         let is_disconnected = matches!(disconnected, Err(RecvError::Disconnected));
-        crate::assert_with_log!(
-            is_disconnected,
-            "recv disconnected",
-            true,
-            is_disconnected
-        );
+        crate::assert_with_log!(is_disconnected, "recv disconnected", true, is_disconnected);
         crate::test_complete!("recv_after_sender_dropped_drains_queue");
     }
 
@@ -1121,12 +1106,7 @@ mod tests {
         let cx = test_cx();
 
         let has_messages = rx.has_messages();
-        crate::assert_with_log!(
-            !has_messages,
-            "no messages",
-            false,
-            has_messages
-        );
+        crate::assert_with_log!(!has_messages, "no messages", false, has_messages);
         tx.send(&cx, 1).expect("send failed");
         let has_messages = rx.has_messages();
         crate::assert_with_log!(has_messages, "has messages", true, has_messages);
@@ -1198,23 +1178,13 @@ mod tests {
         crate::assert_with_log!(closed, "rx closed", true, closed);
         let disconnected = rx.recv(&cx);
         let is_disconnected = matches!(disconnected, Err(RecvError::Disconnected));
-        crate::assert_with_log!(
-            is_disconnected,
-            "recv disconnected",
-            true,
-            is_disconnected
-        );
+        crate::assert_with_log!(is_disconnected, "recv disconnected", true, is_disconnected);
 
         // Upgrade weak sender
         if let Some(tx2) = weak.upgrade() {
             // If upgrade succeeds, we resurrected the channel
             let closed = rx.is_closed();
-            crate::assert_with_log!(
-                !closed,
-                "channel open if sender exists",
-                false,
-                closed
-            );
+            crate::assert_with_log!(!closed, "channel open if sender exists", false, closed);
             tx2.send(&cx, 99).unwrap();
 
             // Receiver sees message after Disconnected?

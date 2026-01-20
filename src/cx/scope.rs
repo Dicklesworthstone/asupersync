@@ -722,7 +722,10 @@ mod tests {
 
         let stored = state.get_stored_future(handle.task_id()).unwrap();
         let poll_result = stored.poll(&mut poll_cx);
-        assert!(poll_result.is_ready(), "Simple async should complete in one poll");
+        assert!(
+            poll_result.is_ready(),
+            "Simple async should complete in one poll"
+        );
 
         // Join should now have the result
         let mut join_fut = Box::pin(handle.join(&cx));

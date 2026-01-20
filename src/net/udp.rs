@@ -47,9 +47,8 @@ impl UdpSocket {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "failed to bind any address")
-        }))
+        Err(last_err
+            .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to bind any address")))
     }
 
     /// Connect to a remote address (for send/recv).

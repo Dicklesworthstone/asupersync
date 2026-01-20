@@ -434,12 +434,7 @@ mod tests {
         init_test("interest_bit_operators");
         // BitOr
         let interest = Interest::READABLE | Interest::WRITABLE;
-        crate::assert_with_log!(
-            interest.bits() == 3,
-            "bitor bits",
-            3,
-            interest.bits()
-        );
+        crate::assert_with_log!(interest.bits() == 3, "bitor bits", 3, interest.bits());
 
         // BitAnd
         let masked = interest & Interest::READABLE;
@@ -502,18 +497,8 @@ mod tests {
             true,
             socket.is_writable()
         );
-        crate::assert_with_log!(
-            socket.is_error(),
-            "socket error",
-            true,
-            socket.is_error()
-        );
-        crate::assert_with_log!(
-            socket.is_hup(),
-            "socket hup",
-            true,
-            socket.is_hup()
-        );
+        crate::assert_with_log!(socket.is_error(), "socket error", true, socket.is_error());
+        crate::assert_with_log!(socket.is_hup(), "socket hup", true, socket.is_hup());
         crate::assert_with_log!(
             !socket.is_priority(),
             "socket priority unset",
@@ -613,12 +598,7 @@ mod tests {
     fn interest_display() {
         init_test("interest_display");
         let none_display = format!("{}", Interest::NONE);
-        crate::assert_with_log!(
-            none_display == "NONE",
-            "NONE display",
-            "NONE",
-            none_display
-        );
+        crate::assert_with_log!(none_display == "NONE", "NONE display", "NONE", none_display);
         let readable_display = format!("{}", Interest::READABLE);
         crate::assert_with_log!(
             readable_display == "READABLE",

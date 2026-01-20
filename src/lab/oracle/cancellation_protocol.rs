@@ -780,7 +780,10 @@ mod tests {
         let err = result.is_err();
         crate::assert_with_log!(err, "result err", true, err);
         let violation = result.unwrap_err();
-        let skipped = matches!(violation, CancellationProtocolViolation::SkippedState { .. });
+        let skipped = matches!(
+            violation,
+            CancellationProtocolViolation::SkippedState { .. }
+        );
         crate::assert_with_log!(skipped, "skipped state", true, skipped);
         crate::test_complete!("skipped_state_detected");
     }
@@ -892,7 +895,12 @@ mod tests {
             violation,
             CancellationProtocolViolation::CancelNotPropagated { .. }
         );
-        crate::assert_with_log!(not_propagated, "cancel not propagated", true, not_propagated);
+        crate::assert_with_log!(
+            not_propagated,
+            "cancel not propagated",
+            true,
+            not_propagated
+        );
         crate::test_complete!("cancel_propagation_violation_detected");
     }
 

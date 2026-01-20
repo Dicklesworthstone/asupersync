@@ -21,9 +21,9 @@ where
 {
     spawn_blocking_resolve(move || {
         let mut addrs = addr.to_socket_addrs()?;
-        addrs.next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses found")
-        })
+        addrs
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses found"))
     })
     .await
 }
@@ -146,11 +146,9 @@ mod tests {
         };
 
         let mut fut = Box::pin(lookup_one(addr));
-        future::block_on(poll_fn(|cx| {
-            match fut.as_mut().poll(cx) {
-                Poll::Pending => Poll::Ready(()),
-                Poll::Ready(_) => Poll::Ready(()),
-            }
+        future::block_on(poll_fn(|cx| match fut.as_mut().poll(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => Poll::Ready(()),
         }));
 
         drop(fut);

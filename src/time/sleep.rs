@@ -354,12 +354,7 @@ mod tests {
             Time::from_secs(5),
             sleep.deadline()
         );
-        crate::assert_with_log!(
-            !sleep.was_polled(),
-            "not polled",
-            false,
-            sleep.was_polled()
-        );
+        crate::assert_with_log!(!sleep.was_polled(), "not polled", false, sleep.was_polled());
         crate::test_complete!("new_creates_sleep_with_deadline");
     }
 
@@ -527,12 +522,7 @@ mod tests {
         let sleep = Sleep::new(Time::from_secs(10));
         let poll = sleep.poll_with_time(Time::from_secs(5));
         crate::assert_with_log!(poll.is_pending(), "pending", true, poll.is_pending());
-        crate::assert_with_log!(
-            sleep.was_polled(),
-            "was polled",
-            true,
-            sleep.was_polled()
-        );
+        crate::assert_with_log!(sleep.was_polled(), "was polled", true, sleep.was_polled());
         crate::test_complete!("poll_with_time_before_deadline");
     }
 
@@ -574,12 +564,7 @@ mod tests {
 
         // Poll it
         let _ = sleep.poll_with_time(Time::from_secs(5));
-        crate::assert_with_log!(
-            sleep.was_polled(),
-            "was polled",
-            true,
-            sleep.was_polled()
-        );
+        crate::assert_with_log!(sleep.was_polled(), "was polled", true, sleep.was_polled());
 
         // Reset
         sleep.reset(Time::from_secs(20));

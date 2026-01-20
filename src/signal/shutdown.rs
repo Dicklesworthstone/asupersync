@@ -204,11 +204,21 @@ mod tests {
         init_test("shutdown_controller_initial_state");
         let controller = ShutdownController::new();
         let shutting_down = controller.is_shutting_down();
-        crate::assert_with_log!(!shutting_down, "controller not shutting down", false, shutting_down);
+        crate::assert_with_log!(
+            !shutting_down,
+            "controller not shutting down",
+            false,
+            shutting_down
+        );
 
         let receiver = controller.subscribe();
         let rx_shutdown = receiver.is_shutting_down();
-        crate::assert_with_log!(!rx_shutdown, "receiver not shutting down", false, rx_shutdown);
+        crate::assert_with_log!(
+            !rx_shutdown,
+            "receiver not shutting down",
+            false,
+            rx_shutdown
+        );
         crate::test_complete!("shutdown_controller_initial_state");
     }
 
@@ -221,7 +231,12 @@ mod tests {
         controller.shutdown();
 
         let ctrl_shutdown = controller.is_shutting_down();
-        crate::assert_with_log!(ctrl_shutdown, "controller shutting down", true, ctrl_shutdown);
+        crate::assert_with_log!(
+            ctrl_shutdown,
+            "controller shutting down",
+            true,
+            ctrl_shutdown
+        );
         let rx_shutdown = receiver.is_shutting_down();
         crate::assert_with_log!(rx_shutdown, "receiver shutting down", true, rx_shutdown);
         crate::test_complete!("shutdown_controller_initiates");

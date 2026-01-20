@@ -386,7 +386,12 @@ mod tests {
             Duration::from_secs(10),
             config.grace_period
         );
-        crate::assert_with_log!(!config.log_events, "log_events false", false, config.log_events);
+        crate::assert_with_log!(
+            !config.log_events,
+            "log_events false",
+            false,
+            config.log_events
+        );
         crate::test_complete!("graceful_config_builder");
     }
 }

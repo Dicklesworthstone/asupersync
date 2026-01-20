@@ -230,7 +230,10 @@ mod tests {
             other => panic!("expected Cancelled, got {other:?}"),
         }
         match policy.aggregate_outcomes(&[cancelled, panicked]) {
-            AggregateDecision::Panicked { payload: p, first_panic_index: idx } => {
+            AggregateDecision::Panicked {
+                payload: p,
+                first_panic_index: idx,
+            } => {
                 assert_eq!(p.message(), "boom");
                 assert_eq!(idx, 1);
             }

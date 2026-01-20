@@ -273,12 +273,7 @@ mod tests {
 
         // Less severe should not change.
         let unchanged = !reason.strengthen(&CancelReason::timeout());
-        crate::assert_with_log!(
-            unchanged,
-            "less severe should not change",
-            true,
-            unchanged
-        );
+        crate::assert_with_log!(unchanged, "less severe should not change", true, unchanged);
         crate::assert_with_log!(
             reason.kind == CancelKind::Shutdown,
             "kind should remain Shutdown",
@@ -366,12 +361,7 @@ mod tests {
         init_test("strengthen_resets_message_when_kind_increases");
         let mut reason = CancelReason::user("please stop");
         let changed = reason.strengthen(&CancelReason::shutdown());
-        crate::assert_with_log!(
-            changed,
-            "kind increase should change reason",
-            true,
-            changed
-        );
+        crate::assert_with_log!(changed, "kind increase should change reason", true, changed);
         crate::assert_with_log!(
             reason.kind == CancelKind::Shutdown,
             "kind should be Shutdown",

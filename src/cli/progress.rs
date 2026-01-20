@@ -234,11 +234,11 @@ impl ProgressReporter {
 
         // Status indicator with color
         let (indicator, color_code) = match event.kind {
-            ProgressKind::Started => ("▶", "\x1b[34m"),    // Blue
-            ProgressKind::Update => ("⋯", "\x1b[33m"),     // Yellow
-            ProgressKind::Completed => ("✓", "\x1b[32m"),  // Green
-            ProgressKind::Failed => ("✗", "\x1b[31m"),     // Red
-            ProgressKind::Cancelled => ("⊘", "\x1b[33m"),  // Yellow
+            ProgressKind::Started => ("▶", "\x1b[34m"),   // Blue
+            ProgressKind::Update => ("⋯", "\x1b[33m"),    // Yellow
+            ProgressKind::Completed => ("✓", "\x1b[32m"), // Green
+            ProgressKind::Failed => ("✗", "\x1b[31m"),    // Red
+            ProgressKind::Cancelled => ("⊘", "\x1b[33m"), // Yellow
         };
 
         if use_color {
@@ -255,7 +255,11 @@ impl ProgressReporter {
             use std::fmt::Write;
             let bar_width: usize = 20;
             // Percentage is always 0-100, so filled will always be 0-20
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
             let filled = ((pct / 100.0) * bar_width as f64) as usize;
             let empty = bar_width - filled;
 
@@ -353,7 +357,12 @@ impl ProgressReporter {
     /// # Errors
     ///
     /// Returns an error if writing fails.
-    pub fn update(&mut self, current: u64, total: u64, message: impl Into<String>) -> io::Result<()> {
+    pub fn update(
+        &mut self,
+        current: u64,
+        total: u64,
+        message: impl Into<String>,
+    ) -> io::Result<()> {
         self.report(ProgressEvent::update(current, total, message))
     }
 
@@ -463,12 +472,7 @@ mod tests {
             5,
             parsed["current"].clone()
         );
-        crate::assert_with_log!(
-            parsed["total"] == 10,
-            "total",
-            10,
-            parsed["total"].clone()
-        );
+        crate::assert_with_log!(parsed["total"] == 10, "total", 10, parsed["total"].clone());
         crate::assert_with_log!(
             parsed["message"] == "Processing",
             "message",
@@ -509,12 +513,7 @@ mod tests {
         let reporter = ProgressReporter::new(OutputFormat::Human);
         std::thread::sleep(Duration::from_millis(10));
         let elapsed = reporter.elapsed().as_millis();
-        crate::assert_with_log!(
-            elapsed >= 10,
-            "elapsed >= 10ms",
-            ">= 10ms",
-            elapsed
-        );
+        crate::assert_with_log!(elapsed >= 10, "elapsed >= 10ms", ">= 10ms", elapsed);
         crate::test_complete!("progress_reporter_tracks_elapsed");
     }
 
@@ -522,12 +521,7 @@ mod tests {
     fn progress_kind_serializes_snake_case() {
         init_test("progress_kind_serializes_snake_case");
         let json = serde_json::to_string(&ProgressKind::Started).unwrap();
-        crate::assert_with_log!(
-            json == "\"started\"",
-            "started json",
-            "\"started\"",
-            json
-        );
+        crate::assert_with_log!(json == "\"started\"", "started json", "\"started\"", json);
 
         let json = serde_json::to_string(&ProgressKind::Completed).unwrap();
         crate::assert_with_log!(

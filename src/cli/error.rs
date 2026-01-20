@@ -256,7 +256,9 @@ pub mod errors {
     pub fn internal(details: &str) -> CliError {
         CliError::new("internal_error", "Internal error")
             .detail(details)
-            .suggestion("Please report this bug at https://github.com/Dicklesworthstone/asupersync/issues")
+            .suggestion(
+                "Please report this bug at https://github.com/Dicklesworthstone/asupersync/issues",
+            )
             .exit_code(ExitCode::INTERNAL_ERROR)
     }
 
@@ -485,24 +487,9 @@ mod tests {
         let json = r#"{"type":"test","title":"Test","exit_code":1}"#;
         let error: CliError = serde_json::from_str(json).unwrap();
 
-        crate::assert_with_log!(
-            error.error_type == "test",
-            "type",
-            "test",
-            error.error_type
-        );
-        crate::assert_with_log!(
-            error.title == "Test",
-            "title",
-            "Test",
-            error.title
-        );
-        crate::assert_with_log!(
-            error.exit_code == 1,
-            "exit_code",
-            1,
-            error.exit_code
-        );
+        crate::assert_with_log!(error.error_type == "test", "type", "test", error.error_type);
+        crate::assert_with_log!(error.title == "Test", "title", "Test", error.title);
+        crate::assert_with_log!(error.exit_code == 1, "exit_code", 1, error.exit_code);
         crate::test_complete!("error_deserializes_from_json");
     }
 }

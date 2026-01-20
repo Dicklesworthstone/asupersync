@@ -326,7 +326,10 @@ impl IoDriverHandle {
     #[must_use]
     pub fn with_capacity(reactor: Arc<dyn Reactor>, events_capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(IoDriver::with_capacity(reactor, events_capacity))),
+            inner: Arc::new(Mutex::new(IoDriver::with_capacity(
+                reactor,
+                events_capacity,
+            ))),
         }
     }
 
@@ -530,12 +533,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriver::new(reactor);
 
-        crate::assert_with_log!(
-            driver.is_empty(),
-            "driver empty",
-            true,
-            driver.is_empty()
-        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         crate::assert_with_log!(
             driver.waker_count() == 0,
             "waker count",
@@ -629,12 +627,7 @@ mod tests {
             0usize,
             driver.waker_count()
         );
-        crate::assert_with_log!(
-            driver.is_empty(),
-            "driver empty",
-            true,
-            driver.is_empty()
-        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         crate::assert_with_log!(
             driver.stats().deregistrations == 1,
             "deregistrations",
@@ -942,12 +935,7 @@ mod tests {
 
             // Waker should not be woken yet
             let initial = waker_state.flag.load(Ordering::SeqCst);
-            crate::assert_with_log!(
-                !initial,
-                "waker not yet woken",
-                false,
-                initial
-            );
+            crate::assert_with_log!(!initial, "waker not yet woken", false, initial);
 
             // Write data to make sock_read readable
             sock_write.write_all(b"hello").expect("write failed");

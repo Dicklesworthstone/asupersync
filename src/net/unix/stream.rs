@@ -1,4 +1,8 @@
+#![allow(unsafe_code)]
 //! Unix domain socket stream implementation.
+//!
+//! This module uses unsafe code for peer credentials retrieval (getsockopt/getpeereid)
+//! and ancillary data passing (sendmsg/recvmsg).
 //!
 //! This module provides [`UnixStream`] for bidirectional communication over
 //! Unix domain sockets.
@@ -766,5 +770,81 @@ mod tests {
         }
 
         crate::test_complete!("test_peer_cred");
+    }
+
+    #[test]
+    fn test_send_recv_with_ancillary() {
+        use crate::net::unix::{AncillaryMessage, SocketAncillary};
+        use std::io::Read as _;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        init_test("test_send_recv_with_ancillary");
+        futures_lite::future::block_on(async {
+            let (tx, rx) = UnixStream::pair().expect("pair failed");
+
+            // Create a pipe to get a file descriptor to pass
+            let (pipe_read, pipe_write) = nix::unistd::pipe().expect("pipe failed");
+            let pipe_read_raw = pipe_read.as_raw_fd();
+            let _pipe_write_raw = pipe_write.as_raw_fd();
+
+            // Write something to the pipe so we can verify the fd works
+            nix::unistd::write(&pipe_write, b"test data").expect("write to pipe failed");
+
+            // Send the read end of the pipe
+            let mut ancillary_buf = [0u8; 128];
+            let mut send_ancillary = SocketAncillary::new(&mut ancillary_buf);
+            let added = send_ancillary.add_fds(&[pipe_read_raw]);
+            crate::assert_with_log!(added, "add_fds", true, added);
+
+            let sent = tx
+                .send_with_ancillary(b"file descriptor attached", &mut send_ancillary)
+                .await
+                .expect("send_with_ancillary failed");
+            crate::assert_with_log!(sent == 24, "sent bytes", 24, sent);
+
+            // Close the original fd (the receiver now owns it)
+            // Dropping the OwnedFd will close it
+            drop(pipe_read);
+
+            // Receive the data and file descriptor
+            let mut recv_buf = [0u8; 64];
+            let mut recv_ancillary_buf = [0u8; 128];
+            let mut recv_ancillary = SocketAncillary::new(&mut recv_ancillary_buf);
+
+            let received = rx
+                .recv_with_ancillary(&mut recv_buf, &mut recv_ancillary)
+                .await
+                .expect("recv_with_ancillary failed");
+            crate::assert_with_log!(received == 24, "received bytes", 24, received);
+            crate::assert_with_log!(
+                &recv_buf[..received] == b"file descriptor attached",
+                "received data",
+                b"file descriptor attached",
+                &recv_buf[..received]
+            );
+
+            // Extract the file descriptor
+            let mut received_fd = None;
+            for msg in recv_ancillary.messages() {
+                if let AncillaryMessage::ScmRights(fds) = msg {
+                    for fd in fds {
+                        received_fd = Some(fd);
+                    }
+                }
+            }
+
+            let fd = received_fd.expect("should have received a file descriptor");
+
+            // Close the write end so read_to_end can complete (pipe needs EOF)
+            drop(pipe_write);
+
+            // Verify we can read from the received file descriptor
+            // SAFETY: We received this fd from the sender and will close it properly
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).expect("read from fd failed");
+            crate::assert_with_log!(&data == b"test data", "pipe data", b"test data", data);
+        });
+        crate::test_complete!("test_send_recv_with_ancillary");
     }
 }

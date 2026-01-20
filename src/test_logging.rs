@@ -1143,19 +1143,9 @@ mod tests {
 
         let report = logger.report();
         let has_spawns = report.contains("Task spawns: 2");
-        crate::assert_with_log!(
-            has_spawns,
-            "report contains task spawns",
-            true,
-            has_spawns
-        );
+        crate::assert_with_log!(has_spawns, "report contains task spawns", true, has_spawns);
         let has_events = report.contains("3 events");
-        crate::assert_with_log!(
-            has_events,
-            "report contains events count",
-            true,
-            has_events
-        );
+        crate::assert_with_log!(has_events, "report contains events count", true, has_events);
         crate::test_complete!("test_logger_report_includes_statistics");
     }
 

@@ -1785,7 +1785,12 @@ mod tests {
             e.prev()
         );
         let genesis_prev_none = EpochId::GENESIS.prev().is_none();
-        crate::assert_with_log!(genesis_prev_none, "genesis prev none", true, genesis_prev_none);
+        crate::assert_with_log!(
+            genesis_prev_none,
+            "genesis prev none",
+            true,
+            genesis_prev_none
+        );
         crate::assert_with_log!(
             EpochId::MAX.saturating_next() == EpochId::MAX,
             "max saturating_next",
@@ -1817,7 +1822,12 @@ mod tests {
             ..EpochConfig::default()
         };
         let invalid_quorum_err = invalid_quorum.validate().is_err();
-        crate::assert_with_log!(invalid_quorum_err, "invalid quorum err", true, invalid_quorum_err);
+        crate::assert_with_log!(
+            invalid_quorum_err,
+            "invalid quorum err",
+            true,
+            invalid_quorum_err
+        );
         crate::test_complete!("test_epoch_config_validation");
     }
 
@@ -2303,7 +2313,12 @@ mod tests {
             result.trigger
         );
         crate::assert_with_log!(result.arrived == 1, "arrived in result", 1, result.arrived);
-        crate::assert_with_log!(result.expected == 5, "expected in result", 5, result.expected);
+        crate::assert_with_log!(
+            result.expected == 5,
+            "expected in result",
+            5,
+            result.expected
+        );
 
         // Barrier should now be triggered
         let triggered = barrier.is_triggered();
@@ -2423,7 +2438,12 @@ mod tests {
         );
 
         let no_remaining = ctx.remaining_time(Time::from_secs(12));
-        crate::assert_with_log!(no_remaining.is_none(), "no remaining at t=12", true, no_remaining.is_none());
+        crate::assert_with_log!(
+            no_remaining.is_none(),
+            "no remaining at t=12",
+            true,
+            no_remaining.is_none()
+        );
 
         crate::test_complete!("test_epoch_context_expiry");
     }
@@ -2483,27 +2503,87 @@ mod tests {
 
         // Preparing state
         let preparing = EpochState::Preparing;
-        crate::assert_with_log!(!preparing.is_active(), "preparing not active", false, preparing.is_active());
-        crate::assert_with_log!(!preparing.is_terminal(), "preparing not terminal", false, preparing.is_terminal());
-        crate::assert_with_log!(!preparing.allows_completion(), "preparing not allows_completion", false, preparing.allows_completion());
+        crate::assert_with_log!(
+            !preparing.is_active(),
+            "preparing not active",
+            false,
+            preparing.is_active()
+        );
+        crate::assert_with_log!(
+            !preparing.is_terminal(),
+            "preparing not terminal",
+            false,
+            preparing.is_terminal()
+        );
+        crate::assert_with_log!(
+            !preparing.allows_completion(),
+            "preparing not allows_completion",
+            false,
+            preparing.allows_completion()
+        );
 
         // Active state
         let active = EpochState::Active;
-        crate::assert_with_log!(active.is_active(), "active is_active", true, active.is_active());
-        crate::assert_with_log!(!active.is_terminal(), "active not terminal", false, active.is_terminal());
-        crate::assert_with_log!(active.allows_completion(), "active allows_completion", true, active.allows_completion());
+        crate::assert_with_log!(
+            active.is_active(),
+            "active is_active",
+            true,
+            active.is_active()
+        );
+        crate::assert_with_log!(
+            !active.is_terminal(),
+            "active not terminal",
+            false,
+            active.is_terminal()
+        );
+        crate::assert_with_log!(
+            active.allows_completion(),
+            "active allows_completion",
+            true,
+            active.allows_completion()
+        );
 
         // Ending state
         let ending = EpochState::Ending;
-        crate::assert_with_log!(!ending.is_active(), "ending not active", false, ending.is_active());
-        crate::assert_with_log!(!ending.is_terminal(), "ending not terminal", false, ending.is_terminal());
-        crate::assert_with_log!(ending.allows_completion(), "ending allows_completion", true, ending.allows_completion());
+        crate::assert_with_log!(
+            !ending.is_active(),
+            "ending not active",
+            false,
+            ending.is_active()
+        );
+        crate::assert_with_log!(
+            !ending.is_terminal(),
+            "ending not terminal",
+            false,
+            ending.is_terminal()
+        );
+        crate::assert_with_log!(
+            ending.allows_completion(),
+            "ending allows_completion",
+            true,
+            ending.allows_completion()
+        );
 
         // Ended state
         let ended = EpochState::Ended;
-        crate::assert_with_log!(!ended.is_active(), "ended not active", false, ended.is_active());
-        crate::assert_with_log!(ended.is_terminal(), "ended is_terminal", true, ended.is_terminal());
-        crate::assert_with_log!(!ended.allows_completion(), "ended not allows_completion", false, ended.allows_completion());
+        crate::assert_with_log!(
+            !ended.is_active(),
+            "ended not active",
+            false,
+            ended.is_active()
+        );
+        crate::assert_with_log!(
+            ended.is_terminal(),
+            "ended is_terminal",
+            true,
+            ended.is_terminal()
+        );
+        crate::assert_with_log!(
+            !ended.allows_completion(),
+            "ended not allows_completion",
+            false,
+            ended.allows_completion()
+        );
 
         crate::test_complete!("test_epoch_state_predicates_comprehensive");
     }
@@ -2515,14 +2595,29 @@ mod tests {
         let config = EpochConfig::default();
         let mut epoch = Epoch::new(EpochId(1), Time::ZERO, config);
 
-        crate::assert_with_log!(epoch.operation_count == 0, "initial count", 0, epoch.operation_count);
+        crate::assert_with_log!(
+            epoch.operation_count == 0,
+            "initial count",
+            0,
+            epoch.operation_count
+        );
 
         epoch.record_operation();
-        crate::assert_with_log!(epoch.operation_count == 1, "after first", 1, epoch.operation_count);
+        crate::assert_with_log!(
+            epoch.operation_count == 1,
+            "after first",
+            1,
+            epoch.operation_count
+        );
 
         epoch.record_operation();
         epoch.record_operation();
-        crate::assert_with_log!(epoch.operation_count == 3, "after three", 3, epoch.operation_count);
+        crate::assert_with_log!(
+            epoch.operation_count == 3,
+            "after three",
+            3,
+            epoch.operation_count
+        );
 
         crate::test_complete!("test_epoch_operation_counting");
     }
@@ -2547,7 +2642,12 @@ mod tests {
         );
 
         let no_remaining = epoch.remaining(Time::from_secs(150));
-        crate::assert_with_log!(no_remaining.is_none(), "no remaining at t=150", true, no_remaining.is_none());
+        crate::assert_with_log!(
+            no_remaining.is_none(),
+            "no remaining at t=150",
+            true,
+            no_remaining.is_none()
+        );
 
         crate::test_complete!("test_epoch_remaining_time");
     }
@@ -2579,11 +2679,21 @@ mod tests {
         // Advance and get historical epoch
         clock.advance(Time::from_millis(20)).unwrap();
         let historical_genesis = clock.get_epoch(EpochId::GENESIS);
-        crate::assert_with_log!(historical_genesis.is_some(), "historical genesis found", true, historical_genesis.is_some());
+        crate::assert_with_log!(
+            historical_genesis.is_some(),
+            "historical genesis found",
+            true,
+            historical_genesis.is_some()
+        );
 
         // Get non-existent epoch
         let non_existent = clock.get_epoch(EpochId(999));
-        crate::assert_with_log!(non_existent.is_none(), "non-existent not found", true, non_existent.is_none());
+        crate::assert_with_log!(
+            non_existent.is_none(),
+            "non-existent not found",
+            true,
+            non_existent.is_none()
+        );
 
         crate::test_complete!("test_epoch_clock_get_epoch");
     }
@@ -2595,13 +2705,23 @@ mod tests {
         let barrier = EpochBarrier::new(EpochId(1), 3, Time::ZERO);
 
         let initial_participants = barrier.participants();
-        crate::assert_with_log!(initial_participants.is_empty(), "initial empty", true, initial_participants.is_empty());
+        crate::assert_with_log!(
+            initial_participants.is_empty(),
+            "initial empty",
+            true,
+            initial_participants.is_empty()
+        );
 
         barrier.arrive("alice", Time::from_secs(1)).unwrap();
         barrier.arrive("bob", Time::from_secs(2)).unwrap();
 
         let participants = barrier.participants();
-        crate::assert_with_log!(participants.len() == 2, "two participants", 2, participants.len());
+        crate::assert_with_log!(
+            participants.len() == 2,
+            "two participants",
+            2,
+            participants.len()
+        );
         let has_alice = participants.contains(&"alice".to_string());
         crate::assert_with_log!(has_alice, "has alice", true, has_alice);
         let has_bob = participants.contains(&"bob".to_string());
@@ -2697,7 +2817,12 @@ mod tests {
             EpochTransitionBehavior::AbortAll,
             strict.on_transition
         );
-        crate::assert_with_log!(strict.check_on_poll, "strict checks", true, strict.check_on_poll);
+        crate::assert_with_log!(
+            strict.check_on_poll,
+            "strict checks",
+            true,
+            strict.check_on_poll
+        );
 
         let lenient = EpochPolicy::lenient();
         crate::assert_with_log!(
@@ -2706,8 +2831,18 @@ mod tests {
             EpochTransitionBehavior::DrainExecuting,
             lenient.on_transition
         );
-        crate::assert_with_log!(!lenient.check_on_poll, "lenient no check", false, lenient.check_on_poll);
-        crate::assert_with_log!(lenient.grace_period.is_some(), "lenient has grace", true, lenient.grace_period.is_some());
+        crate::assert_with_log!(
+            !lenient.check_on_poll,
+            "lenient no check",
+            false,
+            lenient.check_on_poll
+        );
+        crate::assert_with_log!(
+            lenient.grace_period.is_some(),
+            "lenient has grace",
+            true,
+            lenient.grace_period.is_some()
+        );
 
         let ignore = EpochPolicy::ignore();
         crate::assert_with_log!(
@@ -2716,7 +2851,12 @@ mod tests {
             EpochTransitionBehavior::Ignore,
             ignore.on_transition
         );
-        crate::assert_with_log!(!ignore.propagate_to_children, "ignore no propagate", false, ignore.propagate_to_children);
+        crate::assert_with_log!(
+            !ignore.propagate_to_children,
+            "ignore no propagate",
+            false,
+            ignore.propagate_to_children
+        );
 
         crate::test_complete!("test_epoch_policy_variants");
     }

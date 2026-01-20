@@ -209,7 +209,8 @@ impl Cx {
         io_driver: Option<IoDriverHandle>,
     ) -> Self {
         let inner = Arc::new(std::sync::RwLock::new(CxInner::new(region, task, budget)));
-        let observability_state = observability.unwrap_or_else(|| ObservabilityState::new(region, task));
+        let observability_state =
+            observability.unwrap_or_else(|| ObservabilityState::new(region, task));
         let observability = Arc::new(std::sync::RwLock::new(observability_state));
 
         debug!(
@@ -405,15 +406,7 @@ impl Cx {
     /// ```
     #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
-        let (
-            cancel_requested,
-            mask_depth,
-            task,
-            region,
-            budget,
-            budget_baseline,
-            cancel_reason,
-        ) = {
+        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let inner = self.inner.read().expect("lock poisoned");
             (
                 inner.cancel_requested,

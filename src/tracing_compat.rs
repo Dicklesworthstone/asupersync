@@ -313,12 +313,7 @@ mod tests {
         {
             let span = NoopSpan;
             let disabled = span.is_disabled();
-            crate::assert_with_log!(
-                disabled,
-                "noop span should be disabled",
-                true,
-                disabled
-            );
+            crate::assert_with_log!(disabled, "noop span should be disabled", true, disabled);
 
             let current = NoopSpan::current();
             let none = NoopSpan::none();

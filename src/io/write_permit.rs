@@ -175,12 +175,7 @@ mod tests {
 
         let ok = result.is_ok();
         crate::assert_with_log!(ok, "commit ok", true, ok);
-        crate::assert_with_log!(
-            output == b"hello world",
-            "output",
-            b"hello world",
-            output
-        );
+        crate::assert_with_log!(output == b"hello world", "output", b"hello world", output);
         crate::test_complete!("commit_writes_data");
     }
 

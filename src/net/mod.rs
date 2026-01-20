@@ -16,15 +16,15 @@ mod udp;
 #[cfg(unix)]
 pub mod unix;
 
+pub use resolve::{lookup_all, lookup_one};
 pub use tcp::listener::{Incoming, TcpListener};
 pub use tcp::socket::TcpSocket;
 pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 pub use tcp::stream::TcpStream;
 pub use udp::{RecvStream, SendSink, UdpSocket};
-pub use resolve::{lookup_all, lookup_one};
 #[cfg(unix)]
 pub use unix::{
     Incoming as UnixIncoming, OwnedReadHalf as UnixOwnedReadHalf,
-    OwnedWriteHalf as UnixOwnedWriteHalf, ReadHalf as UnixReadHalf, ReuniteError as UnixReuniteError,
-    UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
+    OwnedWriteHalf as UnixOwnedWriteHalf, ReadHalf as UnixReadHalf,
+    ReuniteError as UnixReuniteError, UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
 };

@@ -305,12 +305,7 @@ mod tests {
         init_test("virtual_clock_starts_at_zero");
         let clock = VirtualClock::new();
         let now = clock.now();
-        crate::assert_with_log!(
-            now == Time::ZERO,
-            "clock starts at zero",
-            Time::ZERO,
-            now
-        );
+        crate::assert_with_log!(now == Time::ZERO, "clock starts at zero", Time::ZERO, now);
         crate::test_complete!("virtual_clock_starts_at_zero");
     }
 
@@ -343,12 +338,7 @@ mod tests {
 
         clock.advance(500_000_000); // 0.5 seconds
         let nanos = clock.now().as_nanos();
-        crate::assert_with_log!(
-            nanos == 1_500_000_000,
-            "advance 0.5s",
-            1_500_000_000,
-            nanos
-        );
+        crate::assert_with_log!(nanos == 1_500_000_000, "advance 0.5s", 1_500_000_000, nanos);
         crate::test_complete!("virtual_clock_advance");
     }
 
@@ -414,12 +404,7 @@ mod tests {
         // Should be very close to zero (within 1ms of creation)
         let max_nanos = 1_000_000;
         let actual = now.as_nanos();
-        crate::assert_with_log!(
-            actual < max_nanos,
-            "near zero",
-            max_nanos,
-            actual
-        );
+        crate::assert_with_log!(actual < max_nanos, "near zero", max_nanos, actual);
         crate::test_complete!("wall_clock_starts_near_zero");
     }
 
@@ -485,12 +470,7 @@ mod tests {
 
         let expected: Option<Time> = None;
         let actual = driver.next_deadline();
-        crate::assert_with_log!(
-            actual == expected,
-            "empty next_deadline",
-            expected,
-            actual
-        );
+        crate::assert_with_log!(actual == expected, "empty next_deadline", expected, actual);
 
         driver.register(Time::from_secs(5), futures_waker());
         driver.register(Time::from_secs(3), futures_waker());
@@ -499,12 +479,7 @@ mod tests {
         // Should return earliest deadline
         let expected = Some(Time::from_secs(3));
         let actual = driver.next_deadline();
-        crate::assert_with_log!(
-            actual == expected,
-            "earliest deadline",
-            expected,
-            actual
-        );
+        crate::assert_with_log!(actual == expected, "earliest deadline", expected, actual);
         crate::test_complete!("timer_driver_next_deadline");
     }
 
@@ -522,39 +497,19 @@ mod tests {
 
         // Time is 0, no timers should fire
         let processed = driver.process_timers();
-        crate::assert_with_log!(
-            processed == 0,
-            "process_timers at t=0",
-            0,
-            processed
-        );
+        crate::assert_with_log!(processed == 0, "process_timers at t=0", 0, processed);
         let woken_now = woken.load(Ordering::SeqCst);
-        crate::assert_with_log!(
-            !woken_now,
-            "not woken",
-            false,
-            woken_now
-        );
+        crate::assert_with_log!(!woken_now, "not woken", false, woken_now);
 
         // Advance time past deadline
         clock.advance(2_000_000_000); // 2 seconds
         let processed = driver.process_timers();
-        crate::assert_with_log!(
-            processed == 1,
-            "process_timers after advance",
-            1,
-            processed
-        );
+        crate::assert_with_log!(processed == 1, "process_timers after advance", 1, processed);
         let woken_now = woken.load(Ordering::SeqCst);
         crate::assert_with_log!(woken_now, "woken", true, woken_now);
 
         // No more timers
-        crate::assert_with_log!(
-            driver.is_empty(),
-            "driver empty",
-            true,
-            driver.is_empty()
-        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         crate::test_complete!("timer_driver_process_expired");
     }
 
@@ -582,19 +537,9 @@ mod tests {
         // Advance to t=3, should fire 3 timers
         clock.set(Time::from_secs(3));
         let processed = driver.process_timers();
-        crate::assert_with_log!(
-            processed == 3,
-            "process_timers at t=3",
-            3,
-            processed
-        );
+        crate::assert_with_log!(processed == 3, "process_timers at t=3", 3, processed);
         let count_now = count.load(Ordering::SeqCst);
-        crate::assert_with_log!(
-            count_now == 3,
-            "count at t=3",
-            3,
-            count_now
-        );
+        crate::assert_with_log!(count_now == 3, "count at t=3", 3, count_now);
         crate::assert_with_log!(
             driver.pending_count() == 2,
             "pending count after t=3",
@@ -605,25 +550,10 @@ mod tests {
         // Advance to t=10, should fire remaining 2
         clock.set(Time::from_secs(10));
         let processed = driver.process_timers();
-        crate::assert_with_log!(
-            processed == 2,
-            "process_timers at t=10",
-            2,
-            processed
-        );
+        crate::assert_with_log!(processed == 2, "process_timers at t=10", 2, processed);
         let count_now = count.load(Ordering::SeqCst);
-        crate::assert_with_log!(
-            count_now == 5,
-            "count at t=10",
-            5,
-            count_now
-        );
-        crate::assert_with_log!(
-            driver.is_empty(),
-            "driver empty",
-            true,
-            driver.is_empty()
-        );
+        crate::assert_with_log!(count_now == 5, "count at t=10", 5, count_now);
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         crate::test_complete!("timer_driver_multiple_timers");
     }
 
@@ -642,23 +572,13 @@ mod tests {
 
         clock.set(Time::from_secs(3));
         let processed = driver.process_timers();
-        crate::assert_with_log!(
-            processed == 1,
-            "process_timers at t=3",
-            1,
-            processed
-        );
+        crate::assert_with_log!(processed == 1, "process_timers at t=3", 1, processed);
         let count_now = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count_now == 1, "counter", 1, count_now);
 
         clock.set(Time::from_secs(10));
         let processed = driver.process_timers();
-        crate::assert_with_log!(
-            processed == 0,
-            "process_timers at t=10",
-            0,
-            processed
-        );
+        crate::assert_with_log!(processed == 0, "process_timers at t=10", 0, processed);
         let count_now = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count_now == 1, "counter stable", 1, count_now);
         crate::test_complete!("timer_driver_update_cancels_old_handle");
@@ -680,12 +600,7 @@ mod tests {
             driver.pending_count()
         );
         driver.clear();
-        crate::assert_with_log!(
-            driver.is_empty(),
-            "driver empty",
-            true,
-            driver.is_empty()
-        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         crate::test_complete!("timer_driver_clear");
     }
 

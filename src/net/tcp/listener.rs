@@ -6,8 +6,8 @@ use crate::net::tcp::stream::TcpStream;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
-use std::io;
 use std::future::poll_fn;
+use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -49,9 +49,8 @@ impl TcpListener {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "failed to bind any address")
-        }))
+        Err(last_err
+            .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to bind any address")))
     }
 
     /// Accept connection.
@@ -60,10 +59,7 @@ impl TcpListener {
     }
 
     /// Polls for an incoming connection using reactor wakeups.
-    pub fn poll_accept(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+    pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
         match self.inner.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(true)?;

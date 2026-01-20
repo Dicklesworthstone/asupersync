@@ -606,12 +606,7 @@ mod tests {
         init_test("tick_first_is_at_start_time");
         let mut interval = Interval::new(Time::from_secs(1), Duration::from_millis(100));
         let tick = interval.tick(Time::from_secs(1));
-        crate::assert_with_log!(
-            tick == Time::from_secs(1),
-            "tick",
-            Time::from_secs(1),
-            tick
-        );
+        crate::assert_with_log!(tick == Time::from_secs(1), "tick", Time::from_secs(1), tick);
         crate::test_complete!("tick_first_is_at_start_time");
     }
 
@@ -666,12 +661,7 @@ mod tests {
         // Now deadline is at 1.1s, poll at 1.05s should return None
         let expected: Option<Time> = None;
         let actual = interval.poll_tick(Time::from_millis(1050));
-        crate::assert_with_log!(
-            actual == expected,
-            "poll before deadline",
-            expected,
-            actual
-        );
+        crate::assert_with_log!(actual == expected, "poll before deadline", expected, actual);
         crate::test_complete!("poll_tick_before_deadline");
     }
 
@@ -697,12 +687,7 @@ mod tests {
         // Poll past deadline
         let tick = interval.poll_tick(Time::from_millis(1200));
         let expected = Some(Time::from_millis(1100));
-        crate::assert_with_log!(
-            tick == expected,
-            "poll after deadline",
-            expected,
-            tick
-        );
+        crate::assert_with_log!(tick == expected, "poll after deadline", expected, tick);
         crate::test_complete!("poll_tick_after_deadline");
     }
 
@@ -960,12 +945,7 @@ mod tests {
         let interval = Interval::new(Time::from_secs(10), Duration::from_millis(100));
 
         let before = interval.is_ready(Time::from_secs(9));
-        crate::assert_with_log!(
-            !before,
-            "ready before deadline",
-            false,
-            before
-        );
+        crate::assert_with_log!(!before, "ready before deadline", false, before);
         let at = interval.is_ready(Time::from_secs(10));
         crate::assert_with_log!(at, "ready at deadline", true, at);
         let after = interval.is_ready(Time::from_secs(11));

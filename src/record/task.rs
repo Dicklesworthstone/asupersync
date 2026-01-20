@@ -715,7 +715,12 @@ mod tests {
         let requested = t.request_cancel(CancelReason::user("stop"));
         crate::assert_with_log!(requested, "request_cancel", true, requested);
         let requested_state = matches!(t.state, TaskState::CancelRequested { .. });
-        crate::assert_with_log!(requested_state, "state cancel requested", true, requested_state);
+        crate::assert_with_log!(
+            requested_state,
+            "state cancel requested",
+            true,
+            requested_state
+        );
         let cancelling = t.state.is_cancelling();
         crate::assert_with_log!(cancelling, "state cancelling", true, cancelling);
 
@@ -787,7 +792,12 @@ mod tests {
             Budget::new().with_poll_quota(500),
         );
         let budget = t.cleanup_budget().expect("should have cleanup budget");
-        crate::assert_with_log!(budget.poll_quota == 500, "poll_quota", 500, budget.poll_quota);
+        crate::assert_with_log!(
+            budget.poll_quota == 500,
+            "poll_quota",
+            500,
+            budget.poll_quota
+        );
         crate::test_complete!("cleanup_budget_accessor");
     }
 
@@ -803,14 +813,29 @@ mod tests {
         t.set_cx_inner(inner.clone());
 
         let cancel_requested = inner.read().unwrap().cancel_requested;
-        crate::assert_with_log!(!cancel_requested, "cancel_requested false", false, cancel_requested);
+        crate::assert_with_log!(
+            !cancel_requested,
+            "cancel_requested false",
+            false,
+            cancel_requested
+        );
         let cancel_reason_none = inner.read().unwrap().cancel_reason.is_none();
-        crate::assert_with_log!(cancel_reason_none, "cancel_reason none", true, cancel_reason_none);
+        crate::assert_with_log!(
+            cancel_reason_none,
+            "cancel_reason none",
+            true,
+            cancel_reason_none
+        );
 
         t.request_cancel(CancelReason::timeout());
 
         let cancel_requested = inner.read().unwrap().cancel_requested;
-        crate::assert_with_log!(cancel_requested, "cancel_requested true", true, cancel_requested);
+        crate::assert_with_log!(
+            cancel_requested,
+            "cancel_requested true",
+            true,
+            cancel_requested
+        );
         let cancel_reason = inner.read().unwrap().cancel_reason.as_ref().cloned();
         crate::assert_with_log!(
             cancel_reason == Some(CancelReason::timeout()),
@@ -819,7 +844,12 @@ mod tests {
             cancel_reason
         );
         let requested_state = matches!(t.state, TaskState::CancelRequested { .. });
-        crate::assert_with_log!(requested_state, "state cancel requested", true, requested_state);
+        crate::assert_with_log!(
+            requested_state,
+            "state cancel requested",
+            true,
+            requested_state
+        );
         crate::test_complete!("request_cancel_updates_shared_cx");
     }
 }

@@ -6,9 +6,11 @@
 //! - Obligations (resources to be resolved)
 //! - Current time
 
-use crate::record::finalizer::Finalizer;
-use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord, RegionRecord, TaskRecord};
 use crate::error::{Error, ErrorKind};
+use crate::record::finalizer::Finalizer;
+use crate::record::{
+    ObligationAbortReason, ObligationKind, ObligationRecord, RegionRecord, TaskRecord,
+};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
@@ -376,7 +378,13 @@ impl RuntimeState {
             }
 
             let duration = record.commit(self.now);
-            (duration, record.id, record.holder, record.region, record.kind)
+            (
+                duration,
+                record.id,
+                record.holder,
+                record.region,
+                record.kind,
+            )
         };
 
         let _span = crate::tracing_compat::debug_span!(
@@ -398,13 +406,7 @@ impl RuntimeState {
 
         let seq = self.next_trace_seq();
         self.trace.push(TraceEvent::obligation_commit(
-            seq,
-            self.now,
-            id,
-            holder,
-            region,
-            kind,
-            duration,
+            seq, self.now, id, holder, region, kind, duration,
         ));
 
         Ok(duration)
@@ -433,7 +435,13 @@ impl RuntimeState {
             }
 
             let duration = record.abort(self.now, reason);
-            (duration, record.id, record.holder, record.region, record.kind)
+            (
+                duration,
+                record.id,
+                record.holder,
+                record.region,
+                record.kind,
+            )
         };
 
         let _span = crate::tracing_compat::debug_span!(
@@ -457,14 +465,7 @@ impl RuntimeState {
 
         let seq = self.next_trace_seq();
         self.trace.push(TraceEvent::obligation_abort(
-            seq,
-            self.now,
-            id,
-            holder,
-            region,
-            kind,
-            duration,
-            reason,
+            seq, self.now, id, holder, region, kind, duration, reason,
         ));
 
         Ok(duration)
@@ -489,7 +490,13 @@ impl RuntimeState {
             }
 
             let duration = record.mark_leaked(self.now);
-            (duration, record.id, record.holder, record.region, record.kind)
+            (
+                duration,
+                record.id,
+                record.holder,
+                record.region,
+                record.kind,
+            )
         };
 
         let _span = crate::tracing_compat::error_span!(
@@ -503,13 +510,7 @@ impl RuntimeState {
 
         let seq = self.next_trace_seq();
         self.trace.push(TraceEvent::obligation_leak(
-            seq,
-            self.now,
-            id,
-            holder,
-            region,
-            kind,
-            duration,
+            seq, self.now, id, holder, region, kind, duration,
         ));
         crate::tracing_compat::error!(
             obligation_id = ?id,
@@ -1135,7 +1136,12 @@ mod tests {
 
         // Should NOT be able to close because a task is running
         let can_close = state.can_region_complete_close(region);
-        crate::assert_with_log!(!can_close, "cannot close with running task", false, can_close);
+        crate::assert_with_log!(
+            !can_close,
+            "cannot close with running task",
+            false,
+            can_close
+        );
 
         // Complete the task
         state
@@ -1796,12 +1802,7 @@ mod tests {
         // Verify all tasks are in the region
         let region_record = state.regions.get(region.arena_index()).expect("region");
         let task_ids = region_record.task_ids();
-        crate::assert_with_log!(
-            task_ids.len() == 3,
-            "task count",
-            3usize,
-            task_ids.len()
-        );
+        crate::assert_with_log!(task_ids.len() == 3, "task count", 3usize, task_ids.len());
         crate::assert_with_log!(
             task_ids.contains(&task1),
             "contains task1",
@@ -1830,22 +1831,12 @@ mod tests {
 
         // Call task_completed to notify the runtime
         let waiters = state.task_completed(task2);
-        crate::assert_with_log!(
-            waiters.is_empty(),
-            "no waiters",
-            true,
-            waiters.is_empty()
-        ); // No waiters registered
+        crate::assert_with_log!(waiters.is_empty(), "no waiters", true, waiters.is_empty()); // No waiters registered
 
         // Verify task2 is removed from the region
         let region_record = state.regions.get(region.arena_index()).expect("region");
         let task_ids = region_record.task_ids();
-        crate::assert_with_log!(
-            task_ids.len() == 2,
-            "task count",
-            2usize,
-            task_ids.len()
-        );
+        crate::assert_with_log!(task_ids.len() == 2, "task count", 2usize, task_ids.len());
         crate::assert_with_log!(
             task_ids.contains(&task1),
             "contains task1",
@@ -1983,12 +1974,7 @@ mod tests {
 
         // Verify the driver is functional
         let driver = state.io_driver().unwrap();
-        crate::assert_with_log!(
-            driver.is_empty(),
-            "driver empty",
-            true,
-            driver.is_empty()
-        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         crate::assert_with_log!(
             driver.waker_count() == 0,
             "waker count",
@@ -2026,12 +2012,7 @@ mod tests {
 
         // Verify registration
         let waker_count = state.io_driver().unwrap().waker_count();
-        crate::assert_with_log!(
-            waker_count == 1,
-            "waker count",
-            1usize,
-            waker_count
-        );
+        crate::assert_with_log!(waker_count == 1, "waker count", 1usize, waker_count);
         let empty = state.io_driver().unwrap().is_empty();
         crate::assert_with_log!(!empty, "driver not empty", false, empty);
         crate::test_complete!("io_driver_mut_allows_modification");
@@ -2152,9 +2133,7 @@ mod tests {
             // Turn the driver to dispatch waker
             let count = {
                 let mut driver = state.io_driver_mut().unwrap();
-                driver
-                    .turn(Some(Duration::from_millis(100)))
-                    .expect("turn")
+                driver.turn(Some(Duration::from_millis(100))).expect("turn")
             };
 
             crate::assert_with_log!(count >= 1, "event count", true, count >= 1);

@@ -642,12 +642,7 @@ mod tests {
             .expect("future did not resolve")
             .unwrap();
         crate::assert_with_log!(n == 12, "bytes", 12, n);
-        crate::assert_with_log!(
-            writer == b"hello buffer",
-            "writer",
-            b"hello buffer",
-            writer
-        );
+        crate::assert_with_log!(writer == b"hello buffer", "writer", b"hello buffer", writer);
         let empty = reader.is_empty();
         crate::assert_with_log!(empty, "reader empty", true, empty);
         crate::test_complete!("copy_buf_reads_from_slice");

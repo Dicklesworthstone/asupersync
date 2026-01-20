@@ -388,12 +388,7 @@ mod tests {
         let packed = token.to_usize();
         let unpacked = SlabToken::from_usize(packed);
 
-        crate::assert_with_log!(
-            token == unpacked,
-            "token round-trip",
-            token,
-            unpacked
-        );
+        crate::assert_with_log!(token == unpacked, "token round-trip", token, unpacked);
         crate::assert_with_log!(
             unpacked.index() == 42,
             "index round-trip",
@@ -417,12 +412,7 @@ mod tests {
         let packed = token.to_usize();
         let unpacked = SlabToken::from_usize(packed);
 
-        crate::assert_with_log!(
-            token == unpacked,
-            "max token round-trip",
-            token,
-            unpacked
-        );
+        crate::assert_with_log!(token == unpacked, "max token round-trip", token, unpacked);
         crate::test_complete!("token_pack_unpack_max_values");
     }
 
@@ -435,12 +425,7 @@ mod tests {
         let token = slab.insert(waker);
 
         crate::assert_with_log!(slab.len() == 1, "len after insert", 1usize, slab.len());
-        crate::assert_with_log!(
-            !slab.is_empty(),
-            "slab not empty",
-            false,
-            slab.is_empty()
-        );
+        crate::assert_with_log!(!slab.is_empty(), "slab not empty", false, slab.is_empty());
         let contains = slab.contains(token);
         crate::assert_with_log!(contains, "slab contains token", true, contains);
         let get_some = slab.get(token).is_some();
@@ -683,20 +668,10 @@ mod tests {
         for (i, token) in tokens.iter().enumerate() {
             if i % 2 == 0 {
                 let contains = slab.contains(*token);
-                crate::assert_with_log!(
-                    contains,
-                    "even token retained",
-                    true,
-                    contains
-                );
+                crate::assert_with_log!(contains, "even token retained", true, contains);
             } else {
                 let contains = slab.contains(*token);
-                crate::assert_with_log!(
-                    !contains,
-                    "odd token removed",
-                    false,
-                    contains
-                );
+                crate::assert_with_log!(!contains, "odd token removed", false, contains);
             }
         }
         crate::test_complete!("slab_retain");
@@ -743,12 +718,7 @@ mod tests {
             true,
             slab.capacity() >= 100
         );
-        crate::assert_with_log!(
-            slab.is_empty(),
-            "slab starts empty",
-            true,
-            slab.is_empty()
-        );
+        crate::assert_with_log!(slab.is_empty(), "slab starts empty", true, slab.is_empty());
         crate::test_complete!("slab_with_capacity");
     }
 

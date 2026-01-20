@@ -454,15 +454,30 @@ mod tests {
 
         let mut next = stream.next();
         let poll = Pin::new(&mut next).poll(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "next 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "next 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
 
         let mut next = stream.next();
         let poll = Pin::new(&mut next).poll(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "next 2", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "next 2",
+            Poll::Ready(Some(2)),
+            poll
+        );
 
         let mut next = stream.next();
         let poll = Pin::new(&mut next).poll(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "next 3", Poll::Ready(Some(3)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "next 3",
+            Poll::Ready(Some(3)),
+            poll
+        );
 
         let mut next = stream.next();
         let poll = Pin::new(&mut next).poll(&mut cx);
@@ -484,11 +499,26 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut mapped).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "map 1", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "map 1",
+            Poll::Ready(Some(2)),
+            poll
+        );
         let poll = Pin::new(&mut mapped).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(4)), "map 2", Poll::Ready(Some(4)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(4)),
+            "map 2",
+            Poll::Ready(Some(4)),
+            poll
+        );
         let poll = Pin::new(&mut mapped).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(6)), "map 3", Poll::Ready(Some(6)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(6)),
+            "map 3",
+            Poll::Ready(Some(6)),
+            poll
+        );
         let poll = Pin::new(&mut mapped).poll_next(&mut cx);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),
@@ -508,11 +538,26 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut filtered).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "filter 1", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "filter 1",
+            Poll::Ready(Some(2)),
+            poll
+        );
         let poll = Pin::new(&mut filtered).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(4)), "filter 2", Poll::Ready(Some(4)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(4)),
+            "filter 2",
+            Poll::Ready(Some(4)),
+            poll
+        );
         let poll = Pin::new(&mut filtered).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(6)), "filter 3", Poll::Ready(Some(6)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(6)),
+            "filter 3",
+            Poll::Ready(Some(6)),
+            poll
+        );
         let poll = Pin::new(&mut filtered).poll_next(&mut cx);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),
@@ -532,9 +577,19 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut parsed).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "filter_map 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "filter_map 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
         let poll = Pin::new(&mut parsed).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "filter_map 2", Poll::Ready(Some(3)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "filter_map 2",
+            Poll::Ready(Some(3)),
+            poll
+        );
         let poll = Pin::new(&mut parsed).poll_next(&mut cx);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),
@@ -554,11 +609,26 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut taken).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "take 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "take 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
         let poll = Pin::new(&mut taken).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "take 2", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "take 2",
+            Poll::Ready(Some(2)),
+            poll
+        );
         let poll = Pin::new(&mut taken).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "take 3", Poll::Ready(Some(3)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "take 3",
+            Poll::Ready(Some(3)),
+            poll
+        );
         let poll = Pin::new(&mut taken).poll_next(&mut cx);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),
@@ -578,11 +648,26 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut skipped).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "skip 1", Poll::Ready(Some(3)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "skip 1",
+            Poll::Ready(Some(3)),
+            poll
+        );
         let poll = Pin::new(&mut skipped).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(4)), "skip 2", Poll::Ready(Some(4)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(4)),
+            "skip 2",
+            Poll::Ready(Some(4)),
+            poll
+        );
         let poll = Pin::new(&mut skipped).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(5)), "skip 3", Poll::Ready(Some(5)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(5)),
+            "skip 3",
+            Poll::Ready(Some(5)),
+            poll
+        );
         let poll = Pin::new(&mut skipped).poll_next(&mut cx);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),
@@ -602,11 +687,26 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some((0, "a"))), "enum 0", Poll::Ready(Some((0, "a"))), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some((0, "a"))),
+            "enum 0",
+            Poll::Ready(Some((0, "a"))),
+            poll
+        );
         let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some((1, "b"))), "enum 1", Poll::Ready(Some((1, "b"))), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some((1, "b"))),
+            "enum 1",
+            Poll::Ready(Some((1, "b"))),
+            poll
+        );
         let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some((2, "c"))), "enum 2", Poll::Ready(Some((2, "c"))), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some((2, "c"))),
+            "enum 2",
+            Poll::Ready(Some((2, "c"))),
+            poll
+        );
         let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<(usize, &str)>),
@@ -638,7 +738,12 @@ mod tests {
         // Second item
         let mut next = processed.next();
         let poll = Pin::new(&mut next).poll(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(20)), "then 2", Poll::Ready(Some(20)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(20)),
+            "then 2",
+            Poll::Ready(Some(20)),
+            poll
+        );
 
         // End
         let mut next = processed.next();
@@ -663,19 +768,39 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut inspected).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "inspect 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "inspect 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
         let items_now = items.borrow().clone();
         crate::assert_with_log!(items_now == vec![1], "items", vec![1], items_now);
 
         let poll = Pin::new(&mut inspected).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "inspect 2", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "inspect 2",
+            Poll::Ready(Some(2)),
+            poll
+        );
         let items_now = items.borrow().clone();
         crate::assert_with_log!(items_now == vec![1, 2], "items", vec![1, 2], items_now);
 
         let poll = Pin::new(&mut inspected).poll_next(&mut cx);
-        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "inspect 3", Poll::Ready(Some(3)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "inspect 3",
+            Poll::Ready(Some(3)),
+            poll
+        );
         let items_now = items.borrow().clone();
-        crate::assert_with_log!(items_now == vec![1, 2, 3], "items", vec![1, 2, 3], items_now);
+        crate::assert_with_log!(
+            items_now == vec![1, 2, 3],
+            "items",
+            vec![1, 2, 3],
+            items_now
+        );
 
         let poll = Pin::new(&mut inspected).poll_next(&mut cx);
         crate::assert_with_log!(
@@ -705,9 +830,19 @@ mod tests {
         let mut cx_task = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "recv 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "recv 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
         let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "recv 2", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "recv 2",
+            Poll::Ready(Some(2)),
+            poll
+        );
         let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),
@@ -732,12 +867,22 @@ mod tests {
 
         // Initial value
         let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(0)), "watch 0", Poll::Ready(Some(0)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(0)),
+            "watch 0",
+            Poll::Ready(Some(0)),
+            poll
+        );
 
         // Update value
         tx.send(1).unwrap();
         let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "watch 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "watch 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
         crate::test_complete!("test_watch_stream");
     }
 
@@ -792,11 +937,26 @@ mod tests {
         let mut cx_task = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut output).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "forward 1", Poll::Ready(Some(1)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "forward 1",
+            Poll::Ready(Some(1)),
+            poll
+        );
         let poll = Pin::new(&mut output).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "forward 2", Poll::Ready(Some(2)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "forward 2",
+            Poll::Ready(Some(2)),
+            poll
+        );
         let poll = Pin::new(&mut output).poll_next(&mut cx_task);
-        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "forward 3", Poll::Ready(Some(3)), poll);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "forward 3",
+            Poll::Ready(Some(3)),
+            poll
+        );
         let poll = Pin::new(&mut output).poll_next(&mut cx_task);
         crate::assert_with_log!(
             poll == Poll::Ready(None::<i32>),

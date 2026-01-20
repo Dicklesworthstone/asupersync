@@ -396,7 +396,12 @@ mod tests {
             let ok = matches!(result, Poll::Ready(Ok(())));
             crate::assert_with_log!(ok, "ready ok", true, ok);
             let available = svc.available_tokens();
-            crate::assert_with_log!(available == expected - 1, "available", expected - 1, available);
+            crate::assert_with_log!(
+                available == expected - 1,
+                "available",
+                expected - 1,
+                available
+            );
         }
         crate::test_complete!("tokens_consumed_on_ready");
     }

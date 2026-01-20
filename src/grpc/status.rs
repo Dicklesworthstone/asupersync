@@ -384,7 +384,12 @@ mod tests {
     #[test]
     fn test_code_from_i32() {
         init_test("test_code_from_i32");
-        crate::assert_with_log!(Code::from_i32(0) == Code::Ok, "0", Code::Ok, Code::from_i32(0));
+        crate::assert_with_log!(
+            Code::from_i32(0) == Code::Ok,
+            "0",
+            Code::Ok,
+            Code::from_i32(0)
+        );
         crate::assert_with_log!(
             Code::from_i32(1) == Code::Cancelled,
             "1",
@@ -428,7 +433,12 @@ mod tests {
         let code = status.code();
         crate::assert_with_log!(code == Code::NotFound, "code", Code::NotFound, code);
         let message = status.message();
-        crate::assert_with_log!(message == "resource not found", "message", "resource not found", message);
+        crate::assert_with_log!(
+            message == "resource not found",
+            "message",
+            "resource not found",
+            message
+        );
         let details = status.details();
         crate::assert_with_log!(details.is_none(), "details none", true, details.is_none());
         crate::test_complete!("test_status_creation");

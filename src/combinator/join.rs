@@ -503,7 +503,10 @@ pub fn join_all_to_result<T, E: Clone>(
             })
         }
         AggregateDecision::Cancelled(r) => Err(JoinAllError::Cancelled(r)),
-        AggregateDecision::Panicked { payload, first_panic_index } => Err(JoinAllError::Panicked {
+        AggregateDecision::Panicked {
+            payload,
+            first_panic_index,
+        } => Err(JoinAllError::Panicked {
             payload,
             index: first_panic_index,
         }),
@@ -650,7 +653,10 @@ mod tests {
         let (decision, successes) = join_all_outcomes(outcomes);
 
         match decision {
-            AggregateDecision::Panicked { payload: _, first_panic_index } => assert_eq!(first_panic_index, 1),
+            AggregateDecision::Panicked {
+                payload: _,
+                first_panic_index,
+            } => assert_eq!(first_panic_index, 1),
             _ => panic!("Expected Panicked decision"),
         }
         // All successful values collected (join waits for all branches)
@@ -963,7 +969,10 @@ mod tests {
         ];
         let result = make_join_all_result(outcomes);
         match result.decision {
-            AggregateDecision::Panicked { payload: _, first_panic_index } => assert_eq!(first_panic_index, 1),
+            AggregateDecision::Panicked {
+                payload: _,
+                first_panic_index,
+            } => assert_eq!(first_panic_index, 1),
             _ => panic!("Expected Panicked decision"),
         }
     }
