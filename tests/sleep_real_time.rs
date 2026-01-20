@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::time::Sleep;
 use asupersync::types::Time;
 use std::future::Future;

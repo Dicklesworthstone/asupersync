@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::record::TaskRecord;
 use asupersync::types::{Budget, CancelReason, CxInner, RegionId, TaskId};
 use std::sync::{Arc, RwLock};

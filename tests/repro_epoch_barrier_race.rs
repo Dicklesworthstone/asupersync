@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::epoch::{EpochBarrier, EpochId};
 use asupersync::types::Time;
 use std::sync::{Arc, Barrier};

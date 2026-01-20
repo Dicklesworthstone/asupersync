@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::error::SendError;
