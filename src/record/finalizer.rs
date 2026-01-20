@@ -156,8 +156,14 @@ impl FinalizerStack {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn finalizer_stack_lifo_order() {
+        init_test("finalizer_stack_lifo_order");
         let mut stack = FinalizerStack::new();
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let o1 = order.clone();
@@ -176,42 +182,68 @@ mod tests {
         }
 
         // Should be 3, 2, 1 (LIFO)
-        assert_eq!(*order.lock().unwrap(), vec![3, 2, 1]);
+        let order = order.lock().unwrap().clone();
+        crate::assert_with_log!(order == vec![3, 2, 1], "order", vec![3, 2, 1], order);
+        crate::test_complete!("finalizer_stack_lifo_order");
     }
 
     #[test]
     fn finalizer_stack_empty() {
+        init_test("finalizer_stack_empty");
         let mut stack = FinalizerStack::new();
-        assert!(stack.is_empty());
-        assert_eq!(stack.len(), 0);
-        assert!(stack.pop().is_none());
+        let empty = stack.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        let len = stack.len();
+        crate::assert_with_log!(len == 0, "len", 0, len);
+        let pop = stack.pop();
+        crate::assert_with_log!(pop.is_none(), "pop none", true, pop.is_none());
+        crate::test_complete!("finalizer_stack_empty");
     }
 
     #[test]
     fn finalizer_escalation_policies() {
-        assert!(FinalizerEscalation::Soft.is_soft());
-        assert!(!FinalizerEscalation::BoundedLog.is_soft());
-        assert!(!FinalizerEscalation::BoundedPanic.is_soft());
+        init_test("finalizer_escalation_policies");
+        let soft = FinalizerEscalation::Soft.is_soft();
+        crate::assert_with_log!(soft, "soft is soft", true, soft);
+        let log_soft = FinalizerEscalation::BoundedLog.is_soft();
+        crate::assert_with_log!(!log_soft, "log not soft", false, log_soft);
+        let panic_soft = FinalizerEscalation::BoundedPanic.is_soft();
+        crate::assert_with_log!(!panic_soft, "panic not soft", false, panic_soft);
 
-        assert!(FinalizerEscalation::BoundedLog.allows_continuation());
-        assert!(!FinalizerEscalation::Soft.allows_continuation());
-        assert!(!FinalizerEscalation::BoundedPanic.allows_continuation());
+        let log_cont = FinalizerEscalation::BoundedLog.allows_continuation();
+        crate::assert_with_log!(log_cont, "log allows", true, log_cont);
+        let soft_cont = FinalizerEscalation::Soft.allows_continuation();
+        crate::assert_with_log!(!soft_cont, "soft no continue", false, soft_cont);
+        let panic_cont = FinalizerEscalation::BoundedPanic.allows_continuation();
+        crate::assert_with_log!(!panic_cont, "panic no continue", false, panic_cont);
+        crate::test_complete!("finalizer_escalation_policies");
     }
 
     #[test]
     fn finalizer_budget_has_expected_values() {
+        init_test("finalizer_budget_has_expected_values");
         let budget = finalizer_budget();
-        assert_eq!(budget.poll_quota, FINALIZER_POLL_BUDGET);
+        crate::assert_with_log!(
+            budget.poll_quota == FINALIZER_POLL_BUDGET,
+            "poll_quota",
+            FINALIZER_POLL_BUDGET,
+            budget.poll_quota
+        );
+        crate::test_complete!("finalizer_budget_has_expected_values");
     }
 
     #[test]
     fn finalizer_debug_impl() {
+        init_test("finalizer_debug_impl");
         let sync_finalizer = Finalizer::Sync(Box::new(|| {}));
         let debug_str = format!("{sync_finalizer:?}");
-        assert!(debug_str.contains("Sync"));
+        let has_sync = debug_str.contains("Sync");
+        crate::assert_with_log!(has_sync, "sync debug", true, has_sync);
 
         let async_finalizer = Finalizer::Async(Box::pin(async {}));
         let debug_str = format!("{async_finalizer:?}");
-        assert!(debug_str.contains("Async"));
+        let has_async = debug_str.contains("Async");
+        crate::assert_with_log!(has_async, "async debug", true, has_async);
+        crate::test_complete!("finalizer_debug_impl");
     }
 }

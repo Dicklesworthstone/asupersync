@@ -176,6 +176,16 @@ impl TraceEventSummary {
                     format!("msg={msg}")
                 }
             }
+            TraceData::Chaos { kind, task, detail } => {
+                let mut summary = format!("chaos={kind}");
+                if let Some(t) = task {
+                    summary.push_str(&format!(" task={t}"));
+                }
+                if !detail.is_empty() {
+                    summary.push_str(&format!(" detail={detail}"));
+                }
+                summary
+            }
         }
     }
 }
@@ -367,8 +377,14 @@ mod tests {
     use super::*;
     use crate::types::Budget;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn empty_runtime_is_deterministic() {
+        init_test("empty_runtime_is_deterministic");
         let config = LabConfig::new(42);
         let oracle = DeterminismOracle::new();
 
@@ -376,11 +392,14 @@ mod tests {
             // Do nothing
         });
 
-        assert!(result.is_ok());
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("empty_runtime_is_deterministic");
     }
 
     #[test]
     fn time_advance_is_deterministic() {
+        init_test("time_advance_is_deterministic");
         let config = LabConfig::new(42);
         let oracle = DeterminismOracle::new();
 
@@ -390,11 +409,14 @@ mod tests {
             runtime.advance_time(3_000_000);
         });
 
-        assert!(result.is_ok());
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("time_advance_is_deterministic");
     }
 
     #[test]
     fn region_creation_is_deterministic() {
+        init_test("region_creation_is_deterministic");
         let config = LabConfig::new(42);
         let oracle = DeterminismOracle::new();
 
@@ -402,11 +424,14 @@ mod tests {
             let _root = runtime.state.create_root_region(Budget::INFINITE);
         });
 
-        assert!(result.is_ok());
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("region_creation_is_deterministic");
     }
 
     #[test]
     fn run_until_quiescent_is_deterministic() {
+        init_test("run_until_quiescent_is_deterministic");
         let config = LabConfig::new(42);
         let oracle = DeterminismOracle::new();
 
@@ -414,11 +439,14 @@ mod tests {
             runtime.run_until_quiescent();
         });
 
-        assert!(result.is_ok());
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("run_until_quiescent_is_deterministic");
     }
 
     #[test]
     fn rng_seeded_deterministically() {
+        init_test("rng_seeded_deterministically");
         // Verify that the RNG produces identical sequences
         let config = LabConfig::new(12345);
 
@@ -446,20 +474,25 @@ mod tests {
             .collect();
 
         let oracle = DeterminismOracle::new();
-        assert!(oracle.compare_traces(&trace1, &trace2).is_ok());
+        let ok = oracle.compare_traces(&trace1, &trace2).is_ok();
+        crate::assert_with_log!(ok, "traces ok", true, ok);
+        crate::test_complete!("rng_seeded_deterministically");
     }
 
     #[test]
     fn multi_run_determinism() {
+        init_test("multi_run_determinism");
         let config = LabConfig::new(999);
         assert_deterministic_multi(&config, 5, |runtime| {
             runtime.advance_time(1_000);
             runtime.run_until_quiescent();
         });
+        crate::test_complete!("multi_run_determinism");
     }
 
     #[test]
     fn violation_reports_divergence_correctly() {
+        init_test("violation_reports_divergence_correctly");
         let oracle = DeterminismOracle::new().context_window(3);
 
         // Create two traces that diverge
@@ -506,17 +539,28 @@ mod tests {
         ];
 
         let result = oracle.compare_traces(&trace1, &trace2);
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.divergence_index, 2);
-        assert_eq!(violation.expected.unwrap().data_summary, "msg=foo");
-        assert_eq!(violation.actual.unwrap().data_summary, "msg=bar");
-        assert_eq!(violation.context_before.len(), 2); // Events 0 and 1
+        crate::assert_with_log!(
+            violation.divergence_index == 2,
+            "divergence_index",
+            2,
+            violation.divergence_index
+        );
+        let expected = violation.expected.unwrap().data_summary;
+        crate::assert_with_log!(expected == "msg=foo", "expected", "msg=foo", expected);
+        let actual = violation.actual.unwrap().data_summary;
+        crate::assert_with_log!(actual == "msg=bar", "actual", "msg=bar", actual);
+        let ctx_len = violation.context_before.len();
+        crate::assert_with_log!(ctx_len == 2, "context len", 2, ctx_len); // Events 0 and 1
+        crate::test_complete!("violation_reports_divergence_correctly");
     }
 
     #[test]
     fn violation_handles_different_lengths() {
+        init_test("violation_handles_different_lengths");
         let oracle = DeterminismOracle::new();
 
         let trace1 = vec![
@@ -542,16 +586,26 @@ mod tests {
         }];
 
         let result = oracle.compare_traces(&trace1, &trace2);
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.divergence_index, 1);
-        assert!(violation.expected.is_some());
-        assert!(violation.actual.is_none());
+        crate::assert_with_log!(
+            violation.divergence_index == 1,
+            "divergence_index",
+            1,
+            violation.divergence_index
+        );
+        let expected_some = violation.expected.is_some();
+        crate::assert_with_log!(expected_some, "expected some", true, expected_some);
+        let actual_none = violation.actual.is_none();
+        crate::assert_with_log!(actual_none, "actual none", true, actual_none);
+        crate::test_complete!("violation_handles_different_lengths");
     }
 
     #[test]
     fn trace_event_summary_equality() {
+        init_test("trace_event_summary_equality");
         let s1 = TraceEventSummary {
             seq: 0,
             time_nanos: 100,
@@ -566,7 +620,7 @@ mod tests {
             data_summary: "task=Task(0) region=Region(0)".to_string(),
         };
 
-        assert_eq!(s1, s2);
+        crate::assert_with_log!(s1 == s2, "equal", s2.clone(), s1.clone());
 
         let s3 = TraceEventSummary {
             seq: 1, // Different seq
@@ -575,6 +629,8 @@ mod tests {
             data_summary: "task=Task(0) region=Region(0)".to_string(),
         };
 
-        assert_ne!(s1, s3);
+        let neq = s1 != s3;
+        crate::assert_with_log!(neq, "not equal", true, neq);
+        crate::test_complete!("trace_event_summary_equality");
     }
 }

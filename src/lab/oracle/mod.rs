@@ -183,13 +183,23 @@ impl OracleSuite {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn oracle_suite_default_is_clean() {
+        init_test("oracle_suite_default_is_clean");
         let suite = OracleSuite::new();
         let violations = suite.check_all(Time::ZERO);
-        assert!(
-            violations.is_empty(),
-            "Fresh suite should have no violations"
+        let empty = violations.is_empty();
+        crate::assert_with_log!(
+            empty,
+            "suite clean",
+            true,
+            empty
         );
+        crate::test_complete!("oracle_suite_default_is_clean");
     }
 }

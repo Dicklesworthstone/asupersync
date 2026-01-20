@@ -386,51 +386,74 @@ mod tests {
         Time::from_nanos(nanos)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn empty_oracle_passes() {
+        init_test("empty_oracle_passes");
         let oracle = AmbientAuthorityOracle::new();
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("empty_oracle_passes");
     }
 
     #[test]
     fn root_task_has_full_capabilities() {
+        init_test("root_task_has_full_capabilities");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
 
         // Root task should have all capabilities
-        assert!(oracle.task_has_capability(task(1), CapabilityKind::Spawn));
-        assert!(oracle.task_has_capability(task(1), CapabilityKind::Time));
-        assert!(oracle.task_has_capability(task(1), CapabilityKind::Trace));
-        assert!(oracle.task_has_capability(task(1), CapabilityKind::Region));
-        assert!(oracle.task_has_capability(task(1), CapabilityKind::Obligation));
+        let has_spawn = oracle.task_has_capability(task(1), CapabilityKind::Spawn);
+        crate::assert_with_log!(has_spawn, "has spawn", true, has_spawn);
+        let has_time = oracle.task_has_capability(task(1), CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "has time", true, has_time);
+        let has_trace = oracle.task_has_capability(task(1), CapabilityKind::Trace);
+        crate::assert_with_log!(has_trace, "has trace", true, has_trace);
+        let has_region = oracle.task_has_capability(task(1), CapabilityKind::Region);
+        crate::assert_with_log!(has_region, "has region", true, has_region);
+        let has_obligation = oracle.task_has_capability(task(1), CapabilityKind::Obligation);
+        crate::assert_with_log!(has_obligation, "has obligation", true, has_obligation);
+        crate::test_complete!("root_task_has_full_capabilities");
     }
 
     #[test]
     fn child_inherits_parent_capabilities() {
+        init_test("child_inherits_parent_capabilities");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
         oracle.on_task_created(task(2), region(0), Some(task(1)), t(10));
 
         // Child should inherit parent's full capabilities
-        assert!(oracle.task_has_capability(task(2), CapabilityKind::Spawn));
-        assert!(oracle.task_has_capability(task(2), CapabilityKind::Time));
+        let has_spawn = oracle.task_has_capability(task(2), CapabilityKind::Spawn);
+        crate::assert_with_log!(has_spawn, "child has spawn", true, has_spawn);
+        let has_time = oracle.task_has_capability(task(2), CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "child has time", true, has_time);
+        crate::test_complete!("child_inherits_parent_capabilities");
     }
 
     #[test]
     fn authorized_spawn_passes() {
+        init_test("authorized_spawn_passes");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
         oracle.on_spawn_effect(task(1), task(2), t(10));
         oracle.on_task_created(task(2), region(0), Some(task(1)), t(10));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("authorized_spawn_passes");
     }
 
     #[test]
     fn unauthorized_spawn_fails() {
+        init_test("unauthorized_spawn_fails");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
@@ -441,15 +464,28 @@ mod tests {
         oracle.on_spawn_effect(task(1), task(2), t(10));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.task, task(1));
-        assert_eq!(violation.required_capability, CapabilityKind::Spawn);
+        crate::assert_with_log!(
+            violation.task == task(1),
+            "violation task",
+            task(1),
+            violation.task
+        );
+        crate::assert_with_log!(
+            violation.required_capability == CapabilityKind::Spawn,
+            "required capability",
+            CapabilityKind::Spawn,
+            violation.required_capability
+        );
+        crate::test_complete!("unauthorized_spawn_fails");
     }
 
     #[test]
     fn unauthorized_time_access_fails() {
+        init_test("unauthorized_time_access_fails");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
@@ -459,14 +495,22 @@ mod tests {
         oracle.on_time_access(task(1), t(10));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.required_capability, CapabilityKind::Time);
+        crate::assert_with_log!(
+            violation.required_capability == CapabilityKind::Time,
+            "required capability",
+            CapabilityKind::Time,
+            violation.required_capability
+        );
+        crate::test_complete!("unauthorized_time_access_fails");
     }
 
     #[test]
     fn regranting_capability_passes() {
+        init_test("regranting_capability_passes");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
@@ -476,26 +520,38 @@ mod tests {
 
         oracle.on_spawn_effect(task(1), task(2), t(10));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("regranting_capability_passes");
     }
 
     #[test]
     fn unknown_task_fails() {
+        init_test("unknown_task_fails");
         let mut oracle = AmbientAuthorityOracle::new();
 
         // Task 1 never created, tries to spawn
         oracle.on_spawn_effect(task(1), task(2), t(10));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.task, task(1));
-        assert!(violation.granted_capabilities.is_empty());
+        crate::assert_with_log!(
+            violation.task == task(1),
+            "violation task",
+            task(1),
+            violation.task
+        );
+        let empty = violation.granted_capabilities.is_empty();
+        crate::assert_with_log!(empty, "capabilities empty", true, empty);
+        crate::test_complete!("unknown_task_fails");
     }
 
     #[test]
     fn multiple_effects_all_authorized() {
+        init_test("multiple_effects_all_authorized");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
@@ -505,12 +561,16 @@ mod tests {
         oracle.on_trace(task(1), "hello", t(30));
         oracle.on_region_create(task(1), region(1), t(40));
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.effect_count(), 4);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        let count = oracle.effect_count();
+        crate::assert_with_log!(count == 4, "effect count", 4, count);
+        crate::test_complete!("multiple_effects_all_authorized");
     }
 
     #[test]
     fn child_with_narrowed_capabilities() {
+        init_test("child_with_narrowed_capabilities");
         let mut oracle = AmbientAuthorityOracle::new();
 
         // Parent with full capabilities
@@ -525,12 +585,21 @@ mod tests {
         oracle.on_spawn_effect(task(2), task(3), t(20));
 
         let result = oracle.check();
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().task, task(2));
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.task == task(2),
+            "violation task",
+            task(2),
+            violation.task
+        );
+        crate::test_complete!("child_with_narrowed_capabilities");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
@@ -539,48 +608,70 @@ mod tests {
         oracle.on_spawn_effect(task(1), task(2), t(10));
 
         // Would fail
-        assert!(oracle.check().is_err());
+        let err = oracle.check().is_err();
+        crate::assert_with_log!(err, "oracle err", true, err);
 
         oracle.reset();
 
         // After reset, no violations (no effects tracked)
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.effect_count(), 0);
-        assert_eq!(oracle.task_count(), 0);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        let effect_count = oracle.effect_count();
+        crate::assert_with_log!(effect_count == 0, "effect count", 0, effect_count);
+        let task_count = oracle.task_count();
+        crate::assert_with_log!(task_count == 0, "task count", 0, task_count);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn capability_set_full_implies_all() {
+        init_test("capability_set_full_implies_all");
         let full = CapabilitySet::full();
 
-        assert!(full.has(CapabilityKind::Spawn));
-        assert!(full.has(CapabilityKind::Time));
-        assert!(full.has(CapabilityKind::Trace));
-        assert!(full.has(CapabilityKind::Region));
-        assert!(full.has(CapabilityKind::Obligation));
-        assert!(full.has(CapabilityKind::Full));
+        let has_spawn = full.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(has_spawn, "has spawn", true, has_spawn);
+        let has_time = full.has(CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "has time", true, has_time);
+        let has_trace = full.has(CapabilityKind::Trace);
+        crate::assert_with_log!(has_trace, "has trace", true, has_trace);
+        let has_region = full.has(CapabilityKind::Region);
+        crate::assert_with_log!(has_region, "has region", true, has_region);
+        let has_obligation = full.has(CapabilityKind::Obligation);
+        crate::assert_with_log!(has_obligation, "has obligation", true, has_obligation);
+        let has_full = full.has(CapabilityKind::Full);
+        crate::assert_with_log!(has_full, "has full", true, has_full);
+        crate::test_complete!("capability_set_full_implies_all");
     }
 
     #[test]
     fn capability_set_individual_grants() {
+        init_test("capability_set_individual_grants");
         let mut caps = CapabilitySet::empty();
 
-        assert!(!caps.has(CapabilityKind::Spawn));
+        let has_spawn = caps.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(!has_spawn, "spawn missing", false, has_spawn);
 
         caps.grant(CapabilityKind::Spawn);
-        assert!(caps.has(CapabilityKind::Spawn));
-        assert!(!caps.has(CapabilityKind::Time));
+        let has_spawn = caps.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(has_spawn, "spawn granted", true, has_spawn);
+        let has_time = caps.has(CapabilityKind::Time);
+        crate::assert_with_log!(!has_time, "time missing", false, has_time);
 
         caps.grant(CapabilityKind::Time);
-        assert!(caps.has(CapabilityKind::Time));
+        let has_time = caps.has(CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "time granted", true, has_time);
 
         caps.revoke(CapabilityKind::Spawn);
-        assert!(!caps.has(CapabilityKind::Spawn));
-        assert!(caps.has(CapabilityKind::Time));
+        let has_spawn = caps.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(!has_spawn, "spawn revoked", false, has_spawn);
+        let has_time = caps.has(CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "time still", true, has_time);
+        crate::test_complete!("capability_set_individual_grants");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let violation = AmbientAuthorityViolation {
             task: task(1),
             required_capability: CapabilityKind::Spawn,
@@ -590,12 +681,16 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("spawn"));
-        assert!(s.contains("Time"));
+        let has_spawn = s.contains("spawn");
+        crate::assert_with_log!(has_spawn, "contains spawn", true, has_spawn);
+        let has_time = s.contains("Time");
+        crate::assert_with_log!(has_time, "contains Time", true, has_time);
+        crate::test_complete!("violation_display");
     }
 
     #[test]
     fn generic_effect_tracking() {
+        init_test("generic_effect_tracking");
         let mut oracle = AmbientAuthorityOracle::new();
 
         oracle.on_task_created(task(1), region(0), None, t(0));
@@ -606,12 +701,16 @@ mod tests {
             t(10),
         );
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.effect_count(), 1);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        let count = oracle.effect_count();
+        crate::assert_with_log!(count == 1, "effect count", 1, count);
+        crate::test_complete!("generic_effect_tracking");
     }
 
     #[test]
     fn multiple_tasks_independent() {
+        init_test("multiple_tasks_independent");
         let mut oracle = AmbientAuthorityOracle::new();
 
         // Task 1: full capabilities
@@ -627,6 +726,8 @@ mod tests {
         // Task 2 does access time (which it still has)
         oracle.on_time_access(task(2), t(15));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("multiple_tasks_independent");
     }
 }

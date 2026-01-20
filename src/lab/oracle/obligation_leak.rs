@@ -175,8 +175,14 @@ mod tests {
     use crate::types::{Budget, ObligationId, RegionId, TaskId};
     use crate::util::ArenaIndex;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn detects_leak_on_region_close() {
+        init_test("detects_leak_on_region_close");
         let mut oracle = ObligationLeakOracle::new();
 
         let region = RegionId::from_arena(ArenaIndex::new(0, 0));
@@ -187,13 +193,17 @@ mod tests {
         oracle.on_region_close(region, Time::ZERO);
 
         let err = oracle.check(Time::ZERO).expect_err("expected leak");
-        assert_eq!(err.region, region);
-        assert_eq!(err.leaked.len(), 1);
-        assert_eq!(err.leaked[0].obligation, obligation);
+        crate::assert_with_log!(err.region == region, "region", region, err.region);
+        let len = err.leaked.len();
+        crate::assert_with_log!(len == 1, "leaked len", 1, len);
+        let leaked = err.leaked[0].obligation;
+        crate::assert_with_log!(leaked == obligation, "obligation", obligation, leaked);
+        crate::test_complete!("detects_leak_on_region_close");
     }
 
     #[test]
     fn snapshot_from_state_catches_reserved_obligation() {
+        init_test("snapshot_from_state_catches_reserved_obligation");
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
 
@@ -220,12 +230,16 @@ mod tests {
         oracle.on_region_close(root, Time::ZERO);
 
         let err = oracle.check(Time::ZERO).expect_err("expected leak");
-        assert_eq!(err.leaked.len(), 1);
-        assert_eq!(err.leaked[0].obligation, obl_id);
+        let len = err.leaked.len();
+        crate::assert_with_log!(len == 1, "leaked len", 1, len);
+        let leaked = err.leaked[0].obligation;
+        crate::assert_with_log!(leaked == obl_id, "obligation", obl_id, leaked);
+        crate::test_complete!("snapshot_from_state_catches_reserved_obligation");
     }
 
     #[test]
     fn resolved_obligation_is_not_leak() {
+        init_test("resolved_obligation_is_not_leak");
         let mut oracle = ObligationLeakOracle::new();
 
         let region = RegionId::from_arena(ArenaIndex::new(0, 0));
@@ -236,6 +250,8 @@ mod tests {
         oracle.on_resolve(obligation, ObligationState::Committed);
         oracle.on_region_close(region, Time::ZERO);
 
-        assert!(oracle.check(Time::ZERO).is_ok());
+        let ok = oracle.check(Time::ZERO).is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("resolved_obligation_is_not_leak");
     }
 }

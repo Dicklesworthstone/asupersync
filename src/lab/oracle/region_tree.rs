@@ -344,24 +344,37 @@ mod tests {
         Time::from_nanos(nanos)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     // === Valid Tree Tests ===
 
     #[test]
     fn empty_tree_passes() {
+        init_test("empty_tree_passes");
         let oracle = RegionTreeOracle::new();
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("empty_tree_passes");
     }
 
     #[test]
     fn single_root_passes() {
+        init_test("single_root_passes");
         let mut oracle = RegionTreeOracle::new();
         oracle.on_region_create(region(0), None, t(10));
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.root(), Some(region(0)));
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let root = oracle.root();
+        crate::assert_with_log!(root == Some(region(0)), "root", Some(region(0)), root);
+        crate::test_complete!("single_root_passes");
     }
 
     #[test]
     fn linear_chain_passes() {
+        init_test("linear_chain_passes");
         let mut oracle = RegionTreeOracle::new();
 
         // r0 -> r1 -> r2
@@ -369,12 +382,16 @@ mod tests {
         oracle.on_region_create(region(1), Some(region(0)), t(20));
         oracle.on_region_create(region(2), Some(region(1)), t(30));
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.region_count(), 3);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 3, "region_count", 3, count);
+        crate::test_complete!("linear_chain_passes");
     }
 
     #[test]
     fn branching_tree_passes() {
+        init_test("branching_tree_passes");
         let mut oracle = RegionTreeOracle::new();
 
         //       r0
@@ -388,12 +405,16 @@ mod tests {
         oracle.on_region_create(region(3), Some(region(1)), t(40));
         oracle.on_region_create(region(4), Some(region(1)), t(50));
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.region_count(), 5);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 5, "region_count", 5, count);
+        crate::test_complete!("branching_tree_passes");
     }
 
     #[test]
     fn deeply_nested_tree_passes() {
+        init_test("deeply_nested_tree_passes");
         let mut oracle = RegionTreeOracle::new();
 
         // Create a chain of 10 nested regions
@@ -402,35 +423,46 @@ mod tests {
             oracle.on_region_create(region(i), Some(region(i - 1)), t(u64::from(i) * 10));
         }
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.depth(region(9)), Some(9));
-        assert_eq!(oracle.depth(region(0)), Some(0));
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let depth9 = oracle.depth(region(9));
+        crate::assert_with_log!(depth9 == Some(9), "depth 9", Some(9), depth9);
+        let depth0 = oracle.depth(region(0));
+        crate::assert_with_log!(depth0 == Some(0), "depth 0", Some(0), depth0);
+        crate::test_complete!("deeply_nested_tree_passes");
     }
 
     // === Multiple Roots Violation ===
 
     #[test]
     fn multiple_roots_fails() {
+        init_test("multiple_roots_fails");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
         oracle.on_region_create(region(1), None, t(20)); // Second root!
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         match result.unwrap_err() {
             RegionTreeViolation::MultipleRoots { roots } => {
-                assert_eq!(roots.len(), 2);
-                assert!(roots.contains(&region(0)));
-                assert!(roots.contains(&region(1)));
+                let len = roots.len();
+                crate::assert_with_log!(len == 2, "roots len", 2, len);
+                let has0 = roots.contains(&region(0));
+                crate::assert_with_log!(has0, "contains r0", true, has0);
+                let has1 = roots.contains(&region(1));
+                crate::assert_with_log!(has1, "contains r1", true, has1);
             }
             other => panic!("Expected MultipleRoots, got {other:?}"),
         }
+        crate::test_complete!("multiple_roots_fails");
     }
 
     #[test]
     fn multiple_roots_with_children_fails() {
+        init_test("multiple_roots_with_children_fails");
         let mut oracle = RegionTreeOracle::new();
 
         // Two separate trees
@@ -440,16 +472,16 @@ mod tests {
         oracle.on_region_create(region(3), Some(region(2)), t(40));
 
         let result = oracle.check();
-        assert!(matches!(
-            result.unwrap_err(),
-            RegionTreeViolation::MultipleRoots { .. }
-        ));
+        let is_multiple = matches!(result.unwrap_err(), RegionTreeViolation::MultipleRoots { .. });
+        crate::assert_with_log!(is_multiple, "multiple roots", true, is_multiple);
+        crate::test_complete!("multiple_roots_with_children_fails");
     }
 
     // === No Root Violation ===
 
     #[test]
     fn no_root_fails() {
+        init_test("no_root_fails");
         let mut oracle = RegionTreeOracle::new();
 
         // Manually create regions where all have parents (forming a cycle)
@@ -472,7 +504,8 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         // First we'll get NoRoot since all have parents
         match result.unwrap_err() {
@@ -481,12 +514,14 @@ mod tests {
             }
             other => panic!("Expected NoRoot, got {other:?}"),
         }
+        crate::test_complete!("no_root_fails");
     }
 
     // === Invalid Parent Violation ===
 
     #[test]
     fn invalid_parent_fails() {
+        init_test("invalid_parent_fails");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
@@ -494,24 +529,27 @@ mod tests {
         oracle.on_region_create(region(1), Some(region(99)), t(20));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         match result.unwrap_err() {
             RegionTreeViolation::InvalidParent {
                 region: r,
                 claimed_parent,
             } => {
-                assert_eq!(r, region(1));
-                assert_eq!(claimed_parent, region(99));
+                crate::assert_with_log!(r == region(1), "region", region(1), r);
+                crate::assert_with_log!(claimed_parent == region(99), "parent", region(99), claimed_parent);
             }
             other => panic!("Expected InvalidParent, got {other:?}"),
         }
+        crate::test_complete!("invalid_parent_fails");
     }
 
     // === Parent-Child Mismatch Violation ===
 
     #[test]
     fn parent_child_mismatch_fails() {
+        init_test("parent_child_mismatch_fails");
         let mut oracle = RegionTreeOracle::new();
 
         // Create root
@@ -530,21 +568,24 @@ mod tests {
         // Note: we did NOT add region(1) to region(0)'s subregions
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         match result.unwrap_err() {
             RegionTreeViolation::ParentChildMismatch { region: r, parent } => {
-                assert_eq!(r, region(1));
-                assert_eq!(parent, region(0));
+                crate::assert_with_log!(r == region(1), "region", region(1), r);
+                crate::assert_with_log!(parent == region(0), "parent", region(0), parent);
             }
             other => panic!("Expected ParentChildMismatch, got {other:?}"),
         }
+        crate::test_complete!("parent_child_mismatch_fails");
     }
 
     // === Cycle Detection ===
 
     #[test]
     fn simple_cycle_fails() {
+        init_test("simple_cycle_fails");
         let mut oracle = RegionTreeOracle::new();
 
         // Create a cycle: r0 -> r1 -> r2 -> r0
@@ -576,7 +617,8 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         // First we'll get NoRoot since all have parents
         match result.unwrap_err() {
@@ -584,14 +626,17 @@ mod tests {
                 // Expected - there's no root in a cycle
             }
             RegionTreeViolation::CycleDetected { cycle } => {
-                assert!(!cycle.is_empty());
+                let empty = cycle.is_empty();
+                crate::assert_with_log!(!empty, "cycle not empty", false, empty);
             }
             other => panic!("Expected NoRoot or CycleDetected, got {other:?}"),
         }
+        crate::test_complete!("simple_cycle_fails");
     }
 
     #[test]
     fn self_loop_fails() {
+        init_test("self_loop_fails");
         let mut oracle = RegionTreeOracle::new();
 
         // Region is its own parent
@@ -605,52 +650,74 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
+        crate::test_complete!("self_loop_fails");
     }
 
     // === Helper Method Tests ===
 
     #[test]
     fn depth_calculation() {
+        init_test("depth_calculation");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
         oracle.on_region_create(region(1), Some(region(0)), t(20));
         oracle.on_region_create(region(2), Some(region(1)), t(30));
 
-        assert_eq!(oracle.depth(region(0)), Some(0));
-        assert_eq!(oracle.depth(region(1)), Some(1));
-        assert_eq!(oracle.depth(region(2)), Some(2));
-        assert_eq!(oracle.depth(region(99)), None); // Not found
+        let depth0 = oracle.depth(region(0));
+        crate::assert_with_log!(depth0 == Some(0), "depth 0", Some(0), depth0);
+        let depth1 = oracle.depth(region(1));
+        crate::assert_with_log!(depth1 == Some(1), "depth 1", Some(1), depth1);
+        let depth2 = oracle.depth(region(2));
+        crate::assert_with_log!(depth2 == Some(2), "depth 2", Some(2), depth2);
+        let depth_missing = oracle.depth(region(99));
+        crate::assert_with_log!(
+            depth_missing == None,
+            "depth missing",
+            None::<usize>,
+            depth_missing
+        ); // Not found
+        crate::test_complete!("depth_calculation");
     }
 
     #[test]
     fn root_returns_none_for_multiple_roots() {
+        init_test("root_returns_none_for_multiple_roots");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
         oracle.on_region_create(region(1), None, t(20));
 
-        assert_eq!(oracle.root(), None);
+        let root = oracle.root();
+        crate::assert_with_log!(root == None, "root none", None::<RegionId>, root);
+        crate::test_complete!("root_returns_none_for_multiple_roots");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
         oracle.on_region_create(region(1), Some(region(0)), t(20));
 
-        assert_eq!(oracle.region_count(), 2);
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 2, "region_count", 2, count);
 
         oracle.reset();
 
-        assert_eq!(oracle.region_count(), 0);
-        assert!(oracle.check().is_ok());
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 0, "region_count", 0, count);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn on_subregion_add_updates_parent() {
+        init_test("on_subregion_add_updates_parent");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
@@ -662,60 +729,78 @@ mod tests {
         }
         oracle.on_subregion_add(region(0), region(1));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("on_subregion_add_updates_parent");
     }
 
     // === Violation Display Tests ===
 
     #[test]
     fn violation_display_multiple_roots() {
+        init_test("violation_display_multiple_roots");
         let v = RegionTreeViolation::MultipleRoots {
             roots: vec![region(0), region(1)],
         };
         let s = v.to_string();
-        assert!(s.contains("Multiple root"));
+        let has = s.contains("Multiple root");
+        crate::assert_with_log!(has, "contains", true, has);
+        crate::test_complete!("violation_display_multiple_roots");
     }
 
     #[test]
     fn violation_display_invalid_parent() {
+        init_test("violation_display_invalid_parent");
         let v = RegionTreeViolation::InvalidParent {
             region: region(1),
             claimed_parent: region(99),
         };
         let s = v.to_string();
-        assert!(s.contains("does not exist"));
+        let has = s.contains("does not exist");
+        crate::assert_with_log!(has, "contains", true, has);
+        crate::test_complete!("violation_display_invalid_parent");
     }
 
     #[test]
     fn violation_display_mismatch() {
+        init_test("violation_display_mismatch");
         let v = RegionTreeViolation::ParentChildMismatch {
             region: region(1),
             parent: region(0),
         };
         let s = v.to_string();
-        assert!(s.contains("subregions"));
+        let has = s.contains("subregions");
+        crate::assert_with_log!(has, "contains", true, has);
+        crate::test_complete!("violation_display_mismatch");
     }
 
     #[test]
     fn violation_display_cycle() {
+        init_test("violation_display_cycle");
         let v = RegionTreeViolation::CycleDetected {
             cycle: vec![region(0), region(1), region(2)],
         };
         let s = v.to_string();
-        assert!(s.contains("Cycle"));
+        let has = s.contains("Cycle");
+        crate::assert_with_log!(has, "contains", true, has);
+        crate::test_complete!("violation_display_cycle");
     }
 
     #[test]
     fn violation_display_no_root() {
+        init_test("violation_display_no_root");
         let v = RegionTreeViolation::NoRoot;
         let s = v.to_string();
-        assert!(s.contains("No root"));
+        let has = s.contains("No root");
+        crate::assert_with_log!(has, "contains", true, has);
+        crate::test_complete!("violation_display_no_root");
     }
 
     // === Edge Cases ===
 
     #[test]
     fn late_parent_creation_handled() {
+        init_test("late_parent_creation_handled");
         let mut oracle = RegionTreeOracle::new();
 
         // Create child before parent (unusual but possible in some scenarios)
@@ -728,11 +813,14 @@ mod tests {
         // Need to manually fix the subregions relationship since parent was created later
         oracle.on_subregion_add(region(0), region(1));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("late_parent_creation_handled");
     }
 
     #[test]
     fn many_siblings() {
+        init_test("many_siblings");
         let mut oracle = RegionTreeOracle::new();
 
         oracle.on_region_create(region(0), None, t(10));
@@ -742,12 +830,16 @@ mod tests {
             oracle.on_region_create(region(i), Some(region(0)), t(u64::from(i) * 10));
         }
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.region_count(), 101);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 101, "region_count", 101, count);
 
         // Verify all children are at depth 1
         for i in 1..=100 {
-            assert_eq!(oracle.depth(region(i)), Some(1));
+            let depth = oracle.depth(region(i));
+            crate::assert_with_log!(depth == Some(1), "depth", Some(1), depth);
         }
+        crate::test_complete!("many_siblings");
     }
 }

@@ -1,39 +1,105 @@
 //! Chaos testing configuration and injection hooks for the Lab runtime.
 //!
-//! This module provides configurable chaos injection for stress testing the runtime's
-//! resilience to failures, delays, and other adverse conditions. All chaos is
-//! deterministic given the same seed, making failures reproducible.
+//! Chaos testing deliberately injects faults into a system to verify that it handles
+//! failures correctly. The key insight is that bugs often hide in error handling paths
+//! that rarely execute in production—chaos testing exercises those paths.
+//!
+//! # Why Chaos Testing?
+//!
+//! Traditional testing often exercises only the "happy path." But production systems
+//! face cancellations, timeouts, resource exhaustion, and unexpected delays. Chaos
+//! testing verifies your code handles these conditions gracefully.
+//!
+//! Key benefits:
+//! - **Find bugs early**: Discover race conditions and error handling bugs before production
+//! - **Build confidence**: Know your code handles adverse conditions correctly
+//! - **Reproducible failures**: Same seed = same chaos sequence = reproducible bugs
 //!
 //! # Chaos Types
 //!
-//! - **Cancellation**: Random cancellation injection at poll points
-//! - **Delay**: Artificial delays during task execution
-//! - **I/O Errors**: Simulated I/O failures with configurable error kinds
-//! - **Wakeup Storms**: Spurious wakeups to test waker handling
-//! - **Budget Exhaustion**: Simulate resource quota exhaustion
+//! | Type | What It Tests |
+//! |------|---------------|
+//! | **Cancellation** | Task cancellation at arbitrary poll points |
+//! | **Delay** | Handling of slow operations and timeouts |
+//! | **I/O Errors** | Recovery from network/disk failures |
+//! | **Wakeup Storms** | Waker correctness under spurious wakes |
+//! | **Budget Exhaustion** | Resource quota enforcement |
 //!
 //! # Determinism
 //!
 //! All chaos injection uses a deterministic RNG seeded from the configuration.
-//! Running the same test with the same seed will produce identical chaos sequences.
+//! Running the same test with the same seed produces identical chaos sequences,
+//! making failures reproducible:
 //!
-//! # Example
+//! ```text
+//! FAILED tests/my_test.rs - seed 12345
+//! Re-run with `CHAOS_SEED=12345` to reproduce
+//! ```
+//!
+//! # Quick Start
+//!
+//! ## Using Presets with LabRuntime
+//!
+//! The easiest way to enable chaos testing:
 //!
 //! ```ignore
-//! use asupersync::lab::chaos::{ChaosConfig, ChaosRng};
+//! use asupersync::lab::{LabConfig, LabRuntime};
 //!
-//! // Create a light chaos configuration for CI
-//! let config = ChaosConfig::light()
-//!     .with_seed(42)
-//!     .with_cancel_probability(0.01)
-//!     .with_io_error_probability(0.05);
+//! // Light chaos for CI (low-probability, fast)
+//! let config = LabConfig::new(42).with_light_chaos();
+//! let mut runtime = LabRuntime::new(config);
 //!
-//! // Use in Lab runtime
-//! let mut rng = ChaosRng::from_config(&config);
-//! if rng.should_inject_cancel(&config) {
-//!     // Inject cancellation
-//! }
+//! // Heavy chaos for thorough testing
+//! let config = LabConfig::new(42).with_heavy_chaos();
+//! let mut runtime = LabRuntime::new(config);
 //! ```
+//!
+//! ## Custom Configuration
+//!
+//! For fine-grained control:
+//!
+//! ```ignore
+//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use asupersync::lab::chaos::ChaosConfig;
+//! use std::time::Duration;
+//!
+//! // Delay-only configuration (no cancellations)
+//! let chaos = ChaosConfig::new(42)
+//!     .with_cancel_probability(0.0)      // No cancellations
+//!     .with_delay_probability(0.3)       // 30% delay
+//!     .with_delay_range(Duration::from_micros(1)..Duration::from_micros(100));
+//!
+//! let config = LabConfig::new(42).with_chaos(chaos);
+//! let mut runtime = LabRuntime::new(config);
+//! ```
+//!
+//! ## Checking Injection Statistics
+//!
+//! Verify chaos is working as expected:
+//!
+//! ```ignore
+//! // After running your test...
+//! let stats = runtime.chaos_stats();
+//! println!("Decision points: {}", stats.decision_points);
+//! println!("Delays injected: {}", stats.delays);
+//! println!("Injection rate: {:.1}%", stats.injection_rate() * 100.0);
+//! ```
+//!
+//! # Presets
+//!
+//! | Preset | Use Case | Cancel | Delay | I/O Error |
+//! |--------|----------|--------|-------|-----------|
+//! | `ChaosConfig::off()` | Disabled | 0% | 0% | 0% |
+//! | `ChaosConfig::light()` | CI pipelines | 1% | 5% | 2% |
+//! | `ChaosConfig::heavy()` | Thorough testing | 10% | 20% | 15% |
+//!
+//! # Best Practices
+//!
+//! 1. **Start with light chaos in CI** - Catches obvious bugs without excessive flakiness
+//! 2. **Use heavy chaos for release testing** - Thorough stress testing before deployment
+//! 3. **Log the seed on failure** - Enables exact reproduction of failures
+//! 4. **Test cancellation resilience** - Ensure cleanup code runs correctly
+//! 5. **Monitor injection rates** - Use `ChaosStats` to verify chaos is working
 
 use std::io;
 use std::ops::Range;

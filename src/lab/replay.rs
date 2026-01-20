@@ -123,8 +123,14 @@ mod tests {
     use crate::trace::event::{TraceData, TraceEventKind};
     use crate::types::Time;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn identical_traces_no_divergence() {
+        init_test("identical_traces_no_divergence");
         let mut a = TraceBuffer::new(10);
         let mut b = TraceBuffer::new(10);
 
@@ -141,11 +147,15 @@ mod tests {
             TraceData::None,
         ));
 
-        assert!(find_divergence(&a, &b).is_none());
+        let div = find_divergence(&a, &b);
+        let ok = div.is_none();
+        crate::assert_with_log!(ok, "no divergence", true, ok);
+        crate::test_complete!("identical_traces_no_divergence");
     }
 
     #[test]
     fn different_traces_find_divergence() {
+        init_test("different_traces_find_divergence");
         let mut a = TraceBuffer::new(10);
         let mut b = TraceBuffer::new(10);
 
@@ -163,7 +173,10 @@ mod tests {
         ));
 
         let div = find_divergence(&a, &b);
-        assert!(div.is_some());
-        assert_eq!(div.unwrap().position, 0);
+        let some = div.is_some();
+        crate::assert_with_log!(some, "divergence", true, some);
+        let pos = div.expect("divergence").position;
+        crate::assert_with_log!(pos == 0, "position", 0, pos);
+        crate::test_complete!("different_traces_find_divergence");
     }
 }

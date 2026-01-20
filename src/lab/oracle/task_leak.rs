@@ -170,14 +170,23 @@ mod tests {
         Time::from_nanos(nanos)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn no_tasks_passes() {
+        init_test("no_tasks_passes");
         let oracle = TaskLeakOracle::new();
-        assert!(oracle.check(t(100)).is_ok());
+        let ok = oracle.check(t(100)).is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("no_tasks_passes");
     }
 
     #[test]
     fn all_tasks_complete_passes() {
+        init_test("all_tasks_complete_passes");
         let mut oracle = TaskLeakOracle::new();
 
         oracle.on_spawn(task(1), region(0), t(10));
@@ -188,11 +197,14 @@ mod tests {
 
         oracle.on_region_close(region(0), t(100));
 
-        assert!(oracle.check(t(100)).is_ok());
+        let ok = oracle.check(t(100)).is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("all_tasks_complete_passes");
     }
 
     #[test]
     fn leaked_task_fails() {
+        init_test("leaked_task_fails");
         let mut oracle = TaskLeakOracle::new();
 
         oracle.on_spawn(task(1), region(0), t(10));
@@ -204,16 +216,34 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check(t(100));
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.region, region(0));
-        assert_eq!(violation.leaked_tasks, vec![task(2)]);
-        assert_eq!(violation.region_close_time, t(100));
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.leaked_tasks == vec![task(2)],
+            "leaked_tasks",
+            vec![task(2)],
+            violation.leaked_tasks
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "close_time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!("leaked_task_fails");
     }
 
     #[test]
     fn no_tasks_complete_all_leak() {
+        init_test("no_tasks_complete_all_leak");
         let mut oracle = TaskLeakOracle::new();
 
         oracle.on_spawn(task(1), region(0), t(10));
@@ -223,14 +253,18 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check(t(100));
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.leaked_tasks.len(), 2);
+        let len = violation.leaked_tasks.len();
+        crate::assert_with_log!(len == 2, "leaked_tasks len", 2, len);
+        crate::test_complete!("no_tasks_complete_all_leak");
     }
 
     #[test]
     fn multiple_regions_independent() {
+        init_test("multiple_regions_independent");
         let mut oracle = TaskLeakOracle::new();
 
         // Region 0: task completes
@@ -243,44 +277,67 @@ mod tests {
         oracle.on_region_close(region(1), t(100));
 
         let result = oracle.check(t(100));
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.region, region(1));
-        assert_eq!(violation.leaked_tasks, vec![task(2)]);
+        crate::assert_with_log!(
+            violation.region == region(1),
+            "region",
+            region(1),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.leaked_tasks == vec![task(2)],
+            "leaked_tasks",
+            vec![task(2)],
+            violation.leaked_tasks
+        );
+        crate::test_complete!("multiple_regions_independent");
     }
 
     #[test]
     fn region_without_close_not_checked() {
+        init_test("region_without_close_not_checked");
         let mut oracle = TaskLeakOracle::new();
 
         oracle.on_spawn(task(1), region(0), t(10));
         // task 1 never completes, but region never closes either
 
-        assert!(oracle.check(t(100)).is_ok());
+        let ok = oracle.check(t(100)).is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("region_without_close_not_checked");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = TaskLeakOracle::new();
 
         oracle.on_spawn(task(1), region(0), t(10));
         oracle.on_region_close(region(0), t(100));
 
         // Would fail
-        assert!(oracle.check(t(100)).is_err());
+        let err = oracle.check(t(100)).is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         oracle.reset();
 
         // After reset, no violations
-        assert!(oracle.check(t(100)).is_ok());
-        assert_eq!(oracle.task_count(), 0);
-        assert_eq!(oracle.completed_count(), 0);
-        assert_eq!(oracle.closed_region_count(), 0);
+        let ok = oracle.check(t(100)).is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let task_count = oracle.task_count();
+        crate::assert_with_log!(task_count == 0, "task_count", 0, task_count);
+        let completed_count = oracle.completed_count();
+        crate::assert_with_log!(completed_count == 0, "completed_count", 0, completed_count);
+        let closed_count = oracle.closed_region_count();
+        crate::assert_with_log!(closed_count == 0, "closed_count", 0, closed_count);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let violation = TaskLeakViolation {
             region: region(0),
             leaked_tasks: vec![task(1), task(2)],
@@ -288,12 +345,16 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("leaked"));
-        assert!(s.contains('2'));
+        let has_leaked = s.contains("leaked");
+        crate::assert_with_log!(has_leaked, "leaked text", true, has_leaked);
+        let has_two = s.contains('2');
+        crate::assert_with_log!(has_two, "contains 2", true, has_two);
+        crate::test_complete!("violation_display");
     }
 
     #[test]
     fn task_in_multiple_regions_ok() {
+        init_test("task_in_multiple_regions_ok");
         // This tests the oracle's behavior - tasks should only be in one region
         // but if a bug causes them to be recorded in multiple, we check per-region
         let mut oracle = TaskLeakOracle::new();
@@ -308,11 +369,14 @@ mod tests {
         oracle.on_region_close(region(1), t(100));
 
         // Should pass because task 1 is marked complete
-        assert!(oracle.check(t(100)).is_ok());
+        let ok = oracle.check(t(100)).is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("task_in_multiple_regions_ok");
     }
 
     #[test]
     fn many_tasks_some_leaked() {
+        init_test("many_tasks_some_leaked");
         let mut oracle = TaskLeakOracle::new();
 
         // Spawn 5 tasks
@@ -328,12 +392,17 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check(t(100));
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
         // Tasks 2 and 4 should be leaked
-        assert_eq!(violation.leaked_tasks.len(), 2);
-        assert!(violation.leaked_tasks.contains(&task(2)));
-        assert!(violation.leaked_tasks.contains(&task(4)));
+        let len = violation.leaked_tasks.len();
+        crate::assert_with_log!(len == 2, "leaked_tasks len", 2, len);
+        let has_two = violation.leaked_tasks.contains(&task(2));
+        crate::assert_with_log!(has_two, "contains task2", true, has_two);
+        let has_four = violation.leaked_tasks.contains(&task(4));
+        crate::assert_with_log!(has_four, "contains task4", true, has_four);
+        crate::test_complete!("many_tasks_some_leaked");
     }
 }

@@ -202,16 +202,25 @@ mod tests {
         Time::from_nanos(nanos)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn empty_region_passes() {
+        init_test("empty_region_passes");
         let mut oracle = QuiescenceOracle::new();
         oracle.on_region_create(region(0), None);
         oracle.on_region_close(region(0), t(100));
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("empty_region_passes");
     }
 
     #[test]
     fn all_tasks_complete_passes() {
+        init_test("all_tasks_complete_passes");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -222,11 +231,14 @@ mod tests {
         oracle.on_task_complete(task(2));
         oracle.on_region_close(region(0), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("all_tasks_complete_passes");
     }
 
     #[test]
     fn live_task_fails() {
+        init_test("live_task_fails");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -235,16 +247,30 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.region, region(0));
-        assert_eq!(violation.live_tasks, vec![task(1)]);
-        assert!(violation.live_children.is_empty());
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.live_tasks == vec![task(1)],
+            "live_tasks",
+            vec![task(1)],
+            violation.live_tasks
+        );
+        let empty = violation.live_children.is_empty();
+        crate::assert_with_log!(empty, "live_children empty", true, empty);
+        crate::test_complete!("live_task_fails");
     }
 
     #[test]
     fn live_child_region_fails() {
+        init_test("live_child_region_fails");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -254,14 +280,22 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.live_children, vec![region(1)]);
+        crate::assert_with_log!(
+            violation.live_children == vec![region(1)],
+            "live_children",
+            vec![region(1)],
+            violation.live_children
+        );
+        crate::test_complete!("live_child_region_fails");
     }
 
     #[test]
     fn nested_regions_pass_when_properly_closed() {
+        init_test("nested_regions_pass_when_properly_closed");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -272,11 +306,14 @@ mod tests {
         oracle.on_region_close(region(1), t(50)); // Child closes first
         oracle.on_region_close(region(0), t(100)); // Parent closes after
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("nested_regions_pass_when_properly_closed");
     }
 
     #[test]
     fn multiple_children_all_must_close() {
+        init_test("multiple_children_all_must_close");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -288,14 +325,22 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.live_children, vec![region(2)]);
+        crate::assert_with_log!(
+            violation.live_children == vec![region(2)],
+            "live_children",
+            vec![region(2)],
+            violation.live_children
+        );
+        crate::test_complete!("multiple_children_all_must_close");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -303,18 +348,24 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         // This would fail
-        assert!(oracle.check().is_err());
+        let err = oracle.check().is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         oracle.reset();
 
         // After reset, no violations
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.region_count(), 0);
-        assert_eq!(oracle.closed_count(), 0);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let region_count = oracle.region_count();
+        crate::assert_with_log!(region_count == 0, "region_count", 0, region_count);
+        let closed_count = oracle.closed_count();
+        crate::assert_with_log!(closed_count == 0, "closed_count", 0, closed_count);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let violation = QuiescenceViolation {
             region: region(0),
             live_children: vec![region(1)],
@@ -323,13 +374,18 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("without quiescence"));
-        assert!(s.contains("1 live children"));
-        assert!(s.contains("2 live tasks"));
+        let has_without = s.contains("without quiescence");
+        crate::assert_with_log!(has_without, "without quiescence", true, has_without);
+        let has_children = s.contains("1 live children");
+        crate::assert_with_log!(has_children, "children text", true, has_children);
+        let has_tasks = s.contains("2 live tasks");
+        crate::assert_with_log!(has_tasks, "tasks text", true, has_tasks);
+        crate::test_complete!("violation_display");
     }
 
     #[test]
     fn deeply_nested_regions() {
+        init_test("deeply_nested_regions");
         let mut oracle = QuiescenceOracle::new();
 
         // Create a chain: r0 -> r1 -> r2
@@ -344,11 +400,14 @@ mod tests {
         oracle.on_region_close(region(1), t(50));
         oracle.on_region_close(region(0), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("deeply_nested_regions");
     }
 
     #[test]
     fn both_tasks_and_children_must_complete() {
+        init_test("both_tasks_and_children_must_complete");
         let mut oracle = QuiescenceOracle::new();
 
         oracle.on_region_create(region(0), None);
@@ -360,10 +419,18 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert!(violation.live_children.is_empty());
-        assert_eq!(violation.live_tasks, vec![task(1)]);
+        let children_empty = violation.live_children.is_empty();
+        crate::assert_with_log!(children_empty, "children empty", true, children_empty);
+        crate::assert_with_log!(
+            violation.live_tasks == vec![task(1)],
+            "live_tasks",
+            vec![task(1)],
+            violation.live_tasks
+        );
+        crate::test_complete!("both_tasks_and_children_must_complete");
     }
 }

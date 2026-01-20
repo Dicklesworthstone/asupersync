@@ -231,14 +231,23 @@ mod tests {
         Time::from_nanos(nanos)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn no_races_passes() {
+        init_test("no_races_passes");
         let oracle = LoserDrainOracle::new();
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("no_races_passes");
     }
 
     #[test]
     fn properly_drained_race_passes() {
+        init_test("properly_drained_race_passes");
         let mut oracle = LoserDrainOracle::new();
 
         let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
@@ -249,11 +258,14 @@ mod tests {
 
         oracle.on_race_complete(race_id, task(1), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("properly_drained_race_passes");
     }
 
     #[test]
     fn undrained_loser_fails() {
+        init_test("undrained_loser_fails");
         let mut oracle = LoserDrainOracle::new();
 
         let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
@@ -266,15 +278,28 @@ mod tests {
         oracle.on_task_complete(task(2), t(150));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.winner, task(1));
-        assert_eq!(violation.undrained_losers, vec![task(2)]);
+        crate::assert_with_log!(
+            violation.winner == task(1),
+            "winner",
+            task(1),
+            violation.winner
+        );
+        crate::assert_with_log!(
+            violation.undrained_losers == vec![task(2)],
+            "undrained_losers",
+            vec![task(2)],
+            violation.undrained_losers
+        );
+        crate::test_complete!("undrained_loser_fails");
     }
 
     #[test]
     fn loser_never_completes_fails() {
+        init_test("loser_never_completes_fails");
         let mut oracle = LoserDrainOracle::new();
 
         let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
@@ -285,14 +310,22 @@ mod tests {
         // task(2) never completes
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.undrained_losers, vec![task(2)]);
+        crate::assert_with_log!(
+            violation.undrained_losers == vec![task(2)],
+            "undrained_losers",
+            vec![task(2)],
+            violation.undrained_losers
+        );
+        crate::test_complete!("loser_never_completes_fails");
     }
 
     #[test]
     fn three_way_race_all_drained_passes() {
+        init_test("three_way_race_all_drained_passes");
         let mut oracle = LoserDrainOracle::new();
 
         let race_id = oracle.on_race_start(region(0), vec![task(1), task(2), task(3)], t(0));
@@ -304,11 +337,14 @@ mod tests {
 
         oracle.on_race_complete(race_id, task(1), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("three_way_race_all_drained_passes");
     }
 
     #[test]
     fn loser_completes_at_same_time_as_race_passes() {
+        init_test("loser_completes_at_same_time_as_race_passes");
         let mut oracle = LoserDrainOracle::new();
 
         let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
@@ -318,11 +354,14 @@ mod tests {
 
         oracle.on_race_complete(race_id, task(1), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("loser_completes_at_same_time_as_race_passes");
     }
 
     #[test]
     fn multiple_races_independent() {
+        init_test("multiple_races_independent");
         let mut oracle = LoserDrainOracle::new();
 
         // Race 1: properly drained
@@ -338,14 +377,17 @@ mod tests {
         // task(4) not completed
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.race_id, race2);
+        crate::assert_with_log!(violation.race_id == race2, "race_id", race2, violation.race_id);
+        crate::test_complete!("multiple_races_independent");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = LoserDrainOracle::new();
 
         let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
@@ -353,18 +395,24 @@ mod tests {
         oracle.on_race_complete(race_id, task(1), t(100));
 
         // Would fail
-        assert!(oracle.check().is_err());
+        let err = oracle.check().is_err();
+        crate::assert_with_log!(err, "err", true, err);
 
         oracle.reset();
 
         // After reset, no violations
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.active_race_count(), 0);
-        assert_eq!(oracle.completed_race_count(), 0);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        let active = oracle.active_race_count();
+        crate::assert_with_log!(active == 0, "active_race_count", 0, active);
+        let completed = oracle.completed_race_count();
+        crate::assert_with_log!(completed == 0, "completed_race_count", 0, completed);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let violation = LoserDrainViolation {
             race_id: 42,
             winner: task(1),
@@ -373,13 +421,18 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("Race 42"));
-        assert!(s.contains("undrained"));
-        assert!(s.contains('2'));
+        let has_race = s.contains("Race 42");
+        crate::assert_with_log!(has_race, "race text", true, has_race);
+        let has_undrained = s.contains("undrained");
+        crate::assert_with_log!(has_undrained, "undrained text", true, has_undrained);
+        let has_two = s.contains('2');
+        crate::assert_with_log!(has_two, "contains 2", true, has_two);
+        crate::test_complete!("violation_display");
     }
 
     #[test]
     fn nested_race_tracking() {
+        init_test("nested_race_tracking");
         let mut oracle = LoserDrainOracle::new();
 
         // Outer race starts
@@ -398,6 +451,8 @@ mod tests {
         oracle.on_task_complete(task(2), t(60));
         oracle.on_race_complete(outer, task(1), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "ok", true, ok);
+        crate::test_complete!("nested_race_tracking");
     }
 }

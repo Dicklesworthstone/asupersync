@@ -300,25 +300,35 @@ mod tests {
         Budget::new()
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     // =========================================================================
     // Basic monotonicity tests
     // =========================================================================
 
     #[test]
     fn root_region_with_any_deadline_passes() {
+        init_test("root_region_with_any_deadline_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Root with bounded deadline
         oracle.on_region_create(region(0), None, &budget_with_deadline(t(1000)), t(0));
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
 
         // Root with unbounded deadline
         oracle.on_region_create(region(1), None, &unbounded_budget(), t(0));
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("root_region_with_any_deadline_passes");
     }
 
     #[test]
     fn child_with_tighter_deadline_passes() {
+        init_test("child_with_tighter_deadline_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=1000
@@ -331,11 +341,14 @@ mod tests {
             t(0),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("child_with_tighter_deadline_passes");
     }
 
     #[test]
     fn child_with_equal_deadline_passes() {
+        init_test("child_with_equal_deadline_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=1000
@@ -348,11 +361,14 @@ mod tests {
             t(0),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("child_with_equal_deadline_passes");
     }
 
     #[test]
     fn child_with_looser_deadline_fails() {
+        init_test("child_with_looser_deadline_fails");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=500
@@ -366,13 +382,35 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.child, region(1));
-        assert_eq!(violation.child_deadline, Some(t(1000)));
-        assert_eq!(violation.parent, region(0));
-        assert_eq!(violation.parent_deadline, Some(t(500)));
+        crate::assert_with_log!(
+            violation.child == region(1),
+            "violation child",
+            region(1),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.child_deadline == Some(t(1000)),
+            "child deadline",
+            Some(t(1000)),
+            violation.child_deadline
+        );
+        crate::assert_with_log!(
+            violation.parent == region(0),
+            "parent",
+            region(0),
+            violation.parent
+        );
+        crate::assert_with_log!(
+            violation.parent_deadline == Some(t(500)),
+            "parent deadline",
+            Some(t(500)),
+            violation.parent_deadline
+        );
+        crate::test_complete!("child_with_looser_deadline_fails");
     }
 
     // =========================================================================
@@ -381,6 +419,7 @@ mod tests {
 
     #[test]
     fn bounded_child_under_unbounded_parent_passes() {
+        init_test("bounded_child_under_unbounded_parent_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with unbounded deadline (None = ∞)
@@ -393,11 +432,14 @@ mod tests {
             t(0),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("bounded_child_under_unbounded_parent_passes");
     }
 
     #[test]
     fn unbounded_child_under_unbounded_parent_passes() {
+        init_test("unbounded_child_under_unbounded_parent_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with unbounded deadline
@@ -405,11 +447,14 @@ mod tests {
         // Child also unbounded - ok (∞ ≤ ∞)
         oracle.on_region_create(region(1), Some(region(0)), &unbounded_budget(), t(0));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("unbounded_child_under_unbounded_parent_passes");
     }
 
     #[test]
     fn unbounded_child_under_bounded_parent_fails() {
+        init_test("unbounded_child_under_bounded_parent_fails");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with bounded deadline at t=1000
@@ -418,13 +463,35 @@ mod tests {
         oracle.on_region_create(region(1), Some(region(0)), &unbounded_budget(), t(0));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.child, region(1));
-        assert_eq!(violation.child_deadline, None); // Unbounded
-        assert_eq!(violation.parent, region(0));
-        assert_eq!(violation.parent_deadline, Some(t(1000)));
+        crate::assert_with_log!(
+            violation.child == region(1),
+            "violation child",
+            region(1),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.child_deadline.is_none(),
+            "child deadline unbounded",
+            true,
+            violation.child_deadline.is_none()
+        );
+        crate::assert_with_log!(
+            violation.parent == region(0),
+            "parent",
+            region(0),
+            violation.parent
+        );
+        crate::assert_with_log!(
+            violation.parent_deadline == Some(t(1000)),
+            "parent deadline",
+            Some(t(1000)),
+            violation.parent_deadline
+        );
+        crate::test_complete!("unbounded_child_under_bounded_parent_fails");
     }
 
     // =========================================================================
@@ -433,6 +500,7 @@ mod tests {
 
     #[test]
     fn deeply_nested_with_progressively_tighter_deadlines_passes() {
+        init_test("deeply_nested_with_progressively_tighter_deadlines_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // r0: deadline 1000
@@ -459,11 +527,14 @@ mod tests {
             t(0),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("deeply_nested_with_progressively_tighter_deadlines_passes");
     }
 
     #[test]
     fn violation_in_deep_hierarchy_detected() {
+        init_test("violation_in_deep_hierarchy_detected");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // r0: deadline 1000
@@ -484,15 +555,28 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.child, region(2));
-        assert_eq!(violation.parent, region(1));
+        crate::assert_with_log!(
+            violation.child == region(2),
+            "violation child",
+            region(2),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.parent == region(1),
+            "violation parent",
+            region(1),
+            violation.parent
+        );
+        crate::test_complete!("violation_in_deep_hierarchy_detected");
     }
 
     #[test]
     fn multiple_children_one_violating() {
+        init_test("multiple_children_one_violating");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=1000
@@ -520,8 +604,11 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
-        assert_eq!(oracle.violations().len(), 1);
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violations = oracle.violations().len();
+        crate::assert_with_log!(violations == 1, "violations len", 1, violations);
+        crate::test_complete!("multiple_children_one_violating");
     }
 
     // =========================================================================
@@ -530,6 +617,7 @@ mod tests {
 
     #[test]
     fn budget_update_tightening_passes() {
+        init_test("budget_update_tightening_passes");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=1000
@@ -545,11 +633,14 @@ mod tests {
         // Tighten child's deadline to t=500 - still ok
         oracle.on_budget_update(region(1), &budget_with_deadline(t(500)), t(10));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("budget_update_tightening_passes");
     }
 
     #[test]
     fn budget_update_loosening_fails() {
+        init_test("budget_update_loosening_fails");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=500
@@ -562,17 +653,21 @@ mod tests {
             t(0),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
 
         // Loosen child's deadline to t=1000 - VIOLATION!
         oracle.on_budget_update(region(1), &budget_with_deadline(t(1000)), t(10));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        crate::test_complete!("budget_update_loosening_fails");
     }
 
     #[test]
     fn parent_deadline_tightened_causes_child_violation() {
+        init_test("parent_deadline_tightened_causes_child_violation");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         // Parent with deadline at t=1000
@@ -585,18 +680,36 @@ mod tests {
             t(0),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
 
         // Parent's deadline is tightened to t=500 - child's 800 is now a violation!
         oracle.on_parent_deadline_tightened(region(0), &budget_with_deadline(t(500)), t(10));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.child, region(1));
-        assert_eq!(violation.child_deadline, Some(t(800)));
-        assert_eq!(violation.parent_deadline, Some(t(500)));
+        crate::assert_with_log!(
+            violation.child == region(1),
+            "violation child",
+            region(1),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.child_deadline == Some(t(800)),
+            "child deadline",
+            Some(t(800)),
+            violation.child_deadline
+        );
+        crate::assert_with_log!(
+            violation.parent_deadline == Some(t(500)),
+            "parent deadline",
+            Some(t(500)),
+            violation.parent_deadline
+        );
+        crate::test_complete!("parent_deadline_tightened_causes_child_violation");
     }
 
     // =========================================================================
@@ -605,6 +718,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         oracle.on_region_create(region(0), None, &budget_with_deadline(t(100)), t(0));
@@ -615,30 +729,53 @@ mod tests {
             t(0),
         ); // Violation
 
-        assert!(oracle.check().is_err());
-        assert_eq!(oracle.region_count(), 2);
+        let err = oracle.check().is_err();
+        crate::assert_with_log!(err, "oracle err", true, err);
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 2, "region count", 2, count);
 
         oracle.reset();
 
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.region_count(), 0);
-        assert!(oracle.violations().is_empty());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        let count = oracle.region_count();
+        crate::assert_with_log!(count == 0, "region count", 0, count);
+        let empty = oracle.violations().is_empty();
+        crate::assert_with_log!(empty, "violations empty", true, empty);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn get_deadline_returns_tracked_value() {
+        init_test("get_deadline_returns_tracked_value");
         let mut oracle = DeadlineMonotoneOracle::new();
 
         oracle.on_region_create(region(0), None, &budget_with_deadline(t(1000)), t(0));
         oracle.on_region_create(region(1), None, &unbounded_budget(), t(0));
 
-        assert_eq!(oracle.get_deadline(region(0)), Some(Some(t(1000))));
-        assert_eq!(oracle.get_deadline(region(1)), Some(None));
-        assert_eq!(oracle.get_deadline(region(99)), None); // Not tracked
+        let r0 = oracle.get_deadline(region(0));
+        crate::assert_with_log!(
+            r0 == Some(Some(t(1000))),
+            "deadline r0",
+            Some(Some(t(1000))),
+            r0
+        );
+        let r1 = oracle.get_deadline(region(1));
+        let r1_unbounded = matches!(r1, Some(None));
+        crate::assert_with_log!(
+            r1_unbounded,
+            "deadline r1 unbounded",
+            true,
+            r1_unbounded
+        );
+        let r99 = oracle.get_deadline(region(99));
+        crate::assert_with_log!(r99.is_none(), "deadline r99", true, r99.is_none());
+        crate::test_complete!("get_deadline_returns_tracked_value");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let violation = DeadlineMonotoneViolation {
             child: region(1),
             child_deadline: Some(t(1000)),
@@ -648,12 +785,26 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("monotonicity violated"));
-        assert!(s.contains("cannot exceed parent"));
+        let has_violation = s.contains("monotonicity violated");
+        crate::assert_with_log!(
+            has_violation,
+            "message contains violation",
+            true,
+            has_violation
+        );
+        let has_parent = s.contains("cannot exceed parent");
+        crate::assert_with_log!(
+            has_parent,
+            "message contains parent",
+            true,
+            has_parent
+        );
+        crate::test_complete!("violation_display");
     }
 
     #[test]
     fn violation_display_with_unbounded() {
+        init_test("violation_display_with_unbounded");
         let violation = DeadlineMonotoneViolation {
             child: region(1),
             child_deadline: None,
@@ -663,7 +814,14 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("unbounded"));
+        let has_unbounded = s.contains("unbounded");
+        crate::assert_with_log!(
+            has_unbounded,
+            "message contains unbounded",
+            true,
+            has_unbounded
+        );
+        crate::test_complete!("violation_display_with_unbounded");
     }
 
     // =========================================================================
@@ -672,41 +830,68 @@ mod tests {
 
     #[test]
     fn test_is_deadline_monotone() {
+        init_test("test_is_deadline_monotone");
         // Both bounded - normal comparison
-        assert!(DeadlineMonotoneOracle::is_deadline_monotone(
+        let bounded_ok = DeadlineMonotoneOracle::is_deadline_monotone(
             Some(t(100)),
-            Some(t(200))
-        ));
-        assert!(DeadlineMonotoneOracle::is_deadline_monotone(
             Some(t(200)),
-            Some(t(200))
-        ));
-        assert!(!DeadlineMonotoneOracle::is_deadline_monotone(
+        );
+        crate::assert_with_log!(bounded_ok, "100 <= 200", true, bounded_ok);
+        let equal_ok = DeadlineMonotoneOracle::is_deadline_monotone(
+            Some(t(200)),
+            Some(t(200)),
+        );
+        crate::assert_with_log!(equal_ok, "200 <= 200", true, equal_ok);
+        let looser_bad = DeadlineMonotoneOracle::is_deadline_monotone(
             Some(t(300)),
-            Some(t(200))
-        ));
+            Some(t(200)),
+        );
+        crate::assert_with_log!(!looser_bad, "300 <= 200", false, looser_bad);
 
         // Bounded child, unbounded parent - always ok
-        assert!(DeadlineMonotoneOracle::is_deadline_monotone(
+        let bounded_unbounded = DeadlineMonotoneOracle::is_deadline_monotone(
             Some(t(100)),
-            None
-        ));
-        assert!(DeadlineMonotoneOracle::is_deadline_monotone(
+            None,
+        );
+        crate::assert_with_log!(
+            bounded_unbounded,
+            "bounded under unbounded",
+            true,
+            bounded_unbounded
+        );
+        let bounded_max = DeadlineMonotoneOracle::is_deadline_monotone(
             Some(t(u64::MAX)),
-            None
-        ));
+            None,
+        );
+        crate::assert_with_log!(
+            bounded_max,
+            "max under unbounded",
+            true,
+            bounded_max
+        );
 
         // Both unbounded - ok
-        assert!(DeadlineMonotoneOracle::is_deadline_monotone(None, None));
+        let both_unbounded = DeadlineMonotoneOracle::is_deadline_monotone(None, None);
+        crate::assert_with_log!(
+            both_unbounded,
+            "unbounded <= unbounded",
+            true,
+            both_unbounded
+        );
 
         // Unbounded child, bounded parent - VIOLATION
-        assert!(!DeadlineMonotoneOracle::is_deadline_monotone(
+        let unbounded_bad = DeadlineMonotoneOracle::is_deadline_monotone(None, Some(t(100)));
+        crate::assert_with_log!(!unbounded_bad, "unbounded <= 100", false, unbounded_bad);
+        let unbounded_max = DeadlineMonotoneOracle::is_deadline_monotone(
             None,
-            Some(t(100))
-        ));
-        assert!(!DeadlineMonotoneOracle::is_deadline_monotone(
-            None,
-            Some(t(u64::MAX))
-        ));
+            Some(t(u64::MAX)),
+        );
+        crate::assert_with_log!(
+            !unbounded_max,
+            "unbounded <= max",
+            false,
+            unbounded_max
+        );
+        crate::test_complete!("test_is_deadline_monotone");
     }
 }

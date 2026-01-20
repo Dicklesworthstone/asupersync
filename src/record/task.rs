@@ -3,6 +3,7 @@
 //! A task is a unit of concurrent execution owned by a region.
 //! This module defines the internal record structure for tracking task state.
 
+use crate::cx::Cx;
 use crate::tracing_compat::{debug, trace};
 use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId};
 use std::sync::{Arc, RwLock};
@@ -85,6 +86,10 @@ pub struct TaskRecord {
     /// This is shared with the `Cx` held by the user code.
     /// It is `None` only during initial construction or testing if not provided.
     pub cx_inner: Option<Arc<RwLock<CxInner>>>,
+    /// Full capability context for this task.
+    ///
+    /// This allows the runtime to set a current task context while polling.
+    pub cx: Option<Cx>,
 
     /// Number of polls remaining (for budget tracking).
     pub polls_remaining: u32,
@@ -103,6 +108,7 @@ impl TaskRecord {
             owner,
             state: TaskState::Created,
             cx_inner: None, // Must be set via set_cx_inner or similar
+            cx: None,
             polls_remaining: budget.poll_quota,
             last_polled_step: 0,
             waiters: Vec::new(),
@@ -112,6 +118,11 @@ impl TaskRecord {
     /// Sets the shared CxInner.
     pub fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
         self.cx_inner = Some(inner);
+    }
+
+    /// Sets the full Cx for this task.
+    pub fn set_cx(&mut self, cx: Cx) {
+        self.cx = Some(cx);
     }
 
     /// Records that the task was polled on the given lab step.
@@ -212,6 +223,7 @@ impl TaskRecord {
                 if let Some(inner) = &self.cx_inner {
                     if let Ok(mut guard) = inner.write() {
                         guard.budget = new_budget;
+                        guard.budget_baseline = new_budget;
                     }
                 }
                 // Also update polls_remaining to respect tighter quota
@@ -336,6 +348,7 @@ impl TaskRecord {
                 if let Some(inner) = &self.cx_inner {
                     if let Ok(mut guard) = inner.write() {
                         guard.budget = budget;
+                        guard.budget_baseline = budget;
                     }
                 }
                 self.polls_remaining = budget.poll_quota;
@@ -478,6 +491,11 @@ mod tests {
     use crate::error::{Error, ErrorKind};
     use crate::util::ArenaIndex;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     fn task() -> TaskId {
         TaskId::from_arena(ArenaIndex::new(0, 0))
     }
@@ -488,74 +506,118 @@ mod tests {
 
     #[test]
     fn cancel_before_first_poll_enters_cancel_requested() {
+        init_test("cancel_before_first_poll_enters_cancel_requested");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(matches!(t.state, TaskState::Created));
-        assert!(t.request_cancel(CancelReason::timeout()));
+        let created = matches!(t.state, TaskState::Created);
+        crate::assert_with_log!(created, "created", true, created);
+        let requested = t.request_cancel(CancelReason::timeout());
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
         match &t.state {
             TaskState::CancelRequested {
                 reason,
                 cleanup_budget: _,
             } => {
-                assert_eq!(reason.kind, crate::types::CancelKind::Timeout);
+                crate::assert_with_log!(
+                    reason.kind == crate::types::CancelKind::Timeout,
+                    "reason kind",
+                    crate::types::CancelKind::Timeout,
+                    reason.kind
+                );
             }
             other => panic!("expected CancelRequested, got {other:?}"),
         }
+        crate::test_complete!("cancel_before_first_poll_enters_cancel_requested");
     }
 
     #[test]
     fn cancel_strengthens_idempotently_when_already_cancel_requested() {
+        init_test("cancel_strengthens_idempotently_when_already_cancel_requested");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(t.request_cancel(CancelReason::timeout()));
-        assert!(!t.request_cancel(CancelReason::shutdown()));
+        let first = t.request_cancel(CancelReason::timeout());
+        crate::assert_with_log!(first, "first cancel", true, first);
+        let second = t.request_cancel(CancelReason::shutdown());
+        crate::assert_with_log!(!second, "second cancel false", false, second);
         match &t.state {
             TaskState::CancelRequested { reason, .. } => {
-                assert_eq!(reason.kind, crate::types::CancelKind::Shutdown);
+                crate::assert_with_log!(
+                    reason.kind == crate::types::CancelKind::Shutdown,
+                    "reason kind",
+                    crate::types::CancelKind::Shutdown,
+                    reason.kind
+                );
             }
             other => panic!("expected CancelRequested, got {other:?}"),
         }
+        crate::test_complete!("cancel_strengthens_idempotently_when_already_cancel_requested");
     }
 
     #[test]
     fn completed_is_absorbing() {
+        init_test("completed_is_absorbing");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(t.complete(Outcome::Ok(())));
-        assert!(!t.request_cancel(CancelReason::timeout()));
-        assert!(t.state.is_terminal());
+        let completed = t.complete(Outcome::Ok(()));
+        crate::assert_with_log!(completed, "complete ok", true, completed);
+        let requested = t.request_cancel(CancelReason::timeout());
+        crate::assert_with_log!(!requested, "request_cancel false", false, requested);
+        let terminal = t.state.is_terminal();
+        crate::assert_with_log!(terminal, "terminal", true, terminal);
         match &t.state {
-            TaskState::Completed(outcome) => assert!(matches!(outcome, Outcome::Ok(()))),
+            TaskState::Completed(outcome) => {
+                let ok = matches!(outcome, Outcome::Ok(()));
+                crate::assert_with_log!(ok, "outcome ok", true, ok);
+            }
             other => panic!("expected Completed, got {other:?}"),
         }
+        crate::test_complete!("completed_is_absorbing");
     }
 
     #[test]
     fn can_be_polled_matches_state() {
+        init_test("can_be_polled_matches_state");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(!t.state.can_be_polled());
-        assert!(t.start_running());
-        assert!(t.state.can_be_polled());
+        let can_poll = t.state.can_be_polled();
+        crate::assert_with_log!(!can_poll, "not pollable", false, can_poll);
+        let started = t.start_running();
+        crate::assert_with_log!(started, "start_running", true, started);
+        let can_poll = t.state.can_be_polled();
+        crate::assert_with_log!(can_poll, "pollable", true, can_poll);
 
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let _ = t.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE);
-        assert!(t.state.can_be_polled());
+        let can_poll = t.state.can_be_polled();
+        crate::assert_with_log!(can_poll, "pollable after cancel", true, can_poll);
+        crate::test_complete!("can_be_polled_matches_state");
     }
 
     #[test]
     fn complete_with_error_outcome() {
+        init_test("complete_with_error_outcome");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let err = Error::new(ErrorKind::User);
-        assert!(t.complete(Outcome::Err(err)));
-        assert!(t.state.is_terminal());
+        let completed = t.complete(Outcome::Err(err));
+        crate::assert_with_log!(completed, "complete err", true, completed);
+        let terminal = t.state.is_terminal();
+        crate::assert_with_log!(terminal, "terminal", true, terminal);
+        crate::test_complete!("complete_with_error_outcome");
     }
 
     #[test]
     fn acknowledge_cancel_transitions_to_cancelling() {
+        init_test("acknowledge_cancel_transitions_to_cancelling");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let _ = t.request_cancel(CancelReason::timeout());
 
         let reason = t.acknowledge_cancel();
-        assert!(reason.is_some());
-        assert_eq!(reason.unwrap().kind, crate::types::CancelKind::Timeout);
-        assert!(matches!(
+        let has_reason = reason.is_some();
+        crate::assert_with_log!(has_reason, "reason present", true, has_reason);
+        let kind = reason.unwrap().kind;
+        crate::assert_with_log!(
+            kind == crate::types::CancelKind::Timeout,
+            "reason kind",
+            crate::types::CancelKind::Timeout,
+            kind
+        );
+        let cancelling = matches!(
             t.state,
             TaskState::Cancelling {
                 reason: CancelReason {
@@ -564,89 +626,129 @@ mod tests {
                 },
                 ..
             }
-        ));
+        );
+        crate::assert_with_log!(cancelling, "state cancelling", true, cancelling);
+        crate::test_complete!("acknowledge_cancel_transitions_to_cancelling");
     }
 
     #[test]
     fn acknowledge_cancel_fails_for_wrong_state() {
+        init_test("acknowledge_cancel_fails_for_wrong_state");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(t.acknowledge_cancel().is_none());
+        let none = t.acknowledge_cancel().is_none();
+        crate::assert_with_log!(none, "none in created", true, none);
 
         // Move to Running
         t.start_running();
-        assert!(t.acknowledge_cancel().is_none());
+        let none = t.acknowledge_cancel().is_none();
+        crate::assert_with_log!(none, "none in running", true, none);
+        crate::test_complete!("acknowledge_cancel_fails_for_wrong_state");
     }
 
     #[test]
     fn cleanup_done_transitions_to_finalizing() {
+        init_test("cleanup_done_transitions_to_finalizing");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let _ = t.request_cancel(CancelReason::timeout());
         let _ = t.acknowledge_cancel();
 
-        assert!(matches!(t.state, TaskState::Cancelling { .. }));
-        assert!(t.cleanup_done());
-        assert!(matches!(t.state, TaskState::Finalizing { .. }));
+        let cancelling = matches!(t.state, TaskState::Cancelling { .. });
+        crate::assert_with_log!(cancelling, "state cancelling", true, cancelling);
+        let cleanup = t.cleanup_done();
+        crate::assert_with_log!(cleanup, "cleanup_done", true, cleanup);
+        let finalizing = matches!(t.state, TaskState::Finalizing { .. });
+        crate::assert_with_log!(finalizing, "state finalizing", true, finalizing);
+        crate::test_complete!("cleanup_done_transitions_to_finalizing");
     }
 
     #[test]
     fn cleanup_done_fails_for_wrong_state() {
+        init_test("cleanup_done_fails_for_wrong_state");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(!t.cleanup_done());
+        let cleanup = t.cleanup_done();
+        crate::assert_with_log!(!cleanup, "cleanup_done false", false, cleanup);
 
         let _ = t.request_cancel(CancelReason::timeout());
         // Still in CancelRequested, not Cancelling
-        assert!(!t.cleanup_done());
+        let cleanup = t.cleanup_done();
+        crate::assert_with_log!(!cleanup, "cleanup_done false", false, cleanup);
+        crate::test_complete!("cleanup_done_fails_for_wrong_state");
     }
 
     #[test]
     fn finalize_done_transitions_to_completed_cancelled() {
+        init_test("finalize_done_transitions_to_completed_cancelled");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let _ = t.request_cancel(CancelReason::timeout());
         let _ = t.acknowledge_cancel();
         let _ = t.cleanup_done();
 
-        assert!(matches!(t.state, TaskState::Finalizing { .. }));
-        assert!(t.finalize_done());
-        assert!(t.state.is_terminal());
+        let finalizing = matches!(t.state, TaskState::Finalizing { .. });
+        crate::assert_with_log!(finalizing, "state finalizing", true, finalizing);
+        let finalized = t.finalize_done();
+        crate::assert_with_log!(finalized, "finalize_done", true, finalized);
+        let terminal = t.state.is_terminal();
+        crate::assert_with_log!(terminal, "terminal", true, terminal);
         match &t.state {
             TaskState::Completed(Outcome::Cancelled(reason)) => {
-                assert_eq!(reason.kind, crate::types::CancelKind::Timeout);
+                crate::assert_with_log!(
+                    reason.kind == crate::types::CancelKind::Timeout,
+                    "reason kind",
+                    crate::types::CancelKind::Timeout,
+                    reason.kind
+                );
             }
             other => panic!("expected Completed(Cancelled), got {other:?}"),
         }
+        crate::test_complete!("finalize_done_transitions_to_completed_cancelled");
     }
 
     #[test]
     fn full_cancellation_protocol_flow() {
+        init_test("full_cancellation_protocol_flow");
         // Complete flow: Created → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(matches!(t.state, TaskState::Created));
+        let created = matches!(t.state, TaskState::Created);
+        crate::assert_with_log!(created, "created", true, created);
 
         // Step 1: Request cancellation
-        assert!(t.request_cancel(CancelReason::user("stop")));
-        assert!(matches!(t.state, TaskState::CancelRequested { .. }));
-        assert!(t.state.is_cancelling());
+        let requested = t.request_cancel(CancelReason::user("stop"));
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
+        let requested_state = matches!(t.state, TaskState::CancelRequested { .. });
+        crate::assert_with_log!(requested_state, "state cancel requested", true, requested_state);
+        let cancelling = t.state.is_cancelling();
+        crate::assert_with_log!(cancelling, "state cancelling", true, cancelling);
 
         // Step 2: Acknowledge cancellation (checkpoint with mask=0)
         let reason = t.acknowledge_cancel().expect("should acknowledge");
-        assert_eq!(reason.kind, crate::types::CancelKind::User);
-        assert!(matches!(t.state, TaskState::Cancelling { .. }));
+        crate::assert_with_log!(
+            reason.kind == crate::types::CancelKind::User,
+            "reason kind",
+            crate::types::CancelKind::User,
+            reason.kind
+        );
+        let cancelling = matches!(t.state, TaskState::Cancelling { .. });
+        crate::assert_with_log!(cancelling, "state cancelling", true, cancelling);
 
         // Step 3: Cleanup completes
-        assert!(t.cleanup_done());
-        assert!(matches!(t.state, TaskState::Finalizing { .. }));
+        let cleanup = t.cleanup_done();
+        crate::assert_with_log!(cleanup, "cleanup_done", true, cleanup);
+        let finalizing = matches!(t.state, TaskState::Finalizing { .. });
+        crate::assert_with_log!(finalizing, "state finalizing", true, finalizing);
 
         // Step 4: Finalizers complete
-        assert!(t.finalize_done());
-        assert!(t.state.is_terminal());
-        assert!(matches!(
-            t.state,
-            TaskState::Completed(Outcome::Cancelled(_))
-        ));
+        let finalized = t.finalize_done();
+        crate::assert_with_log!(finalized, "finalize_done", true, finalized);
+        let terminal = t.state.is_terminal();
+        crate::assert_with_log!(terminal, "terminal", true, terminal);
+        let cancelled = matches!(t.state, TaskState::Completed(Outcome::Cancelled(_)));
+        crate::assert_with_log!(cancelled, "cancelled", true, cancelled);
+        crate::test_complete!("full_cancellation_protocol_flow");
     }
 
     #[test]
     fn masking_operations() {
+        init_test("masking_operations");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
 
         // Need to set inner for mask operations to work
@@ -657,31 +759,41 @@ mod tests {
         )));
         t.set_cx_inner(inner);
 
-        assert_eq!(t.increment_mask(), 1);
-        assert_eq!(t.increment_mask(), 2);
+        let mask1 = t.increment_mask();
+        crate::assert_with_log!(mask1 == 1, "mask 1", 1, mask1);
+        let mask2 = t.increment_mask();
+        crate::assert_with_log!(mask2 == 2, "mask 2", 2, mask2);
 
-        assert_eq!(t.decrement_mask(), Some(1));
-        assert_eq!(t.decrement_mask(), Some(0));
+        let dec1 = t.decrement_mask();
+        crate::assert_with_log!(dec1 == Some(1), "dec 1", Some(1), dec1);
+        let dec0 = t.decrement_mask();
+        crate::assert_with_log!(dec0 == Some(0), "dec 0", Some(0), dec0);
 
         // Can't go below zero
-        assert_eq!(t.decrement_mask(), None);
+        let dec_none = t.decrement_mask();
+        crate::assert_with_log!(dec_none.is_none(), "dec none", true, dec_none.is_none());
+        crate::test_complete!("masking_operations");
     }
 
     #[test]
     fn cleanup_budget_accessor() {
+        init_test("cleanup_budget_accessor");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        assert!(t.cleanup_budget().is_none());
+        let none = t.cleanup_budget().is_none();
+        crate::assert_with_log!(none, "no budget", true, none);
 
         let _ = t.request_cancel_with_budget(
             CancelReason::timeout(),
             Budget::new().with_poll_quota(500),
         );
         let budget = t.cleanup_budget().expect("should have cleanup budget");
-        assert_eq!(budget.poll_quota, 500);
+        crate::assert_with_log!(budget.poll_quota == 500, "poll_quota", 500, budget.poll_quota);
+        crate::test_complete!("cleanup_budget_accessor");
     }
 
     #[test]
     fn request_cancel_updates_shared_cx() {
+        init_test("request_cancel_updates_shared_cx");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let inner = Arc::new(RwLock::new(CxInner::new(
             region(),
@@ -690,16 +802,24 @@ mod tests {
         )));
         t.set_cx_inner(inner.clone());
 
-        assert!(!inner.read().unwrap().cancel_requested);
-        assert!(inner.read().unwrap().cancel_reason.is_none());
+        let cancel_requested = inner.read().unwrap().cancel_requested;
+        crate::assert_with_log!(!cancel_requested, "cancel_requested false", false, cancel_requested);
+        let cancel_reason_none = inner.read().unwrap().cancel_reason.is_none();
+        crate::assert_with_log!(cancel_reason_none, "cancel_reason none", true, cancel_reason_none);
 
         t.request_cancel(CancelReason::timeout());
 
-        assert!(inner.read().unwrap().cancel_requested);
-        assert_eq!(
-            inner.read().unwrap().cancel_reason.as_ref(),
-            Some(&CancelReason::timeout())
+        let cancel_requested = inner.read().unwrap().cancel_requested;
+        crate::assert_with_log!(cancel_requested, "cancel_requested true", true, cancel_requested);
+        let cancel_reason = inner.read().unwrap().cancel_reason.as_ref().cloned();
+        crate::assert_with_log!(
+            cancel_reason == Some(CancelReason::timeout()),
+            "cancel_reason",
+            Some(CancelReason::timeout()),
+            cancel_reason
         );
-        assert!(matches!(t.state, TaskState::CancelRequested { .. }));
+        let requested_state = matches!(t.state, TaskState::CancelRequested { .. });
+        crate::assert_with_log!(requested_state, "state cancel requested", true, requested_state);
+        crate::test_complete!("request_cancel_updates_shared_cx");
     }
 }

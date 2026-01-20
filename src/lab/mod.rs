@@ -10,6 +10,42 @@
 //! - Await point tracking for cancellation injection
 //! - Integrated cancellation injection with oracle verification
 //! - Chaos testing with configurable failure injection
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use asupersync::types::Budget;
+//!
+//! let mut runtime = LabRuntime::new(LabConfig::new(42));
+//! let region = runtime.state.create_root_region(Budget::INFINITE);
+//!
+//! let (task_id, _handle) = runtime
+//!     .state
+//!     .create_task(region, Budget::INFINITE, async { 42 })
+//!     .expect("create task");
+//!
+//! runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+//! runtime.run_until_quiescent();
+//! ```
+//!
+//! # Chaos Testing
+//!
+//! Enable chaos injection to stress-test error handling:
+//!
+//! ```ignore
+//! // Light chaos for CI (1% cancel, 5% delay)
+//! let config = LabConfig::new(42).with_light_chaos();
+//! let mut runtime = LabRuntime::new(config);
+//!
+//! // ... run tests ...
+//!
+//! // Check injection statistics
+//! let stats = runtime.chaos_stats();
+//! println!("Injections: {} delays, {} cancellations", stats.delays, stats.cancellations);
+//! ```
+//!
+//! See the [`chaos`] module for detailed documentation on chaos testing.
 
 pub mod chaos;
 pub mod config;

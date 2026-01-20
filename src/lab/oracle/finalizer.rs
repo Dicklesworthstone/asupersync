@@ -209,14 +209,23 @@ mod tests {
         Time::from_nanos(nanos)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn no_finalizers_passes() {
+        init_test("no_finalizers_passes");
         let oracle = FinalizerOracle::new();
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("no_finalizers_passes");
     }
 
     #[test]
     fn all_finalizers_run_passes() {
+        init_test("all_finalizers_run_passes");
         let mut oracle = FinalizerOracle::new();
 
         let f1 = oracle.generate_id();
@@ -230,11 +239,14 @@ mod tests {
 
         oracle.on_region_close(region(0), t(100));
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("all_finalizers_run_passes");
     }
 
     #[test]
     fn unrun_finalizer_fails() {
+        init_test("unrun_finalizer_fails");
         let mut oracle = FinalizerOracle::new();
 
         let f1 = oracle.generate_id();
@@ -249,16 +261,34 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.region, region(0));
-        assert_eq!(violation.unrun_finalizers, vec![f2]);
-        assert_eq!(violation.region_close_time, t(100));
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "violation region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.unrun_finalizers == vec![f2],
+            "unrun finalizers",
+            vec![f2],
+            violation.unrun_finalizers
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "region close time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!("unrun_finalizer_fails");
     }
 
     #[test]
     fn no_finalizers_run_all_fail() {
+        init_test("no_finalizers_run_all_fail");
         let mut oracle = FinalizerOracle::new();
 
         let f1 = oracle.generate_id();
@@ -271,14 +301,18 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.unrun_finalizers.len(), 2);
+        let count = violation.unrun_finalizers.len();
+        crate::assert_with_log!(count == 2, "unrun finalizers", 2, count);
+        crate::test_complete!("no_finalizers_run_all_fail");
     }
 
     #[test]
     fn multiple_regions_independent() {
+        init_test("multiple_regions_independent");
         let mut oracle = FinalizerOracle::new();
 
         // Region 0: finalizer runs
@@ -293,26 +327,42 @@ mod tests {
         oracle.on_region_close(region(1), t(100));
 
         let result = oracle.check();
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
 
         let violation = result.unwrap_err();
-        assert_eq!(violation.region, region(1));
-        assert_eq!(violation.unrun_finalizers, vec![f2]);
+        crate::assert_with_log!(
+            violation.region == region(1),
+            "violation region",
+            region(1),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.unrun_finalizers == vec![f2],
+            "unrun finalizers",
+            vec![f2],
+            violation.unrun_finalizers
+        );
+        crate::test_complete!("multiple_regions_independent");
     }
 
     #[test]
     fn region_without_close_not_checked() {
+        init_test("region_without_close_not_checked");
         let mut oracle = FinalizerOracle::new();
 
         let f1 = oracle.generate_id();
         oracle.on_register(f1, region(0), t(10));
         // f1 never runs, but region never closes either
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("region_without_close_not_checked");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = FinalizerOracle::new();
 
         let f1 = oracle.generate_id();
@@ -320,18 +370,24 @@ mod tests {
         oracle.on_region_close(region(0), t(100));
 
         // Would fail
-        assert!(oracle.check().is_err());
+        let err = oracle.check().is_err();
+        crate::assert_with_log!(err, "oracle err", true, err);
 
         oracle.reset();
 
         // After reset, no violations
-        assert!(oracle.check().is_ok());
-        assert_eq!(oracle.registered_count(), 0);
-        assert_eq!(oracle.ran_count(), 0);
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        let registered = oracle.registered_count();
+        crate::assert_with_log!(registered == 0, "registered count", 0, registered);
+        let ran = oracle.ran_count();
+        crate::assert_with_log!(ran == 0, "ran count", 0, ran);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let violation = FinalizerViolation {
             region: region(0),
             unrun_finalizers: vec![FinalizerId(1), FinalizerId(2)],
@@ -339,8 +395,12 @@ mod tests {
         };
 
         let s = violation.to_string();
-        assert!(s.contains("Region"));
-        assert!(s.contains("unrun finalizer"));
-        assert!(s.contains('2'));
+        let has_region = s.contains("Region");
+        crate::assert_with_log!(has_region, "contains Region", true, has_region);
+        let has_unrun = s.contains("unrun finalizer");
+        crate::assert_with_log!(has_unrun, "contains unrun", true, has_unrun);
+        let has_two = s.contains('2');
+        crate::assert_with_log!(has_two, "contains 2", true, has_two);
+        crate::test_complete!("violation_display");
     }
 }

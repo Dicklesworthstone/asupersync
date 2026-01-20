@@ -572,14 +572,23 @@ mod tests {
         RegionId::from_arena(ArenaIndex::new(idx as u32, 0))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn empty_oracle_passes() {
+        init_test("empty_oracle_passes");
         let oracle = CancellationProtocolOracle::new();
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("empty_oracle_passes");
     }
 
     #[test]
     fn valid_normal_lifecycle_passes() {
+        init_test("valid_normal_lifecycle_passes");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -596,11 +605,14 @@ mod tests {
             Time::from_nanos(1000),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("valid_normal_lifecycle_passes");
     }
 
     #[test]
     fn valid_cancellation_protocol_passes() {
+        init_test("valid_cancellation_protocol_passes");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -666,11 +678,14 @@ mod tests {
             Time::from_nanos(400),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("valid_cancellation_protocol_passes");
     }
 
     #[test]
     fn cancel_before_first_poll_passes() {
+        init_test("cancel_before_first_poll_passes");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -730,11 +745,14 @@ mod tests {
             Time::from_nanos(300),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_before_first_poll_passes");
     }
 
     #[test]
     fn skipped_state_detected() {
+        init_test("skipped_state_detected");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -759,15 +777,17 @@ mod tests {
         );
 
         let result = oracle.check();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            CancellationProtocolViolation::SkippedState { .. }
-        ));
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let skipped = matches!(violation, CancellationProtocolViolation::SkippedState { .. });
+        crate::assert_with_log!(skipped, "skipped state", true, skipped);
+        crate::test_complete!("skipped_state_detected");
     }
 
     #[test]
     fn cancel_strengthening_is_valid() {
+        init_test("cancel_strengthening_is_valid");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -807,7 +827,8 @@ mod tests {
         );
 
         // No violations for strengthening
-        assert!(oracle.violations.is_empty());
+        let empty = oracle.violations.is_empty();
+        crate::assert_with_log!(empty, "violations empty", true, empty);
 
         // Complete the cancellation
         oracle.on_transition(
@@ -844,11 +865,14 @@ mod tests {
             Time::from_nanos(400),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_strengthening_is_valid");
     }
 
     #[test]
     fn cancel_propagation_violation_detected() {
+        init_test("cancel_propagation_violation_detected");
         let mut oracle = CancellationProtocolOracle::new();
         let parent = region_id(0);
         let child = region_id(1);
@@ -861,15 +885,20 @@ mod tests {
         // Note: child is NOT cancelled
 
         let result = oracle.check();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let not_propagated = matches!(
+            violation,
             CancellationProtocolViolation::CancelNotPropagated { .. }
-        ));
+        );
+        crate::assert_with_log!(not_propagated, "cancel not propagated", true, not_propagated);
+        crate::test_complete!("cancel_propagation_violation_detected");
     }
 
     #[test]
     fn cancel_propagation_valid_when_all_descendants_cancelled() {
+        init_test("cancel_propagation_valid_when_all_descendants_cancelled");
         let mut oracle = CancellationProtocolOracle::new();
         let root = region_id(0);
         let child1 = region_id(1);
@@ -899,11 +928,14 @@ mod tests {
             Time::from_nanos(100),
         );
 
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_propagation_valid_when_all_descendants_cancelled");
     }
 
     #[test]
     fn cancelled_task_not_completed_detected() {
+        init_test("cancelled_task_not_completed_detected");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -928,15 +960,20 @@ mod tests {
 
         // Task is stuck in CancelRequested
         let result = oracle.check();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let not_completed = matches!(
+            violation,
             CancellationProtocolViolation::CancelNotCompleted { .. }
-        ));
+        );
+        crate::assert_with_log!(not_completed, "cancel not completed", true, not_completed);
+        crate::test_complete!("cancelled_task_not_completed_detected");
     }
 
     #[test]
     fn error_during_cleanup_is_valid() {
+        init_test("error_during_cleanup_is_valid");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -986,11 +1023,14 @@ mod tests {
         );
 
         // This should pass - error during cleanup is allowed
-        assert!(oracle.check().is_ok());
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("error_during_cleanup_is_valid");
     }
 
     #[test]
     fn reset_clears_state() {
+        init_test("reset_clears_state");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -999,18 +1039,25 @@ mod tests {
         oracle.on_task_create(task, region);
         oracle.on_cancel_request(task, CancelReason::timeout(), Time::ZERO);
 
-        assert!(oracle.has_cancel_request(task));
+        let has_request = oracle.has_cancel_request(task);
+        crate::assert_with_log!(has_request, "has cancel request", true, has_request);
 
         oracle.reset();
 
-        assert!(!oracle.has_cancel_request(task));
-        assert!(oracle.tasks.is_empty());
-        assert!(oracle.region_parents.is_empty());
-        assert!(oracle.cancelled_regions.is_empty());
+        let has_request = oracle.has_cancel_request(task);
+        crate::assert_with_log!(!has_request, "cancel request cleared", false, has_request);
+        let tasks_empty = oracle.tasks.is_empty();
+        crate::assert_with_log!(tasks_empty, "tasks empty", true, tasks_empty);
+        let parents_empty = oracle.region_parents.is_empty();
+        crate::assert_with_log!(parents_empty, "parents empty", true, parents_empty);
+        let cancelled_empty = oracle.cancelled_regions.is_empty();
+        crate::assert_with_log!(cancelled_empty, "cancelled empty", true, cancelled_empty);
+        crate::test_complete!("reset_clears_state");
     }
 
     #[test]
     fn task_state_tracking() {
+        init_test("task_state_tracking");
         let mut oracle = CancellationProtocolOracle::new();
         let task = task_id(0);
         let region = region_id(0);
@@ -1018,15 +1065,29 @@ mod tests {
         oracle.on_region_create(region, None);
         oracle.on_task_create(task, region);
 
-        assert_eq!(oracle.task_state(task), Some(TaskStateKind::Created));
+        let created = oracle.task_state(task);
+        crate::assert_with_log!(
+            created == Some(TaskStateKind::Created),
+            "task state created",
+            Some(TaskStateKind::Created),
+            created
+        );
 
         oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
 
-        assert_eq!(oracle.task_state(task), Some(TaskStateKind::Running));
+        let running = oracle.task_state(task);
+        crate::assert_with_log!(
+            running == Some(TaskStateKind::Running),
+            "task state running",
+            Some(TaskStateKind::Running),
+            running
+        );
+        crate::test_complete!("task_state_tracking");
     }
 
     #[test]
     fn violation_display() {
+        init_test("violation_display");
         let v = CancellationProtocolViolation::SkippedState {
             task: task_id(0),
             from: TaskStateKind::Running,
@@ -1035,8 +1096,12 @@ mod tests {
         };
 
         let display = format!("{v}");
-        assert!(display.contains("skipped state"));
-        assert!(display.contains("Running"));
-        assert!(display.contains("Finalizing"));
+        let has_skipped = display.contains("skipped state");
+        crate::assert_with_log!(has_skipped, "contains skipped", true, has_skipped);
+        let has_running = display.contains("Running");
+        crate::assert_with_log!(has_running, "contains Running", true, has_running);
+        let has_finalizing = display.contains("Finalizing");
+        crate::assert_with_log!(has_finalizing, "contains Finalizing", true, has_finalizing);
+        crate::test_complete!("violation_display");
     }
 }

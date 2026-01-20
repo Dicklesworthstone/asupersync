@@ -4,7 +4,57 @@
 //! - Random seed for scheduling decisions
 //! - Whether to panic on obligation leaks
 //! - Trace buffer size
+//! - Futurelock detection settings
+//! - Chaos injection settings
+//!
+//! # Basic Usage
+//!
+//! ```ignore
+//! use asupersync::lab::{LabConfig, LabRuntime};
+//!
+//! // Default configuration (seed=42)
+//! let config = LabConfig::default();
+//!
+//! // Explicit seed for reproducibility
+//! let config = LabConfig::new(12345);
+//!
+//! // Time-based seed for variety (useful in CI)
+//! let config = LabConfig::from_time();
+//! ```
+//!
+//! # Chaos Testing
+//!
+//! Enable chaos injection to stress-test error handling paths:
+//!
+//! ```ignore
+//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use asupersync::lab::chaos::ChaosConfig;
+//!
+//! // Quick: use presets
+//! let config = LabConfig::new(42).with_light_chaos();  // CI-friendly
+//! let config = LabConfig::new(42).with_heavy_chaos();  // Thorough
+//!
+//! // Custom: fine-grained control
+//! let chaos = ChaosConfig::new(42)
+//!     .with_delay_probability(0.3)
+//!     .with_cancel_probability(0.05);
+//! let config = LabConfig::new(42).with_chaos(chaos);
+//!
+//! // Check if chaos is enabled
+//! assert!(config.has_chaos());
+//! ```
+//!
+//! # Futurelock Detection
+//!
+//! Detect tasks that hold obligations but stop being polled:
+//!
+//! ```ignore
+//! let config = LabConfig::new(42)
+//!     .futurelock_max_idle_steps(5000)  // Trigger after 5000 idle steps
+//!     .panic_on_futurelock(true);       // Panic when detected
+//! ```
 
+use super::chaos::ChaosConfig;
 use crate::util::DetRng;
 
 /// Configuration for the lab runtime.
@@ -24,6 +74,11 @@ pub struct LabConfig {
     pub panic_on_futurelock: bool,
     /// Maximum number of steps before forced termination.
     pub max_steps: Option<u64>,
+    /// Chaos injection configuration.
+    ///
+    /// When enabled, the runtime will inject faults at various points
+    /// to stress-test the system's resilience.
+    pub chaos: Option<ChaosConfig>,
 }
 
 impl LabConfig {
@@ -37,6 +92,7 @@ impl LabConfig {
             futurelock_max_idle_steps: 10_000,
             panic_on_futurelock: true,
             max_steps: Some(100_000),
+            chaos: None,
         }
     }
 
@@ -93,6 +149,35 @@ impl LabConfig {
         self
     }
 
+    /// Enables chaos injection with the given configuration.
+    ///
+    /// The chaos seed will be derived from the main seed for determinism.
+    #[must_use]
+    pub fn with_chaos(mut self, config: ChaosConfig) -> Self {
+        // Derive chaos seed from main seed for determinism
+        let chaos_seed = self.seed.wrapping_add(0xCAFE_BABE);
+        self.chaos = Some(config.with_seed(chaos_seed));
+        self
+    }
+
+    /// Enables light chaos (suitable for CI).
+    #[must_use]
+    pub fn with_light_chaos(self) -> Self {
+        self.with_chaos(ChaosConfig::light())
+    }
+
+    /// Enables heavy chaos (thorough testing).
+    #[must_use]
+    pub fn with_heavy_chaos(self) -> Self {
+        self.with_chaos(ChaosConfig::heavy())
+    }
+
+    /// Returns true if chaos injection is enabled.
+    #[must_use]
+    pub fn has_chaos(&self) -> bool {
+        self.chaos.as_ref().is_some_and(ChaosConfig::is_enabled)
+    }
+
     /// Creates a deterministic RNG from this configuration.
     #[must_use]
     pub fn rng(&self) -> DetRng {
@@ -110,20 +195,42 @@ impl Default for LabConfig {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn default_config() {
+        init_test("default_config");
         let config = LabConfig::default();
-        assert_eq!(config.seed, 42);
-        assert!(config.panic_on_obligation_leak);
-        assert!(config.panic_on_futurelock);
+        let ok = config.seed == 42;
+        crate::assert_with_log!(ok, "seed", 42, config.seed);
+        crate::assert_with_log!(
+            config.panic_on_obligation_leak,
+            "panic_on_obligation_leak",
+            true,
+            config.panic_on_obligation_leak
+        );
+        crate::assert_with_log!(
+            config.panic_on_futurelock,
+            "panic_on_futurelock",
+            true,
+            config.panic_on_futurelock
+        );
+        crate::test_complete!("default_config");
     }
 
     #[test]
     fn rng_is_deterministic() {
+        init_test("rng_is_deterministic");
         let config = LabConfig::new(12345);
         let mut rng1 = config.rng();
         let mut rng2 = config.rng();
 
-        assert_eq!(rng1.next_u64(), rng2.next_u64());
+        let a = rng1.next_u64();
+        let b = rng2.next_u64();
+        crate::assert_with_log!(a == b, "rng equal", b, a);
+        crate::test_complete!("rng_is_deterministic");
     }
 }

@@ -4,14 +4,16 @@
 //! - Virtual time (controlled advancement)
 //! - Deterministic scheduling (seed-driven)
 //! - Trace capture for replay
+//! - Chaos injection for stress testing
 
+use super::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
 use crate::record::ObligationKind;
 use crate::runtime::RuntimeState;
 use crate::trace::event::TraceEventKind;
 use crate::trace::TraceBuffer;
 use crate::trace::{TraceData, TraceEvent};
-use crate::types::ObligationId;
+use crate::types::{ObligationId, TaskId};
 use crate::types::Time;
 use crate::util::DetRng;
 use std::sync::{Arc, Mutex};
@@ -23,6 +25,7 @@ use std::task::{Context, Poll, Wake, Waker};
 /// - Virtual time instead of wall-clock time
 /// - Deterministic scheduling based on a seed
 /// - Trace capture for debugging and replay
+/// - Chaos injection for stress testing
 #[derive(Debug)]
 pub struct LabRuntime {
     /// Runtime state (public for tests and oracle access).
@@ -37,6 +40,10 @@ pub struct LabRuntime {
     virtual_time: Time,
     /// Number of steps executed.
     steps: u64,
+    /// Chaos RNG for deterministic fault injection.
+    chaos_rng: Option<ChaosRng>,
+    /// Statistics about chaos injections.
+    chaos_stats: ChaosStats,
 }
 
 impl LabRuntime {
@@ -44,6 +51,7 @@ impl LabRuntime {
     #[must_use]
     pub fn new(config: LabConfig) -> Self {
         let rng = config.rng();
+        let chaos_rng = config.chaos.as_ref().map(ChaosRng::from_config);
         let mut state = RuntimeState::new();
         state.trace = TraceBuffer::new(config.trace_capacity);
         Self {
@@ -53,6 +61,8 @@ impl LabRuntime {
             rng,
             virtual_time: Time::ZERO,
             steps: 0,
+            chaos_rng,
+            chaos_stats: ChaosStats::new(),
         }
     }
 
@@ -84,6 +94,18 @@ impl LabRuntime {
     #[must_use]
     pub fn trace(&self) -> &TraceBuffer {
         &self.state.trace
+    }
+
+    /// Returns a reference to the chaos statistics.
+    #[must_use]
+    pub fn chaos_stats(&self) -> &ChaosStats {
+        &self.chaos_stats
+    }
+
+    /// Returns true if chaos injection is enabled.
+    #[must_use]
+    pub fn has_chaos(&self) -> bool {
+        self.chaos_rng.is_some() && self.config.has_chaos()
     }
 
     /// Returns true if the runtime is quiescent.
@@ -137,7 +159,13 @@ impl LabRuntime {
             return;
         };
 
-        // 2. Prepare context
+        // 2. Pre-poll chaos injection
+        if self.inject_pre_poll_chaos(task_id) {
+            // Chaos caused the task to be skipped (e.g., cancelled, budget exhausted)
+            return;
+        }
+
+        // 3. Prepare context
         let priority = self
             .state
             .tasks
@@ -152,8 +180,14 @@ impl LabRuntime {
             scheduler: self.scheduler.clone(),
         }));
         let mut cx = Context::from_waker(&waker);
+        let current_cx = self
+            .state
+            .tasks
+            .get(task_id.arena_index())
+            .and_then(|record| record.cx.clone());
+        let _cx_guard = crate::cx::Cx::set_current(current_cx);
 
-        // 3. Poll the task
+        // 4. Poll the task
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             stored.poll(&mut cx)
         } else {
@@ -161,7 +195,7 @@ impl LabRuntime {
             return;
         };
 
-        // 4. Handle result
+        // 5. Handle result
         match result {
             Poll::Ready(()) => {
                 // Task completed
@@ -196,8 +230,166 @@ impl LabRuntime {
                 // Task yielded. Waker will reschedule it when ready.
                 // Note: If the task yielded via `cx.waker().wake_by_ref()`, it might already be scheduled.
                 // If it yielded for I/O or other events, it won't be scheduled until that event fires.
+
+                // 6. Post-poll chaos injection (spurious wakeups for pending tasks)
+                self.inject_post_poll_chaos(task_id, priority);
             }
         }
+    }
+
+    /// Injects chaos before polling a task.
+    ///
+    /// Returns `true` if the task should be skipped (e.g., cancelled or budget exhausted).
+    fn inject_pre_poll_chaos(&mut self, task_id: TaskId) -> bool {
+        let Some(chaos_config) = self.config.chaos.clone() else {
+            return false;
+        };
+        let Some(chaos_rng) = &mut self.chaos_rng else {
+            return false;
+        };
+
+        let mut skip_poll = false;
+
+        // Check for cancellation injection
+        if chaos_rng.should_inject_cancel(&chaos_config) {
+            skip_poll = true;
+        }
+
+        // Check for delay injection
+        let delay = if chaos_rng.should_inject_delay(&chaos_config) {
+            Some(chaos_rng.next_delay(&chaos_config))
+        } else {
+            None
+        };
+
+        // Check for budget exhaustion injection
+        let budget_exhaust = chaos_rng.should_inject_budget_exhaust(&chaos_config);
+        if budget_exhaust {
+            skip_poll = true;
+        }
+
+        // Now apply the injections (no more borrowing chaos_rng)
+        if skip_poll && !budget_exhaust {
+            // Cancellation was injected
+            self.chaos_stats.record_cancel();
+            self.inject_cancel(task_id);
+        }
+
+        if let Some(d) = delay {
+            self.chaos_stats.record_delay(d);
+            self.advance_time(d.as_nanos() as u64);
+        }
+
+        if budget_exhaust {
+            self.chaos_stats.record_budget_exhaust();
+            self.inject_budget_exhaust(task_id);
+        }
+
+        if !skip_poll {
+            self.chaos_stats.record_no_injection();
+        }
+
+        skip_poll
+    }
+
+    /// Injects chaos after polling a task that returned Pending.
+    fn inject_post_poll_chaos(&mut self, task_id: TaskId, priority: u8) {
+        let Some(chaos_config) = self.config.chaos.clone() else {
+            return;
+        };
+        let Some(chaos_rng) = &mut self.chaos_rng else {
+            return;
+        };
+
+        // Check for spurious wakeup storm
+        let wakeup_count = if chaos_rng.should_inject_wakeup_storm(&chaos_config) {
+            Some(chaos_rng.next_wakeup_count(&chaos_config))
+        } else {
+            None
+        };
+
+        // Apply the injection (no more borrowing chaos_rng)
+        if let Some(count) = wakeup_count {
+            self.chaos_stats.record_wakeup_storm(count as u64);
+            self.inject_spurious_wakes(task_id, priority, count);
+        }
+    }
+
+    /// Injects a cancellation for a task.
+    fn inject_cancel(&mut self, task_id: TaskId) {
+        use crate::types::{Budget, CancelReason};
+
+        // Mark the task as cancel-requested with chaos reason
+        if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
+            if !record.state.is_terminal() {
+                record.state = crate::record::task::TaskState::CancelRequested {
+                    reason: CancelReason::user("chaos-injected"),
+                    cleanup_budget: Budget::ZERO,
+                };
+            }
+        }
+
+        // Emit trace event
+        let seq = self.state.next_trace_seq();
+        self.state.trace.push(TraceEvent::new(
+            seq,
+            self.virtual_time,
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "cancel".to_string(),
+                task: Some(task_id),
+                detail: "chaos-injected cancellation".to_string(),
+            },
+        ));
+    }
+
+    /// Injects budget exhaustion for a task.
+    fn inject_budget_exhaust(&mut self, task_id: TaskId) {
+        // Set the task's budget quotas to zero
+        if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+            if let Some(cx_inner) = &record.cx_inner {
+                if let Ok(mut inner) = cx_inner.write() {
+                    inner.budget.poll_quota = 0;
+                    inner.budget.cost_quota = Some(0);
+                }
+            }
+        }
+
+        // Emit trace event
+        let seq = self.state.next_trace_seq();
+        self.state.trace.push(TraceEvent::new(
+            seq,
+            self.virtual_time,
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "budget_exhaust".to_string(),
+                task: Some(task_id),
+                detail: "chaos-injected budget exhaustion".to_string(),
+            },
+        ));
+    }
+
+    /// Injects spurious wakeups for a task.
+    fn inject_spurious_wakes(&mut self, task_id: TaskId, priority: u8, count: usize) {
+        // Schedule the task multiple times (spurious wakeups)
+        let mut sched = self.scheduler.lock().unwrap();
+        for _ in 0..count {
+            sched.schedule(task_id, priority);
+        }
+        drop(sched);
+
+        // Emit trace event
+        let seq = self.state.next_trace_seq();
+        self.state.trace.push(TraceEvent::new(
+            seq,
+            self.virtual_time,
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "wakeup_storm".to_string(),
+                task: Some(task_id),
+                detail: format!("chaos-injected {} spurious wakeups", count),
+            },
+        ));
     }
 
     /// Public wrapper for `step()` for use in tests.
@@ -502,31 +694,48 @@ mod tests {
     use crate::types::{Budget, ObligationId, Outcome, TaskId};
     use crate::util::ArenaIndex;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn empty_runtime_is_quiescent() {
+        init_test("empty_runtime_is_quiescent");
         let runtime = LabRuntime::with_seed(42);
-        assert!(runtime.is_quiescent());
+        let quiescent = runtime.is_quiescent();
+        crate::assert_with_log!(quiescent, "quiescent", true, quiescent);
+        crate::test_complete!("empty_runtime_is_quiescent");
     }
 
     #[test]
     fn advance_time() {
+        init_test("advance_time");
         let mut runtime = LabRuntime::with_seed(42);
-        assert_eq!(runtime.now(), Time::ZERO);
+        let now = runtime.now();
+        crate::assert_with_log!(now == Time::ZERO, "now", Time::ZERO, now);
 
         runtime.advance_time(1_000_000);
-        assert_eq!(runtime.now(), Time::from_millis(1));
+        let now = runtime.now();
+        crate::assert_with_log!(now == Time::from_millis(1), "now", Time::from_millis(1), now);
+        crate::test_complete!("advance_time");
     }
 
     #[test]
     fn deterministic_rng() {
+        init_test("deterministic_rng");
         let mut r1 = LabRuntime::with_seed(42);
         let mut r2 = LabRuntime::with_seed(42);
 
-        assert_eq!(r1.rng.next_u64(), r2.rng.next_u64());
+        let a = r1.rng.next_u64();
+        let b = r2.rng.next_u64();
+        crate::assert_with_log!(a == b, "rng", b, a);
+        crate::test_complete!("deterministic_rng");
     }
 
     #[test]
     fn futurelock_emits_trace_event() {
+        init_test("futurelock_emits_trace_event");
         let config = LabConfig::new(42)
             .futurelock_max_idle_steps(3)
             .panic_on_futurelock(false);
@@ -571,18 +780,27 @@ mod tests {
                 idle_steps,
                 held,
             } => {
-                assert_eq!(*task, task_id);
-                assert_eq!(*region, root);
-                assert!(*idle_steps > 3);
-                assert_eq!(held.as_slice(), &[(obl_id, ObligationKind::SendPermit)]);
+                crate::assert_with_log!(*task == task_id, "task", task_id, *task);
+                crate::assert_with_log!(*region == root, "region", root, *region);
+                let idle_ok = *idle_steps > 3;
+                crate::assert_with_log!(idle_ok, "idle_steps > 3", true, idle_ok);
+                let ok = held.as_slice() == &[(obl_id, ObligationKind::SendPermit)];
+                crate::assert_with_log!(
+                    ok,
+                    "held",
+                    &[(obl_id, ObligationKind::SendPermit)],
+                    held.as_slice()
+                );
             }
             other => panic!("unexpected trace data: {other:?}"),
         }
+        crate::test_complete!("futurelock_emits_trace_event");
     }
 
     #[test]
     #[should_panic(expected = "futurelock detected")]
     fn futurelock_can_panic() {
+        init_test("futurelock_can_panic");
         let config = LabConfig::new(42).futurelock_max_idle_steps(1);
         let mut runtime = LabRuntime::new(config);
 
@@ -614,6 +832,7 @@ mod tests {
 
     #[test]
     fn obligation_leak_detected_when_holder_completed() {
+        init_test("obligation_leak_detected_when_holder_completed");
         let mut runtime = LabRuntime::with_seed(7);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -647,19 +866,42 @@ mod tests {
         for violation in violations {
             if let InvariantViolation::ObligationLeak { leaks } = violation {
                 found = true;
-                assert_eq!(leaks.len(), 1);
+                let len = leaks.len();
+                crate::assert_with_log!(len == 1, "leaks len", 1, len);
                 let leak = &leaks[0];
-                assert_eq!(leak.obligation, obl_id);
-                assert_eq!(leak.kind, ObligationKind::SendPermit);
-                assert_eq!(leak.holder, task_id);
-                assert_eq!(leak.region, root);
+                crate::assert_with_log!(
+                    leak.obligation == obl_id,
+                    "obligation",
+                    obl_id,
+                    leak.obligation
+                );
+                crate::assert_with_log!(
+                    leak.kind == ObligationKind::SendPermit,
+                    "kind",
+                    ObligationKind::SendPermit,
+                    leak.kind
+                );
+                crate::assert_with_log!(
+                    leak.holder == task_id,
+                    "holder",
+                    task_id,
+                    leak.holder
+                );
+                crate::assert_with_log!(
+                    leak.region == root,
+                    "region",
+                    root,
+                    leak.region
+                );
             }
         }
-        assert!(found, "expected obligation leak violation");
+        crate::assert_with_log!(found, "found leak", true, found);
+        crate::test_complete!("obligation_leak_detected_when_holder_completed");
     }
 
     #[test]
     fn obligation_leak_ignored_when_resolved() {
+        init_test("obligation_leak_ignored_when_resolved");
         let mut runtime = LabRuntime::with_seed(11);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -696,16 +938,21 @@ mod tests {
             .complete(Outcome::Ok(()));
 
         let violations = runtime.check_invariants();
-        assert!(
-            !violations
-                .iter()
-                .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. })),
-            "resolved obligations should not report leaks"
+        let has_leak = violations
+            .iter()
+            .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. }));
+        crate::assert_with_log!(
+            !has_leak,
+            "no leak",
+            false,
+            has_leak
         );
+        crate::test_complete!("obligation_leak_ignored_when_resolved");
     }
 
     #[test]
     fn obligation_trace_events_emitted() {
+        init_test("obligation_trace_events_emitted");
         let mut runtime = LabRuntime::with_seed(21);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -752,13 +999,33 @@ mod tests {
                 duration_ns,
                 abort_reason,
             } => {
-                assert_eq!(*obligation, ob1);
-                assert_eq!(*task, task_id);
-                assert_eq!(*region, root);
-                assert_eq!(*kind, ObligationKind::SendPermit);
-                assert_eq!(*state, crate::record::ObligationState::Committed);
-                assert_eq!(duration_ns, &Some(15));
-                assert_eq!(abort_reason, &None);
+                crate::assert_with_log!(*obligation == ob1, "obligation", ob1, *obligation);
+                crate::assert_with_log!(*task == task_id, "task", task_id, *task);
+                crate::assert_with_log!(*region == root, "region", root, *region);
+                crate::assert_with_log!(
+                    *kind == ObligationKind::SendPermit,
+                    "kind",
+                    ObligationKind::SendPermit,
+                    *kind
+                );
+                crate::assert_with_log!(
+                    *state == crate::record::ObligationState::Committed,
+                    "state",
+                    crate::record::ObligationState::Committed,
+                    *state
+                );
+                crate::assert_with_log!(
+                    duration_ns == &Some(15),
+                    "duration",
+                    &Some(15),
+                    duration_ns
+                );
+                crate::assert_with_log!(
+                    abort_reason == &None::<crate::record::ObligationAbortReason>,
+                    "abort_reason",
+                    &None::<crate::record::ObligationAbortReason>,
+                    abort_reason
+                );
             }
             other => panic!("unexpected commit data: {other:?}"),
         }
@@ -778,20 +1045,42 @@ mod tests {
                 duration_ns,
                 abort_reason,
             } => {
-                assert_eq!(*obligation, ob2);
-                assert_eq!(*task, task_id);
-                assert_eq!(*region, root);
-                assert_eq!(*kind, ObligationKind::Ack);
-                assert_eq!(*state, crate::record::ObligationState::Aborted);
-                assert_eq!(duration_ns, &Some(20));
-                assert_eq!(abort_reason, &Some(ObligationAbortReason::Cancel));
+                crate::assert_with_log!(*obligation == ob2, "obligation", ob2, *obligation);
+                crate::assert_with_log!(*task == task_id, "task", task_id, *task);
+                crate::assert_with_log!(*region == root, "region", root, *region);
+                crate::assert_with_log!(
+                    *kind == ObligationKind::Ack,
+                    "kind",
+                    ObligationKind::Ack,
+                    *kind
+                );
+                crate::assert_with_log!(
+                    *state == crate::record::ObligationState::Aborted,
+                    "state",
+                    crate::record::ObligationState::Aborted,
+                    *state
+                );
+                crate::assert_with_log!(
+                    duration_ns == &Some(20),
+                    "duration",
+                    &Some(20),
+                    duration_ns
+                );
+                crate::assert_with_log!(
+                    abort_reason == &Some(ObligationAbortReason::Cancel),
+                    "abort_reason",
+                    &Some(ObligationAbortReason::Cancel),
+                    abort_reason
+                );
             }
             other => panic!("unexpected abort data: {other:?}"),
         }
+        crate::test_complete!("obligation_trace_events_emitted");
     }
 
     #[test]
     fn obligation_leak_emits_trace_event() {
+        init_test("obligation_leak_emits_trace_event");
         let mut runtime = LabRuntime::with_seed(22);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -818,9 +1107,10 @@ mod tests {
             .complete(Outcome::Ok(()));
 
         let violations = runtime.check_invariants();
-        assert!(violations
+        let has_leak = violations
             .iter()
-            .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. })));
+            .any(|v| matches!(v, InvariantViolation::ObligationLeak { .. }));
+        crate::assert_with_log!(has_leak, "has leak", true, has_leak);
 
         let leak_event = runtime
             .trace()
@@ -837,15 +1127,36 @@ mod tests {
                 duration_ns,
                 abort_reason,
             } => {
-                assert_eq!(*leaked, obligation);
-                assert_eq!(*task, task_id);
-                assert_eq!(*region, root);
-                assert_eq!(*kind, ObligationKind::Lease);
-                assert_eq!(*state, crate::record::ObligationState::Leaked);
-                assert_eq!(duration_ns, &Some(40));
-                assert_eq!(abort_reason, &None);
+                crate::assert_with_log!(*leaked == obligation, "obligation", obligation, *leaked);
+                crate::assert_with_log!(*task == task_id, "task", task_id, *task);
+                crate::assert_with_log!(*region == root, "region", root, *region);
+                crate::assert_with_log!(
+                    *kind == ObligationKind::Lease,
+                    "kind",
+                    ObligationKind::Lease,
+                    *kind
+                );
+                crate::assert_with_log!(
+                    *state == crate::record::ObligationState::Leaked,
+                    "state",
+                    crate::record::ObligationState::Leaked,
+                    *state
+                );
+                crate::assert_with_log!(
+                    duration_ns == &Some(40),
+                    "duration",
+                    &Some(40),
+                    duration_ns
+                );
+                crate::assert_with_log!(
+                    abort_reason == &None::<crate::record::ObligationAbortReason>,
+                    "abort_reason",
+                    &None::<crate::record::ObligationAbortReason>,
+                    abort_reason
+                );
             }
             other => panic!("unexpected leak data: {other:?}"),
         }
+        crate::test_complete!("obligation_leak_emits_trace_event");
     }
 }
