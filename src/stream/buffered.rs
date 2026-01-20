@@ -275,8 +275,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn buffered_preserves_order() {
+        init_test("buffered_preserves_order");
         let stream = iter(vec![
             std::future::ready(1),
             std::future::ready(2),
@@ -286,26 +292,24 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(1))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(2))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(3))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(None)
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(1)));
+        crate::assert_with_log!(ok, "poll 1", "Poll::Ready(Some(1))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(2)));
+        crate::assert_with_log!(ok, "poll 2", "Poll::Ready(Some(2))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(3)));
+        crate::assert_with_log!(ok, "poll 3", "Poll::Ready(Some(3))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "poll done", "Poll::Ready(None)", poll);
+        crate::test_complete!("buffered_preserves_order");
     }
 
     #[test]
     fn buffer_unordered_yields_all() {
+        init_test("buffer_unordered_yields_all");
         let stream = iter(vec![
             std::future::ready(1),
             std::future::ready(2),
@@ -325,6 +329,8 @@ mod tests {
         }
 
         items.sort_unstable();
-        assert_eq!(items, vec![1, 2, 3]);
+        let ok = items == vec![1, 2, 3];
+        crate::assert_with_log!(ok, "items", vec![1, 2, 3], items);
+        crate::test_complete!("buffer_unordered_yields_all");
     }
 }

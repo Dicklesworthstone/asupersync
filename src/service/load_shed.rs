@@ -260,6 +260,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     struct NoopWaker;
 
     impl Wake for NoopWaker {
@@ -307,80 +312,103 @@ mod tests {
 
     #[test]
     fn load_shed_layer_creates_service() {
+        init_test("load_shed_layer_creates_service");
         let layer = LoadShedLayer::new();
         let _svc: LoadShed<ReadyService> = layer.layer(ReadyService);
+        crate::test_complete!("load_shed_layer_creates_service");
     }
 
     #[test]
     fn load_shed_passes_through_when_ready() {
+        init_test("load_shed_passes_through_when_ready");
         let mut svc = LoadShed::new(ReadyService);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // poll_ready should succeed
         let ready = svc.poll_ready(&mut cx);
-        assert!(matches!(ready, Poll::Ready(Ok(()))));
-        assert!(!svc.is_overloaded());
+        let ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        let overloaded = svc.is_overloaded();
+        crate::assert_with_log!(!overloaded, "not overloaded", false, overloaded);
 
         // call should succeed
         let mut future = svc.call(21);
         let result = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(result, Poll::Ready(Ok(42))));
+        let ok = matches!(result, Poll::Ready(Ok(42)));
+        crate::assert_with_log!(ok, "call ok", true, ok);
+        crate::test_complete!("load_shed_passes_through_when_ready");
     }
 
     #[test]
     fn load_shed_sheds_when_not_ready() {
+        init_test("load_shed_sheds_when_not_ready");
         let mut svc = LoadShed::new(NeverReadyService);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // poll_ready should return Ready (even though inner is pending)
         let ready = svc.poll_ready(&mut cx);
-        assert!(matches!(ready, Poll::Ready(Ok(()))));
-        assert!(svc.is_overloaded());
+        let ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        let overloaded = svc.is_overloaded();
+        crate::assert_with_log!(overloaded, "overloaded", true, overloaded);
 
         // call should return overloaded error
         let mut future = svc.call(42);
         let result = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(
+        let overloaded = matches!(
             result,
             Poll::Ready(Err(LoadShedError::Overloaded(_)))
-        ));
+        );
+        crate::assert_with_log!(overloaded, "overloaded error", true, overloaded);
+        crate::test_complete!("load_shed_sheds_when_not_ready");
     }
 
     #[test]
     fn load_shed_recovers_after_shed() {
+        init_test("load_shed_recovers_after_shed");
         let mut svc = LoadShed::new(NeverReadyService);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // Trigger overload
         let _ = svc.poll_ready(&mut cx);
-        assert!(svc.is_overloaded());
+        let overloaded = svc.is_overloaded();
+        crate::assert_with_log!(overloaded, "overloaded", true, overloaded);
 
         // Shed a request
         let mut future = svc.call(42);
         let _ = Pin::new(&mut future).poll(&mut cx);
 
         // Overloaded flag should be cleared
-        assert!(!svc.is_overloaded());
+        let overloaded = svc.is_overloaded();
+        crate::assert_with_log!(!overloaded, "overload cleared", false, overloaded);
+        crate::test_complete!("load_shed_recovers_after_shed");
     }
 
     #[test]
     fn overloaded_error_display() {
+        init_test("overloaded_error_display");
         let err = Overloaded::new();
         let display = format!("{err}");
-        assert!(display.contains("overloaded"));
+        let has_overloaded = display.contains("overloaded");
+        crate::assert_with_log!(has_overloaded, "contains overloaded", true, has_overloaded);
+        crate::test_complete!("overloaded_error_display");
     }
 
     #[test]
     fn load_shed_error_display() {
+        init_test("load_shed_error_display");
         let err: LoadShedError<&str> = LoadShedError::Overloaded(Overloaded::new());
         let display = format!("{err}");
-        assert!(display.contains("overloaded"));
+        let has_overloaded = display.contains("overloaded");
+        crate::assert_with_log!(has_overloaded, "overloaded", true, has_overloaded);
 
         let err: LoadShedError<&str> = LoadShedError::Inner("inner error");
         let display = format!("{err}");
-        assert!(display.contains("inner service error"));
+        let has_inner = display.contains("inner service error");
+        crate::assert_with_log!(has_inner, "inner error", true, has_inner);
+        crate::test_complete!("load_shed_error_display");
     }
 }

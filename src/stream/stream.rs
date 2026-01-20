@@ -146,45 +146,53 @@ mod tests {
         }
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn stream_produces_items() {
+        init_test("stream_produces_items");
         let mut stream = TestStream::new(vec![1, 2, 3]);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(1))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(2))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(3))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(None)
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(1)));
+        crate::assert_with_log!(ok, "poll 1", "Poll::Ready(Some(1))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(2)));
+        crate::assert_with_log!(ok, "poll 2", "Poll::Ready(Some(2))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(3)));
+        crate::assert_with_log!(ok, "poll 3", "Poll::Ready(Some(3))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "poll done", "Poll::Ready(None)", poll);
+        crate::test_complete!("stream_produces_items");
     }
 
     #[test]
     fn stream_size_hint() {
+        init_test("stream_size_hint");
         let stream = TestStream::new(vec![1, 2, 3]);
-        assert_eq!(stream.size_hint(), (3, Some(3)));
+        let hint = stream.size_hint();
+        let ok = hint == (3, Some(3));
+        crate::assert_with_log!(ok, "size hint", (3, Some(3)), hint);
+        crate::test_complete!("stream_size_hint");
     }
 
     #[test]
     fn boxed_stream() {
+        init_test("boxed_stream");
         let mut stream: Box<TestStream> = Box::new(TestStream::new(vec![42]));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(42))
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(42)));
+        crate::assert_with_log!(ok, "poll boxed", "Poll::Ready(Some(42))", poll);
+        crate::test_complete!("boxed_stream");
     }
 }

@@ -118,49 +118,56 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn zip_pairs_items() {
+        init_test("zip_pairs_items");
         let mut stream = Zip::new(iter(vec![1, 2, 3]), iter(vec!["a", "b", "c"]));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some((1, "a")))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some((2, "b")))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some((3, "c")))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(None)
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some((1, "a"))));
+        crate::assert_with_log!(ok, "poll 1", "Poll::Ready(Some((1, \"a\")))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some((2, "b"))));
+        crate::assert_with_log!(ok, "poll 2", "Poll::Ready(Some((2, \"b\")))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some((3, "c"))));
+        crate::assert_with_log!(ok, "poll 3", "Poll::Ready(Some((3, \"c\")))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "poll done", "Poll::Ready(None)", poll);
+        crate::test_complete!("zip_pairs_items");
     }
 
     #[test]
     fn zip_ends_when_shorter_finishes() {
+        init_test("zip_ends_when_shorter_finishes");
         let mut stream = Zip::new(iter(vec![1, 2, 3]), iter(vec!["a"]));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some((1, "a")))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(None)
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some((1, "a"))));
+        crate::assert_with_log!(ok, "poll 1", "Poll::Ready(Some((1, \"a\")))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "poll done", "Poll::Ready(None)", poll);
+        crate::test_complete!("zip_ends_when_shorter_finishes");
     }
 
     #[test]
     fn zip_size_hint_min() {
+        init_test("zip_size_hint_min");
         let stream = Zip::new(iter(vec![1, 2, 3]), iter(vec!["a", "b"]));
-        assert_eq!(stream.size_hint(), (2, Some(2)));
+        let hint = stream.size_hint();
+        let ok = hint == (2, Some(2));
+        crate::assert_with_log!(ok, "size hint", (2, Some(2)), hint);
+        crate::test_complete!("zip_size_hint_min");
     }
 }

@@ -87,8 +87,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn receiver_stream_reads_messages() {
+        init_test("receiver_stream_reads_messages");
         let cx_send = Cx::for_testing();
         let cx_recv = Cx::for_testing();
         let (tx, rx) = mpsc::channel(4);
@@ -102,21 +108,18 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(1))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(2))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(Some(3))
-        ));
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(None)
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(1)));
+        crate::assert_with_log!(ok, "poll 1", "Poll::Ready(Some(1))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(2)));
+        crate::assert_with_log!(ok, "poll 2", "Poll::Ready(Some(2))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(3)));
+        crate::assert_with_log!(ok, "poll 3", "Poll::Ready(Some(3))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "poll done", "Poll::Ready(None)", poll);
+        crate::test_complete!("receiver_stream_reads_messages");
     }
 }

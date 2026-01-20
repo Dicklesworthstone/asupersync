@@ -169,8 +169,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn try_collect_success() {
+        init_test("try_collect_success");
         let items: Vec<Result<i32, &str>> = vec![Ok(1), Ok(2), Ok(3)];
         let mut future = TryCollect::new(iter(items), Vec::new());
         let waker = noop_waker();
@@ -178,15 +184,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Ok(collected)) => {
-                assert_eq!(collected, vec![1, 2, 3]);
+                let ok = collected == vec![1, 2, 3];
+                crate::assert_with_log!(ok, "collected", vec![1, 2, 3], collected);
             }
             Poll::Ready(Err(_)) => panic!("expected Ok"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_collect_success");
     }
 
     #[test]
     fn try_collect_error() {
+        init_test("try_collect_error");
         let items: Vec<Result<i32, &str>> = vec![Ok(1), Err("error"), Ok(3)];
         let mut future = TryCollect::new(iter(items), Vec::new());
         let waker = noop_waker();
@@ -194,15 +203,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Err(e)) => {
-                assert_eq!(e, "error");
+                let ok = e == "error";
+                crate::assert_with_log!(ok, "error", "error", e);
             }
             Poll::Ready(Ok(_)) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_collect_error");
     }
 
     #[test]
     fn try_collect_empty() {
+        init_test("try_collect_empty");
         let items: Vec<Result<i32, &str>> = vec![];
         let mut future = TryCollect::new(iter(items), Vec::new());
         let waker = noop_waker();
@@ -210,15 +222,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Ok(collected)) => {
-                assert!(collected.is_empty());
+                let empty = collected.is_empty();
+                crate::assert_with_log!(empty, "collected empty", true, empty);
             }
             Poll::Ready(Err(_)) => panic!("expected Ok"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_collect_empty");
     }
 
     #[test]
     fn try_fold_success() {
+        init_test("try_fold_success");
         let items: Vec<Result<i32, &str>> = vec![Ok(1), Ok(2), Ok(3)];
         let mut future = TryFold::new(iter(items), 0i32, |acc, x| Ok(acc + x));
         let waker = noop_waker();
@@ -226,15 +241,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Ok(sum)) => {
-                assert_eq!(sum, 6);
+                let ok = sum == 6;
+                crate::assert_with_log!(ok, "sum", 6, sum);
             }
             Poll::Ready(Err(_)) => panic!("expected Ok"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_fold_success");
     }
 
     #[test]
     fn try_fold_stream_error() {
+        init_test("try_fold_stream_error");
         let items: Vec<Result<i32, &str>> = vec![Ok(1), Err("stream error"), Ok(3)];
         let mut future = TryFold::new(iter(items), 0i32, |acc, x| Ok(acc + x));
         let waker = noop_waker();
@@ -242,15 +260,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Err(e)) => {
-                assert_eq!(e, "stream error");
+                let ok = e == "stream error";
+                crate::assert_with_log!(ok, "stream error", "stream error", e);
             }
             Poll::Ready(Ok(_)) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_fold_stream_error");
     }
 
     #[test]
     fn try_fold_closure_error() {
+        init_test("try_fold_closure_error");
         let items: Vec<Result<i32, &str>> = vec![Ok(1), Ok(2), Ok(3)];
         let mut future = TryFold::new(iter(items), 0i32, |acc, x| {
             if x == 2 {
@@ -264,15 +285,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Err(e)) => {
-                assert_eq!(e, "closure error");
+                let ok = e == "closure error";
+                crate::assert_with_log!(ok, "closure error", "closure error", e);
             }
             Poll::Ready(Ok(_)) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_fold_closure_error");
     }
 
     #[test]
     fn try_for_each_success() {
+        init_test("try_for_each_success");
         let mut results = Vec::new();
         let mut future = TryForEach::new(iter(vec![1i32, 2, 3]), |x| {
             results.push(x);
@@ -283,15 +307,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Ok(())) => {
-                assert_eq!(results, vec![1, 2, 3]);
+                let ok = results == vec![1, 2, 3];
+                crate::assert_with_log!(ok, "results", vec![1, 2, 3], results);
             }
             Poll::Ready(Err(_)) => panic!("expected Ok"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_for_each_success");
     }
 
     #[test]
     fn try_for_each_error() {
+        init_test("try_for_each_error");
         let mut results = Vec::new();
         let mut future = TryForEach::new(iter(vec![1i32, 2, 3]), |x| {
             if x == 2 {
@@ -306,11 +333,14 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Err(e)) => {
-                assert_eq!(e, "error at 2");
-                assert_eq!(results, vec![1]); // Only first item processed
+                let err_ok = e == "error at 2";
+                crate::assert_with_log!(err_ok, "error", "error at 2", e);
+                let ok = results == vec![1];
+                crate::assert_with_log!(ok, "results", vec![1], results);
             }
             Poll::Ready(Ok(())) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("try_for_each_error");
     }
 }

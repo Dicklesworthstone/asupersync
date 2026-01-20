@@ -122,8 +122,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn merge_yields_all_items() {
+        init_test("merge_yields_all_items");
         let mut stream = merge([iter(vec![1, 3, 5]), iter(vec![2, 4, 6])]);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -138,18 +144,21 @@ mod tests {
         }
 
         items.sort_unstable();
-        assert_eq!(items, vec![1, 2, 3, 4, 5, 6]);
+        let ok = items == vec![1, 2, 3, 4, 5, 6];
+        crate::assert_with_log!(ok, "merged items", vec![1, 2, 3, 4, 5, 6], items);
+        crate::test_complete!("merge_yields_all_items");
     }
 
     #[test]
     fn merge_empty() {
+        init_test("merge_empty");
         let mut stream: Merge<crate::stream::Iter<std::vec::IntoIter<i32>>> = merge([]);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
-            Poll::Ready(None)
-        ));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "poll empty", "Poll::Ready(None)", poll);
+        crate::test_complete!("merge_empty");
     }
 }

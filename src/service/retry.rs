@@ -440,6 +440,11 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -504,73 +509,90 @@ mod tests {
 
     #[test]
     fn layer_creates_service() {
+        init_test("layer_creates_service");
         let policy = LimitedRetry::<i32>::new(3);
         let layer = RetryLayer::new(policy);
         let (svc, _) = FailingService::new(0);
         let _retry_svc: Retry<_, FailingService> = layer.layer(svc);
+        crate::test_complete!("layer_creates_service");
     }
 
     #[test]
     fn limited_retry_policy_basics() {
+        init_test("limited_retry_policy_basics");
         let policy = LimitedRetry::<i32>::new(3);
-        assert_eq!(policy.max_retries(), 3);
-        assert_eq!(policy.current_attempt(), 0);
+        let max = policy.max_retries();
+        crate::assert_with_log!(max == 3, "max_retries", 3, max);
+        let attempt = policy.current_attempt();
+        crate::assert_with_log!(attempt == 0, "current_attempt", 0, attempt);
+        crate::test_complete!("limited_retry_policy_basics");
     }
 
     #[test]
     fn limited_retry_clones_request() {
+        init_test("limited_retry_clones_request");
         let policy = LimitedRetry::<i32>::new(3);
         // Specify generic types for Policy trait: Request=i32, Res=(), E=()
         let cloned = Policy::<i32, (), ()>::clone_request(&policy, &42);
-        assert_eq!(cloned, Some(42));
+        crate::assert_with_log!(cloned == Some(42), "cloned", Some(42), cloned);
+        crate::test_complete!("limited_retry_clones_request");
     }
 
     #[test]
     fn limited_retry_returns_none_on_success() {
+        init_test("limited_retry_returns_none_on_success");
         let policy = LimitedRetry::<i32>::new(3);
         let result: Option<_> = policy.retry(&42, Ok::<&i32, &String>(&100));
-        assert!(result.is_none());
+        crate::assert_with_log!(result.is_none(), "none on success", true, result.is_none());
+        crate::test_complete!("limited_retry_returns_none_on_success");
     }
 
     #[test]
     fn limited_retry_returns_some_on_error() {
+        init_test("limited_retry_returns_some_on_error");
         let policy = LimitedRetry::<i32>::new(3);
         let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
-        assert!(result.is_some());
+        crate::assert_with_log!(result.is_some(), "some on error", true, result.is_some());
+        crate::test_complete!("limited_retry_returns_some_on_error");
     }
 
     #[test]
     fn limited_retry_exhausts_retries() {
+        init_test("limited_retry_exhausts_retries");
         let mut policy = LimitedRetry::<i32>::new(2);
 
         // First retry
         let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
-        assert!(result.is_some());
+        crate::assert_with_log!(result.is_some(), "first retry", true, result.is_some());
         policy.current_attempt = 1;
 
         // Second retry
         let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
-        assert!(result.is_some());
+        crate::assert_with_log!(result.is_some(), "second retry", true, result.is_some());
         policy.current_attempt = 2;
 
         // Third attempt - should fail (max_retries reached)
         let result: Option<_> = policy.retry(&42, Err::<&i32, &&str>(&"error"));
-        assert!(result.is_none());
+        crate::assert_with_log!(result.is_none(), "third retry none", true, result.is_none());
+        crate::test_complete!("limited_retry_exhausts_retries");
     }
 
     #[test]
     fn no_retry_policy() {
+        init_test("no_retry_policy");
         let policy = NoRetry::new();
         let result: Option<std::future::Pending<NoRetry>> =
             Policy::<i32, (), &str>::retry(&policy, &42, Err(&"error"));
-        assert!(result.is_none());
+        crate::assert_with_log!(result.is_none(), "retry none", true, result.is_none());
 
         let cloned: Option<i32> = Policy::<i32, (), ()>::clone_request(&policy, &42);
-        assert!(cloned.is_none());
+        crate::assert_with_log!(cloned.is_none(), "clone none", true, cloned.is_none());
+        crate::test_complete!("no_retry_policy");
     }
 
     #[test]
     fn retry_succeeds_after_failures() {
+        init_test("retry_succeeds_after_failures");
         let policy = LimitedRetry::<i32>::new(3);
         let (svc, calls) = FailingService::new(2); // Fail twice, then succeed
         let mut retry_svc = Retry::new(svc, policy);
@@ -588,7 +610,8 @@ mod tests {
         loop {
             match Pin::new(&mut future).poll(&mut cx) {
                 Poll::Ready(result) => {
-                    assert!(matches!(result, Ok(42)));
+                    let ok = matches!(result, Ok(42));
+                    crate::assert_with_log!(ok, "result ok", true, ok);
                     break;
                 }
                 Poll::Pending => continue,
@@ -596,11 +619,14 @@ mod tests {
         }
 
         // Should have called the service 3 times (2 failures + 1 success)
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let count = calls.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 3, "call count", 3, count);
+        crate::test_complete!("retry_succeeds_after_failures");
     }
 
     #[test]
     fn retry_exhausts_and_returns_error() {
+        init_test("retry_exhausts_and_returns_error");
         let policy = LimitedRetry::<i32>::new(2);
         let (svc, calls) = FailingService::new(10); // Always fail
         let mut retry_svc = Retry::new(svc, policy);
@@ -614,7 +640,8 @@ mod tests {
         loop {
             match Pin::new(&mut future).poll(&mut cx) {
                 Poll::Ready(result) => {
-                    assert!(matches!(result, Err("service error")));
+                    let err = matches!(result, Err("service error"));
+                    crate::assert_with_log!(err, "result err", true, err);
                     break;
                 }
                 Poll::Pending => continue,
@@ -622,6 +649,8 @@ mod tests {
         }
 
         // Should have called 3 times (initial + 2 retries)
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let count = calls.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 3, "call count", 3, count);
+        crate::test_complete!("retry_exhausts_and_returns_error");
     }
 }

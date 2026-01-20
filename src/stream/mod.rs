@@ -391,8 +391,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn stream_ext_chaining() {
+        init_test("stream_ext_chaining");
         use std::future::Future;
         use std::pin::Pin;
         use std::task::Poll;
@@ -408,14 +414,17 @@ mod tests {
 
         match Pin::new(&mut collect).poll(&mut cx) {
             Poll::Ready(result) => {
-                assert_eq!(result, vec![20, 40, 60]);
+                let ok = result == vec![20, 40, 60];
+                crate::assert_with_log!(ok, "collected", vec![20, 40, 60], result);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("stream_ext_chaining");
     }
 
     #[test]
     fn stream_ext_fold_chain() {
+        init_test("stream_ext_fold_chain");
         use std::future::Future;
         use std::pin::Pin;
         use std::task::Poll;
@@ -428,167 +437,189 @@ mod tests {
 
         match Pin::new(&mut fold).poll(&mut cx) {
             Poll::Ready(sum) => {
-                assert_eq!(sum, 30); // 2+4+6+8+10 = 30
+                let ok = sum == 30;
+                crate::assert_with_log!(ok, "sum", 30, sum);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("stream_ext_fold_chain");
     }
 
     #[test]
     fn test_stream_next() {
+        init_test("test_stream_next");
         let mut stream = iter(vec![1, 2, 3]);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let mut next = stream.next();
-        assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(1)));
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "next 1", Poll::Ready(Some(1)), poll);
 
         let mut next = stream.next();
-        assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(2)));
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "next 2", Poll::Ready(Some(2)), poll);
 
         let mut next = stream.next();
-        assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(3)));
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "next 3", Poll::Ready(Some(3)), poll);
 
         let mut next = stream.next();
-        assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(None));
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "next done",
+            Poll::Ready(None::<i32>),
+            poll
+        );
+        crate::test_complete!("test_stream_next");
     }
 
     #[test]
     fn test_stream_map() {
+        init_test("test_stream_map");
         let stream = iter(vec![1, 2, 3]);
         let mut mapped = stream.map(|x| x * 2);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut mapped).poll_next(&mut cx),
-            Poll::Ready(Some(2))
+        let poll = Pin::new(&mut mapped).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "map 1", Poll::Ready(Some(2)), poll);
+        let poll = Pin::new(&mut mapped).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(4)), "map 2", Poll::Ready(Some(4)), poll);
+        let poll = Pin::new(&mut mapped).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(6)), "map 3", Poll::Ready(Some(6)), poll);
+        let poll = Pin::new(&mut mapped).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "map done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut mapped).poll_next(&mut cx),
-            Poll::Ready(Some(4))
-        );
-        assert_eq!(
-            Pin::new(&mut mapped).poll_next(&mut cx),
-            Poll::Ready(Some(6))
-        );
-        assert_eq!(Pin::new(&mut mapped).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("test_stream_map");
     }
 
     #[test]
     fn test_stream_filter() {
+        init_test("test_stream_filter");
         let stream = iter(vec![1, 2, 3, 4, 5, 6]);
         let mut filtered = stream.filter(|x| x % 2 == 0);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut filtered).poll_next(&mut cx),
-            Poll::Ready(Some(2))
+        let poll = Pin::new(&mut filtered).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "filter 1", Poll::Ready(Some(2)), poll);
+        let poll = Pin::new(&mut filtered).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(4)), "filter 2", Poll::Ready(Some(4)), poll);
+        let poll = Pin::new(&mut filtered).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(6)), "filter 3", Poll::Ready(Some(6)), poll);
+        let poll = Pin::new(&mut filtered).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "filter done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut filtered).poll_next(&mut cx),
-            Poll::Ready(Some(4))
-        );
-        assert_eq!(
-            Pin::new(&mut filtered).poll_next(&mut cx),
-            Poll::Ready(Some(6))
-        );
-        assert_eq!(
-            Pin::new(&mut filtered).poll_next(&mut cx),
-            Poll::Ready(None)
-        );
+        crate::test_complete!("test_stream_filter");
     }
 
     #[test]
     fn test_stream_filter_map() {
+        init_test("test_stream_filter_map");
         let stream = iter(vec!["1", "two", "3", "four"]);
         let mut parsed = stream.filter_map(|s| s.parse::<i32>().ok());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut parsed).poll_next(&mut cx),
-            Poll::Ready(Some(1))
+        let poll = Pin::new(&mut parsed).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "filter_map 1", Poll::Ready(Some(1)), poll);
+        let poll = Pin::new(&mut parsed).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "filter_map 2", Poll::Ready(Some(3)), poll);
+        let poll = Pin::new(&mut parsed).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "filter_map done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut parsed).poll_next(&mut cx),
-            Poll::Ready(Some(3))
-        );
-        assert_eq!(Pin::new(&mut parsed).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("test_stream_filter_map");
     }
 
     #[test]
     fn test_stream_take() {
+        init_test("test_stream_take");
         let stream = iter(vec![1, 2, 3, 4, 5]);
         let mut taken = stream.take(3);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut taken).poll_next(&mut cx),
-            Poll::Ready(Some(1))
+        let poll = Pin::new(&mut taken).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "take 1", Poll::Ready(Some(1)), poll);
+        let poll = Pin::new(&mut taken).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "take 2", Poll::Ready(Some(2)), poll);
+        let poll = Pin::new(&mut taken).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "take 3", Poll::Ready(Some(3)), poll);
+        let poll = Pin::new(&mut taken).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "take done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut taken).poll_next(&mut cx),
-            Poll::Ready(Some(2))
-        );
-        assert_eq!(
-            Pin::new(&mut taken).poll_next(&mut cx),
-            Poll::Ready(Some(3))
-        );
-        assert_eq!(Pin::new(&mut taken).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("test_stream_take");
     }
 
     #[test]
     fn test_stream_skip() {
+        init_test("test_stream_skip");
         let stream = iter(vec![1, 2, 3, 4, 5]);
         let mut skipped = stream.skip(2);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut skipped).poll_next(&mut cx),
-            Poll::Ready(Some(3))
+        let poll = Pin::new(&mut skipped).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "skip 1", Poll::Ready(Some(3)), poll);
+        let poll = Pin::new(&mut skipped).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(4)), "skip 2", Poll::Ready(Some(4)), poll);
+        let poll = Pin::new(&mut skipped).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(5)), "skip 3", Poll::Ready(Some(5)), poll);
+        let poll = Pin::new(&mut skipped).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "skip done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut skipped).poll_next(&mut cx),
-            Poll::Ready(Some(4))
-        );
-        assert_eq!(
-            Pin::new(&mut skipped).poll_next(&mut cx),
-            Poll::Ready(Some(5))
-        );
-        assert_eq!(Pin::new(&mut skipped).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("test_stream_skip");
     }
 
     #[test]
     fn test_stream_enumerate() {
+        init_test("test_stream_enumerate");
         let stream = iter(vec!["a", "b", "c"]);
         let mut enumerated = stream.enumerate();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut enumerated).poll_next(&mut cx),
-            Poll::Ready(Some((0, "a")))
+        let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some((0, "a"))), "enum 0", Poll::Ready(Some((0, "a"))), poll);
+        let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some((1, "b"))), "enum 1", Poll::Ready(Some((1, "b"))), poll);
+        let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some((2, "c"))), "enum 2", Poll::Ready(Some((2, "c"))), poll);
+        let poll = Pin::new(&mut enumerated).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<(usize, &str)>),
+            "enum done",
+            Poll::Ready(None::<(usize, &str)>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut enumerated).poll_next(&mut cx),
-            Poll::Ready(Some((1, "b")))
-        );
-        assert_eq!(
-            Pin::new(&mut enumerated).poll_next(&mut cx),
-            Poll::Ready(Some((2, "c")))
-        );
-        assert_eq!(
-            Pin::new(&mut enumerated).poll_next(&mut cx),
-            Poll::Ready(None)
-        );
+        crate::test_complete!("test_stream_enumerate");
     }
 
     #[test]
     fn test_stream_then() {
+        init_test("test_stream_then");
         // We need a runtime or manual polling for async map.
         // But Then combinator returns a Stream.
         // We can poll it manually.
@@ -600,34 +631,30 @@ mod tests {
 
         // First item
         let mut next = processed.next();
-        match Pin::new(&mut next).poll(&mut cx) {
-            // First poll starts the future, but future might be ready immediately
-            Poll::Ready(Some(10)) => {}
-            Poll::Pending => {
-                // If pending, poll again?
-                // async move { x * 10 } is ready immediately.
-                // But Then implementation:
-                // 1. polls stream -> Ready(1). Creates future.
-                // 2. Loop continues.
-                // 3. polls future -> Ready(10). Returns Ready(Some(10)).
-                // So it should be Ready immediately.
-                panic!("Should be ready");
-            }
-            Poll::Ready(Some(val)) => panic!("Expected 10, got {val}"),
-            Poll::Ready(None) => panic!("Expected Some"),
-        }
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(10)));
+        crate::assert_with_log!(ok, "then 1", "Poll::Ready(Some(10))", poll);
 
         // Second item
         let mut next = processed.next();
-        assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(Some(20)));
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(20)), "then 2", Poll::Ready(Some(20)), poll);
 
         // End
         let mut next = processed.next();
-        assert_eq!(Pin::new(&mut next).poll(&mut cx), Poll::Ready(None));
+        let poll = Pin::new(&mut next).poll(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "then done",
+            Poll::Ready(None::<i32>),
+            poll
+        );
+        crate::test_complete!("test_stream_then");
     }
 
     #[test]
     fn test_stream_inspect() {
+        init_test("test_stream_inspect");
         use std::cell::RefCell;
         let stream = iter(vec![1, 2, 3]);
         let items = RefCell::new(Vec::new());
@@ -635,32 +662,34 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut inspected).poll_next(&mut cx),
-            Poll::Ready(Some(1))
-        );
-        assert_eq!(*items.borrow(), vec![1]);
+        let poll = Pin::new(&mut inspected).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "inspect 1", Poll::Ready(Some(1)), poll);
+        let items_now = items.borrow().clone();
+        crate::assert_with_log!(items_now == vec![1], "items", vec![1], items_now);
 
-        assert_eq!(
-            Pin::new(&mut inspected).poll_next(&mut cx),
-            Poll::Ready(Some(2))
-        );
-        assert_eq!(*items.borrow(), vec![1, 2]);
+        let poll = Pin::new(&mut inspected).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "inspect 2", Poll::Ready(Some(2)), poll);
+        let items_now = items.borrow().clone();
+        crate::assert_with_log!(items_now == vec![1, 2], "items", vec![1, 2], items_now);
 
-        assert_eq!(
-            Pin::new(&mut inspected).poll_next(&mut cx),
-            Poll::Ready(Some(3))
-        );
-        assert_eq!(*items.borrow(), vec![1, 2, 3]);
+        let poll = Pin::new(&mut inspected).poll_next(&mut cx);
+        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "inspect 3", Poll::Ready(Some(3)), poll);
+        let items_now = items.borrow().clone();
+        crate::assert_with_log!(items_now == vec![1, 2, 3], "items", vec![1, 2, 3], items_now);
 
-        assert_eq!(
-            Pin::new(&mut inspected).poll_next(&mut cx),
-            Poll::Ready(None)
+        let poll = Pin::new(&mut inspected).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "inspect done",
+            Poll::Ready(None::<i32>),
+            poll
         );
+        crate::test_complete!("test_stream_inspect");
     }
 
     #[test]
     fn test_receiver_stream() {
+        init_test("test_receiver_stream");
         use crate::channel::mpsc;
         use crate::cx::Cx;
 
@@ -675,22 +704,23 @@ mod tests {
         let waker = noop_waker();
         let mut cx_task = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(Some(1))
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "recv 1", Poll::Ready(Some(1)), poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "recv 2", Poll::Ready(Some(2)), poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "recv done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(Some(2))
-        );
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(None)
-        );
+        crate::test_complete!("test_receiver_stream");
     }
 
     #[test]
     fn test_watch_stream() {
+        init_test("test_watch_stream");
         use crate::channel::watch;
         use crate::cx::Cx;
 
@@ -701,21 +731,19 @@ mod tests {
         let mut cx_task = Context::from_waker(&waker);
 
         // Initial value
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(Some(0))
-        );
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(0)), "watch 0", Poll::Ready(Some(0)), poll);
 
         // Update value
         tx.send(1).unwrap();
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(Some(1))
-        );
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "watch 1", Poll::Ready(Some(1)), poll);
+        crate::test_complete!("test_watch_stream");
     }
 
     #[test]
     fn test_broadcast_stream() {
+        init_test("test_broadcast_stream");
         use crate::channel::broadcast;
         use crate::cx::Cx;
 
@@ -728,18 +756,26 @@ mod tests {
         tx.send(&cx, 1).unwrap();
         tx.send(&cx, 2).unwrap();
 
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(Some(Ok(1)))
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(Ok::<i32, BroadcastStreamRecvError>(1))),
+            "broadcast 1",
+            Poll::Ready(Some(Ok::<i32, BroadcastStreamRecvError>(1))),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut stream).poll_next(&mut cx_task),
-            Poll::Ready(Some(Ok(2)))
+        let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(Ok::<i32, BroadcastStreamRecvError>(2))),
+            "broadcast 2",
+            Poll::Ready(Some(Ok::<i32, BroadcastStreamRecvError>(2))),
+            poll
         );
+        crate::test_complete!("test_broadcast_stream");
     }
 
     #[test]
     fn test_forward() {
+        init_test("test_forward");
         use crate::channel::mpsc;
         use crate::cx::Cx;
 
@@ -755,21 +791,19 @@ mod tests {
         let waker = noop_waker();
         let mut cx_task = Context::from_waker(&waker);
 
-        assert_eq!(
-            Pin::new(&mut output).poll_next(&mut cx_task),
-            Poll::Ready(Some(1))
+        let poll = Pin::new(&mut output).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(1)), "forward 1", Poll::Ready(Some(1)), poll);
+        let poll = Pin::new(&mut output).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(2)), "forward 2", Poll::Ready(Some(2)), poll);
+        let poll = Pin::new(&mut output).poll_next(&mut cx_task);
+        crate::assert_with_log!(poll == Poll::Ready(Some(3)), "forward 3", Poll::Ready(Some(3)), poll);
+        let poll = Pin::new(&mut output).poll_next(&mut cx_task);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "forward done",
+            Poll::Ready(None::<i32>),
+            poll
         );
-        assert_eq!(
-            Pin::new(&mut output).poll_next(&mut cx_task),
-            Poll::Ready(Some(2))
-        );
-        assert_eq!(
-            Pin::new(&mut output).poll_next(&mut cx_task),
-            Poll::Ready(Some(3))
-        );
-        assert_eq!(
-            Pin::new(&mut output).poll_next(&mut cx_task),
-            Poll::Ready(None)
-        );
+        crate::test_complete!("test_forward");
     }
 }

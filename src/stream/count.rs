@@ -62,45 +62,59 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn count_items() {
+        init_test("count_items");
         let mut future = Count::new(iter(vec![1i32, 2, 3, 4, 5]));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(count) => {
-                assert_eq!(count, 5);
+                let ok = count == 5;
+                crate::assert_with_log!(ok, "count", 5, count);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("count_items");
     }
 
     #[test]
     fn count_empty() {
+        init_test("count_empty");
         let mut future = Count::new(iter(Vec::<i32>::new()));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(count) => {
-                assert_eq!(count, 0);
+                let ok = count == 0;
+                crate::assert_with_log!(ok, "count", 0, count);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("count_empty");
     }
 
     #[test]
     fn count_single() {
+        init_test("count_single");
         let mut future = Count::new(iter(vec![42i32]));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(count) => {
-                assert_eq!(count, 1);
+                let ok = count == 1;
+                crate::assert_with_log!(ok, "count", 1, count);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("count_single");
     }
 }

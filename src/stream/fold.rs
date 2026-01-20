@@ -71,36 +71,48 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn fold_sum() {
+        init_test("fold_sum");
         let mut future = Fold::new(iter(vec![1i32, 2, 3, 4, 5]), 0i32, |acc, x| acc + x);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(sum) => {
-                assert_eq!(sum, 15);
+                let ok = sum == 15;
+                crate::assert_with_log!(ok, "sum", 15, sum);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("fold_sum");
     }
 
     #[test]
     fn fold_product() {
+        init_test("fold_product");
         let mut future = Fold::new(iter(vec![1i32, 2, 3, 4, 5]), 1i32, |acc, x| acc * x);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(product) => {
-                assert_eq!(product, 120);
+                let ok = product == 120;
+                crate::assert_with_log!(ok, "product", 120, product);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("fold_product");
     }
 
     #[test]
     fn fold_string_concat() {
+        init_test("fold_string_concat");
         let mut future = Fold::new(
             iter(vec!["a", "b", "c"]),
             String::new(),
@@ -114,23 +126,28 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(s) => {
-                assert_eq!(s, "abc");
+                let ok = s == "abc";
+                crate::assert_with_log!(ok, "concat", "abc", s);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("fold_string_concat");
     }
 
     #[test]
     fn fold_empty() {
+        init_test("fold_empty");
         let mut future = Fold::new(iter(Vec::<i32>::new()), 42i32, |acc, x| acc + x);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(result) => {
-                assert_eq!(result, 42); // Returns initial value for empty stream
+                let ok = result == 42;
+                crate::assert_with_log!(ok, "empty result", 42, result);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("fold_empty");
     }
 }

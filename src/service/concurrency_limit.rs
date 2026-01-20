@@ -263,6 +263,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     struct NoopWaker;
 
     impl Wake for NoopWaker {
@@ -334,39 +339,53 @@ mod tests {
 
     #[test]
     fn layer_creates_service() {
+        init_test("layer_creates_service");
         let layer = ConcurrencyLimitLayer::new(5);
-        assert_eq!(layer.max_concurrency(), 5);
+        let max = layer.max_concurrency();
+        crate::assert_with_log!(max == 5, "max", 5, max);
         let _svc: ConcurrencyLimit<EchoService> = layer.layer(EchoService);
+        crate::test_complete!("layer_creates_service");
     }
 
     #[test]
     fn service_accessors() {
+        init_test("service_accessors");
         let semaphore = Arc::new(Semaphore::new(10));
         let svc = ConcurrencyLimit::new(EchoService, semaphore);
-        assert_eq!(svc.max_concurrency(), 10);
-        assert_eq!(svc.available(), 10);
+        let max = svc.max_concurrency();
+        crate::assert_with_log!(max == 10, "max", 10, max);
+        let available = svc.available();
+        crate::assert_with_log!(available == 10, "available", 10, available);
         let _ = svc.inner();
+        crate::test_complete!("service_accessors");
     }
 
     #[test]
     fn poll_ready_acquires_permit() {
+        init_test("poll_ready_acquires_permit");
         let layer = ConcurrencyLimitLayer::new(2);
         let mut svc = layer.layer(EchoService);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // Initially 2 available
-        assert_eq!(svc.available(), 2);
+        let available = svc.available();
+        crate::assert_with_log!(available == 2, "available", 2, available);
 
         // poll_ready should acquire a permit
         let ready = svc.poll_ready(&mut cx);
-        assert!(matches!(ready, Poll::Ready(Ok(()))));
-        assert!(svc.permit.is_some());
-        assert_eq!(svc.available(), 1);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "ready ok", true, ready_ok);
+        let has_permit = svc.permit.is_some();
+        crate::assert_with_log!(has_permit, "permit present", true, has_permit);
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+        crate::test_complete!("poll_ready_acquires_permit");
     }
 
     #[test]
     fn call_consumes_permit() {
+        init_test("call_consumes_permit");
         let layer = ConcurrencyLimitLayer::new(2);
         let mut svc = layer.layer(EchoService);
         let waker = noop_waker();
@@ -374,15 +393,19 @@ mod tests {
 
         // Acquire permit
         let _ = svc.poll_ready(&mut cx);
-        assert!(svc.permit.is_some());
+        let has_permit = svc.permit.is_some();
+        crate::assert_with_log!(has_permit, "permit present", true, has_permit);
 
         // Call consumes permit
         let _future = svc.call(42);
-        assert!(svc.permit.is_none());
+        let has_permit = svc.permit.is_some();
+        crate::assert_with_log!(!has_permit, "permit cleared", false, has_permit);
+        crate::test_complete!("call_consumes_permit");
     }
 
     #[test]
     fn future_releases_permit_on_completion() {
+        init_test("future_releases_permit_on_completion");
         let layer = ConcurrencyLimitLayer::new(2);
         let mut svc = layer.layer(EchoService);
         let waker = noop_waker();
@@ -390,20 +413,25 @@ mod tests {
 
         // Acquire and call
         let _ = svc.poll_ready(&mut cx);
-        assert_eq!(svc.available(), 1);
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
         let mut future = svc.call(42);
 
         // Future completes
         let result = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(result, Poll::Ready(Ok(42))));
+        let ok = matches!(result, Poll::Ready(Ok(42)));
+        crate::assert_with_log!(ok, "result ok", true, ok);
 
         // Drop future to release permit
         drop(future);
-        assert_eq!(svc.available(), 2);
+        let available = svc.available();
+        crate::assert_with_log!(available == 2, "available", 2, available);
+        crate::test_complete!("future_releases_permit_on_completion");
     }
 
     #[test]
     fn limit_enforced() {
+        init_test("limit_enforced");
         let layer = ConcurrencyLimitLayer::new(1);
         let mut svc1 = layer.layer(EchoService);
         let mut svc2 = layer.layer(EchoService);
@@ -412,21 +440,28 @@ mod tests {
 
         // First service acquires permit
         let ready1 = svc1.poll_ready(&mut cx);
-        assert!(matches!(ready1, Poll::Ready(Ok(()))));
+        let ok = matches!(ready1, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready1 ok", true, ok);
 
         // Second service should be pending (no permits)
         let ready2 = svc2.poll_ready(&mut cx);
-        assert!(ready2.is_pending());
+        let pending = ready2.is_pending();
+        crate::assert_with_log!(pending, "ready2 pending", true, pending);
+        crate::test_complete!("limit_enforced");
     }
 
     #[test]
     fn error_display() {
+        init_test("error_display");
         let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::LimitExceeded;
         let display = format!("{err}");
-        assert!(display.contains("limit exceeded"));
+        let has_limit = display.contains("limit exceeded");
+        crate::assert_with_log!(has_limit, "limit exceeded", true, has_limit);
 
         let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::Inner("inner error");
         let display = format!("{err}");
-        assert!(display.contains("inner service error"));
+        let has_inner = display.contains("inner service error");
+        crate::assert_with_log!(has_inner, "inner error", true, has_inner);
+        crate::test_complete!("error_display");
     }
 }

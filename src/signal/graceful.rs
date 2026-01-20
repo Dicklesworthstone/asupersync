@@ -257,35 +257,56 @@ mod tests {
         std::pin::Pin::new(fut).poll(&mut cx)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn graceful_outcome_completed() {
+        init_test("graceful_outcome_completed");
         let outcome: GracefulOutcome<i32> = GracefulOutcome::Completed(42);
-        assert!(outcome.is_completed());
-        assert!(!outcome.is_shutdown());
-        assert_eq!(outcome.into_completed(), Some(42));
+        let completed = outcome.is_completed();
+        crate::assert_with_log!(completed, "completed", true, completed);
+        let shutdown = outcome.is_shutdown();
+        crate::assert_with_log!(!shutdown, "not shutdown", false, shutdown);
+        let value = outcome.into_completed();
+        crate::assert_with_log!(value == Some(42), "value", Some(42), value);
+        crate::test_complete!("graceful_outcome_completed");
     }
 
     #[test]
     fn graceful_outcome_shutdown() {
+        init_test("graceful_outcome_shutdown");
         let outcome: GracefulOutcome<i32> = GracefulOutcome::ShutdownSignaled;
-        assert!(!outcome.is_completed());
-        assert!(outcome.is_shutdown());
-        assert_eq!(outcome.into_completed(), None);
+        let completed = outcome.is_completed();
+        crate::assert_with_log!(!completed, "not completed", false, completed);
+        let shutdown = outcome.is_shutdown();
+        crate::assert_with_log!(shutdown, "shutdown", true, shutdown);
+        let value = outcome.into_completed();
+        let none = value.is_none();
+        crate::assert_with_log!(none, "value none", true, none);
+        crate::test_complete!("graceful_outcome_shutdown");
     }
 
     #[test]
     fn graceful_outcome_map() {
+        init_test("graceful_outcome_map");
         let outcome: GracefulOutcome<i32> = GracefulOutcome::Completed(21);
         let mapped = outcome.map(|x| x * 2);
-        assert_eq!(mapped.into_completed(), Some(42));
+        let value = mapped.into_completed();
+        crate::assert_with_log!(value == Some(42), "mapped value", Some(42), value);
 
         let outcome: GracefulOutcome<i32> = GracefulOutcome::ShutdownSignaled;
         let mapped = outcome.map(|x| x * 2);
-        assert!(mapped.is_shutdown());
+        let shutdown = mapped.is_shutdown();
+        crate::assert_with_log!(shutdown, "mapped shutdown", true, shutdown);
+        crate::test_complete!("graceful_outcome_map");
     }
 
     #[test]
     fn with_graceful_shutdown_already_shutdown() {
+        init_test("with_graceful_shutdown_already_shutdown");
         let controller = ShutdownController::new();
         controller.shutdown();
         let receiver = controller.subscribe();
@@ -298,14 +319,17 @@ mod tests {
         // Should immediately return ShutdownSignaled.
         match poll_once(&mut boxed) {
             Poll::Ready(outcome) => {
-                assert!(outcome.is_shutdown());
+                let shutdown = outcome.is_shutdown();
+                crate::assert_with_log!(shutdown, "shutdown", true, shutdown);
             }
             Poll::Pending => panic!("Expected Ready"),
         }
+        crate::test_complete!("with_graceful_shutdown_already_shutdown");
     }
 
     #[test]
     fn graceful_builder_config() {
+        init_test("graceful_builder_config");
         let controller = ShutdownController::new();
         let receiver = controller.subscribe();
 
@@ -313,29 +337,56 @@ mod tests {
             .grace_period(Duration::from_secs(60))
             .logging(false);
 
-        assert_eq!(builder.config().grace_period, Duration::from_secs(60));
-        assert!(!builder.config().log_events);
+        let grace_period = builder.config().grace_period;
+        crate::assert_with_log!(
+            grace_period == Duration::from_secs(60),
+            "grace_period",
+            Duration::from_secs(60),
+            grace_period
+        );
+        let log_events = builder.config().log_events;
+        crate::assert_with_log!(!log_events, "log_events false", false, log_events);
+        crate::test_complete!("graceful_builder_config");
     }
 
     #[test]
     fn grace_period_guard() {
+        init_test("grace_period_guard");
         let guard = GracePeriodGuard::new(Duration::from_millis(100));
-        assert!(!guard.is_elapsed());
-        assert!(guard.remaining() <= Duration::from_millis(100));
+        let elapsed = guard.is_elapsed();
+        crate::assert_with_log!(!elapsed, "not elapsed", false, elapsed);
+        let remaining = guard.remaining();
+        let within = remaining <= Duration::from_millis(100);
+        crate::assert_with_log!(within, "remaining <= 100ms", true, within);
 
         thread::sleep(Duration::from_millis(150));
 
-        assert!(guard.is_elapsed());
-        assert_eq!(guard.remaining(), Duration::ZERO);
+        let elapsed = guard.is_elapsed();
+        crate::assert_with_log!(elapsed, "elapsed", true, elapsed);
+        let remaining = guard.remaining();
+        crate::assert_with_log!(
+            remaining == Duration::ZERO,
+            "remaining zero",
+            Duration::ZERO,
+            remaining
+        );
+        crate::test_complete!("grace_period_guard");
     }
 
     #[test]
     fn graceful_config_builder() {
+        init_test("graceful_config_builder");
         let config = GracefulConfig::default()
             .with_grace_period(Duration::from_secs(10))
             .with_logging(false);
 
-        assert_eq!(config.grace_period, Duration::from_secs(10));
-        assert!(!config.log_events);
+        crate::assert_with_log!(
+            config.grace_period == Duration::from_secs(10),
+            "grace_period",
+            Duration::from_secs(10),
+            config.grace_period
+        );
+        crate::assert_with_log!(!config.log_events, "log_events false", false, config.log_events);
+        crate::test_complete!("graceful_config_builder");
     }
 }

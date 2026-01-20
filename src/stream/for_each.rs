@@ -119,8 +119,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn for_each_collects_side_effects() {
+        init_test("for_each_collects_side_effects");
         let results = RefCell::new(Vec::new());
         let mut future = ForEach::new(iter(vec![1i32, 2, 3]), |x| {
             results.borrow_mut().push(x);
@@ -130,14 +136,18 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(()) => {
-                assert_eq!(*results.borrow(), vec![1, 2, 3]);
+                let collected = results.borrow().clone();
+                let ok = collected == vec![1, 2, 3];
+                crate::assert_with_log!(ok, "collected", vec![1, 2, 3], collected);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("for_each_collects_side_effects");
     }
 
     #[test]
     fn for_each_empty() {
+        init_test("for_each_empty");
         let mut called = false;
         let mut future = ForEach::new(iter(Vec::<i32>::new()), |_| {
             called = true;
@@ -147,14 +157,16 @@ mod tests {
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(()) => {
-                assert!(!called);
+                crate::assert_with_log!(!called, "not called", false, called);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("for_each_empty");
     }
 
     #[test]
     fn for_each_async() {
+        init_test("for_each_async");
         let results = RefCell::new(Vec::new());
         let mut future = ForEachAsync::new(iter(vec![1i32, 2, 3]), |x| {
             let res = &results;
@@ -177,6 +189,9 @@ mod tests {
             }
         }
 
-        assert_eq!(*results.borrow(), vec![1, 2, 3]);
+        let collected = results.borrow().clone();
+        let ok = collected == vec![1, 2, 3];
+        crate::assert_with_log!(ok, "collected", vec![1, 2, 3], collected);
+        crate::test_complete!("for_each_async");
     }
 }

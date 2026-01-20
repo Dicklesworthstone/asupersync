@@ -99,15 +99,26 @@ pub fn is_available() -> bool {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn ctrl_c_not_available() {
-        assert!(!is_available());
+        init_test("ctrl_c_not_available");
+        let available = is_available();
+        crate::assert_with_log!(!available, "not available", false, available);
+        crate::test_complete!("ctrl_c_not_available");
     }
 
     #[test]
     fn ctrl_c_error_display() {
+        init_test("ctrl_c_error_display");
         let err = CtrlCError::not_implemented();
         let msg = format!("{err}");
-        assert!(msg.contains("Phase 0"));
+        let contains = msg.contains("Phase 0");
+        crate::assert_with_log!(contains, "contains Phase 0", true, contains);
+        crate::test_complete!("ctrl_c_error_display");
     }
 }

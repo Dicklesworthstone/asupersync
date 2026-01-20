@@ -194,28 +194,42 @@ mod tests {
         std::pin::Pin::new(fut).poll(&mut cx)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn shutdown_controller_initial_state() {
+        init_test("shutdown_controller_initial_state");
         let controller = ShutdownController::new();
-        assert!(!controller.is_shutting_down());
+        let shutting_down = controller.is_shutting_down();
+        crate::assert_with_log!(!shutting_down, "controller not shutting down", false, shutting_down);
 
         let receiver = controller.subscribe();
-        assert!(!receiver.is_shutting_down());
+        let rx_shutdown = receiver.is_shutting_down();
+        crate::assert_with_log!(!rx_shutdown, "receiver not shutting down", false, rx_shutdown);
+        crate::test_complete!("shutdown_controller_initial_state");
     }
 
     #[test]
     fn shutdown_controller_initiates() {
+        init_test("shutdown_controller_initiates");
         let controller = ShutdownController::new();
         let receiver = controller.subscribe();
 
         controller.shutdown();
 
-        assert!(controller.is_shutting_down());
-        assert!(receiver.is_shutting_down());
+        let ctrl_shutdown = controller.is_shutting_down();
+        crate::assert_with_log!(ctrl_shutdown, "controller shutting down", true, ctrl_shutdown);
+        let rx_shutdown = receiver.is_shutting_down();
+        crate::assert_with_log!(rx_shutdown, "receiver shutting down", true, rx_shutdown);
+        crate::test_complete!("shutdown_controller_initiates");
     }
 
     #[test]
     fn shutdown_only_once() {
+        init_test("shutdown_only_once");
         let controller = ShutdownController::new();
 
         // Multiple shutdown calls should be idempotent.
@@ -223,29 +237,40 @@ mod tests {
         controller.shutdown();
         controller.shutdown();
 
-        assert!(controller.is_shutting_down());
+        let shutting_down = controller.is_shutting_down();
+        crate::assert_with_log!(shutting_down, "shutting down", true, shutting_down);
+        crate::test_complete!("shutdown_only_once");
     }
 
     #[test]
     fn multiple_receivers() {
+        init_test("multiple_receivers");
         let controller = ShutdownController::new();
         let rx1 = controller.subscribe();
         let rx2 = controller.subscribe();
         let rx3 = controller.subscribe();
 
-        assert!(!rx1.is_shutting_down());
-        assert!(!rx2.is_shutting_down());
-        assert!(!rx3.is_shutting_down());
+        let rx1_shutdown = rx1.is_shutting_down();
+        crate::assert_with_log!(!rx1_shutdown, "rx1 not shutting down", false, rx1_shutdown);
+        let rx2_shutdown = rx2.is_shutting_down();
+        crate::assert_with_log!(!rx2_shutdown, "rx2 not shutting down", false, rx2_shutdown);
+        let rx3_shutdown = rx3.is_shutting_down();
+        crate::assert_with_log!(!rx3_shutdown, "rx3 not shutting down", false, rx3_shutdown);
 
         controller.shutdown();
 
-        assert!(rx1.is_shutting_down());
-        assert!(rx2.is_shutting_down());
-        assert!(rx3.is_shutting_down());
+        let rx1_shutdown = rx1.is_shutting_down();
+        crate::assert_with_log!(rx1_shutdown, "rx1 shutting down", true, rx1_shutdown);
+        let rx2_shutdown = rx2.is_shutting_down();
+        crate::assert_with_log!(rx2_shutdown, "rx2 shutting down", true, rx2_shutdown);
+        let rx3_shutdown = rx3.is_shutting_down();
+        crate::assert_with_log!(rx3_shutdown, "rx3 shutting down", true, rx3_shutdown);
+        crate::test_complete!("multiple_receivers");
     }
 
     #[test]
     fn receiver_wait_after_shutdown() {
+        init_test("receiver_wait_after_shutdown");
         let controller = ShutdownController::new();
         let mut receiver = controller.subscribe();
 
@@ -253,11 +278,14 @@ mod tests {
 
         // Wait should return immediately.
         let mut fut = Box::pin(receiver.wait());
-        assert!(poll_once(&mut fut).is_ready());
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "wait ready", true, ready);
+        crate::test_complete!("receiver_wait_after_shutdown");
     }
 
     #[test]
     fn receiver_wait_before_shutdown() {
+        init_test("receiver_wait_before_shutdown");
         let controller = Arc::new(ShutdownController::new());
         let controller2 = Arc::clone(&controller);
         let mut receiver = controller.subscribe();
@@ -269,32 +297,42 @@ mod tests {
 
         // First poll should be pending.
         let mut fut = Box::pin(receiver.wait());
-        assert!(poll_once(&mut fut).is_pending());
+        let pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(pending, "wait pending", true, pending);
 
         // Wait for shutdown.
         handle.join().expect("thread panicked");
 
         // Now should be ready.
-        assert!(poll_once(&mut fut).is_ready());
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "wait ready", true, ready);
+        crate::test_complete!("receiver_wait_before_shutdown");
     }
 
     #[test]
     fn receiver_clone() {
+        init_test("receiver_clone");
         let controller = ShutdownController::new();
         let rx1 = controller.subscribe();
         let rx2 = rx1.clone();
 
-        assert!(!rx1.is_shutting_down());
-        assert!(!rx2.is_shutting_down());
+        let rx1_shutdown = rx1.is_shutting_down();
+        crate::assert_with_log!(!rx1_shutdown, "rx1 not shutting down", false, rx1_shutdown);
+        let rx2_shutdown = rx2.is_shutting_down();
+        crate::assert_with_log!(!rx2_shutdown, "rx2 not shutting down", false, rx2_shutdown);
 
         controller.shutdown();
 
-        assert!(rx1.is_shutting_down());
-        assert!(rx2.is_shutting_down());
+        let rx1_shutdown = rx1.is_shutting_down();
+        crate::assert_with_log!(rx1_shutdown, "rx1 shutting down", true, rx1_shutdown);
+        let rx2_shutdown = rx2.is_shutting_down();
+        crate::assert_with_log!(rx2_shutdown, "rx2 shutting down", true, rx2_shutdown);
+        crate::test_complete!("receiver_clone");
     }
 
     #[test]
     fn receiver_clone_preserves_state() {
+        init_test("receiver_clone_preserves_state");
         let controller = ShutdownController::new();
         controller.shutdown();
 
@@ -302,12 +340,16 @@ mod tests {
         let rx2 = rx1.clone();
 
         // Both should see shutdown already initiated.
-        assert!(rx1.is_shutting_down());
-        assert!(rx2.is_shutting_down());
+        let rx1_shutdown = rx1.is_shutting_down();
+        crate::assert_with_log!(rx1_shutdown, "rx1 shutting down", true, rx1_shutdown);
+        let rx2_shutdown = rx2.is_shutting_down();
+        crate::assert_with_log!(rx2_shutdown, "rx2 shutting down", true, rx2_shutdown);
+        crate::test_complete!("receiver_clone_preserves_state");
     }
 
     #[test]
     fn controller_clone() {
+        init_test("controller_clone");
         let controller1 = ShutdownController::new();
         let controller2 = controller1.clone();
         let receiver = controller1.subscribe();
@@ -316,8 +358,12 @@ mod tests {
         controller2.shutdown();
 
         // All should see it.
-        assert!(controller1.is_shutting_down());
-        assert!(controller2.is_shutting_down());
-        assert!(receiver.is_shutting_down());
+        let ctrl1 = controller1.is_shutting_down();
+        crate::assert_with_log!(ctrl1, "controller1 shutting down", true, ctrl1);
+        let ctrl2 = controller2.is_shutting_down();
+        crate::assert_with_log!(ctrl2, "controller2 shutting down", true, ctrl2);
+        let rx_shutdown = receiver.is_shutting_down();
+        crate::assert_with_log!(rx_shutdown, "receiver shutting down", true, rx_shutdown);
+        crate::test_complete!("controller_clone");
     }
 }

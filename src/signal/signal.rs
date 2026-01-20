@@ -210,34 +210,61 @@ pub fn sigwinch() -> io::Result<Signal> {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn signal_error_display() {
+        init_test("signal_error_display");
         let err = SignalError::not_implemented(SignalKind::Terminate);
         let msg = format!("{err}");
-        assert!(msg.contains("SIGTERM"));
-        assert!(msg.contains("Phase 0"));
+        let has_sigterm = msg.contains("SIGTERM");
+        crate::assert_with_log!(has_sigterm, "contains SIGTERM", true, has_sigterm);
+        let has_phase = msg.contains("Phase 0");
+        crate::assert_with_log!(has_phase, "contains Phase 0", true, has_phase);
+        crate::test_complete!("signal_error_display");
     }
 
     #[test]
     fn signal_not_implemented() {
+        init_test("signal_not_implemented");
         // All signals should return NotImplemented error in Phase 0
         let result = signal(SignalKind::terminate());
-        assert!(result.is_err());
+        let is_err = result.is_err();
+        crate::assert_with_log!(is_err, "result err", true, is_err);
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Unsupported,
+            "err kind",
+            io::ErrorKind::Unsupported,
+            err.kind()
+        );
+        crate::test_complete!("signal_not_implemented");
     }
 
     #[cfg(unix)]
     #[test]
     fn unix_signal_helpers() {
+        init_test("unix_signal_helpers");
         // Verify all helper functions return the expected error
-        assert!(sigint().is_err());
-        assert!(sigterm().is_err());
-        assert!(sighup().is_err());
-        assert!(sigusr1().is_err());
-        assert!(sigusr2().is_err());
-        assert!(sigquit().is_err());
-        assert!(sigchld().is_err());
-        assert!(sigwinch().is_err());
+        let sigint_err = sigint().is_err();
+        crate::assert_with_log!(sigint_err, "sigint err", true, sigint_err);
+        let sigterm_err = sigterm().is_err();
+        crate::assert_with_log!(sigterm_err, "sigterm err", true, sigterm_err);
+        let sighup_err = sighup().is_err();
+        crate::assert_with_log!(sighup_err, "sighup err", true, sighup_err);
+        let sigusr1_err = sigusr1().is_err();
+        crate::assert_with_log!(sigusr1_err, "sigusr1 err", true, sigusr1_err);
+        let sigusr2_err = sigusr2().is_err();
+        crate::assert_with_log!(sigusr2_err, "sigusr2 err", true, sigusr2_err);
+        let sigquit_err = sigquit().is_err();
+        crate::assert_with_log!(sigquit_err, "sigquit err", true, sigquit_err);
+        let sigchld_err = sigchld().is_err();
+        crate::assert_with_log!(sigchld_err, "sigchld err", true, sigchld_err);
+        let sigwinch_err = sigwinch().is_err();
+        crate::assert_with_log!(sigwinch_err, "sigwinch err", true, sigwinch_err);
+        crate::test_complete!("unix_signal_helpers");
     }
 }

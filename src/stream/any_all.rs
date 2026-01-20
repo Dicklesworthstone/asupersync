@@ -107,87 +107,104 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn any_found() {
+        init_test("any_found");
         let mut future = Any::new(iter(vec![1i32, 2, 3, 4, 5]), |&x: &i32| x > 3);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(found) => {
-                assert!(found);
+                crate::assert_with_log!(found, "any found", true, found);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("any_found");
     }
 
     #[test]
     fn any_not_found() {
+        init_test("any_not_found");
         let mut future = Any::new(iter(vec![1i32, 2, 3]), |&x: &i32| x > 5);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(found) => {
-                assert!(!found);
+                crate::assert_with_log!(!found, "any not found", false, found);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("any_not_found");
     }
 
     #[test]
     fn any_empty() {
+        init_test("any_empty");
         let mut future = Any::new(iter(Vec::<i32>::new()), |_: &i32| true);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(found) => {
-                assert!(!found); // Empty stream -> false
+                crate::assert_with_log!(!found, "empty false", false, found);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("any_empty");
     }
 
     #[test]
     fn all_pass() {
+        init_test("all_pass");
         let mut future = All::new(iter(vec![2i32, 4, 6, 8]), |&x: &i32| x % 2 == 0);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(all_pass) => {
-                assert!(all_pass);
+                crate::assert_with_log!(all_pass, "all pass", true, all_pass);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("all_pass");
     }
 
     #[test]
     fn all_fail() {
+        init_test("all_fail");
         let mut future = All::new(iter(vec![2i32, 4, 5, 8]), |&x: &i32| x % 2 == 0);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(all_pass) => {
-                assert!(!all_pass);
+                crate::assert_with_log!(!all_pass, "all fail", false, all_pass);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("all_fail");
     }
 
     #[test]
     fn all_empty() {
+        init_test("all_empty");
         let mut future = All::new(iter(Vec::<i32>::new()), |_: &i32| false);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(all_pass) => {
-                assert!(all_pass); // Empty stream -> true (vacuously true)
+                crate::assert_with_log!(all_pass, "empty true", true, all_pass);
             }
             Poll::Pending => panic!("expected Ready"),
         }
+        crate::test_complete!("all_empty");
     }
 }

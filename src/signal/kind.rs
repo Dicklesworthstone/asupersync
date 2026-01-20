@@ -149,36 +149,97 @@ impl std::fmt::Display for SignalKind {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn signal_kind_constructors() {
-        assert_eq!(SignalKind::interrupt(), SignalKind::Interrupt);
-        assert_eq!(SignalKind::terminate(), SignalKind::Terminate);
-        assert_eq!(SignalKind::hangup(), SignalKind::Hangup);
-        assert_eq!(SignalKind::quit(), SignalKind::Quit);
-        assert_eq!(SignalKind::user_defined1(), SignalKind::User1);
-        assert_eq!(SignalKind::user_defined2(), SignalKind::User2);
-        assert_eq!(SignalKind::child(), SignalKind::Child);
-        assert_eq!(SignalKind::window_change(), SignalKind::WindowChange);
+        init_test("signal_kind_constructors");
+        crate::assert_with_log!(
+            SignalKind::interrupt() == SignalKind::Interrupt,
+            "interrupt",
+            SignalKind::Interrupt,
+            SignalKind::interrupt()
+        );
+        crate::assert_with_log!(
+            SignalKind::terminate() == SignalKind::Terminate,
+            "terminate",
+            SignalKind::Terminate,
+            SignalKind::terminate()
+        );
+        crate::assert_with_log!(
+            SignalKind::hangup() == SignalKind::Hangup,
+            "hangup",
+            SignalKind::Hangup,
+            SignalKind::hangup()
+        );
+        crate::assert_with_log!(
+            SignalKind::quit() == SignalKind::Quit,
+            "quit",
+            SignalKind::Quit,
+            SignalKind::quit()
+        );
+        crate::assert_with_log!(
+            SignalKind::user_defined1() == SignalKind::User1,
+            "user1",
+            SignalKind::User1,
+            SignalKind::user_defined1()
+        );
+        crate::assert_with_log!(
+            SignalKind::user_defined2() == SignalKind::User2,
+            "user2",
+            SignalKind::User2,
+            SignalKind::user_defined2()
+        );
+        crate::assert_with_log!(
+            SignalKind::child() == SignalKind::Child,
+            "child",
+            SignalKind::Child,
+            SignalKind::child()
+        );
+        crate::assert_with_log!(
+            SignalKind::window_change() == SignalKind::WindowChange,
+            "window_change",
+            SignalKind::WindowChange,
+            SignalKind::window_change()
+        );
+        crate::test_complete!("signal_kind_constructors");
     }
 
     #[test]
     fn signal_kind_names() {
-        assert_eq!(SignalKind::Interrupt.name(), "SIGINT");
-        assert_eq!(SignalKind::Terminate.name(), "SIGTERM");
-        assert_eq!(SignalKind::Hangup.name(), "SIGHUP");
+        init_test("signal_kind_names");
+        let interrupt = SignalKind::Interrupt.name();
+        crate::assert_with_log!(interrupt == "SIGINT", "interrupt", "SIGINT", interrupt);
+        let terminate = SignalKind::Terminate.name();
+        crate::assert_with_log!(terminate == "SIGTERM", "terminate", "SIGTERM", terminate);
+        let hangup = SignalKind::Hangup.name();
+        crate::assert_with_log!(hangup == "SIGHUP", "hangup", "SIGHUP", hangup);
+        crate::test_complete!("signal_kind_names");
     }
 
     #[test]
     fn signal_kind_display() {
-        assert_eq!(format!("{}", SignalKind::Interrupt), "SIGINT");
-        assert_eq!(format!("{}", SignalKind::Terminate), "SIGTERM");
+        init_test("signal_kind_display");
+        let interrupt = format!("{}", SignalKind::Interrupt);
+        crate::assert_with_log!(interrupt == "SIGINT", "interrupt", "SIGINT", interrupt);
+        let terminate = format!("{}", SignalKind::Terminate);
+        crate::assert_with_log!(terminate == "SIGTERM", "terminate", "SIGTERM", terminate);
+        crate::test_complete!("signal_kind_display");
     }
 
     #[cfg(unix)]
     #[test]
     fn signal_kind_raw_values() {
-        assert_eq!(SignalKind::Interrupt.as_raw_value(), 2);
-        assert_eq!(SignalKind::Terminate.as_raw_value(), 15);
-        assert_eq!(SignalKind::Hangup.as_raw_value(), 1);
+        init_test("signal_kind_raw_values");
+        let interrupt = SignalKind::Interrupt.as_raw_value();
+        crate::assert_with_log!(interrupt == 2, "interrupt", 2, interrupt);
+        let terminate = SignalKind::Terminate.as_raw_value();
+        crate::assert_with_log!(terminate == 15, "terminate", 15, terminate);
+        let hangup = SignalKind::Hangup.as_raw_value();
+        crate::assert_with_log!(hangup == 1, "hangup", 1, hangup);
+        crate::test_complete!("signal_kind_raw_values");
     }
 }

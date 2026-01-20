@@ -15,6 +15,8 @@ pub struct CxInner {
     pub task: TaskId,
     /// Current budget.
     pub budget: Budget,
+    /// Baseline budget used for checkpoint accounting.
+    pub budget_baseline: Budget,
     /// Whether cancellation has been requested.
     pub cancel_requested: bool,
     /// The reason for cancellation, if requested.
@@ -31,6 +33,7 @@ impl CxInner {
             region,
             task,
             budget,
+            budget_baseline: budget,
             cancel_requested: false,
             cancel_reason: None,
             mask_depth: 0,

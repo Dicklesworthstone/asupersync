@@ -128,6 +128,7 @@
 //! ```
 
 use super::id::Time;
+use crate::tracing_compat::{info, trace};
 use core::fmt;
 
 /// A budget constraining resource usage for a task or region.
@@ -162,6 +163,18 @@ impl Budget {
         poll_quota: 0,
         cost_quota: Some(0),
         priority: 0,
+    };
+
+    /// A minimal budget for cleanup operations.
+    ///
+    /// This provides a small poll quota (100 polls) for cleanup and finalizer code
+    /// to run, but no deadline or cost constraints. Used when requesting cancellation
+    /// to allow tasks a bounded cleanup phase.
+    pub const MINIMAL: Self = Self {
+        deadline: None,
+        poll_quota: 100,
+        cost_quota: None,
+        priority: 128,
     };
 
     /// Creates a new budget with default values (unlimited).
@@ -277,8 +290,22 @@ impl Budget {
         if self.poll_quota > 0 {
             let old = self.poll_quota;
             self.poll_quota -= 1;
+            trace!(
+                polls_remaining = self.poll_quota,
+                polls_consumed = 1,
+                "budget poll consumed"
+            );
+            if self.poll_quota == 0 {
+                info!(
+                    exhausted_resource = "polls",
+                    final_quota = 0,
+                    overage_amount = 0,
+                    "budget poll quota exhausted"
+                );
+            }
             Some(old)
         } else {
+            trace!(polls_remaining = 0, "budget poll consume failed: already exhausted");
             None
         }
     }
@@ -311,7 +338,7 @@ impl Budget {
     /// ```
     #[must_use]
     pub fn combine(self, other: Self) -> Self {
-        Self {
+        let combined = Self {
             deadline: match (self.deadline, other.deadline) {
                 (Some(a), Some(b)) => Some(if a < b { a } else { b }),
                 (Some(a), None) => Some(a),
@@ -326,7 +353,40 @@ impl Budget {
                 (None, None) => None,
             },
             priority: self.priority.max(other.priority),
+        };
+
+        // Trace when budget is tightened (any constraint becomes stricter)
+        let deadline_tightened = combined.deadline < self.deadline || combined.deadline < other.deadline;
+        let poll_tightened = combined.poll_quota < self.poll_quota || combined.poll_quota < other.poll_quota;
+        let cost_tightened = match (combined.cost_quota, self.cost_quota, other.cost_quota) {
+            (Some(c), Some(s), _) if c < s => true,
+            (Some(c), _, Some(o)) if c < o => true,
+            (Some(_), None, _) | (Some(_), _, None) => true,
+            _ => false,
+        };
+
+        if deadline_tightened || poll_tightened || cost_tightened {
+            trace!(
+                deadline_tightened,
+                poll_tightened,
+                cost_tightened,
+                self_deadline = ?self.deadline,
+                other_deadline = ?other.deadline,
+                combined_deadline = ?combined.deadline,
+                self_poll_quota = self.poll_quota,
+                other_poll_quota = other.poll_quota,
+                combined_poll_quota = combined.poll_quota,
+                self_cost_quota = ?self.cost_quota,
+                other_cost_quota = ?other.cost_quota,
+                combined_cost_quota = ?combined.cost_quota,
+                self_priority = self.priority,
+                other_priority = other.priority,
+                combined_priority = combined.priority,
+                "budget combined (tightened)"
+            );
         }
+
+        combined
     }
 
     /// Meet operation (∧) - alias for [`combine`](Self::combine).
@@ -368,12 +428,36 @@ impl Budget {
     /// ```
     pub fn consume_cost(&mut self, cost: u64) -> bool {
         match self.cost_quota {
-            None => true, // No quota means unlimited
+            None => {
+                trace!(cost_consumed = cost, cost_remaining = "unlimited", "budget cost consumed (unlimited)");
+                true // No quota means unlimited
+            }
             Some(remaining) if remaining >= cost => {
-                self.cost_quota = Some(remaining - cost);
+                let new_remaining = remaining - cost;
+                self.cost_quota = Some(new_remaining);
+                trace!(
+                    cost_consumed = cost,
+                    cost_remaining = new_remaining,
+                    "budget cost consumed"
+                );
+                if new_remaining == 0 {
+                    info!(
+                        exhausted_resource = "cost",
+                        final_quota = 0,
+                        overage_amount = 0,
+                        "budget cost quota exhausted"
+                    );
+                }
                 true
             }
-            Some(_) => false,
+            Some(_remaining) => {
+                trace!(
+                    cost_requested = cost,
+                    cost_remaining = _remaining,
+                    "budget cost consume failed: insufficient quota"
+                );
+                false
+            }
         }
     }
 

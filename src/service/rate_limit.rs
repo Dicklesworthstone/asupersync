@@ -325,6 +325,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     struct NoopWaker;
 
     impl Wake for NoopWaker {
@@ -354,20 +359,33 @@ mod tests {
 
     #[test]
     fn layer_creates_service() {
+        init_test("layer_creates_service");
         let layer = RateLimitLayer::new(10, Duration::from_secs(1));
-        assert_eq!(layer.rate(), 10);
-        assert_eq!(layer.period(), Duration::from_secs(1));
+        let rate = layer.rate();
+        crate::assert_with_log!(rate == 10, "rate", 10, rate);
+        let period = layer.period();
+        crate::assert_with_log!(
+            period == Duration::from_secs(1),
+            "period",
+            Duration::from_secs(1),
+            period
+        );
         let _svc: RateLimit<EchoService> = layer.layer(EchoService);
+        crate::test_complete!("layer_creates_service");
     }
 
     #[test]
     fn service_starts_with_full_bucket() {
+        init_test("service_starts_with_full_bucket");
         let svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
-        assert_eq!(svc.available_tokens(), 5);
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 5, "available", 5, available);
+        crate::test_complete!("service_starts_with_full_bucket");
     }
 
     #[test]
     fn tokens_consumed_on_ready() {
+        init_test("tokens_consumed_on_ready");
         let mut svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -375,28 +393,36 @@ mod tests {
         // Each poll_ready should consume a token
         for expected in (1..=5).rev() {
             let result = svc.poll_ready(&mut cx);
-            assert!(matches!(result, Poll::Ready(Ok(()))));
-            assert_eq!(svc.available_tokens(), expected - 1);
+            let ok = matches!(result, Poll::Ready(Ok(())));
+            crate::assert_with_log!(ok, "ready ok", true, ok);
+            let available = svc.available_tokens();
+            crate::assert_with_log!(available == expected - 1, "available", expected - 1, available);
         }
+        crate::test_complete!("tokens_consumed_on_ready");
     }
 
     #[test]
     fn pending_when_no_tokens() {
+        init_test("pending_when_no_tokens");
         let mut svc = RateLimit::new(EchoService, 1, Duration::from_secs(1));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // First call succeeds
         let result = svc.poll_ready(&mut cx);
-        assert!(matches!(result, Poll::Ready(Ok(()))));
+        let ok = matches!(result, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "first ready", true, ok);
 
         // Second call should be pending (no tokens)
         let result = svc.poll_ready(&mut cx);
-        assert!(result.is_pending());
+        let pending = result.is_pending();
+        crate::assert_with_log!(pending, "pending", true, pending);
+        crate::test_complete!("pending_when_no_tokens");
     }
 
     #[test]
     fn refill_adds_tokens() {
+        init_test("refill_adds_tokens");
         let svc = RateLimit::new(EchoService, 10, Duration::from_secs(1));
 
         // Drain all tokens
@@ -410,11 +436,14 @@ mod tests {
         svc.refill(Time::from_secs(1));
 
         // Should have refilled to max
-        assert_eq!(svc.available_tokens(), 10);
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 10, "available", 10, available);
+        crate::test_complete!("refill_adds_tokens");
     }
 
     #[test]
     fn refill_caps_at_rate() {
+        init_test("refill_caps_at_rate");
         let svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
 
         // Start with some tokens
@@ -428,17 +457,23 @@ mod tests {
         svc.refill(Time::from_secs(2));
 
         // Should cap at rate (5), not 3 + 10
-        assert_eq!(svc.available_tokens(), 5);
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 5, "available", 5, available);
+        crate::test_complete!("refill_caps_at_rate");
     }
 
     #[test]
     fn error_display() {
+        init_test("error_display");
         let err: RateLimitError<&str> = RateLimitError::RateLimitExceeded;
         let display = format!("{err}");
-        assert!(display.contains("rate limit exceeded"));
+        let has_rate = display.contains("rate limit exceeded");
+        crate::assert_with_log!(has_rate, "rate limit", true, has_rate);
 
         let err: RateLimitError<&str> = RateLimitError::Inner("inner error");
         let display = format!("{err}");
-        assert!(display.contains("inner service error"));
+        let has_inner = display.contains("inner service error");
+        crate::assert_with_log!(has_inner, "inner error", true, has_inner);
+        crate::test_complete!("error_display");
     }
 }
