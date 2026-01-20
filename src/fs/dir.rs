@@ -57,49 +57,68 @@ mod tests {
         path
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_create_dir() {
+        init_test("test_create_dir");
         let path = unique_temp_dir("create_dir");
         let result = futures_lite::future::block_on(async { create_dir(&path).await });
-        assert!(result.is_ok());
-        assert!(path.exists());
-        assert!(path.is_dir());
+        crate::assert_with_log!(result.is_ok(), "create ok", true, result.is_ok());
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "path exists", true, exists);
+        let is_dir = path.is_dir();
+        crate::assert_with_log!(is_dir, "path is dir", true, is_dir);
 
         let _ = std::fs::remove_dir_all(&path);
+        crate::test_complete!("test_create_dir");
     }
 
     #[test]
     fn test_create_dir_all() {
+        init_test("test_create_dir_all");
         let base = unique_temp_dir("create_dir_all");
         let path = base.join("a/b/c");
 
         let result = futures_lite::future::block_on(async { create_dir_all(&path).await });
-        assert!(result.is_ok());
-        assert!(path.exists());
+        crate::assert_with_log!(result.is_ok(), "create ok", true, result.is_ok());
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "path exists", true, exists);
 
         let _ = std::fs::remove_dir_all(&base);
+        crate::test_complete!("test_create_dir_all");
     }
 
     #[test]
     fn test_remove_dir() {
+        init_test("test_remove_dir");
         let path = unique_temp_dir("remove_dir");
         std::fs::create_dir_all(&path).unwrap();
-        assert!(path.exists());
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "path exists", true, exists);
 
         let result = futures_lite::future::block_on(async { remove_dir(&path).await });
-        assert!(result.is_ok());
-        assert!(!path.exists());
+        crate::assert_with_log!(result.is_ok(), "remove ok", true, result.is_ok());
+        let exists_after = path.exists();
+        crate::assert_with_log!(!exists_after, "path removed", false, exists_after);
+        crate::test_complete!("test_remove_dir");
     }
 
     #[test]
     fn test_remove_dir_all() {
+        init_test("test_remove_dir_all");
         let path = unique_temp_dir("remove_dir_all");
         std::fs::create_dir_all(path.join("a/b/c")).unwrap();
         std::fs::write(path.join("a/file.txt"), b"content").unwrap();
         std::fs::write(path.join("a/b/file.txt"), b"content").unwrap();
 
         let result = futures_lite::future::block_on(async { remove_dir_all(&path).await });
-        assert!(result.is_ok());
-        assert!(!path.exists());
+        crate::assert_with_log!(result.is_ok(), "remove ok", true, result.is_ok());
+        let exists_after = path.exists();
+        crate::assert_with_log!(!exists_after, "path removed", false, exists_after);
+        crate::test_complete!("test_remove_dir_all");
     }
 }

@@ -87,8 +87,14 @@ mod tests {
     use crate::stream::StreamExt as _;
     use tempfile::tempdir;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_buf_reader_basic() {
+        init_test("test_buf_reader_basic");
         futures_lite::future::block_on(async {
             let temp = tempdir().unwrap();
             let path = temp.path().join("test.txt");
@@ -98,13 +104,17 @@ mod tests {
             let reader = BufReader::new(file);
 
             let mut lines = reader.lines();
-            assert_eq!(lines.next().await.unwrap().unwrap(), "hello");
-            assert_eq!(lines.next().await.unwrap().unwrap(), "world");
+            let first = lines.next().await.unwrap().unwrap();
+            crate::assert_with_log!(first == "hello", "first line", "hello", first);
+            let second = lines.next().await.unwrap().unwrap();
+            crate::assert_with_log!(second == "world", "second line", "world", second);
         });
+        crate::test_complete!("test_buf_reader_basic");
     }
 
     #[test]
     fn test_buf_reader_lines() {
+        init_test("test_buf_reader_lines");
         futures_lite::future::block_on(async {
             let temp = tempdir().unwrap();
             let path = temp.path().join("test_lines.txt");
@@ -116,7 +126,9 @@ mod tests {
             let reader = BufReader::new(file);
             let lines: Vec<_> = reader.lines().try_collect().await.unwrap();
 
-            assert_eq!(lines, vec!["line1", "line2", "line3"]);
+            let expected = vec!["line1", "line2", "line3"];
+            crate::assert_with_log!(lines == expected, "lines", expected, lines);
         });
+        crate::test_complete!("test_buf_reader_lines");
     }
 }

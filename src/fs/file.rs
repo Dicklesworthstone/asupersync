@@ -144,8 +144,14 @@ mod tests {
     use crate::io::{AsyncReadExt, AsyncWriteExt}; // Extension traits for read_to_string etc
     use tempfile::tempdir;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_file_create_write_read() {
+        init_test("test_file_create_write_read");
         // Since we are synchronous in Phase 0, we can just block_on or run directly?
         // But functions are async.
         // We need a runtime or simple block_on.
@@ -167,12 +173,19 @@ mod tests {
             let mut file = File::open(&path).await.unwrap();
             let mut contents = String::new();
             file.read_to_string(&mut contents).await.unwrap();
-            assert_eq!(contents, "hello world");
+            crate::assert_with_log!(
+                contents == "hello world",
+                "contents",
+                "hello world",
+                contents
+            );
         });
+        crate::test_complete!("test_file_create_write_read");
     }
 
     #[test]
     fn test_file_seek() {
+        init_test("test_file_seek");
         futures_lite::future::block_on(async {
             let dir = tempdir().unwrap();
             let path = dir.path().join("test_seek.txt");
@@ -190,7 +203,8 @@ mod tests {
             file.seek(SeekFrom::Start(5)).await.unwrap();
             let mut buf = [0u8; 5];
             file.read_exact(&mut buf).await.unwrap();
-            assert_eq!(&buf, b"56789");
+            crate::assert_with_log!(&buf == b"56789", "seek contents", b"56789", buf);
         });
+        crate::test_complete!("test_file_seek");
     }
 }

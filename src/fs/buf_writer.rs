@@ -179,8 +179,14 @@ mod tests {
     use crate::io::AsyncWriteExt;
     use tempfile::tempdir;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_buf_writer_basic() {
+        init_test("test_buf_writer_basic");
         futures_lite::future::block_on(async {
             let temp = tempdir().unwrap();
             let path = temp.path().join("test_write.txt");
@@ -193,12 +199,19 @@ mod tests {
             writer.flush().await.unwrap();
 
             let contents = crate::fs::read_to_string(&path).await.unwrap();
-            assert_eq!(contents, "hello world");
+            crate::assert_with_log!(
+                contents == "hello world",
+                "contents",
+                "hello world",
+                contents
+            );
         });
+        crate::test_complete!("test_buf_writer_basic");
     }
 
     #[test]
     fn test_buf_writer_large() {
+        init_test("test_buf_writer_large");
         futures_lite::future::block_on(async {
             let temp = tempdir().unwrap();
             let path = temp.path().join("test_large.txt");
@@ -212,8 +225,11 @@ mod tests {
             writer.flush().await.unwrap();
 
             let contents = crate::fs::read(&path).await.unwrap();
-            assert_eq!(contents.len(), 10000);
-            assert!(contents.iter().all(|&b| b == b'x'));
+            let len = contents.len();
+            crate::assert_with_log!(len == 10000, "length", 10000, len);
+            let all_x = contents.iter().all(|&b| b == b'x');
+            crate::assert_with_log!(all_x, "all x", true, all_x);
         });
+        crate::test_complete!("test_buf_writer_large");
     }
 }

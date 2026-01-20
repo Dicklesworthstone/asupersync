@@ -103,8 +103,14 @@ mod tests {
         path
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_read_dir() {
+        init_test("test_read_dir");
         let path = unique_temp_dir("read_dir");
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("a.txt"), b"a").unwrap();
@@ -122,12 +128,19 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(result, vec!["a.txt", "b.txt", "subdir"]);
+        crate::assert_with_log!(
+            result == vec!["a.txt", "b.txt", "subdir"],
+            "entries",
+            vec!["a.txt", "b.txt", "subdir"],
+            result
+        );
         let _ = std::fs::remove_dir_all(&path);
+        crate::test_complete!("test_read_dir");
     }
 
     #[test]
     fn test_read_dir_as_stream() {
+        init_test("test_read_dir_as_stream");
         let path = unique_temp_dir("read_dir_stream");
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("file1.txt"), b"1").unwrap();
@@ -144,12 +157,19 @@ mod tests {
             names
         });
 
-        assert_eq!(names, vec!["file1.txt", "file2.txt"]);
+        crate::assert_with_log!(
+            names == vec!["file1.txt", "file2.txt"],
+            "entries",
+            vec!["file1.txt", "file2.txt"],
+            names
+        );
         let _ = std::fs::remove_dir_all(&path);
+        crate::test_complete!("test_read_dir_as_stream");
     }
 
     #[test]
     fn test_dir_entry_metadata() {
+        init_test("test_dir_entry_metadata");
         let path = unique_temp_dir("dir_entry_metadata");
         std::fs::create_dir_all(&path).unwrap();
         let file_path = path.join("test.txt");
@@ -163,8 +183,9 @@ mod tests {
         })
         .unwrap();
 
-        assert!(is_file);
-        assert_eq!(len, 7);
+        crate::assert_with_log!(is_file, "is_file", true, is_file);
+        crate::assert_with_log!(len == 7, "len", 7, len);
         let _ = std::fs::remove_dir_all(&path);
+        crate::test_complete!("test_dir_entry_metadata");
     }
 }

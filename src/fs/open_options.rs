@@ -168,31 +168,41 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn open_options_builder() {
+        init_test("open_options_builder");
         let opts = OpenOptions::new().read(true).write(true).create(true);
 
-        assert!(opts.read);
-        assert!(opts.write);
-        assert!(opts.create);
-        assert!(!opts.append);
-        assert!(!opts.truncate);
-        assert!(!opts.create_new);
+        crate::assert_with_log!(opts.read, "read", true, opts.read);
+        crate::assert_with_log!(opts.write, "write", true, opts.write);
+        crate::assert_with_log!(opts.create, "create", true, opts.create);
+        crate::assert_with_log!(!opts.append, "append false", false, opts.append);
+        crate::assert_with_log!(!opts.truncate, "truncate false", false, opts.truncate);
+        crate::assert_with_log!(!opts.create_new, "create_new false", false, opts.create_new);
+        crate::test_complete!("open_options_builder");
     }
 
     #[test]
     fn open_options_default() {
+        init_test("open_options_default");
         let opts = OpenOptions::default();
-        assert!(!opts.read);
-        assert!(!opts.write);
-        assert!(!opts.append);
-        assert!(!opts.truncate);
-        assert!(!opts.create);
-        assert!(!opts.create_new);
+        crate::assert_with_log!(!opts.read, "read false", false, opts.read);
+        crate::assert_with_log!(!opts.write, "write false", false, opts.write);
+        crate::assert_with_log!(!opts.append, "append false", false, opts.append);
+        crate::assert_with_log!(!opts.truncate, "truncate false", false, opts.truncate);
+        crate::assert_with_log!(!opts.create, "create false", false, opts.create);
+        crate::assert_with_log!(!opts.create_new, "create_new false", false, opts.create_new);
+        crate::test_complete!("open_options_default");
     }
 
     #[test]
     fn to_std_options_roundtrip() {
+        init_test("to_std_options_roundtrip");
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.txt");
 
@@ -202,14 +212,17 @@ mod tests {
 
         // Should succeed
         let file = std_opts.open(&path);
-        assert!(file.is_ok());
+        crate::assert_with_log!(file.is_ok(), "open ok", true, file.is_ok());
+        crate::test_complete!("to_std_options_roundtrip");
     }
 
     #[cfg(unix)]
     #[test]
     fn mode_option_unix() {
+        init_test("mode_option_unix");
         let opts = OpenOptions::new().write(true).create(true).mode(0o600);
 
-        assert_eq!(opts.mode, Some(0o600));
+        crate::assert_with_log!(opts.mode == Some(0o600), "mode", Some(0o600), opts.mode);
+        crate::test_complete!("mode_option_unix");
     }
 }
