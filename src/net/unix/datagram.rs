@@ -1,7 +1,8 @@
 #![allow(unsafe_code)]
 //! Unix domain socket datagram implementation.
 //!
-//! This module uses unsafe code for peek operations via libc.
+//! This module uses unsafe code for peek operations via libc and peer credentials
+//! retrieval (getsockopt/getpeereid).
 //!
 //! This module provides [`UnixDatagram`] for connectionless communication over
 //! Unix domain sockets.
@@ -33,6 +34,7 @@
 //!   instead of [`send_to`](UnixDatagram::send_to).
 
 use crate::cx::Cx;
+use crate::net::unix::stream::UCred;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use std::cell::RefCell;
@@ -487,6 +489,49 @@ impl UnixDatagram {
         self.inner.peer_addr()
     }
 
+    /// Returns the credentials of the peer process.
+    ///
+    /// This can be used to verify the identity of the process on the other
+    /// end of a connected datagram socket for security purposes.
+    ///
+    /// # Platform-Specific Behavior
+    ///
+    /// - On Linux: Uses `SO_PEERCRED` socket option to retrieve uid, gid, and pid.
+    /// - On macOS/FreeBSD/OpenBSD/NetBSD: Uses `getpeereid()` to retrieve uid and gid;
+    ///   pid is not available.
+    ///
+    /// # Note
+    ///
+    /// For datagram sockets, peer credentials are only available for connected
+    /// sockets (those that have called [`connect`](Self::connect)). For unconnected
+    /// datagram sockets, this will return an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The socket is not connected
+    /// - Retrieving credentials fails for platform-specific reasons
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (a, b) = UnixDatagram::pair()?;
+    /// let cred = a.peer_cred()?;
+    /// if cred.uid == 0 {
+    ///     println!("Connected to a root process");
+    /// }
+    /// ```
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    pub fn peer_cred(&self) -> io::Result<UCred> {
+        datagram_peer_cred_impl(&self.inner)
+    }
+
     /// Creates an async `UnixDatagram` from a standard library socket.
     ///
     /// The socket will be set to non-blocking mode. Unlike [`bind`](Self::bind),
@@ -707,6 +752,80 @@ impl Drop for UnixDatagram {
 impl std::os::unix::io::AsRawFd for UnixDatagram {
     fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.inner.as_raw_fd()
+    }
+}
+
+// Platform-specific peer credential implementations for datagram sockets
+
+/// Linux implementation using SO_PEERCRED.
+#[cfg(target_os = "linux")]
+fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
+    use std::os::unix::io::AsRawFd;
+
+    // ucred structure from Linux
+    #[repr(C)]
+    struct LinuxUcred {
+        pid: i32,
+        uid: u32,
+        gid: u32,
+    }
+
+    let fd = socket.as_raw_fd();
+    let mut ucred = LinuxUcred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<LinuxUcred>() as libc::socklen_t;
+
+    // SAFETY: getsockopt is a well-defined syscall, and we're passing
+    // correct buffer size and type for SO_PEERCRED option.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut LinuxUcred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+
+    if ret == 0 {
+        Ok(UCred {
+            uid: ucred.uid,
+            gid: ucred.gid,
+            pid: Some(ucred.pid),
+        })
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// macOS/BSD implementation using getpeereid.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = socket.as_raw_fd();
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+
+    // SAFETY: getpeereid is a well-defined syscall on BSD systems.
+    let ret = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+
+    if ret == 0 {
+        Ok(UCred {
+            uid: uid as u32,
+            gid: gid as u32,
+            pid: None, // Not available via getpeereid
+        })
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -1053,5 +1172,43 @@ mod tests {
         }
 
         crate::test_complete!("test_datagram_send_registers_on_wouldblock");
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn test_peer_cred() {
+        init_test("test_datagram_peer_cred");
+        let (a, b) = UnixDatagram::pair().expect("pair failed");
+
+        // Both sides should be able to get peer credentials
+        let cred_a = a.peer_cred().expect("peer_cred a failed");
+        let cred_b = b.peer_cred().expect("peer_cred b failed");
+
+        // Both should report the same process (ourselves)
+        let our_uid = unsafe { libc::getuid() } as u32;
+        let our_gid = unsafe { libc::getgid() } as u32;
+
+        crate::assert_with_log!(cred_a.uid == our_uid, "a uid", our_uid, cred_a.uid);
+        crate::assert_with_log!(cred_a.gid == our_gid, "a gid", our_gid, cred_a.gid);
+        crate::assert_with_log!(cred_b.uid == our_uid, "b uid", our_uid, cred_b.uid);
+        crate::assert_with_log!(cred_b.gid == our_gid, "b gid", our_gid, cred_b.gid);
+
+        // On Linux, pid should be available and match our process
+        #[cfg(target_os = "linux")]
+        {
+            let our_pid = std::process::id() as i32;
+            let pid_a = cred_a.pid.expect("pid should be available on Linux");
+            let pid_b = cred_b.pid.expect("pid should be available on Linux");
+            crate::assert_with_log!(pid_a == our_pid, "a pid", our_pid, pid_a);
+            crate::assert_with_log!(pid_b == our_pid, "b pid", our_pid, pid_b);
+        }
+
+        crate::test_complete!("test_datagram_peer_cred");
     }
 }
