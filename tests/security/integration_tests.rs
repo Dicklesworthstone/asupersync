@@ -1,3 +1,4 @@
+use crate::common::*;
 use asupersync::security::{AuthKey, AuthMode, AuthenticatedSymbol, SecurityContext};
 use asupersync::types::Symbol;
 
@@ -7,6 +8,8 @@ fn symbol_with(data: &[u8]) -> Symbol {
 
 #[test]
 fn roundtrip_sign_then_verify_with_shared_key() {
+    init_test_logging();
+    test_phase!("roundtrip_sign_then_verify_with_shared_key");
     let key = AuthKey::from_seed(77);
     let sender = SecurityContext::new(key);
     let receiver = SecurityContext::new(key);
@@ -19,11 +22,20 @@ fn roundtrip_sign_then_verify_with_shared_key() {
         .verify_authenticated_symbol(&mut received)
         .expect("verification should succeed");
 
-    assert!(received.is_verified());
+    let verified = received.is_verified();
+    assert_with_log!(
+        verified,
+        "received symbol should be verified",
+        true,
+        verified
+    );
+    test_complete!("roundtrip_sign_then_verify_with_shared_key");
 }
 
 #[test]
 fn tampered_symbol_fails_in_strict_mode() {
+    init_test_logging();
+    test_phase!("tampered_symbol_fails_in_strict_mode");
     let key = AuthKey::from_seed(77);
     let sender = SecurityContext::new(key);
     let receiver = SecurityContext::new(key).with_mode(AuthMode::Strict);
@@ -35,12 +47,26 @@ fn tampered_symbol_fails_in_strict_mode() {
     let mut received = AuthenticatedSymbol::from_parts(tampered, *signed.tag());
 
     let result = receiver.verify_authenticated_symbol(&mut received);
-    assert!(result.is_err());
-    assert!(!received.is_verified());
+    assert_with_log!(
+        result.is_err(),
+        "strict mode should reject",
+        true,
+        result.is_err()
+    );
+    let verified = received.is_verified();
+    assert_with_log!(
+        !verified,
+        "received symbol should be unverified",
+        false,
+        verified
+    );
+    test_complete!("tampered_symbol_fails_in_strict_mode");
 }
 
 #[test]
 fn tampered_symbol_allowed_in_permissive_mode() {
+    init_test_logging();
+    test_phase!("tampered_symbol_allowed_in_permissive_mode");
     let key = AuthKey::from_seed(77);
     let sender = SecurityContext::new(key);
     let receiver = SecurityContext::new(key).with_mode(AuthMode::Permissive);
@@ -52,6 +78,18 @@ fn tampered_symbol_allowed_in_permissive_mode() {
     let mut received = AuthenticatedSymbol::from_parts(tampered, *signed.tag());
 
     let result = receiver.verify_authenticated_symbol(&mut received);
-    assert!(result.is_ok());
-    assert!(!received.is_verified());
+    assert_with_log!(
+        result.is_ok(),
+        "permissive mode should allow",
+        true,
+        result.is_ok()
+    );
+    let verified = received.is_verified();
+    assert_with_log!(
+        !verified,
+        "received symbol should be unverified",
+        false,
+        verified
+    );
+    test_complete!("tampered_symbol_allowed_in_permissive_mode");
 }

@@ -1,5 +1,8 @@
 #![allow(missing_docs)]
 
+#[macro_use]
+mod common;
+
 #[path = "security/authenticated_tests.rs"]
 mod authenticated_tests;
 #[path = "security/context_tests.rs"]

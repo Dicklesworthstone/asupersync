@@ -3,6 +3,9 @@
 //! These tests exercise the Phase 0 invariants and determinism guarantees
 //! using the lab oracles and deterministic trace capture.
 
+#[macro_use]
+mod common;
+
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::oracle::{
@@ -14,6 +17,7 @@ use asupersync::record::task::TaskState;
 use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
+use common::*;
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
@@ -35,12 +39,18 @@ fn push_trace(runtime: &mut LabRuntime, kind: TraceEventKind, data: TraceData, t
         .push(TraceEvent::new(seq, time, kind, data));
 }
 
+fn init_test(test_name: &str) {
+    init_test_logging();
+    test_phase!(test_name);
+}
+
 // ============================================================================
 // Oracle-driven E2E scenarios
 // ============================================================================
 
 #[test]
 fn e2e_nested_region_quiescence_oracles() {
+    init_test("e2e_nested_region_quiescence_oracles");
     let mut suite = OracleSuite::new();
 
     let root = region(0);
@@ -66,14 +76,18 @@ fn e2e_nested_region_quiescence_oracles() {
     suite.task_leak.on_region_close(root, t(50));
 
     let violations = suite.check_all(t(60));
-    assert!(
+    assert_with_log!(
         violations.is_empty(),
-        "expected no violations, got: {violations:?}"
+        "expected no violations",
+        "empty",
+        violations
     );
+    test_complete!("e2e_nested_region_quiescence_oracles");
 }
 
 #[test]
 fn e2e_cancellation_protocol_sequence() {
+    init_test("e2e_cancellation_protocol_sequence");
     let mut oracle = CancellationProtocolOracle::new();
 
     let root = region(0);
@@ -135,14 +149,14 @@ fn e2e_cancellation_protocol_sequence() {
         t(40),
     );
 
-    assert!(
-        oracle.check().is_ok(),
-        "expected cancellation protocol to be valid"
-    );
+    let ok = oracle.check().is_ok();
+    assert_with_log!(ok, "expected cancellation protocol to be valid", true, ok);
+    test_complete!("e2e_cancellation_protocol_sequence");
 }
 
 #[test]
 fn e2e_race_loser_drained_oracle() {
+    init_test("e2e_race_loser_drained_oracle");
     let mut oracle = LoserDrainOracle::new();
 
     let race = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
@@ -150,11 +164,14 @@ fn e2e_race_loser_drained_oracle() {
     oracle.on_task_complete(task(2), t(20)); // loser drained
     oracle.on_race_complete(race, task(1), t(30));
 
-    assert!(oracle.check().is_ok(), "expected loser drain to hold");
+    let ok = oracle.check().is_ok();
+    assert_with_log!(ok, "expected loser drain to hold", true, ok);
+    test_complete!("e2e_race_loser_drained_oracle");
 }
 
 #[test]
 fn e2e_deadline_monotone_oracle() {
+    init_test("e2e_deadline_monotone_oracle");
     let mut oracle = DeadlineMonotoneOracle::new();
 
     let root = region(0);
@@ -166,7 +183,9 @@ fn e2e_deadline_monotone_oracle() {
     oracle.on_region_create(root, None, &parent_budget, t(0));
     oracle.on_region_create(child, Some(root), &child_budget, t(10));
 
-    assert!(oracle.check().is_ok(), "expected deadlines to be monotone");
+    let ok = oracle.check().is_ok();
+    assert_with_log!(ok, "expected deadlines to be monotone", true, ok);
+    test_complete!("e2e_deadline_monotone_oracle");
 }
 
 // ============================================================================
@@ -175,6 +194,7 @@ fn e2e_deadline_monotone_oracle() {
 
 #[test]
 fn e2e_two_phase_channel_abort_releases_capacity() {
+    init_test("e2e_two_phase_channel_abort_releases_capacity");
     let (tx, rx) = mpsc::channel::<u32>(1);
     let cx = Cx::for_testing();
 
@@ -185,7 +205,8 @@ fn e2e_two_phase_channel_abort_releases_capacity() {
     // Capacity should be released so we can send again.
     tx.send(&cx, 7).expect("send failed");
     let value = rx.recv(&cx).expect("recv failed");
-    assert_eq!(value, 7);
+    assert_with_log!(value == 7, "should receive sent value", 7, value);
+    test_complete!("e2e_two_phase_channel_abort_releases_capacity");
 }
 
 // ============================================================================
@@ -194,6 +215,7 @@ fn e2e_two_phase_channel_abort_releases_capacity() {
 
 #[test]
 fn determinism_nested_regions_trace() {
+    init_test("determinism_nested_regions_trace");
     assert_deterministic(LabConfig::new(1), |runtime| {
         let root = region(0);
         let child = region(1);
@@ -227,10 +249,12 @@ fn determinism_nested_regions_trace() {
             t(30),
         );
     });
+    test_complete!("determinism_nested_regions_trace");
 }
 
 #[test]
 fn determinism_race_trace() {
+    init_test("determinism_race_trace");
     assert_deterministic(LabConfig::new(2), |runtime| {
         let region_id = region(0);
         let winner = task(1);
@@ -265,10 +289,12 @@ fn determinism_race_trace() {
             t(15),
         );
     });
+    test_complete!("determinism_race_trace");
 }
 
 #[test]
 fn determinism_two_phase_obligation_trace() {
+    init_test("determinism_two_phase_obligation_trace");
     assert_deterministic(LabConfig::new(3), |runtime| {
         let region_id = region(0);
         let worker = task(1);
@@ -312,4 +338,5 @@ fn determinism_two_phase_obligation_trace() {
             t(3),
         );
     });
+    test_complete!("determinism_two_phase_obligation_trace");
 }

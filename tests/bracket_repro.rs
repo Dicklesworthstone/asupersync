@@ -1,7 +1,11 @@
 //! Regression test ensuring bracket releases on cancellation.
 
+#[macro_use]
+mod common;
+
 #[cfg(test)]
 mod tests {
+    use crate::common::*;
     use asupersync::combinator::bracket::bracket;
     use std::future::Future;
     use std::pin::Pin;
@@ -30,6 +34,9 @@ mod tests {
 
     #[test]
     fn bracket_leak_on_cancel() {
+        init_test_logging();
+        test_phase!("bracket_leak_on_cancel");
+        test_section!("setup");
         let released = Arc::new(AtomicBool::new(false));
         let rel = released.clone();
 
@@ -52,16 +59,24 @@ mod tests {
         let waker = std::task::Waker::from(Arc::new(NoopWaker));
         let mut cx = Context::from_waker(&waker);
 
-        assert!(boxed.as_mut().poll(&mut cx).is_pending());
+        test_section!("poll_once");
+        let pending = boxed.as_mut().poll(&mut cx).is_pending();
+        assert_with_log!(pending, "bracket future should be pending", true, pending);
 
         // Now drop the future (simulate cancellation)
+        test_section!("cancel");
         drop(boxed);
 
         // Verify if release was called
-        assert!(
-            released.load(Ordering::SeqCst),
-            "Release should have been called on cancellation"
+        test_section!("verify");
+        let released_value = released.load(Ordering::SeqCst);
+        assert_with_log!(
+            released_value,
+            "release should have been called on cancellation",
+            true,
+            released_value
         );
+        test_complete!("bracket_leak_on_cancel");
     }
 
     struct NoopWaker;

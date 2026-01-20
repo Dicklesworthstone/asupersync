@@ -1,12 +1,19 @@
 #![allow(missing_docs)]
 
+#[macro_use]
+mod common;
+
 use asupersync::epoch::{EpochBarrier, EpochId};
 use asupersync::types::Time;
+use common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[test]
 fn test_epoch_barrier_overflow_race() {
+    init_test_logging();
+    test_phase!("test_epoch_barrier_overflow_race");
+    test_section!("setup");
     // 10 expected, but 20 arrive
     let expected = 10;
     let actual = 20;
@@ -43,9 +50,12 @@ fn test_epoch_barrier_overflow_race() {
     }
 
     // Even with overflow, exactly ONE should trigger
-    assert_eq!(
-        trigger_count, 1,
-        "Expected exactly 1 trigger, got {}",
+    test_section!("verify");
+    assert_with_log!(
+        trigger_count == 1,
+        "expected exactly 1 trigger",
+        1,
         trigger_count
     );
+    test_complete!("test_epoch_barrier_overflow_race");
 }

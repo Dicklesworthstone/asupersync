@@ -1,11 +1,18 @@
 #![allow(missing_docs)]
 
+#[macro_use]
+mod common;
+
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::error::SendError;
+use common::*;
 
 #[test]
 fn repro_mpsc_cancel_returns_disconnected() {
+    init_test_logging();
+    test_phase!("repro_mpsc_cancel_returns_disconnected");
+    test_section!("setup");
     let (tx, _rx) = mpsc::channel::<i32>(1);
     let cx = Cx::for_testing();
 
@@ -19,6 +26,8 @@ fn repro_mpsc_cancel_returns_disconnected() {
     // It should observe cancellation immediately before blocking
     let result = tx.reserve(&cx);
 
+    test_section!("verify");
+    tracing::debug!(result = ?result, "reserve result");
     match result {
         Err(SendError::Cancelled(_)) => {
             // Success: cancellation is now correctly reported
@@ -31,4 +40,5 @@ fn repro_mpsc_cancel_returns_disconnected() {
         }
         Ok(_) => panic!("Should have failed due to cancellation"),
     }
+    test_complete!("repro_mpsc_cancel_returns_disconnected");
 }

@@ -36,6 +36,7 @@ pub fn init_test_logging_with_level(level: tracing::Level) {
             .with_file(true)
             .with_line_number(true)
             .with_target(true)
+            .with_thread_ids(true)
             .with_span_events(FmtSpan::CLOSE)
             .with_ansi(false)
             .try_init();
@@ -97,7 +98,8 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
-    match timeout(Time::ZERO, timeout_duration, f()).await {
+    let fut = Box::pin(f());
+    match timeout(Time::ZERO, timeout_duration, fut).await {
         Ok(value) => {
             tracing::debug!(
                 description = %description,
@@ -146,6 +148,20 @@ macro_rules! test_complete {
             "test completed successfully: {}",
             $name
         );
+    };
+}
+
+/// Log before assertions for context.
+#[macro_export]
+macro_rules! assert_with_log {
+    ($cond:expr, $msg:expr, $expected:expr, $actual:expr) => {
+        tracing::debug!(
+            expected = ?$expected,
+            actual = ?$actual,
+            "Asserting: {}",
+            $msg
+        );
+        assert!($cond, "{}: expected {:?}, got {:?}", $msg, $expected, $actual);
     };
 }
 

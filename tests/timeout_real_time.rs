@@ -1,7 +1,11 @@
 #![allow(missing_docs)]
 
+#[macro_use]
+mod common;
+
 use asupersync::time::timeout;
 use asupersync::types::Time;
+use common::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,6 +14,9 @@ use std::time::Duration;
 
 #[test]
 fn timeout_wakes_up_pending_future() {
+    init_test_logging();
+    test_phase!("timeout_wakes_up_pending_future");
+    test_section!("setup");
     // This test verifies that timeout() actually wakes up the task when the deadline passes,
     // even if the inner future is completely unresponsive (Pending forever).
 
@@ -28,10 +35,18 @@ fn timeout_wakes_up_pending_future() {
     let waker = Waker::from(Arc::new(NotifyWaker(flag.clone())));
     let mut cx = Context::from_waker(&waker);
 
+    test_section!("first_poll");
     // First poll: inner is pending. Timeout should register wakeup.
-    assert!(Pin::new(&mut t).poll(&mut cx).is_pending());
+    let first_poll_pending = Pin::new(&mut t).poll(&mut cx).is_pending();
+    assert_with_log!(
+        first_poll_pending,
+        "first poll should be pending",
+        true,
+        first_poll_pending
+    );
 
     // If the timeout works, it should spawn a thread (via Sleep) that wakes us up.
+    test_section!("wait_for_wake");
     let wait_start = std::time::Instant::now();
     loop {
         if flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -45,10 +60,13 @@ fn timeout_wakes_up_pending_future() {
 
     // Poll again: should be Ready(Err(Elapsed))
     let result = Pin::new(&mut t).poll(&mut cx);
-    assert!(result.is_ready());
+    test_section!("verify");
+    let is_ready = result.is_ready();
+    assert_with_log!(is_ready, "second poll should be ready", true, is_ready);
     // Verify it is an error (timeout) not Ok (completion)
     match result {
         std::task::Poll::Ready(Err(_)) => {}
         _ => panic!("Expected Ready(Err(Elapsed)), got {:?}", result),
     }
+    test_complete!("timeout_wakes_up_pending_future");
 }

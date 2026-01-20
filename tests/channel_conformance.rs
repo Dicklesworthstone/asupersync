@@ -1,7 +1,11 @@
 //! Channel Conformance Tests using asupersync implementation.
 
+#[macro_use]
+mod common;
+
 use asupersync::channel::{broadcast, mpsc, oneshot, watch};
 use asupersync::cx::Cx;
+use common::*;
 use conformance::{
     AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
     OneshotSender, RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket,
@@ -375,17 +379,24 @@ impl RuntimeInterface for AsupersyncRuntime {
 
 #[test]
 fn run_channel_conformance_tests() {
+    init_test_logging();
+    test_phase!("run_channel_conformance_tests");
     let runtime = AsupersyncRuntime::new();
     let tests = conformance::tests::channels::collect_tests::<AsupersyncRuntime>();
 
     for test in tests {
-        println!("Running test: {}", test.meta.name);
+        test_section!("conformance_case");
+        tracing::info!(case = %test.meta.name, "running conformance test");
         let result = test.run(&runtime);
-        assert!(
-            result.passed,
-            "Test {} failed: {}",
-            test.meta.name,
-            result.message.unwrap_or_default()
+        let message = result.message.clone().unwrap_or_default();
+        tracing::debug!(
+            passed = result.passed,
+            message = %message,
+            "conformance test result"
         );
+        if !result.passed {
+            panic!("Test {} failed: {}", test.meta.name, message);
+        }
     }
+    test_complete!("run_channel_conformance_tests");
 }
