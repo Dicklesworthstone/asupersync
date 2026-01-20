@@ -9,7 +9,9 @@
 //! - Test oracles for invariant verification
 //! - Await point tracking for cancellation injection
 //! - Integrated cancellation injection with oracle verification
+//! - Chaos testing with configurable failure injection
 
+pub mod chaos;
 pub mod config;
 pub mod injection;
 pub mod instrumented_future;
