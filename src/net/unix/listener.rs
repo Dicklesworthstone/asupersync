@@ -337,9 +337,9 @@ mod tests {
             // Accept the connection
             let (mut stream, _addr) = listener.accept().await.expect("accept failed");
 
-            // Read the data
+            // Read the data using the std Read trait
             let mut buf = [0u8; 5];
-            stream.inner.read_exact(&mut buf).expect("read failed");
+            stream.read_exact(&mut buf).expect("read failed");
             assert_eq!(&buf, b"hello");
 
             handle.join().expect("thread failed");

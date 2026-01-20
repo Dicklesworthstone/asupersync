@@ -35,7 +35,9 @@
 //! namespace sockets (via [`UnixListener::bind_abstract`]) are Linux-only.
 
 pub mod listener;
+pub mod split;
 pub mod stream;
 
 pub use listener::{Incoming, UnixListener};
+pub use split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};
 pub use stream::UnixStream;
