@@ -26,6 +26,36 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+/// Credentials of the peer process.
+///
+/// This struct contains the user ID, group ID, and optionally the process ID
+/// of the process on the other end of a Unix domain socket connection.
+///
+/// # Platform-Specific Behavior
+///
+/// - On Linux: All fields are populated using `SO_PEERCRED`.
+/// - On macOS/BSD: `uid` and `gid` are populated using `getpeereid()`;
+///   `pid` is `None` as it's not available through this API.
+///
+/// # Example
+///
+/// ```ignore
+/// let stream = UnixStream::connect("/tmp/my_socket.sock").await?;
+/// let cred = stream.peer_cred()?;
+/// println!("Peer: uid={}, gid={}, pid={:?}", cred.uid, cred.gid, cred.pid);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UCred {
+    /// User ID of the peer process.
+    pub uid: u32,
+    /// Group ID of the peer process.
+    pub gid: u32,
+    /// Process ID of the peer process.
+    ///
+    /// This is `None` on platforms where it's not available (e.g., macOS/BSD).
+    pub pid: Option<i32>,
+}
+
 /// A Unix domain socket stream.
 ///
 /// Provides a bidirectional byte stream for inter-process communication
@@ -171,6 +201,41 @@ impl UnixStream {
         &self.inner
     }
 
+    /// Returns the credentials of the peer process.
+    ///
+    /// This can be used to verify the identity of the process on the other
+    /// end of the connection for security purposes.
+    ///
+    /// # Platform-Specific Behavior
+    ///
+    /// - On Linux: Uses `SO_PEERCRED` socket option to retrieve uid, gid, and pid.
+    /// - On macOS/FreeBSD/OpenBSD/NetBSD: Uses `getpeereid()` to retrieve uid and gid;
+    ///   pid is not available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if retrieving credentials fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stream = UnixStream::connect("/tmp/my_socket.sock").await?;
+    /// let cred = stream.peer_cred()?;
+    /// if cred.uid == 0 {
+    ///     println!("Connected to a root process");
+    /// }
+    /// ```
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    pub fn peer_cred(&self) -> io::Result<UCred> {
+        peer_cred_impl(&self.inner)
+    }
+
     /// Splits the stream into borrowed read and write halves.
     ///
     /// The halves borrow the stream and can be used concurrently for
@@ -299,19 +364,27 @@ impl std::os::unix::io::AsRawFd for UnixStream {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_pair() {
+        init_test("test_pair");
         let (mut s1, mut s2) = UnixStream::pair().expect("pair failed");
 
         s1.write_all(b"hello").expect("write failed");
         let mut buf = [0u8; 5];
         s2.read_exact(&mut buf).expect("read failed");
 
-        assert_eq!(&buf, b"hello");
+        crate::assert_with_log!(&buf == b"hello", "buf", b"hello", buf);
+        crate::test_complete!("test_pair");
     }
 
     #[test]
     fn test_local_peer_addr() {
+        init_test("test_local_peer_addr");
         let (s1, s2) = UnixStream::pair().expect("pair failed");
 
         // Unnamed sockets from pair() don't have pathname addresses
@@ -319,50 +392,73 @@ mod tests {
         let peer = s2.peer_addr().expect("peer_addr failed");
 
         // Both should be unnamed (no pathname)
-        assert!(local.as_pathname().is_none());
-        assert!(peer.as_pathname().is_none());
+        let local_path = local.as_pathname();
+        crate::assert_with_log!(
+            local_path.is_none(),
+            "local no pathname",
+            "None",
+            format!("{:?}", local_path)
+        );
+        let peer_path = peer.as_pathname();
+        crate::assert_with_log!(
+            peer_path.is_none(),
+            "peer no pathname",
+            "None",
+            format!("{:?}", peer_path)
+        );
+        crate::test_complete!("test_local_peer_addr");
     }
 
     #[test]
     fn test_shutdown() {
+        init_test("test_shutdown");
         let (s1, _s2) = UnixStream::pair().expect("pair failed");
 
         // Shutdown should succeed
         s1.shutdown(Shutdown::Write).expect("shutdown failed");
+        crate::test_complete!("test_shutdown");
     }
 
     #[test]
     fn test_split() {
+        init_test("test_split");
         let (s1, _s2) = UnixStream::pair().expect("pair failed");
 
         // Split should work
         let (_read, _write) = s1.split();
+        crate::test_complete!("test_split");
     }
 
     #[test]
     fn test_into_split() {
+        init_test("test_into_split");
         let (s1, _s2) = UnixStream::pair().expect("pair failed");
 
         // into_split should work
         let (_read, _write) = s1.into_split();
+        crate::test_complete!("test_into_split");
     }
 
     #[test]
     fn test_from_std() {
+        init_test("test_from_std");
         let (std_s1, _std_s2) = net::UnixStream::pair().expect("pair failed");
         std_s1.set_nonblocking(true).expect("set_nonblocking failed");
 
         let _stream = UnixStream::from_std(std_s1);
+        crate::test_complete!("test_from_std");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn test_connect_abstract() {
+        init_test("test_connect_abstract");
         // Test that connect_abstract compiles and returns an error when no listener exists
         futures_lite::future::block_on(async {
             // This will fail because no listener, but validates the API
             let result = UnixStream::connect_abstract(b"nonexistent_test_socket").await;
-            assert!(result.is_err()); // Expected: no listener
+            crate::assert_with_log!(result.is_err(), "result err", true, result.is_err());
         });
+        crate::test_complete!("test_connect_abstract");
     }
 }

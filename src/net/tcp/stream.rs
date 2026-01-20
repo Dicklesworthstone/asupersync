@@ -1,7 +1,12 @@
 //! TCP stream implementation.
 
+use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use crate::net::lookup_one;
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io;
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
@@ -13,23 +18,36 @@ use std::time::Duration;
 #[derive(Debug)]
 pub struct TcpStream {
     inner: Arc<net::TcpStream>,
+    registration: Option<IoRegistration>,
 }
 
 impl TcpStream {
     pub(crate) fn from_std(stream: net::TcpStream) -> Self {
         Self {
             inner: Arc::new(stream),
+            registration: None,
         }
     }
 
     /// Connect to address.
-    pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        // TODO: Async connect
-        // 1. Create socket
-        // 2. Set non-blocking
-        // 3. Connect (EINPROGRESS)
-        // 4. Wait for writable
-        let stream = net::TcpStream::connect(addr)?;
+    pub async fn connect<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
+        // 1. Resolve and create socket
+        let addr = lookup_one(addr).await?;
+        let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_nonblocking(true)?;
+
+        // 2. Attempt connect (non-blocking)
+        let sock_addr = SockAddr::from(addr);
+        match socket.connect(&sock_addr) {
+            Ok(()) => {}
+            Err(err) if connect_in_progress(&err) => {
+                wait_for_connect(&socket).await?;
+            }
+            Err(err) => return Err(err),
+        }
+
+        let stream: net::TcpStream = socket.into();
         stream.set_nonblocking(true)?;
         Ok(Self::from_std(stream))
     }
@@ -84,6 +102,68 @@ impl TcpStream {
             OwnedWriteHalf::new(self.inner),
         )
     }
+
+    fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        if let Some(registration) = &mut self.registration {
+            let combined = registration.interest() | interest;
+            if combined != registration.interest() {
+                if let Err(err) = registration.set_interest(combined) {
+                    if err.kind() == io::ErrorKind::NotConnected {
+                        self.registration = None;
+                        cx.waker().wake_by_ref();
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+            }
+            if registration.update_waker(cx.waker().clone()) {
+                return Ok(());
+            }
+            self.registration = None;
+        }
+
+        let Some(current) = Cx::current() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+
+        match driver.register(&*self.inner, interest, cx.waker().clone()) {
+            Ok(registration) => {
+                self.registration = Some(registration);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                cx.waker().wake_by_ref();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn connect_in_progress(err: &io::Error) -> bool {
+    matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
+}
+
+async fn wait_for_connect(socket: &Socket) -> io::Result<()> {
+    // TODO(Phase 2): register with reactor and await WRITABLE instead of yielding.
+    loop {
+        if let Some(err) = socket.take_error()? {
+            return Err(err);
+        }
+
+        match socket.peer_addr() {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                crate::runtime::yield_now().await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 impl AsyncRead for TcpStream {
@@ -93,7 +173,8 @@ impl AsyncRead for TcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         use std::io::Read;
-        let inner: &net::TcpStream = &self.inner;
+        let this = self.get_mut();
+        let inner: &net::TcpStream = &this.inner;
         // std::net::TcpStream implements Read for &TcpStream
         match (&*inner).read(buf.unfilled()) {
             Ok(n) => {
@@ -101,7 +182,9 @@ impl AsyncRead for TcpStream {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                if let Err(err) = this.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -116,11 +199,14 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         use std::io::Write;
-        let inner: &net::TcpStream = &self.inner;
+        let this = self.get_mut();
+        let inner: &net::TcpStream = &this.inner;
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -129,11 +215,14 @@ impl AsyncWrite for TcpStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::io::Write;
-        let inner: &net::TcpStream = &self.inner;
+        let this = self.get_mut();
+        let inner: &net::TcpStream = &this.inner;
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -143,5 +232,94 @@ impl AsyncWrite for TcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.inner.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{IoDriverHandle, LabReactor};
+    use crate::types::{Budget, RegionId, TaskId};
+    use futures_lite::future;
+    use std::future::poll_fn;
+    use std::future::Future;
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[test]
+    fn tcp_connect_local_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let handle = std::thread::spawn(move || future::block_on(TcpStream::connect(addr)));
+
+        let _ = listener.accept().expect("accept");
+        let stream = handle.join().expect("join").expect("connect");
+        assert!(stream.peer_addr().is_ok());
+    }
+
+    #[test]
+    fn tcp_connect_refused() {
+        let addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("local addr")
+        };
+
+        let result = future::block_on(TcpStream::connect(addr));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tcp_connect_cancel_does_not_deadlock() {
+        let addr: SocketAddr = "192.0.2.1:81".parse().expect("addr");
+        let mut fut = Box::pin(TcpStream::connect(addr));
+
+        future::block_on(poll_fn(|cx| match fut.as_mut().poll(cx) {
+            Poll::Pending | Poll::Ready(_) => Poll::Ready(()),
+        }));
+
+        drop(fut);
+    }
+
+    #[test]
+    fn tcp_stream_registers_on_wouldblock() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        server.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut stream = TcpStream::from_std(client);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut buf);
+
+        let poll = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(stream.registration.is_some());
     }
 }

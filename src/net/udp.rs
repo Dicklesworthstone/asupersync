@@ -11,6 +11,7 @@
 
 #![allow(clippy::unused_async)]
 
+use crate::net::lookup_all;
 use crate::stream::Stream;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
@@ -26,20 +27,67 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Bind to the given address.
-    pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let socket = StdUdpSocket::bind(addr)?;
-        socket.set_nonblocking(true)?;
-        Ok(Self::from(socket))
+    pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
+        let addrs = lookup_all(addr).await?;
+        if addrs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no socket addresses found",
+            ));
+        }
+
+        let mut last_err = None;
+        for addr in addrs {
+            match StdUdpSocket::bind(addr) {
+                Ok(socket) => {
+                    socket.set_nonblocking(true)?;
+                    return Ok(Self::from(socket));
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "failed to bind any address")
+        }))
     }
 
     /// Connect to a remote address (for send/recv).
-    pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
-        self.inner.connect(addr)
+    pub async fn connect<A: ToSocketAddrs + Send + 'static>(&self, addr: A) -> io::Result<()> {
+        let addrs = lookup_all(addr).await?;
+        if addrs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no socket addresses found",
+            ));
+        }
+
+        let mut last_err = None;
+        for addr in addrs {
+            match self.inner.connect(addr) {
+                Ok(()) => return Ok(()),
+                Err(err) => last_err = Some(err),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "failed to connect to any address")
+        }))
     }
 
     /// Send a datagram to the specified target.
-    pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
-        let addrs: Vec<_> = target.to_socket_addrs()?.collect();
+    pub async fn send_to<A: ToSocketAddrs + Send + 'static>(
+        &self,
+        buf: &[u8],
+        target: A,
+    ) -> io::Result<usize> {
+        let addrs = lookup_all(target).await?;
+        if addrs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no socket addresses found",
+            ));
+        }
         loop {
             for addr in &addrs {
                 match self.inner.send_to(buf, addr) {
@@ -238,7 +286,11 @@ impl<'a> SendSink<'a> {
     }
 
     /// Send a datagram to the specified target.
-    pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> io::Result<usize> {
+    pub async fn send_to<A: ToSocketAddrs + Send + 'static>(
+        &self,
+        buf: &[u8],
+        target: A,
+    ) -> io::Result<usize> {
         self.socket.send_to(buf, target).await
     }
 

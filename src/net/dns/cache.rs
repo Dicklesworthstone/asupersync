@@ -216,14 +216,28 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn cache_hit_miss() {
+        init_test("cache_hit_miss");
         let cache = DnsCache::new();
 
         // Miss
-        assert!(cache.get_ip("example.com").is_none());
-        assert_eq!(cache.stats().misses, 1);
-        assert_eq!(cache.stats().hits, 0);
+        let miss = cache.get_ip("example.com");
+        crate::assert_with_log!(
+            miss.is_none(),
+            "cache miss",
+            true,
+            miss.is_none()
+        );
+        let misses = cache.stats().misses;
+        crate::assert_with_log!(misses == 1, "misses", 1, misses);
+        let hits = cache.stats().hits;
+        crate::assert_with_log!(hits == 0, "hits", 0, hits);
 
         // Insert
         let lookup = LookupIp::new(
@@ -234,12 +248,20 @@ mod tests {
 
         // Hit
         let result = cache.get_ip("example.com");
-        assert!(result.is_some());
-        assert_eq!(cache.stats().hits, 1);
+        crate::assert_with_log!(
+            result.is_some(),
+            "cache hit",
+            true,
+            result.is_some()
+        );
+        let hits = cache.stats().hits;
+        crate::assert_with_log!(hits == 1, "hits", 1, hits);
+        crate::test_complete!("cache_hit_miss");
     }
 
     #[test]
     fn cache_expiration() {
+        init_test("cache_expiration");
         let config = CacheConfig {
             min_ttl: Duration::from_millis(1),
             max_ttl: Duration::from_millis(50),
@@ -254,17 +276,31 @@ mod tests {
         cache.put_ip("example.com", &lookup);
 
         // Should be in cache immediately
-        assert!(cache.get_ip("example.com").is_some());
+        let immediate = cache.get_ip("example.com");
+        crate::assert_with_log!(
+            immediate.is_some(),
+            "immediate hit",
+            true,
+            immediate.is_some()
+        );
 
         // Wait for expiration
         std::thread::sleep(Duration::from_millis(10));
 
         // Should be expired
-        assert!(cache.get_ip("example.com").is_none());
+        let expired = cache.get_ip("example.com");
+        crate::assert_with_log!(
+            expired.is_none(),
+            "expired",
+            true,
+            expired.is_none()
+        );
+        crate::test_complete!("cache_expiration");
     }
 
     #[test]
     fn cache_clear() {
+        init_test("cache_clear");
         let cache = DnsCache::new();
 
         let lookup = LookupIp::new(
@@ -272,14 +308,18 @@ mod tests {
             Duration::from_secs(300),
         );
         cache.put_ip("example.com", &lookup);
-        assert!(cache.stats().size > 0);
+        let size = cache.stats().size;
+        crate::assert_with_log!(size > 0, "size > 0", ">0", size);
 
         cache.clear();
-        assert_eq!(cache.stats().size, 0);
+        let size = cache.stats().size;
+        crate::assert_with_log!(size == 0, "size 0", 0, size);
+        crate::test_complete!("cache_clear");
     }
 
     #[test]
     fn cache_ttl_clamping() {
+        init_test("cache_ttl_clamping");
         let config = CacheConfig {
             min_ttl: Duration::from_secs(60),
             max_ttl: Duration::from_secs(3600),
@@ -295,6 +335,13 @@ mod tests {
         cache.put_ip("example.com", &lookup);
 
         // Entry should exist
-        assert!(cache.get_ip("example.com").is_some());
+        let result = cache.get_ip("example.com");
+        crate::assert_with_log!(
+            result.is_some(),
+            "entry exists",
+            true,
+            result.is_some()
+        );
+        crate::test_complete!("cache_ttl_clamping");
     }
 }

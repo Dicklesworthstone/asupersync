@@ -259,8 +259,14 @@ impl LookupTxt {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn happy_eyeballs_interleaves() {
+        init_test("happy_eyeballs_interleaves");
         let v6 = vec![
             "2001:db8::1".parse().unwrap(),
             "2001:db8::2".parse().unwrap(),
@@ -271,15 +277,18 @@ mod tests {
         let addrs: Vec<_> = he.collect();
 
         // Should interleave: v6, v4, v6, v4
-        assert_eq!(addrs.len(), 4);
-        assert!(addrs[0].is_ipv6());
-        assert!(addrs[1].is_ipv4());
-        assert!(addrs[2].is_ipv6());
-        assert!(addrs[3].is_ipv4());
+        let len = addrs.len();
+        crate::assert_with_log!(len == 4, "len", 4, len);
+        crate::assert_with_log!(addrs[0].is_ipv6(), "addr0 v6", true, addrs[0]);
+        crate::assert_with_log!(addrs[1].is_ipv4(), "addr1 v4", true, addrs[1]);
+        crate::assert_with_log!(addrs[2].is_ipv6(), "addr2 v6", true, addrs[2]);
+        crate::assert_with_log!(addrs[3].is_ipv4(), "addr3 v4", true, addrs[3]);
+        crate::test_complete!("happy_eyeballs_interleaves");
     }
 
     #[test]
     fn happy_eyeballs_uneven() {
+        init_test("happy_eyeballs_uneven");
         let v6 = vec!["2001:db8::1".parse().unwrap()];
         let v4 = vec![
             "192.0.2.1".parse().unwrap(),
@@ -290,24 +299,32 @@ mod tests {
         let he = HappyEyeballs::new(v6, v4);
         let addrs: Vec<_> = he.collect();
 
-        assert_eq!(addrs.len(), 4);
+        let len = addrs.len();
+        crate::assert_with_log!(len == 4, "len", 4, len);
         // v6, v4, v4, v4 (v6 exhausted after first)
-        assert!(addrs[0].is_ipv6());
-        assert!(addrs[1].is_ipv4());
-        assert!(addrs[2].is_ipv4());
-        assert!(addrs[3].is_ipv4());
+        crate::assert_with_log!(addrs[0].is_ipv6(), "addr0 v6", true, addrs[0]);
+        crate::assert_with_log!(addrs[1].is_ipv4(), "addr1 v4", true, addrs[1]);
+        crate::assert_with_log!(addrs[2].is_ipv4(), "addr2 v4", true, addrs[2]);
+        crate::assert_with_log!(addrs[3].is_ipv4(), "addr3 v4", true, addrs[3]);
+        crate::test_complete!("happy_eyeballs_uneven");
     }
 
     #[test]
     fn lookup_ip_accessors() {
+        init_test("lookup_ip_accessors");
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
             Duration::from_secs(300),
         );
 
-        assert_eq!(lookup.len(), 2);
-        assert!(!lookup.is_empty());
-        assert_eq!(lookup.ipv4_addrs().count(), 1);
-        assert_eq!(lookup.ipv6_addrs().count(), 1);
+        let len = lookup.len();
+        crate::assert_with_log!(len == 2, "len", 2, len);
+        let empty = lookup.is_empty();
+        crate::assert_with_log!(!empty, "not empty", false, empty);
+        let v4_count = lookup.ipv4_addrs().count();
+        crate::assert_with_log!(v4_count == 1, "ipv4 count", 1, v4_count);
+        let v6_count = lookup.ipv6_addrs().count();
+        crate::assert_with_log!(v6_count == 1, "ipv6 count", 1, v6_count);
+        crate::test_complete!("lookup_ip_accessors");
     }
 }

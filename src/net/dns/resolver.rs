@@ -357,44 +357,67 @@ impl Clone for Resolver {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn resolver_ip_passthrough() {
+        init_test("resolver_ip_passthrough");
         let resolver = Resolver::new();
 
         // Create a simple blocking test for IP passthrough
         let result = resolver.query_ip_sync("127.0.0.1");
-        assert!(result.is_ok());
-        let lookup = result.unwrap();
-        assert_eq!(lookup.len(), 1);
-        assert_eq!(
-            lookup.first().unwrap(),
-            "127.0.0.1".parse::<IpAddr>().unwrap()
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
         );
+        let lookup = result.unwrap();
+        let len = lookup.len();
+        crate::assert_with_log!(len == 1, "len", 1, len);
+        let first = lookup.first().unwrap();
+        let expected = "127.0.0.1".parse::<IpAddr>().unwrap();
+        crate::assert_with_log!(first == expected, "addr", expected, first);
+        crate::test_complete!("resolver_ip_passthrough");
     }
 
     #[test]
     fn resolver_localhost() {
+        init_test("resolver_localhost");
         let resolver = Resolver::new();
 
         // Localhost should resolve
         let result = resolver.query_ip_sync("localhost");
-        assert!(result.is_ok());
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
         let lookup = result.unwrap();
-        assert!(!lookup.is_empty());
+        let empty = lookup.is_empty();
+        crate::assert_with_log!(!empty, "not empty", false, empty);
+        crate::test_complete!("resolver_localhost");
     }
 
     #[test]
     fn resolver_invalid_host() {
+        init_test("resolver_invalid_host");
         let resolver = Resolver::new();
 
         // Empty hostname
         let _result = resolver.query_ip_sync("");
         // This may or may not error depending on platform
         // Just ensure it doesn't panic
+        crate::test_complete!("resolver_invalid_host");
     }
 
     #[test]
     fn resolver_cache_shared() {
+        init_test("resolver_cache_shared");
         let resolver1 = Resolver::new();
         let resolver2 = resolver1.clone();
 
@@ -407,15 +430,20 @@ mod tests {
 
         // Should be visible on resolver2 (shared cache)
         let stats = resolver2.cache_stats();
-        assert!(stats.size > 0);
+        crate::assert_with_log!(stats.size > 0, "cache size", ">0", stats.size);
+        crate::test_complete!("resolver_cache_shared");
     }
 
     #[test]
     fn resolver_config_presets() {
+        init_test("resolver_config_presets");
         let google = ResolverConfig::google();
-        assert!(!google.nameservers.is_empty());
+        let empty = google.nameservers.is_empty();
+        crate::assert_with_log!(!empty, "google nameservers", false, empty);
 
         let cloudflare = ResolverConfig::cloudflare();
-        assert!(!cloudflare.nameservers.is_empty());
+        let empty = cloudflare.nameservers.is_empty();
+        crate::assert_with_log!(!empty, "cloudflare nameservers", false, empty);
+        crate::test_complete!("resolver_config_presets");
     }
 }

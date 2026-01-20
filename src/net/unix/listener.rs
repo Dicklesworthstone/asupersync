@@ -304,8 +304,14 @@ mod tests {
     use std::io::{Read, Write};
     use tempfile::tempdir;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_bind_and_local_addr() {
+        init_test("test_bind_and_local_addr");
         futures_lite::future::block_on(async {
             let dir = tempdir().expect("create temp dir");
             let path = dir.path().join("test.sock");
@@ -314,13 +320,22 @@ mod tests {
             let addr = listener.local_addr().expect("local_addr failed");
 
             // Should be a pathname socket
-            assert!(addr.as_pathname().is_some());
-            assert_eq!(addr.as_pathname().unwrap(), path);
+            let pathname = addr.as_pathname();
+            crate::assert_with_log!(
+                pathname.is_some(),
+                "pathname exists",
+                true,
+                pathname.is_some()
+            );
+            let pathname = pathname.unwrap();
+            crate::assert_with_log!(pathname == path, "pathname", path, pathname);
         });
+        crate::test_complete!("test_bind_and_local_addr");
     }
 
     #[test]
     fn test_accept() {
+        init_test("test_accept");
         futures_lite::future::block_on(async {
             let dir = tempdir().expect("create temp dir");
             let path = dir.path().join("accept_test.sock");
@@ -340,28 +355,34 @@ mod tests {
             // Read the data using the std Read trait
             let mut buf = [0u8; 5];
             stream.read_exact(&mut buf).expect("read failed");
-            assert_eq!(&buf, b"hello");
+            crate::assert_with_log!(&buf == b"hello", "buf", b"hello", buf);
 
             handle.join().expect("thread failed");
         });
+        crate::test_complete!("test_accept");
     }
 
     #[test]
     fn test_socket_cleanup_on_drop() {
+        init_test("test_socket_cleanup_on_drop");
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("cleanup_test.sock");
 
         futures_lite::future::block_on(async {
             let listener = UnixListener::bind(&path).await.expect("bind failed");
-            assert!(path.exists(), "socket file should exist");
+            let exists = path.exists();
+            crate::assert_with_log!(exists, "socket exists", true, exists);
             drop(listener);
         });
 
-        assert!(!path.exists(), "socket file should be cleaned up on drop");
+        let exists = path.exists();
+        crate::assert_with_log!(!exists, "socket cleaned up", false, exists);
+        crate::test_complete!("test_socket_cleanup_on_drop");
     }
 
     #[test]
     fn test_from_std_no_cleanup() {
+        init_test("test_from_std_no_cleanup");
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("from_std_test.sock");
 
@@ -370,20 +391,24 @@ mod tests {
 
         // Wrap in async version
         let _listener = UnixListener::from_std(std_listener).expect("from_std failed");
-        assert!(path.exists(), "socket file should exist");
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "socket exists", true, exists);
 
         // Drop async listener
         drop(_listener);
 
         // Socket file should still exist (from_std doesn't clean up)
-        assert!(path.exists(), "socket file should NOT be cleaned up");
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "socket remains", true, exists);
 
         // Clean up manually
         std::fs::remove_file(&path).ok();
+        crate::test_complete!("test_from_std_no_cleanup");
     }
 
     #[test]
     fn test_take_path_prevents_cleanup() {
+        init_test("test_take_path_prevents_cleanup");
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("take_path_test.sock");
 
@@ -392,29 +417,45 @@ mod tests {
 
             // Take the path
             let taken = listener.take_path();
-            assert!(taken.is_some());
-            assert_eq!(taken.unwrap(), path);
+            crate::assert_with_log!(
+                taken.is_some(),
+                "taken some",
+                true,
+                taken.is_some()
+            );
+            let taken = taken.unwrap();
+            crate::assert_with_log!(taken == path, "taken path", path, taken);
 
             drop(listener);
         });
 
         // Socket should still exist
-        assert!(path.exists(), "socket file should NOT be cleaned up after take_path");
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "socket remains", true, exists);
 
         // Clean up manually
         std::fs::remove_file(&path).ok();
+        crate::test_complete!("test_take_path_prevents_cleanup");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn test_abstract_socket() {
+        init_test("test_abstract_socket");
         futures_lite::future::block_on(async {
             let name = b"asupersync_test_abstract_socket";
             let listener = UnixListener::bind_abstract(name).await.expect("bind failed");
             let addr = listener.local_addr().expect("local_addr failed");
 
             // Should be an abstract socket
-            assert!(addr.as_pathname().is_none());
+            let pathname = addr.as_pathname();
+            crate::assert_with_log!(
+                pathname.is_none(),
+                "no pathname",
+                "None",
+                format!("{:?}", pathname)
+            );
         });
+        crate::test_complete!("test_abstract_socket");
     }
 }
