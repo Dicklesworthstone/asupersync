@@ -70,6 +70,7 @@ pub mod io;
 pub mod lab;
 pub mod net;
 pub mod observability;
+pub mod process;
 pub mod record;
 pub mod runtime;
 pub mod security;
