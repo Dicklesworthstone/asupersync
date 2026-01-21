@@ -51,7 +51,10 @@ pub use metrics::{
     Counter, Gauge, Histogram, MetricValue, Metrics, MetricsProvider, NoOpMetrics, OutcomeKind,
 };
 #[cfg(feature = "metrics")]
-pub use otel::OtelMetrics;
+pub use otel::{
+    CardinalityOverflow, ExportError, InMemoryExporter, MetricsConfig, MetricsExporter,
+    MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
+};
 
 /// Configuration for observability and logging.
 ///
