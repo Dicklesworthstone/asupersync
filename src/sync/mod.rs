@@ -8,6 +8,7 @@
 //! - [`Mutex`]: Mutual exclusion with guard obligations
 //! - [`RwLock`]: Read-write lock with cancel-aware acquisition
 //! - [`Semaphore`]: Counting semaphore with permit obligations
+//! - [`Pool`]: Resource pooling with obligation-based return semantics
 //! - [`Barrier`]: N-way rendezvous with leader election
 //! - [`Notify`]: Event signaling (one-shot or broadcast)
 //! - [`OnceCell`]: Lazy initialization cell
@@ -40,8 +41,8 @@ pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
 pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, OnceCellError};
 pub use pool::{
-    AcquireError as PoolAcquireError, Pool, PoolStats, PooledResource, ReturnAction,
-    ReturnCallback, TryAcquireError as PoolTryAcquireError,
+    Pool, PoolFuture, PoolReturn, PoolReturnReceiver, PoolReturnSender, PoolStats,
+    PooledResource,
 };
 pub use rwlock::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockError, RwLockReadGuard,
