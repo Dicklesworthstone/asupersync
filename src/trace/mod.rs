@@ -18,8 +18,10 @@
 //! - [`streaming`]: Streaming replay for large traces with O(1) memory
 //! - [`integrity`]: Trace file integrity verification
 //! - [`filter`]: Trace event filtering during recording
+//! - [`compat`]: Forward/backward compatibility and migration support
 
 pub mod buffer;
+pub mod compat;
 pub mod distributed;
 pub mod event;
 pub mod file;
@@ -52,3 +54,7 @@ pub use integrity::{
     VerificationOptions, VerificationResult,
 };
 pub use filter::{EventCategory, FilterableEvent, FilterBuilder, TraceFilter};
+pub use compat::{
+    check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
+    CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
+};
