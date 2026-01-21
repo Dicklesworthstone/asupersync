@@ -16,12 +16,14 @@
 //! - [`buffer`]: Ring buffer for recent events
 //! - [`format`]: Output formatting utilities
 //! - [`streaming`]: Streaming replay for large traces with O(1) memory
+//! - [`integrity`]: Trace file integrity verification
 
 pub mod buffer;
 pub mod distributed;
 pub mod event;
 pub mod file;
 pub mod format;
+pub mod integrity;
 pub mod recorder;
 pub mod replay;
 pub mod replayer;
@@ -42,4 +44,8 @@ pub use replayer::{Breakpoint, DivergenceError, ReplayError, ReplayMode, TraceRe
 pub use streaming::{
     ReplayCheckpoint, ReplayProgress, StreamingReplayError, StreamingReplayResult,
     StreamingReplayer,
+};
+pub use integrity::{
+    find_first_corruption, is_trace_valid_quick, verify_trace, IntegrityIssue, IssueSeverity,
+    VerificationOptions, VerificationResult,
 };

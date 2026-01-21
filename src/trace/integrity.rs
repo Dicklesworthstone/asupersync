@@ -31,9 +31,7 @@
 //! let result = verify_trace("trace.bin", VerificationOptions::strict())?;
 //! ```
 
-use super::file::{
-    TraceFileError, TraceReader, HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC,
-};
+use super::file::{HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
 use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -833,8 +831,8 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
         let path = temp.path();
 
-        // Write garbage
-        std::fs::write(path, b"NOT A TRACE FILE").unwrap();
+        // Write garbage (must be >= HEADER_SIZE + 8 = 27 bytes to pass size check)
+        std::fs::write(path, b"NOT A TRACE FILE - EXTRA PADDING HERE!").unwrap();
 
         let result = verify_trace(path, VerificationOptions::default()).unwrap();
 
