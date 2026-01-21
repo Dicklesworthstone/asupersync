@@ -15,8 +15,8 @@ use crate::trace::recorder::TraceRecorder;
 use crate::trace::replay::{ReplayTrace, TraceMetadata};
 use crate::trace::TraceBuffer;
 use crate::trace::{TraceData, TraceEvent};
-use crate::types::{Severity, Time};
 use crate::types::{ObligationId, TaskId};
+use crate::types::{Severity, Time};
 use crate::util::DetRng;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -61,10 +61,7 @@ impl LabRuntime {
 
         // Initialize replay recorder if configured
         let mut replay_recorder = if let Some(ref rec_config) = config.replay_recording {
-            TraceRecorder::with_config(
-                TraceMetadata::new(config.seed),
-                rec_config.clone(),
-            )
+            TraceRecorder::with_config(TraceMetadata::new(config.seed), rec_config.clone())
         } else {
             TraceRecorder::disabled()
         };
@@ -169,7 +166,8 @@ impl LabRuntime {
         self.virtual_time = self.virtual_time.saturating_add_nanos(nanos);
         self.state.now = self.virtual_time;
         // Record time advancement
-        self.replay_recorder.record_time_advanced(from, self.virtual_time);
+        self.replay_recorder
+            .record_time_advanced(from, self.virtual_time);
     }
 
     /// Advances time to the given absolute time.
@@ -179,7 +177,8 @@ impl LabRuntime {
             self.virtual_time = time;
             self.state.now = self.virtual_time;
             // Record time advancement
-            self.replay_recorder.record_time_advanced(from, self.virtual_time);
+            self.replay_recorder
+                .record_time_advanced(from, self.virtual_time);
         }
     }
 
@@ -216,7 +215,8 @@ impl LabRuntime {
         };
 
         // Record task scheduling
-        self.replay_recorder.record_task_scheduled(task_id, self.steps);
+        self.replay_recorder
+            .record_task_scheduled(task_id, self.steps);
 
         // 2. Pre-poll chaos injection
         if self.inject_pre_poll_chaos(task_id) {
@@ -261,7 +261,8 @@ impl LabRuntime {
                 self.state.remove_stored_future(task_id);
 
                 // Record task completion
-                self.replay_recorder.record_task_completed(task_id, Severity::Ok);
+                self.replay_recorder
+                    .record_task_completed(task_id, Severity::Ok);
 
                 // Update state to Completed if not already terminal
                 if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
@@ -414,7 +415,8 @@ impl LabRuntime {
     /// Injects budget exhaustion for a task.
     fn inject_budget_exhaust(&mut self, task_id: TaskId) {
         // Record replay event
-        self.replay_recorder.record_budget_exhaust_injection(task_id);
+        self.replay_recorder
+            .record_budget_exhaust_injection(task_id);
 
         // Set the task's budget quotas to zero
         if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
@@ -443,7 +445,8 @@ impl LabRuntime {
     /// Injects spurious wakeups for a task.
     fn inject_spurious_wakes(&mut self, task_id: TaskId, priority: u8, count: usize) {
         // Record replay event
-        self.replay_recorder.record_wakeup_storm_injection(task_id, count as u32);
+        self.replay_recorder
+            .record_wakeup_storm_injection(task_id, count as u32);
 
         // Schedule the task multiple times (spurious wakeups)
         let mut sched = self.scheduler.lock().unwrap();

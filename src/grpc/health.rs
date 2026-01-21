@@ -30,10 +30,11 @@ use super::status::Status;
 use super::streaming::{Request, Response};
 
 /// Service status for health checking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(i32)]
 pub enum ServingStatus {
     /// Status is unknown.
+    #[default]
     Unknown = 0,
     /// Service is healthy and serving requests.
     Serving = 1,
@@ -60,12 +61,6 @@ impl ServingStatus {
             3 => Some(Self::ServiceUnknown),
             _ => None,
         }
-    }
-}
-
-impl Default for ServingStatus {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 
@@ -177,8 +172,7 @@ impl HealthService {
     #[must_use]
     pub fn is_serving(&self, service: &str) -> bool {
         self.get_status(service)
-            .map(|s| s.is_healthy())
-            .unwrap_or(false)
+            .is_some_and(|s| s.is_healthy())
     }
 
     /// Clear all service statuses.
@@ -205,14 +199,17 @@ impl HealthService {
         let statuses = self.statuses.read().expect("lock poisoned");
 
         if let Some(&status) = statuses.get(&request.service) {
+            drop(statuses);
             Ok(HealthCheckResponse::new(status))
         } else if request.service.is_empty() {
             // No explicit server status set, default to SERVING if any services are registered
             if statuses.is_empty() {
+                drop(statuses);
                 Ok(HealthCheckResponse::new(ServingStatus::ServiceUnknown))
             } else {
                 // Check if all services are healthy
                 let all_healthy = statuses.values().all(|s| s.is_healthy());
+                drop(statuses);
                 if all_healthy {
                     Ok(HealthCheckResponse::new(ServingStatus::Serving))
                 } else {
@@ -220,6 +217,7 @@ impl HealthService {
                 }
             }
         } else {
+            drop(statuses);
             Err(Status::not_found(format!(
                 "service '{}' not registered for health checking",
                 request.service

@@ -304,6 +304,7 @@ pub struct ConformanceTestFn {
 /// Run a slice of conformance tests with the given configuration.
 ///
 /// Returns the number of tests that passed and failed.
+#[must_use]
 pub fn run_conformance_tests(tests: &[ConformanceTestFn], config: &TestConfig) -> (usize, usize) {
     let mut passed = 0;
     let mut failed = 0;

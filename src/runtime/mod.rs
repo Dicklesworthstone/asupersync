@@ -31,7 +31,7 @@ pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
 pub use scheduler::Scheduler;
-pub use state::{RuntimeState, SpawnError};
+pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};
 pub use yield_now::yield_now;

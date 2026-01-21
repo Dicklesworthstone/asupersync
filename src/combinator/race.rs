@@ -224,9 +224,9 @@ impl<E> RaceAllError<E> {
     #[must_use]
     pub const fn winner_index(&self) -> usize {
         match self {
-            Self::Error { winner_index, .. } => *winner_index,
-            Self::Cancelled { winner_index, .. } => *winner_index,
-            Self::Panicked { winner_index, .. } => *winner_index,
+            Self::Error { winner_index, .. }
+            | Self::Cancelled { winner_index, .. }
+            | Self::Panicked { winner_index, .. } => *winner_index,
         }
     }
 

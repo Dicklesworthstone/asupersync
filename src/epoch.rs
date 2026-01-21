@@ -298,6 +298,7 @@ pub struct Epoch {
 
 impl Epoch {
     /// Creates a new epoch.
+    #[must_use]
     pub fn new(id: EpochId, started_at: Time, config: EpochConfig) -> Self {
         let expected_end =
             Time::from_nanos(started_at.as_nanos() + config.target_duration.as_nanos());
@@ -314,6 +315,7 @@ impl Epoch {
     }
 
     /// Creates the genesis epoch.
+    #[must_use]
     pub fn genesis(config: EpochConfig) -> Self {
         Self::new(EpochId::GENESIS, Time::ZERO, config)
     }
@@ -391,23 +393,23 @@ impl Epoch {
     // Logging integration
     fn log_created(&self) -> LogEntry {
         LogEntry::info("Epoch created")
-            .with_field("epoch_id", &format!("{}", self.id))
-            .with_field("started_at", &format!("{}", self.started_at))
-            .with_field("expected_end", &format!("{}", self.expected_end))
+            .with_field("epoch_id", format!("{}", self.id))
+            .with_field("started_at", format!("{}", self.started_at))
+            .with_field("expected_end", format!("{}", self.expected_end))
     }
 
     fn log_state_change(&self, old_state: EpochState) -> LogEntry {
         LogEntry::info("Epoch state changed")
-            .with_field("epoch_id", &format!("{}", self.id))
-            .with_field("from_state", &format!("{:?}", old_state))
-            .with_field("to_state", &format!("{:?}", self.state))
+            .with_field("epoch_id", format!("{}", self.id))
+            .with_field("from_state", format!("{old_state:?}"))
+            .with_field("to_state", format!("{:?}", self.state))
     }
 
     fn log_completed(&self) -> LogEntry {
         LogEntry::info("Epoch completed")
-            .with_field("epoch_id", &format!("{}", self.id))
-            .with_field("operations", &format!("{}", self.operation_count))
-            .with_field("duration", &format!("{:?}", self.ended_at))
+            .with_field("epoch_id", format!("{}", self.id))
+            .with_field("operations", format!("{}", self.operation_count))
+            .with_field("duration", format!("{:?}", self.ended_at))
     }
 }
 
@@ -596,6 +598,7 @@ pub struct EpochBarrier {
 
 impl EpochBarrier {
     /// Creates a new epoch barrier.
+    #[must_use]
     pub fn new(epoch: EpochId, expected: u32, created_at: Time) -> Self {
         Self {
             epoch,
@@ -745,18 +748,18 @@ impl EpochBarrier {
     // Logging integration
     fn log_arrival(&self, participant: &str) -> LogEntry {
         LogEntry::debug("Epoch barrier arrival")
-            .with_field("epoch_id", &format!("{}", self.epoch))
+            .with_field("epoch_id", format!("{}", self.epoch))
             .with_field("participant", participant)
-            .with_field("arrived", &format!("{}", self.arrived()))
-            .with_field("expected", &format!("{}", self.expected))
+            .with_field("arrived", format!("{}", self.arrived()))
+            .with_field("expected", format!("{}", self.expected))
     }
 
     fn log_triggered(&self, result: &BarrierResult) -> LogEntry {
         LogEntry::info("Epoch barrier triggered")
-            .with_field("epoch_id", &format!("{}", self.epoch))
-            .with_field("trigger", &format!("{:?}", result.trigger))
-            .with_field("arrived", &format!("{}", result.arrived))
-            .with_field("expected", &format!("{}", result.expected))
+            .with_field("epoch_id", format!("{}", self.epoch))
+            .with_field("trigger", format!("{:?}", result.trigger))
+            .with_field("arrived", format!("{}", result.arrived))
+            .with_field("expected", format!("{}", result.expected))
     }
 }
 
@@ -785,6 +788,7 @@ pub struct EpochClock {
 
 impl EpochClock {
     /// Creates a new epoch clock with the given configuration.
+    #[must_use]
     pub fn new(config: EpochConfig) -> Self {
         Self {
             current: AtomicU64::new(0),
@@ -875,10 +879,11 @@ impl EpochClock {
     }
 
     // Logging integration
+    #[allow(clippy::unused_self)]
     fn log_advance(&self, from: EpochId, to: EpochId) -> LogEntry {
         LogEntry::info("Epoch advanced")
-            .with_field("from_epoch", &format!("{}", from))
-            .with_field("to_epoch", &format!("{}", to))
+            .with_field("from_epoch", format!("{from}"))
+            .with_field("to_epoch", format!("{to}"))
     }
 }
 
@@ -947,14 +952,14 @@ impl EpochContext {
     /// Returns true if the operation budget is exhausted.
     #[must_use]
     pub fn is_budget_exhausted(&self) -> bool {
-        self.operation_budget.map_or(false, |limit| {
-            self.operations_used.load(Ordering::Acquire) >= limit
-        })
+        self.operation_budget
+            .is_some_and(|limit| self.operations_used.load(Ordering::Acquire) >= limit)
     }
 
     /// Attempts to record an operation.
     ///
     /// Returns false if the operation budget is exhausted.
+    #[must_use]
     pub fn record_operation(&self) -> bool {
         if let Some(limit) = self.operation_budget {
             let mut current = self.operations_used.load(Ordering::Acquire);
@@ -996,22 +1001,22 @@ impl EpochContext {
 
     fn log_created(&self) -> LogEntry {
         LogEntry::debug("Epoch context created")
-            .with_field("epoch_id", &format!("{}", self.epoch_id))
-            .with_field("deadline_ms", &format!("{}", self.deadline.as_millis()))
-            .with_field("operation_budget", &format!("{:?}", self.operation_budget))
+            .with_field("epoch_id", format!("{}", self.epoch_id))
+            .with_field("deadline_ms", format!("{}", self.deadline.as_millis()))
+            .with_field("operation_budget", format!("{:?}", self.operation_budget))
     }
 
     fn log_expired(&self, now: Time) -> LogEntry {
         LogEntry::warn("Epoch expired")
-            .with_field("epoch_id", &format!("{}", self.epoch_id))
-            .with_field("deadline_ms", &format!("{}", self.deadline.as_millis()))
-            .with_field("current_time_ms", &format!("{}", now.as_millis()))
+            .with_field("epoch_id", format!("{}", self.epoch_id))
+            .with_field("deadline_ms", format!("{}", self.deadline.as_millis()))
+            .with_field("current_time_ms", format!("{}", now.as_millis()))
     }
 
     fn log_budget_exhausted(&self) -> LogEntry {
         LogEntry::info("Epoch operation budget exhausted")
-            .with_field("epoch_id", &format!("{}", self.epoch_id))
-            .with_field("operations_used", &format!("{}", self.operations_used()))
+            .with_field("epoch_id", format!("{}", self.epoch_id))
+            .with_field("operations_used", format!("{}", self.operations_used()))
     }
 }
 
@@ -1576,9 +1581,9 @@ where
 
 fn log_epoch_transition(from: EpochId, to: EpochId, behavior: EpochTransitionBehavior) -> LogEntry {
     LogEntry::info("Epoch transition")
-        .with_field("from_epoch", &format!("{}", from))
-        .with_field("to_epoch", &format!("{}", to))
-        .with_field("behavior", &format!("{:?}", behavior))
+        .with_field("from_epoch", format!("{from}"))
+        .with_field("to_epoch", format!("{to}"))
+        .with_field("behavior", format!("{behavior:?}"))
 }
 
 // ============================================================================
@@ -1641,17 +1646,17 @@ pub enum EpochError {
 impl std::fmt::Display for EpochError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Expired { epoch } => write!(f, "epoch {} expired", epoch),
+            Self::Expired { epoch } => write!(f, "epoch {epoch} expired"),
             Self::BudgetExhausted {
                 epoch,
                 budget,
                 used,
-            } => write!(f, "epoch {} budget exhausted: used {used}/{budget}", epoch),
+            } => write!(f, "epoch {epoch} budget exhausted: used {used}/{budget}"),
             Self::TransitionOccurred { from, to } => {
-                write!(f, "epoch transition from {} to {}", from, to)
+                write!(f, "epoch transition from {from} to {to}")
             }
             Self::Mismatch { expected, actual } => {
-                write!(f, "epoch mismatch: expected {}, got {}", expected, actual)
+                write!(f, "epoch mismatch: expected {expected}, got {actual}")
             }
             Self::ValidityViolation {
                 symbol_epoch,
@@ -1659,8 +1664,8 @@ impl std::fmt::Display for EpochError {
             } => {
                 write!(
                     f,
-                    "symbol epoch {} outside validity window [{}, {}]",
-                    symbol_epoch, window.start, window.end
+                    "symbol epoch {symbol_epoch} outside validity window [{}, {}]",
+                    window.start, window.end
                 )
             }
             Self::BarrierTimeout {
@@ -1670,8 +1675,7 @@ impl std::fmt::Display for EpochError {
             } => {
                 write!(
                     f,
-                    "barrier timeout for epoch {}: {}/{} arrived",
-                    epoch, arrived, expected
+                    "barrier timeout for epoch {epoch}: {arrived}/{expected} arrived"
                 )
             }
         }
@@ -2220,7 +2224,7 @@ mod tests {
         init_test("test_epoch_wrapped_bulkhead_and_circuit_breaker");
         use super::bulkhead_call_in_epoch;
         use crate::combinator::{BulkheadPolicy, CircuitBreakerPolicy};
-        
+
         let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
         let epoch_source = Arc::new(TestEpochSource::new(EpochId(1)));
         let policy = EpochPolicy::strict();
@@ -2289,7 +2293,7 @@ mod tests {
 
     // Test 22: EpochId next overflow panic
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "attempt to add with overflow")]
     fn test_epoch_id_next_overflow_panics() {
         init_test("test_epoch_id_next_overflow_panics");
         let max_epoch = EpochId::MAX;

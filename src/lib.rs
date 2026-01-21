@@ -58,6 +58,7 @@ pub mod cli;
 pub mod codec;
 pub mod combinator;
 pub mod config;
+pub mod conformance;
 pub mod cx;
 pub mod decoding;
 pub mod encoding;

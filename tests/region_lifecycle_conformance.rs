@@ -109,7 +109,12 @@ fn region_child_can_be_created() {
 
     // Verify child has correct depth
     let child_depth = oracle.depth(child);
-    assert_with_log!(child_depth == Some(1), "child depth is 1", Some(1), child_depth);
+    assert_with_log!(
+        child_depth == Some(1),
+        "child depth is 1",
+        Some(1),
+        child_depth
+    );
 
     test_complete!("region_child_can_be_created");
 }
@@ -198,7 +203,12 @@ fn inv_tree_single_root() {
     assert_with_log!(ok, "single root valid", true, ok);
 
     let root = oracle.root();
-    assert_with_log!(root == Some(region(0)), "root is region 0", Some(region(0)), root);
+    assert_with_log!(
+        root == Some(region(0)),
+        "root is region 0",
+        Some(region(0)),
+        root
+    );
 
     test_complete!("inv_tree_single_root");
 }

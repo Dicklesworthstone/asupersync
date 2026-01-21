@@ -7,18 +7,22 @@
 //! - Current time
 
 use crate::error::{Error, ErrorKind};
-use crate::record::finalizer::Finalizer;
 use crate::record::{
-    ObligationAbortReason, ObligationKind, ObligationRecord, RegionRecord, TaskRecord,
+    finalizer::Finalizer, region::RegionState, task::TaskState, ObligationAbortReason,
+    ObligationKind, ObligationRecord, ObligationState, RegionRecord, TaskRecord,
 };
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
+use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBuffer, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
 use crate::types::policy::PolicyAction;
-use crate::types::{Budget, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time};
+use crate::types::{
+    Budget, CancelKind, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
+};
 use crate::util::Arena;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -173,12 +177,62 @@ impl RuntimeState {
         self.io_driver.is_some()
     }
 
+    /// Takes a point-in-time snapshot of the runtime state for debugging or visualization.
+    ///
+    /// The snapshot captures a consistent view of regions, tasks, obligations, and
+    /// recent trace events. It is designed to be lightweight and serializable.
+    #[must_use]
+    pub fn snapshot(&self) -> RuntimeSnapshot {
+        let mut obligations_by_task: HashMap<TaskId, Vec<ObligationId>> = HashMap::new();
+        let obligations: Vec<ObligationSnapshot> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| {
+                obligations_by_task
+                    .entry(record.holder)
+                    .or_default()
+                    .push(record.id);
+                ObligationSnapshot::from_record(record)
+            })
+            .collect();
+
+        let regions: Vec<RegionSnapshot> = self
+            .regions
+            .iter()
+            .map(|(_, record)| RegionSnapshot::from_record(record))
+            .collect();
+
+        let tasks: Vec<TaskSnapshot> = self
+            .tasks
+            .iter()
+            .map(|(_, record)| {
+                let task_obligations = obligations_by_task
+                    .get(&record.id)
+                    .cloned()
+                    .unwrap_or_default();
+                TaskSnapshot::from_record(record, task_obligations)
+            })
+            .collect();
+
+        let recent_events: Vec<EventSnapshot> =
+            self.trace.iter().map(EventSnapshot::from_event).collect();
+
+        RuntimeSnapshot {
+            timestamp: self.now.as_nanos(),
+            regions,
+            tasks,
+            obligations,
+            recent_events,
+        }
+    }
+
     /// Creates a root region and returns its ID.
     pub fn create_root_region(&mut self, budget: Budget) -> RegionId {
-        let idx = self.regions.insert(RegionRecord::new(
+        let idx = self.regions.insert(RegionRecord::new_with_time(
             RegionId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
             None,
             budget,
+            self.now,
         ));
         let id = RegionId::from_arena(idx);
 
@@ -230,10 +284,11 @@ impl RuntimeState {
         let (result_tx, result_rx) = oneshot::channel::<Result<T, JoinError>>();
 
         // Create the TaskRecord
-        let idx = self.tasks.insert(TaskRecord::new(
+        let idx = self.tasks.insert(TaskRecord::new_with_time(
             TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
             region,
             budget,
+            self.now,
         ));
         let task_id = TaskId::from_arena(idx);
 
@@ -1083,6 +1138,664 @@ impl Default for RuntimeState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Serializable identifier snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IdSnapshot {
+    /// Arena index for the entity.
+    pub index: u32,
+    /// Generation counter for ABA safety.
+    pub generation: u32,
+}
+
+impl From<RegionId> for IdSnapshot {
+    fn from(id: RegionId) -> Self {
+        let arena = id.arena_index();
+        Self {
+            index: arena.index(),
+            generation: arena.generation(),
+        }
+    }
+}
+
+impl From<TaskId> for IdSnapshot {
+    fn from(id: TaskId) -> Self {
+        let arena = id.arena_index();
+        Self {
+            index: arena.index(),
+            generation: arena.generation(),
+        }
+    }
+}
+
+impl From<ObligationId> for IdSnapshot {
+    fn from(id: ObligationId) -> Self {
+        let arena = id.arena_index();
+        Self {
+            index: arena.index(),
+            generation: arena.generation(),
+        }
+    }
+}
+
+/// Serializable budget snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct BudgetSnapshot {
+    /// Deadline in nanoseconds, if any.
+    pub deadline: Option<u64>,
+    /// Poll quota for the budget.
+    pub poll_quota: u32,
+    /// Optional cost quota.
+    pub cost_quota: Option<u64>,
+    /// Scheduling priority (0-255).
+    pub priority: u8,
+}
+
+impl From<Budget> for BudgetSnapshot {
+    fn from(budget: Budget) -> Self {
+        Self {
+            deadline: budget.deadline.map(Time::as_nanos),
+            poll_quota: budget.poll_quota,
+            cost_quota: budget.cost_quota,
+            priority: budget.priority,
+        }
+    }
+}
+
+/// Snapshot of the runtime state for debugging or visualization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeSnapshot {
+    /// Snapshot timestamp in nanoseconds.
+    pub timestamp: u64,
+    /// Region snapshots.
+    pub regions: Vec<RegionSnapshot>,
+    /// Task snapshots.
+    pub tasks: Vec<TaskSnapshot>,
+    /// Obligation snapshots.
+    pub obligations: Vec<ObligationSnapshot>,
+    /// Recent trace events (if tracing is enabled).
+    pub recent_events: Vec<EventSnapshot>,
+}
+
+/// Serializable region snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionSnapshot {
+    /// Region identifier.
+    pub id: IdSnapshot,
+    /// Parent region identifier, if any.
+    pub parent_id: Option<IdSnapshot>,
+    /// Current region state.
+    pub state: RegionStateSnapshot,
+    /// Effective budget for the region.
+    pub budget: BudgetSnapshot,
+    /// Number of child regions.
+    pub child_count: usize,
+    /// Number of tasks owned by the region.
+    pub task_count: usize,
+    /// Optional human-friendly name.
+    pub name: Option<String>,
+}
+
+impl RegionSnapshot {
+    fn from_record(record: &RegionRecord) -> Self {
+        let child_count = record.child_ids().len();
+        let task_count = record.task_ids().len();
+        Self {
+            id: record.id.into(),
+            parent_id: record.parent.map(IdSnapshot::from),
+            state: RegionStateSnapshot::from(record.state()),
+            budget: BudgetSnapshot::from(record.budget()),
+            child_count,
+            task_count,
+            name: None,
+        }
+    }
+}
+
+/// Serializable region lifecycle state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RegionStateSnapshot {
+    /// Region is open and accepting work.
+    Open,
+    /// Region has begun closing.
+    Closing,
+    /// Region is draining children.
+    Draining,
+    /// Region is running finalizers.
+    Finalizing,
+    /// Region is fully closed.
+    Closed,
+}
+
+impl From<RegionState> for RegionStateSnapshot {
+    fn from(state: RegionState) -> Self {
+        match state {
+            RegionState::Open => Self::Open,
+            RegionState::Closing => Self::Closing,
+            RegionState::Draining => Self::Draining,
+            RegionState::Finalizing => Self::Finalizing,
+            RegionState::Closed => Self::Closed,
+        }
+    }
+}
+
+/// Serializable task snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSnapshot {
+    /// Task identifier.
+    pub id: IdSnapshot,
+    /// Owning region identifier.
+    pub region_id: IdSnapshot,
+    /// Current task state.
+    pub state: TaskStateSnapshot,
+    /// Optional human-friendly name.
+    pub name: Option<String>,
+    /// Estimated poll count since creation.
+    pub poll_count: u64,
+    /// Task creation time in nanoseconds.
+    pub created_at: u64,
+    /// Obligations currently held by the task.
+    pub obligations: Vec<IdSnapshot>,
+}
+
+impl TaskSnapshot {
+    fn from_record(record: &TaskRecord, obligations: Vec<ObligationId>) -> Self {
+        let poll_count = record
+            .cx_inner
+            .as_ref()
+            .and_then(|inner| inner.read().ok())
+            .map(|inner| inner.budget_baseline.poll_quota)
+            .map_or(0, |baseline| {
+                u64::from(baseline.saturating_sub(record.polls_remaining))
+            });
+
+        let obligations = obligations.into_iter().map(IdSnapshot::from).collect();
+
+        Self {
+            id: record.id.into(),
+            region_id: record.owner.into(),
+            state: TaskStateSnapshot::from_state(&record.state),
+            name: None,
+            poll_count,
+            created_at: record.created_at().as_nanos(),
+            obligations,
+        }
+    }
+}
+
+/// Serializable task lifecycle state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TaskStateSnapshot {
+    /// Task created but not yet running.
+    Created,
+    /// Task is running normally.
+    Running,
+    /// Cancellation requested.
+    CancelRequested {
+        /// Cancellation reason.
+        reason: CancelReasonSnapshot,
+    },
+    /// Task acknowledged cancellation and is cleaning up.
+    Cancelling {
+        /// Cancellation reason.
+        reason: CancelReasonSnapshot,
+    },
+    /// Task is running finalizers.
+    Finalizing {
+        /// Cancellation reason.
+        reason: CancelReasonSnapshot,
+    },
+    /// Task completed with an outcome.
+    Completed {
+        /// Completion outcome.
+        outcome: OutcomeSnapshot,
+    },
+}
+
+impl TaskStateSnapshot {
+    fn from_state(state: &TaskState) -> Self {
+        match state {
+            TaskState::Created => Self::Created,
+            TaskState::Running => Self::Running,
+            TaskState::CancelRequested { reason, .. } => Self::CancelRequested {
+                reason: CancelReasonSnapshot::from(reason),
+            },
+            TaskState::Cancelling { reason, .. } => Self::Cancelling {
+                reason: CancelReasonSnapshot::from(reason),
+            },
+            TaskState::Finalizing { reason, .. } => Self::Finalizing {
+                reason: CancelReasonSnapshot::from(reason),
+            },
+            TaskState::Completed(outcome) => Self::Completed {
+                outcome: OutcomeSnapshot::from_outcome(outcome),
+            },
+        }
+    }
+}
+
+/// Serializable cancellation kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CancelKindSnapshot {
+    /// Explicit user cancellation.
+    User,
+    /// Deadline or timeout cancellation.
+    Timeout,
+    /// Fail-fast cancellation.
+    FailFast,
+    /// Race-loser cancellation.
+    RaceLost,
+    /// Parent region cancelled.
+    ParentCancelled,
+    /// Runtime shutdown cancellation.
+    Shutdown,
+}
+
+impl From<CancelKind> for CancelKindSnapshot {
+    fn from(kind: CancelKind) -> Self {
+        match kind {
+            CancelKind::User => Self::User,
+            CancelKind::Timeout => Self::Timeout,
+            CancelKind::FailFast => Self::FailFast,
+            CancelKind::RaceLost => Self::RaceLost,
+            CancelKind::ParentCancelled => Self::ParentCancelled,
+            CancelKind::Shutdown => Self::Shutdown,
+        }
+    }
+}
+
+/// Serializable cancellation reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelReasonSnapshot {
+    /// Cancellation kind.
+    pub kind: CancelKindSnapshot,
+    /// Optional static message.
+    pub message: Option<String>,
+}
+
+impl From<&CancelReason> for CancelReasonSnapshot {
+    fn from(reason: &CancelReason) -> Self {
+        Self {
+            kind: CancelKindSnapshot::from(reason.kind()),
+            message: reason.message.map(str::to_string),
+        }
+    }
+}
+
+/// Serializable task outcome summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OutcomeSnapshot {
+    /// Task completed successfully.
+    Ok,
+    /// Task completed with an application error.
+    Err {
+        /// Optional error message.
+        message: Option<String>,
+    },
+    /// Task completed due to cancellation.
+    Cancelled {
+        /// Cancellation reason.
+        reason: CancelReasonSnapshot,
+    },
+    /// Task panicked.
+    Panicked {
+        /// Optional panic message.
+        message: Option<String>,
+    },
+}
+
+impl OutcomeSnapshot {
+    fn from_outcome(outcome: &Outcome<(), crate::error::Error>) -> Self {
+        match outcome {
+            Outcome::Ok(()) => Self::Ok,
+            Outcome::Err(err) => Self::Err {
+                message: Some(err.to_string()),
+            },
+            Outcome::Cancelled(reason) => Self::Cancelled {
+                reason: CancelReasonSnapshot::from(reason),
+            },
+            Outcome::Panicked(payload) => Self::Panicked {
+                message: Some(payload.message().to_string()),
+            },
+        }
+    }
+}
+
+/// Serializable obligation snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObligationSnapshot {
+    /// Obligation identifier.
+    pub id: IdSnapshot,
+    /// Obligation kind.
+    pub kind: ObligationKindSnapshot,
+    /// Obligation state.
+    pub state: ObligationStateSnapshot,
+    /// Task holding the obligation.
+    pub holder_task: IdSnapshot,
+    /// Region owning the obligation.
+    pub owning_region: IdSnapshot,
+    /// Time when the obligation was created.
+    pub created_at: u64,
+}
+
+impl ObligationSnapshot {
+    fn from_record(record: &ObligationRecord) -> Self {
+        Self {
+            id: record.id.into(),
+            kind: ObligationKindSnapshot::from(record.kind),
+            state: ObligationStateSnapshot::from(record.state),
+            holder_task: record.holder.into(),
+            owning_region: record.region.into(),
+            created_at: record.reserved_at.as_nanos(),
+        }
+    }
+}
+
+/// Serializable obligation kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ObligationKindSnapshot {
+    /// Send permit.
+    SendPermit,
+    /// Acknowledgement.
+    Ack,
+    /// Lease.
+    Lease,
+    /// I/O operation.
+    IoOp,
+}
+
+impl From<ObligationKind> for ObligationKindSnapshot {
+    fn from(kind: ObligationKind) -> Self {
+        match kind {
+            ObligationKind::SendPermit => Self::SendPermit,
+            ObligationKind::Ack => Self::Ack,
+            ObligationKind::Lease => Self::Lease,
+            ObligationKind::IoOp => Self::IoOp,
+        }
+    }
+}
+
+/// Serializable obligation state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ObligationStateSnapshot {
+    /// Reserved but not yet resolved.
+    Reserved,
+    /// Committed successfully.
+    Committed,
+    /// Aborted cleanly.
+    Aborted,
+    /// Leaked (error).
+    Leaked,
+}
+
+impl From<ObligationState> for ObligationStateSnapshot {
+    fn from(state: ObligationState) -> Self {
+        match state {
+            ObligationState::Reserved => Self::Reserved,
+            ObligationState::Committed => Self::Committed,
+            ObligationState::Aborted => Self::Aborted,
+            ObligationState::Leaked => Self::Leaked,
+        }
+    }
+}
+
+/// Serializable obligation abort reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ObligationAbortReasonSnapshot {
+    /// Aborted due to cancellation.
+    Cancel,
+    /// Aborted due to error.
+    Error,
+    /// Explicitly aborted.
+    Explicit,
+}
+
+impl From<ObligationAbortReason> for ObligationAbortReasonSnapshot {
+    fn from(reason: ObligationAbortReason) -> Self {
+        match reason {
+            ObligationAbortReason::Cancel => Self::Cancel,
+            ObligationAbortReason::Error => Self::Error,
+            ObligationAbortReason::Explicit => Self::Explicit,
+        }
+    }
+}
+
+/// Serializable trace event snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSnapshot {
+    /// Sequence number.
+    pub seq: u64,
+    /// Event timestamp in nanoseconds.
+    pub time: u64,
+    /// Event kind.
+    pub kind: EventKindSnapshot,
+    /// Event data payload.
+    pub data: EventDataSnapshot,
+}
+
+impl EventSnapshot {
+    fn from_event(event: &TraceEvent) -> Self {
+        Self {
+            seq: event.seq,
+            time: event.time.as_nanos(),
+            kind: EventKindSnapshot::from(event.kind),
+            data: EventDataSnapshot::from_trace_data(&event.data),
+        }
+    }
+}
+
+/// Serializable trace event kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EventKindSnapshot {
+    /// Task was spawned.
+    Spawn,
+    /// Task was scheduled.
+    Schedule,
+    /// Task was polled.
+    Poll,
+    /// Task completed.
+    Complete,
+    /// Cancellation requested.
+    CancelRequest,
+    /// Cancellation acknowledged.
+    CancelAck,
+    /// Region close started.
+    RegionCloseBegin,
+    /// Region close completed.
+    RegionCloseComplete,
+    /// Obligation reserved.
+    ObligationReserve,
+    /// Obligation committed.
+    ObligationCommit,
+    /// Obligation aborted.
+    ObligationAbort,
+    /// Obligation leaked.
+    ObligationLeak,
+    /// Time advanced.
+    TimeAdvance,
+    /// Futurelock detected.
+    FuturelockDetected,
+    /// Chaos injection occurred.
+    ChaosInjection,
+    /// User trace point.
+    UserTrace,
+}
+
+impl From<TraceEventKind> for EventKindSnapshot {
+    fn from(kind: TraceEventKind) -> Self {
+        match kind {
+            TraceEventKind::Spawn => Self::Spawn,
+            TraceEventKind::Schedule => Self::Schedule,
+            TraceEventKind::Poll => Self::Poll,
+            TraceEventKind::Complete => Self::Complete,
+            TraceEventKind::CancelRequest => Self::CancelRequest,
+            TraceEventKind::CancelAck => Self::CancelAck,
+            TraceEventKind::RegionCloseBegin => Self::RegionCloseBegin,
+            TraceEventKind::RegionCloseComplete => Self::RegionCloseComplete,
+            TraceEventKind::ObligationReserve => Self::ObligationReserve,
+            TraceEventKind::ObligationCommit => Self::ObligationCommit,
+            TraceEventKind::ObligationAbort => Self::ObligationAbort,
+            TraceEventKind::ObligationLeak => Self::ObligationLeak,
+            TraceEventKind::TimeAdvance => Self::TimeAdvance,
+            TraceEventKind::FuturelockDetected => Self::FuturelockDetected,
+            TraceEventKind::ChaosInjection => Self::ChaosInjection,
+            TraceEventKind::UserTrace => Self::UserTrace,
+        }
+    }
+}
+
+/// Serializable trace event payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EventDataSnapshot {
+    /// No additional data.
+    None,
+    /// Task-related event.
+    Task {
+        /// Task identifier.
+        task: IdSnapshot,
+        /// Region identifier.
+        region: IdSnapshot,
+    },
+    /// Region-related event.
+    Region {
+        /// Region identifier.
+        region: IdSnapshot,
+        /// Parent region identifier.
+        parent: Option<IdSnapshot>,
+    },
+    /// Obligation-related event.
+    Obligation {
+        /// Obligation identifier.
+        obligation: IdSnapshot,
+        /// Task holding the obligation.
+        task: IdSnapshot,
+        /// Owning region.
+        region: IdSnapshot,
+        /// Obligation kind.
+        kind: ObligationKindSnapshot,
+        /// Obligation state.
+        state: ObligationStateSnapshot,
+        /// Duration held in nanoseconds, if resolved.
+        duration_ns: Option<u64>,
+        /// Abort reason, if applicable.
+        abort_reason: Option<ObligationAbortReasonSnapshot>,
+    },
+    /// Cancellation-related event.
+    Cancel {
+        /// Task identifier.
+        task: IdSnapshot,
+        /// Region identifier.
+        region: IdSnapshot,
+        /// Cancellation reason.
+        reason: CancelReasonSnapshot,
+    },
+    /// Time-related event.
+    Time {
+        /// Previous time in nanoseconds.
+        old: u64,
+        /// New time in nanoseconds.
+        new: u64,
+    },
+    /// Futurelock event data.
+    Futurelock {
+        /// Task identifier.
+        task: IdSnapshot,
+        /// Region identifier.
+        region: IdSnapshot,
+        /// Idle steps since last poll.
+        idle_steps: u64,
+        /// Obligations held at detection time.
+        held: Vec<HeldObligationSnapshot>,
+    },
+    /// User-defined message.
+    Message(String),
+    /// Chaos injection details.
+    Chaos {
+        /// Chaos kind.
+        kind: String,
+        /// Optional task identifier.
+        task: Option<IdSnapshot>,
+        /// Additional detail.
+        detail: String,
+    },
+}
+
+impl EventDataSnapshot {
+    fn from_trace_data(data: &TraceData) -> Self {
+        match data {
+            TraceData::None => Self::None,
+            TraceData::Task { task, region } => Self::Task {
+                task: (*task).into(),
+                region: (*region).into(),
+            },
+            TraceData::Region { region, parent } => Self::Region {
+                region: (*region).into(),
+                parent: parent.map(IdSnapshot::from),
+            },
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => Self::Obligation {
+                obligation: (*obligation).into(),
+                task: (*task).into(),
+                region: (*region).into(),
+                kind: ObligationKindSnapshot::from(*kind),
+                state: ObligationStateSnapshot::from(*state),
+                duration_ns: *duration_ns,
+                abort_reason: abort_reason.map(ObligationAbortReasonSnapshot::from),
+            },
+            TraceData::Cancel {
+                task,
+                region,
+                reason,
+            } => Self::Cancel {
+                task: (*task).into(),
+                region: (*region).into(),
+                reason: CancelReasonSnapshot::from(reason),
+            },
+            TraceData::Time { old, new } => Self::Time {
+                old: old.as_nanos(),
+                new: new.as_nanos(),
+            },
+            TraceData::Futurelock {
+                task,
+                region,
+                idle_steps,
+                held,
+            } => Self::Futurelock {
+                task: (*task).into(),
+                region: (*region).into(),
+                idle_steps: *idle_steps,
+                held: held
+                    .iter()
+                    .map(|(obligation, kind)| HeldObligationSnapshot {
+                        obligation: (*obligation).into(),
+                        kind: ObligationKindSnapshot::from(*kind),
+                    })
+                    .collect(),
+            },
+            TraceData::Message(message) => Self::Message(message.clone()),
+            TraceData::Chaos { kind, task, detail } => Self::Chaos {
+                kind: kind.clone(),
+                task: task.map(IdSnapshot::from),
+                detail: detail.clone(),
+            },
+        }
+    }
+}
+
+/// Serializable representation of a held obligation at futurelock detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeldObligationSnapshot {
+    /// Obligation identifier.
+    pub obligation: IdSnapshot,
+    /// Obligation kind.
+    pub kind: ObligationKindSnapshot,
 }
 
 #[cfg(test)]

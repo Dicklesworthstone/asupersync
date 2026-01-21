@@ -552,7 +552,7 @@ impl Child {
         })?;
 
         let status = child.wait().map_err(ProcessError::Io)?;
-        
+
         // self.code = status.code(); // Child doesn't have these fields
         // #[cfg(unix)]
         // {
@@ -960,7 +960,7 @@ mod tests {
             .arg("exit 42")
             .spawn()
             .expect("spawn failed");
-        
+
         let result = child.wait().expect("wait failed");
 
         crate::assert_with_log!(!result.success(), "not success", false, result.success());
@@ -1162,7 +1162,8 @@ mod tests {
             .stdout(Stdio::Null)
             .stderr(Stdio::Null);
 
-        let result = cmd.output().expect("output failed");
+        let mut child = cmd.spawn().expect("spawn failed");
+        let result = child.wait_with_output().expect("output failed");
 
         // stdout/stderr should be empty because they were null (not piped)
         crate::assert_with_log!(

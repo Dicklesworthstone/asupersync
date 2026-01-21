@@ -355,23 +355,23 @@ impl ReplayEvent {
     #[must_use]
     pub const fn estimated_size(&self) -> usize {
         match self {
-            Self::TaskScheduled { .. } => 17, // 1 + 8 + 8
-            Self::TaskYielded { .. } => 9,    // 1 + 8
-            Self::TaskCompleted { .. } => 10, // 1 + 8 + 1
-            Self::TaskSpawned { .. } => 25,   // 1 + 8 + 8 + 8
-            Self::TimeAdvanced { .. } => 17,  // 1 + 8 + 8
-            Self::TimerCreated { .. } => 17,  // 1 + 8 + 8
-            Self::TimerFired { .. } => 9,     // 1 + 8
-            Self::TimerCancelled { .. } => 9, // 1 + 8
-            Self::IoReady { .. } => 10,       // 1 + 8 + 1
-            Self::IoResult { .. } => 17,      // 1 + 8 + 8
-            Self::IoError { .. } => 10,       // 1 + 8 + 1
-            Self::RngSeed { .. } => 9,        // 1 + 8
-            Self::RngValue { .. } => 9,       // 1 + 8
-            Self::ChaosInjection { task: None, .. } => 11, // 1 + 1 + 1 + 8
+            Self::TaskScheduled { .. } => 17,                 // 1 + 8 + 8
+            Self::TaskYielded { .. } => 9,                    // 1 + 8
+            Self::TaskCompleted { .. } => 10,                 // 1 + 8 + 1
+            Self::TaskSpawned { .. } => 25,                   // 1 + 8 + 8 + 8
+            Self::TimeAdvanced { .. } => 17,                  // 1 + 8 + 8
+            Self::TimerCreated { .. } => 17,                  // 1 + 8 + 8
+            Self::TimerFired { .. } => 9,                     // 1 + 8
+            Self::TimerCancelled { .. } => 9,                 // 1 + 8
+            Self::IoReady { .. } => 10,                       // 1 + 8 + 1
+            Self::IoResult { .. } => 17,                      // 1 + 8 + 8
+            Self::IoError { .. } => 10,                       // 1 + 8 + 1
+            Self::RngSeed { .. } => 9,                        // 1 + 8
+            Self::RngValue { .. } => 9,                       // 1 + 8
+            Self::ChaosInjection { task: None, .. } => 11,    // 1 + 1 + 1 + 8
             Self::ChaosInjection { task: Some(_), .. } => 19, // 1 + 1 + 9 + 8
-            Self::WakerWake { .. } => 9,      // 1 + 8
-            Self::WakerBatchWake { .. } => 5, // 1 + 4
+            Self::WakerWake { .. } => 9,                      // 1 + 8
+            Self::WakerBatchWake { .. } => 5,                 // 1 + 4
         }
     }
 
@@ -514,7 +514,11 @@ impl ReplayTrace {
     #[must_use]
     pub fn estimated_size(&self) -> usize {
         // Metadata overhead (~50 bytes) + events
-        50 + self.events.iter().map(ReplayEvent::estimated_size).sum::<usize>()
+        50 + self
+            .events
+            .iter()
+            .map(ReplayEvent::estimated_size)
+            .sum::<usize>()
     }
 }
 

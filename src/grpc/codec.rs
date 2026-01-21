@@ -129,7 +129,7 @@ impl Encoder<GrpcMessage> for GrpcCodec {
         dst.reserve(MESSAGE_HEADER_SIZE + item.data.len());
 
         // Write compressed flag
-        dst.put_u8(if item.compressed { 1 } else { 0 });
+        dst.put_u8(u8::from(item.compressed));
 
         // Write length (big-endian)
         dst.put_u32(item.data.len() as u32);
@@ -219,12 +219,8 @@ impl<C: Codec> FramedCodec<C> {
             .map_err(|e| GrpcError::invalid_message(e.to_string()))?;
 
         // Create framed message
-        let message = if self.use_compression {
-            // TODO: Implement compression
-            GrpcMessage::new(data)
-        } else {
-            GrpcMessage::new(data)
-        };
+        // TODO: Implement compression when use_compression is true
+        let message = GrpcMessage::new(data);
 
         // Encode with framing
         self.framing.encode(message, dst)

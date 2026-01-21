@@ -171,11 +171,13 @@ impl Channel {
     }
 
     /// Get the target URI.
+    #[must_use]
     pub fn uri(&self) -> &str {
         &self.uri
     }
 
     /// Get the channel configuration.
+    #[must_use]
     pub fn config(&self) -> &ChannelConfig {
         &self.config
     }

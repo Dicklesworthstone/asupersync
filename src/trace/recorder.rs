@@ -143,7 +143,10 @@ impl TraceRecorder {
     #[must_use]
     pub fn with_config(metadata: TraceMetadata, config: RecorderConfig) -> Self {
         let trace = if config.enabled {
-            Some(ReplayTrace::with_capacity(metadata, config.initial_capacity))
+            Some(ReplayTrace::with_capacity(
+                metadata,
+                config.initial_capacity,
+            ))
         } else {
             None
         };
@@ -280,7 +283,14 @@ impl TraceRecorder {
 
     /// Records that I/O became ready.
     #[inline]
-    pub fn record_io_ready(&mut self, token: u64, readable: bool, writable: bool, error: bool, hangup: bool) {
+    pub fn record_io_ready(
+        &mut self,
+        token: u64,
+        readable: bool,
+        writable: bool,
+        error: bool,
+        hangup: bool,
+    ) {
         if let Some(ref mut trace) = self.trace {
             let mut readiness = 0u8;
             if readable {
@@ -438,7 +448,10 @@ impl TraceRecorder {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            self.trace = Some(ReplayTrace::with_capacity(new_meta, self.config.initial_capacity));
+            self.trace = Some(ReplayTrace::with_capacity(
+                new_meta,
+                self.config.initial_capacity,
+            ));
             self.seed_recorded = false;
         }
         taken
@@ -660,10 +673,22 @@ mod tests {
 
         let trace = recorder.finish().expect("trace");
 
-        assert!(matches!(trace.events[0], ReplayEvent::TimerCreated { timer_id: 1, .. }));
-        assert!(matches!(trace.events[1], ReplayEvent::TimerFired { timer_id: 1 }));
-        assert!(matches!(trace.events[2], ReplayEvent::TimerCreated { timer_id: 2, .. }));
-        assert!(matches!(trace.events[3], ReplayEvent::TimerCancelled { timer_id: 2 }));
+        assert!(matches!(
+            trace.events[0],
+            ReplayEvent::TimerCreated { timer_id: 1, .. }
+        ));
+        assert!(matches!(
+            trace.events[1],
+            ReplayEvent::TimerFired { timer_id: 1 }
+        ));
+        assert!(matches!(
+            trace.events[2],
+            ReplayEvent::TimerCreated { timer_id: 2, .. }
+        ));
+        assert!(matches!(
+            trace.events[3],
+            ReplayEvent::TimerCancelled { timer_id: 2 }
+        ));
     }
 
     #[test]

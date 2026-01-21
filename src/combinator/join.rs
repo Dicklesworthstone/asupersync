@@ -365,6 +365,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for JoinAllError<E> {}
 ///
 /// # Returns
 /// A tuple of (aggregate decision, vector of successful values with their indices).
+#[must_use]
 pub fn join_all_outcomes<T, E: Clone>(
     outcomes: Vec<Outcome<T, E>>,
 ) -> (AggregateDecision<E>, Vec<(usize, T)>) {

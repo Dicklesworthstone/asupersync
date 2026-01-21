@@ -542,10 +542,11 @@ impl<P: Policy> Scope<'_, P> {
         use crate::util::ArenaIndex;
 
         // Create placeholder task record
-        let idx = state.tasks.insert(TaskRecord::new(
+        let idx = state.tasks.insert(TaskRecord::new_with_time(
             TaskId::from_arena(ArenaIndex::new(0, 0)), // placeholder ID
             self.region,
             self.budget,
+            state.now,
         ));
 
         // Get the real task ID from the arena index

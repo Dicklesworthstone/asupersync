@@ -222,7 +222,10 @@ fn cancel_skipping_request_state_detected() {
     assert_with_log!(is_err, "skipped state detected", true, is_err);
 
     if let Err(violation) = result {
-        let is_skipped = matches!(violation, CancellationProtocolViolation::SkippedState { .. });
+        let is_skipped = matches!(
+            violation,
+            CancellationProtocolViolation::SkippedState { .. }
+        );
         assert_with_log!(is_skipped, "violation is SkippedState", true, is_skipped);
     }
 
@@ -278,7 +281,12 @@ fn cancel_drain_phase_entered() {
     // Verify state
     let state = oracle.task_state(worker);
     let is_cancelling = state == Some(TaskStateKind::Cancelling);
-    assert_with_log!(is_cancelling, "task in Cancelling state", true, is_cancelling);
+    assert_with_log!(
+        is_cancelling,
+        "task in Cancelling state",
+        true,
+        is_cancelling
+    );
 
     // Complete the protocol
     oracle.on_transition(
@@ -428,7 +436,12 @@ fn cancel_finalize_phase_entered() {
 
     let state = oracle.task_state(worker);
     let is_finalizing = state == Some(TaskStateKind::Finalizing);
-    assert_with_log!(is_finalizing, "task in Finalizing state", true, is_finalizing);
+    assert_with_log!(
+        is_finalizing,
+        "task in Finalizing state",
+        true,
+        is_finalizing
+    );
 
     // Complete
     oracle.on_transition(
@@ -538,8 +551,10 @@ fn cancel_task_must_complete() {
     assert_with_log!(is_err, "incomplete cancel detected", true, is_err);
 
     if let Err(violation) = result {
-        let is_not_completed =
-            matches!(violation, CancellationProtocolViolation::CancelNotCompleted { .. });
+        let is_not_completed = matches!(
+            violation,
+            CancellationProtocolViolation::CancelNotCompleted { .. }
+        );
         assert_with_log!(
             is_not_completed,
             "violation is CancelNotCompleted",
@@ -598,8 +613,10 @@ fn cancel_missing_propagation_detected() {
     assert_with_log!(is_err, "missing propagation detected", true, is_err);
 
     if let Err(violation) = result {
-        let is_not_propagated =
-            matches!(violation, CancellationProtocolViolation::CancelNotPropagated { .. });
+        let is_not_propagated = matches!(
+            violation,
+            CancellationProtocolViolation::CancelNotPropagated { .. }
+        );
         assert_with_log!(
             is_not_propagated,
             "violation is CancelNotPropagated",
@@ -827,7 +844,12 @@ fn cancel_nested_only_affects_descendants() {
     // Root should NOT be in cancelled_regions
     let cancelled = oracle.cancelled_regions();
     let root_not_cancelled = !cancelled.contains_key(&root);
-    assert_with_log!(root_not_cancelled, "root not cancelled", true, root_not_cancelled);
+    assert_with_log!(
+        root_not_cancelled,
+        "root not cancelled",
+        true,
+        root_not_cancelled
+    );
 
     let middle_cancelled = cancelled.contains_key(&middle);
     assert_with_log!(middle_cancelled, "middle cancelled", true, middle_cancelled);
@@ -863,7 +885,12 @@ fn cancel_sibling_regions_independent() {
 
     let cancelled = oracle.cancelled_regions();
     let only_sibling2 = cancelled.len() == 1 && cancelled.contains_key(&sibling2);
-    assert_with_log!(only_sibling2, "only sibling2 cancelled", true, only_sibling2);
+    assert_with_log!(
+        only_sibling2,
+        "only sibling2 cancelled",
+        true,
+        only_sibling2
+    );
 
     let result = oracle.check();
     let ok = result.is_ok();
@@ -1114,13 +1141,23 @@ fn cancel_oracle_reset() {
     oracle.reset();
 
     let has_request_after = oracle.has_cancel_request(worker);
-    assert_with_log!(!has_request_after, "cancel request cleared", false, has_request_after);
+    assert_with_log!(
+        !has_request_after,
+        "cancel request cleared",
+        false,
+        has_request_after
+    );
 
     let state = oracle.task_state(worker);
     assert_with_log!(state.is_none(), "task state cleared", true, state.is_none());
 
     let cancelled = oracle.cancelled_regions();
-    assert_with_log!(cancelled.is_empty(), "cancelled regions cleared", true, cancelled.is_empty());
+    assert_with_log!(
+        cancelled.is_empty(),
+        "cancelled regions cleared",
+        true,
+        cancelled.is_empty()
+    );
 
     test_complete!("cancel_oracle_reset");
 }

@@ -923,7 +923,12 @@ mod tests {
         init_test("intrusive_wheel_new");
         let wheel: TimerWheel<256> = TimerWheel::new(Duration::from_millis(1));
 
-        crate::assert_with_log!(wheel.is_empty(), "wheel starts empty", true, wheel.is_empty());
+        crate::assert_with_log!(
+            wheel.is_empty(),
+            "wheel starts empty",
+            true,
+            wheel.is_empty()
+        );
         crate::assert_with_log!(wheel.len() == 0, "len is 0", 0, wheel.len());
         crate::assert_with_log!(
             wheel.resolution() == Duration::from_millis(1),
@@ -1011,7 +1016,8 @@ mod tests {
         let mut wheel: TimerWheel<256> = TimerWheel::new_at(Duration::from_millis(1), base);
         let counter = Arc::new(AtomicU64::new(0));
 
-        let mut nodes: Vec<Pin<Box<TimerNode>>> = (0..5).map(|_| Box::pin(TimerNode::new())).collect();
+        let mut nodes: Vec<Pin<Box<TimerNode>>> =
+            (0..5).map(|_| Box::pin(TimerNode::new())).collect();
 
         // Insert timers at different deadlines
         for (i, node) in nodes.iter_mut().enumerate() {
@@ -1074,7 +1080,8 @@ mod tests {
         let mut wheel: TimerWheel<256> = TimerWheel::new_at(Duration::from_millis(1), base);
         let counter = Arc::new(AtomicU64::new(0));
 
-        let mut nodes: Vec<Pin<Box<TimerNode>>> = (0..3).map(|_| Box::pin(TimerNode::new())).collect();
+        let mut nodes: Vec<Pin<Box<TimerNode>>> =
+            (0..3).map(|_| Box::pin(TimerNode::new())).collect();
 
         for (i, node) in nodes.iter_mut().enumerate() {
             let deadline = base + Duration::from_millis((i as u64 + 1) * 10);

@@ -386,8 +386,14 @@ fn events_match(expected: &ReplayEvent, actual: &ReplayEvent) -> bool {
 fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
     match (expected, actual) {
         (
-            ReplayEvent::TaskScheduled { task: expected_task, at_tick: expected_tick },
-            ReplayEvent::TaskScheduled { task: actual_task, at_tick: actual_tick },
+            ReplayEvent::TaskScheduled {
+                task: expected_task,
+                at_tick: expected_tick,
+            },
+            ReplayEvent::TaskScheduled {
+                task: actual_task,
+                at_tick: actual_tick,
+            },
         ) => {
             if expected_task != actual_task {
                 format!(
@@ -402,8 +408,14 @@ fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
             }
         }
         (
-            ReplayEvent::TimeAdvanced { from_nanos: e_from, to_nanos: e_to },
-            ReplayEvent::TimeAdvanced { from_nanos: a_from, to_nanos: a_to },
+            ReplayEvent::TimeAdvanced {
+                from_nanos: e_from,
+                to_nanos: e_to,
+            },
+            ReplayEvent::TimeAdvanced {
+                from_nanos: a_from,
+                to_nanos: a_to,
+            },
         ) => {
             format!(
                 "Time advanced differently: expected {}ns -> {}ns, got {}ns -> {}ns",
@@ -411,11 +423,20 @@ fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
             )
         }
         (
-            ReplayEvent::TaskCompleted { task: e_task, outcome: e_out },
-            ReplayEvent::TaskCompleted { task: a_task, outcome: a_out },
+            ReplayEvent::TaskCompleted {
+                task: e_task,
+                outcome: e_out,
+            },
+            ReplayEvent::TaskCompleted {
+                task: a_task,
+                outcome: a_out,
+            },
         ) => {
             if e_task != a_task {
-                format!("Different task completed: expected {:?}, got {:?}", e_task, a_task)
+                format!(
+                    "Different task completed: expected {:?}, got {:?}",
+                    e_task, a_task
+                )
             } else {
                 format!("Different outcome: expected {}, got {}", e_out, a_out)
             }

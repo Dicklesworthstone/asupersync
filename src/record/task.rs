@@ -5,7 +5,7 @@
 
 use crate::cx::Cx;
 use crate::tracing_compat::{debug, trace};
-use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId};
+use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId, Time};
 use std::sync::{Arc, RwLock};
 
 /// The concrete outcome type stored in task records (Phase 0).
@@ -90,6 +90,8 @@ pub struct TaskRecord {
     ///
     /// This allows the runtime to set a current task context while polling.
     pub cx: Option<Cx>,
+    /// Logical time when the task was created.
+    pub created_at: Time,
 
     /// Number of polls remaining (for budget tracking).
     pub polls_remaining: u32,
@@ -103,16 +105,29 @@ impl TaskRecord {
     /// Creates a new task record.
     #[must_use]
     pub fn new(id: TaskId, owner: RegionId, budget: Budget) -> Self {
+        Self::new_with_time(id, owner, budget, Time::ZERO)
+    }
+
+    /// Creates a new task record with an explicit creation time.
+    #[must_use]
+    pub fn new_with_time(id: TaskId, owner: RegionId, budget: Budget, created_at: Time) -> Self {
         Self {
             id,
             owner,
             state: TaskState::Created,
             cx_inner: None, // Must be set via set_cx_inner or similar
             cx: None,
+            created_at,
             polls_remaining: budget.poll_quota,
             last_polled_step: 0,
             waiters: Vec::new(),
         }
+    }
+
+    /// Returns the logical time when the task was created.
+    #[must_use]
+    pub const fn created_at(&self) -> Time {
+        self.created_at
     }
 
     /// Sets the shared CxInner.

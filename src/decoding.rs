@@ -692,7 +692,7 @@ struct Row {
 }
 
 impl Row {
-    fn xor_with(&mut self, other: &Row) {
+    fn xor_with(&mut self, other: &Self) {
         for (a, b) in self.coeffs.iter_mut().zip(&other.coeffs) {
             *a ^= *b;
         }

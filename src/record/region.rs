@@ -5,7 +5,7 @@
 
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::tracing_compat::{debug, info_span, Span};
-use crate::types::{Budget, CancelReason, RegionId, TaskId};
+use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
 
@@ -148,6 +148,8 @@ pub struct RegionRecord {
     pub id: RegionId,
     /// Parent region (None for root).
     pub parent: Option<RegionId>,
+    /// Logical time when the region was created.
+    pub created_at: Time,
     /// Current state (atomic for concurrent access).
     state: AtomicRegionState,
     /// Inner mutable state (guarded by a lock).
@@ -164,6 +166,17 @@ impl RegionRecord {
     /// Creates a new region record.
     #[must_use]
     pub fn new(id: RegionId, parent: Option<RegionId>, budget: Budget) -> Self {
+        Self::new_with_time(id, parent, budget, Time::ZERO)
+    }
+
+    /// Creates a new region record with an explicit creation time.
+    #[must_use]
+    pub fn new_with_time(
+        id: RegionId,
+        parent: Option<RegionId>,
+        budget: Budget,
+        created_at: Time,
+    ) -> Self {
         // Create a tracing span for the region lifecycle
         let span = info_span!(
             "region",
@@ -187,6 +200,7 @@ impl RegionRecord {
         Self {
             id,
             parent,
+            created_at,
             state: AtomicRegionState::new(RegionState::Open),
             inner: RwLock::new(RegionInner {
                 budget,
@@ -197,6 +211,12 @@ impl RegionRecord {
             }),
             span,
         }
+    }
+
+    /// Returns the logical time when the region was created.
+    #[must_use]
+    pub const fn created_at(&self) -> Time {
+        self.created_at
     }
 
     /// Returns the current region state.
