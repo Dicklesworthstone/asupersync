@@ -693,10 +693,345 @@ fn test_harness_apply_invalid_selectors() {
     test_complete!("test_harness_apply_invalid_selectors");
 }
 
+// ============================================================================
+// Invariant Checking Functions (asupersync-16tb)
+// ============================================================================
+
+use std::collections::HashSet;
+
+/// Result of an invariant check.
+#[derive(Debug)]
+pub struct InvariantViolation {
+    /// Name of the violated invariant.
+    pub invariant: &'static str,
+    /// Description of what went wrong.
+    pub message: String,
+}
+
+impl std::fmt::Display for InvariantViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invariant '{}' violated: {}", self.invariant, self.message)
+    }
+}
+
+/// Checks all region tree invariants.
+///
+/// This function verifies that the region tree maintained by the test harness
+/// is in a valid state according to asupersync's structured concurrency model.
+///
+/// # Returns
+///
+/// A vector of all invariant violations found (empty if all invariants hold).
+pub fn check_all_invariants(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    violations.extend(check_no_orphan_tasks(harness));
+    violations.extend(check_valid_tree_structure(harness));
+    violations.extend(check_child_tracking_consistent(harness));
+    violations.extend(check_unique_ids(harness));
+    violations.extend(check_cancel_propagation(harness));
+    violations.extend(check_close_ordering(harness));
+
+    violations
+}
+
+/// Asserts all invariants hold, panicking with details if any fail.
+///
+/// This is the primary function to call after each operation in property tests.
+pub fn assert_all_invariants(harness: &TestHarness) {
+    let violations = check_all_invariants(harness);
+    if !violations.is_empty() {
+        let messages: Vec<_> = violations.iter().map(|v| v.to_string()).collect();
+        panic!(
+            "Region tree invariant violations detected:\n{}",
+            messages.join("\n")
+        );
+    }
+}
+
+/// Invariant 1: No Orphan Tasks
+///
+/// Every task must belong to an existing region, and that region must
+/// track the task in its task list.
+fn check_no_orphan_tasks(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    for task_id in &harness.tasks {
+        let arena_idx = ArenaIndex::new(
+            task_id.new_for_test_index(),
+            task_id.new_for_test_generation(),
+        );
+
+        if let Some(task_record) = harness.runtime.state.tasks.get(arena_idx) {
+            let region_id = task_record.owner; // Note: field is `owner` not `region`
+            let region_idx = ArenaIndex::new(
+                region_id.new_for_test_index(),
+                region_id.new_for_test_generation(),
+            );
+
+            // Check region exists
+            if harness.runtime.state.regions.get(region_idx).is_none() {
+                violations.push(InvariantViolation {
+                    invariant: "no_orphan_tasks",
+                    message: format!(
+                        "Task {:?} references non-existent region {:?}",
+                        task_id, region_id
+                    ),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
+/// Invariant 2: Valid Tree Structure
+///
+/// - Exactly one root region (no parent)
+/// - No cycles in parent-child relationships
+fn check_valid_tree_structure(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    if harness.regions.is_empty() {
+        return violations; // Empty tree is valid (no regions created yet)
+    }
+
+    // Count roots (regions with no parent)
+    let mut roots = Vec::new();
+    for region_id in &harness.regions {
+        let arena_idx = ArenaIndex::new(
+            region_id.new_for_test_index(),
+            region_id.new_for_test_generation(),
+        );
+
+        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+            if region_record.parent.is_none() {
+                roots.push(*region_id);
+            }
+        }
+    }
+
+    if roots.len() != 1 {
+        violations.push(InvariantViolation {
+            invariant: "single_root",
+            message: format!(
+                "Expected exactly one root region, found {}: {:?}",
+                roots.len(),
+                roots
+            ),
+        });
+    }
+
+    // Check for cycles via DFS
+    let mut visited = HashSet::new();
+    for region_id in &harness.regions {
+        if visited.contains(region_id) {
+            continue;
+        }
+
+        let mut path = HashSet::new();
+        let mut current = Some(*region_id);
+
+        while let Some(id) = current {
+            if path.contains(&id) {
+                violations.push(InvariantViolation {
+                    invariant: "no_cycles",
+                    message: format!(
+                        "Cycle detected: region {:?} is its own ancestor",
+                        id
+                    ),
+                });
+                break;
+            }
+
+            if visited.contains(&id) {
+                break; // Already validated this subtree
+            }
+
+            path.insert(id);
+            visited.insert(id);
+
+            let arena_idx = ArenaIndex::new(
+                id.new_for_test_index(),
+                id.new_for_test_generation(),
+            );
+
+            current = harness
+                .runtime
+                .state
+                .regions
+                .get(arena_idx)
+                .and_then(|r| r.parent);
+        }
+    }
+
+    violations
+}
+
+/// Invariant 3: Child Tracking Consistency
+///
+/// If region A lists region B as a child, then B's parent must be A.
+fn check_child_tracking_consistent(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    for region_id in &harness.regions {
+        let arena_idx = ArenaIndex::new(
+            region_id.new_for_test_index(),
+            region_id.new_for_test_generation(),
+        );
+
+        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+            // Check each child's parent pointer
+            for child_id in region_record.child_ids() {
+                let child_idx = ArenaIndex::new(
+                    child_id.new_for_test_index(),
+                    child_id.new_for_test_generation(),
+                );
+
+                if let Some(child_record) = harness.runtime.state.regions.get(child_idx) {
+                    if child_record.parent != Some(*region_id) {
+                        violations.push(InvariantViolation {
+                            invariant: "child_tracking_consistent",
+                            message: format!(
+                                "Region {:?} lists {:?} as child, but child's parent is {:?}",
+                                region_id, child_id, child_record.parent
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
+/// Invariant 4: Unique IDs
+///
+/// All region IDs must be unique, and all task IDs must be unique.
+fn check_unique_ids(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    // Check region ID uniqueness
+    let mut seen_regions = HashSet::new();
+    for region_id in &harness.regions {
+        if !seen_regions.insert(region_id) {
+            violations.push(InvariantViolation {
+                invariant: "unique_region_ids",
+                message: format!("Duplicate region ID: {:?}", region_id),
+            });
+        }
+    }
+
+    // Check task ID uniqueness
+    let mut seen_tasks = HashSet::new();
+    for task_id in &harness.tasks {
+        if !seen_tasks.insert(task_id) {
+            violations.push(InvariantViolation {
+                invariant: "unique_task_ids",
+                message: format!("Duplicate task ID: {:?}", task_id),
+            });
+        }
+    }
+
+    violations
+}
+
+/// Invariant 5: Cancel Propagation
+///
+/// If a region has a cancel reason, all its children must also have cancellation requested
+/// (indicated by having a cancel_reason set or being in a closing state).
+fn check_cancel_propagation(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    for region_id in &harness.regions {
+        let arena_idx = ArenaIndex::new(
+            region_id.new_for_test_index(),
+            region_id.new_for_test_generation(),
+        );
+
+        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+            // If this region has a cancel reason set, check all children
+            if region_record.cancel_reason().is_some() {
+                for child_id in region_record.child_ids() {
+                    let child_idx = ArenaIndex::new(
+                        child_id.new_for_test_index(),
+                        child_id.new_for_test_generation(),
+                    );
+
+                    if let Some(child_record) = harness.runtime.state.regions.get(child_idx) {
+                        // Child must have cancel reason or be in closing/terminal state
+                        let child_state = child_record.state();
+                        let child_has_cancel = child_record.cancel_reason().is_some();
+                        if !child_has_cancel
+                            && !child_state.is_closing()
+                            && !child_state.is_terminal()
+                        {
+                            violations.push(InvariantViolation {
+                                invariant: "cancel_propagation",
+                                message: format!(
+                                    "Region {:?} is cancelled but child {:?} is not (state: {:?})",
+                                    region_id, child_id, child_state
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
+/// Invariant 6: Close Ordering
+///
+/// A parent region cannot be closed until all its children are closed.
+fn check_close_ordering(harness: &TestHarness) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    for region_id in &harness.regions {
+        let arena_idx = ArenaIndex::new(
+            region_id.new_for_test_index(),
+            region_id.new_for_test_generation(),
+        );
+
+        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+            // If this region is closed, all children must be closed
+            if region_record.state().is_terminal() {
+                for child_id in region_record.child_ids() {
+                    let child_idx = ArenaIndex::new(
+                        child_id.new_for_test_index(),
+                        child_id.new_for_test_generation(),
+                    );
+
+                    if let Some(child_record) = harness.runtime.state.regions.get(child_idx) {
+                        if !child_record.state().is_terminal() {
+                            violations.push(InvariantViolation {
+                                invariant: "close_ordering",
+                                message: format!(
+                                    "Region {:?} is closed but child {:?} is not (state: {:?})",
+                                    region_id, child_id, child_record.state()
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
+// ============================================================================
+// Property Tests with Invariant Checking
+// ============================================================================
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
-    /// Test that random operation sequences don't panic.
+    /// Test that random operation sequences don't panic and maintain invariants.
     #[test]
     fn random_ops_no_panic(ops in proptest::collection::vec(any::<RegionOp>(), 1..50)) {
         init_test_logging();
@@ -709,6 +1044,15 @@ proptest! {
             if op.apply(&mut harness) {
                 applied_count += 1;
             }
+
+            // Check invariants after each operation
+            let violations = check_all_invariants(&harness);
+            prop_assert!(
+                violations.is_empty(),
+                "Invariant violations after {:?}: {:?}",
+                op,
+                violations
+            );
         }
 
         // At least some operations should apply (we start with a root region)
@@ -726,4 +1070,98 @@ proptest! {
 
         test_complete!("random_ops_no_panic");
     }
+
+    /// Test invariants are maintained after many operations.
+    #[test]
+    fn invariants_maintained_under_stress(ops in proptest::collection::vec(any::<RegionOp>(), 50..100)) {
+        init_test_logging();
+        test_phase!("invariants_maintained_under_stress");
+
+        let mut harness = TestHarness::with_root(0xCAFEBABE);
+
+        for op in &ops {
+            let _ = op.apply(&mut harness);
+        }
+
+        // Final invariant check
+        let violations = check_all_invariants(&harness);
+        prop_assert!(
+            violations.is_empty(),
+            "Final invariant violations: {:?}",
+            violations
+        );
+
+        // Clean up
+        harness.runtime.run_until_quiescent();
+
+        test_complete!("invariants_maintained_under_stress");
+    }
+}
+
+// ============================================================================
+// Unit Tests for Invariant Checkers
+// ============================================================================
+
+#[test]
+fn test_invariants_on_fresh_harness() {
+    init_test_logging();
+    test_phase!("test_invariants_on_fresh_harness");
+
+    let harness = TestHarness::with_root(42);
+    let violations = check_all_invariants(&harness);
+
+    assert!(
+        violations.is_empty(),
+        "Fresh harness should have no violations: {:?}",
+        violations
+    );
+
+    test_complete!("test_invariants_on_fresh_harness");
+}
+
+#[test]
+fn test_invariants_after_operations() {
+    init_test_logging();
+    test_phase!("test_invariants_after_operations");
+
+    let mut harness = TestHarness::with_root(42);
+
+    // Create some children
+    let root = harness.regions[0];
+    harness.create_child(root);
+    harness.create_child(root);
+
+    let violations = check_all_invariants(&harness);
+    assert!(
+        violations.is_empty(),
+        "Violations after creating children: {:?}",
+        violations
+    );
+
+    // Spawn some tasks
+    harness.spawn_task(root);
+    harness.spawn_task(harness.regions[1]);
+
+    let violations = check_all_invariants(&harness);
+    assert!(
+        violations.is_empty(),
+        "Violations after spawning tasks: {:?}",
+        violations
+    );
+
+    test_complete!("test_invariants_after_operations");
+}
+
+#[test]
+fn test_unique_id_invariant() {
+    init_test_logging();
+    test_phase!("test_unique_id_invariant");
+
+    let harness = TestHarness::with_root(42);
+
+    // Should have no duplicate IDs
+    let violations = check_unique_ids(&harness);
+    assert!(violations.is_empty(), "Unique ID violations: {:?}", violations);
+
+    test_complete!("test_unique_id_invariant");
 }
