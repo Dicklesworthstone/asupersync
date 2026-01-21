@@ -803,9 +803,9 @@ impl OtelMetrics {
                     return Some(aggregated);
                 }
                 CardinalityOverflow::Warn => {
-                    tracing::warn!(
-                        metric = %metric,
-                        "Cardinality limit reached for metric"
+                    crate::tracing_compat::warn!(
+                        metric = metric,
+                        "cardinality limit reached for metric"
                     );
                 }
             }
