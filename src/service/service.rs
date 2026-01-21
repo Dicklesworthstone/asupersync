@@ -318,7 +318,7 @@ mod tests {
     fn function_service_call_works() {
         run_test_with_cx(|cx| async move {
             let svc = |_: &crate::cx::Cx, req: i32| async move { Ok::<_, ()>(req + 1) };
-            let result = svc.call(&cx, 41).await.unwrap();
+            let result = AsupersyncService::call(&svc, &cx, 41).await.unwrap();
             assert_eq!(result, 42);
         });
     }
@@ -328,12 +328,12 @@ mod tests {
         run_test_with_cx(|cx| async move {
             let svc = |_: &crate::cx::Cx, req: i32| async move { Ok::<_, &str>(req) };
             let svc = svc.map_response(|v| v + 1).map_err(|e| format!("err:{e}"));
-            let result = svc.call(&cx, 41).await.unwrap();
+            let result = AsupersyncService::call(&svc, &cx, 41).await.unwrap();
             assert_eq!(result, 42);
 
             let fail = |_: &crate::cx::Cx, _: i32| async move { Err::<i32, &str>("nope") };
             let fail = fail.map_err(|e| format!("err:{e}"));
-            let err = fail.call(&cx, 0).await.unwrap_err();
+            let err = AsupersyncService::call(&fail, &cx, 0).await.unwrap_err();
             assert_eq!(err, "err:nope");
         });
     }
