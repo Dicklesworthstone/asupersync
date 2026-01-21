@@ -51,7 +51,6 @@ use proptest::test_runner::{RngSeed, TestRunner};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Selector Types
@@ -303,6 +302,10 @@ fn region_op_sequence(size: impl Into<SizeRange>) -> RegionOpSequenceStrategy {
 }
 
 fn shrink_op_sequence(ops: &[RegionOp]) -> Vec<Vec<RegionOp>> {
+    // Shrinking strategy:
+    // - Prefer shorter sequences (drop tail, remove single ops).
+    // - Drop time/deadline ops first (often non-essential).
+    // - Simplify selectors/outcomes while preserving causal order.
     if ops.len() <= 1 {
         return Vec::new();
     }
@@ -321,7 +324,12 @@ fn shrink_op_sequence(ops: &[RegionOp]) -> Vec<Vec<RegionOp>> {
     // Drop time-related operations to focus on structural behavior.
     let without_time: Vec<RegionOp> = ops
         .iter()
-        .filter(|op| !matches!(op, RegionOp::AdvanceTime { .. } | RegionOp::SetDeadline { .. }))
+        .filter(|op| {
+            !matches!(
+                op,
+                RegionOp::AdvanceTime { .. } | RegionOp::SetDeadline { .. }
+            )
+        })
         .cloned()
         .collect();
     if without_time.len() >= 1 && without_time.len() < len && is_sequence_causal(&without_time) {
@@ -354,28 +362,70 @@ fn shrink_op_sequence(ops: &[RegionOp]) -> Vec<Vec<RegionOp>> {
 
 fn simplify_op(op: &RegionOp) -> Option<RegionOp> {
     match op {
-        RegionOp::CreateChild { parent } => Some(RegionOp::CreateChild {
-            parent: RegionSelector(parent.0.min(1)),
-        }),
-        RegionOp::SpawnTask { region } => Some(RegionOp::SpawnTask {
-            region: RegionSelector(region.0.min(1)),
-        }),
-        RegionOp::Cancel { region, reason } => Some(RegionOp::Cancel {
-            region: RegionSelector(region.0.min(1)),
-            reason: CancelKind::User,
-        }),
-        RegionOp::CompleteTask { task, outcome } => Some(RegionOp::CompleteTask {
-            task: TaskSelector(task.0.min(1)),
-            outcome: TaskOutcome::Ok,
-        }),
-        RegionOp::CloseRegion { region } => Some(RegionOp::CloseRegion {
-            region: RegionSelector(region.0.min(1)),
-        }),
-        RegionOp::AdvanceTime { .. } => Some(RegionOp::AdvanceTime { millis: 1 }),
-        RegionOp::SetDeadline { region, .. } => Some(RegionOp::SetDeadline {
-            region: RegionSelector(region.0.min(1)),
-            millis: 1,
-        }),
+        RegionOp::CreateChild { parent } => {
+            if parent.0 == 0 {
+                None
+            } else {
+                Some(RegionOp::CreateChild {
+                    parent: RegionSelector(0),
+                })
+            }
+        }
+        RegionOp::SpawnTask { region } => {
+            if region.0 == 0 {
+                None
+            } else {
+                Some(RegionOp::SpawnTask {
+                    region: RegionSelector(0),
+                })
+            }
+        }
+        RegionOp::Cancel { region, reason } => {
+            if region.0 == 0 && *reason == CancelKind::User {
+                None
+            } else {
+                Some(RegionOp::Cancel {
+                    region: RegionSelector(0),
+                    reason: CancelKind::User,
+                })
+            }
+        }
+        RegionOp::CompleteTask { task, outcome } => {
+            if task.0 == 0 && *outcome == TaskOutcome::Ok {
+                None
+            } else {
+                Some(RegionOp::CompleteTask {
+                    task: TaskSelector(0),
+                    outcome: TaskOutcome::Ok,
+                })
+            }
+        }
+        RegionOp::CloseRegion { region } => {
+            if region.0 == 0 {
+                None
+            } else {
+                Some(RegionOp::CloseRegion {
+                    region: RegionSelector(0),
+                })
+            }
+        }
+        RegionOp::AdvanceTime { millis } => {
+            if *millis <= 1 {
+                None
+            } else {
+                Some(RegionOp::AdvanceTime { millis: 1 })
+            }
+        }
+        RegionOp::SetDeadline { region, millis } => {
+            if region.0 == 0 && *millis <= 1 {
+                None
+            } else {
+                Some(RegionOp::SetDeadline {
+                    region: RegionSelector(0),
+                    millis: 1,
+                })
+            }
+        }
     }
 }
 
@@ -475,13 +525,30 @@ impl From<TaskOutcomeRecord> for TaskOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum RegionOpRecord {
-    CreateChild { parent: usize },
-    SpawnTask { region: usize },
-    Cancel { region: usize, reason: CancelKindRecord },
-    CompleteTask { task: usize, outcome: TaskOutcomeRecord },
-    CloseRegion { region: usize },
-    AdvanceTime { millis: u64 },
-    SetDeadline { region: usize, millis: u64 },
+    CreateChild {
+        parent: usize,
+    },
+    SpawnTask {
+        region: usize,
+    },
+    Cancel {
+        region: usize,
+        reason: CancelKindRecord,
+    },
+    CompleteTask {
+        task: usize,
+        outcome: TaskOutcomeRecord,
+    },
+    CloseRegion {
+        region: usize,
+    },
+    AdvanceTime {
+        millis: u64,
+    },
+    SetDeadline {
+        region: usize,
+        millis: u64,
+    },
 }
 
 impl RegionOpRecord {
@@ -499,9 +566,10 @@ impl RegionOpRecord {
             },
             RegionOp::CloseRegion { region } => Self::CloseRegion { region: region.0 },
             RegionOp::AdvanceTime { millis } => Self::AdvanceTime { millis: *millis },
-            RegionOp::SetDeadline { region, millis } => {
-                Self::SetDeadline { region: region.0, millis: *millis }
-            }
+            RegionOp::SetDeadline { region, millis } => Self::SetDeadline {
+                region: region.0,
+                millis: *millis,
+            },
         }
     }
 
@@ -554,7 +622,11 @@ fn record_failure_to_dir(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let filename = format!("failure_{}_{}.json", sanitize_filename(test_name), timestamp);
+    let filename = format!(
+        "failure_{}_{}.json",
+        sanitize_filename(test_name),
+        timestamp
+    );
     let path = dir.join(filename);
     let payload = serde_json::to_string_pretty(&ops_to_records(ops))
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
@@ -1769,4 +1841,120 @@ fn test_unique_id_invariant() {
     );
 
     test_complete!("test_unique_id_invariant");
+}
+
+// ============================================================================
+// Shrinker + Regression Infrastructure Tests
+// ============================================================================
+
+#[test]
+fn custom_shrinker_produces_shorter_sequences() {
+    init_test_logging();
+
+    let ops = vec![
+        RegionOp::CreateChild {
+            parent: RegionSelector(0),
+        },
+        RegionOp::SpawnTask {
+            region: RegionSelector(0),
+        },
+        RegionOp::CompleteTask {
+            task: TaskSelector(0),
+            outcome: TaskOutcome::Ok,
+        },
+        RegionOp::AdvanceTime { millis: 500 },
+    ];
+
+    let candidates = shrink_op_sequence(&ops);
+    assert!(
+        candidates.iter().any(|cand| cand.len() < ops.len()),
+        "Expected shrinker to produce shorter candidates"
+    );
+    assert!(
+        candidates.iter().all(|cand| is_sequence_causal(cand)),
+        "Shrinker must preserve causal structure"
+    );
+}
+
+#[test]
+fn fixed_seed_generates_same_sequence() {
+    init_test_logging();
+
+    let mut config = ProptestConfig::with_cases(1);
+    config.rng_seed = RngSeed::Fixed(0xACED_BEEF);
+    let mut runner_a = TestRunner::new(config.clone());
+    let mut runner_b = TestRunner::new(config);
+
+    let seq_a = region_op_sequence(10..20)
+        .new_tree(&mut runner_a)
+        .expect("seq_a")
+        .current();
+    let seq_b = region_op_sequence(10..20)
+        .new_tree(&mut runner_b)
+        .expect("seq_b")
+        .current();
+
+    assert_eq!(ops_to_records(&seq_a), ops_to_records(&seq_b));
+}
+
+#[test]
+fn record_failure_roundtrip() {
+    init_test_logging();
+
+    let ops = vec![
+        RegionOp::CreateChild {
+            parent: RegionSelector(0),
+        },
+        RegionOp::SpawnTask {
+            region: RegionSelector(0),
+        },
+        RegionOp::CompleteTask {
+            task: TaskSelector(0),
+            outcome: TaskOutcome::Err,
+        },
+        RegionOp::CloseRegion {
+            region: RegionSelector(0),
+        },
+    ];
+
+    let dir = std::env::temp_dir().join(format!("asupersync_regressions_{}", {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    }));
+
+    let path = record_failure_to_dir(&dir, "roundtrip", &ops).expect("record failure");
+    let cases = load_regression_cases(&dir).expect("load cases");
+    assert_eq!(cases.len(), 1, "expected exactly one regression case");
+    assert_eq!(cases[0].0, path);
+    assert_eq!(cases[0].1, ops_to_records(&ops));
+}
+
+#[test]
+fn regression_cases_replay_without_violations() {
+    init_test_logging();
+
+    let dir = Path::new("tests/regressions/region_ops");
+    let cases = load_regression_cases(dir).expect("load regression cases");
+    if cases.is_empty() {
+        return;
+    }
+
+    for (path, records) in cases {
+        let ops: Vec<RegionOp> = records.iter().map(RegionOpRecord::to_op).collect();
+        let mut harness = TestHarness::with_root(0xFEED_FACE);
+
+        for op in &ops {
+            let _ = op.apply(&mut harness);
+        }
+
+        let violations = check_all_invariants(&harness);
+        assert!(
+            violations.is_empty(),
+            "Regression {:?} violated invariants: {:?}",
+            path,
+            violations
+        );
+    }
 }

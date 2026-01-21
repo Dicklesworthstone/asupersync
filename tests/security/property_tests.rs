@@ -8,7 +8,7 @@ fn symbol_with(data: &[u8]) -> Symbol {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(test_proptest_config(128))]
 
     #[test]
     fn tag_verifies_for_original(seed in 0u64..1000, data in prop::collection::vec(any::<u8>(), 0..256)) {

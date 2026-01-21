@@ -109,7 +109,7 @@ fn arb_budget() -> impl Strategy<Value = Budget> {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW: join_outcomes is commutative in severity
     ///
@@ -176,7 +176,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW: Budget::combine is associative
     ///
@@ -275,7 +275,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW: strengthen is idempotent
     ///
@@ -363,7 +363,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW-TIMEOUT-MIN: timeout(d1, timeout(d2, f)) ≃ timeout(min(d1, d2), f)
     ///
@@ -445,7 +445,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW-JOIN-COMM: join2_outcomes severity is commutative
     ///
@@ -507,7 +507,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW-RACE-COMM: race(a, b) ≃ race(b, a) (up to winner selection)
     ///
@@ -588,7 +588,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(test_proptest_config(1000))]
 
     /// LAW: Time comparison is a total order
     ///
