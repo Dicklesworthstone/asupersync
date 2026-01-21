@@ -75,7 +75,7 @@ pub enum Stdio {
     ///
     /// For stdin, the parent can write to the child.
     /// For stdout/stderr, the parent can read from the child.
-    Piped,
+    Pipe,
 
     /// Discard (redirect to /dev/null).
     ///
@@ -91,10 +91,10 @@ impl Stdio {
         Self::Inherit
     }
 
-    /// Creates a `Piped` configuration.
+    /// Creates a `Pipe` configuration.
     #[must_use]
     pub fn piped() -> Self {
-        Self::Piped
+        Self::Pipe
     }
 
     /// Creates a `Null` configuration.
@@ -107,15 +107,22 @@ impl Stdio {
     fn to_std(&self) -> std_process::Stdio {
         match self {
             Self::Inherit => std_process::Stdio::inherit(),
-            Self::Piped => std_process::Stdio::piped(),
+            Self::Pipe => std_process::Stdio::piped(),
             Self::Null => std_process::Stdio::null(),
         }
     }
 }
 
 impl Default for Stdio {
+    /// Default is `Inherit` to match typical command-line tool behavior.
     fn default() -> Self {
         Self::Inherit
+    }
+}
+
+impl From<Stdio> for std_process::Stdio {
+    fn from(stdio: Stdio) -> Self {
+        stdio.to_std()
     }
 }
 
@@ -430,18 +437,17 @@ impl Command {
     /// ```ignore
     /// let output = Command::new("echo")
     ///     .arg("hello")
-    ///     .output()
-    ///     .await?;
+    ///     .output()?;
     ///
     /// println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
     /// ```
-    pub async fn output(&mut self) -> Result<Output, ProcessError> {
+    pub fn output(&mut self) -> Result<Output, ProcessError> {
         self.stdin(Stdio::Null);
-        self.stdout(Stdio::Piped);
-        self.stderr(Stdio::Piped);
+        self.stdout(Stdio::Pipe);
+        self.stderr(Stdio::Pipe);
 
         let child = self.spawn()?;
-        child.wait_with_output().await
+        child.wait_with_output()
     }
 
     /// Spawns the command and waits for it to complete, returning status.
@@ -456,16 +462,15 @@ impl Command {
     ///
     /// ```ignore
     /// let status = Command::new("ls")
-    ///     .status()
-    ///     .await?;
+    ///     .status()?;
     ///
     /// if status.success() {
     ///     println!("Command succeeded");
     /// }
     /// ```
-    pub async fn status(&mut self) -> Result<ExitStatus, ProcessError> {
+    pub fn status(&mut self) -> Result<ExitStatus, ProcessError> {
         let mut child = self.spawn()?;
-        child.wait().await
+        child.wait()
     }
 }
 
@@ -533,21 +538,27 @@ impl Child {
     ///
     /// ```ignore
     /// let mut child = Command::new("sleep").arg("1").spawn()?;
-    /// let status = child.wait().await?;
+    /// let status = child.wait()?;
     /// println!("Exit code: {:?}", status.code());
     /// ```
-    pub async fn wait(&mut self) -> Result<ExitStatus, ProcessError> {
+    pub fn wait(&mut self) -> Result<ExitStatus, ProcessError> {
         // For now, use blocking wait
         // TODO: Use non-blocking waitpid with reactor when available
-        let child = self.inner.as_mut().ok_or_else(|| {
+        let mut child = self.inner.take().ok_or_else(|| {
             ProcessError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "child already waited",
+                io::ErrorKind::NotConnected,
+                "process already consumed",
             ))
         })?;
 
-        let status = child.wait()?;
-        self.inner = None;
+        let status = child.wait().map_err(ProcessError::Io)?;
+        
+        // self.code = status.code(); // Child doesn't have these fields
+        // #[cfg(unix)]
+        // {
+        //     use std::os::unix::process::ExitStatusExt;
+        //     self.signal = status.signal();
+        // }
 
         Ok(ExitStatus::from_std(status))
     }
@@ -559,7 +570,7 @@ impl Child {
     /// # Errors
     ///
     /// Returns an error if waiting or reading fails.
-    pub async fn wait_with_output(mut self) -> Result<Output, ProcessError> {
+    pub fn wait_with_output(mut self) -> Result<Output, ProcessError> {
         // Take the handles before waiting
         let mut stdout_handle = self.stdout.take();
         let mut stderr_handle = self.stderr.take();
@@ -577,7 +588,7 @@ impl Child {
         }
 
         // Wait for exit
-        let status = self.wait().await?;
+        let status = self.wait()?;
 
         Ok(Output {
             status,
@@ -917,15 +928,13 @@ mod tests {
     fn test_command_echo() {
         init_test("test_command_echo");
 
-        let output = Command::new("echo")
+        let mut child = Command::new("echo")
             .arg("hello")
-            .stdout(Stdio::Piped)
+            .stdout(Stdio::Pipe)
             .spawn()
-            .expect("spawn failed")
-            .wait_with_output();
+            .expect("spawn failed");
 
-        // Run the future synchronously for testing
-        let result = futures_lite::future::block_on(output).expect("output failed");
+        let result = child.wait_with_output().expect("output failed");
 
         crate::assert_with_log!(
             result.status.success(),
@@ -951,9 +960,8 @@ mod tests {
             .arg("exit 42")
             .spawn()
             .expect("spawn failed");
-        let status = child.wait();
-
-        let result = futures_lite::future::block_on(status).expect("wait failed");
+        
+        let result = child.wait().expect("wait failed");
 
         crate::assert_with_log!(!result.success(), "not success", false, result.success());
         crate::assert_with_log!(
@@ -969,16 +977,15 @@ mod tests {
     fn test_command_env() {
         init_test("test_command_env");
 
-        let output = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg("echo $MY_VAR")
             .env("MY_VAR", "test_value")
-            .stdout(Stdio::Piped)
+            .stdout(Stdio::Pipe)
             .spawn()
-            .expect("spawn failed")
-            .wait_with_output();
+            .expect("spawn failed");
 
-        let result = futures_lite::future::block_on(output).expect("output failed");
+        let result = child.wait_with_output().expect("output failed");
 
         crate::assert_with_log!(
             result.stdout == b"test_value\n",
@@ -993,14 +1000,13 @@ mod tests {
     fn test_command_current_dir() {
         init_test("test_command_current_dir");
 
-        let output = Command::new("pwd")
+        let mut child = Command::new("pwd")
             .current_dir("/tmp")
-            .stdout(Stdio::Piped)
+            .stdout(Stdio::Pipe)
             .spawn()
-            .expect("spawn failed")
-            .wait_with_output();
+            .expect("spawn failed");
 
-        let result = futures_lite::future::block_on(output).expect("output failed");
+        let result = child.wait_with_output().expect("output failed");
 
         let stdout = String::from_utf8_lossy(&result.stdout);
         crate::assert_with_log!(
@@ -1017,8 +1023,8 @@ mod tests {
         init_test("test_command_stdin_pipe");
 
         let mut child = Command::new("cat")
-            .stdin(Stdio::Piped)
-            .stdout(Stdio::Piped)
+            .stdin(Stdio::Pipe)
+            .stdout(Stdio::Pipe)
             .spawn()
             .expect("spawn failed");
 
@@ -1031,8 +1037,7 @@ mod tests {
         }
         // stdin is automatically closed when dropped after the if block
 
-        let output =
-            futures_lite::future::block_on(child.wait_with_output()).expect("output failed");
+        let output = child.wait_with_output().expect("output failed");
 
         crate::assert_with_log!(
             output.stdout == b"hello from stdin",
@@ -1047,16 +1052,15 @@ mod tests {
     fn test_command_stderr_capture() {
         init_test("test_command_stderr_capture");
 
-        let output = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg("echo error message >&2")
             .stdout(Stdio::Null)
-            .stderr(Stdio::Piped)
+            .stderr(Stdio::Pipe)
             .spawn()
-            .expect("spawn failed")
-            .wait_with_output();
+            .expect("spawn failed");
 
-        let result = futures_lite::future::block_on(output).expect("output failed");
+        let result = child.wait_with_output().expect("output failed");
 
         crate::assert_with_log!(
             result.stderr == b"error message\n",
@@ -1088,7 +1092,7 @@ mod tests {
         init_test("test_command_kill");
 
         let mut child = Command::new("sleep")
-            .arg("100")
+            .arg("10")
             .spawn()
             .expect("spawn failed");
 
@@ -1096,7 +1100,7 @@ mod tests {
         child.kill().expect("kill failed");
 
         // Wait for it
-        let status = futures_lite::future::block_on(child.wait()).expect("wait failed");
+        let status = child.wait().expect("wait failed");
 
         // Should have been killed by signal
         #[cfg(unix)]
@@ -1153,15 +1157,12 @@ mod tests {
     fn test_stdio_null() {
         init_test("test_stdio_null");
 
-        let output = Command::new("echo")
-            .arg("should not appear")
+        let mut cmd = Command::new("echo");
+        cmd.arg("should not appear")
             .stdout(Stdio::Null)
-            .stderr(Stdio::Null)
-            .spawn()
-            .expect("spawn failed")
-            .wait_with_output();
+            .stderr(Stdio::Null);
 
-        let result = futures_lite::future::block_on(output).expect("output failed");
+        let result = cmd.output().expect("output failed");
 
         // stdout/stderr should be empty because they were null (not piped)
         crate::assert_with_log!(
