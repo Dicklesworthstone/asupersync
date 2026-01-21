@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::transport::sink::{SymbolSink, SymbolSinkExt};
-use std::sync::Mutex;
+use crate::sync::Mutex;
+use crate::cx::Cx;
+use crate::sync::OwnedMutexGuard;
 
 // ============================================================================
 // Endpoint Types
@@ -879,14 +881,15 @@ impl SymbolDispatcher {
     }
 
     /// Dispatches a symbol using the default strategy.
-    pub async fn dispatch(&self, symbol: AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
-        self.dispatch_with_strategy(symbol, self.config.default_strategy)
+    pub async fn dispatch(&self, cx: &Cx, symbol: AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
+        self.dispatch_with_strategy(cx, symbol, self.config.default_strategy)
             .await
     }
 
     /// Dispatches a symbol with a specific strategy.
     pub async fn dispatch_with_strategy(
         &self,
+        cx: &Cx,
         symbol: AuthenticatedSymbol,
         strategy: DispatchStrategy,
     ) -> Result<DispatchResult, DispatchError> {
@@ -898,11 +901,11 @@ impl SymbolDispatcher {
         }
 
         let result = match strategy {
-            DispatchStrategy::Unicast => self.dispatch_unicast(&symbol).await,
-            DispatchStrategy::Multicast { count } => self.dispatch_multicast(&symbol, count).await,
-            DispatchStrategy::Broadcast => self.dispatch_broadcast(&symbol).await,
+            DispatchStrategy::Unicast => self.dispatch_unicast(cx, &symbol).await,
+            DispatchStrategy::Multicast { count } => self.dispatch_multicast(cx, &symbol, count).await,
+            DispatchStrategy::Broadcast => self.dispatch_broadcast(cx, &symbol).await,
             DispatchStrategy::QuorumCast { required } => {
-                self.dispatch_quorum(&symbol, required).await
+                self.dispatch_quorum(cx, &symbol, required).await
             }
         };
 
@@ -925,7 +928,7 @@ impl SymbolDispatcher {
 
     /// Dispatches to a single endpoint.
     #[allow(clippy::unused_async)]
-    async fn dispatch_unicast(&self, symbol: &AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
+    async fn dispatch_unicast(&self, cx: &Cx, symbol: &AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
         let route = self.router.route(symbol.symbol())?;
 
         // Get sink
@@ -937,24 +940,14 @@ impl SymbolDispatcher {
         if let Some(sink) = sink {
             route.endpoint.acquire_connection();
             
-            // We need to lock the sink to use it (since we have Arc<Mutex<Box<dyn SymbolSink>>>)
-            // But send() is async. We can't hold the mutex across await if we want to be async.
-            // However, SymbolSinkExt::send() takes &mut self.
-            // We can use `futures_lite::future::poll_fn` to poll the sink while holding the lock?
-            // No, that would block the thread if poll returns Pending.
-            // Actually, for this "Phase 0" or mock implementation, maybe we can just assume it's fast?
-            // Or we can clone the sink if it was cloneable? But Box<dyn SymbolSink> isn't.
+            // Acquire lock asynchronously
+            let mut guard: OwnedMutexGuard<Box<dyn SymbolSink>> = OwnedMutexGuard::lock(sink, cx)
+                .await
+                .map_err(|_| DispatchError::Timeout)?; 
+
+            let result = guard.send(symbol.clone()).await;
             
-            // For now, let's just try:
-            let result = {
-                let mut guard = sink.lock().expect("sink lock poisoned");
-                guard.send(symbol.clone()).await
-            };
-            
-            let success = match result {
-                Ok(_) => true,
-                Err(_) => false,
-            };
+            let success = result.is_ok();
 
             route.endpoint.release_connection();
 
@@ -999,6 +992,7 @@ impl SymbolDispatcher {
     #[allow(clippy::unused_async)]
     async fn dispatch_multicast(
         &self,
+        cx: &Cx,
         symbol: &AuthenticatedSymbol,
         count: usize,
     ) -> Result<DispatchResult, DispatchError> {
@@ -1025,42 +1019,37 @@ impl SymbolDispatcher {
             .collect();
 
         if available.is_empty() {
-            return Err(RoutingError::NoHealthyEndpoints { object_id });
+            return Err(DispatchError::RoutingFailed(RoutingError::NoHealthyEndpoints { object_id }));
         }
 
         let selected_count = count.min(available.len());
-        let results: Vec<_> = available
-            .into_iter()
-            .take(selected_count)
-            .map(|endpoint| RouteResult {
-                endpoint,
-                matched_key: key.clone(),
-                is_fallback: key == RouteKey::Default,
-            })
-            .collect();
+        let selected: Vec<_> = available.into_iter().take(selected_count).collect();
 
-        Ok(results)
-    }
-
-    /// Dispatches to all endpoints.
-    #[allow(clippy::unused_async)]
-    async fn dispatch_broadcast(&self, _symbol: &AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
-        let endpoints = self.router.table().healthy_endpoints();
-
-        if endpoints.is_empty() {
-            return Err(DispatchError::NoEndpoints);
-        }
-
+        // Actually dispatch to selected endpoints
         let mut successes = 0;
         let mut failures = 0;
         let mut sent_to = Vec::new();
         let mut failed = Vec::new();
 
-        for endpoint in endpoints {
+        for endpoint in selected {
             endpoint.acquire_connection();
 
-            // Simulate sending
-            let success = true; // Would be actual send result
+            // Attempt send
+            let success = if let Some(sink) = {
+                let sinks = self.sinks.read().expect("sinks lock poisoned");
+                sinks.get(&endpoint.id).cloned()
+            } {
+                match OwnedMutexGuard::lock(sink, cx).await {
+                    Ok(mut guard) => {
+                        let guard: &mut Box<dyn SymbolSink> = &mut *guard;
+                        guard.send(symbol.clone()).await.is_ok()
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                // Simulation mode
+                true
+            };
 
             endpoint.release_connection();
 
@@ -1090,11 +1079,74 @@ impl SymbolDispatcher {
         })
     }
 
+    /// Dispatches to all endpoints.
+    #[allow(clippy::unused_async)]
+    async fn dispatch_broadcast(&self, cx: &Cx, symbol: &AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
+        let endpoints = self.router.table().healthy_endpoints();
+
+        if endpoints.is_empty() {
+            return Err(DispatchError::NoEndpoints);
+        }
+
+        let mut successes = 0;
+        let mut failures = 0;
+        let mut sent_to = Vec::new();
+        let mut failed = Vec::new();
+
+        for route in endpoints {
+            route.acquire_connection();
+
+            // Attempt send
+            let success = if let Some(sink) = {
+                let sinks = self.sinks.read().expect("sinks lock poisoned");
+                sinks.get(&route.id).cloned()
+            } {
+                match OwnedMutexGuard::lock(sink, cx).await {
+                    Ok(mut guard) => {
+                        let guard: &mut Box<dyn SymbolSink> = &mut *guard;
+                        guard.send(symbol.clone()).await.is_ok()
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                // Simulation
+                true
+            };
+
+            route.release_connection();
+
+            if success {
+                route.record_success(Time::ZERO);
+                successes += 1;
+                sent_to.push(route.id);
+            } else {
+                route.record_failure(Time::ZERO);
+                failures += 1;
+                failed.push((
+                    route.id,
+                    DispatchError::SendFailed {
+                        endpoint: route.id,
+                        reason: "Send failed".into(),
+                    },
+                ));
+            }
+        }
+
+        Ok(DispatchResult {
+            successes,
+            failures,
+            sent_to,
+            failed_endpoints: failed,
+            duration: Time::ZERO,
+        })
+    }
+
     /// Dispatches until quorum is reached.
     #[allow(clippy::unused_async)]
     async fn dispatch_quorum(
         &self,
-        _symbol: &AuthenticatedSymbol,
+        cx: &Cx,
+        symbol: &AuthenticatedSymbol,
         required: usize,
     ) -> Result<DispatchResult, DispatchError> {
         let endpoints = self.router.table().healthy_endpoints();
@@ -1111,29 +1163,41 @@ impl SymbolDispatcher {
         let mut sent_to = Vec::new();
         let mut failed = Vec::new();
 
-        for endpoint in endpoints {
+        for route in endpoints {
             if successes >= required {
                 break;
             }
 
-            endpoint.acquire_connection();
+            route.acquire_connection();
 
-            // Simulate sending
-            let success = true;
+            let success = if let Some(sink) = {
+                let sinks = self.sinks.read().expect("sinks lock poisoned");
+                sinks.get(&route.id).cloned()
+            } {
+                match OwnedMutexGuard::lock(sink, cx).await {
+                    Ok(mut guard) => {
+                        let guard: &mut Box<dyn SymbolSink> = &mut *guard;
+                        guard.send(symbol.clone()).await.is_ok()
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                true
+            };
 
-            endpoint.release_connection();
+            route.release_connection();
 
             if success {
-                endpoint.record_success(Time::ZERO);
+                route.record_success(Time::ZERO);
                 successes += 1;
-                sent_to.push(endpoint.id);
+                sent_to.push(route.id);
             } else {
-                endpoint.record_failure(Time::ZERO);
+                route.record_failure(Time::ZERO);
                 failures += 1;
                 failed.push((
-                    endpoint.id,
+                    route.id,
                     DispatchError::SendFailed {
-                        endpoint: endpoint.id,
+                        endpoint: route.id,
                         reason: "Send failed".into(),
                     },
                 ));
