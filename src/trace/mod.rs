@@ -38,7 +38,7 @@ pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
 };
-pub use event::{TraceData, TraceEvent, TraceEventKind};
+pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
 pub use file::{
     read_trace, write_trace, TraceEventIterator, TraceFileError, TraceReader, TraceWriter,
     TRACE_FILE_VERSION, TRACE_MAGIC,

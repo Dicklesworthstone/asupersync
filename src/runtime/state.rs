@@ -1626,6 +1626,8 @@ impl From<ObligationAbortReason> for ObligationAbortReasonSnapshot {
 /// Serializable trace event snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSnapshot {
+    /// Event schema version.
+    pub version: u32,
     /// Sequence number.
     pub seq: u64,
     /// Event timestamp in nanoseconds.
@@ -1639,6 +1641,7 @@ pub struct EventSnapshot {
 impl EventSnapshot {
     fn from_event(event: &TraceEvent) -> Self {
         Self {
+            version: event.version,
             seq: event.seq,
             time: event.time.as_nanos(),
             kind: EventKindSnapshot::from(event.kind),
@@ -1654,6 +1657,10 @@ pub enum EventKindSnapshot {
     Spawn,
     /// Task was scheduled.
     Schedule,
+    /// Task yielded.
+    Yield,
+    /// Task was woken.
+    Wake,
     /// Task was polled.
     Poll,
     /// Task completed.
@@ -1666,6 +1673,10 @@ pub enum EventKindSnapshot {
     RegionCloseBegin,
     /// Region close completed.
     RegionCloseComplete,
+    /// Region created.
+    RegionCreated,
+    /// Region cancelled.
+    RegionCancelled,
     /// Obligation reserved.
     ObligationReserve,
     /// Obligation committed.
@@ -1676,6 +1687,26 @@ pub enum EventKindSnapshot {
     ObligationLeak,
     /// Time advanced.
     TimeAdvance,
+    /// Timer scheduled.
+    TimerScheduled,
+    /// Timer fired.
+    TimerFired,
+    /// Timer cancelled.
+    TimerCancelled,
+    /// I/O interest requested.
+    IoRequested,
+    /// I/O ready.
+    IoReady,
+    /// I/O result.
+    IoResult,
+    /// I/O error.
+    IoError,
+    /// RNG seed.
+    RngSeed,
+    /// RNG value.
+    RngValue,
+    /// Replay checkpoint.
+    Checkpoint,
     /// Futurelock detected.
     FuturelockDetected,
     /// Chaos injection occurred.
@@ -1689,17 +1720,31 @@ impl From<TraceEventKind> for EventKindSnapshot {
         match kind {
             TraceEventKind::Spawn => Self::Spawn,
             TraceEventKind::Schedule => Self::Schedule,
+            TraceEventKind::Yield => Self::Yield,
+            TraceEventKind::Wake => Self::Wake,
             TraceEventKind::Poll => Self::Poll,
             TraceEventKind::Complete => Self::Complete,
             TraceEventKind::CancelRequest => Self::CancelRequest,
             TraceEventKind::CancelAck => Self::CancelAck,
             TraceEventKind::RegionCloseBegin => Self::RegionCloseBegin,
             TraceEventKind::RegionCloseComplete => Self::RegionCloseComplete,
+            TraceEventKind::RegionCreated => Self::RegionCreated,
+            TraceEventKind::RegionCancelled => Self::RegionCancelled,
             TraceEventKind::ObligationReserve => Self::ObligationReserve,
             TraceEventKind::ObligationCommit => Self::ObligationCommit,
             TraceEventKind::ObligationAbort => Self::ObligationAbort,
             TraceEventKind::ObligationLeak => Self::ObligationLeak,
             TraceEventKind::TimeAdvance => Self::TimeAdvance,
+            TraceEventKind::TimerScheduled => Self::TimerScheduled,
+            TraceEventKind::TimerFired => Self::TimerFired,
+            TraceEventKind::TimerCancelled => Self::TimerCancelled,
+            TraceEventKind::IoRequested => Self::IoRequested,
+            TraceEventKind::IoReady => Self::IoReady,
+            TraceEventKind::IoResult => Self::IoResult,
+            TraceEventKind::IoError => Self::IoError,
+            TraceEventKind::RngSeed => Self::RngSeed,
+            TraceEventKind::RngValue => Self::RngValue,
+            TraceEventKind::Checkpoint => Self::Checkpoint,
             TraceEventKind::FuturelockDetected => Self::FuturelockDetected,
             TraceEventKind::ChaosInjection => Self::ChaosInjection,
             TraceEventKind::UserTrace => Self::UserTrace,
@@ -1752,12 +1797,73 @@ pub enum EventDataSnapshot {
         /// Cancellation reason.
         reason: CancelReasonSnapshot,
     },
+    /// Region cancellation event.
+    RegionCancel {
+        /// Region identifier.
+        region: IdSnapshot,
+        /// Cancellation reason.
+        reason: CancelReasonSnapshot,
+    },
     /// Time-related event.
     Time {
         /// Previous time in nanoseconds.
         old: u64,
         /// New time in nanoseconds.
         new: u64,
+    },
+    /// Timer event.
+    Timer {
+        /// Timer identifier.
+        timer_id: u64,
+        /// Deadline in nanoseconds, if applicable.
+        deadline: Option<u64>,
+    },
+    /// I/O request event.
+    IoRequested {
+        /// I/O token.
+        token: u64,
+        /// Interest bitflags.
+        interest: u8,
+    },
+    /// I/O ready event.
+    IoReady {
+        /// I/O token.
+        token: u64,
+        /// Readiness bitflags.
+        readiness: u8,
+    },
+    /// I/O result event.
+    IoResult {
+        /// I/O token.
+        token: u64,
+        /// Bytes transferred.
+        bytes: i64,
+    },
+    /// I/O error event.
+    IoError {
+        /// I/O token.
+        token: u64,
+        /// Error kind.
+        kind: u8,
+    },
+    /// RNG seed event.
+    RngSeed {
+        /// Seed value.
+        seed: u64,
+    },
+    /// RNG value event.
+    RngValue {
+        /// Generated value.
+        value: u64,
+    },
+    /// Checkpoint event.
+    Checkpoint {
+        /// Monotonic sequence number.
+        sequence: u64,
+        /// Active task count.
+        active_tasks: u32,
+        /// Active region count.
+        active_regions: u32,
     },
     /// Futurelock event data.
     Futurelock {
@@ -1821,9 +1927,44 @@ impl EventDataSnapshot {
                 region: (*region).into(),
                 reason: CancelReasonSnapshot::from(reason),
             },
+            TraceData::RegionCancel { region, reason } => Self::RegionCancel {
+                region: (*region).into(),
+                reason: CancelReasonSnapshot::from(reason),
+            },
             TraceData::Time { old, new } => Self::Time {
                 old: old.as_nanos(),
                 new: new.as_nanos(),
+            },
+            TraceData::Timer { timer_id, deadline } => Self::Timer {
+                timer_id: *timer_id,
+                deadline: deadline.map(Time::as_nanos),
+            },
+            TraceData::IoRequested { token, interest } => Self::IoRequested {
+                token: *token,
+                interest: *interest,
+            },
+            TraceData::IoReady { token, readiness } => Self::IoReady {
+                token: *token,
+                readiness: *readiness,
+            },
+            TraceData::IoResult { token, bytes } => Self::IoResult {
+                token: *token,
+                bytes: *bytes,
+            },
+            TraceData::IoError { token, kind } => Self::IoError {
+                token: *token,
+                kind: *kind,
+            },
+            TraceData::RngSeed { seed } => Self::RngSeed { seed: *seed },
+            TraceData::RngValue { value } => Self::RngValue { value: *value },
+            TraceData::Checkpoint {
+                sequence,
+                active_tasks,
+                active_regions,
+            } => Self::Checkpoint {
+                sequence: *sequence,
+                active_tasks: *active_tasks,
+                active_regions: *active_regions,
             },
             TraceData::Futurelock {
                 task,
@@ -1867,6 +2008,7 @@ mod tests {
     use crate::record::task::TaskState;
     use crate::record::{ObligationKind, ObligationRecord};
     use crate::test_utils::init_test_logging;
+    use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
 
@@ -1946,6 +2088,27 @@ mod tests {
             .contains(&IdSnapshot::from(obl_id));
         crate::assert_with_log!(has_obligation, "task has obligation", true, has_obligation);
         crate::test_complete!("snapshot_captures_entities");
+    }
+
+    #[test]
+    fn snapshot_preserves_event_version() {
+        init_test("snapshot_preserves_event_version");
+        let mut state = RuntimeState::new();
+        let event = TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
+        state.trace.push(event);
+
+        let snapshot = state.snapshot();
+        let event_snapshot = snapshot
+            .recent_events
+            .first()
+            .expect("event snapshot missing");
+        crate::assert_with_log!(
+            event_snapshot.version == TRACE_EVENT_SCHEMA_VERSION,
+            "event version",
+            TRACE_EVENT_SCHEMA_VERSION,
+            event_snapshot.version
+        );
+        crate::test_complete!("snapshot_preserves_event_version");
     }
 
     #[test]

@@ -345,12 +345,7 @@ impl TraceEvent {
 
     /// Creates a region cancelled event.
     #[must_use]
-    pub fn region_cancelled(
-        seq: u64,
-        time: Time,
-        region: RegionId,
-        reason: CancelReason,
-    ) -> Self {
+    pub fn region_cancelled(seq: u64, time: Time, region: RegionId, reason: CancelReason) -> Self {
         Self::new(
             seq,
             time,
@@ -362,7 +357,12 @@ impl TraceEvent {
     /// Creates a time advance event.
     #[must_use]
     pub fn time_advance(seq: u64, time: Time, old: Time, new: Time) -> Self {
-        Self::new(seq, time, TraceEventKind::TimeAdvance, TraceData::Time { old, new })
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::TimeAdvance,
+            TraceData::Time { old, new },
+        )
     }
 
     /// Creates a timer scheduled event.
@@ -454,7 +454,12 @@ impl TraceEvent {
     /// Creates an RNG seed event.
     #[must_use]
     pub fn rng_seed(seq: u64, time: Time, seed: u64) -> Self {
-        Self::new(seq, time, TraceEventKind::RngSeed, TraceData::RngSeed { seed })
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::RngSeed,
+            TraceData::RngSeed { seed },
+        )
     }
 
     /// Creates an RNG value event.
@@ -651,10 +656,7 @@ impl fmt::Display for TraceEvent {
                 write!(f, " {region} reason={reason}")?;
             }
             TraceData::Time { old, new } => write!(f, " {old} -> {new}")?,
-            TraceData::Timer {
-                timer_id,
-                deadline,
-            } => {
+            TraceData::Timer { timer_id, deadline } => {
                 write!(f, " timer={timer_id}")?;
                 if let Some(dl) = deadline {
                     write!(f, " deadline={dl}")?;
