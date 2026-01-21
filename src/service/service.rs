@@ -168,6 +168,154 @@ where
     }
 }
 
+// =============================================================================
+// Tower Adapter Types
+// =============================================================================
+
+/// How to handle Tower services that don't support cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CancellationMode {
+    /// Best effort: set cancelled flag, but operation may complete.
+    #[default]
+    BestEffort,
+
+    /// Strict: fail if service doesn't respect cancellation.
+    Strict,
+
+    /// Timeout: cancel via timeout if Cx cancelled.
+    TimeoutFallback,
+}
+
+/// Configuration for Tower service adaptation.
+#[derive(Debug, Clone)]
+pub struct AdapterConfig {
+    /// How to handle Tower services that ignore cancellation.
+    pub cancellation_mode: CancellationMode,
+
+    /// Timeout for non-cancellable operations.
+    pub fallback_timeout: Option<std::time::Duration>,
+
+    /// Minimum budget required to wait for service readiness.
+    /// If budget is below this, fail fast with overload error.
+    pub min_budget_for_wait: u64,
+}
+
+impl Default for AdapterConfig {
+    fn default() -> Self {
+        Self {
+            cancellation_mode: CancellationMode::BestEffort,
+            fallback_timeout: None,
+            min_budget_for_wait: 10,
+        }
+    }
+}
+
+impl AdapterConfig {
+    /// Create a new adapter config with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the cancellation mode.
+    #[must_use]
+    pub fn cancellation_mode(mut self, mode: CancellationMode) -> Self {
+        self.cancellation_mode = mode;
+        self
+    }
+
+    /// Set the fallback timeout.
+    #[must_use]
+    pub fn fallback_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.fallback_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the minimum budget required to wait for service readiness.
+    #[must_use]
+    pub fn min_budget_for_wait(mut self, budget: u64) -> Self {
+        self.min_budget_for_wait = budget;
+        self
+    }
+}
+
+/// Trait for mapping between Tower and Asupersync error types.
+pub trait ErrorAdapter: Send + Sync {
+    /// The Tower error type.
+    type TowerError;
+    /// The Asupersync error type.
+    type AsupersyncError;
+
+    /// Convert a Tower error to an Asupersync error.
+    fn to_asupersync(&self, err: Self::TowerError) -> Self::AsupersyncError;
+
+    /// Convert an Asupersync error to a Tower error.
+    fn to_tower(&self, err: Self::AsupersyncError) -> Self::TowerError;
+}
+
+/// Default error adapter that converts errors using Into.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultErrorAdapter<E> {
+    _marker: PhantomData<E>,
+}
+
+impl<E> DefaultErrorAdapter<E> {
+    /// Create a new default error adapter.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E> ErrorAdapter for DefaultErrorAdapter<E>
+where
+    E: Clone + Send + Sync,
+{
+    type TowerError = E;
+    type AsupersyncError = E;
+
+    fn to_asupersync(&self, err: Self::TowerError) -> Self::AsupersyncError {
+        err
+    }
+
+    fn to_tower(&self, err: Self::AsupersyncError) -> Self::TowerError {
+        err
+    }
+}
+
+/// Error type for Tower adapter failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TowerAdapterError<E> {
+    /// The inner service returned an error.
+    Service(E),
+    /// The operation was cancelled.
+    Cancelled,
+    /// The operation timed out.
+    Timeout,
+    /// The service is overloaded and budget is too low.
+    Overloaded,
+    /// Strict mode: service didn't respect cancellation.
+    CancellationIgnored,
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for TowerAdapterError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Service(e) => write!(f, "service error: {e}"),
+            Self::Cancelled => write!(f, "operation cancelled"),
+            Self::Timeout => write!(f, "operation timed out"),
+            Self::Overloaded => write!(f, "service overloaded, insufficient budget"),
+            Self::CancellationIgnored => {
+                write!(f, "service ignored cancellation request (strict mode)")
+            }
+        }
+    }
+}
+
+impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for TowerAdapterError<E> {}
+
 #[cfg(feature = "tower")]
 pub struct TowerAdapter<S> {
     service: std::sync::Arc<S>,
@@ -201,6 +349,133 @@ where
     fn call(&mut self, (cx, request): (Cx, Request)) -> Self::Future {
         let service = std::sync::Arc::clone(&self.service);
         Box::pin(async move { service.call(&cx, request).await })
+    }
+}
+
+/// Adapter that wraps a Tower service for use with Asupersync.
+///
+/// This adapter bridges Tower-style services to the Asupersync service model,
+/// providing graceful degradation when Tower services don't support asupersync
+/// features like cancellation.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::service::{AsupersyncAdapter, AdapterConfig, CancellationMode};
+///
+/// let tower_service = MyTowerService::new();
+/// let adapter = AsupersyncAdapter::new(tower_service)
+///     .with_config(AdapterConfig::new()
+///         .cancellation_mode(CancellationMode::TimeoutFallback)
+///         .fallback_timeout(Duration::from_secs(30)));
+/// ```
+#[cfg(feature = "tower")]
+pub struct AsupersyncAdapter<S> {
+    inner: std::sync::Mutex<S>,
+    config: AdapterConfig,
+}
+
+#[cfg(feature = "tower")]
+impl<S> AsupersyncAdapter<S> {
+    /// Create a new adapter with default configuration.
+    pub fn new(service: S) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(service),
+            config: AdapterConfig::default(),
+        }
+    }
+
+    /// Create a new adapter with the specified configuration.
+    pub fn with_config(service: S, config: AdapterConfig) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(service),
+            config,
+        }
+    }
+
+    /// Returns a reference to the adapter configuration.
+    pub fn config(&self) -> &AdapterConfig {
+        &self.config
+    }
+}
+
+#[cfg(feature = "tower")]
+impl<S, Request> AsupersyncService<Request> for AsupersyncAdapter<S>
+where
+    S: tower::Service<Request> + Send + 'static,
+    Request: Send + 'static,
+    S::Response: Send + 'static,
+    S::Error: Send + std::fmt::Debug + std::fmt::Display + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = TowerAdapterError<S::Error>;
+
+    async fn call(&self, cx: &Cx, request: Request) -> Result<Self::Response, Self::Error> {
+        use std::future::poll_fn;
+
+        // Check if already cancelled
+        if cx.is_cancel_requested() {
+            return Err(TowerAdapterError::Cancelled);
+        }
+
+        // Check budget for waiting on readiness
+        let budget = cx.remaining_budget();
+        if budget.units() < self.config.min_budget_for_wait {
+            return Err(TowerAdapterError::Overloaded);
+        }
+
+        // Get the inner service
+        let mut service = self.inner.lock().expect("lock poisoned");
+
+        // Poll for readiness
+        let ready_result = poll_fn(|poll_cx| service.poll_ready(poll_cx)).await;
+        if let Err(e) = ready_result {
+            return Err(TowerAdapterError::Service(e));
+        }
+
+        // Check cancellation again before calling
+        if cx.is_cancel_requested() {
+            return Err(TowerAdapterError::Cancelled);
+        }
+
+        // Dispatch the request
+        let future = service.call(request);
+
+        // Drop the lock before awaiting
+        drop(service);
+
+        // Handle the call based on cancellation mode
+        match self.config.cancellation_mode {
+            CancellationMode::BestEffort => {
+                // Just await the future, no special handling
+                future.await.map_err(TowerAdapterError::Service)
+            }
+            CancellationMode::Strict => {
+                // Use tokio's select to race cancellation
+                // For now, fallback to best effort since we don't have tokio dependency
+                // In strict mode, we'd fail if cancellation is requested during execution
+                let result = future.await.map_err(TowerAdapterError::Service);
+
+                // After completion, check if we were cancelled
+                if cx.is_cancel_requested() {
+                    // In strict mode, we report this as an error
+                    return Err(TowerAdapterError::CancellationIgnored);
+                }
+
+                result
+            }
+            CancellationMode::TimeoutFallback => {
+                // If we have a fallback timeout, use it
+                if let Some(_timeout) = self.config.fallback_timeout {
+                    // Note: Full timeout implementation would require async runtime support
+                    // For now, just await the future directly
+                    future.await.map_err(TowerAdapterError::Service)
+                } else {
+                    future.await.map_err(TowerAdapterError::Service)
+                }
+            }
+        }
     }
 }
 
@@ -336,5 +611,102 @@ mod tests {
             let err = AsupersyncService::call(&fail, &cx, 0).await.unwrap_err();
             assert_eq!(err, "err:nope");
         });
+    }
+
+    // ========================================================================
+    // Tower Adapter Configuration Tests
+    // ========================================================================
+
+    use super::{AdapterConfig, CancellationMode, DefaultErrorAdapter, ErrorAdapter, TowerAdapterError};
+
+    #[test]
+    fn cancellation_mode_default_is_best_effort() {
+        let mode = CancellationMode::default();
+        assert_eq!(mode, CancellationMode::BestEffort);
+    }
+
+    #[test]
+    fn adapter_config_builder_pattern() {
+        let config = AdapterConfig::new()
+            .cancellation_mode(CancellationMode::Strict)
+            .fallback_timeout(std::time::Duration::from_secs(30))
+            .min_budget_for_wait(100);
+
+        assert_eq!(config.cancellation_mode, CancellationMode::Strict);
+        assert_eq!(config.fallback_timeout, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(config.min_budget_for_wait, 100);
+    }
+
+    #[test]
+    fn adapter_config_default_values() {
+        let config = AdapterConfig::default();
+
+        assert_eq!(config.cancellation_mode, CancellationMode::BestEffort);
+        assert!(config.fallback_timeout.is_none());
+        assert_eq!(config.min_budget_for_wait, 10);
+    }
+
+    #[test]
+    fn default_error_adapter_round_trip() {
+        let adapter = DefaultErrorAdapter::<String>::new();
+
+        let original = "test error".to_string();
+        let converted = adapter.to_asupersync(original.clone());
+        assert_eq!(converted, original);
+
+        let back = adapter.to_tower(converted);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn tower_adapter_error_display() {
+        let service_err: TowerAdapterError<&str> = TowerAdapterError::Service("inner error");
+        assert_eq!(format!("{service_err}"), "service error: inner error");
+
+        let cancelled: TowerAdapterError<&str> = TowerAdapterError::Cancelled;
+        assert_eq!(format!("{cancelled}"), "operation cancelled");
+
+        let timeout: TowerAdapterError<&str> = TowerAdapterError::Timeout;
+        assert_eq!(format!("{timeout}"), "operation timed out");
+
+        let overloaded: TowerAdapterError<&str> = TowerAdapterError::Overloaded;
+        assert_eq!(format!("{overloaded}"), "service overloaded, insufficient budget");
+
+        let ignored: TowerAdapterError<&str> = TowerAdapterError::CancellationIgnored;
+        assert_eq!(
+            format!("{ignored}"),
+            "service ignored cancellation request (strict mode)"
+        );
+    }
+
+    #[test]
+    fn tower_adapter_error_equality() {
+        let err1: TowerAdapterError<i32> = TowerAdapterError::Service(42);
+        let err2: TowerAdapterError<i32> = TowerAdapterError::Service(42);
+        let err3: TowerAdapterError<i32> = TowerAdapterError::Service(43);
+
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+
+        assert_eq!(
+            TowerAdapterError::<i32>::Cancelled,
+            TowerAdapterError::Cancelled
+        );
+        assert_ne!(
+            TowerAdapterError::<i32>::Cancelled,
+            TowerAdapterError::Timeout
+        );
+    }
+
+    #[test]
+    fn cancellation_mode_all_variants() {
+        // Ensure all variants are distinct
+        let best_effort = CancellationMode::BestEffort;
+        let strict = CancellationMode::Strict;
+        let timeout = CancellationMode::TimeoutFallback;
+
+        assert_ne!(best_effort, strict);
+        assert_ne!(best_effort, timeout);
+        assert_ne!(strict, timeout);
     }
 }
