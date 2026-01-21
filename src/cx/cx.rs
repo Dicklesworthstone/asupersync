@@ -54,7 +54,7 @@
 use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::tracing_compat::{debug, info, trace};
-use crate::types::{Budget, CxInner, RegionId, TaskId};
+use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -667,6 +667,248 @@ impl Cx {
         }
     }
 
+    // ========================================================================
+    // Cancel Attribution API
+    // ========================================================================
+
+    /// Cancels this context with a detailed reason.
+    ///
+    /// This is the preferred method for initiating cancellation, as it provides
+    /// complete attribution information. The reason includes:
+    /// - The kind of cancellation (e.g., User, Timeout, Deadline)
+    /// - An optional message explaining the cancellation
+    /// - Origin region and task information (automatically set)
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The type of cancellation being initiated
+    /// * `message` - An optional human-readable message explaining why
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::CancelKind};
+    ///
+    /// let cx = Cx::for_testing();
+    /// cx.cancel_with(CancelKind::User, Some("User pressed Ctrl+C"));
+    /// assert!(cx.is_cancel_requested());
+    ///
+    /// if let Some(reason) = cx.cancel_reason() {
+    ///     assert_eq!(reason.kind, CancelKind::User);
+    /// }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This method only sets the local cancellation flag. In a real runtime,
+    /// cancellation propagates through the region tree via `cancel_request()`.
+    pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        let region = inner.region;
+        let task = inner.task;
+
+        let mut reason = CancelReason::new(kind).with_region(region).with_task(task);
+        if let Some(msg) = message {
+            reason = reason.with_message(msg);
+        }
+
+        inner.cancel_requested = true;
+        inner.cancel_reason = Some(reason);
+
+        debug!(
+            task_id = ?task,
+            region_id = ?region,
+            cancel_kind = ?kind,
+            cancel_message = message,
+            "cancel initiated via cancel_with"
+        );
+    }
+
+    /// Gets the cancellation reason if this context is cancelled.
+    ///
+    /// Returns `None` if the context is not cancelled, or `Some(reason)` if
+    /// cancellation has been requested. The returned reason includes full
+    /// attribution (kind, origin region, origin task, timestamp, cause chain).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::CancelKind};
+    ///
+    /// let cx = Cx::for_testing();
+    /// assert!(cx.cancel_reason().is_none());
+    ///
+    /// cx.cancel_with(CancelKind::Timeout, Some("request timeout"));
+    /// if let Some(reason) = cx.cancel_reason() {
+    ///     assert_eq!(reason.kind, CancelKind::Timeout);
+    ///     println!("Cancelled: {:?}", reason.kind);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn cancel_reason(&self) -> Option<CancelReason> {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.cancel_reason.clone()
+    }
+
+    /// Iterates through the full cancellation cause chain.
+    ///
+    /// The first element is the immediate reason, followed by parent causes
+    /// in order (immediate -> root). This is useful for understanding the
+    /// full propagation path of a cancellation.
+    ///
+    /// Returns an empty iterator if the context is not cancelled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    ///
+    /// let cx = Cx::for_testing();
+    ///
+    /// // Create a chained reason: ParentCancelled -> Deadline
+    /// let root_cause = CancelReason::deadline();
+    /// let chained = CancelReason::parent_cancelled().with_cause(root_cause);
+    ///
+    /// // Set it via internal method for testing
+    /// cx.set_cancel_reason(chained);
+    ///
+    /// let chain: Vec<_> = cx.cancel_chain().collect();
+    /// assert_eq!(chain.len(), 2);
+    /// assert_eq!(chain[0].kind, CancelKind::ParentCancelled);
+    /// assert_eq!(chain[1].kind, CancelKind::Deadline);
+    /// ```
+    pub fn cancel_chain(&self) -> impl Iterator<Item = CancelReason> {
+        let inner = self.inner.read().expect("lock poisoned");
+        let chain: Vec<CancelReason> = inner
+            .cancel_reason
+            .as_ref()
+            .map(|r| r.chain().cloned().collect())
+            .unwrap_or_default();
+        chain.into_iter()
+    }
+
+    /// Gets the root cause of cancellation.
+    ///
+    /// This is the original trigger that initiated the cancellation, regardless
+    /// of how many parent regions the cancellation propagated through. For example,
+    /// if a grandchild task was cancelled due to a parent timeout, `root_cancel_cause()`
+    /// returns the original Timeout reason, not the intermediate ParentCancelled reasons.
+    ///
+    /// Returns `None` if the context is not cancelled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    ///
+    /// let cx = Cx::for_testing();
+    ///
+    /// // Simulate a deep cancellation chain
+    /// let deadline = CancelReason::deadline();
+    /// let parent1 = CancelReason::parent_cancelled().with_cause(deadline);
+    /// let parent2 = CancelReason::parent_cancelled().with_cause(parent1);
+    ///
+    /// cx.set_cancel_reason(parent2);
+    ///
+    /// // Root cause is the original Deadline, not ParentCancelled
+    /// if let Some(root) = cx.root_cancel_cause() {
+    ///     assert_eq!(root.kind, CancelKind::Deadline);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn root_cancel_cause(&self) -> Option<CancelReason> {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.cancel_reason.as_ref().map(|r| r.root_cause().clone())
+    }
+
+    /// Checks if cancellation was due to a specific kind.
+    ///
+    /// This checks the immediate reason only, not the cause chain. For example,
+    /// if a task was cancelled with `ParentCancelled` due to an upstream timeout,
+    /// `cancelled_by(CancelKind::ParentCancelled)` returns `true` but
+    /// `cancelled_by(CancelKind::Timeout)` returns `false`.
+    ///
+    /// Use `any_cause_is()` to check the full cause chain.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::CancelKind};
+    ///
+    /// let cx = Cx::for_testing();
+    /// cx.cancel_with(CancelKind::User, Some("manual cancel"));
+    ///
+    /// assert!(cx.cancelled_by(CancelKind::User));
+    /// assert!(!cx.cancelled_by(CancelKind::Timeout));
+    /// ```
+    #[must_use]
+    pub fn cancelled_by(&self, kind: CancelKind) -> bool {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.cancel_reason.as_ref().is_some_and(|r| r.kind == kind)
+    }
+
+    /// Checks if any cause in the chain is a specific kind.
+    ///
+    /// This searches the entire cause chain, from the immediate reason to the
+    /// root cause. This is useful for checking if a specific condition (like
+    /// a timeout) anywhere in the hierarchy caused this cancellation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    ///
+    /// let cx = Cx::for_testing();
+    ///
+    /// // Grandchild cancelled due to parent timeout
+    /// let timeout = CancelReason::timeout();
+    /// let parent_cancelled = CancelReason::parent_cancelled().with_cause(timeout);
+    ///
+    /// cx.set_cancel_reason(parent_cancelled);
+    ///
+    /// // Immediate reason is ParentCancelled, but timeout is in the chain
+    /// assert!(cx.cancelled_by(CancelKind::ParentCancelled));
+    /// assert!(!cx.cancelled_by(CancelKind::Timeout));  // immediate only
+    /// assert!(cx.any_cause_is(CancelKind::Timeout));   // searches chain
+    /// assert!(cx.any_cause_is(CancelKind::ParentCancelled));  // also in chain
+    /// ```
+    #[must_use]
+    pub fn any_cause_is(&self, kind: CancelKind) -> bool {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner
+            .cancel_reason
+            .as_ref()
+            .is_some_and(|r| r.any_cause_is(kind))
+    }
+
+    /// Sets the cancellation reason (for testing purposes).
+    ///
+    /// This method allows tests to set a specific cancellation reason, including
+    /// complex cause chains. It sets both the `cancel_requested` flag and the
+    /// `cancel_reason`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    ///
+    /// let cx = Cx::for_testing();
+    ///
+    /// // Create a chained reason for testing
+    /// let root = CancelReason::deadline();
+    /// let chained = CancelReason::parent_cancelled().with_cause(root);
+    ///
+    /// cx.set_cancel_reason(chained);
+    ///
+    /// assert!(cx.is_cancel_requested());
+    /// assert_eq!(cx.cancel_reason().unwrap().kind, CancelKind::ParentCancelled);
+    /// ```
+    pub fn set_cancel_reason(&self, reason: CancelReason) {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        inner.cancel_requested = true;
+        inner.cancel_reason = Some(reason);
+    }
+
     /// Creates a [`Scope`] bound to this context's region.
     ///
     /// The returned `Scope` can be used to spawn tasks, create child regions,
@@ -828,5 +1070,190 @@ mod tests {
             cx.checkpoint().is_err(),
             "Cx remains masked after panic! mask_depth leaked."
         );
+    }
+
+    // ========================================================================
+    // Cancel Attribution API Tests
+    // ========================================================================
+
+    #[test]
+    fn cancel_with_sets_reason() {
+        let cx = test_cx();
+        assert!(cx.cancel_reason().is_none());
+
+        cx.cancel_with(CancelKind::User, Some("manual stop"));
+
+        assert!(cx.is_cancel_requested());
+        let reason = cx.cancel_reason().expect("should have reason");
+        assert_eq!(reason.kind, CancelKind::User);
+        assert_eq!(reason.message, Some("manual stop"));
+    }
+
+    #[test]
+    fn cancel_with_no_message() {
+        let cx = test_cx();
+        cx.cancel_with(CancelKind::Timeout, None);
+
+        let reason = cx.cancel_reason().expect("should have reason");
+        assert_eq!(reason.kind, CancelKind::Timeout);
+        assert!(reason.message.is_none());
+    }
+
+    #[test]
+    fn cancel_reason_returns_none_when_not_cancelled() {
+        let cx = test_cx();
+        assert!(cx.cancel_reason().is_none());
+    }
+
+    #[test]
+    fn cancel_chain_empty_when_not_cancelled() {
+        let cx = test_cx();
+        let chain: Vec<_> = cx.cancel_chain().collect();
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn cancel_chain_traverses_causes() {
+        let cx = test_cx();
+
+        // Build a chain: ParentCancelled -> ParentCancelled -> Deadline
+        let deadline = CancelReason::deadline();
+        let parent1 = CancelReason::parent_cancelled().with_cause(deadline);
+        let parent2 = CancelReason::parent_cancelled().with_cause(parent1);
+
+        cx.set_cancel_reason(parent2);
+
+        let chain: Vec<_> = cx.cancel_chain().collect();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].kind, CancelKind::ParentCancelled);
+        assert_eq!(chain[1].kind, CancelKind::ParentCancelled);
+        assert_eq!(chain[2].kind, CancelKind::Deadline);
+    }
+
+    #[test]
+    fn root_cancel_cause_returns_none_when_not_cancelled() {
+        let cx = test_cx();
+        assert!(cx.root_cancel_cause().is_none());
+    }
+
+    #[test]
+    fn root_cancel_cause_finds_root() {
+        let cx = test_cx();
+
+        // Build: ParentCancelled -> Timeout
+        let timeout = CancelReason::timeout();
+        let parent = CancelReason::parent_cancelled().with_cause(timeout);
+
+        cx.set_cancel_reason(parent);
+
+        let root = cx.root_cancel_cause().expect("should have root");
+        assert_eq!(root.kind, CancelKind::Timeout);
+    }
+
+    #[test]
+    fn root_cancel_cause_with_no_chain() {
+        let cx = test_cx();
+        cx.cancel_with(CancelKind::Shutdown, None);
+
+        let root = cx.root_cancel_cause().expect("should have root");
+        assert_eq!(root.kind, CancelKind::Shutdown);
+    }
+
+    #[test]
+    fn cancelled_by_checks_immediate_reason() {
+        let cx = test_cx();
+
+        // Build: ParentCancelled -> Deadline
+        let deadline = CancelReason::deadline();
+        let parent = CancelReason::parent_cancelled().with_cause(deadline);
+
+        cx.set_cancel_reason(parent);
+
+        // Immediate reason is ParentCancelled
+        assert!(cx.cancelled_by(CancelKind::ParentCancelled));
+        // Deadline is in chain but not immediate
+        assert!(!cx.cancelled_by(CancelKind::Deadline));
+    }
+
+    #[test]
+    fn cancelled_by_returns_false_when_not_cancelled() {
+        let cx = test_cx();
+        assert!(!cx.cancelled_by(CancelKind::User));
+    }
+
+    #[test]
+    fn any_cause_is_searches_chain() {
+        let cx = test_cx();
+
+        // Build: ParentCancelled -> ParentCancelled -> Timeout
+        let timeout = CancelReason::timeout();
+        let parent1 = CancelReason::parent_cancelled().with_cause(timeout);
+        let parent2 = CancelReason::parent_cancelled().with_cause(parent1);
+
+        cx.set_cancel_reason(parent2);
+
+        // All kinds in the chain return true
+        assert!(cx.any_cause_is(CancelKind::ParentCancelled));
+        assert!(cx.any_cause_is(CancelKind::Timeout));
+
+        // Kinds not in chain return false
+        assert!(!cx.any_cause_is(CancelKind::Deadline));
+        assert!(!cx.any_cause_is(CancelKind::Shutdown));
+    }
+
+    #[test]
+    fn any_cause_is_returns_false_when_not_cancelled() {
+        let cx = test_cx();
+        assert!(!cx.any_cause_is(CancelKind::Timeout));
+    }
+
+    #[test]
+    fn set_cancel_reason_sets_flag_and_reason() {
+        let cx = test_cx();
+        assert!(!cx.is_cancel_requested());
+
+        cx.set_cancel_reason(CancelReason::shutdown());
+
+        assert!(cx.is_cancel_requested());
+        assert_eq!(
+            cx.cancel_reason().expect("should have reason").kind,
+            CancelKind::Shutdown
+        );
+    }
+
+    #[test]
+    fn integration_realistic_usage() {
+        // Simulate a realistic cancellation scenario:
+        // 1. Root region times out
+        // 2. Child task receives ParentCancelled
+        // 3. Handler inspects the cause chain
+
+        let cx = test_cx();
+
+        // Simulate runtime setting a chained reason (timeout -> parent_cancelled)
+        let timeout_reason = CancelReason::timeout().with_message("request timeout");
+        let child_reason = CancelReason::parent_cancelled().with_cause(timeout_reason);
+
+        cx.set_cancel_reason(child_reason);
+
+        // Handler code checks various conditions
+        assert!(cx.is_cancel_requested());
+
+        // Immediate reason is ParentCancelled
+        assert!(cx.cancelled_by(CancelKind::ParentCancelled));
+
+        // But we want to know if a timeout caused it
+        if cx.any_cause_is(CancelKind::Timeout) {
+            // Log or metric: "Request cancelled due to timeout"
+            let root = cx.root_cancel_cause().unwrap();
+            assert_eq!(root.kind, CancelKind::Timeout);
+            assert_eq!(root.message, Some("request timeout"));
+        }
+
+        // Full chain inspection
+        let chain: Vec<_> = cx.cancel_chain().collect();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].kind, CancelKind::ParentCancelled);
+        assert_eq!(chain[1].kind, CancelKind::Timeout);
     }
 }
