@@ -41,6 +41,7 @@ where
 }
 
 /// A server streaming RPC method.
+#[allow(clippy::type_complexity)]
 pub trait ServerStreamingMethod<Req, Resp>: Send + Sync + 'static
 where
     Req: Send + 'static,
@@ -73,6 +74,7 @@ where
 }
 
 /// A bidirectional streaming RPC method.
+#[allow(clippy::type_complexity)]
 pub trait BidiStreamingMethod<Req, Resp>: Send + Sync + 'static
 where
     Req: Send + 'static,

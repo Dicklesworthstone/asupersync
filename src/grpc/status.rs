@@ -8,7 +8,7 @@ use std::fmt;
 /// gRPC status codes.
 ///
 /// These codes follow the gRPC specification and map to HTTP/2 status codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(i32)]
 pub enum Code {
     /// Not an error; returned on success.
@@ -16,6 +16,7 @@ pub enum Code {
     /// The operation was cancelled, typically by the caller.
     Cancelled = 1,
     /// Unknown error.
+    #[default]
     Unknown = 2,
     /// The client specified an invalid argument.
     InvalidArgument = 3,
@@ -54,7 +55,6 @@ impl Code {
         match value {
             0 => Self::Ok,
             1 => Self::Cancelled,
-            2 => Self::Unknown,
             3 => Self::InvalidArgument,
             4 => Self::DeadlineExceeded,
             5 => Self::NotFound,
@@ -69,6 +69,7 @@ impl Code {
             14 => Self::Unavailable,
             15 => Self::DataLoss,
             16 => Self::Unauthenticated,
+            // 2 is Unknown per gRPC spec; unmapped codes also return Unknown
             _ => Self::Unknown,
         }
     }
@@ -107,12 +108,6 @@ impl Code {
 impl fmt::Display for Code {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
-    }
-}
-
-impl Default for Code {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 

@@ -181,7 +181,7 @@ impl HeaderName {
 
     /// Creates a new header name from a string.
     #[must_use]
-    pub fn from_string(name: String) -> Self {
+    pub fn from_string(name: &str) -> Self {
         Self(name.to_lowercase())
     }
 
@@ -318,6 +318,7 @@ impl SizeHint {
 ///     Ok(data)
 /// }
 /// ```
+#[allow(clippy::type_complexity)]
 pub trait Body {
     /// The buffer type for data frames.
     type Data: Buf;
@@ -481,14 +482,14 @@ impl<D: Buf + Unpin> Body for Full<D> {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.data.as_ref().map_or(true, |d| d.remaining() == 0)
+        self.data.as_ref().is_none_or(|d| d.remaining() == 0)
     }
 
     fn size_hint(&self) -> SizeHint {
-        match &self.data {
-            Some(data) => SizeHint::with_exact(data.remaining() as u64),
-            None => SizeHint::with_exact(0),
-        }
+        self.data.as_ref().map_or_else(
+            || SizeHint::with_exact(0),
+            |data| SizeHint::with_exact(data.remaining() as u64),
+        )
     }
 }
 
@@ -551,7 +552,7 @@ impl<S> StreamBody<S> {
 #[derive(Debug)]
 pub struct Collected<B: Body> {
     inner: B,
-    collected: Vec<u8>,
+    data: Vec<u8>,
     trailers: Option<HeaderMap>,
     done: bool,
 }
@@ -564,7 +565,7 @@ where
     pub fn new(inner: B) -> Self {
         Self {
             inner,
-            collected: Vec::new(),
+            data: Vec::new(),
             trailers: None,
             done: false,
         }
@@ -573,7 +574,7 @@ where
     /// Returns the collected data.
     #[must_use]
     pub fn data(&self) -> &[u8] {
-        &self.collected
+        &self.data
     }
 
     /// Returns the trailers, if any.
@@ -585,7 +586,7 @@ where
     /// Consumes the collector and returns the collected data.
     #[must_use]
     pub fn into_data(self) -> Vec<u8> {
-        self.collected
+        self.data
     }
 }
 

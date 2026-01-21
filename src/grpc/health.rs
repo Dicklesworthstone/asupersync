@@ -207,7 +207,7 @@ impl HealthService {
                 Ok(HealthCheckResponse::new(ServingStatus::ServiceUnknown))
             } else {
                 // Check if all services are healthy
-                let all_healthy = statuses.values().all(|s| s.is_healthy());
+                let all_healthy = statuses.values().all(ServingStatus::is_healthy);
                 drop(statuses);
                 if all_healthy {
                     Ok(HealthCheckResponse::new(ServingStatus::Serving))
@@ -225,9 +225,10 @@ impl HealthService {
     }
 
     /// Async check handler for use with gRPC server.
+    #[must_use]
     pub fn check_async(
         &self,
-        request: Request<HealthCheckRequest>,
+        request: &Request<HealthCheckRequest>,
     ) -> Pin<Box<dyn Future<Output = Result<Response<HealthCheckResponse>, Status>> + Send>> {
         let result = self.check(request.get_ref());
         Box::pin(async move { result.map(Response::new) })

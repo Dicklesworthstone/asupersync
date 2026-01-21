@@ -161,6 +161,7 @@ impl Channel {
     }
 
     /// Connect with custom configuration.
+    #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
         // Placeholder implementation
         // In a real implementation, this would establish an HTTP/2 connection
@@ -219,6 +220,7 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     /// Make a unary RPC call.
+    #[allow(clippy::unused_async)]
     pub async fn unary<Req, Resp>(
         &mut self,
         path: &str,
@@ -238,6 +240,7 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     /// Start a server streaming RPC call.
+    #[allow(clippy::unused_async)]
     pub async fn server_streaming<Req, Resp>(
         &mut self,
         path: &str,
@@ -255,6 +258,7 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     /// Start a client streaming RPC call.
+    #[allow(clippy::unused_async)]
     pub async fn client_streaming<Req, Resp>(
         &mut self,
         path: &str,
@@ -271,6 +275,7 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     /// Start a bidirectional streaming RPC call.
+    #[allow(clippy::unused_async)]
     pub async fn bidi_streaming<Req, Resp>(
         &mut self,
         path: &str,
@@ -338,12 +343,14 @@ impl<T> RequestSink<T> {
     }
 
     /// Send a request message.
+    #[allow(clippy::unused_async)]
     pub async fn send(&mut self, _message: T) -> Result<(), Status> {
         // Placeholder implementation
         Ok(())
     }
 
     /// Close the sink, signaling no more requests.
+    #[allow(clippy::unused_async)]
     pub async fn close(&mut self) -> Result<(), Status> {
         // Placeholder implementation
         Ok(())

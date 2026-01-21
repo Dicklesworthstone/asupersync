@@ -123,6 +123,7 @@ impl ServerBuilder {
     }
 
     /// Add a service to the server.
+    #[must_use]
     pub fn add_service<S>(mut self, service: S) -> Self
     where
         S: NamedService + ServiceHandler + 'static,
@@ -172,16 +173,19 @@ impl Server {
     }
 
     /// Get the server configuration.
+    #[must_use]
     pub fn config(&self) -> &ServerConfig {
         &self.config
     }
 
     /// Get the registered services.
+    #[must_use]
     pub fn services(&self) -> &HashMap<String, Arc<dyn ServiceHandler>> {
         &self.services
     }
 
     /// Get a service by name.
+    #[must_use]
     pub fn get_service(&self, name: &str) -> Option<&Arc<dyn ServiceHandler>> {
         self.services.get(name)
     }
@@ -194,6 +198,7 @@ impl Server {
     /// Serve on the given address.
     ///
     /// This is a placeholder - actual implementation would use async networking.
+    #[allow(clippy::unused_async)]
     pub async fn serve(self, _addr: &str) -> Result<(), GrpcError> {
         // Placeholder implementation
         // In a real implementation, this would:
@@ -227,16 +232,19 @@ impl CallContext {
     }
 
     /// Get the request metadata.
+    #[must_use]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
     /// Get the deadline.
+    #[must_use]
     pub fn deadline(&self) -> Option<std::time::Instant> {
         self.deadline
     }
 
     /// Get the peer address.
+    #[must_use]
     pub fn peer_addr(&self) -> Option<&str> {
         self.peer_addr.as_deref()
     }
@@ -244,9 +252,7 @@ impl CallContext {
     /// Check if the deadline has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.deadline
-            .map(|d| std::time::Instant::now() > d)
-            .unwrap_or(false)
+        self.deadline.is_some_and(|d| std::time::Instant::now() > d)
     }
 }
 

@@ -179,6 +179,7 @@ impl Metadata {
     }
 
     /// Get a value by key.
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<&MetadataValue> {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
@@ -413,12 +414,14 @@ impl<T> RequestSink<T> {
     }
 
     /// Send a message.
+    #[allow(clippy::unused_async)]
     pub async fn send(&mut self, _item: T) -> Result<(), GrpcError> {
         // Placeholder implementation
         Ok(())
     }
 
     /// Close the sink and wait for the response.
+    #[allow(clippy::unused_async)]
     pub async fn close(self) -> Result<(), GrpcError> {
         // Placeholder implementation
         Ok(())
