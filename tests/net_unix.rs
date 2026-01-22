@@ -110,6 +110,8 @@ fn net_uds_002_echo_roundtrip() {
                 let (stream, _) = listener.accept().await?;
                 // Get underlying std stream for blocking I/O
                 let std_stream = stream.as_std().try_clone()?;
+                // Set back to blocking mode for blocking I/O operations
+                std_stream.set_nonblocking(false)?;
                 std_stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 std_stream.set_write_timeout(Some(Duration::from_secs(5)))?;
                 let mut reader = std_stream.try_clone()?;
@@ -380,6 +382,8 @@ fn net_uds_007_multiple_connections() {
 
                             // Convert to blocking std stream for echo
                             if let Ok(std_stream) = stream.as_std().try_clone() {
+                                // Set back to blocking mode for blocking I/O operations
+                                let _ = std_stream.set_nonblocking(false);
                                 let _ = std_stream.set_read_timeout(Some(Duration::from_secs(5)));
                                 let mut reader = std_stream.try_clone().unwrap();
                                 let mut writer = std_stream;

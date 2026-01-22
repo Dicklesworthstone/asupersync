@@ -22,6 +22,7 @@
 //! assert!(report.all_passed(), "Cancellation handling failed: {:?}", report.failures());
 //! ```
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -237,45 +238,48 @@ impl LabInjectionReport {
         let mut xml = String::new();
         xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         xml.push('\n');
-        xml.push_str(&format!(
+        let _ = write!(
+            xml,
             r#"<testsuite name="CancellationInjectionTests" tests="{}" failures="{}" errors="0" skipped="{}">"#,
             self.tests_run,
             self.failures,
             self.total_await_points.saturating_sub(self.tests_run)
-        ));
+        );
         xml.push('\n');
 
         for result in &self.results {
             let test_name = format!("await_point_{}", result.injection.injection_point);
-            xml.push_str(&format!(
-                r#"  <testcase name="{}" classname="CancellationInjection" time="0">"#,
-                test_name
-            ));
+            let _ = write!(
+                xml,
+                r#"  <testcase name="{test_name}" classname="CancellationInjection" time="0">"#,
+            );
             xml.push('\n');
 
             if !result.is_success() {
-                let failure_message = if !result.injection.is_success() {
-                    format!("Injection failed: {:?}", result.injection.outcome)
-                } else {
+                let failure_message = if result.injection.is_success() {
                     result
                         .oracle_violations
                         .iter()
                         .map(|v| format!("{v}"))
                         .collect::<Vec<_>>()
                         .join("; ")
+                } else {
+                    format!("Injection failed: {:?}", result.injection.outcome)
                 };
 
-                xml.push_str(&format!(
+                let _ = write!(
+                    xml,
                     r#"    <failure message="{}" type="CancellationFailure">"#,
                     escape_xml(&failure_message)
-                ));
+                );
                 xml.push('\n');
-                xml.push_str(&format!(
+                let _ = write!(
+                    xml,
                     "Seed: {}\nInjection point: {}\n\nReproduction:\n{}",
                     self.seed,
                     result.injection.injection_point,
                     result.reproduction_code(self.seed)
-                ));
+                );
                 xml.push_str("    </failure>\n");
             }
 
@@ -318,7 +322,7 @@ pub struct LabInjectionReportDisplay<'a> {
     report: &'a LabInjectionReport,
 }
 
-impl<'a> std::fmt::Display for LabInjectionReportDisplay<'a> {
+impl std::fmt::Display for LabInjectionReportDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let r = self.report;
 
@@ -567,19 +571,17 @@ impl LabInjectionRunner {
         match result {
             Ok(poll_result) => {
                 let outcome = match &poll_result {
-                    InstrumentedPollResult::Inner(_) => InjectionOutcome::Success,
-                    InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
+                    InstrumentedPollResult::Inner(_)
+                    | InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
                 };
                 (outcome, Some(poll_result))
             }
             Err(e) => {
-                let message = if let Some(s) = e.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown panic".to_string()
-                };
+                let message = e
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "Unknown panic".to_string());
                 (InjectionOutcome::Panic(message), None)
             }
         }

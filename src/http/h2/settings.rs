@@ -109,11 +109,11 @@ impl Settings {
                 }
             }
             Setting::MaxFrameSize(v) => {
-                if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&v) {
-                    Err("max frame size out of range")
-                } else {
+                if (MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&v) {
                     self.max_frame_size = v;
                     Ok(())
+                } else {
+                    Err("max frame size out of range")
                 }
             }
             Setting::MaxHeaderListSize(v) => {
