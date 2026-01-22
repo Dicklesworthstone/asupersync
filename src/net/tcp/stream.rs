@@ -1,9 +1,13 @@
 //! TCP stream implementation.
+//!
+//! This module provides a TCP stream for reading and writing data over a connection.
+//! The stream implements [`TcpStreamApi`] for use with generic code and frameworks.
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::lookup_one;
 use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use crate::net::tcp::traits::TcpStreamApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -348,6 +352,43 @@ impl AsyncWrite for TcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.inner.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
+    }
+}
+
+// Implement the TcpStreamApi trait for TcpStream
+impl TcpStreamApi for TcpStream {
+    fn connect<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+    ) -> impl std::future::Future<Output = io::Result<Self>> + Send {
+        Self::connect(addr)
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        TcpStream::peer_addr(self)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        TcpStream::local_addr(self)
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        TcpStream::shutdown(self, how)
+    }
+
+    fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        TcpStream::set_nodelay(self, nodelay)
+    }
+
+    fn nodelay(&self) -> io::Result<bool> {
+        self.inner.nodelay()
+    }
+
+    fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        self.inner.set_ttl(ttl)
+    }
+
+    fn ttl(&self) -> io::Result<u32> {
+        self.inner.ttl()
     }
 }
 

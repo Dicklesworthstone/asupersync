@@ -1,8 +1,12 @@
 //! TCP listener implementation.
+//!
+//! This module provides a TCP listener for accepting incoming connections.
+//! The listener implements [`TcpListenerApi`] for use with generic code and frameworks.
 
 use crate::cx::Cx;
 use crate::net::lookup_all;
 use crate::net::tcp::stream::TcpStream;
+use crate::net::tcp::traits::TcpListenerApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
@@ -146,6 +150,36 @@ impl Stream for Incoming<'_> {
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+// Implement the TcpListenerApi trait for TcpListener
+impl TcpListenerApi for TcpListener {
+    type Stream = TcpStream;
+
+    fn bind<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+    ) -> impl std::future::Future<Output = io::Result<Self>> + Send {
+        Self::bind(addr)
+    }
+
+    fn accept(&self) -> impl std::future::Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send {
+        // Use poll_fn which is Send since TcpListener is not Send due to Mutex
+        // We need to wrap in an async block that captures self
+        let accept_fn = move || poll_fn(|cx| self.poll_accept(cx));
+        async move { accept_fn().await }
+    }
+
+    fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
+        TcpListener::poll_accept(self, cx)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        TcpListener::local_addr(self)
+    }
+
+    fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        TcpListener::set_ttl(self, ttl)
     }
 }
 
