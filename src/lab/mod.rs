@@ -54,6 +54,7 @@ pub mod instrumented_future;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
+pub mod virtual_time_wheel;
 
 pub use config::LabConfig;
 pub use injection::{
@@ -71,3 +72,4 @@ pub use oracle::{
     QuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
 pub use runtime::LabRuntime;
+pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};
