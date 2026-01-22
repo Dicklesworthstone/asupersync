@@ -444,15 +444,15 @@ mod tests {
         let (mut server, _) = listener.accept().expect("accept");
 
         // Create borrowed halves
-        let read_half = ReadHalf::new(&client);
-        let mut write_half = WriteHalf::new(&client);
+        let _read_half = ReadHalf::new(&client);
+        let _write_half = WriteHalf::new(&client);
 
         // Write from server, read from client
         server.write_all(b"hello").expect("write");
 
         // Borrowed halves work (may need multiple attempts due to non-blocking)
         let mut buf = [0u8; 5];
-        let mut read_buf = ReadBuf::new(&mut buf);
+        let _read_buf = ReadBuf::new(&mut buf);
 
         // Just verify the types compile and basic operations work
         crate::assert_with_log!(true, "borrowed split compiles", true, true);

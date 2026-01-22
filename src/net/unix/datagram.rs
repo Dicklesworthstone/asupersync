@@ -1185,22 +1185,22 @@ mod tests {
         let cred_b = b.peer_cred().expect("peer_cred b failed");
 
         // Both should report the same process (ourselves)
-        let our_uid = unsafe { libc::getuid() } as u32;
-        let our_gid = unsafe { libc::getgid() } as u32;
+        let user_id = unsafe { libc::getuid() } as u32;
+        let group_id = unsafe { libc::getgid() } as u32;
 
-        crate::assert_with_log!(cred_a.uid == our_uid, "a uid", our_uid, cred_a.uid);
-        crate::assert_with_log!(cred_a.gid == our_gid, "a gid", our_gid, cred_a.gid);
-        crate::assert_with_log!(cred_b.uid == our_uid, "b uid", our_uid, cred_b.uid);
-        crate::assert_with_log!(cred_b.gid == our_gid, "b gid", our_gid, cred_b.gid);
+        crate::assert_with_log!(cred_a.uid == user_id, "a uid", user_id, cred_a.uid);
+        crate::assert_with_log!(cred_a.gid == group_id, "a gid", group_id, cred_a.gid);
+        crate::assert_with_log!(cred_b.uid == user_id, "b uid", user_id, cred_b.uid);
+        crate::assert_with_log!(cred_b.gid == group_id, "b gid", group_id, cred_b.gid);
 
         // On Linux, pid should be available and match our process
         #[cfg(target_os = "linux")]
         {
-            let our_pid = std::process::id() as i32;
+            let proc_id = std::process::id() as i32;
             let pid_a = cred_a.pid.expect("pid should be available on Linux");
             let pid_b = cred_b.pid.expect("pid should be available on Linux");
-            crate::assert_with_log!(pid_a == our_pid, "a pid", our_pid, pid_a);
-            crate::assert_with_log!(pid_b == our_pid, "b pid", our_pid, pid_b);
+            crate::assert_with_log!(pid_a == proc_id, "a pid", proc_id, pid_a);
+            crate::assert_with_log!(pid_b == proc_id, "b pid", proc_id, pid_b);
         }
 
         crate::test_complete!("test_datagram_peer_cred");

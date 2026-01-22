@@ -54,17 +54,15 @@ impl TcpStream {
 
         // 2. Attempt connect (non-blocking)
         let sock_addr = SockAddr::from(addr);
-        match socket.connect(&sock_addr) {
-            Ok(()) => {}
-            Err(err) if connect_in_progress(&err) => {
-                wait_for_connect(&socket).await?;
-            }
+        let registration = match socket.connect(&sock_addr) {
+            Ok(()) => None,
+            Err(err) if connect_in_progress(&err) => wait_for_connect(&socket).await?,
             Err(err) => return Err(err),
-        }
+        };
 
         let stream: net::TcpStream = socket.into();
         stream.set_nonblocking(true)?;
-        Ok(Self::from_std(stream))
+        Ok(Self::from_parts(Arc::new(stream), registration))
     }
 
     /// Connect with timeout.
@@ -170,8 +168,55 @@ fn connect_in_progress(err: &io::Error) -> bool {
     ) || err.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
-async fn wait_for_connect(socket: &Socket) -> io::Result<()> {
-    // TODO(Phase 2): register with reactor and await WRITABLE instead of yielding.
+async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
+    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    };
+
+    let mut registration: Option<IoRegistration> = None;
+    let mut fallback = false;
+    std::future::poll_fn(|cx| {
+        if let Some(err) = socket.take_error()? {
+            return Poll::Ready(Err(err));
+        }
+
+        match socket.peer_addr() {
+            Ok(_) => Poll::Ready(Ok(())),
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                if let Some(existing) = registration.as_ref() {
+                    if !existing.update_waker(cx.waker().clone()) {
+                        registration = None;
+                    }
+                }
+
+                if registration.is_none() {
+                    match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
+                        Ok(new_reg) => registration = Some(new_reg),
+                        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                            fallback = true;
+                            return Poll::Ready(Ok(()));
+                        }
+                        Err(err) => return Poll::Ready(Err(err)),
+                    }
+                }
+
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    })
+    .await?;
+
+    if fallback {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    }
+
+    Ok(registration)
+}
+
+async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     loop {
         if let Some(err) = socket.take_error()? {
             return Err(err);
@@ -180,7 +225,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<()> {
         match socket.peer_addr() {
             Ok(_) => return Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                // Sleep briefly to avoid busy loop in Phase 0 blocking connect
+                // Sleep briefly to avoid busy loop when no reactor is available.
                 std::thread::sleep(Duration::from_millis(1));
                 crate::runtime::yield_now().await;
             }
