@@ -598,17 +598,15 @@ impl InjectionPoint {
     /// Returns which chaos types are applicable at this injection point.
     #[must_use]
     pub fn applicable_chaos(&self) -> &'static [ChaosType] {
-        use ChaosType::*;
         match self {
-            InjectionPoint::SchedulerPoll => &[Cancel, Delay],
-            InjectionPoint::TaskPoll => &[Cancel, Delay, BudgetExhaust],
-            InjectionPoint::ReactorPoll => &[IoError, Delay],
-            InjectionPoint::WakerInvoke => &[WakeupStorm, Delay],
-            InjectionPoint::BudgetCheck => &[BudgetExhaust],
-            InjectionPoint::TimerFire => &[Delay],
-            InjectionPoint::SyncAcquire => &[Cancel, Delay],
-            InjectionPoint::ChannelSend => &[Cancel, Delay],
-            InjectionPoint::ChannelRecv => &[Cancel, Delay],
+            Self::TaskPoll => &[ChaosType::Cancel, ChaosType::Delay, ChaosType::BudgetExhaust],
+            Self::ReactorPoll => &[ChaosType::IoError, ChaosType::Delay],
+            Self::WakerInvoke => &[ChaosType::WakeupStorm, ChaosType::Delay],
+            Self::BudgetCheck => &[ChaosType::BudgetExhaust],
+            Self::TimerFire => &[ChaosType::Delay],
+            Self::SchedulerPoll | Self::SyncAcquire | Self::ChannelSend | Self::ChannelRecv => {
+                &[ChaosType::Cancel, ChaosType::Delay]
+            }
         }
     }
 }
@@ -707,7 +705,7 @@ impl ChaosStats {
     }
 
     /// Merges another stats instance into this one.
-    pub fn merge(&mut self, other: &ChaosStats) {
+    pub fn merge(&mut self, other: &Self) {
         self.cancellations += other.cancellations;
         self.delays += other.delays;
         self.total_delay += other.total_delay;
