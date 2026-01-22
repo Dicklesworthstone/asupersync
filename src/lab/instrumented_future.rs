@@ -42,6 +42,7 @@
 //! // When polled, if await_counter reaches 3, it will trigger cancellation
 //! ```
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,9 +101,10 @@ impl AwaitPoint {
 ///
 /// This controls which points are selected for injection during a test run.
 /// Use with [`InjectionRunner::run_with_injection`] for automated test execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum InjectionStrategy {
     /// Never inject cancellation (recording mode only).
+    #[default]
     Never,
     /// Inject at a specific await point sequence number.
     AtSequence(u64),
@@ -120,12 +122,6 @@ pub enum InjectionStrategy {
     FirstN(usize),
     /// Each await point has probability p (0.0-1.0) of injection.
     Probabilistic(f64),
-}
-
-impl Default for InjectionStrategy {
-    fn default() -> Self {
-        Self::Never
-    }
 }
 
 impl InjectionStrategy {
@@ -212,7 +208,9 @@ impl InjectionStrategy {
                         .wrapping_mul(6_364_136_223_846_793_005)
                         .wrapping_add(1_442_695_040_888_963_407);
                     // Use upper bits for better distribution
-                    let rand_val = (rng_state >> 32) as f64 / (u32::MAX as f64);
+                    // Precision loss is intentional here - we only need a random float in [0,1)
+                    #[allow(clippy::cast_precision_loss)]
+                    let rand_val = (rng_state >> 32) as f64 / f64::from(u32::MAX);
                     if rand_val < *p {
                         selected.push(seq);
                     }
@@ -224,21 +222,16 @@ impl InjectionStrategy {
 }
 
 /// Mode of operation for the injector during a test run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InjectionMode {
     /// Recording await points without injecting.
+    #[default]
     Recording,
     /// Injecting cancellation at a specific target point.
     Injecting {
         /// The await point sequence to inject at.
         target: u64,
     },
-}
-
-impl Default for InjectionMode {
-    fn default() -> Self {
-        Self::Recording
-    }
 }
 
 /// The outcome of a single injection test run.
@@ -394,31 +387,25 @@ impl InjectionReport {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut json = String::from("{\n");
-        json.push_str(&format!(
-            "  \"total_await_points\": {},\n",
-            self.total_await_points
-        ));
-        json.push_str(&format!("  \"tests_run\": {},\n", self.tests_run));
-        json.push_str(&format!("  \"successes\": {},\n", self.successes));
-        json.push_str(&format!("  \"failures\": {},\n", self.failures));
-        json.push_str(&format!(
-            "  \"strategy\": \"{}\",\n",
-            escape_json(&self.strategy)
-        ));
-        json.push_str(&format!("  \"seed\": {},\n", self.seed));
-        json.push_str(&format!("  \"passed\": {},\n", self.is_success()));
+        let _ = write!(json, "  \"total_await_points\": {},\n", self.total_await_points);
+        let _ = write!(json, "  \"tests_run\": {},\n", self.tests_run);
+        let _ = write!(json, "  \"successes\": {},\n", self.successes);
+        let _ = write!(json, "  \"failures\": {},\n", self.failures);
+        let _ = write!(json, "  \"strategy\": \"{}\",\n", escape_json(&self.strategy));
+        let _ = write!(json, "  \"seed\": {},\n", self.seed);
+        let _ = write!(json, "  \"passed\": {},\n", self.is_success());
         json.push_str("  \"results\": [\n");
 
         for (i, result) in self.results.iter().enumerate() {
             let comma = if i < self.results.len() - 1 { "," } else { "" };
-            json.push_str(&format!(
-                "    {{\n      \"injection_point\": {},\n      \"await_points_before\": {},\n      \"success\": {},\n      \"outcome\": \"{}\"\n    }}{}\n",
+            let _ = write!(
+                json,
+                "    {{\n      \"injection_point\": {},\n      \"await_points_before\": {},\n      \"success\": {},\n      \"outcome\": \"{}\"\n    }}{comma}\n",
                 result.injection_point,
                 result.await_points_before,
                 result.is_success(),
                 escape_json(&result.outcome_summary()),
-                comma
-            ));
+            );
         }
 
         json.push_str("  ]\n");
