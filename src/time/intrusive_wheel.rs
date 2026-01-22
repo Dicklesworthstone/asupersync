@@ -62,9 +62,9 @@ use std::time::{Duration, Instant};
 /// to ensure this invariant.
 pub struct TimerNode {
     /// Next node in the slot's linked list.
-    next: Cell<Option<NonNull<TimerNode>>>,
+    next: Cell<Option<NonNull<Self>>>,
     /// Previous node in the slot's linked list.
-    prev: Cell<Option<NonNull<TimerNode>>>,
+    prev: Cell<Option<NonNull<Self>>>,
     /// Waker to call on expiration.
     waker: Cell<Option<Waker>>,
     /// Slot index this timer is in (for O(1) cancel).
@@ -82,8 +82,8 @@ pub struct TimerNode {
 impl std::fmt::Debug for TimerNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimerNode")
-            .field("next", &self.next.get().map(|p| p.as_ptr()))
-            .field("prev", &self.prev.get().map(|p| p.as_ptr()))
+            .field("next", &self.next.get().map(std::ptr::NonNull::as_ptr))
+            .field("prev", &self.prev.get().map(std::ptr::NonNull::as_ptr))
             .field("waker", &"<waker>")
             .field("slot", &self.slot.get())
             .field("level", &self.level.get())
@@ -833,7 +833,7 @@ impl HierarchicalTimerWheel {
 
 impl<const SLOTS: usize> WheelLevel<SLOTS> {
     fn iter_deadlines(&self) -> impl Iterator<Item = Instant> + '_ {
-        self.slots.iter().flat_map(|slot| slot.iter_deadlines())
+        self.slots.iter().flat_map(TimerSlot::iter_deadlines)
     }
 
     unsafe fn clear_slots(&mut self) -> Vec<Waker> {

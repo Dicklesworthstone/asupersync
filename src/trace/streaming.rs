@@ -233,7 +233,7 @@ impl ReplayCheckpoint {
 
             fn write(&mut self, bytes: &[u8]) {
                 for byte in bytes {
-                    self.0 = self.0.wrapping_mul(31).wrapping_add(*byte as u64);
+                    self.0 = self.0.wrapping_mul(31).wrapping_add(u64::from(*byte));
                 }
             }
         }
@@ -491,7 +491,7 @@ impl StreamingReplayer {
                 index: current_position as usize,
                 expected: expected_clone,
                 actual: actual.clone(),
-                context: format!("Event mismatch at position {}", current_position),
+                context: format!("Event mismatch at position {current_position}"),
             }));
         }
 
@@ -609,7 +609,7 @@ impl StreamingReplayer {
 
 impl EventSource for StreamingReplayer {
     fn next_event(&mut self) -> Option<ReplayEvent> {
-        StreamingReplayer::next_event(self).ok().flatten()
+        Self::next_event(self).ok().flatten()
     }
 
     fn metadata(&self) -> &TraceMetadata {

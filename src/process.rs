@@ -501,7 +501,7 @@ impl Child {
     /// Returns `None` if the process has already been waited on.
     #[must_use]
     pub fn id(&self) -> Option<u32> {
-        self.inner.as_ref().map(|c| c.id())
+        self.inner.as_ref().map(std::process::Child::id)
     }
 
     /// Takes ownership of the child's stdin handle.
@@ -901,15 +901,12 @@ impl ExitStatus {
 
 impl std::fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.code {
-            Some(code) => write!(f, "exit code: {code}"),
-            None => {
-                #[cfg(unix)]
-                if let Some(sig) = self.signal {
-                    return write!(f, "signal: {sig}");
-                }
-                write!(f, "unknown exit status")
+        if let Some(code) = self.code { write!(f, "exit code: {code}") } else {
+            #[cfg(unix)]
+            if let Some(sig) = self.signal {
+                return write!(f, "signal: {sig}");
             }
+            write!(f, "unknown exit status")
         }
     }
 }

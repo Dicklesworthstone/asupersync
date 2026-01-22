@@ -4,7 +4,7 @@
 //! concurrent requests. It uses a semaphore internally to track permits.
 
 use super::{Layer, Service};
-use crate::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use crate::sync::{OwnedSemaphorePermit, Semaphore};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -181,20 +181,17 @@ where
         }
 
         // Try to acquire a permit
-        match OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1) {
-            Ok(permit) => {
-                self.permit = Some(permit);
-                self.inner
-                    .poll_ready(cx)
-                    .map_err(ConcurrencyLimitError::Inner)
-            }
-            Err(TryAcquireError) => {
-                // No permits available - register waker and return pending
-                // Note: The semaphore doesn't have built-in waker support,
-                // so we rely on the caller to retry poll_ready
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
+        if let Ok(permit) = OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1) {
+            self.permit = Some(permit);
+            self.inner
+                .poll_ready(cx)
+                .map_err(ConcurrencyLimitError::Inner)
+        } else {
+            // No permits available - register waker and return pending
+            // Note: The semaphore doesn't have built-in waker support,
+            // so we rely on the caller to retry poll_ready
+            cx.waker().wake_by_ref();
+            Poll::Pending
         }
     }
 

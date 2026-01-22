@@ -368,7 +368,7 @@ impl RegionRecord {
             .transition(RegionState::Open, RegionState::Closing)
         {
             let mut inner = self.inner.write().expect("lock poisoned");
-            inner.cancel_reason = reason.clone();
+            inner.cancel_reason = reason;
 
             // Record state transition with tracing
             self.span.record("state", "Closing");

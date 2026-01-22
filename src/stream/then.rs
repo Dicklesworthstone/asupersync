@@ -57,7 +57,7 @@ where
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.stream.size_hint();
-        let pending_len = if self.pending.is_some() { 1 } else { 0 };
+        let pending_len = usize::from(self.pending.is_some());
         (
             lower.saturating_add(pending_len),
             upper.and_then(|u| u.checked_add(pending_len)),

@@ -259,7 +259,7 @@ impl IoDriver {
         self.stats.events_received += n as u64;
 
         // Dispatch wakers for ready events
-        for event in self.events.iter() {
+        for event in &self.events {
             if let Some(waker) = self.wakers.get(event.token.0) {
                 waker.wake_by_ref();
                 self.stats.wakers_dispatched += 1;
@@ -350,6 +350,7 @@ impl IoDriverHandle {
     }
 
     /// Updates the waker for an existing registration.
+    #[must_use] 
     pub fn update_waker(&self, token: Token, waker: Waker) -> bool {
         let mut driver = self.inner.lock().expect("lock poisoned");
         driver.update_waker(token, waker)
@@ -436,6 +437,7 @@ impl IoRegistration {
     }
 
     /// Updates the waker for this registration.
+    #[must_use] 
     pub fn update_waker(&self, waker: Waker) -> bool {
         if let Some(driver) = self.driver.upgrade() {
             let mut guard = driver.lock().expect("lock poisoned");

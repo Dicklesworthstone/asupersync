@@ -553,8 +553,8 @@ fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
             fd,
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
-            &mut ucred as *mut LinuxUcred as *mut libc::c_void,
-            &mut len,
+            (&raw mut ucred).cast::<libc::c_void>(),
+            &raw mut len,
         )
     };
 
@@ -613,17 +613,17 @@ fn send_with_ancillary_impl(
     };
 
     let mut msg: libc::msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-    msg.msg_iov = &mut iov;
+    msg.msg_iov = &raw mut iov;
     msg.msg_iovlen = 1;
 
-    if ancillary.len() > 0 {
-        msg.msg_control = ancillary.as_mut_ptr() as *mut libc::c_void;
+    if !ancillary.is_empty() {
+        msg.msg_control = ancillary.as_mut_ptr().cast::<libc::c_void>();
         msg.msg_controllen = ancillary.len();
     }
 
     // SAFETY: sendmsg is a well-defined syscall and we've set up the
     // msghdr correctly with valid pointers and lengths.
-    let ret = unsafe { libc::sendmsg(fd, &msg, 0) };
+    let ret = unsafe { libc::sendmsg(fd, &raw const msg, 0) };
 
     if ret >= 0 {
         // Clear the ancillary data after successful send
@@ -643,19 +643,19 @@ fn recv_with_ancillary_impl(
     use std::mem::MaybeUninit;
 
     let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+        iov_base: buf.as_mut_ptr().cast::<libc::c_void>(),
         iov_len: buf.len(),
     };
 
     let mut msg: libc::msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-    msg.msg_iov = &mut iov;
+    msg.msg_iov = &raw mut iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = ancillary.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_control = ancillary.as_mut_ptr().cast::<libc::c_void>();
     msg.msg_controllen = ancillary.capacity();
 
     // SAFETY: recvmsg is a well-defined syscall and we've set up the
     // msghdr correctly with valid pointers and lengths.
-    let ret = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+    let ret = unsafe { libc::recvmsg(fd, &raw mut msg, 0) };
 
     if ret >= 0 {
         let truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;

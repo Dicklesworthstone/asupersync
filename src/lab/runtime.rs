@@ -257,8 +257,7 @@ impl LabRuntime {
             .tasks
             .get(task_id.arena_index())
             .and_then(|t| t.cx_inner.as_ref())
-            .map(|inner| inner.read().expect("lock poisoned").budget.priority)
-            .unwrap_or(0);
+            .map_or(0, |inner| inner.read().expect("lock poisoned").budget.priority);
 
         let waker = Waker::from(Arc::new(TaskWaker {
             task_id,
@@ -311,8 +310,7 @@ impl LabRuntime {
                         .tasks
                         .get(waiter.arena_index())
                         .and_then(|t| t.cx_inner.as_ref())
-                        .map(|inner| inner.read().expect("lock poisoned").budget.priority)
-                        .unwrap_or(0);
+                        .map_or(0, |inner| inner.read().expect("lock poisoned").budget.priority);
                     sched.schedule(waiter, prio);
                 }
             }
@@ -500,7 +498,7 @@ impl LabRuntime {
             TraceData::Chaos {
                 kind: "wakeup_storm".to_string(),
                 task: Some(task_id),
-                detail: format!("chaos-injected {} spurious wakeups", count),
+                detail: format!("chaos-injected {count} spurious wakeups"),
             },
         ));
     }

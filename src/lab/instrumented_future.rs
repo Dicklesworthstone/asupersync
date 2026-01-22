@@ -387,20 +387,20 @@ impl InjectionReport {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut json = String::from("{\n");
-        let _ = write!(json, "  \"total_await_points\": {},\n", self.total_await_points);
-        let _ = write!(json, "  \"tests_run\": {},\n", self.tests_run);
-        let _ = write!(json, "  \"successes\": {},\n", self.successes);
-        let _ = write!(json, "  \"failures\": {},\n", self.failures);
-        let _ = write!(json, "  \"strategy\": \"{}\",\n", escape_json(&self.strategy));
-        let _ = write!(json, "  \"seed\": {},\n", self.seed);
-        let _ = write!(json, "  \"passed\": {},\n", self.is_success());
+        let _ = writeln!(json, "  \"total_await_points\": {},", self.total_await_points);
+        let _ = writeln!(json, "  \"tests_run\": {},", self.tests_run);
+        let _ = writeln!(json, "  \"successes\": {},", self.successes);
+        let _ = writeln!(json, "  \"failures\": {},", self.failures);
+        let _ = writeln!(json, "  \"strategy\": \"{}\",", escape_json(&self.strategy));
+        let _ = writeln!(json, "  \"seed\": {},", self.seed);
+        let _ = writeln!(json, "  \"passed\": {},", self.is_success());
         json.push_str("  \"results\": [\n");
 
         for (i, result) in self.results.iter().enumerate() {
             let comma = if i < self.results.len() - 1 { "," } else { "" };
-            let _ = write!(
+            let _ = writeln!(
                 json,
-                "    {{\n      \"injection_point\": {},\n      \"await_points_before\": {},\n      \"success\": {},\n      \"outcome\": \"{}\"\n    }}{comma}\n",
+                "    {{\n      \"injection_point\": {},\n      \"await_points_before\": {},\n      \"success\": {},\n      \"outcome\": \"{}\"\n    }}{comma}",
                 result.injection_point,
                 result.await_points_before,
                 result.is_success(),
@@ -409,7 +409,7 @@ impl InjectionReport {
         }
 
         json.push_str("  ]\n");
-        json.push_str("}");
+        json.push('}');
         json
     }
 
@@ -428,27 +428,31 @@ impl InjectionReport {
     #[must_use]
     pub fn to_junit_xml(&self) -> String {
         let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        xml.push_str(&format!(
-            "<testsuite name=\"CancellationInjection\" tests=\"{}\" failures=\"{}\" time=\"0\">\n",
+        let _ = writeln!(
+            xml,
+            "<testsuite name=\"CancellationInjection\" tests=\"{}\" failures=\"{}\" time=\"0\">",
             self.tests_run, self.failures
-        ));
+        );
 
         for result in &self.results {
             let name = format!("await_point_{}", result.injection_point);
             if result.is_success() {
-                xml.push_str(&format!(
-                    "  <testcase name=\"{}\" classname=\"injection\"/>\n",
+                let _ = writeln!(
+                    xml,
+                    "  <testcase name=\"{}\" classname=\"injection\"/>",
                     escape_xml(&name)
-                ));
+                );
             } else {
-                xml.push_str(&format!(
-                    "  <testcase name=\"{}\" classname=\"injection\">\n",
+                let _ = writeln!(
+                    xml,
+                    "  <testcase name=\"{}\" classname=\"injection\">",
                     escape_xml(&name)
-                ));
-                xml.push_str(&format!(
-                    "    <failure message=\"{}\"/>\n",
+                );
+                let _ = writeln!(
+                    xml,
+                    "    <failure message=\"{}\"/>",
                     escape_xml(&result.outcome_summary())
-                ));
+                );
                 xml.push_str("  </testcase>\n");
             }
         }
@@ -844,7 +848,7 @@ impl CancellationInjector {
                 }
             }
             InjectionStrategy::EveryNth(n) => {
-                if *n > 0 && sequence % *n == 0 {
+                if *n > 0 && sequence.is_multiple_of(*n) {
                     self.injection_count.fetch_add(1, Ordering::SeqCst);
                     true
                 } else {

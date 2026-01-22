@@ -35,7 +35,7 @@ impl std::error::Error for CtrlCError {}
 
 impl From<CtrlCError> for io::Error {
     fn from(e: CtrlCError) -> Self {
-        io::Error::new(io::ErrorKind::Unsupported, e)
+        Self::new(io::ErrorKind::Unsupported, e)
     }
 }
 

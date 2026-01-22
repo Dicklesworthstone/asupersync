@@ -499,6 +499,7 @@ impl Default for PoolConfig {
 
 impl PoolConfig {
     /// Creates a new pool configuration with the given max size.
+    #[must_use] 
     pub fn with_max_size(max_size: usize) -> Self {
         Self {
             max_size,
@@ -507,66 +508,77 @@ impl PoolConfig {
     }
 
     /// Sets the minimum pool size.
+    #[must_use] 
     pub fn min_size(mut self, min_size: usize) -> Self {
         self.min_size = min_size;
         self
     }
 
     /// Sets the maximum pool size.
+    #[must_use] 
     pub fn max_size(mut self, max_size: usize) -> Self {
         self.max_size = max_size;
         self
     }
 
     /// Sets the acquire timeout.
+    #[must_use] 
     pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
         self.acquire_timeout = timeout;
         self
     }
 
     /// Sets the idle timeout.
+    #[must_use] 
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = timeout;
         self
     }
 
     /// Sets the max lifetime.
+    #[must_use] 
     pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
         self.max_lifetime = lifetime;
         self
     }
 
     /// Enables health checking before returning idle resources.
+    #[must_use] 
     pub fn health_check_on_acquire(mut self, enabled: bool) -> Self {
         self.health_check_on_acquire = enabled;
         self
     }
 
     /// Sets the periodic health check interval for idle resources.
+    #[must_use] 
     pub fn health_check_interval(mut self, interval: Option<Duration>) -> Self {
         self.health_check_interval = interval;
         self
     }
 
     /// Sets whether to immediately evict unhealthy resources.
+    #[must_use] 
     pub fn evict_unhealthy(mut self, evict: bool) -> Self {
         self.evict_unhealthy = evict;
         self
     }
 
     /// Sets the number of connections to pre-create during warmup.
+    #[must_use] 
     pub fn warmup_connections(mut self, count: usize) -> Self {
         self.warmup_connections = count;
         self
     }
 
     /// Sets the timeout for the warmup phase.
+    #[must_use] 
     pub fn warmup_timeout(mut self, timeout: Duration) -> Self {
         self.warmup_timeout = timeout;
         self
     }
 
     /// Sets the strategy for handling partial warmup failures.
+    #[must_use] 
     pub fn warmup_failure_strategy(mut self, strategy: WarmupStrategy) -> Self {
         self.warmup_failure_strategy = strategy;
         self

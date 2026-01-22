@@ -50,7 +50,7 @@ impl TcpListener {
         }
 
         Err(last_err
-            .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to bind any address")))
+            .unwrap_or_else(|| io::Error::other("failed to bind any address")))
     }
 
     /// Accept connection.

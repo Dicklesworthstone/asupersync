@@ -197,7 +197,7 @@ pub struct LockFuture<'a, 'b, T> {
     registered: bool,
 }
 
-impl<'a, 'b, T> Future for LockFuture<'a, 'b, T> {
+impl<'a, T> Future for LockFuture<'a, '_, T> {
     type Output = Result<MutexGuard<'a, T>, LockError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {

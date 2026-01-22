@@ -68,7 +68,7 @@ pub enum EventCategory {
 impl EventCategory {
     /// Returns all event kinds.
     #[must_use]
-    pub const fn all() -> &'static [EventCategory] {
+    pub const fn all() -> &'static [Self] {
         &[
             Self::Scheduling,
             Self::Time,
@@ -83,7 +83,7 @@ impl EventCategory {
 
     /// Returns event kinds that are typically high-frequency and may benefit from sampling.
     #[must_use]
-    pub const fn high_frequency() -> &'static [EventCategory] {
+    pub const fn high_frequency() -> &'static [Self] {
         &[Self::Rng, Self::Waker]
     }
 
@@ -327,6 +327,7 @@ impl TraceFilter {
     /// Note: This removes the region from the include set. If no include set exists,
     /// this method has no effect. Use [`exclude_region_explicit`] if you need
     /// explicit exclusion.
+    #[must_use] 
     pub fn exclude_region(mut self, region: RegionId) -> Self {
         if let Some(ref mut regions) = self.region_filter {
             regions.remove(&region);
@@ -432,11 +433,10 @@ impl TraceFilter {
         }
 
         // 5. Apply sampling for high-frequency events
-        if kind.is_sampled() && self.sample_rate < 1.0 {
-            if !self.sample() {
+        if kind.is_sampled() && self.sample_rate < 1.0
+            && !self.sample() {
                 return false;
             }
-        }
 
         // 6. Apply custom predicate
         if let Some(ref predicate) = self.custom {

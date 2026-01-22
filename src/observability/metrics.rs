@@ -274,10 +274,10 @@ pub enum OutcomeKind {
 impl<T, E> From<&Outcome<T, E>> for OutcomeKind {
     fn from(outcome: &Outcome<T, E>) -> Self {
         match outcome {
-            Outcome::Ok(_) => OutcomeKind::Ok,
-            Outcome::Err(_) => OutcomeKind::Err,
-            Outcome::Cancelled(_) => OutcomeKind::Cancelled,
-            Outcome::Panicked(_) => OutcomeKind::Panicked,
+            Outcome::Ok(_) => Self::Ok,
+            Outcome::Err(_) => Self::Err,
+            Outcome::Cancelled(_) => Self::Cancelled,
+            Outcome::Panicked(_) => Self::Panicked,
         }
     }
 }

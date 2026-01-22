@@ -178,7 +178,7 @@ pub struct Notified<'a> {
     initial_generation: u64,
 }
 
-impl<'a> Future for Notified<'a> {
+impl Future for Notified<'_> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
@@ -281,7 +281,7 @@ impl Notified<'_> {
             }
 
             // Clean up empty entries from the end.
-            while waiters.last().map_or(false, |e| e.waker.is_none()) {
+            while waiters.last().is_some_and(|e| e.waker.is_none()) {
                 waiters.pop();
             }
         }

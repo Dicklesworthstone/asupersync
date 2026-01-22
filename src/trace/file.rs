@@ -431,8 +431,7 @@ impl TraceWriter {
                     "trace write failed: limit exceeded"
                 );
                 self.stopped = true;
-                Err(TraceFileError::Io(io::Error::new(
-                    io::ErrorKind::Other,
+                Err(TraceFileError::Io(io::Error::other(
                     "trace write limit exceeded",
                 )))
             }
@@ -480,7 +479,6 @@ impl TraceWriter {
             if let TraceFileError::Io(io_err) = &err {
                 if Self::is_disk_full(io_err) {
                     warn!("trace event count update skipped: disk full");
-                    return;
                 }
             }
             warn!("trace event count update skipped: {err}");
@@ -522,7 +520,7 @@ impl TraceWriter {
         self.write_bytes(&meta_bytes)?;
 
         // Write placeholder for event count (we'll update this in finish())
-        self.event_count_pos = HEADER_SIZE as u64 + meta_len as u64;
+        self.event_count_pos = HEADER_SIZE as u64 + u64::from(meta_len);
         self.write_bytes(&0u64.to_le_bytes())?;
 
         Ok(())
@@ -855,6 +853,7 @@ impl TraceReader {
     ///
     /// Events are read incrementally from the file.
     /// Automatically handles decompression for compressed files.
+    #[must_use] 
     pub fn events(self) -> TraceEventIterator {
         TraceEventIterator {
             reader: self.reader,

@@ -219,7 +219,7 @@ impl Resolver {
         // Sort: IPv6 first, then IPv4
         let mut sorted_addrs: Vec<SocketAddr> =
             addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
-        sorted_addrs.sort_by_key(|a| if a.is_ipv6() { 0 } else { 1 });
+        sorted_addrs.sort_by_key(|a| i32::from(!a.is_ipv6()));
 
         // If Happy Eyeballs is disabled, just try sequentially
         if !self.config.happy_eyeballs {

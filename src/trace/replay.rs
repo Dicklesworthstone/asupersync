@@ -135,7 +135,7 @@ pub struct CompactTaskId(pub u64);
 impl From<TaskId> for CompactTaskId {
     fn from(id: TaskId) -> Self {
         let idx = id.arena_index();
-        let packed = ((idx.index() as u64) << 32) | (idx.generation() as u64);
+        let packed = (u64::from(idx.index()) << 32) | u64::from(idx.generation());
         Self(packed)
     }
 }
@@ -166,7 +166,7 @@ pub struct CompactRegionId(pub u64);
 impl From<RegionId> for CompactRegionId {
     fn from(id: RegionId) -> Self {
         let idx = id.arena_index();
-        let packed = ((idx.index() as u64) << 32) | (idx.generation() as u64);
+        let packed = (u64::from(idx.index()) << 32) | u64::from(idx.generation());
         Self(packed)
     }
 }
@@ -205,7 +205,7 @@ impl CompactRegionId {
 /// - Most variants: 8-24 bytes of payload
 /// - Typical event: < 32 bytes
 /// - Maximum event: < 64 bytes (IoError with message)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ReplayEvent {
     // =========================================================================
@@ -657,7 +657,7 @@ pub enum ReplayTraceError {
 /// Converts an `io::ErrorKind` to a u8 for compact serialization.
 #[must_use]
 fn error_kind_to_u8(kind: io::ErrorKind) -> u8 {
-    use io::ErrorKind::*;
+    use io::ErrorKind::{NotFound, PermissionDenied, ConnectionRefused, ConnectionReset, ConnectionAborted, NotConnected, AddrInUse, AddrNotAvailable, BrokenPipe, AlreadyExists, WouldBlock, InvalidInput, InvalidData, TimedOut, WriteZero, Interrupted, UnexpectedEof, OutOfMemory};
     match kind {
         NotFound => 1,
         PermissionDenied => 2,
@@ -684,7 +684,7 @@ fn error_kind_to_u8(kind: io::ErrorKind) -> u8 {
 /// Converts a u8 back to an `io::ErrorKind`.
 #[must_use]
 pub fn u8_to_error_kind(value: u8) -> io::ErrorKind {
-    use io::ErrorKind::*;
+    use io::ErrorKind::{NotFound, PermissionDenied, ConnectionRefused, ConnectionReset, ConnectionAborted, NotConnected, AddrInUse, AddrNotAvailable, BrokenPipe, AlreadyExists, WouldBlock, InvalidInput, InvalidData, TimedOut, WriteZero, Interrupted, UnexpectedEof, OutOfMemory, Other};
     match value {
         1 => NotFound,
         2 => PermissionDenied,

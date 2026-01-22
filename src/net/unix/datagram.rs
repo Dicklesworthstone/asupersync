@@ -570,7 +570,7 @@ impl UnixDatagram {
         let ret = unsafe {
             libc::recv(
                 self.inner.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.as_mut_ptr().cast::<libc::c_void>(),
                 0, // zero-length read to check readiness
                 libc::MSG_PEEK | libc::MSG_DONTWAIT,
             )
@@ -634,7 +634,7 @@ impl UnixDatagram {
             let ret = unsafe {
                 libc::recv(
                     self.inner.as_raw_fd(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
                     buf.len(),
                     libc::MSG_PEEK,
                 )
@@ -671,11 +671,11 @@ impl UnixDatagram {
             let ret = unsafe {
                 libc::recvfrom(
                     self.inner.as_raw_fd(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
                     buf.len(),
                     libc::MSG_PEEK,
-                    &mut addr_storage as *mut _ as *mut libc::sockaddr,
-                    &mut addr_len,
+                    (&raw mut addr_storage).cast::<libc::sockaddr>(),
+                    &raw mut addr_len,
                 )
             };
 
@@ -779,8 +779,8 @@ fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
             fd,
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
-            &mut ucred as *mut LinuxUcred as *mut libc::c_void,
-            &mut len,
+            (&raw mut ucred).cast::<libc::c_void>(),
+            &raw mut len,
         )
     };
 

@@ -163,7 +163,7 @@ impl<'a> SocketAncillary<'a> {
             return true;
         }
 
-        let fd_size = fds.len() * mem::size_of::<RawFd>();
+        let fd_size = std::mem::size_of_val(fds);
         let cmsg_space = unsafe { libc::CMSG_SPACE(fd_size as u32) } as usize;
 
         if self.length + cmsg_space > self.buffer.len() {
@@ -172,13 +172,13 @@ impl<'a> SocketAncillary<'a> {
 
         // SAFETY: We've verified there's enough space in the buffer.
         unsafe {
-            let cmsg_ptr = self.buffer.as_mut_ptr().add(self.length) as *mut libc::cmsghdr;
+            let cmsg_ptr = self.buffer.as_mut_ptr().add(self.length).cast::<libc::cmsghdr>();
 
             (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(fd_size as u32) as _;
             (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
             (*cmsg_ptr).cmsg_type = libc::SCM_RIGHTS;
 
-            let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *mut RawFd;
+            let data_ptr = libc::CMSG_DATA(cmsg_ptr).cast::<RawFd>();
             ptr::copy_nonoverlapping(fds.as_ptr(), data_ptr, fds.len());
         }
 
@@ -204,6 +204,7 @@ impl<'a> SocketAncillary<'a> {
     ///     }
     /// }
     /// ```
+    #[must_use] 
     pub fn messages(&self) -> AncillaryMessages<'_> {
         AncillaryMessages {
             buffer: &self.buffer[..self.length],
@@ -253,14 +254,14 @@ impl<'a> Iterator for AncillaryMessages<'a> {
         // SAFETY: We're iterating through a valid control message buffer
         // that was filled by recvmsg.
         unsafe {
-            let cmsg_ptr = self.buffer.as_ptr().add(self.current) as *const libc::cmsghdr;
+            let cmsg_ptr = self.buffer.as_ptr().add(self.current).cast::<libc::cmsghdr>();
 
             // Check if we have at least a header
             if self.current + mem::size_of::<libc::cmsghdr>() > self.buffer.len() {
                 return None;
             }
 
-            let cmsg_len = (*cmsg_ptr).cmsg_len as usize;
+            let cmsg_len = (*cmsg_ptr).cmsg_len;
             if cmsg_len < mem::size_of::<libc::cmsghdr>() {
                 return None;
             }
@@ -315,7 +316,7 @@ pub struct ScmRights<'a> {
     fds: &'a [RawFd],
 }
 
-impl<'a> Iterator for ScmRights<'a> {
+impl Iterator for ScmRights<'_> {
     type Item = RawFd;
 
     fn next(&mut self) -> Option<Self::Item> {

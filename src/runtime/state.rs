@@ -1466,7 +1466,7 @@ pub struct CancelReasonSnapshot {
     /// Optional static message.
     pub message: Option<String>,
     /// Optional parent cause.
-    pub cause: Option<Box<CancelReasonSnapshot>>,
+    pub cause: Option<Box<Self>>,
 }
 
 impl From<&CancelReason> for CancelReasonSnapshot {
@@ -1480,7 +1480,7 @@ impl From<&CancelReason> for CancelReasonSnapshot {
             cause: reason
                 .cause
                 .as_deref()
-                .map(|cause| Box::new(CancelReasonSnapshot::from(cause))),
+                .map(|cause| Box::new(Self::from(cause))),
         }
     }
 }

@@ -38,7 +38,7 @@ pub async fn lookup_all<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
 {
-    spawn_blocking_resolve(move || addr.to_socket_addrs().map(|iter| iter.collect())).await
+    spawn_blocking_resolve(move || addr.to_socket_addrs().map(std::iter::Iterator::collect)).await
 }
 
 async fn spawn_blocking_resolve<F, T>(f: F) -> io::Result<T>
@@ -53,8 +53,7 @@ where
             let _ = tx.send(f());
         });
     if let Err(err) = thread_result {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             format!("failed to spawn resolver thread: {err}"),
         ));
     }
@@ -66,8 +65,7 @@ where
                 yield_now().await;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(io::Error::other(
                     "resolver thread dropped without sending",
                 ));
             }

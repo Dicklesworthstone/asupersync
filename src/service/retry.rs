@@ -311,20 +311,17 @@ where
                             let next_request =
                                 request.as_ref().and_then(|r| new_policy.clone_request(r));
 
-                            match next_request {
-                                Some(new_request) => {
-                                    this.state = RetryState::PollReady {
-                                        service: _service,
-                                        policy: new_policy,
-                                        request: Some(new_request),
-                                    };
-                                }
-                                None => {
-                                    // Cannot clone request - return original result
-                                    let result = result.take().expect("result should exist");
-                                    this.state = RetryState::Done;
-                                    return Poll::Ready(result);
-                                }
+                            if let Some(new_request) = next_request {
+                                this.state = RetryState::PollReady {
+                                    service: _service,
+                                    policy: new_policy,
+                                    request: Some(new_request),
+                                };
+                            } else {
+                                // Cannot clone request - return original result
+                                let result = result.take().expect("result should exist");
+                                this.state = RetryState::Done;
+                                return Poll::Ready(result);
                             }
                         }
                     }

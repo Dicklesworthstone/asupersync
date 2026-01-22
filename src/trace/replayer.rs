@@ -40,8 +40,10 @@ use std::fmt;
 
 /// The replay execution mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ReplayMode {
     /// Run to completion without stopping.
+    #[default]
     Run,
     /// Stop after each event.
     Step,
@@ -49,11 +51,6 @@ pub enum ReplayMode {
     RunTo(Breakpoint),
 }
 
-impl Default for ReplayMode {
-    fn default() -> Self {
-        Self::Run
-    }
-}
 
 /// A breakpoint that stops replay execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,15 +392,13 @@ fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
                 at_tick: actual_tick,
             },
         ) => {
-            if expected_task != actual_task {
+            if expected_task == actual_task {
                 format!(
-                    "Different task scheduled: expected {:?}, got {:?} (at tick {})",
-                    expected_task, actual_task, actual_tick
+                    "Task scheduled at different tick: expected {expected_tick}, got {actual_tick}"
                 )
             } else {
                 format!(
-                    "Task scheduled at different tick: expected {}, got {}",
-                    expected_tick, actual_tick
+                    "Different task scheduled: expected {expected_task:?}, got {actual_task:?} (at tick {actual_tick})"
                 )
             }
         }
@@ -418,8 +413,7 @@ fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
             },
         ) => {
             format!(
-                "Time advanced differently: expected {}ns -> {}ns, got {}ns -> {}ns",
-                e_from, e_to, a_from, a_to
+                "Time advanced differently: expected {e_from}ns -> {e_to}ns, got {a_from}ns -> {a_to}ns"
             )
         }
         (
@@ -432,13 +426,12 @@ fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
                 outcome: a_out,
             },
         ) => {
-            if e_task != a_task {
-                format!(
-                    "Different task completed: expected {:?}, got {:?}",
-                    e_task, a_task
-                )
+            if e_task == a_task {
+                format!("Different outcome: expected {e_out}, got {a_out}")
             } else {
-                format!("Different outcome: expected {}, got {}", e_out, a_out)
+                format!(
+                    "Different task completed: expected {e_task:?}, got {a_task:?}"
+                )
             }
         }
         _ => "Events have same type but different values".to_string(),

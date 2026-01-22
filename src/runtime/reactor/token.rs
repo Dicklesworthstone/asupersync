@@ -166,7 +166,16 @@ impl TokenSlab {
     /// If there's a free slot, it will be reused. Otherwise, a new slot
     /// is allocated at the end.
     pub fn insert(&mut self, waker: Waker) -> SlabToken {
-        if self.free_head != FREE_LIST_END {
+        if self.free_head == FREE_LIST_END {
+            // Allocate a new slot.
+            let index = self.entries.len() as u32;
+            let generation = 0;
+
+            self.entries.push(Entry::Occupied { waker, generation });
+            self.len += 1;
+
+            SlabToken::new(index, generation)
+        } else {
             // Reuse a free slot.
             let index = self.free_head;
             let entry = &mut self.entries[index as usize];
@@ -186,15 +195,6 @@ impl TokenSlab {
             // Convert to occupied entry (generation incremented on removal).
             *entry = Entry::Occupied { waker, generation };
             self.free_head = next_free;
-            self.len += 1;
-
-            SlabToken::new(index, generation)
-        } else {
-            // Allocate a new slot.
-            let index = self.entries.len() as u32;
-            let generation = 0;
-
-            self.entries.push(Entry::Occupied { waker, generation });
             self.len += 1;
 
             SlabToken::new(index, generation)

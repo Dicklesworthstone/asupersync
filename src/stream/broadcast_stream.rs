@@ -32,7 +32,7 @@ impl<T: Clone + Send> Stream for BroadcastStream<T> {
     type Item = Result<T, BroadcastStreamRecvError>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let BroadcastStream { inner, cx } = &mut *self;
+        let Self { inner, cx } = &mut *self;
         // recv() blocks in Phase 0
         match inner.recv(cx) {
             Ok(item) => Poll::Ready(Some(Ok(item))),

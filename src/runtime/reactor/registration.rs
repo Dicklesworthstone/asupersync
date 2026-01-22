@@ -41,7 +41,7 @@ use std::sync::Weak;
 /// This trait is implemented by reactors to support RAII deregistration
 /// and interest modification. It uses interior mutability since Registration
 /// only holds a shared reference.
-pub(crate) trait ReactorHandle: Send + Sync {
+pub trait ReactorHandle: Send + Sync {
     /// Deregisters a source by its token.
     ///
     /// This is called from Registration::drop(). Errors are ignored since

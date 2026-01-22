@@ -252,9 +252,8 @@ impl CompatReader {
                 // For forward compat with newer traces, we proceed but may skip events
                 // Log a warning (caller can check stats)
                 eprintln!(
-                    "Warning: trace schema version {} is newer than supported version {}. \
-                     Some events may be skipped.",
-                    found, max_supported
+                    "Warning: trace schema version {found} is newer than supported version {max_supported}. \
+                     Some events may be skipped."
                 );
             }
         }
@@ -345,7 +344,7 @@ impl CompatReader {
                 Err(e) => {
                     // Try to extract the event type from the raw bytes for logging
                     let event_type = extract_event_type(&event_bytes);
-                    let reason = format!("unknown event type: {}", e);
+                    let reason = format!("unknown event type: {e}");
 
                     self.stats.record_skipped(event_type.as_deref());
 
@@ -392,7 +391,7 @@ impl CompatReader {
                     "{}{}",
                     event_type
                         .as_ref()
-                        .map(|t| format!("event type '{}': ", t))
+                        .map(|t| format!("event type '{t}': "))
                         .unwrap_or_default(),
                     e
                 );
@@ -408,6 +407,7 @@ impl CompatReader {
     }
 
     /// Returns an iterator over events, skipping unknown ones.
+    #[must_use] 
     pub fn events(self) -> CompatEventIterator {
         CompatEventIterator {
             reader: self.reader,
@@ -477,7 +477,7 @@ impl Iterator for CompatEventIterator {
                         let reason = format!(
                             "skipping unknown event: {}{}",
                             event_type
-                                .map(|t| format!("type '{}', ", t))
+                                .map(|t| format!("type '{t}', "))
                                 .unwrap_or_default(),
                             e
                         );
@@ -571,6 +571,7 @@ impl TraceMigrator {
     }
 
     /// Migrates a trace from its current version to the target version.
+    #[must_use] 
     pub fn migrate(
         &self,
         metadata: TraceMetadata,

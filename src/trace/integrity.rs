@@ -196,12 +196,11 @@ impl std::fmt::Display for IntegrityIssue {
             Self::FileTooSmall { actual, expected } => {
                 write!(
                     f,
-                    "file too small: {} bytes, expected at least {}",
-                    actual, expected
+                    "file too small: {actual} bytes, expected at least {expected}"
                 )
             }
             Self::InvalidMagic { found } => {
-                write!(f, "invalid magic bytes: {:?}", found)
+                write!(f, "invalid magic bytes: {found:?}")
             }
             Self::UnsupportedVersion {
                 found,
@@ -209,35 +208,32 @@ impl std::fmt::Display for IntegrityIssue {
             } => {
                 write!(
                     f,
-                    "unsupported version: {}, max supported: {}",
-                    found, max_supported
+                    "unsupported version: {found}, max supported: {max_supported}"
                 )
             }
             Self::UnsupportedFlags { flags } => {
-                write!(f, "unsupported flags: {:#06x}", flags)
+                write!(f, "unsupported flags: {flags:#06x}")
             }
             Self::SchemaMismatch { found, expected } => {
                 write!(
                     f,
-                    "schema version mismatch: found {}, expected {}",
-                    found, expected
+                    "schema version mismatch: found {found}, expected {expected}"
                 )
             }
             Self::InvalidMetadata { message } => {
-                write!(f, "invalid metadata: {}", message)
+                write!(f, "invalid metadata: {message}")
             }
             Self::EventCountMismatch { declared, actual } => {
                 write!(
                     f,
-                    "event count mismatch: declared {}, actual {}",
-                    declared, actual
+                    "event count mismatch: declared {declared}, actual {actual}"
                 )
             }
             Self::InvalidEvent { index, message } => {
-                write!(f, "invalid event at index {}: {}", index, message)
+                write!(f, "invalid event at index {index}: {message}")
             }
             Self::Truncated { at_event } => {
-                write!(f, "file truncated at event {}", at_event)
+                write!(f, "file truncated at event {at_event}")
             }
             Self::TimelineNonMonotonic {
                 at_event,
@@ -246,12 +242,11 @@ impl std::fmt::Display for IntegrityIssue {
             } => {
                 write!(
                     f,
-                    "non-monotonic timeline at event {}: {} -> {}",
-                    at_event, prev_time, curr_time
+                    "non-monotonic timeline at event {at_event}: {prev_time} -> {curr_time}"
                 )
             }
             Self::IoError { message } => {
-                write!(f, "I/O error: {}", message)
+                write!(f, "I/O error: {message}")
             }
         }
     }

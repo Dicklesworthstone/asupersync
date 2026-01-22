@@ -40,7 +40,7 @@ impl std::error::Error for SignalError {}
 
 impl From<SignalError> for io::Error {
     fn from(e: SignalError) -> Self {
-        io::Error::new(io::ErrorKind::Unsupported, e)
+        Self::new(io::ErrorKind::Unsupported, e)
     }
 }
 

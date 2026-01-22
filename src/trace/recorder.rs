@@ -76,15 +76,17 @@ pub struct LimitReached {
 
 /// Action to take when a recording limit is reached.
 #[derive(Clone)]
+#[derive(Default)]
 pub enum LimitAction {
     /// Stop recording, keep what we have.
+    #[default]
     StopRecording,
     /// Drop oldest events (ring buffer mode).
     DropOldest,
     /// Fail loudly (panic in debug, log error in release).
     Fail,
     /// Call user callback for decision.
-    Callback(Arc<dyn Fn(LimitReached) -> LimitAction + Send + Sync>),
+    Callback(Arc<dyn Fn(LimitReached) -> Self + Send + Sync>),
 }
 
 impl fmt::Debug for LimitAction {
@@ -98,11 +100,6 @@ impl fmt::Debug for LimitAction {
     }
 }
 
-impl Default for LimitAction {
-    fn default() -> Self {
-        Self::StopRecording
-    }
-}
 
 /// Configuration for trace recording.
 #[derive(Debug, Clone)]
@@ -309,13 +306,13 @@ impl TraceRecorder {
     /// Returns the number of recorded events.
     #[must_use]
     pub fn event_count(&self) -> usize {
-        self.trace.as_ref().map_or(0, |t| t.len())
+        self.trace.as_ref().map_or(0, super::replay::ReplayTrace::len)
     }
 
     /// Returns the estimated size of the trace in bytes.
     #[must_use]
     pub fn estimated_size(&self) -> usize {
-        self.trace.as_ref().map_or(0, |t| t.estimated_size())
+        self.trace.as_ref().map_or(0, super::replay::ReplayTrace::estimated_size)
     }
 
     fn should_record(&self) -> bool {
@@ -604,7 +601,7 @@ impl TraceRecorder {
     pub fn record_chaos_injection(&mut self, kind: u8, task: Option<TaskId>, data: u64) {
         self.record_event(ReplayEvent::ChaosInjection {
             kind,
-            task: task.map(|t| t.into()),
+            task: task.map(std::convert::Into::into),
             data,
         });
     }
@@ -624,13 +621,13 @@ impl TraceRecorder {
     /// Records an I/O error injection.
     #[inline]
     pub fn record_io_error_injection(&mut self, task: Option<TaskId>, error_kind: u8) {
-        self.record_chaos_injection(chaos_kind::IO_ERROR, task, error_kind as u64);
+        self.record_chaos_injection(chaos_kind::IO_ERROR, task, u64::from(error_kind));
     }
 
     /// Records a wakeup storm injection.
     #[inline]
     pub fn record_wakeup_storm_injection(&mut self, task: TaskId, count: u32) {
-        self.record_chaos_injection(chaos_kind::WAKEUP_STORM, Some(task), count as u64);
+        self.record_chaos_injection(chaos_kind::WAKEUP_STORM, Some(task), u64::from(count));
     }
 
     /// Records a budget exhaustion injection.

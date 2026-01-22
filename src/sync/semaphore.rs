@@ -186,7 +186,7 @@ impl Semaphore {
     pub fn add_permits(&self, count: usize) {
         let mut state = self.state.lock().expect("semaphore lock poisoned");
         state.permits += count;
-        for waiter in state.waiters.iter() {
+        for waiter in &state.waiters {
             waiter.waker.wake_by_ref();
         }
     }
@@ -213,7 +213,7 @@ impl Drop for AcquireFuture<'_, '_> {
     }
 }
 
-impl<'a, 'b> Future for AcquireFuture<'a, 'b> {
+impl<'a> Future for AcquireFuture<'a, '_> {
     type Output = Result<SemaphorePermit<'a>, AcquireError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {

@@ -430,16 +430,16 @@ impl<T> Future for WaitInit<'_, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let state = self.cell.state.load(Ordering::Acquire);
-        if state != INITIALIZING {
-            Poll::Ready(())
-        } else {
+        if state == INITIALIZING {
             self.cell.register_waker(cx.waker());
             // Double-check after registering.
-            if self.cell.state.load(Ordering::Acquire) != INITIALIZING {
-                Poll::Ready(())
-            } else {
+            if self.cell.state.load(Ordering::Acquire) == INITIALIZING {
                 Poll::Pending
+            } else {
+                Poll::Ready(())
             }
+        } else {
+            Poll::Ready(())
         }
     }
 }
