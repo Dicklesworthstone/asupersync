@@ -58,7 +58,10 @@
 //! }
 //! ```
 
+use super::recorder::{LimitAction, LimitKind, LimitReached, DEFAULT_MAX_FILE_SIZE};
 use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
+use crate::tracing_compat::{error, warn};
+use libc::ENOSPC;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -155,6 +158,17 @@ pub struct TraceFileConfig {
 
     /// Chunk size for streaming compression (default: 64KB).
     pub chunk_size: usize,
+
+    /// Maximum events to write before stopping.
+    /// Default: None (unlimited).
+    pub max_events: Option<u64>,
+
+    /// Maximum file size for trace file.
+    /// Default: 1GB.
+    pub max_file_size: u64,
+
+    /// Action when limit reached.
+    pub on_limit: LimitAction,
 }
 
 impl Default for TraceFileConfig {
@@ -162,6 +176,9 @@ impl Default for TraceFileConfig {
         Self {
             compression: CompressionMode::None,
             chunk_size: DEFAULT_COMPRESSION_CHUNK_SIZE,
+            max_events: None,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            on_limit: LimitAction::StopRecording,
         }
     }
 }
@@ -184,6 +201,27 @@ impl TraceFileConfig {
     #[must_use]
     pub fn with_chunk_size(mut self, size: usize) -> Self {
         self.chunk_size = size;
+        self
+    }
+
+    /// Sets a maximum number of events to write.
+    #[must_use]
+    pub const fn with_max_events(mut self, max_events: Option<u64>) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    /// Sets a maximum file size for the trace file.
+    #[must_use]
+    pub const fn with_max_file_size(mut self, max_file_size: u64) -> Self {
+        self.max_file_size = max_file_size;
+        self
+    }
+
+    /// Sets the limit action policy.
+    #[must_use]
+    pub fn on_limit(mut self, action: LimitAction) -> Self {
+        self.on_limit = action;
         self
     }
 }
@@ -299,6 +337,10 @@ pub struct TraceWriter {
     event_count_pos: u64,
     finished: bool,
     config: TraceFileConfig,
+    bytes_written: u64,
+    buffered_bytes: u64,
+    stopped: bool,
+    halted: bool,
     /// Buffer for uncompressed event data (used in chunked compression).
     #[cfg(feature = "trace-compression")]
     event_buffer: Vec<u8>,
@@ -319,7 +361,10 @@ impl TraceWriter {
     /// # Errors
     ///
     /// Returns an error if the file cannot be created.
-    pub fn create_with_config(path: impl AsRef<Path>, config: TraceFileConfig) -> TraceFileResult<Self> {
+    pub fn create_with_config(
+        path: impl AsRef<Path>,
+        config: TraceFileConfig,
+    ) -> TraceFileResult<Self> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
 
@@ -329,9 +374,117 @@ impl TraceWriter {
             event_count_pos: 0,
             finished: false,
             config,
+            bytes_written: 0,
+            buffered_bytes: 0,
+            stopped: false,
+            halted: false,
             #[cfg(feature = "trace-compression")]
             event_buffer: Vec::new(),
         })
+    }
+
+    fn should_write(&self) -> bool {
+        !self.stopped && !self.halted
+    }
+
+    fn resolve_limit_action(&self, info: &LimitReached) -> LimitAction {
+        match &self.config.on_limit {
+            LimitAction::Callback(cb) => (cb)(info.clone()),
+            other => other.clone(),
+        }
+    }
+
+    fn handle_limit(&mut self, info: LimitReached) -> TraceFileResult<bool> {
+        let mut action = self.resolve_limit_action(&info);
+        if matches!(action, LimitAction::Callback(_)) {
+            action = LimitAction::StopRecording;
+        }
+
+        match action {
+            LimitAction::StopRecording => {
+                warn!(
+                    kind = ?info.kind,
+                    current_events = info.current_events,
+                    max_events = ?info.max_events,
+                    current_bytes = info.current_bytes,
+                    max_bytes = info.max_bytes,
+                    "trace write stopped: limit reached"
+                );
+                self.stopped = true;
+                Ok(false)
+            }
+            LimitAction::DropOldest => {
+                warn!(
+                    kind = ?info.kind,
+                    "trace write stopped: drop-oldest not supported for file writer"
+                );
+                self.stopped = true;
+                Ok(false)
+            }
+            LimitAction::Fail => {
+                error!(
+                    kind = ?info.kind,
+                    current_events = info.current_events,
+                    max_events = ?info.max_events,
+                    current_bytes = info.current_bytes,
+                    max_bytes = info.max_bytes,
+                    "trace write failed: limit exceeded"
+                );
+                self.stopped = true;
+                Err(TraceFileError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    "trace write limit exceeded",
+                )))
+            }
+            LimitAction::Callback(_) => {
+                self.stopped = true;
+                Ok(false)
+            }
+        }
+    }
+
+    fn is_disk_full(err: &io::Error) -> bool {
+        err.raw_os_error() == Some(ENOSPC)
+    }
+
+    fn handle_disk_full(&mut self, err: io::Error) -> TraceFileError {
+        warn!("trace write halted: disk full (ENOSPC). Free space and retry recording.");
+        self.halted = true;
+        TraceFileError::Io(err)
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> TraceFileResult<()> {
+        if self.halted {
+            return Ok(());
+        }
+        match self.writer.write_all(bytes) {
+            Ok(()) => {
+                self.bytes_written = self.bytes_written.saturating_add(bytes.len() as u64);
+                Ok(())
+            }
+            Err(err) if Self::is_disk_full(&err) => Err(self.handle_disk_full(err)),
+            Err(err) => Err(TraceFileError::Io(err)),
+        }
+    }
+
+    fn update_event_count(&mut self) -> TraceFileResult<()> {
+        let file = self.writer.get_mut();
+        file.seek(SeekFrom::Start(self.event_count_pos))?;
+        file.write_all(&self.event_count.to_le_bytes())?;
+        file.flush()?;
+        Ok(())
+    }
+
+    fn update_event_count_best_effort(&mut self) {
+        if let Err(err) = self.update_event_count() {
+            if let TraceFileError::Io(io_err) = &err {
+                if Self::is_disk_full(io_err) {
+                    warn!("trace event count update skipped: disk full");
+                    return;
+                }
+            }
+            warn!("trace event count update skipped: {err}");
+        }
     }
 
     /// Writes the trace metadata (must be called first).
@@ -358,19 +511,19 @@ impl TraceWriter {
         };
 
         // Write header
-        self.writer.write_all(TRACE_MAGIC)?;
-        self.writer.write_all(&TRACE_FILE_VERSION.to_le_bytes())?;
-        self.writer.write_all(&flags.to_le_bytes())?;
-        self.writer.write_all(&[self.config.compression.to_byte()])?; // compression byte
+        self.write_bytes(TRACE_MAGIC)?;
+        self.write_bytes(&TRACE_FILE_VERSION.to_le_bytes())?;
+        self.write_bytes(&flags.to_le_bytes())?;
+        self.write_bytes(&[self.config.compression.to_byte()])?; // compression byte
 
         // Write metadata length and data
         let meta_len = meta_bytes.len() as u32;
-        self.writer.write_all(&meta_len.to_le_bytes())?;
-        self.writer.write_all(&meta_bytes)?;
+        self.write_bytes(&meta_len.to_le_bytes())?;
+        self.write_bytes(&meta_bytes)?;
 
         // Write placeholder for event count (we'll update this in finish())
         self.event_count_pos = HEADER_SIZE as u64 + meta_len as u64;
-        self.writer.write_all(&0u64.to_le_bytes())?;
+        self.write_bytes(&0u64.to_le_bytes())?;
 
         Ok(())
     }
@@ -387,16 +540,54 @@ impl TraceWriter {
         if self.finished {
             return Err(TraceFileError::AlreadyFinished);
         }
+        if !self.should_write() {
+            return Ok(());
+        }
+
+        if let Some(max_events) = self.config.max_events {
+            if self.event_count.saturating_add(1) > max_events {
+                let info = LimitReached {
+                    kind: LimitKind::MaxEvents,
+                    current_events: self.event_count,
+                    max_events: Some(max_events),
+                    current_bytes: self.bytes_written,
+                    max_bytes: self.config.max_file_size,
+                    needed_bytes: 0,
+                };
+                if !self.handle_limit(info)? {
+                    return Ok(());
+                }
+            }
+        }
 
         // Serialize event with length prefix
         let event_bytes = rmp_serde::to_vec(event)?;
         let len = event_bytes.len() as u32;
+        let estimated_bytes = 4u64 + event_bytes.len() as u64;
+        let pending_bytes = self.bytes_written.saturating_add(self.buffered_bytes);
+
+        if self.config.max_file_size > 0
+            && pending_bytes.saturating_add(estimated_bytes) > self.config.max_file_size
+        {
+            let info = LimitReached {
+                kind: LimitKind::MaxFileSize,
+                current_events: self.event_count,
+                max_events: self.config.max_events,
+                current_bytes: pending_bytes,
+                max_bytes: self.config.max_file_size,
+                needed_bytes: estimated_bytes,
+            };
+            if !self.handle_limit(info)? {
+                return Ok(());
+            }
+        }
 
         #[cfg(feature = "trace-compression")]
         if self.config.compression.is_compressed() {
             // Buffer the event for chunk compression
             self.event_buffer.extend_from_slice(&len.to_le_bytes());
             self.event_buffer.extend_from_slice(&event_bytes);
+            self.buffered_bytes = self.buffered_bytes.saturating_add(estimated_bytes);
             self.event_count += 1;
 
             // Flush chunk if buffer exceeds threshold
@@ -407,8 +598,8 @@ impl TraceWriter {
         }
 
         // Uncompressed: write directly
-        self.writer.write_all(&len.to_le_bytes())?;
-        self.writer.write_all(&event_bytes)?;
+        self.write_bytes(&len.to_le_bytes())?;
+        self.write_bytes(&event_bytes)?;
         self.event_count += 1;
         Ok(())
     }
@@ -425,10 +616,11 @@ impl TraceWriter {
 
         // Write chunk: compressed_len (u32) + compressed_data
         let chunk_len = compressed.len() as u32;
-        self.writer.write_all(&chunk_len.to_le_bytes())?;
-        self.writer.write_all(&compressed)?;
+        self.write_bytes(&chunk_len.to_le_bytes())?;
+        self.write_bytes(&compressed)?;
 
         self.event_buffer.clear();
+        self.buffered_bytes = 0;
         Ok(())
     }
 
@@ -450,14 +642,17 @@ impl TraceWriter {
             self.flush_compressed_chunk()?;
         }
 
+        if self.halted {
+            let _ = self.writer.flush();
+            self.update_event_count_best_effort();
+            return Ok(());
+        }
+
         // Flush buffered data
         self.writer.flush()?;
 
         // Seek back and update event count
-        let file = self.writer.get_mut();
-        file.seek(SeekFrom::Start(self.event_count_pos))?;
-        file.write_all(&self.event_count.to_le_bytes())?;
-        file.flush()?;
+        self.update_event_count()?;
 
         Ok(())
     }
@@ -562,7 +757,9 @@ impl TraceReader {
             reader.read_exact(&mut comp_byte)?;
             match CompressionMode::from_byte(comp_byte[0]) {
                 Some(mode) => mode,
-                None if is_compressed => return Err(TraceFileError::UnsupportedCompression(comp_byte[0])),
+                None if is_compressed => {
+                    return Err(TraceFileError::UnsupportedCompression(comp_byte[0]))
+                }
                 None => CompressionMode::None,
             }
         } else {
@@ -603,7 +800,11 @@ impl TraceReader {
         let event_count = u64::from_le_bytes(event_count_bytes);
 
         // Calculate events start position (header size depends on version)
-        let header_size = if version >= 2 { HEADER_SIZE } else { HEADER_SIZE - 1 };
+        let header_size = if version >= 2 {
+            HEADER_SIZE
+        } else {
+            HEADER_SIZE - 1
+        };
         let events_start_pos = header_size as u64 + meta_len as u64 + 8;
 
         Ok(Self {
@@ -885,10 +1086,11 @@ impl TraceEventIterator {
         if self.buffer_pos + 4 > self.decompressed_buffer.len() {
             return Some(Err(TraceFileError::Truncated));
         }
-        let len_bytes: [u8; 4] = match self.decompressed_buffer[self.buffer_pos..self.buffer_pos + 4].try_into() {
-            Ok(b) => b,
-            Err(_) => return Some(Err(TraceFileError::Truncated)),
-        };
+        let len_bytes: [u8; 4] =
+            match self.decompressed_buffer[self.buffer_pos..self.buffer_pos + 4].try_into() {
+                Ok(b) => b,
+                Err(_) => return Some(Err(TraceFileError::Truncated)),
+            };
         let len = u32::from_le_bytes(len_bytes) as usize;
         self.buffer_pos += 4;
 
@@ -987,6 +1189,8 @@ pub fn read_trace(path: impl AsRef<Path>) -> TraceFileResult<(TraceMetadata, Vec
 mod tests {
     use super::*;
     use crate::trace::replay::CompactTaskId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
 
     fn sample_events() -> Vec<ReplayEvent> {
@@ -1200,6 +1404,97 @@ mod tests {
         // because finish() consumes self, so this is compile-time safety
     }
 
+    #[test]
+    fn write_stops_at_max_events() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let metadata = TraceMetadata::new(42);
+        let events = sample_events();
+
+        let config = TraceFileConfig::new().with_max_events(Some(2));
+        let mut writer = TraceWriter::create_with_config(path, config).expect("create writer");
+        writer.write_metadata(&metadata).expect("write metadata");
+        for event in &events {
+            writer.write_event(event).expect("write event");
+        }
+        writer.finish().expect("finish");
+
+        let reader = TraceReader::open(path).expect("open reader");
+        assert_eq!(reader.event_count(), 2);
+    }
+
+    #[test]
+    fn write_stops_at_max_file_size() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let meta_len = rmp_serde::to_vec(&metadata)
+            .expect("serialize metadata")
+            .len() as u64;
+        let header_bytes = HEADER_SIZE as u64 + meta_len + 8;
+
+        let config = TraceFileConfig::new().with_max_file_size(header_bytes);
+        let mut writer = TraceWriter::create_with_config(path, config).expect("create writer");
+        writer.write_metadata(&metadata).expect("write metadata");
+        writer
+            .write_event(&ReplayEvent::RngSeed { seed: 42 })
+            .expect("write event");
+        writer.finish().expect("finish");
+
+        let reader = TraceReader::open(path).expect("open reader");
+        assert_eq!(reader.event_count(), 0);
+    }
+
+    #[test]
+    fn write_limit_callback_invoked() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hit_ref = Arc::clone(&hits);
+        let action = LimitAction::Callback(Arc::new(move |_info| {
+            hit_ref.fetch_add(1, Ordering::SeqCst);
+            LimitAction::StopRecording
+        }));
+
+        let config = TraceFileConfig::new()
+            .with_max_events(Some(1))
+            .on_limit(action);
+        let mut writer = TraceWriter::create_with_config(path, config).expect("create writer");
+        writer
+            .write_metadata(&TraceMetadata::new(42))
+            .expect("write metadata");
+        writer
+            .write_event(&ReplayEvent::RngSeed { seed: 1 })
+            .expect("write event");
+        writer
+            .write_event(&ReplayEvent::RngSeed { seed: 2 })
+            .expect("write event");
+        writer.finish().expect("finish");
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[cfg(target_family = "unix")]
+    fn disk_full_is_handled() {
+        let path = std::path::Path::new("/dev/full");
+        if !path.exists() {
+            return;
+        }
+
+        let Ok(mut writer) = TraceWriter::create(path) else {
+            return;
+        };
+
+        let result = writer.write_metadata(&TraceMetadata::new(42));
+        assert!(matches!(
+            result,
+            Err(TraceFileError::Io(err)) if err.raw_os_error() == Some(ENOSPC)
+        ));
+    }
+
     // =========================================================================
     // Compression Tests (feature-gated)
     // =========================================================================
@@ -1332,7 +1627,8 @@ mod tests {
 
             // Write uncompressed
             {
-                let mut writer = TraceWriter::create(temp_uncompressed.path()).expect("create writer");
+                let mut writer =
+                    TraceWriter::create(temp_uncompressed.path()).expect("create writer");
                 writer.write_metadata(&metadata).expect("write metadata");
                 for event in &events {
                     writer.write_event(event).expect("write event");
@@ -1342,9 +1638,10 @@ mod tests {
 
             // Write compressed
             {
-                let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
-                let mut writer =
-                    TraceWriter::create_with_config(temp_compressed.path(), config).expect("create writer");
+                let config =
+                    TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
+                let mut writer = TraceWriter::create_with_config(temp_compressed.path(), config)
+                    .expect("create writer");
                 writer.write_metadata(&metadata).expect("write metadata");
                 for event in &events {
                     writer.write_event(event).expect("write event");

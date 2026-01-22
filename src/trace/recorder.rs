@@ -31,15 +31,81 @@
 //! - Disabled recorders have zero allocation overhead
 
 use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
+use crate::tracing_compat::{error, warn};
 use crate::types::{RegionId, Severity, TaskId, Time};
+use std::fmt;
 use std::io;
+use std::sync::Arc;
 
 // =============================================================================
 // Trace Recorder Configuration
 // =============================================================================
 
+/// Default maximum memory for buffered events (100MB).
+pub const DEFAULT_MAX_MEMORY: usize = 100 * 1024 * 1024;
+/// Default maximum trace file size (1GB).
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024;
+
+/// The kind of limit that was reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// Maximum event count reached.
+    MaxEvents,
+    /// Maximum in-memory bytes reached.
+    MaxMemory,
+    /// Maximum file size reached.
+    MaxFileSize,
+}
+
+/// Context provided when a recording limit is reached.
+#[derive(Debug, Clone)]
+pub struct LimitReached {
+    /// Which limit was hit.
+    pub kind: LimitKind,
+    /// Current number of events recorded.
+    pub current_events: u64,
+    /// Maximum allowed events (if applicable).
+    pub max_events: Option<u64>,
+    /// Current bytes (memory or file size depending on limit kind).
+    pub current_bytes: u64,
+    /// Maximum allowed bytes (memory or file size depending on limit kind).
+    pub max_bytes: u64,
+    /// Additional bytes required to record the next event.
+    pub needed_bytes: u64,
+}
+
+/// Action to take when a recording limit is reached.
+#[derive(Clone)]
+pub enum LimitAction {
+    /// Stop recording, keep what we have.
+    StopRecording,
+    /// Drop oldest events (ring buffer mode).
+    DropOldest,
+    /// Fail loudly (panic in debug, log error in release).
+    Fail,
+    /// Call user callback for decision.
+    Callback(Arc<dyn Fn(LimitReached) -> LimitAction + Send + Sync>),
+}
+
+impl fmt::Debug for LimitAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StopRecording => f.write_str("StopRecording"),
+            Self::DropOldest => f.write_str("DropOldest"),
+            Self::Fail => f.write_str("Fail"),
+            Self::Callback(_) => f.write_str("Callback(..)"),
+        }
+    }
+}
+
+impl Default for LimitAction {
+    fn default() -> Self {
+        Self::StopRecording
+    }
+}
+
 /// Configuration for trace recording.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RecorderConfig {
     /// Whether recording is enabled.
     pub enabled: bool,
@@ -49,6 +115,17 @@ pub struct RecorderConfig {
     pub record_rng: bool,
     /// Whether to record waker events.
     pub record_wakers: bool,
+    /// Maximum events to record before stopping.
+    /// Default: None (unlimited).
+    pub max_events: Option<u64>,
+    /// Maximum memory for buffered events (streaming writer bypasses this).
+    /// Default: 100MB.
+    pub max_memory: usize,
+    /// Maximum file size for trace file.
+    /// Default: 1GB.
+    pub max_file_size: u64,
+    /// Action when limit reached.
+    pub on_limit: LimitAction,
 }
 
 impl RecorderConfig {
@@ -60,6 +137,10 @@ impl RecorderConfig {
             initial_capacity: 1024,
             record_rng: true,
             record_wakers: true,
+            max_events: None,
+            max_memory: DEFAULT_MAX_MEMORY,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            on_limit: LimitAction::StopRecording,
         }
     }
 
@@ -88,6 +169,49 @@ impl RecorderConfig {
     pub const fn with_wakers(mut self, record: bool) -> Self {
         self.record_wakers = record;
         self
+    }
+
+    /// Sets a maximum number of events to record.
+    #[must_use]
+    pub const fn with_max_events(mut self, max_events: Option<u64>) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    /// Sets a maximum memory budget for buffered events.
+    #[must_use]
+    pub const fn with_max_memory(mut self, max_memory: usize) -> Self {
+        self.max_memory = max_memory;
+        self
+    }
+
+    /// Sets a maximum file size for trace files.
+    #[must_use]
+    pub const fn with_max_file_size(mut self, max_file_size: u64) -> Self {
+        self.max_file_size = max_file_size;
+        self
+    }
+
+    /// Sets the limit action policy.
+    #[must_use]
+    pub fn on_limit(mut self, action: LimitAction) -> Self {
+        self.on_limit = action;
+        self
+    }
+}
+
+impl Default for RecorderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            initial_capacity: 1024,
+            record_rng: true,
+            record_wakers: true,
+            max_events: None,
+            max_memory: DEFAULT_MAX_MEMORY,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            on_limit: LimitAction::StopRecording,
+        }
     }
 }
 
@@ -130,6 +254,10 @@ pub struct TraceRecorder {
     config: RecorderConfig,
     /// Whether the initial RNG seed has been recorded.
     seed_recorded: bool,
+    /// Whether recording has been stopped due to limits or errors.
+    stopped: bool,
+    /// Estimated bytes for recorded events (metadata excluded).
+    estimated_event_bytes: u64,
 }
 
 impl TraceRecorder {
@@ -154,6 +282,8 @@ impl TraceRecorder {
             trace,
             config,
             seed_recorded: false,
+            stopped: false,
+            estimated_event_bytes: 0,
         }
     }
 
@@ -164,6 +294,8 @@ impl TraceRecorder {
             trace: None,
             config: RecorderConfig::disabled(),
             seed_recorded: false,
+            stopped: true,
+            estimated_event_bytes: 0,
         }
     }
 
@@ -186,6 +318,142 @@ impl TraceRecorder {
         self.trace.as_ref().map_or(0, |t| t.estimated_size())
     }
 
+    fn should_record(&self) -> bool {
+        self.trace.is_some() && !self.stopped
+    }
+
+    fn resolve_limit_action(&self, info: &LimitReached) -> LimitAction {
+        match &self.config.on_limit {
+            LimitAction::Callback(cb) => (cb)(info.clone()),
+            other => other.clone(),
+        }
+    }
+
+    fn handle_limit(&mut self, info: LimitReached) -> bool {
+        let mut action = self.resolve_limit_action(&info);
+        if matches!(action, LimitAction::Callback(_)) {
+            action = LimitAction::StopRecording;
+        }
+
+        match action {
+            LimitAction::StopRecording => {
+                warn!(
+                    kind = ?info.kind,
+                    current_events = info.current_events,
+                    max_events = ?info.max_events,
+                    current_bytes = info.current_bytes,
+                    max_bytes = info.max_bytes,
+                    "trace recording stopped: limit reached"
+                );
+                self.stopped = true;
+                false
+            }
+            LimitAction::DropOldest => {
+                if self.drop_oldest_event() {
+                    true
+                } else {
+                    warn!(
+                        kind = ?info.kind,
+                        "trace recording stopped: unable to drop oldest event"
+                    );
+                    self.stopped = true;
+                    false
+                }
+            }
+            LimitAction::Fail => {
+                if cfg!(debug_assertions) {
+                    panic!("trace recording limit exceeded: {info:?}");
+                } else {
+                    error!(
+                        kind = ?info.kind,
+                        current_events = info.current_events,
+                        max_events = ?info.max_events,
+                        current_bytes = info.current_bytes,
+                        max_bytes = info.max_bytes,
+                        "trace recording failed: limit exceeded"
+                    );
+                }
+                self.stopped = true;
+                false
+            }
+            LimitAction::Callback(_) => {
+                self.stopped = true;
+                false
+            }
+        }
+    }
+
+    fn drop_oldest_event(&mut self) -> bool {
+        let trace = match self.trace.as_mut() {
+            Some(trace) => trace,
+            None => return false,
+        };
+        if trace.events.is_empty() {
+            return false;
+        }
+        let dropped = trace.events.remove(0);
+        self.estimated_event_bytes = self
+            .estimated_event_bytes
+            .saturating_sub(dropped.estimated_size() as u64);
+        true
+    }
+
+    fn ensure_capacity(&mut self, event_size: u64) -> bool {
+        loop {
+            if let Some(max_events) = self.config.max_events {
+                let current = self.event_count() as u64;
+                if current.saturating_add(1) > max_events {
+                    let info = LimitReached {
+                        kind: LimitKind::MaxEvents,
+                        current_events: current,
+                        max_events: Some(max_events),
+                        current_bytes: self.estimated_event_bytes,
+                        max_bytes: self.config.max_memory as u64,
+                        needed_bytes: event_size,
+                    };
+                    if !self.handle_limit(info) {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+
+            let max_memory = self.config.max_memory as u64;
+            if max_memory > 0 && self.estimated_event_bytes.saturating_add(event_size) > max_memory
+            {
+                let info = LimitReached {
+                    kind: LimitKind::MaxMemory,
+                    current_events: self.event_count() as u64,
+                    max_events: self.config.max_events,
+                    current_bytes: self.estimated_event_bytes,
+                    max_bytes: max_memory,
+                    needed_bytes: event_size,
+                };
+                if !self.handle_limit(info) {
+                    return false;
+                }
+                continue;
+            }
+
+            break;
+        }
+        true
+    }
+
+    fn record_event(&mut self, event: ReplayEvent) {
+        if !self.should_record() {
+            return;
+        }
+        let event_size = event.estimated_size() as u64;
+        if !self.ensure_capacity(event_size) {
+            return;
+        }
+        if let Some(ref mut trace) = self.trace {
+            trace.push(event);
+            self.estimated_event_bytes = self.estimated_event_bytes.saturating_add(event_size);
+        }
+    }
+
     // =========================================================================
     // Recording Methods - Scheduling
     // =========================================================================
@@ -193,43 +461,35 @@ impl TraceRecorder {
     /// Records that a task was scheduled.
     #[inline]
     pub fn record_task_scheduled(&mut self, task: TaskId, at_tick: u64) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TaskScheduled {
-                task: task.into(),
-                at_tick,
-            });
-        }
+        self.record_event(ReplayEvent::TaskScheduled {
+            task: task.into(),
+            at_tick,
+        });
     }
 
     /// Records that a task yielded.
     #[inline]
     pub fn record_task_yielded(&mut self, task: TaskId) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TaskYielded { task: task.into() });
-        }
+        self.record_event(ReplayEvent::TaskYielded { task: task.into() });
     }
 
     /// Records that a task completed.
     #[inline]
     pub fn record_task_completed(&mut self, task: TaskId, severity: Severity) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TaskCompleted {
-                task: task.into(),
-                outcome: severity.as_u8(),
-            });
-        }
+        self.record_event(ReplayEvent::TaskCompleted {
+            task: task.into(),
+            outcome: severity.as_u8(),
+        });
     }
 
     /// Records that a task was spawned.
     #[inline]
     pub fn record_task_spawned(&mut self, task: TaskId, region: RegionId, at_tick: u64) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TaskSpawned {
-                task: task.into(),
-                region: region.into(),
-                at_tick,
-            });
-        }
+        self.record_event(ReplayEvent::TaskSpawned {
+            task: task.into(),
+            region: region.into(),
+            at_tick,
+        });
     }
 
     // =========================================================================
@@ -239,42 +499,33 @@ impl TraceRecorder {
     /// Records that virtual time advanced.
     #[inline]
     pub fn record_time_advanced(&mut self, from: Time, to: Time) {
-        if let Some(ref mut trace) = self.trace {
-            // Only record if time actually changed
-            if from != to {
-                trace.push(ReplayEvent::TimeAdvanced {
-                    from_nanos: from.as_nanos(),
-                    to_nanos: to.as_nanos(),
-                });
-            }
+        if from != to {
+            self.record_event(ReplayEvent::TimeAdvanced {
+                from_nanos: from.as_nanos(),
+                to_nanos: to.as_nanos(),
+            });
         }
     }
 
     /// Records that a timer was created.
     #[inline]
     pub fn record_timer_created(&mut self, timer_id: u64, deadline: Time) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TimerCreated {
-                timer_id,
-                deadline_nanos: deadline.as_nanos(),
-            });
-        }
+        self.record_event(ReplayEvent::TimerCreated {
+            timer_id,
+            deadline_nanos: deadline.as_nanos(),
+        });
     }
 
     /// Records that a timer fired.
     #[inline]
     pub fn record_timer_fired(&mut self, timer_id: u64) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TimerFired { timer_id });
-        }
+        self.record_event(ReplayEvent::TimerFired { timer_id });
     }
 
     /// Records that a timer was cancelled.
     #[inline]
     pub fn record_timer_cancelled(&mut self, timer_id: u64) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::TimerCancelled { timer_id });
-        }
+        self.record_event(ReplayEvent::TimerCancelled { timer_id });
     }
 
     // =========================================================================
@@ -291,38 +542,32 @@ impl TraceRecorder {
         error: bool,
         hangup: bool,
     ) {
-        if let Some(ref mut trace) = self.trace {
-            let mut readiness = 0u8;
-            if readable {
-                readiness |= 1;
-            }
-            if writable {
-                readiness |= 2;
-            }
-            if error {
-                readiness |= 4;
-            }
-            if hangup {
-                readiness |= 8;
-            }
-            trace.push(ReplayEvent::IoReady { token, readiness });
+        let mut readiness = 0u8;
+        if readable {
+            readiness |= 1;
         }
+        if writable {
+            readiness |= 2;
+        }
+        if error {
+            readiness |= 4;
+        }
+        if hangup {
+            readiness |= 8;
+        }
+        self.record_event(ReplayEvent::IoReady { token, readiness });
     }
 
     /// Records an I/O result (bytes transferred).
     #[inline]
     pub fn record_io_result(&mut self, token: u64, bytes: i64) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::IoResult { token, bytes });
-        }
+        self.record_event(ReplayEvent::IoResult { token, bytes });
     }
 
     /// Records an I/O error.
     #[inline]
     pub fn record_io_error(&mut self, token: u64, kind: io::ErrorKind) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::io_error(token, kind));
-        }
+        self.record_event(ReplayEvent::io_error(token, kind));
     }
 
     // =========================================================================
@@ -334,11 +579,9 @@ impl TraceRecorder {
     /// This should be called once at the start of execution.
     #[inline]
     pub fn record_rng_seed(&mut self, seed: u64) {
-        if let Some(ref mut trace) = self.trace {
-            if !self.seed_recorded {
-                trace.push(ReplayEvent::RngSeed { seed });
-                self.seed_recorded = true;
-            }
+        if !self.seed_recorded {
+            self.record_event(ReplayEvent::RngSeed { seed });
+            self.seed_recorded = true;
         }
     }
 
@@ -348,9 +591,7 @@ impl TraceRecorder {
     #[inline]
     pub fn record_rng_value(&mut self, value: u64) {
         if self.config.record_rng {
-            if let Some(ref mut trace) = self.trace {
-                trace.push(ReplayEvent::RngValue { value });
-            }
+            self.record_event(ReplayEvent::RngValue { value });
         }
     }
 
@@ -361,13 +602,11 @@ impl TraceRecorder {
     /// Records a chaos injection.
     #[inline]
     pub fn record_chaos_injection(&mut self, kind: u8, task: Option<TaskId>, data: u64) {
-        if let Some(ref mut trace) = self.trace {
-            trace.push(ReplayEvent::ChaosInjection {
-                kind,
-                task: task.map(|t| t.into()),
-                data,
-            });
-        }
+        self.record_event(ReplayEvent::ChaosInjection {
+            kind,
+            task: task.map(|t| t.into()),
+            data,
+        });
     }
 
     /// Records a cancellation injection.
@@ -408,9 +647,7 @@ impl TraceRecorder {
     #[inline]
     pub fn record_waker_wake(&mut self, task: TaskId) {
         if self.config.record_wakers {
-            if let Some(ref mut trace) = self.trace {
-                trace.push(ReplayEvent::WakerWake { task: task.into() });
-            }
+            self.record_event(ReplayEvent::WakerWake { task: task.into() });
         }
     }
 
@@ -418,9 +655,7 @@ impl TraceRecorder {
     #[inline]
     pub fn record_waker_batch_wake(&mut self, count: u32) {
         if self.config.record_wakers {
-            if let Some(ref mut trace) = self.trace {
-                trace.push(ReplayEvent::WakerBatchWake { count });
-            }
+            self.record_event(ReplayEvent::WakerBatchWake { count });
         }
     }
 
@@ -453,6 +688,8 @@ impl TraceRecorder {
                 self.config.initial_capacity,
             ));
             self.seed_recorded = false;
+            self.stopped = false;
+            self.estimated_event_bytes = 0;
         }
         taken
     }
@@ -471,6 +708,8 @@ impl TraceRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn make_task_id(index: u32, gen: u32) -> TaskId {
         TaskId::new_for_test(index, gen)
@@ -707,5 +946,84 @@ mod tests {
         let with_events = recorder.estimated_size();
         assert!(with_events > base_size);
         assert!(with_events < 5000); // Should be compact
+    }
+
+    #[test]
+    fn max_events_stop_recording() {
+        let config = RecorderConfig::enabled()
+            .with_max_events(Some(2))
+            .on_limit(LimitAction::StopRecording);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+
+        recorder.record_task_scheduled(make_task_id(1, 0), 0);
+        recorder.record_task_scheduled(make_task_id(2, 0), 1);
+        recorder.record_task_scheduled(make_task_id(3, 0), 2);
+
+        assert_eq!(recorder.event_count(), 2);
+        let trace = recorder.finish().expect("trace");
+        assert_eq!(trace.events.len(), 2);
+    }
+
+    #[test]
+    fn max_events_drop_oldest() {
+        let config = RecorderConfig::enabled()
+            .with_max_events(Some(2))
+            .on_limit(LimitAction::DropOldest);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+
+        recorder.record_task_scheduled(make_task_id(1, 0), 0);
+        recorder.record_task_scheduled(make_task_id(2, 0), 1);
+        recorder.record_task_scheduled(make_task_id(3, 0), 2);
+
+        let trace = recorder.finish().expect("trace");
+        assert_eq!(trace.events.len(), 2);
+        match (&trace.events[0], &trace.events[1]) {
+            (
+                ReplayEvent::TaskScheduled { at_tick: first, .. },
+                ReplayEvent::TaskScheduled {
+                    at_tick: second, ..
+                },
+            ) => {
+                assert_eq!(*first, 1);
+                assert_eq!(*second, 2);
+            }
+            _ => panic!("unexpected events for drop-oldest"),
+        }
+    }
+
+    #[test]
+    fn max_memory_stop_recording() {
+        let config = RecorderConfig::enabled()
+            .with_max_memory(20)
+            .on_limit(LimitAction::StopRecording);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+
+        recorder.record_task_scheduled(make_task_id(1, 0), 0);
+        recorder.record_task_scheduled(make_task_id(2, 0), 1);
+
+        assert_eq!(recorder.event_count(), 1);
+        let trace = recorder.finish().expect("trace");
+        assert_eq!(trace.events.len(), 1);
+    }
+
+    #[test]
+    fn limit_callback_invoked() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hit_ref = Arc::clone(&hits);
+        let action = LimitAction::Callback(Arc::new(move |_info| {
+            hit_ref.fetch_add(1, Ordering::SeqCst);
+            LimitAction::StopRecording
+        }));
+
+        let config = RecorderConfig::enabled()
+            .with_max_events(Some(1))
+            .on_limit(action);
+        let mut recorder = TraceRecorder::with_config(TraceMetadata::new(42), config);
+
+        recorder.record_task_scheduled(make_task_id(1, 0), 0);
+        recorder.record_task_scheduled(make_task_id(2, 0), 1);
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(recorder.event_count(), 1);
     }
 }

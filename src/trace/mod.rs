@@ -48,7 +48,10 @@ pub use integrity::{
     find_first_corruption, is_trace_valid_quick, verify_trace, IntegrityIssue, IssueSeverity,
     VerificationOptions, VerificationResult,
 };
-pub use recorder::{RecorderConfig, TraceRecorder};
+pub use recorder::{
+    LimitAction, LimitKind, LimitReached, RecorderConfig, TraceRecorder, DEFAULT_MAX_FILE_SIZE,
+    DEFAULT_MAX_MEMORY,
+};
 pub use replay::{
     CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, ReplayTraceError, TraceMetadata,
     REPLAY_SCHEMA_VERSION,

@@ -805,7 +805,7 @@ fn extract_timestamp(event: &ReplayEvent) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::file::{write_trace, TraceWriter};
+    use crate::trace::file::write_trace;
     use crate::trace::replay::CompactTaskId;
     use tempfile::NamedTempFile;
 

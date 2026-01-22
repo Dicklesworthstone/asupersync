@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn predefined_scheduling_only() {
-        let mut filter = TraceFilter::scheduling_only();
+        let filter = TraceFilter::scheduling_only();
 
         assert!(filter.includes_kind(EventCategory::Scheduling));
         assert!(filter.includes_kind(EventCategory::Chaos));
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn predefined_no_rng() {
-        let mut filter = TraceFilter::no_rng();
+        let filter = TraceFilter::no_rng();
 
         assert!(!filter.includes_kind(EventCategory::Rng));
         assert!(filter.includes_kind(EventCategory::Scheduling));
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn predefined_io_focused() {
-        let mut filter = TraceFilter::io_focused();
+        let filter = TraceFilter::io_focused();
 
         assert!(filter.includes_kind(EventCategory::Io));
         assert!(filter.includes_kind(EventCategory::Scheduling));
