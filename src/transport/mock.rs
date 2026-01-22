@@ -572,7 +572,7 @@ impl SymbolSink for MockSymbolSink {
 
         let mut delivered = symbol;
         if chance(&mut state.rng, corruption_rate) {
-            delivered = corrupt_symbol(delivered, &mut state.rng);
+            delivered = corrupt_symbol(&delivered, &mut state.rng);
         }
 
         state.queue.push_back(delivered.clone());
@@ -697,7 +697,7 @@ fn chance(rng: &mut DetRng, probability: f64) -> bool {
     if probability >= 1.0 {
         return true;
     }
-    let sample = (rng.next_u64() as f64) / (u64::MAX as f64);
+    let sample = f64::from(rng.next_u32()) / f64::from(u32::MAX);
     sample < probability
 }
 
@@ -705,7 +705,7 @@ fn sample_latency(config: &MockTransportConfig, rng: &mut DetRng) -> Duration {
     if config.base_latency == Duration::ZERO && config.latency_jitter == Duration::ZERO {
         return Duration::ZERO;
     }
-    let jitter_nanos = std::cmp::min(config.latency_jitter.as_nanos(), u64::MAX as u128) as u64;
+    let jitter_nanos = std::cmp::min(config.latency_jitter.as_nanos(), u128::from(u64::MAX)) as u64;
     let jitter = if jitter_nanos == 0 {
         Duration::ZERO
     } else {
@@ -719,7 +719,7 @@ fn sample_latency(config: &MockTransportConfig, rng: &mut DetRng) -> Duration {
     config.base_latency.saturating_add(jitter)
 }
 
-fn corrupt_symbol(symbol: AuthenticatedSymbol, rng: &mut DetRng) -> AuthenticatedSymbol {
+fn corrupt_symbol(symbol: &AuthenticatedSymbol, rng: &mut DetRng) -> AuthenticatedSymbol {
     let tag = *symbol.tag();
     let verified = symbol.is_verified();
     let original = symbol.symbol().clone();

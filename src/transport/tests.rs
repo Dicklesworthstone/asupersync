@@ -470,7 +470,7 @@ mod tests {
             init_test("test_multipath_dedup_duplicate_symbols");
 
             let config = DeduplicatorConfig::default();
-            let mut dedup = SymbolDeduplicator::new(config);
+            let dedup = SymbolDeduplicator::new(config);
 
             // First symbol should be accepted
             let sym1 = create_symbol(1);
@@ -504,7 +504,7 @@ mod tests {
 
             // Create deduplicator at receiving node
             let config = DeduplicatorConfig::default();
-            let mut dedup = SymbolDeduplicator::new(config);
+            let dedup = SymbolDeduplicator::new(config);
 
             future::block_on(async {
                 // Send same symbol via both paths
@@ -542,7 +542,7 @@ mod tests {
                 enable_reordering: true,
                 flush_interval: Time::from_millis(100),
             };
-            let mut aggregator = MultipathAggregator::new(config);
+            let aggregator = MultipathAggregator::new(config);
 
             // Process symbols from multiple paths
             let sym1 = create_symbol(0);
@@ -764,11 +764,11 @@ mod tests {
             let config = MockTransportConfig::reliable();
             let (sink1, mut stream1) = mock_channel(config.clone());
             let (sink2, mut stream2) = mock_channel(config.clone());
-            let (sink3, mut stream3) = mock_channel(config);
+            let (sink3, _stream3) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "target1"));
-            let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "target2"));
+            let _e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "target2"));
 
             // Add routes if needed, but we use specific strategy here
             // DispatchStrategy::Unicast uses route() which needs a route.

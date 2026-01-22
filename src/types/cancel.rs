@@ -105,7 +105,7 @@ impl CancelAttributionConfig {
     /// - 8 bytes: cause (Option<Box<...>> pointer, not content)
     /// - 1 byte: truncated flag
     /// - 8 bytes: truncated_at_depth (Option<usize>)
-    /// Total: ~80 bytes (rounded up for alignment)
+    /// - Total: ~80 bytes (rounded up for alignment)
     #[must_use]
     pub const fn single_reason_cost() -> usize {
         80
@@ -226,7 +226,7 @@ pub struct CancelReason {
     /// Optional human-readable message (static for determinism).
     pub message: Option<&'static str>,
     /// The parent cause of this cancellation (for building chains).
-    pub cause: Option<Box<CancelReason>>,
+    pub cause: Option<Box<Self>>,
     /// True if the cause chain was truncated due to limits.
     pub truncated: bool,
     /// Depth at which truncation occurred (if truncated).
@@ -375,7 +375,7 @@ impl CancelReason {
     /// This does not apply any limits to the chain depth.
     /// For production use with limits, prefer [`with_cause_limited`][Self::with_cause_limited].
     #[must_use]
-    pub fn with_cause(mut self, cause: CancelReason) -> Self {
+    pub fn with_cause(mut self, cause: Self) -> Self {
         self.cause = Some(Box::new(cause));
         self
     }
@@ -397,7 +397,7 @@ impl CancelReason {
     /// }
     /// ```
     #[must_use]
-    pub fn with_cause_limited(mut self, cause: CancelReason, config: &CancelAttributionConfig) -> Self {
+    pub fn with_cause_limited(mut self, cause: Self, config: &CancelAttributionConfig) -> Self {
         // Check if adding this cause would exceed limits
         let current_depth = self.chain_depth();
         let cause_depth = cause.chain_depth();
@@ -454,9 +454,9 @@ impl CancelReason {
     ///
     /// Returns a new `CancelReason` with at most `max_depth` levels,
     /// with the `truncated` flag set on the deepest retained level.
-    fn truncate_chain(reason: CancelReason, max_depth: usize) -> CancelReason {
+    fn truncate_chain(reason: Self, max_depth: usize) -> Self {
         if max_depth == 0 {
-            return CancelReason {
+            return Self {
                 truncated: true,
                 truncated_at_depth: Some(0),
                 ..reason
@@ -465,7 +465,7 @@ impl CancelReason {
 
         if max_depth == 1 || reason.cause.is_none() {
             // Keep only this level
-            return CancelReason {
+            return Self {
                 cause: None,
                 truncated: reason.cause.is_some(), // Mark truncated if we removed a cause
                 truncated_at_depth: if reason.cause.is_some() {
@@ -478,11 +478,11 @@ impl CancelReason {
         }
 
         // Recursively truncate the cause chain
-        let truncated_cause = reason.cause.map(|boxed_cause| {
-            Box::new(Self::truncate_chain(*boxed_cause, max_depth - 1))
-        });
+        let truncated_cause = reason
+            .cause
+            .map(|boxed_cause| Box::new(Self::truncate_chain(*boxed_cause, max_depth - 1)));
 
-        CancelReason {
+        Self {
             cause: truncated_cause,
             truncated: reason.truncated,
             truncated_at_depth: reason.truncated_at_depth,
@@ -517,6 +517,7 @@ impl CancelReason {
     ///     println!("Cause: {:?}", reason.kind);
     /// }
     /// ```
+    #[must_use]
     pub fn chain(&self) -> CancelReasonChain<'_> {
         CancelReasonChain {
             current: Some(self),
@@ -527,7 +528,7 @@ impl CancelReason {
     ///
     /// If there is no cause chain, returns `self`.
     #[must_use]
-    pub fn root_cause(&self) -> &CancelReason {
+    pub fn root_cause(&self) -> &Self {
         let mut current = self;
         while let Some(ref cause) = current.cause {
             current = cause;
@@ -551,7 +552,7 @@ impl CancelReason {
     ///
     /// Checks if `cause` appears anywhere in this reason's cause chain.
     #[must_use]
-    pub fn caused_by(&self, cause: &CancelReason) -> bool {
+    pub fn caused_by(&self, cause: &Self) -> bool {
         self.chain().skip(1).any(|r| r == cause)
     }
 
@@ -621,7 +622,7 @@ impl CancelReason {
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
             self.message = other.message;
-            self.cause = other.cause.clone();
+            self.cause.clone_from(&other.cause);
             return true;
         }
 
@@ -636,7 +637,7 @@ impl CancelReason {
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
             self.message = other.message;
-            self.cause = other.cause.clone();
+            self.cause.clone_from(&other.cause);
             return true;
         }
 
@@ -684,10 +685,10 @@ impl CancelReason {
             CancelKind::PollQuota | CancelKind::CostBudget => {
                 Budget::new().with_poll_quota(300).with_priority(215)
             }
-            CancelKind::FailFast | CancelKind::RaceLost => {
-                Budget::new().with_poll_quota(200).with_priority(220)
-            }
-            CancelKind::ParentCancelled | CancelKind::ResourceUnavailable => {
+            CancelKind::FailFast
+            | CancelKind::RaceLost
+            | CancelKind::ParentCancelled
+            | CancelKind::ResourceUnavailable => {
                 Budget::new().with_poll_quota(200).with_priority(220)
             }
             CancelKind::Shutdown => Budget::new().with_poll_quota(50).with_priority(255),
@@ -730,7 +731,7 @@ impl CancelReason {
 
     /// Returns a reference to the parent cause (if any).
     #[must_use]
-    pub fn cause(&self) -> Option<&CancelReason> {
+    pub fn cause(&self) -> Option<&Self> {
         self.cause.as_deref()
     }
 

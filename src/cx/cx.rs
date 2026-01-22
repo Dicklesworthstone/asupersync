@@ -930,9 +930,13 @@ impl Cx {
     /// assert_eq!(chain[1].kind, CancelKind::Deadline);
     /// ```
     pub fn cancel_chain(&self) -> impl Iterator<Item = CancelReason> {
-        let inner = self.inner.read().expect("lock poisoned");
-        let chain: Vec<CancelReason> = inner
+        let cancel_reason = self
+            .inner
+            .read()
+            .expect("lock poisoned")
             .cancel_reason
+            .clone();
+        let chain: Vec<CancelReason> = cancel_reason
             .as_ref()
             .map(|r| r.chain().cloned().collect())
             .unwrap_or_default();
