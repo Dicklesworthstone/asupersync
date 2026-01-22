@@ -112,8 +112,8 @@ impl<T: AsRef<Frame>> Encoder<T> for FrameCodec {
     }
 }
 
-impl AsRef<Frame> for Frame {
-    fn as_ref(&self) -> &Frame {
+impl AsRef<Self> for Frame {
+    fn as_ref(&self) -> &Self {
         self
     }
 }
@@ -157,6 +157,7 @@ pub enum PendingOp {
 
 /// HTTP/2 connection.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Connection {
     /// Connection state.
     state: ConnectionState,
@@ -407,11 +408,11 @@ impl Connection {
                 }
                 Ok(None)
             }
-            Frame::RstStream(f) => self.process_rst_stream(f),
-            Frame::Settings(f) => self.process_settings(f),
-            Frame::PushPromise(f) => self.process_push_promise(f),
-            Frame::Ping(f) => self.process_ping(f),
-            Frame::GoAway(f) => self.process_goaway(f),
+            Frame::RstStream(f) => Ok(Some(self.process_rst_stream(f))),
+            Frame::Settings(f) => self.process_settings(&f),
+            Frame::PushPromise(f) => self.process_push_promise(&f),
+            Frame::Ping(f) => Ok(self.process_ping(f)),
+            Frame::GoAway(f) => Ok(Some(self.process_goaway(f))),
             Frame::WindowUpdate(f) => self.process_window_update(f),
             Frame::Continuation(f) => self.process_continuation(f),
         }
@@ -420,10 +421,14 @@ impl Connection {
     /// Process DATA frame.
     fn process_data(&mut self, frame: DataFrame) -> Result<Option<ReceivedFrame>, H2Error> {
         let stream = self.streams.get_or_create(frame.stream_id)?;
-        stream.recv_data(frame.data.len() as u32, frame.end_stream)?;
+        let payload_len =
+            u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
+        stream.recv_data(payload_len, frame.end_stream)?;
 
         // Update connection-level window
-        self.recv_window -= frame.data.len() as i32;
+        let window_delta = i32::try_from(payload_len)
+            .map_err(|_| H2Error::flow_control("data too large for window"))?;
+        self.recv_window -= window_delta;
 
         // TODO: Auto-send WINDOW_UPDATE when window gets low
 
@@ -489,7 +494,7 @@ impl Connection {
         let fragments = stream.take_header_fragments();
 
         // Concatenate all fragments
-        let total_len: usize = fragments.iter().map(|f| f.len()).sum();
+        let total_len: usize = fragments.iter().map(Bytes::len).sum();
         let mut combined = BytesMut::with_capacity(total_len);
         for fragment in fragments {
             combined.extend_from_slice(&fragment);
@@ -507,22 +512,22 @@ impl Connection {
     }
 
     /// Process RST_STREAM frame.
-    fn process_rst_stream(
-        &mut self,
-        frame: RstStreamFrame,
-    ) -> Result<Option<ReceivedFrame>, H2Error> {
+    fn process_rst_stream(&mut self, frame: RstStreamFrame) -> ReceivedFrame {
         if let Some(stream) = self.streams.get_mut(frame.stream_id) {
             stream.reset(frame.error_code);
         }
 
-        Ok(Some(ReceivedFrame::Reset {
+        ReceivedFrame::Reset {
             stream_id: frame.stream_id,
             error_code: frame.error_code,
-        }))
+        }
     }
 
     /// Process SETTINGS frame.
-    fn process_settings(&mut self, frame: SettingsFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+    fn process_settings(
+        &mut self,
+        frame: &SettingsFrame,
+    ) -> Result<Option<ReceivedFrame>, H2Error> {
         if frame.ack {
             // ACK received for our settings
             return Ok(None);
@@ -561,8 +566,8 @@ impl Connection {
 
     /// Process PUSH_PROMISE frame.
     fn process_push_promise(
-        &mut self,
-        frame: super::frame::PushPromiseFrame,
+        &self,
+        frame: &super::frame::PushPromiseFrame,
     ) -> Result<Option<ReceivedFrame>, H2Error> {
         if self.is_client && !self.local_settings.enable_push {
             return Err(H2Error::protocol("push not enabled"));
@@ -574,17 +579,17 @@ impl Connection {
     }
 
     /// Process PING frame.
-    fn process_ping(&mut self, frame: PingFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+    fn process_ping(&mut self, frame: PingFrame) -> Option<ReceivedFrame> {
         if !frame.ack {
             // Send PING ACK
             self.pending_ops
                 .push_back(PendingOp::PingAck(frame.opaque_data));
         }
-        Ok(None)
+        None
     }
 
     /// Process GOAWAY frame.
-    fn process_goaway(&mut self, frame: GoAwayFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+    fn process_goaway(&mut self, frame: GoAwayFrame) -> ReceivedFrame {
         self.goaway_received = true;
         self.state = ConnectionState::Closing;
 
@@ -597,11 +602,11 @@ impl Connection {
             }
         }
 
-        Ok(Some(ReceivedFrame::GoAway {
+        ReceivedFrame::GoAway {
             last_stream_id: frame.last_stream_id,
             error_code: frame.error_code,
             debug_data: frame.debug_data,
-        }))
+        }
     }
 
     /// Process WINDOW_UPDATE frame.
@@ -609,10 +614,12 @@ impl Connection {
         &mut self,
         frame: WindowUpdateFrame,
     ) -> Result<Option<ReceivedFrame>, H2Error> {
+        let increment = i32::try_from(frame.increment)
+            .map_err(|_| H2Error::flow_control("window increment too large"))?;
         if frame.stream_id == 0 {
             // Connection-level window update
             // Check for overflow using wider arithmetic before adding
-            let new_window = i64::from(self.send_window) + i64::from(frame.increment);
+            let new_window = i64::from(self.send_window) + i64::from(increment);
             if new_window > i64::from(i32::MAX) {
                 return Err(H2Error::flow_control("connection window overflow"));
             }
@@ -620,7 +627,7 @@ impl Connection {
         } else {
             // Stream-level window update
             if let Some(stream) = self.streams.get_mut(frame.stream_id) {
-                stream.update_send_window(frame.increment as i32)?;
+                stream.update_send_window(increment)?;
             }
         }
 
@@ -688,23 +695,37 @@ impl Connection {
     }
 
     /// Send a WINDOW_UPDATE for connection-level flow control.
-    pub fn send_connection_window_update(&mut self, increment: u32) {
-        self.recv_window += increment as i32;
+    pub fn send_connection_window_update(&mut self, increment: u32) -> Result<(), H2Error> {
+        let delta = i32::try_from(increment)
+            .map_err(|_| H2Error::flow_control("window increment too large"))?;
+        let new_window = i64::from(self.recv_window) + i64::from(delta);
+        if new_window > i64::from(i32::MAX) {
+            return Err(H2Error::flow_control("connection window overflow"));
+        }
+        self.recv_window = new_window as i32;
         self.pending_ops.push_back(PendingOp::WindowUpdate {
             stream_id: 0,
             increment,
         });
+        Ok(())
     }
 
     /// Send a WINDOW_UPDATE for stream-level flow control.
-    pub fn send_stream_window_update(&mut self, stream_id: u32, increment: u32) {
+    pub fn send_stream_window_update(
+        &mut self,
+        stream_id: u32,
+        increment: u32,
+    ) -> Result<(), H2Error> {
+        let delta = i32::try_from(increment)
+            .map_err(|_| H2Error::flow_control("window increment too large"))?;
         if let Some(stream) = self.streams.get_mut(stream_id) {
-            let _ = stream.update_recv_window(increment as i32);
+            stream.update_recv_window(delta)?;
         }
         self.pending_ops.push_back(PendingOp::WindowUpdate {
             stream_id,
             increment,
         });
+        Ok(())
     }
 
     /// Prune closed streams.

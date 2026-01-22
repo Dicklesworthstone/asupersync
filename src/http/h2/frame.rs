@@ -197,10 +197,8 @@ impl Frame {
             Self::Headers(f) => f.stream_id,
             Self::Priority(f) => f.stream_id,
             Self::RstStream(f) => f.stream_id,
-            Self::Settings(_) => 0,
+            Self::Settings(_) | Self::Ping(_) | Self::GoAway(_) => 0,
             Self::PushPromise(f) => f.stream_id,
-            Self::Ping(_) => 0,
-            Self::GoAway(_) => 0,
             Self::WindowUpdate(f) => f.stream_id,
             Self::Continuation(f) => f.stream_id,
         }
@@ -445,7 +443,7 @@ pub struct PriorityFrame {
 
 impl PriorityFrame {
     /// Parse a PRIORITY frame from payload.
-    pub fn parse(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
+    pub fn parse(header: &FrameHeader, payload: &Bytes) -> Result<Self, H2Error> {
         if header.stream_id == 0 {
             return Err(H2Error::protocol("PRIORITY frame with stream ID 0"));
         }
@@ -509,7 +507,7 @@ impl RstStreamFrame {
     }
 
     /// Parse a RST_STREAM frame from payload.
-    pub fn parse(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
+    pub fn parse(header: &FrameHeader, payload: &Bytes) -> Result<Self, H2Error> {
         if header.stream_id == 0 {
             return Err(H2Error::protocol("RST_STREAM frame with stream ID 0"));
         }
@@ -572,7 +570,7 @@ impl SettingsFrame {
     }
 
     /// Parse a SETTINGS frame from payload.
-    pub fn parse(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
+    pub fn parse(header: &FrameHeader, payload: &Bytes) -> Result<Self, H2Error> {
         if header.stream_id != 0 {
             return Err(H2Error::protocol("SETTINGS frame with non-zero stream ID"));
         }
@@ -582,7 +580,7 @@ impl SettingsFrame {
             return Err(H2Error::frame_size("SETTINGS ACK with non-zero length"));
         }
 
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             return Err(H2Error::frame_size(
                 "SETTINGS frame length not multiple of 6",
             ));
@@ -799,7 +797,7 @@ impl PingFrame {
     }
 
     /// Parse a PING frame from payload.
-    pub fn parse(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
+    pub fn parse(header: &FrameHeader, payload: &Bytes) -> Result<Self, H2Error> {
         if header.stream_id != 0 {
             return Err(H2Error::protocol("PING frame with non-zero stream ID"));
         }
@@ -857,7 +855,7 @@ impl GoAwayFrame {
     }
 
     /// Parse a GOAWAY frame from payload.
-    pub fn parse(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
+    pub fn parse(header: &FrameHeader, payload: &Bytes) -> Result<Self, H2Error> {
         if header.stream_id != 0 {
             return Err(H2Error::protocol("GOAWAY frame with non-zero stream ID"));
         }
@@ -920,7 +918,7 @@ impl WindowUpdateFrame {
     }
 
     /// Parse a WINDOW_UPDATE frame from payload.
-    pub fn parse(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
+    pub fn parse(header: &FrameHeader, payload: &Bytes) -> Result<Self, H2Error> {
         if payload.len() != 4 {
             return Err(H2Error::frame_size("WINDOW_UPDATE frame must be 4 bytes"));
         }
@@ -1003,16 +1001,18 @@ pub fn parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2Erro
     match frame_type {
         Some(FrameType::Data) => Ok(Frame::Data(DataFrame::parse(header, payload)?)),
         Some(FrameType::Headers) => Ok(Frame::Headers(HeadersFrame::parse(header, payload)?)),
-        Some(FrameType::Priority) => Ok(Frame::Priority(PriorityFrame::parse(header, payload)?)),
-        Some(FrameType::RstStream) => Ok(Frame::RstStream(RstStreamFrame::parse(header, payload)?)),
-        Some(FrameType::Settings) => Ok(Frame::Settings(SettingsFrame::parse(header, payload)?)),
+        Some(FrameType::Priority) => Ok(Frame::Priority(PriorityFrame::parse(header, &payload)?)),
+        Some(FrameType::RstStream) => {
+            Ok(Frame::RstStream(RstStreamFrame::parse(header, &payload)?))
+        }
+        Some(FrameType::Settings) => Ok(Frame::Settings(SettingsFrame::parse(header, &payload)?)),
         Some(FrameType::PushPromise) => Ok(Frame::PushPromise(PushPromiseFrame::parse(
             header, payload,
         )?)),
-        Some(FrameType::Ping) => Ok(Frame::Ping(PingFrame::parse(header, payload)?)),
-        Some(FrameType::GoAway) => Ok(Frame::GoAway(GoAwayFrame::parse(header, payload)?)),
+        Some(FrameType::Ping) => Ok(Frame::Ping(PingFrame::parse(header, &payload)?)),
+        Some(FrameType::GoAway) => Ok(Frame::GoAway(GoAwayFrame::parse(header, &payload)?)),
         Some(FrameType::WindowUpdate) => Ok(Frame::WindowUpdate(WindowUpdateFrame::parse(
-            header, payload,
+            header, &payload,
         )?)),
         Some(FrameType::Continuation) => Ok(Frame::Continuation(ContinuationFrame::parse(
             header, payload,
@@ -1078,7 +1078,7 @@ mod tests {
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
-        let parsed = SettingsFrame::parse(&header, payload).unwrap();
+        let parsed = SettingsFrame::parse(&header, &payload).unwrap();
 
         assert!(!parsed.ack);
         assert_eq!(parsed.settings.len(), 3);
@@ -1105,7 +1105,7 @@ mod tests {
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
-        let parsed = PingFrame::parse(&header, payload).unwrap();
+        let parsed = PingFrame::parse(&header, &payload).unwrap();
 
         assert_eq!(parsed.opaque_data, original.opaque_data);
         assert!(!parsed.ack);
@@ -1120,7 +1120,7 @@ mod tests {
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
-        let parsed = GoAwayFrame::parse(&header, payload).unwrap();
+        let parsed = GoAwayFrame::parse(&header, &payload).unwrap();
 
         assert_eq!(parsed.last_stream_id, 100);
         assert_eq!(parsed.error_code, ErrorCode::NoError);
@@ -1135,7 +1135,7 @@ mod tests {
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
-        let parsed = WindowUpdateFrame::parse(&header, payload).unwrap();
+        let parsed = WindowUpdateFrame::parse(&header, &payload).unwrap();
 
         assert_eq!(parsed.stream_id, 1);
         assert_eq!(parsed.increment, 65535);

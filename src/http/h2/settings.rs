@@ -109,7 +109,7 @@ impl Settings {
                 }
             }
             Setting::MaxFrameSize(v) => {
-                if v < MIN_MAX_FRAME_SIZE || v > MAX_MAX_FRAME_SIZE {
+                if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&v) {
                     Err("max frame size out of range")
                 } else {
                     self.max_frame_size = v;

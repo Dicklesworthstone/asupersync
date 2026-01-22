@@ -140,12 +140,16 @@ impl Stream {
     /// Create a new stream in idle state.
     #[must_use]
     pub fn new(id: u32, initial_window_size: u32) -> Self {
+        let initial_send_window =
+            i32::try_from(initial_window_size).expect("initial window size exceeds i32");
+        let default_recv_window =
+            i32::try_from(DEFAULT_INITIAL_WINDOW_SIZE).expect("default window size exceeds i32");
         Self {
             id,
             state: StreamState::Idle,
-            send_window: initial_window_size as i32,
-            recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i32,
-            initial_send_window: initial_window_size as i32,
+            send_window: initial_send_window,
+            recv_window: default_recv_window,
+            initial_send_window,
             priority: PrioritySpec {
                 exclusive: false,
                 dependency: 0,
@@ -210,10 +214,9 @@ impl Stream {
     pub fn update_send_window(&mut self, delta: i32) -> Result<(), H2Error> {
         // Check for overflow using wider arithmetic
         let new_window = i64::from(self.send_window) + i64::from(delta);
-        if new_window > i64::from(i32::MAX) {
-            return Err(H2Error::flow_control("window size overflow"));
-        }
-        self.send_window = new_window as i32;
+        let new_window =
+            i32::try_from(new_window).map_err(|_| H2Error::flow_control("window size overflow"))?;
+        self.send_window = new_window;
         Ok(())
     }
 
@@ -221,21 +224,22 @@ impl Stream {
     pub fn update_recv_window(&mut self, delta: i32) -> Result<(), H2Error> {
         // Check for overflow using wider arithmetic
         let new_window = i64::from(self.recv_window) + i64::from(delta);
-        if new_window > i64::from(i32::MAX) {
-            return Err(H2Error::flow_control("window size overflow"));
-        }
-        self.recv_window = new_window as i32;
+        let new_window =
+            i32::try_from(new_window).map_err(|_| H2Error::flow_control("window size overflow"))?;
+        self.recv_window = new_window;
         Ok(())
     }
 
     /// Consume from send window (for sending data).
     pub fn consume_send_window(&mut self, amount: u32) {
-        self.send_window -= amount as i32;
+        let amount = i32::try_from(amount).expect("window size exceeds i32");
+        self.send_window -= amount;
     }
 
     /// Consume from receive window (for receiving data).
     pub fn consume_recv_window(&mut self, amount: u32) {
-        self.recv_window -= amount as i32;
+        let amount = i32::try_from(amount).expect("window size exceeds i32");
+        self.recv_window -= amount;
     }
 
     /// Set the priority.
@@ -245,8 +249,10 @@ impl Stream {
 
     /// Update initial window size (affects send window).
     pub fn update_initial_window_size(&mut self, new_size: u32) -> Result<(), H2Error> {
-        let delta = (new_size as i32) - self.initial_send_window;
-        self.initial_send_window = new_size as i32;
+        let new_size = i32::try_from(new_size)
+            .map_err(|_| H2Error::flow_control("initial window size too large"))?;
+        let delta = new_size - self.initial_send_window;
+        self.initial_send_window = new_size;
         self.update_send_window(delta)
     }
 
@@ -382,8 +388,16 @@ impl Stream {
             ));
         }
 
+        let len_i32 = i32::try_from(len).map_err(|_| {
+            H2Error::stream(
+                self.id,
+                ErrorCode::FlowControlError,
+                "data length too large",
+            )
+        })?;
+
         // Check flow control
-        if (len as i32) > self.recv_window {
+        if len_i32 > self.recv_window {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::FlowControlError,

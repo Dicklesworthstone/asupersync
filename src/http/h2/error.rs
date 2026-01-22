@@ -45,7 +45,6 @@ impl ErrorCode {
         match value {
             0x0 => Self::NoError,
             0x1 => Self::ProtocolError,
-            0x2 => Self::InternalError,
             0x3 => Self::FlowControlError,
             0x4 => Self::SettingsTimeout,
             0x5 => Self::StreamClosed,
@@ -64,8 +63,8 @@ impl ErrorCode {
 }
 
 impl From<ErrorCode> for u32 {
-    fn from(code: ErrorCode) -> u32 {
-        code as u32
+    fn from(code: ErrorCode) -> Self {
+        code as Self
     }
 }
 
