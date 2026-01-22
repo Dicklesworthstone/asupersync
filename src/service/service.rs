@@ -617,7 +617,9 @@ mod tests {
     // Tower Adapter Configuration Tests
     // ========================================================================
 
-    use super::{AdapterConfig, CancellationMode, DefaultErrorAdapter, ErrorAdapter, TowerAdapterError};
+    use super::{
+        AdapterConfig, CancellationMode, DefaultErrorAdapter, ErrorAdapter, TowerAdapterError,
+    };
 
     #[test]
     fn cancellation_mode_default_is_best_effort() {
@@ -633,7 +635,10 @@ mod tests {
             .min_budget_for_wait(100);
 
         assert_eq!(config.cancellation_mode, CancellationMode::Strict);
-        assert_eq!(config.fallback_timeout, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(
+            config.fallback_timeout,
+            Some(std::time::Duration::from_secs(30))
+        );
         assert_eq!(config.min_budget_for_wait, 100);
     }
 
@@ -670,7 +675,10 @@ mod tests {
         assert_eq!(format!("{timeout}"), "operation timed out");
 
         let overloaded: TowerAdapterError<&str> = TowerAdapterError::Overloaded;
-        assert_eq!(format!("{overloaded}"), "service overloaded, insufficient budget");
+        assert_eq!(
+            format!("{overloaded}"),
+            "service overloaded, insufficient budget"
+        );
 
         let ignored: TowerAdapterError<&str> = TowerAdapterError::CancellationIgnored;
         assert_eq!(

@@ -237,13 +237,18 @@ mod tests {
         init_test("finalizer_debug_impl");
         let sync_finalizer = Finalizer::Sync(Box::new(|| {}));
         let debug_str = format!("{sync_finalizer:?}");
-        let has_sync = debug_str.contains("Sync");
-        crate::assert_with_log!(has_sync, "sync debug", true, has_sync);
+        let sync_debug_present = debug_str.contains("Sync");
+        crate::assert_with_log!(sync_debug_present, "sync debug", true, sync_debug_present);
 
         let async_finalizer = Finalizer::Async(Box::pin(async {}));
         let debug_str = format!("{async_finalizer:?}");
-        let has_async = debug_str.contains("Async");
-        crate::assert_with_log!(has_async, "async debug", true, has_async);
+        let async_debug_present = debug_str.contains("Async");
+        crate::assert_with_log!(
+            async_debug_present,
+            "async debug",
+            true,
+            async_debug_present
+        );
         crate::test_complete!("finalizer_debug_impl");
     }
 }

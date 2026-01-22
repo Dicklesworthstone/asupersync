@@ -928,7 +928,7 @@ mod tests {
     fn test_command_echo() {
         init_test("test_command_echo");
 
-        let mut child = Command::new("echo")
+        let child = Command::new("echo")
             .arg("hello")
             .stdout(Stdio::Pipe)
             .spawn()
@@ -977,7 +977,7 @@ mod tests {
     fn test_command_env() {
         init_test("test_command_env");
 
-        let mut child = Command::new("sh")
+        let child = Command::new("sh")
             .arg("-c")
             .arg("echo $MY_VAR")
             .env("MY_VAR", "test_value")
@@ -1000,7 +1000,7 @@ mod tests {
     fn test_command_current_dir() {
         init_test("test_command_current_dir");
 
-        let mut child = Command::new("pwd")
+        let child = Command::new("pwd")
             .current_dir("/tmp")
             .stdout(Stdio::Pipe)
             .spawn()
@@ -1052,7 +1052,7 @@ mod tests {
     fn test_command_stderr_capture() {
         init_test("test_command_stderr_capture");
 
-        let mut child = Command::new("sh")
+        let child = Command::new("sh")
             .arg("-c")
             .arg("echo error message >&2")
             .stdout(Stdio::Null)
@@ -1162,7 +1162,7 @@ mod tests {
             .stdout(Stdio::Null)
             .stderr(Stdio::Null);
 
-        let mut child = cmd.spawn().expect("spawn failed");
+        let child = cmd.spawn().expect("spawn failed");
         let result = child.wait_with_output().expect("output failed");
 
         // stdout/stderr should be empty because they were null (not piped)

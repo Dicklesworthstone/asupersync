@@ -276,12 +276,24 @@ impl std::fmt::Debug for KqueueReactor {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use nix::unistd::{close, dup};
+    use std::io::{self, Read, Write};
+    use std::os::unix::io::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct RawFdSource(RawFd);
+
+    impl AsRawFd for RawFdSource {
+        fn as_raw_fd(&self) -> RawFd {
+            self.0
+        }
     }
 
     #[test]
@@ -526,8 +538,6 @@ mod tests {
     #[test]
     fn poll_readable() {
         init_test("kqueue_poll_readable");
-        use std::io::Write;
-
         let reactor = KqueueReactor::new().expect("failed to create reactor");
         let (sock1, mut sock2) = UnixStream::pair().expect("failed to create unix stream pair");
 
@@ -561,6 +571,58 @@ mod tests {
     }
 
     #[test]
+    fn edge_triggered_requires_drain() {
+        init_test("kqueue_edge_triggered_requires_drain");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (mut read_sock, mut write_sock) =
+            UnixStream::pair().expect("failed to create unix stream pair");
+        read_sock
+            .set_nonblocking(true)
+            .expect("failed to set nonblocking");
+
+        let token = Token::new(7);
+        reactor
+            .register(&read_sock, token, Interest::READABLE)
+            .expect("register failed");
+
+        write_sock.write_all(b"hello").expect("write failed");
+
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "has events", true, count >= 1);
+
+        let mut buf = [0_u8; 1];
+        let read_count = read_sock.read(&mut buf).expect("read failed");
+        crate::assert_with_log!(read_count == 1, "read one byte", 1usize, read_count);
+
+        let count = reactor
+            .poll(&mut events, Some(Duration::ZERO))
+            .expect("poll failed");
+        crate::assert_with_log!(count == 0, "no new edge before drain", 0usize, count);
+
+        let mut drain_buf = [0_u8; 16];
+        loop {
+            match read_sock.read(&mut drain_buf) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) => panic!("drain failed: {err}"),
+            }
+        }
+
+        write_sock.write_all(b"world").expect("write failed");
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "edge after new data", true, count >= 1);
+
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("kqueue_edge_triggered_requires_drain");
+    }
+
+    #[test]
     fn duplicate_register_fails() {
         init_test("kqueue_duplicate_register_fails");
         let reactor = KqueueReactor::new().expect("failed to create reactor");
@@ -584,6 +646,43 @@ mod tests {
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("kqueue_duplicate_register_fails");
+    }
+
+    #[test]
+    fn register_invalid_fd_fails() {
+        init_test("kqueue_register_invalid_fd_fails");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let dup_fd = dup(sock1.as_raw_fd()).expect("dup failed");
+        close(dup_fd).expect("close failed");
+
+        let invalid = RawFdSource(dup_fd);
+        let result = reactor.register(&invalid, Token::new(99), Interest::READABLE);
+        crate::assert_with_log!(
+            result.is_err(),
+            "invalid fd register",
+            true,
+            result.is_err()
+        );
+        crate::test_complete!("kqueue_register_invalid_fd_fails");
+    }
+
+    #[test]
+    fn deregister_closed_fd_returns_error() {
+        init_test("kqueue_deregister_closed_fd_returns_error");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(77);
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        drop(sock1);
+        let result = reactor.deregister(token);
+        crate::assert_with_log!(result.is_err(), "closed fd error", true, result.is_err());
+        crate::test_complete!("kqueue_deregister_closed_fd_returns_error");
     }
 
     #[test]

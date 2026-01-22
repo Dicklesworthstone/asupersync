@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
+
 // ============================================================================
 // Endpoint Types
 // ============================================================================
@@ -841,7 +843,7 @@ pub struct SymbolDispatcher {
     total_failures: AtomicU64,
 
     /// Registered sinks for endpoints.
-    sinks: RwLock<HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>>,
+    sinks: RwLock<EndpointSinkMap>,
 }
 
 impl std::fmt::Debug for SymbolDispatcher {
@@ -952,21 +954,39 @@ impl SymbolDispatcher {
             sinks.get(&route.endpoint.id).cloned()
         };
 
-        if let Some(sink) = sink {
-            route.endpoint.acquire_connection();
+        route.endpoint.acquire_connection();
 
-            // Acquire lock asynchronously
-            let mut guard: OwnedMutexGuard<Box<dyn SymbolSink>> = OwnedMutexGuard::lock(sink, cx)
-                .await
-                .map_err(|_| DispatchError::Timeout)?;
+        let result =
+            if let Some(sink) = sink {
+                let send_result =
+                    match OwnedMutexGuard::lock(sink, cx).await {
+                        Ok(mut guard) => guard.send(symbol.clone()).await.map_err(|_| {
+                            DispatchError::SendFailed {
+                                endpoint: route.endpoint.id,
+                                reason: "Send failed".into(),
+                            }
+                        }),
+                        Err(_) => Err(DispatchError::Timeout),
+                    };
 
-            let result = guard.send(symbol.clone()).await;
-
-            let success = result.is_ok();
-
-            route.endpoint.release_connection();
-
-            if success {
+                match send_result {
+                    Ok(()) => {
+                        route.endpoint.record_success(Time::ZERO);
+                        Ok(DispatchResult {
+                            successes: 1,
+                            failures: 0,
+                            sent_to: vec![route.endpoint.id],
+                            failed_endpoints: vec![],
+                            duration: Time::ZERO,
+                        })
+                    }
+                    Err(err) => {
+                        route.endpoint.record_failure(Time::ZERO);
+                        Err(err)
+                    }
+                }
+            } else {
+                // Fallback to simulation if no sink registered (for existing logic)
                 route.endpoint.record_success(Time::ZERO);
                 Ok(DispatchResult {
                     successes: 1,
@@ -975,35 +995,10 @@ impl SymbolDispatcher {
                     failed_endpoints: vec![],
                     duration: Time::ZERO,
                 })
-            } else {
-                route.endpoint.record_failure(Time::ZERO);
-                Err(DispatchError::SendFailed {
-                    endpoint: route.endpoint.id,
-                    reason: "Send failed".into(),
-                })
-            }
-        } else {
-            // Fallback to simulation if no sink registered (for existing logic)
-            route.endpoint.acquire_connection();
-            let success = true;
-            route.endpoint.release_connection();
-            if success {
-                route.endpoint.record_success(Time::ZERO);
-                Ok(DispatchResult {
-                    successes: 1,
-                    failures: 0,
-                    sent_to: vec![route.endpoint.id],
-                    failed_endpoints: vec![],
-                    duration: Time::ZERO,
-                })
-            } else {
-                // ...
-                Err(DispatchError::SendFailed {
-                    endpoint: route.endpoint.id,
-                    reason: "Simulation failed".into(),
-                })
-            }
-        }
+            };
+
+        route.endpoint.release_connection();
+        result
     }
 
     /// Dispatches to multiple endpoints.
@@ -1061,7 +1056,7 @@ impl SymbolDispatcher {
             } {
                 match OwnedMutexGuard::lock(sink, cx).await {
                     Ok(mut guard) => {
-                        let guard: &mut Box<dyn SymbolSink> = &mut *guard;
+                        let guard: &mut Box<dyn SymbolSink> = &mut guard;
                         guard.send(symbol.clone()).await.is_ok()
                     }
                     Err(_) => false,
@@ -1127,7 +1122,7 @@ impl SymbolDispatcher {
             } {
                 match OwnedMutexGuard::lock(sink, cx).await {
                     Ok(mut guard) => {
-                        let guard: &mut Box<dyn SymbolSink> = &mut *guard;
+                        let guard: &mut Box<dyn SymbolSink> = &mut guard;
                         guard.send(symbol.clone()).await.is_ok()
                     }
                     Err(_) => false,
@@ -1200,7 +1195,7 @@ impl SymbolDispatcher {
             } {
                 match OwnedMutexGuard::lock(sink, cx).await {
                     Ok(mut guard) => {
-                        let guard: &mut Box<dyn SymbolSink> = &mut *guard;
+                        let guard: &mut Box<dyn SymbolSink> = &mut guard;
                         guard.send(symbol.clone()).await.is_ok()
                     }
                     Err(_) => false,
