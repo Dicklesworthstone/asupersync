@@ -295,9 +295,17 @@ pub struct PoolStats {
 #[derive(Debug)]
 pub enum PoolReturn<R> {
     /// Resource is healthy; return to idle pool.
-    Return(R),
+    Return {
+        /// The resource being returned.
+        resource: R,
+        /// How long the resource was held.
+        hold_duration: Duration,
+    },
     /// Resource is broken; discard it.
-    Discard,
+    Discard {
+        /// How long the resource was held before being discarded.
+        hold_duration: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -378,8 +386,12 @@ impl<R> PooledResource<R> {
             return;
         }
 
+        let hold_duration = self.held_duration();
         if let Some(resource) = self.resource.take() {
-            let _ = self.return_tx.send(PoolReturn::Return(resource));
+            let _ = self.return_tx.send(PoolReturn::Return {
+                resource,
+                hold_duration,
+            });
         }
 
         self.return_obligation.discharge();
@@ -390,8 +402,9 @@ impl<R> PooledResource<R> {
             return;
         }
 
+        let hold_duration = self.held_duration();
         self.resource.take();
-        let _ = self.return_tx.send(PoolReturn::Discard);
+        let _ = self.return_tx.send(PoolReturn::Discard { hold_duration });
         self.return_obligation.discharge();
     }
 }
@@ -402,8 +415,12 @@ impl<R> Drop for PooledResource<R> {
             return;
         }
 
+        let hold_duration = self.held_duration();
         if let Some(resource) = self.resource.take() {
-            let _ = self.return_tx.send(PoolReturn::Return(resource));
+            let _ = self.return_tx.send(PoolReturn::Return {
+                resource,
+                hold_duration,
+            });
         }
 
         self.return_obligation.discharge();
@@ -680,6 +697,9 @@ where
     return_tx: PoolReturnSender<R>,
     /// Channel receiver for returned resources.
     return_rx: std::sync::Mutex<PoolReturnReceiver<R>>,
+    /// Optional metrics handle for observability.
+    #[cfg(feature = "metrics")]
+    metrics: Option<PoolMetricsHandle>,
 }
 
 impl<R, F> GenericPool<R, F>
@@ -709,6 +729,8 @@ where
             }),
             return_tx,
             return_rx: std::sync::Mutex::new(return_rx),
+            #[cfg(feature = "metrics")]
+            metrics: None,
         }
     }
 
@@ -717,12 +739,50 @@ where
         Self::new(factory, PoolConfig::default())
     }
 
+    /// Configures metrics collection for this pool.
+    ///
+    /// When metrics are enabled, the pool will record:
+    /// - Gauges: size, active, idle, pending (waiters)
+    /// - Counters: acquired, released, created, destroyed, timeouts
+    /// - Histograms: acquire duration, hold duration, wait duration
+    ///
+    /// All metrics are labeled with the provided `pool_name`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use opentelemetry::global;
+    /// use asupersync::sync::{GenericPool, PoolConfig, PoolMetrics};
+    ///
+    /// let meter = global::meter("myapp");
+    /// let metrics = PoolMetrics::new(&meter);
+    ///
+    /// let pool = GenericPool::new(factory, PoolConfig::default())
+    ///     .with_metrics("db_pool", metrics.handle("db_pool"));
+    /// ```
+    #[cfg(feature = "metrics")]
+    #[must_use]
+    pub fn with_metrics(mut self, handle: PoolMetricsHandle) -> Self {
+        self.metrics = Some(handle);
+        self
+    }
+
     /// Process returned resources from the return channel.
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
         let rx = self.return_rx.lock().expect("return_rx lock poisoned");
         while let Ok(ret) = rx.try_recv() {
             match ret {
-                PoolReturn::Return(resource) => {
+                PoolReturn::Return {
+                    resource,
+                    hold_duration,
+                } => {
+                    // Record metrics for the release
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_released(hold_duration);
+                    }
+
                     let mut state = self.state.lock().expect("pool state lock poisoned");
                     state.active = state.active.saturating_sub(1);
 
@@ -740,7 +800,14 @@ where
                     }
                     // If closed, just drop the resource
                 }
-                PoolReturn::Discard => {
+                PoolReturn::Discard { hold_duration } => {
+                    // Record metrics for the discard (destroyed as unhealthy)
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_released(hold_duration);
+                        metrics.record_destroyed(DestroyReason::Unhealthy);
+                    }
+
                     let mut state = self.state.lock().expect("pool state lock poisoned");
                     state.active = state.active.saturating_sub(1);
 
@@ -757,13 +824,39 @@ where
     fn try_get_idle(&self) -> Option<R> {
         let mut state = self.state.lock().expect("pool state lock poisoned");
 
-        // Evict expired resources first
+        // Evict expired resources first and track eviction reasons for metrics
         let now = Instant::now();
+        #[cfg(feature = "metrics")]
+        let mut idle_timeout_evictions = 0u64;
+        #[cfg(feature = "metrics")]
+        let mut max_lifetime_evictions = 0u64;
+
         state.idle.retain(|idle| {
             let idle_ok = now.duration_since(idle.idle_since) < self.config.idle_timeout;
             let lifetime_ok = now.duration_since(idle.created_at) < self.config.max_lifetime;
+
+            #[cfg(feature = "metrics")]
+            {
+                if !idle_ok {
+                    idle_timeout_evictions += 1;
+                } else if !lifetime_ok {
+                    max_lifetime_evictions += 1;
+                }
+            }
+
             idle_ok && lifetime_ok
         });
+
+        // Record eviction metrics
+        #[cfg(feature = "metrics")]
+        if let Some(ref metrics) = self.metrics {
+            for _ in 0..idle_timeout_evictions {
+                metrics.record_destroyed(DestroyReason::IdleTimeout);
+            }
+            for _ in 0..max_lifetime_evictions {
+                metrics.record_destroyed(DestroyReason::MaxLifetime);
+            }
+        }
 
         if let Some(idle) = state.idle.pop_front() {
             state.active += 1;
@@ -806,12 +899,32 @@ where
         state.waiters.retain(|w| w.id != id);
     }
 
-    /// Record that a resource was acquired.
+    /// Record that a resource was acquired (internal state update).
     fn record_acquisition(&self) {
         let mut state = self.state.lock().expect("pool state lock poisoned");
         state.active += 1;
         state.total_acquisitions += 1;
         state.total_created += 1;
+    }
+
+    /// Update metrics gauges from current pool state.
+    #[cfg(feature = "metrics")]
+    fn update_metrics_gauges(&self) {
+        if let Some(ref metrics) = self.metrics {
+            let stats = {
+                let state = self.state.lock().expect("pool state lock poisoned");
+                PoolStats {
+                    active: state.active,
+                    idle: state.idle.len(),
+                    total: state.active + state.idle.len(),
+                    max_size: self.config.max_size,
+                    waiters: state.waiters.len(),
+                    total_acquisitions: state.total_acquisitions,
+                    total_wait_time: state.total_wait_time,
+                }
+            };
+            metrics.update_gauges(&stats);
+        }
     }
 }
 
@@ -827,11 +940,14 @@ where
     type Resource = R;
     type Error = PoolError;
 
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn acquire<'a>(
         &'a self,
         _cx: &'a Cx,
     ) -> PoolFuture<'a, Result<PooledResource<Self::Resource>, Self::Error>> {
         Box::pin(async move {
+            let acquire_start = Instant::now();
+
             // Process any pending returns
             self.process_returns();
 
@@ -845,6 +961,15 @@ where
 
             // Try to get an idle resource
             if let Some(resource) = self.try_get_idle() {
+                let acquire_duration = acquire_start.elapsed();
+
+                // Record metrics
+                #[cfg(feature = "metrics")]
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_acquired(acquire_duration);
+                    self.update_metrics_gauges();
+                }
+
                 return Ok(PooledResource::new(resource, self.return_tx.clone()));
             }
 
@@ -852,17 +977,38 @@ where
             if self.can_create() {
                 let resource = self.create_resource().await?;
                 self.record_acquisition();
+                let acquire_duration = acquire_start.elapsed();
+
+                // Record metrics for create and acquire
+                #[cfg(feature = "metrics")]
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_created();
+                    metrics.record_acquired(acquire_duration);
+                    self.update_metrics_gauges();
+                }
+
                 return Ok(PooledResource::new(resource, self.return_tx.clone()));
             }
 
             // Need to wait for a resource
             // For now, return timeout since we can't actually wait without a runtime
             // In a real implementation, this would use the Cx deadline and wait
+            let wait_duration = acquire_start.elapsed();
+
+            // Record timeout metric
+            #[cfg(feature = "metrics")]
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_timeout(wait_duration);
+            }
+
             Err(PoolError::Timeout)
         })
     }
 
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn try_acquire(&self) -> Option<PooledResource<Self::Resource>> {
+        let acquire_start = Instant::now();
+
         self.process_returns();
 
         {
@@ -872,15 +1018,23 @@ where
             }
         }
 
-        self.try_get_idle()
-            .map(|resource| PooledResource::new(resource, self.return_tx.clone()))
+        self.try_get_idle().map(|resource| {
+            // Record metrics for the acquire
+            #[cfg(feature = "metrics")]
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_acquired(acquire_start.elapsed());
+                self.update_metrics_gauges();
+            }
+
+            PooledResource::new(resource, self.return_tx.clone())
+        })
     }
 
     fn stats(&self) -> PoolStats {
         self.process_returns();
 
         let state = self.state.lock().expect("pool state lock poisoned");
-        PoolStats {
+        let stats = PoolStats {
             active: state.active,
             idle: state.idle.len(),
             total: state.active + state.idle.len(),
@@ -888,24 +1042,409 @@ where
             waiters: state.waiters.len(),
             total_acquisitions: state.total_acquisitions,
             total_wait_time: state.total_wait_time,
+        };
+
+        // Update metrics gauges
+        #[cfg(feature = "metrics")]
+        if let Some(ref metrics) = self.metrics {
+            metrics.update_gauges(&stats);
         }
+
+        stats
     }
 
     fn close(&self) -> PoolFuture<'_, ()> {
         Box::pin(async move {
-            let mut state = self.state.lock().expect("pool state lock poisoned");
-            state.closed = true;
+            #[cfg(feature = "metrics")]
+            let idle_count: usize;
 
-            // Wake all waiters so they can see the pool is closed
-            for waiter in state.waiters.drain(..) {
-                waiter.waker.wake();
+            {
+                let mut state = self.state.lock().expect("pool state lock poisoned");
+                state.closed = true;
+
+                // Wake all waiters so they can see the pool is closed
+                for waiter in state.waiters.drain(..) {
+                    waiter.waker.wake();
+                }
+
+                // Record how many idle resources we're clearing (only needed for metrics)
+                #[cfg(feature = "metrics")]
+                {
+                    idle_count = state.idle.len();
+                }
+
+                // Clear idle resources
+                state.idle.clear();
             }
 
-            // Clear idle resources
-            state.idle.clear();
+            // Record destroyed metrics for all cleared idle resources
+            // (they are being destroyed due to pool shutdown, treat as unhealthy reason)
+            #[cfg(feature = "metrics")]
+            if let Some(ref metrics) = self.metrics {
+                for _ in 0..idle_count {
+                    metrics.record_destroyed(DestroyReason::Unhealthy);
+                }
+                self.update_metrics_gauges();
+            }
         })
     }
 }
+
+// ============================================================================
+// Pool Metrics (OpenTelemetry integration)
+// ============================================================================
+
+/// Reason why a resource was destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestroyReason {
+    /// Resource failed health check.
+    Unhealthy,
+    /// Resource exceeded idle timeout.
+    IdleTimeout,
+    /// Resource exceeded max lifetime.
+    MaxLifetime,
+}
+
+impl DestroyReason {
+    /// Returns the label value for this destroy reason.
+    #[must_use]
+    pub const fn as_label(&self) -> &'static str {
+        match self {
+            Self::Unhealthy => "unhealthy",
+            Self::IdleTimeout => "idle_timeout",
+            Self::MaxLifetime => "max_lifetime",
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+mod pool_metrics {
+    use super::*;
+    use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
+    use opentelemetry::KeyValue;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// Shared state backing observable gauges for pool metrics.
+    #[derive(Debug, Default)]
+    pub struct PoolMetricsState {
+        /// Current pool size (active + idle).
+        pub size: AtomicU64,
+        /// Currently active (checked-out) resources.
+        pub active: AtomicU64,
+        /// Currently idle (available) resources.
+        pub idle: AtomicU64,
+        /// Number of waiters in queue.
+        pub pending: AtomicU64,
+    }
+
+    impl PoolMetricsState {
+        /// Creates a new metrics state.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Update all gauge values from pool stats.
+        pub fn update_from_stats(&self, stats: &PoolStats) {
+            self.size.store(stats.total as u64, Ordering::Relaxed);
+            self.active.store(stats.active as u64, Ordering::Relaxed);
+            self.idle.store(stats.idle as u64, Ordering::Relaxed);
+            self.pending.store(stats.waiters as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// OpenTelemetry metrics for resource pools.
+    ///
+    /// This struct provides comprehensive observability for pool operations including:
+    /// - Gauges for current pool state (size, active, idle, pending)
+    /// - Counters for operations (acquired, released, created, destroyed, timeouts)
+    /// - Histograms for latencies (acquire, hold, wait durations)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use opentelemetry::global;
+    /// use asupersync::sync::{GenericPool, PoolConfig, PoolMetrics};
+    ///
+    /// let meter = global::meter("myapp");
+    /// let metrics = PoolMetrics::new(&meter);
+    ///
+    /// let pool = GenericPool::new(factory, PoolConfig::default())
+    ///     .with_metrics("db_pool", metrics.handle());
+    /// ```
+    #[derive(Clone)]
+    pub struct PoolMetrics {
+        // Gauges (backed by shared state)
+        size: ObservableGauge<u64>,
+        active: ObservableGauge<u64>,
+        idle: ObservableGauge<u64>,
+        pending: ObservableGauge<u64>,
+
+        // Counters
+        acquired_total: Counter<u64>,
+        released_total: Counter<u64>,
+        created_total: Counter<u64>,
+        destroyed_total: Counter<u64>,
+        timeouts_total: Counter<u64>,
+
+        // Histograms
+        acquire_duration: Histogram<f64>,
+        hold_duration: Histogram<f64>,
+        wait_duration: Histogram<f64>,
+
+        // Shared state for observable gauges
+        state: Arc<PoolMetricsState>,
+    }
+
+    impl std::fmt::Debug for PoolMetrics {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PoolMetrics")
+                .field("state", &self.state)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl PoolMetrics {
+        /// Creates a new `PoolMetrics` instance from an OpenTelemetry meter.
+        #[must_use]
+        pub fn new(meter: &Meter) -> Self {
+            let state = Arc::new(PoolMetricsState::new());
+
+            let size = meter
+                .u64_observable_gauge("asupersync.pool.size")
+                .with_description("Current pool size (active + idle)")
+                .with_callback({
+                    let state = Arc::clone(&state);
+                    move |observer| {
+                        observer.observe(state.size.load(Ordering::Relaxed), &[]);
+                    }
+                })
+                .build();
+
+            let active = meter
+                .u64_observable_gauge("asupersync.pool.active")
+                .with_description("Currently checked-out resources")
+                .with_callback({
+                    let state = Arc::clone(&state);
+                    move |observer| {
+                        observer.observe(state.active.load(Ordering::Relaxed), &[]);
+                    }
+                })
+                .build();
+
+            let idle = meter
+                .u64_observable_gauge("asupersync.pool.idle")
+                .with_description("Available idle resources")
+                .with_callback({
+                    let state = Arc::clone(&state);
+                    move |observer| {
+                        observer.observe(state.idle.load(Ordering::Relaxed), &[]);
+                    }
+                })
+                .build();
+
+            let pending = meter
+                .u64_observable_gauge("asupersync.pool.pending")
+                .with_description("Waiters in queue")
+                .with_callback({
+                    let state = Arc::clone(&state);
+                    move |observer| {
+                        observer.observe(state.pending.load(Ordering::Relaxed), &[]);
+                    }
+                })
+                .build();
+
+            let acquired_total = meter
+                .u64_counter("asupersync.pool.acquired_total")
+                .with_description("Total successful acquires")
+                .build();
+
+            let released_total = meter
+                .u64_counter("asupersync.pool.released_total")
+                .with_description("Total returns to pool")
+                .build();
+
+            let created_total = meter
+                .u64_counter("asupersync.pool.created_total")
+                .with_description("Resources created")
+                .build();
+
+            let destroyed_total = meter
+                .u64_counter("asupersync.pool.destroyed_total")
+                .with_description("Resources destroyed")
+                .build();
+
+            let timeouts_total = meter
+                .u64_counter("asupersync.pool.timeouts_total")
+                .with_description("Acquire timeouts")
+                .build();
+
+            let acquire_duration = meter
+                .f64_histogram("asupersync.pool.acquire_duration_seconds")
+                .with_description("Time to acquire a resource")
+                .build();
+
+            let hold_duration = meter
+                .f64_histogram("asupersync.pool.hold_duration_seconds")
+                .with_description("Time resource is held")
+                .build();
+
+            let wait_duration = meter
+                .f64_histogram("asupersync.pool.wait_duration_seconds")
+                .with_description("Time waiting in queue")
+                .build();
+
+            Self {
+                size,
+                active,
+                idle,
+                pending,
+                acquired_total,
+                released_total,
+                created_total,
+                destroyed_total,
+                timeouts_total,
+                acquire_duration,
+                hold_duration,
+                wait_duration,
+                state,
+            }
+        }
+
+        /// Returns a reference to the shared metrics state.
+        #[must_use]
+        pub fn state(&self) -> &Arc<PoolMetricsState> {
+            &self.state
+        }
+
+        /// Records a successful acquire operation.
+        pub fn record_acquired(&self, pool_name: &str, duration: Duration) {
+            let labels = [KeyValue::new("pool_name", pool_name.to_string())];
+            self.acquired_total.add(1, &labels);
+            self.acquire_duration.record(duration.as_secs_f64(), &labels);
+        }
+
+        /// Records a resource release (return to pool).
+        pub fn record_released(&self, pool_name: &str, hold_duration: Duration) {
+            let labels = [KeyValue::new("pool_name", pool_name.to_string())];
+            self.released_total.add(1, &labels);
+            self.hold_duration.record(hold_duration.as_secs_f64(), &labels);
+        }
+
+        /// Records a resource creation.
+        pub fn record_created(&self, pool_name: &str) {
+            let labels = [KeyValue::new("pool_name", pool_name.to_string())];
+            self.created_total.add(1, &labels);
+        }
+
+        /// Records a resource destruction.
+        pub fn record_destroyed(&self, pool_name: &str, reason: DestroyReason) {
+            let labels = [
+                KeyValue::new("pool_name", pool_name.to_string()),
+                KeyValue::new("reason", reason.as_label()),
+            ];
+            self.destroyed_total.add(1, &labels);
+        }
+
+        /// Records an acquire timeout.
+        pub fn record_timeout(&self, pool_name: &str, wait_duration: Duration) {
+            let labels = [KeyValue::new("pool_name", pool_name.to_string())];
+            self.timeouts_total.add(1, &labels);
+            self.wait_duration.record(wait_duration.as_secs_f64(), &labels);
+        }
+
+        /// Records time spent waiting in queue (for successful acquires after waiting).
+        pub fn record_wait(&self, pool_name: &str, wait_duration: Duration) {
+            let labels = [KeyValue::new("pool_name", pool_name.to_string())];
+            self.wait_duration.record(wait_duration.as_secs_f64(), &labels);
+        }
+
+        /// Updates gauge values from pool statistics.
+        pub fn update_gauges(&self, stats: &PoolStats) {
+            self.state.update_from_stats(stats);
+        }
+
+        /// Creates a handle for a named pool.
+        #[must_use]
+        pub fn handle(&self, pool_name: impl Into<String>) -> PoolMetricsHandle {
+            PoolMetricsHandle {
+                metrics: self.clone(),
+                pool_name: pool_name.into(),
+            }
+        }
+    }
+
+    /// Handle to pool metrics with a specific pool name.
+    ///
+    /// This struct wraps `PoolMetrics` and binds it to a specific pool name,
+    /// automatically adding the `pool_name` label to all recorded metrics.
+    #[derive(Clone)]
+    pub struct PoolMetricsHandle {
+        metrics: PoolMetrics,
+        pool_name: String,
+    }
+
+    impl std::fmt::Debug for PoolMetricsHandle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PoolMetricsHandle")
+                .field("pool_name", &self.pool_name)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl PoolMetricsHandle {
+        /// Returns the pool name for this handle.
+        #[must_use]
+        pub fn pool_name(&self) -> &str {
+            &self.pool_name
+        }
+
+        /// Records a successful acquire operation.
+        pub fn record_acquired(&self, duration: Duration) {
+            self.metrics.record_acquired(&self.pool_name, duration);
+        }
+
+        /// Records a resource release (return to pool).
+        pub fn record_released(&self, hold_duration: Duration) {
+            self.metrics.record_released(&self.pool_name, hold_duration);
+        }
+
+        /// Records a resource creation.
+        pub fn record_created(&self) {
+            self.metrics.record_created(&self.pool_name);
+        }
+
+        /// Records a resource destruction.
+        pub fn record_destroyed(&self, reason: DestroyReason) {
+            self.metrics.record_destroyed(&self.pool_name, reason);
+        }
+
+        /// Records an acquire timeout.
+        pub fn record_timeout(&self, wait_duration: Duration) {
+            self.metrics.record_timeout(&self.pool_name, wait_duration);
+        }
+
+        /// Records time spent waiting in queue.
+        pub fn record_wait(&self, wait_duration: Duration) {
+            self.metrics.record_wait(&self.pool_name, wait_duration);
+        }
+
+        /// Updates gauge values from pool statistics.
+        pub fn update_gauges(&self, stats: &PoolStats) {
+            self.metrics.update_gauges(stats);
+        }
+
+        /// Returns a reference to the underlying metrics state.
+        #[must_use]
+        pub fn state(&self) -> &Arc<PoolMetricsState> {
+            self.metrics.state()
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+pub use pool_metrics::{PoolMetrics, PoolMetricsHandle, PoolMetricsState};
 
 #[cfg(test)]
 mod tests {
@@ -925,10 +1464,13 @@ mod tests {
 
         let msg = rx.recv().expect("return message");
         match msg {
-            PoolReturn::Return(value) => {
+            PoolReturn::Return {
+                resource: value,
+                hold_duration: _,
+            } => {
                 crate::assert_with_log!(value == 42, "return value", 42u8, value);
             }
-            PoolReturn::Discard => panic!("unexpected discard"),
+            PoolReturn::Discard { .. } => panic!("unexpected discard"),
         }
         crate::test_complete!("pooled_resource_returns_on_drop");
     }
@@ -942,10 +1484,13 @@ mod tests {
 
         let msg = rx.recv().expect("return message");
         match msg {
-            PoolReturn::Return(value) => {
+            PoolReturn::Return {
+                resource: value,
+                hold_duration: _,
+            } => {
                 crate::assert_with_log!(value == 7, "return value", 7u8, value);
             }
-            PoolReturn::Discard => panic!("unexpected discard"),
+            PoolReturn::Discard { .. } => panic!("unexpected discard"),
         }
         crate::test_complete!("pooled_resource_return_to_pool_sends_return");
     }
@@ -959,8 +1504,8 @@ mod tests {
 
         let msg = rx.recv().expect("return message");
         match msg {
-            PoolReturn::Return(_) => panic!("unexpected return"),
-            PoolReturn::Discard => {
+            PoolReturn::Return { .. } => panic!("unexpected return"),
+            PoolReturn::Discard { hold_duration: _ } => {
                 crate::assert_with_log!(true, "discard", true, true);
             }
         }
@@ -1131,10 +1676,13 @@ mod tests {
         // Verify resource was returned
         let msg = rx.recv().expect("should receive return message");
         match msg {
-            PoolReturn::Return(value) => {
+            PoolReturn::Return {
+                resource: value,
+                hold_duration: _,
+            } => {
                 crate::assert_with_log!(value == 99, "returned value", 99u8, value);
             }
-            PoolReturn::Discard => panic!("expected Return, got Discard"),
+            PoolReturn::Discard { .. } => panic!("expected Return, got Discard"),
         }
 
         // Verify channel is empty (exactly one return)
@@ -1164,10 +1712,13 @@ mod tests {
         // Verify exactly one return message
         let msg = rx.recv().expect("should receive return message");
         match msg {
-            PoolReturn::Return(value) => {
+            PoolReturn::Return {
+                resource: value,
+                hold_duration: _,
+            } => {
                 crate::assert_with_log!(value == 77, "returned value", 77u8, value);
             }
-            PoolReturn::Discard => panic!("expected Return, got Discard"),
+            PoolReturn::Discard { .. } => panic!("expected Return, got Discard"),
         }
 
         // No second message (drop should not send again)
@@ -1196,8 +1747,8 @@ mod tests {
         // Verify we got a discard message
         let msg = rx.recv().expect("should receive discard message");
         match msg {
-            PoolReturn::Return(_) => panic!("expected Discard, got Return"),
-            PoolReturn::Discard => {
+            PoolReturn::Return { .. } => panic!("expected Discard, got Return"),
+            PoolReturn::Discard { hold_duration: _ } => {
                 // Good - discard was sent
             }
         }

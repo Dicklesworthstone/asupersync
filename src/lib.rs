@@ -80,7 +80,7 @@ pub mod signal;
 pub mod stream;
 pub mod sync;
 pub mod test_logging;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
 pub mod time;
 pub mod trace;

@@ -41,9 +41,11 @@ pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
 pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, OnceCellError};
 pub use pool::{
-    GenericPool, Pool, PoolConfig, PoolError, PoolFuture, PoolReturn, PoolReturnReceiver,
-    PoolReturnSender, PoolStats, PooledResource,
+    DestroyReason, GenericPool, Pool, PoolConfig, PoolError, PoolFuture, PoolReturn,
+    PoolReturnReceiver, PoolReturnSender, PoolStats, PooledResource,
 };
+#[cfg(feature = "metrics")]
+pub use pool::{PoolMetrics, PoolMetricsHandle, PoolMetricsState};
 pub use rwlock::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockError, RwLockReadGuard,
     RwLockWriteGuard, TryReadError, TryWriteError,

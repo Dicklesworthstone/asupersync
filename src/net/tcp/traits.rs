@@ -37,7 +37,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncWrite};
 
 /// A TCP listener for accepting incoming connections.
 ///
@@ -241,7 +241,7 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
                 }
             }
 
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
             if self.reuse_port {
                 if let Err(e) = socket.set_reuse_port(true) {
                     last_err = Some(e);
@@ -305,6 +305,7 @@ pub trait TcpListenerExt: TcpListenerApi {
         F: Fn(Self::Stream, SocketAddr) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send + 'static,
         Self::Stream: 'static,
+        Self: Sync,
     {
         async move {
             loop {
@@ -366,9 +367,27 @@ impl<L: TcpListenerApi> crate::stream::Stream for IncomingStream<'_, L> {
 // Placeholder for spawn until we have proper Cx integration
 fn tokio_like_spawn<F: Future<Output = ()> + Send + 'static>(f: F) {
     // In the future, this would integrate with the asupersync runtime's spawn mechanism.
-    // For now, we'll use a simple approach that works with the existing runtime.
+    // For now, spawn a thread that runs the future using a minimal executor.
     std::thread::spawn(move || {
-        futures_lite::future::block_on(f);
+        // Use a simple block_on approach with std::task primitives
+        use std::sync::Arc;
+        use std::task::{Wake, Waker};
+
+        struct ThreadWaker;
+        impl Wake for ThreadWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let waker = Waker::from(Arc::new(ThreadWaker));
+        let mut cx = Context::from_waker(&waker);
+        let mut f = std::pin::pin!(f);
+
+        loop {
+            match f.as_mut().poll(&mut cx) {
+                Poll::Ready(()) => break,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
     });
 }
 

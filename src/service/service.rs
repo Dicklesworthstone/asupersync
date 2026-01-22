@@ -91,13 +91,49 @@ pub trait AsupersyncServiceExt<Request>: AsupersyncService<Request> {
         MapErr::new(self, f)
     }
 
-    /// Convert this service into a Tower-compatible adapter.
+    /// Convert this service into a Tower-compatible adapter requiring `(Cx, Request)`.
+    ///
+    /// The returned adapter implements `tower::Service<(Cx, Request)>`. Use this
+    /// when you want explicit control over Cx passing.
+    ///
+    /// For a version that obtains Cx automatically via a provider, use
+    /// [`into_tower_with_provider`](Self::into_tower_with_provider).
     #[cfg(feature = "tower")]
     fn into_tower(self) -> TowerAdapter<Self>
     where
         Self: Sized,
     {
         TowerAdapter::new(self)
+    }
+
+    /// Convert this service into a Tower-compatible adapter with automatic Cx resolution.
+    ///
+    /// The returned adapter implements `tower::Service<Request>` by obtaining Cx
+    /// from thread-local storage (set by the runtime during task polling).
+    ///
+    /// # Errors
+    ///
+    /// Calls will fail with [`ProviderAdapterError::NoCx`] if no Cx is available.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use asupersync::service::AsupersyncServiceExt;
+    /// use tower::ServiceBuilder;
+    /// use std::time::Duration;
+    ///
+    /// let service = my_service.into_tower_with_provider();
+    ///
+    /// let service = ServiceBuilder::new()
+    ///     .rate_limit(100, Duration::from_secs(1))
+    ///     .service(service);
+    /// ```
+    #[cfg(feature = "tower")]
+    fn into_tower_with_provider(self) -> TowerAdapterWithProvider<Self, ThreadLocalCxProvider>
+    where
+        Self: Sized,
+    {
+        TowerAdapterWithProvider::new(self)
     }
 }
 
@@ -165,6 +201,115 @@ where
 
     async fn call(&self, cx: &Cx, request: Request) -> Result<Self::Response, Self::Error> {
         (self)(cx, request).await
+    }
+}
+
+// =============================================================================
+// Cx Provider Types
+// =============================================================================
+
+/// A mechanism for providing a [`Cx`] to Tower services.
+///
+/// Since Tower services don't receive a Cx in their call signature, adapters
+/// need a way to obtain one. This trait abstracts over different strategies
+/// for Cx acquisition.
+///
+/// # Built-in Implementations
+///
+/// - [`ThreadLocalCxProvider`]: Uses the thread-local Cx set by the runtime
+/// - [`FixedCxProvider`]: Uses a fixed Cx (useful for testing)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use asupersync::service::{CxProvider, TowerAdapterWithProvider};
+///
+/// // Custom provider that creates Cx on demand
+/// struct OnDemandProvider;
+///
+/// impl CxProvider for OnDemandProvider {
+///     fn current_cx(&self) -> Option<Cx> {
+///         Some(Cx::for_testing())
+///     }
+/// }
+/// ```
+pub trait CxProvider: Send + Sync {
+    /// Returns the current Cx, if one is available.
+    ///
+    /// Returns `None` if no Cx is available (e.g., not running within
+    /// the asupersync runtime).
+    fn current_cx(&self) -> Option<Cx>;
+}
+
+/// Provides Cx from thread-local storage.
+///
+/// This provider uses [`Cx::current()`] to retrieve the Cx that was set
+/// by the runtime when polling the current task. This is the standard
+/// provider for production use.
+///
+/// # Panics
+///
+/// The adapter using this provider will return an error (not panic) if
+/// no Cx is available in thread-local storage.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use asupersync::service::{TowerAdapterWithProvider, ThreadLocalCxProvider};
+///
+/// let adapter = TowerAdapterWithProvider::new(my_service);
+/// // Uses ThreadLocalCxProvider by default
+/// ```
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThreadLocalCxProvider;
+
+impl CxProvider for ThreadLocalCxProvider {
+    fn current_cx(&self) -> Option<Cx> {
+        Cx::current()
+    }
+}
+
+/// Provides a fixed Cx for testing.
+///
+/// This provider always returns a clone of the Cx provided at construction.
+/// Useful for testing Tower middleware stacks outside of the asupersync runtime.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use asupersync::service::{TowerAdapterWithProvider, FixedCxProvider};
+/// use asupersync::Cx;
+///
+/// let cx = Cx::for_testing();
+/// let provider = FixedCxProvider::new(cx);
+/// let adapter = TowerAdapterWithProvider::with_provider(my_service, provider);
+///
+/// // Can now use the adapter in tests without a runtime
+/// ```
+#[derive(Clone, Debug)]
+pub struct FixedCxProvider {
+    cx: Cx,
+}
+
+impl FixedCxProvider {
+    /// Creates a new fixed Cx provider.
+    #[must_use]
+    pub fn new(cx: Cx) -> Self {
+        Self { cx }
+    }
+
+    /// Creates a provider with a test Cx.
+    #[must_use]
+    pub fn for_testing() -> Self {
+        Self {
+            cx: Cx::for_testing(),
+        }
+    }
+}
+
+impl CxProvider for FixedCxProvider {
+    fn current_cx(&self) -> Option<Cx> {
+        Some(self.cx.clone())
     }
 }
 
@@ -316,6 +461,21 @@ impl<E: std::fmt::Display> std::fmt::Display for TowerAdapterError<E> {
 
 impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for TowerAdapterError<E> {}
 
+/// Adapter that wraps an [`AsupersyncService`] for use with Tower.
+///
+/// This adapter allows Asupersync services to be used in Tower middleware stacks.
+/// The service is wrapped in an `Arc` for shared ownership.
+///
+/// # Request Type
+///
+/// The Tower service accepts `(Cx, Request)` tuples, where `Cx` is the capability
+/// context that provides cancellation, budget, and other contextual information.
+///
+/// # Limitations
+///
+/// The returned future is not `Send` because `AsupersyncService::call` uses
+/// `async fn in trait` which doesn't guarantee Send futures. For multi-threaded
+/// Tower usage, services should implement `tower::Service` directly.
 #[cfg(feature = "tower")]
 pub struct TowerAdapter<S> {
     service: std::sync::Arc<S>,
@@ -340,7 +500,10 @@ where
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    // Note: This future is not Send because AsupersyncService::call uses async fn in trait
+    // which doesn't guarantee Send futures. For multi-threaded Tower usage, services should
+    // implement tower::Service directly or use a Send-compatible wrapper.
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -349,6 +512,205 @@ where
     fn call(&mut self, (cx, request): (Cx, Request)) -> Self::Future {
         let service = std::sync::Arc::clone(&self.service);
         Box::pin(async move { service.call(&cx, request).await })
+    }
+}
+
+/// Error returned when no Cx is available from the provider.
+#[cfg(feature = "tower")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoCxAvailable;
+
+#[cfg(feature = "tower")]
+impl std::fmt::Display for NoCxAvailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no Cx available from provider (not running within asupersync runtime?)"
+        )
+    }
+}
+
+#[cfg(feature = "tower")]
+impl std::error::Error for NoCxAvailable {}
+
+/// Error type for [`TowerAdapterWithProvider`].
+#[cfg(feature = "tower")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderAdapterError<E> {
+    /// No Cx was available from the provider.
+    NoCx(NoCxAvailable),
+    /// The inner service returned an error.
+    Service(E),
+}
+
+#[cfg(feature = "tower")]
+impl<E: std::fmt::Display> std::fmt::Display for ProviderAdapterError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCx(e) => write!(f, "{e}"),
+            Self::Service(e) => write!(f, "service error: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "tower")]
+impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for ProviderAdapterError<E> {}
+
+/// Adapter that wraps an [`AsupersyncService`] for use with Tower middleware.
+///
+/// Unlike [`TowerAdapter`], which requires `(Cx, Request)` tuples, this adapter
+/// uses a [`CxProvider`] to obtain the Cx automatically. This allows seamless
+/// integration with Tower middleware that expects `Service<Request>`.
+///
+/// # Cx Resolution
+///
+/// The adapter obtains a Cx by calling [`CxProvider::current_cx()`] on each
+/// request. The default provider ([`ThreadLocalCxProvider`]) retrieves the Cx
+/// from thread-local storage, which is set by the runtime while polling tasks.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use asupersync::service::{TowerAdapterWithProvider, AsupersyncService};
+/// use tower::ServiceBuilder;
+/// use std::time::Duration;
+///
+/// struct MyService;
+///
+/// impl AsupersyncService<Request> for MyService {
+///     type Response = Response;
+///     type Error = Error;
+///
+///     async fn call(&self, cx: &Cx, req: Request) -> Result<Response, Error> {
+///         // Implementation
+///     }
+/// }
+///
+/// // Wrap for use with Tower middleware
+/// let service = TowerAdapterWithProvider::new(MyService);
+///
+/// // Use with Tower ServiceBuilder
+/// let service = ServiceBuilder::new()
+///     .rate_limit(100, Duration::from_secs(1))
+///     .service(service);
+/// ```
+///
+/// # Testing
+///
+/// For testing outside the runtime, use [`FixedCxProvider`]:
+///
+/// ```rust,ignore
+/// use asupersync::service::{TowerAdapterWithProvider, FixedCxProvider};
+/// use asupersync::Cx;
+///
+/// let provider = FixedCxProvider::for_testing();
+/// let adapter = TowerAdapterWithProvider::with_provider(MyService, provider);
+/// ```
+///
+/// # Limitations
+///
+/// The returned future is not `Send` because `AsupersyncService::call` uses
+/// `async fn in trait`. For multi-threaded Tower usage, consider implementing
+/// `tower::Service` directly on your type.
+#[cfg(feature = "tower")]
+pub struct TowerAdapterWithProvider<S, P = ThreadLocalCxProvider> {
+    service: std::sync::Arc<S>,
+    provider: P,
+}
+
+#[cfg(feature = "tower")]
+impl<S> TowerAdapterWithProvider<S, ThreadLocalCxProvider> {
+    /// Creates a new adapter using the default thread-local Cx provider.
+    ///
+    /// The provider uses [`Cx::current()`] to retrieve the Cx from thread-local
+    /// storage that was set by the runtime.
+    ///
+    /// # Errors
+    ///
+    /// Calls will fail with [`ProviderAdapterError::NoCx`] if no Cx is
+    /// available in thread-local storage (e.g., called outside the runtime).
+    #[must_use]
+    pub fn new(service: S) -> Self {
+        Self {
+            service: std::sync::Arc::new(service),
+            provider: ThreadLocalCxProvider,
+        }
+    }
+}
+
+#[cfg(feature = "tower")]
+impl<S, P> TowerAdapterWithProvider<S, P> {
+    /// Creates a new adapter with a custom Cx provider.
+    ///
+    /// Use this constructor when you need custom Cx resolution, such as:
+    /// - Testing with [`FixedCxProvider`]
+    /// - Custom runtime integration
+    /// - Cx pooling or caching strategies
+    #[must_use]
+    pub fn with_provider(service: S, provider: P) -> Self {
+        Self {
+            service: std::sync::Arc::new(service),
+            provider,
+        }
+    }
+
+    /// Returns a reference to the Cx provider.
+    #[must_use]
+    pub fn provider(&self) -> &P {
+        &self.provider
+    }
+}
+
+#[cfg(feature = "tower")]
+impl<S, P> Clone for TowerAdapterWithProvider<S, P>
+where
+    P: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            service: std::sync::Arc::clone(&self.service),
+            provider: self.provider.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "tower")]
+impl<S, P, Request> tower::Service<Request> for TowerAdapterWithProvider<S, P>
+where
+    S: AsupersyncService<Request> + Send + Sync + 'static,
+    P: CxProvider,
+    Request: Send + 'static,
+    S::Response: 'static,
+    S::Error: 'static,
+{
+    type Response = S::Response;
+    type Error = ProviderAdapterError<S::Error>;
+    // Note: This future is not Send because AsupersyncService::call uses async fn in trait
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Asupersync services are always ready (backpressure via budgets)
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        // Get Cx from provider
+        let cx = match self.provider.current_cx() {
+            Some(cx) => cx,
+            None => {
+                return Box::pin(std::future::ready(Err(ProviderAdapterError::NoCx(
+                    NoCxAvailable,
+                ))));
+            }
+        };
+
+        let service = std::sync::Arc::clone(&self.service);
+        Box::pin(async move {
+            service
+                .call(&cx, request)
+                .await
+                .map_err(ProviderAdapterError::Service)
+        })
     }
 }
 
@@ -420,8 +782,9 @@ where
         }
 
         // Check budget for waiting on readiness
-        let budget = cx.remaining_budget();
-        if budget.units() < self.config.min_budget_for_wait {
+        // Note: min_budget_for_wait is compared against poll_quota
+        let budget = cx.budget();
+        if (budget.poll_quota as u64) < self.config.min_budget_for_wait {
             return Err(TowerAdapterError::Overloaded);
         }
 
@@ -716,5 +1079,133 @@ mod tests {
         assert_ne!(best_effort, strict);
         assert_ne!(best_effort, timeout);
         assert_ne!(strict, timeout);
+    }
+
+    // ========================================================================
+    // Cx Provider Tests
+    // ========================================================================
+
+    use super::{CxProvider, FixedCxProvider, ThreadLocalCxProvider};
+    use crate::Cx;
+
+    #[test]
+    fn thread_local_provider_returns_none_when_not_set() {
+        let provider = ThreadLocalCxProvider;
+        // Outside of runtime context, should return None
+        assert!(provider.current_cx().is_none());
+    }
+
+    #[test]
+    fn fixed_provider_returns_cx() {
+        let cx = Cx::for_testing();
+        let provider = FixedCxProvider::new(cx.clone());
+
+        let retrieved = provider.current_cx();
+        assert!(retrieved.is_some());
+        // Same task ID indicates it's the same (or equivalent) Cx
+        assert_eq!(retrieved.unwrap().task_id(), cx.task_id());
+    }
+
+    #[test]
+    fn fixed_provider_for_testing_convenience() {
+        let provider = FixedCxProvider::for_testing();
+        assert!(provider.current_cx().is_some());
+    }
+
+    #[test]
+    fn thread_local_provider_default() {
+        let provider = ThreadLocalCxProvider::default();
+        // Just verify it doesn't panic
+        let _ = provider.current_cx();
+    }
+
+    #[test]
+    fn fixed_provider_is_cloneable() {
+        let provider = FixedCxProvider::for_testing();
+        let cloned = provider.clone();
+        assert!(cloned.current_cx().is_some());
+    }
+
+    // ========================================================================
+    // Tower Adapter with Provider Tests (cfg(feature = "tower"))
+    // ========================================================================
+
+    #[cfg(feature = "tower")]
+    mod tower_provider_tests {
+        use super::super::{
+            AsupersyncService, CxProvider, FixedCxProvider, NoCxAvailable, ProviderAdapterError,
+            TowerAdapterWithProvider,
+        };
+        use crate::Cx;
+
+        // A simple test service
+        struct AddOneService;
+
+        impl AsupersyncService<i32> for AddOneService {
+            type Response = i32;
+            type Error = std::convert::Infallible;
+
+            async fn call(
+                &self,
+                _cx: &Cx,
+                req: i32,
+            ) -> Result<Self::Response, Self::Error> {
+                Ok(req + 1)
+            }
+        }
+
+        #[test]
+        fn adapter_with_fixed_provider_works() {
+            let provider = FixedCxProvider::for_testing();
+            let adapter = TowerAdapterWithProvider::with_provider(AddOneService, provider);
+
+            // Verify provider is accessible
+            assert!(adapter.provider().current_cx().is_some());
+        }
+
+        #[test]
+        fn adapter_new_uses_thread_local_provider() {
+            let adapter = TowerAdapterWithProvider::new(AddOneService);
+            // Thread-local provider returns None when not in runtime
+            assert!(adapter.provider().current_cx().is_none());
+        }
+
+        #[test]
+        fn adapter_is_cloneable_with_clone_provider() {
+            let provider = FixedCxProvider::for_testing();
+            let adapter = TowerAdapterWithProvider::with_provider(AddOneService, provider);
+            let _cloned = adapter.clone();
+        }
+
+        #[test]
+        fn no_cx_available_error_display() {
+            let err = NoCxAvailable;
+            let msg = format!("{err}");
+            assert!(msg.contains("no Cx available"));
+        }
+
+        #[test]
+        fn provider_adapter_error_display() {
+            let no_cx: ProviderAdapterError<&str> = ProviderAdapterError::NoCx(NoCxAvailable);
+            assert!(format!("{no_cx}").contains("no Cx available"));
+
+            let service_err: ProviderAdapterError<&str> =
+                ProviderAdapterError::Service("test error");
+            assert_eq!(format!("{service_err}"), "service error: test error");
+        }
+
+        #[test]
+        fn provider_adapter_error_equality() {
+            let err1: ProviderAdapterError<i32> = ProviderAdapterError::Service(42);
+            let err2: ProviderAdapterError<i32> = ProviderAdapterError::Service(42);
+            let err3: ProviderAdapterError<i32> = ProviderAdapterError::Service(43);
+
+            assert_eq!(err1, err2);
+            assert_ne!(err1, err3);
+
+            let no_cx1: ProviderAdapterError<i32> = ProviderAdapterError::NoCx(NoCxAvailable);
+            let no_cx2: ProviderAdapterError<i32> = ProviderAdapterError::NoCx(NoCxAvailable);
+            assert_eq!(no_cx1, no_cx2);
+        }
     }
 }
