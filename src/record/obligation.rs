@@ -227,7 +227,7 @@ impl ObligationRecord {
         self.state = ObligationState::Committed;
         self.resolved_at = Some(now);
         self.abort_reason = None;
-        
+
         info!(
             obligation_id = ?self.id,
             kind = %self.kind,
@@ -247,7 +247,7 @@ impl ObligationRecord {
         self.state = ObligationState::Aborted;
         self.resolved_at = Some(now);
         self.abort_reason = Some(reason);
-        
+
         info!(
             obligation_id = ?self.id,
             kind = %self.kind,
@@ -271,7 +271,7 @@ impl ObligationRecord {
         self.state = ObligationState::Leaked;
         self.resolved_at = Some(now);
         self.abort_reason = None;
-        
+
         error!(
             obligation_id = ?self.id,
             kind = %self.kind,

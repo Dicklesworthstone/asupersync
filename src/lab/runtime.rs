@@ -257,7 +257,9 @@ impl LabRuntime {
             .tasks
             .get(task_id.arena_index())
             .and_then(|t| t.cx_inner.as_ref())
-            .map_or(0, |inner| inner.read().expect("lock poisoned").budget.priority);
+            .map_or(0, |inner| {
+                inner.read().expect("lock poisoned").budget.priority
+            });
 
         let waker = Waker::from(Arc::new(TaskWaker {
             task_id,
@@ -310,7 +312,9 @@ impl LabRuntime {
                         .tasks
                         .get(waiter.arena_index())
                         .and_then(|t| t.cx_inner.as_ref())
-                        .map_or(0, |inner| inner.read().expect("lock poisoned").budget.priority);
+                        .map_or(0, |inner| {
+                            inner.read().expect("lock poisoned").budget.priority
+                        });
                     sched.schedule(waiter, prio);
                 }
             }

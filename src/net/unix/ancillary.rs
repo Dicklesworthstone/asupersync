@@ -172,7 +172,11 @@ impl<'a> SocketAncillary<'a> {
 
         // SAFETY: We've verified there's enough space in the buffer.
         unsafe {
-            let cmsg_ptr = self.buffer.as_mut_ptr().add(self.length).cast::<libc::cmsghdr>();
+            let cmsg_ptr = self
+                .buffer
+                .as_mut_ptr()
+                .add(self.length)
+                .cast::<libc::cmsghdr>();
 
             (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(fd_size as u32) as _;
             (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
@@ -204,7 +208,7 @@ impl<'a> SocketAncillary<'a> {
     ///     }
     /// }
     /// ```
-    #[must_use] 
+    #[must_use]
     pub fn messages(&self) -> AncillaryMessages<'_> {
         AncillaryMessages {
             buffer: &self.buffer[..self.length],
@@ -254,7 +258,11 @@ impl<'a> Iterator for AncillaryMessages<'a> {
         // SAFETY: We're iterating through a valid control message buffer
         // that was filled by recvmsg.
         unsafe {
-            let cmsg_ptr = self.buffer.as_ptr().add(self.current).cast::<libc::cmsghdr>();
+            let cmsg_ptr = self
+                .buffer
+                .as_ptr()
+                .add(self.current)
+                .cast::<libc::cmsghdr>();
 
             // Check if we have at least a header
             if self.current + mem::size_of::<libc::cmsghdr>() > self.buffer.len() {

@@ -75,8 +75,7 @@ pub struct LimitReached {
 }
 
 /// Action to take when a recording limit is reached.
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub enum LimitAction {
     /// Stop recording, keep what we have.
     #[default]
@@ -99,7 +98,6 @@ impl fmt::Debug for LimitAction {
         }
     }
 }
-
 
 /// Configuration for trace recording.
 #[derive(Debug, Clone)]
@@ -306,13 +304,17 @@ impl TraceRecorder {
     /// Returns the number of recorded events.
     #[must_use]
     pub fn event_count(&self) -> usize {
-        self.trace.as_ref().map_or(0, super::replay::ReplayTrace::len)
+        self.trace
+            .as_ref()
+            .map_or(0, super::replay::ReplayTrace::len)
     }
 
     /// Returns the estimated size of the trace in bytes.
     #[must_use]
     pub fn estimated_size(&self) -> usize {
-        self.trace.as_ref().map_or(0, super::replay::ReplayTrace::estimated_size)
+        self.trace
+            .as_ref()
+            .map_or(0, super::replay::ReplayTrace::estimated_size)
     }
 
     fn should_record(&self) -> bool {

@@ -44,7 +44,12 @@ mod imp {
             let wake_fd = create_eventfd()?;
 
             // Arm poll on eventfd so Reactor::wake() can interrupt poll().
-            submit_poll_entry(&mut ring, wake_fd.as_raw_fd(), Interest::READABLE, WAKE_USER_DATA)?;
+            submit_poll_entry(
+                &mut ring,
+                wake_fd.as_raw_fd(),
+                Interest::READABLE,
+                WAKE_USER_DATA,
+            )?;
             ring.submit()?;
 
             Ok(Self {
@@ -73,9 +78,7 @@ mod imp {
                 .user_data(REMOVE_USER_DATA);
             // SAFETY: PollRemove takes ownership of user_data only; no external buffers.
             unsafe {
-                ring.submission()
-                    .push(&entry)
-                    .map_err(push_error_to_io)?;
+                ring.submission().push(&entry).map_err(push_error_to_io)?;
             }
             ring.submit()?;
             Ok(())
@@ -92,13 +95,8 @@ mod imp {
             let fd = self.wake_fd.as_raw_fd();
             let mut buf = [0u8; 8];
             loop {
-                let n = unsafe {
-                    libc::read(
-                        fd,
-                        buf.as_mut_ptr().cast::<libc::c_void>(),
-                        buf.len(),
-                    )
-                };
+                let n =
+                    unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
                 if n >= 0 {
                     continue;
                 }
@@ -114,7 +112,12 @@ mod imp {
     }
 
     impl Reactor for IoUringReactor {
-        fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        fn register(
+            &self,
+            source: &dyn Source,
+            token: Token,
+            interest: Interest,
+        ) -> io::Result<()> {
             let raw_fd = source.as_raw_fd();
             let mut regs = self.registrations.lock();
             if regs.contains_key(&token) {
@@ -123,13 +126,7 @@ mod imp {
                     "token already registered",
                 ));
             }
-            regs.insert(
-                token,
-                RegistrationInfo {
-                    raw_fd,
-                    interest,
-                },
-            );
+            regs.insert(token, RegistrationInfo { raw_fd, interest });
             drop(regs);
 
             self.submit_poll_add(token, raw_fd, interest)
@@ -138,9 +135,9 @@ mod imp {
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
             {
                 let mut regs = self.registrations.lock();
-                let info = regs
-                    .get_mut(&token)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
+                let info = regs.get_mut(&token).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "token not registered")
+                })?;
                 info.interest = interest;
             }
 
@@ -148,9 +145,9 @@ mod imp {
             let _ = self.submit_poll_remove(token);
             let raw_fd = {
                 let regs = self.registrations.lock();
-                regs.get(&token)
-                    .map(|info| info.raw_fd)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?
+                regs.get(&token).map(|info| info.raw_fd).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "token not registered")
+                })?
             };
             self.submit_poll_add(token, raw_fd, interest)
         }
@@ -241,13 +238,8 @@ mod imp {
             let value: u64 = 1;
             let fd = self.wake_fd.as_raw_fd();
             let bytes = value.to_ne_bytes();
-            let written = unsafe {
-                libc::write(
-                    fd,
-                    bytes.as_ptr().cast::<libc::c_void>(),
-                    bytes.len(),
-                )
-            };
+            let written =
+                unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };
             if written >= 0 {
                 return Ok(());
             }
@@ -360,7 +352,12 @@ mod imp {
     }
 
     impl Reactor for IoUringReactor {
-        fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "IoUringReactor is not available (linux + io-uring feature required)",
@@ -381,7 +378,11 @@ mod imp {
             ))
         }
 
-        fn poll(&self, _events: &mut Events, _timeout: Option<std::time::Duration>) -> io::Result<usize> {
+        fn poll(
+            &self,
+            _events: &mut Events,
+            _timeout: Option<std::time::Duration>,
+        ) -> io::Result<usize> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "IoUringReactor is not available (linux + io-uring feature required)",

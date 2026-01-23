@@ -5,4 +5,6 @@ pub mod stream;
 pub mod traits;
 
 // Re-export trait types for convenience
-pub use traits::{IncomingStream, TcpListenerApi, TcpListenerBuilder, TcpListenerExt, TcpStreamApi};
+pub use traits::{
+    IncomingStream, TcpListenerApi, TcpListenerBuilder, TcpListenerExt, TcpStreamApi,
+};

@@ -599,7 +599,11 @@ impl InjectionPoint {
     #[must_use]
     pub fn applicable_chaos(&self) -> &'static [ChaosType] {
         match self {
-            Self::TaskPoll => &[ChaosType::Cancel, ChaosType::Delay, ChaosType::BudgetExhaust],
+            Self::TaskPoll => &[
+                ChaosType::Cancel,
+                ChaosType::Delay,
+                ChaosType::BudgetExhaust,
+            ],
             Self::ReactorPoll => &[ChaosType::IoError, ChaosType::Delay],
             Self::WakerInvoke => &[ChaosType::WakeupStorm, ChaosType::Delay],
             Self::BudgetCheck => &[ChaosType::BudgetExhaust],

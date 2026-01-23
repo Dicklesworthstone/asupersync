@@ -657,7 +657,11 @@ pub enum ReplayTraceError {
 /// Converts an `io::ErrorKind` to a u8 for compact serialization.
 #[must_use]
 fn error_kind_to_u8(kind: io::ErrorKind) -> u8 {
-    use io::ErrorKind::{NotFound, PermissionDenied, ConnectionRefused, ConnectionReset, ConnectionAborted, NotConnected, AddrInUse, AddrNotAvailable, BrokenPipe, AlreadyExists, WouldBlock, InvalidInput, InvalidData, TimedOut, WriteZero, Interrupted, UnexpectedEof, OutOfMemory};
+    use io::ErrorKind::{
+        AddrInUse, AddrNotAvailable, AlreadyExists, BrokenPipe, ConnectionAborted,
+        ConnectionRefused, ConnectionReset, Interrupted, InvalidData, InvalidInput, NotConnected,
+        NotFound, OutOfMemory, PermissionDenied, TimedOut, UnexpectedEof, WouldBlock, WriteZero,
+    };
     match kind {
         NotFound => 1,
         PermissionDenied => 2,
@@ -684,7 +688,12 @@ fn error_kind_to_u8(kind: io::ErrorKind) -> u8 {
 /// Converts a u8 back to an `io::ErrorKind`.
 #[must_use]
 pub fn u8_to_error_kind(value: u8) -> io::ErrorKind {
-    use io::ErrorKind::{NotFound, PermissionDenied, ConnectionRefused, ConnectionReset, ConnectionAborted, NotConnected, AddrInUse, AddrNotAvailable, BrokenPipe, AlreadyExists, WouldBlock, InvalidInput, InvalidData, TimedOut, WriteZero, Interrupted, UnexpectedEof, OutOfMemory, Other};
+    use io::ErrorKind::{
+        AddrInUse, AddrNotAvailable, AlreadyExists, BrokenPipe, ConnectionAborted,
+        ConnectionRefused, ConnectionReset, Interrupted, InvalidData, InvalidInput, NotConnected,
+        NotFound, Other, OutOfMemory, PermissionDenied, TimedOut, UnexpectedEof, WouldBlock,
+        WriteZero,
+    };
     match value {
         1 => NotFound,
         2 => PermissionDenied,
@@ -775,10 +784,7 @@ mod tests {
 
         for event in &events {
             let size = event.estimated_size();
-            assert!(
-                size < 64,
-                "Event {event:?} exceeds 64 bytes: {size} bytes"
-            );
+            assert!(size < 64, "Event {event:?} exceeds 64 bytes: {size} bytes");
         }
     }
 
@@ -1005,10 +1011,7 @@ mod tests {
 
         for event in &events {
             let size = event.estimated_size();
-            assert!(
-                size < 64,
-                "Event {event:?} exceeds 64 bytes: {size} bytes"
-            );
+            assert!(size < 64, "Event {event:?} exceeds 64 bytes: {size} bytes");
         }
     }
 

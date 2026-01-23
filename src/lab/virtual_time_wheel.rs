@@ -295,7 +295,7 @@ impl VirtualTimerWheel {
     /// Returns wakers for all expired timers without removing them from tracking.
     ///
     /// This is useful for waking tasks without modifying timer state.
-    #[must_use] 
+    #[must_use]
     pub fn collect_wakers(&self, up_to_tick: u64) -> Vec<Waker> {
         self.heap
             .iter()

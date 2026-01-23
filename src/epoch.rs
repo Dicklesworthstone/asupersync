@@ -996,7 +996,9 @@ impl EpochContext {
         if now >= self.deadline {
             None
         } else {
-            Some(Duration::from_nanos(self.deadline.as_nanos() - now.as_nanos()))
+            Some(Duration::from_nanos(
+                self.deadline.as_nanos() - now.as_nanos(),
+            ))
         }
     }
 

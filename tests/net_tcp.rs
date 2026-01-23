@@ -105,10 +105,7 @@ fn net_tcp_001_basic_connect_accept() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "connect/accept should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "connect/accept should succeed: {result:?}");
     test_complete!("net_tcp_001_basic_connect_accept");
 }
 

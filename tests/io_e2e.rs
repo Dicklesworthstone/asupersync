@@ -40,7 +40,10 @@ fn poll_once<F: std::future::Future>(fut: &mut Pin<&mut F>) -> Poll<F::Output> {
     fut.as_mut().poll(&mut cx)
 }
 
-fn poll_ready<F: std::future::Future>(fut: &mut Pin<&mut F>, max_polls: usize) -> Option<F::Output> {
+fn poll_ready<F: std::future::Future>(
+    fut: &mut Pin<&mut F>,
+    max_polls: usize,
+) -> Option<F::Output> {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     for _ in 0..max_polls {
@@ -219,8 +222,18 @@ fn io_e2e_copy_bidirectional() {
 
     assert_with_log!(a_to_b == 4, "a->b bytes", 4, a_to_b);
     assert_with_log!(b_to_a == 4, "b->a bytes", 4, b_to_a);
-    assert_with_log!(stream_b.written() == b"ping", "b written", b"ping", stream_b.written());
-    assert_with_log!(stream_a.written() == b"pong", "a written", b"pong", stream_a.written());
+    assert_with_log!(
+        stream_b.written() == b"ping",
+        "b written",
+        b"ping",
+        stream_b.written()
+    );
+    assert_with_log!(
+        stream_a.written() == b"pong",
+        "a written",
+        b"pong",
+        stream_a.written()
+    );
     test_complete!("io_e2e_copy_bidirectional");
 }
 
@@ -239,7 +252,12 @@ fn io_e2e_split_read_write() {
     let read_poll = Pin::new(&mut read_half).poll_read(&mut cx, &mut read_buf);
     let read_ok = matches!(read_poll, Poll::Ready(Ok(())));
     assert_with_log!(read_ok, "read half poll", true, read_ok);
-    assert_with_log!(read_buf.filled() == b"read", "read bytes", b"read", read_buf.filled());
+    assert_with_log!(
+        read_buf.filled() == b"read",
+        "read bytes",
+        b"read",
+        read_buf.filled()
+    );
 
     let write_poll = Pin::new(&mut write_half).poll_write(&mut cx, b"write");
     let write_ok = matches!(write_poll, Poll::Ready(Ok(5)));
@@ -249,6 +267,11 @@ fn io_e2e_split_read_write() {
     drop(write_half);
 
     let inner = wrapper.get_ref();
-    assert_with_log!(inner.written() == b"write", "inner written", b"write", inner.written());
+    assert_with_log!(
+        inner.written() == b"write",
+        "inner written",
+        b"write",
+        inner.written()
+    );
     test_complete!("io_e2e_split_read_write");
 }

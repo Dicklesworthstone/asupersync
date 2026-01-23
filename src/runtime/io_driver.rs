@@ -350,7 +350,7 @@ impl IoDriverHandle {
     }
 
     /// Updates the waker for an existing registration.
-    #[must_use] 
+    #[must_use]
     pub fn update_waker(&self, token: Token, waker: Waker) -> bool {
         let mut driver = self.inner.lock().expect("lock poisoned");
         driver.update_waker(token, waker)
@@ -437,7 +437,7 @@ impl IoRegistration {
     }
 
     /// Updates the waker for this registration.
-    #[must_use] 
+    #[must_use]
     pub fn update_waker(&self, waker: Waker) -> bool {
         if let Some(driver) = self.driver.upgrade() {
             let mut guard = driver.lock().expect("lock poisoned");

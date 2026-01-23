@@ -327,7 +327,7 @@ impl TraceFilter {
     /// Note: This removes the region from the include set. If no include set exists,
     /// this method has no effect. Use [`exclude_region_explicit`] if you need
     /// explicit exclusion.
-    #[must_use] 
+    #[must_use]
     pub fn exclude_region(mut self, region: RegionId) -> Self {
         if let Some(ref mut regions) = self.region_filter {
             regions.remove(&region);
@@ -433,10 +433,9 @@ impl TraceFilter {
         }
 
         // 5. Apply sampling for high-frequency events
-        if kind.is_sampled() && self.sample_rate < 1.0
-            && !self.sample() {
-                return false;
-            }
+        if kind.is_sampled() && self.sample_rate < 1.0 && !self.sample() {
+            return false;
+        }
 
         // 6. Apply custom predicate
         if let Some(ref predicate) = self.custom {

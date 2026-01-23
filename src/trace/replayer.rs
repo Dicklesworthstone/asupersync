@@ -39,8 +39,7 @@ use std::fmt;
 // =============================================================================
 
 /// The replay execution mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReplayMode {
     /// Run to completion without stopping.
     #[default]
@@ -50,7 +49,6 @@ pub enum ReplayMode {
     /// Run until a specific breakpoint is reached.
     RunTo(Breakpoint),
 }
-
 
 /// A breakpoint that stops replay execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,9 +427,7 @@ fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
             if e_task == a_task {
                 format!("Different outcome: expected {e_out}, got {a_out}")
             } else {
-                format!(
-                    "Different task completed: expected {e_task:?}, got {a_task:?}"
-                )
+                format!("Different task completed: expected {e_task:?}, got {a_task:?}")
             }
         }
         _ => "Events have same type but different values".to_string(),

@@ -5,8 +5,8 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::trace::{
-    Breakpoint, CompactTaskId, ReplayError, ReplayEvent, ReplayMode, ReplayTrace,
-    TraceMetadata, TraceReader, TraceReplayer, TraceWriter,
+    Breakpoint, CompactTaskId, ReplayError, ReplayEvent, ReplayMode, ReplayTrace, TraceMetadata,
+    TraceReader, TraceReplayer, TraceWriter,
 };
 use asupersync::types::Budget;
 use common::*;
@@ -49,7 +49,9 @@ fn trace_file_roundtrip_matches_recorded_events() {
     let temp = NamedTempFile::new().expect("tempfile");
     let path = temp.path();
     let mut writer = TraceWriter::create(path).expect("create writer");
-    writer.write_metadata(&trace.metadata).expect("write metadata");
+    writer
+        .write_metadata(&trace.metadata)
+        .expect("write metadata");
     for event in &trace.events {
         writer.write_event(event).expect("write event");
     }

@@ -1145,11 +1145,7 @@ mod tests {
             type Response = i32;
             type Error = std::convert::Infallible;
 
-            async fn call(
-                &self,
-                _cx: &Cx,
-                req: i32,
-            ) -> Result<Self::Response, Self::Error> {
+            async fn call(&self, _cx: &Cx, req: i32) -> Result<Self::Response, Self::Error> {
                 Ok(req + 1)
             }
         }
