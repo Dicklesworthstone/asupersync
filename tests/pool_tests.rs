@@ -17,9 +17,11 @@
 //! cargo test --test pool_tests pool_respects_max_size -- --nocapture
 //! ```
 
+#[macro_use]
+mod common;
+use common::*;
+
 use asupersync::sync::{GenericPool, Pool, PoolConfig, PoolError};
-use asupersync::test_utils::{init_test_logging, MockConnection, MockError};
-use asupersync::{test_complete, test_phase, test_section};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
