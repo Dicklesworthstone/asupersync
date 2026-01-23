@@ -19,9 +19,7 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::sync::{
-    Barrier, BarrierWaitResult, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore,
-};
+use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
 use asupersync::types::Budget;
 use asupersync::Cx;
 use common::*;
@@ -192,14 +190,19 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
-                let guard = rw.read(&cx).expect("read should succeed");
 
-                // Track concurrent readers
-                let prev = current.fetch_add(1, Ordering::SeqCst);
-                max_c.fetch_max(prev + 1, Ordering::SeqCst);
+                // Scope the guard so it's dropped before yield_now
+                // (RwLockReadGuard is not Send across await points)
+                {
+                    let guard = rw.read(&cx).expect("read should succeed");
 
-                // Verify value
-                assert_eq!(*guard, 42, "should read correct value");
+                    // Track concurrent readers while holding lock
+                    let prev = current.fetch_add(1, Ordering::SeqCst);
+                    max_c.fetch_max(prev + 1, Ordering::SeqCst);
+
+                    // Verify value
+                    assert_eq!(*guard, 42, "should read correct value");
+                }
 
                 yield_now().await;
 
