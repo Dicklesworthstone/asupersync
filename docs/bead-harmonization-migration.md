@@ -1,8 +1,8 @@
 # Bead Harmonization Migration Plan
 
 **Date**: 2026-01-22
-**Tracking EPIC**: asupersync-zs64
-**Status**: Executed
+**Tracking EPIC**: bd-zs64
+**Status**: In progress
 
 ## Executive Summary
 
@@ -10,7 +10,7 @@ This migration harmonizes the asupersync bead hierarchy to eliminate duplicates,
 
 ## Changes Executed
 
-### 1. I/O EPIC Consolidation (asupersync-q0om)
+### 1. I/O EPIC Consolidation (bd-q0om)
 
 **Problem**: Two overlapping Phase 2 I/O EPICs existed:
 - `asupersync-90l9` (P0): "[EPIC] Phase 2: Production I/O"
@@ -24,7 +24,7 @@ This migration harmonizes the asupersync bead hierarchy to eliminate duplicates,
 - Closed `asupersync-90l9` with migration note
 - Canonical EPIC: **asupersync-ds8**
 
-### 2. Parallel Runtime EPIC Consolidation (asupersync-hzrb)
+### 2. Parallel Runtime EPIC Consolidation (bd-hzrb)
 
 **Problem**: Two overlapping parallel runtime EPICs existed:
 - `asupersync-n5o` (P1): "[SUB-EPIC] Parallel Runtime"
@@ -35,7 +35,7 @@ This migration harmonizes the asupersync bead hierarchy to eliminate duplicates,
 - Updated n5o description to note it's a tokio-equivalence alias
 - Canonical EPIC: **asupersync-xrc**
 
-### 3. Priority Alignment (asupersync-4rpn)
+### 3. Priority Alignment (bd-4rpn)
 
 **Problem**: xrc EPIC and sub-tasks had P2 priority but parallel runtime is critical.
 
@@ -60,7 +60,19 @@ This migration harmonizes the asupersync bead hierarchy to eliminate duplicates,
 - Removed duplicate dependencies from 14o
 - Updated duplicate beads with "DUPLICATE: Superseded by X" notes
 
-### 5. Naming Standardization (asupersync-kh65)
+### 5. Naming Standardization (bd-kh65)
+
+### 6. Orphan Sub-task Migration (bd-3p6e)
+
+**Problem**: Legacy runtime tasks (8z9, ior, 9d3, c61) were floating without a Phase 1 parent.
+
+**Resolution**:
+- Re-parented to the Phase 1 hierarchy:
+  - `asupersync-9d3` → parent `asupersync-xrc.1` (Work-Stealing Scheduler)
+  - `asupersync-c61` → parent `asupersync-xrc.1` (Work-Stealing Scheduler)
+  - `asupersync-ior` → parent `asupersync-xrc.2` (Region Heap + Send Task Model)
+  - `asupersync-8z9` → parent `asupersync-xrc.2` (Region Heap + Send Task Model)
+- Legacy IDs remain for traceability; canonical hierarchy is now `xrc.*`.
 
 **Status**: Tracked for future standardization
 
@@ -76,12 +88,12 @@ This migration harmonizes the asupersync bead hierarchy to eliminate duplicates,
 
 | ID | Purpose |
 |----|---------|
-| asupersync-zs64 | Master harmonization tracking EPIC |
-| asupersync-q0om | I/O EPIC merge tracking |
-| asupersync-hzrb | Parallel runtime merge tracking |
-| asupersync-kh65 | Naming standardization tracking |
-| asupersync-4rpn | Priority alignment tracking |
-| asupersync-3p6e | Orphan migration tracking |
+| bd-zs64 | Master harmonization tracking EPIC |
+| bd-q0om | I/O EPIC merge tracking |
+| bd-hzrb | Parallel runtime merge tracking |
+| bd-kh65 | Naming standardization tracking |
+| bd-4rpn | Priority alignment tracking |
+| bd-3p6e | Orphan migration tracking |
 
 ## Verification Commands
 
