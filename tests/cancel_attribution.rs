@@ -889,14 +889,15 @@ fn e2e_severity_based_handling() {
     test_section!("Demonstrating strengthening");
 
     // When multiple cancellations occur, the more severe one should win
-    let user = CancelReason::user("user stop");
+    let mut user = CancelReason::user("user stop");
     let shutdown = CancelReason::shutdown();
 
-    let strengthened = user.strengthen(&shutdown);
-    assert_eq!(strengthened.kind, CancelKind::Shutdown);
+    let was_strengthened = user.strengthen(&shutdown);
+    assert!(was_strengthened, "should be strengthened when shutdown > user");
+    assert_eq!(user.kind, CancelKind::Shutdown);
     tracing::info!(
         original = ?CancelKind::User,
-        strengthened_to = ?strengthened.kind,
+        strengthened_to = ?user.kind,
         "Cancellation strengthened to more severe"
     );
 

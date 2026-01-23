@@ -456,8 +456,10 @@ fn pool_concurrent_access_is_safe() {
             let released = Arc::clone(&released);
 
             std::thread::spawn(move || {
+                use asupersync::sync::PooledResource;
                 for j in 0..10 {
                     if let Some(r) = pool.try_acquire() {
+                        let r: PooledResource<MockConnection> = r;
                         acquired.fetch_add(1, Ordering::SeqCst);
                         tracing::trace!(thread = %i, iteration = %j, "Acquired");
 
@@ -556,13 +558,15 @@ fn e2e_pool_under_load() {
             let failed = Arc::clone(&failed);
 
             std::thread::spawn(move || {
+                use asupersync::sync::PooledResource;
                 for j in 0..5 {
                     match pool.try_acquire() {
                         Some(conn) => {
+                            let conn: PooledResource<MockConnection> = conn;
                             tracing::trace!(
                                 worker = %i,
                                 iteration = %j,
-                                conn_id = %conn.id(),
+                                conn_id = %conn.get().id(),
                                 "Got connection"
                             );
 

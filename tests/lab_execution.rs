@@ -3,14 +3,16 @@
 #[macro_use]
 mod common;
 
+use asupersync::cx::Cx;
 use asupersync::lab::LabConfig;
 use asupersync::lab::LabRuntime;
-use asupersync::types::Budget;
+use asupersync::runtime::{DeadlineWarning, MonitorConfig, WarningReason};
+use asupersync::types::{Budget, Time};
 use common::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 fn init_test(test_name: &str) {
@@ -216,6 +218,263 @@ fn test_chaos_stats_tracking() {
         stats.delays
     );
     test_complete!("test_chaos_stats_tracking");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deadline Monitoring Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_deadline_monitor_warns_on_approaching_deadline() {
+    init_test("test_deadline_monitor_warns_on_approaching_deadline");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(42));
+
+    let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_ref = warnings.clone();
+    let config = MonitorConfig {
+        check_interval: Duration::ZERO,
+        warning_threshold_fraction: 0.2,
+        checkpoint_timeout: Duration::from_secs(3600),
+        enabled: true,
+    };
+    runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+        warnings_ref.lock().unwrap().push(warning);
+    });
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let budget = Budget::new().with_deadline(Time::from_secs(100));
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, budget, async {
+            let cx = Cx::current().expect("cx set");
+            cx.checkpoint_with("progress").expect("checkpoint");
+            yield_now().await;
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.advance_time_to(Time::from_secs(90));
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recorded = warnings.lock().unwrap();
+    assert_with_log!(
+        recorded.len() == 1,
+        "one warning emitted",
+        1usize,
+        recorded.len()
+    );
+    assert_with_log!(
+        recorded[0].reason == WarningReason::ApproachingDeadline,
+        "approaching deadline warning",
+        WarningReason::ApproachingDeadline,
+        recorded[0].reason
+    );
+    test_complete!("test_deadline_monitor_warns_on_approaching_deadline");
+}
+
+#[test]
+fn test_deadline_monitor_warns_at_threshold_boundary() {
+    init_test("test_deadline_monitor_warns_at_threshold_boundary");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(123));
+
+    let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_ref = warnings.clone();
+    let config = MonitorConfig {
+        check_interval: Duration::ZERO,
+        warning_threshold_fraction: 0.2,
+        checkpoint_timeout: Duration::from_secs(3600),
+        enabled: true,
+    };
+    runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+        warnings_ref.lock().unwrap().push(warning);
+    });
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let budget = Budget::new().with_deadline(Time::from_secs(100));
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, budget, async {
+            yield_now().await;
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.advance_time_to(Time::from_secs(80));
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recorded = warnings.lock().unwrap();
+    assert_with_log!(
+        recorded.len() == 1,
+        "one warning emitted at threshold boundary",
+        1usize,
+        recorded.len()
+    );
+    assert_with_log!(
+        recorded[0].reason == WarningReason::ApproachingDeadline,
+        "approaching deadline warning",
+        WarningReason::ApproachingDeadline,
+        recorded[0].reason
+    );
+    test_complete!("test_deadline_monitor_warns_at_threshold_boundary");
+}
+
+#[test]
+fn test_deadline_monitor_warns_on_no_progress() {
+    init_test("test_deadline_monitor_warns_on_no_progress");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(7));
+
+    let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_ref = warnings.clone();
+    let config = MonitorConfig {
+        check_interval: Duration::ZERO,
+        warning_threshold_fraction: 0.1,
+        checkpoint_timeout: Duration::ZERO,
+        enabled: true,
+    };
+    runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+        warnings_ref.lock().unwrap().push(warning);
+    });
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let budget = Budget::new().with_deadline(Time::from_secs(1000));
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, budget, async {
+            yield_now().await;
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.advance_time_to(Time::from_secs(100));
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recorded = warnings.lock().unwrap();
+    assert_with_log!(
+        recorded.len() == 1,
+        "one warning emitted",
+        1usize,
+        recorded.len()
+    );
+    assert_with_log!(
+        recorded[0].reason == WarningReason::NoProgress,
+        "no progress warning",
+        WarningReason::NoProgress,
+        recorded[0].reason
+    );
+    test_complete!("test_deadline_monitor_warns_on_no_progress");
+}
+
+#[test]
+fn test_deadline_monitor_includes_checkpoint_message() {
+    init_test("test_deadline_monitor_includes_checkpoint_message");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(99));
+
+    let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_ref = warnings.clone();
+    let config = MonitorConfig {
+        check_interval: Duration::ZERO,
+        warning_threshold_fraction: 0.2,
+        checkpoint_timeout: Duration::from_secs(3600),
+        enabled: true,
+    };
+    runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+        warnings_ref.lock().unwrap().push(warning);
+    });
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let budget = Budget::new().with_deadline(Time::from_secs(100));
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, budget, async {
+            let cx = Cx::current().expect("cx set");
+            cx.checkpoint_with("checkpoint message")
+                .expect("checkpoint");
+            yield_now().await;
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.advance_time_to(Time::from_secs(90));
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recorded = warnings.lock().unwrap();
+    assert_with_log!(
+        recorded.len() == 1,
+        "one warning emitted",
+        1usize,
+        recorded.len()
+    );
+    assert_with_log!(
+        recorded[0].last_checkpoint_message.as_deref() == Some("checkpoint message"),
+        "warning includes last checkpoint message",
+        Some("checkpoint message"),
+        recorded[0].last_checkpoint_message.as_deref()
+    );
+    test_complete!("test_deadline_monitor_includes_checkpoint_message");
+}
+
+#[test]
+fn test_deadline_monitor_e2e_stuck_task_detection() {
+    init_test("test_deadline_monitor_e2e_stuck_task_detection");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(2024));
+
+    let detected = Arc::new(AtomicBool::new(false));
+    let detected_ref = detected.clone();
+    let config = MonitorConfig {
+        check_interval: Duration::ZERO,
+        warning_threshold_fraction: 0.2,
+        checkpoint_timeout: Duration::ZERO,
+        enabled: true,
+    };
+    runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+        if matches!(
+            warning.reason,
+            WarningReason::NoProgress | WarningReason::ApproachingDeadlineNoProgress
+        ) {
+            detected_ref.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let budget = Budget::new().with_deadline(Time::from_secs(100));
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, budget, async {
+            let cx = Cx::current().expect("cx set");
+            cx.checkpoint_with("starting batch").expect("checkpoint");
+            yield_now().await;
+            // Simulate a stall: no further checkpoints.
+            yield_now().await;
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.advance_time_to(Time::from_secs(90));
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let stuck = detected.load(Ordering::SeqCst);
+    assert_with_log!(stuck, "stuck task detected", true, stuck);
+    test_complete!("test_deadline_monitor_e2e_stuck_task_detection");
 }
 
 #[test]
