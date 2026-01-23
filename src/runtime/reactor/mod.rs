@@ -127,10 +127,10 @@ pub use token::{SlabToken, TokenSlab};
 #[cfg(target_os = "linux")]
 pub use epoll::EpollReactor;
 
-#[cfg(target_os = "linux")]
-pub use uring::IoUringReactor;
 use std::io;
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+pub use uring::IoUringReactor;
 
 /// Token identifying a registered source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

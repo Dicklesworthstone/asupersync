@@ -387,7 +387,11 @@ impl InjectionReport {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut json = String::from("{\n");
-        let _ = writeln!(json, "  \"total_await_points\": {},", self.total_await_points);
+        let _ = writeln!(
+            json,
+            "  \"total_await_points\": {},",
+            self.total_await_points
+        );
         let _ = writeln!(json, "  \"tests_run\": {},", self.tests_run);
         let _ = writeln!(json, "  \"successes\": {},", self.successes);
         let _ = writeln!(json, "  \"failures\": {},", self.failures);

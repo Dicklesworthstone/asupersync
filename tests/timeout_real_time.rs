@@ -53,7 +53,10 @@ fn timeout_wakes_up_pending_future() {
             break;
         }
         std::thread::yield_now();
-        assert!(wait_start.elapsed().as_secs() <= 5, "Timeout future failed to wake up within 5 seconds (expected ~200ms)")
+        assert!(
+            wait_start.elapsed().as_secs() <= 5,
+            "Timeout future failed to wake up within 5 seconds (expected ~200ms)"
+        )
     }
 
     // Poll again: should be Ready(Err(Elapsed))

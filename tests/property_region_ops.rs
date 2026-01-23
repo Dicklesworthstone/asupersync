@@ -1244,7 +1244,10 @@ pub fn check_all_invariants(harness: &TestHarness) -> Vec<InvariantViolation> {
 pub fn assert_all_invariants(harness: &TestHarness) {
     let violations = check_all_invariants(harness);
     if !violations.is_empty() {
-        let messages: Vec<_> = violations.iter().map(std::string::ToString::to_string).collect();
+        let messages: Vec<_> = violations
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         panic!(
             "Region tree invariant violations detected:\n{}",
             messages.join("\n")
@@ -1305,7 +1308,10 @@ pub fn check_all_invariants_tracked(
 pub fn assert_all_invariants_tracked(harness: &TestHarness, tracker: &mut InvariantTracker) {
     let violations = check_all_invariants_tracked(harness, tracker);
     if !violations.is_empty() {
-        let messages: Vec<_> = violations.iter().map(std::string::ToString::to_string).collect();
+        let messages: Vec<_> = violations
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         panic!(
             "Region tree invariant violations detected:\n{}",
             messages.join("\n")

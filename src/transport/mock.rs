@@ -578,11 +578,10 @@ impl SymbolSink for MockSymbolSink {
         state.queue.push_back(delivered.clone());
         state.sent_symbols.push(delivered.clone());
 
-        if chance(&mut state.rng, duplication_rate)
-            && state.queue.len() < capacity {
-                state.queue.push_back(delivered.clone());
-                state.sent_symbols.push(delivered);
-            }
+        if chance(&mut state.rng, duplication_rate) && state.queue.len() < capacity {
+            state.queue.push_back(delivered.clone());
+            state.sent_symbols.push(delivered);
+        }
 
         let recv_waker = state.recv_wakers.pop();
         drop(state);

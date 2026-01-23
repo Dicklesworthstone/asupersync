@@ -901,7 +901,9 @@ impl ExitStatus {
 
 impl std::fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(code) = self.code { write!(f, "exit code: {code}") } else {
+        if let Some(code) = self.code {
+            write!(f, "exit code: {code}")
+        } else {
             #[cfg(unix)]
             if let Some(sig) = self.signal {
                 return write!(f, "signal: {sig}");

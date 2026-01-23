@@ -53,9 +53,9 @@ where
             let _ = tx.send(f());
         });
     if let Err(err) = thread_result {
-        return Err(io::Error::other(
-            format!("failed to spawn resolver thread: {err}"),
-        ));
+        return Err(io::Error::other(format!(
+            "failed to spawn resolver thread: {err}"
+        )));
     }
 
     loop {
@@ -65,9 +65,7 @@ where
                 yield_now().await;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(io::Error::other(
-                    "resolver thread dropped without sending",
-                ));
+                return Err(io::Error::other("resolver thread dropped without sending"));
             }
         }
     }

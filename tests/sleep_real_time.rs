@@ -52,7 +52,10 @@ fn sleep_spawns_thread_and_wakes() {
     let wait_start = std::time::Instant::now();
     while !flag.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::yield_now();
-        assert!(wait_start.elapsed().as_secs() <= 5, "Timed out waiting for waker")
+        assert!(
+            wait_start.elapsed().as_secs() <= 5,
+            "Timed out waiting for waker"
+        )
     }
 
     // Verify delay

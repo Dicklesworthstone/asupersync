@@ -219,12 +219,7 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
     test_section!("verify");
     let max = max_concurrent.load(Ordering::SeqCst);
     // Multiple readers should be able to hold lock concurrently
-    assert_with_log!(
-        max >= 2,
-        "should have concurrent readers",
-        ">= 2",
-        max
-    );
+    assert_with_log!(max >= 2, "should have concurrent readers", ">= 2", max);
 
     test_complete!("e2e_sync_010_rwlock_concurrent_readers");
 }
@@ -469,12 +464,7 @@ fn e2e_sync_030_barrier_synchronization() {
         num_tasks,
         post_count
     );
-    assert_with_log!(
-        leaders == 1,
-        "exactly one leader",
-        1,
-        leaders
-    );
+    assert_with_log!(leaders == 1, "exactly one leader", 1, leaders);
 
     test_complete!("e2e_sync_030_barrier_synchronization");
 }
@@ -639,12 +629,7 @@ fn e2e_sync_050_oncecell_single_init() {
 
     test_section!("verify");
     let inits = init_count.load(Ordering::SeqCst);
-    assert_with_log!(
-        inits == 1,
-        "should initialize exactly once",
-        1,
-        inits
-    );
+    assert_with_log!(inits == 1, "should initialize exactly once", 1, inits);
 
     test_complete!("e2e_sync_050_oncecell_single_init");
 }
@@ -662,12 +647,7 @@ fn e2e_sync_051_oncecell_get_before_init() {
     // Get before init should return None
     let value = cell.get();
     let is_none = value.is_none();
-    assert_with_log!(
-        is_none,
-        "get before init should be None",
-        true,
-        is_none
-    );
+    assert_with_log!(is_none, "get before init should be None", true, is_none);
 
     // Initialize
     let _ = futures_lite::future::block_on(cell.get_or_init(|| async { 42 }));
@@ -675,12 +655,7 @@ fn e2e_sync_051_oncecell_get_before_init() {
     // Get after init should return Some
     let value = cell.get();
     let is_some = value.is_some();
-    assert_with_log!(
-        is_some,
-        "get after init should be Some",
-        true,
-        is_some
-    );
+    assert_with_log!(is_some, "get after init should be Some", true, is_some);
     assert_eq!(*value.unwrap(), 42);
 
     test_complete!("e2e_sync_051_oncecell_get_before_init");
@@ -813,12 +788,7 @@ fn e2e_sync_101_semaphore_cancel_no_leak() {
 
     // Should have 1 permit available (no leak from cancelled acquire)
     let available = sem.available_permits();
-    assert_with_log!(
-        available == 1,
-        "no permit leak after cancel",
-        1,
-        available
-    );
+    assert_with_log!(available == 1, "no permit leak after cancel", 1, available);
 
     test_complete!("e2e_sync_101_semaphore_cancel_no_leak");
 }

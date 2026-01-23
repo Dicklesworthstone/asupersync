@@ -17,9 +17,7 @@
 mod common;
 
 use asupersync::bytes::BytesMut;
-use asupersync::codec::{
-    Decoder, Encoder, LengthDelimitedCodec, LinesCodec, LinesCodecError,
-};
+use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec, LinesCodec, LinesCodecError};
 use common::*;
 use std::io;
 
@@ -95,12 +93,18 @@ fn e2e_codec_003_lines_max_length() {
 
     test_section!("short line ok");
     let mut buf = BytesMut::from("short\n");
-    let short = codec.decode(&mut buf).expect("decode short").expect("short");
+    let short = codec
+        .decode(&mut buf)
+        .expect("decode short")
+        .expect("short");
     assert_with_log!(short == "short", "short line ok", "short", short);
 
     test_section!("exact limit ok");
     let mut buf = BytesMut::from("exactly10!\n");
-    let exact = codec.decode(&mut buf).expect("decode exact").expect("exact");
+    let exact = codec
+        .decode(&mut buf)
+        .expect("decode exact")
+        .expect("exact");
     assert_with_log!(exact == "exactly10!", "exact limit ok", "exactly10!", exact);
 
     test_section!("over limit rejected");
@@ -134,7 +138,10 @@ fn e2e_codec_004_lines_partial() {
 
     test_section!("complete with more data");
     buf.put_slice(b" line\n");
-    let complete = codec.decode(&mut buf).expect("decode complete").expect("complete");
+    let complete = codec
+        .decode(&mut buf)
+        .expect("decode complete")
+        .expect("complete");
     assert_with_log!(
         complete == "partial line",
         "completed line",
@@ -182,12 +189,19 @@ fn e2e_codec_006_lines_decode_eof() {
     let mut codec = LinesCodec::new();
     let mut buf = BytesMut::new();
     let result = codec.decode_eof(&mut buf).expect("empty eof ok");
-    assert_with_log!(result.is_none(), "empty eof is none", true, result.is_none());
+    assert_with_log!(
+        result.is_none(),
+        "empty eof is none",
+        true,
+        result.is_none()
+    );
 
     test_section!("incomplete line at eof errors");
     let mut codec = LinesCodec::new();
     let mut buf = BytesMut::from("no newline");
-    let err = codec.decode_eof(&mut buf).expect_err("incomplete should error");
+    let err = codec
+        .decode_eof(&mut buf)
+        .expect_err("incomplete should error");
     // LinesCodecError::InvalidUtf8 is used for io::Error conversion
     assert_with_log!(
         matches!(err, LinesCodecError::InvalidUtf8),
@@ -257,8 +271,16 @@ fn e2e_codec_011_length_delimited_partial() {
 
     test_section!("complete");
     buf.put_slice(b"ial_da");
-    let frame = codec.decode(&mut buf).expect("decode complete").expect("frame");
-    assert_with_log!(&frame[..] == b"partial_da", "frame content", "partial_da", &frame[..]);
+    let frame = codec
+        .decode(&mut buf)
+        .expect("decode complete")
+        .expect("frame");
+    assert_with_log!(
+        &frame[..] == b"partial_da",
+        "frame content",
+        "partial_da",
+        &frame[..]
+    );
 
     test_complete!("e2e_codec_011_length_delimited_partial");
 }
@@ -271,9 +293,7 @@ fn e2e_codec_012_length_delimited_little_endian() {
     init_test("e2e_codec_012_length_delimited_little_endian");
     test_section!("setup");
 
-    let mut codec = LengthDelimitedCodec::builder()
-        .little_endian()
-        .new_codec();
+    let mut codec = LengthDelimitedCodec::builder().little_endian().new_codec();
     let mut buf = BytesMut::new();
 
     // Frame: 4-byte LE length (5) + 5-byte payload "hello"
@@ -370,7 +390,10 @@ fn e2e_codec_015_length_delimited_field_lengths() {
     let mut buf = BytesMut::new();
     buf.put_u8(5);
     buf.put_slice(b"hello");
-    let frame = codec.decode(&mut buf).expect("decode 1-byte").expect("frame");
+    let frame = codec
+        .decode(&mut buf)
+        .expect("decode 1-byte")
+        .expect("frame");
     assert_with_log!(&frame[..] == b"hello", "1-byte field", "hello", &frame[..]);
 
     test_section!("2-byte length field");
@@ -382,7 +405,10 @@ fn e2e_codec_015_length_delimited_field_lengths() {
     buf.put_u8(0);
     buf.put_u8(5);
     buf.put_slice(b"hello");
-    let frame = codec.decode(&mut buf).expect("decode 2-byte").expect("frame");
+    let frame = codec
+        .decode(&mut buf)
+        .expect("decode 2-byte")
+        .expect("frame");
     assert_with_log!(&frame[..] == b"hello", "2-byte field", "hello", &frame[..]);
 
     test_complete!("e2e_codec_015_length_delimited_field_lengths");
@@ -450,7 +476,10 @@ fn e2e_codec_020_empty_frames() {
     buf.put_u8(0);
     buf.put_u8(0);
     buf.put_u8(0);
-    let empty = codec.decode(&mut buf).expect("decode").expect("empty frame");
+    let empty = codec
+        .decode(&mut buf)
+        .expect("decode")
+        .expect("empty frame");
     assert_with_log!(empty.is_empty(), "empty frame", true, empty.is_empty());
 
     test_complete!("e2e_codec_020_empty_frames");
@@ -639,7 +668,12 @@ fn e2e_codec_031_large_frame() {
     let frame = codec.decode(&mut buf).expect("decode").expect("frame");
 
     test_section!("verify");
-    assert_with_log!(frame.len() == frame_size, "frame size", frame_size, frame.len());
+    assert_with_log!(
+        frame.len() == frame_size,
+        "frame size",
+        frame_size,
+        frame.len()
+    );
     assert_with_log!(frame.iter().all(|&b| b == b'X'), "all X", true, true);
 
     test_complete!("e2e_codec_031_large_frame");
@@ -747,9 +781,15 @@ fn e2e_codec_050_lines_encode_multi() {
     let mut buf = BytesMut::new();
 
     test_section!("encode");
-    codec.encode("line1".to_string(), &mut buf).expect("encode 1");
-    codec.encode("line2".to_string(), &mut buf).expect("encode 2");
-    codec.encode("line3".to_string(), &mut buf).expect("encode 3");
+    codec
+        .encode("line1".to_string(), &mut buf)
+        .expect("encode 1");
+    codec
+        .encode("line2".to_string(), &mut buf)
+        .expect("encode 2");
+    codec
+        .encode("line3".to_string(), &mut buf)
+        .expect("encode 3");
 
     test_section!("verify");
     assert_with_log!(

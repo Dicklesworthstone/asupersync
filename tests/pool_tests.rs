@@ -36,7 +36,12 @@ use std::time::Duration;
 static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Factory function type for creating mock connections.
-type FactoryFuture = Pin<Box<dyn Future<Output = Result<MockConnection, Box<dyn std::error::Error + Send + Sync>>> + Send>>;
+type FactoryFuture = Pin<
+    Box<
+        dyn Future<Output = Result<MockConnection, Box<dyn std::error::Error + Send + Sync>>>
+            + Send,
+    >,
+>;
 
 /// Factory function type (function pointer that returns a future).
 type FactoryFn = fn() -> FactoryFuture;
@@ -62,7 +67,8 @@ fn mock_factory() -> FactoryFn {
 fn create_failing_connection() -> FactoryFuture {
     Box::pin(async {
         tracing::debug!("Failing factory invoked");
-        Err(Box::new(MockError("factory failure".to_string())) as Box<dyn std::error::Error + Send + Sync>)
+        Err(Box::new(MockError("factory failure".to_string()))
+            as Box<dyn std::error::Error + Send + Sync>)
     })
 }
 
@@ -110,10 +116,7 @@ fn pool_respects_max_size() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(
-        mock_factory(),
-        PoolConfig::with_max_size(3),
-    );
+    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(3));
 
     let stats = pool.stats();
     assert_eq!(stats.max_size, 3, "Max size should be 3");
@@ -313,7 +316,10 @@ fn pooled_resource_held_duration() {
     let duration = r1.held_duration();
     tracing::info!(held_ms = %duration.as_millis(), "Resource held duration");
 
-    assert!(duration >= Duration::from_millis(10), "Duration should be at least 10ms");
+    assert!(
+        duration >= Duration::from_millis(10),
+        "Duration should be at least 10ms"
+    );
 
     test_complete!("pooled_resource_held_duration");
 }
@@ -332,7 +338,10 @@ fn pool_stats_track_acquisitions() {
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(5));
 
     let stats_initial = pool.stats();
-    assert_eq!(stats_initial.total_acquisitions, 0, "Should start with 0 acquisitions");
+    assert_eq!(
+        stats_initial.total_acquisitions, 0,
+        "Should start with 0 acquisitions"
+    );
 
     test_section!("Multiple acquisitions");
 

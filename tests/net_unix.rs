@@ -155,10 +155,7 @@ fn net_uds_002_echo_roundtrip() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "echo roundtrip should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "echo roundtrip should succeed: {result:?}");
     test_complete!("net_uds_002_echo_roundtrip");
 }
 
@@ -196,10 +193,7 @@ fn net_uds_003_stream_pair() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "stream pair should work: {result:?}"
-    );
+    assert!(result.is_ok(), "stream pair should work: {result:?}");
     test_complete!("net_uds_003_stream_pair");
 }
 
@@ -236,10 +230,7 @@ fn net_uds_004_datagram_basic() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "datagram basic should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "datagram basic should succeed: {result:?}");
     test_complete!("net_uds_004_datagram_basic");
 }
 
@@ -494,10 +485,7 @@ fn net_uds_008_datagram_pair() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "datagram pair should work: {result:?}"
-    );
+    assert!(result.is_ok(), "datagram pair should work: {result:?}");
     test_complete!("net_uds_008_datagram_pair");
 }
 
@@ -527,10 +515,7 @@ fn net_uds_009_local_addr() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "local addr test should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "local addr test should succeed: {result:?}");
     test_complete!("net_uds_009_local_addr");
 }
 

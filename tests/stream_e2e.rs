@@ -19,8 +19,8 @@ use asupersync::channel::{broadcast, mpsc, watch};
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::stream::{
-    iter, merge, BroadcastStream, Chain, Collect, Filter, Fuse, Map, Merge, ReceiverStream,
-    Skip, Stream, StreamExt, Take, WatchStream, Zip,
+    iter, merge, BroadcastStream, Chain, Collect, Filter, Fuse, Map, Merge, ReceiverStream, Skip,
+    Stream, StreamExt, Take, WatchStream, Zip,
 };
 use asupersync::types::{Budget, CancelReason, Outcome, Time};
 use common::*;
@@ -115,9 +115,7 @@ fn test_map_filter_chain() {
     tracing::info!("Testing map + filter combinator chain");
 
     // Double each number, then filter evens
-    let stream = iter(vec![1, 2, 3, 4, 5])
-        .map(|x| x * 2)
-        .filter(|x| *x > 4);
+    let stream = iter(vec![1, 2, 3, 4, 5]).map(|x| x * 2).filter(|x| *x > 4);
 
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
@@ -162,8 +160,7 @@ fn test_zip_combinator() {
     let mut collected = zipped.collect::<Vec<_>>();
     let poll = Pin::new(&mut collected).poll(&mut cx);
 
-    let ok =
-        matches!(poll, Poll::Ready(ref v) if v == &vec![(1, "a"), (2, "b"), (3, "c")]);
+    let ok = matches!(poll, Poll::Ready(ref v) if v == &vec![(1, "a"), (2, "b"), (3, "c")]);
     assert_with_log!(ok, "zip", vec![(1, "a"), (2, "b"), (3, "c")], poll);
     test_complete!("test_zip_combinator");
 }
@@ -462,11 +459,21 @@ fn test_watch_stream_updates() {
     // Send updates
     tx.send(1).unwrap();
     let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
-    assert_with_log!(poll == Poll::Ready(Some(1)), "watch update 1", Some(1), poll);
+    assert_with_log!(
+        poll == Poll::Ready(Some(1)),
+        "watch update 1",
+        Some(1),
+        poll
+    );
 
     tx.send(2).unwrap();
     let poll = Pin::new(&mut stream).poll_next(&mut cx_task);
-    assert_with_log!(poll == Poll::Ready(Some(2)), "watch update 2", Some(2), poll);
+    assert_with_log!(
+        poll == Poll::Ready(Some(2)),
+        "watch update 2",
+        Some(2),
+        poll
+    );
 
     test_complete!("test_watch_stream_updates");
 }

@@ -84,12 +84,7 @@ fn test_sleep_new_creates_with_deadline() {
     let s = Sleep::new(deadline);
 
     let actual = s.deadline();
-    assert_with_log!(
-        actual == deadline,
-        "deadline matches",
-        deadline,
-        actual
-    );
+    assert_with_log!(actual == deadline, "deadline matches", deadline, actual);
     test_complete!("test_sleep_new_creates_with_deadline");
 }
 
@@ -394,7 +389,12 @@ fn test_timeout_at_with_absolute_deadline() {
 
     match poll {
         Poll::Ready(Ok(value)) => {
-            assert_with_log!(value == "success", "timeout_at returns value", "success", value);
+            assert_with_log!(
+                value == "success",
+                "timeout_at returns value",
+                "success",
+                value
+            );
         }
         other => panic!("expected Ready(Ok), got {:?}", other),
     }
@@ -410,7 +410,10 @@ fn test_elapsed_error_display() {
     let display_str = format!("{}", elapsed);
 
     assert_with_log!(
-        display_str.contains("timeout") || display_str.contains("elapsed") || display_str.contains("deadline") || display_str.contains("5"),
+        display_str.contains("timeout")
+            || display_str.contains("elapsed")
+            || display_str.contains("deadline")
+            || display_str.contains("5"),
         "Elapsed display describes timeout",
         "timeout/elapsed/deadline/5",
         display_str
@@ -756,7 +759,12 @@ fn test_missed_tick_behavior_default() {
 
     let behavior = MissedTickBehavior::default();
     let is_burst = behavior == MissedTickBehavior::Burst;
-    assert_with_log!(is_burst, "default is Burst", MissedTickBehavior::Burst, behavior);
+    assert_with_log!(
+        is_burst,
+        "default is Burst",
+        MissedTickBehavior::Burst,
+        behavior
+    );
 
     test_complete!("test_missed_tick_behavior_default");
 }
@@ -811,12 +819,7 @@ fn test_timer_wheel_basic_operations() {
 
     // Advance to deadline
     let expired = wheel.collect_expired(deadline);
-    assert_with_log!(
-        expired.len() == 1,
-        "one timer expired",
-        1,
-        expired.len()
-    );
+    assert_with_log!(expired.len() == 1, "one timer expired", 1, expired.len());
 
     // Wake the waker to verify it was the right one
     for w in expired {

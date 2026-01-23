@@ -164,7 +164,11 @@ impl InvariantTracker {
             return 0.0;
         }
 
-        let total: f64 = self.invariants.values().map(CoverageInfo::detection_rate).sum();
+        let total: f64 = self
+            .invariants
+            .values()
+            .map(CoverageInfo::detection_rate)
+            .sum();
         total / self.invariants.len() as f64
     }
 
@@ -343,7 +347,8 @@ pub fn assert_coverage(tracker: &InvariantTracker, required_invariants: &[&str])
         }
     }
 
-    assert!(missing.is_empty(), 
+    assert!(
+        missing.is_empty(),
         "Missing invariant coverage: {:?}\n\nTracked invariants:\n{}",
         missing,
         tracker.report()
@@ -355,7 +360,8 @@ pub fn assert_coverage_threshold(tracker: &InvariantTracker, min_percentage: f64
     let report = tracker.report();
     let actual = report.coverage_percentage();
 
-    assert!(actual >= min_percentage, 
+    assert!(
+        actual >= min_percentage,
         "Coverage {actual:.1}% is below threshold {min_percentage:.1}%\n\n{report}"
     );
 }

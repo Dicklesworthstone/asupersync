@@ -53,8 +53,7 @@ impl TcpListener {
             }
         }
 
-        Err(last_err
-            .unwrap_or_else(|| io::Error::other("failed to bind any address")))
+        Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
     }
 
     /// Accept connection.
@@ -163,7 +162,9 @@ impl TcpListenerApi for TcpListener {
         Self::bind(addr)
     }
 
-    fn accept(&self) -> impl std::future::Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send {
+    fn accept(
+        &self,
+    ) -> impl std::future::Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send {
         // Use poll_fn which is Send since TcpListener is not Send due to Mutex
         // We need to wrap in an async block that captures self
         let accept_fn = move || poll_fn(|cx| self.poll_accept(cx));

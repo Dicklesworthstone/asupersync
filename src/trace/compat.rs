@@ -407,7 +407,7 @@ impl CompatReader {
     }
 
     /// Returns an iterator over events, skipping unknown ones.
-    #[must_use] 
+    #[must_use]
     pub fn events(self) -> CompatEventIterator {
         CompatEventIterator {
             reader: self.reader,
@@ -571,7 +571,7 @@ impl TraceMigrator {
     }
 
     /// Migrates a trace from its current version to the target version.
-    #[must_use] 
+    #[must_use]
     pub fn migrate(
         &self,
         metadata: TraceMetadata,

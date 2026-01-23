@@ -308,10 +308,7 @@ fn cancel_kind_all_variants_constructible() {
         tracing::debug!(kind = ?kind, "CancelKind variant works");
     }
 
-    tracing::info!(
-        variant_count = 10,
-        "All CancelKind variants constructible"
-    );
+    tracing::info!(variant_count = 10, "All CancelKind variants constructible");
 
     test_complete!("cancel_kind_all_variants_constructible");
 }
@@ -645,10 +642,7 @@ fn e2e_debugging_workflow() {
 
         // Step 3: Determine actionable insight
         if root.kind == CancelKind::Deadline {
-            tracing::warn!(
-                "Root cause: Deadline at region {:?}",
-                root.origin_region
-            );
+            tracing::warn!("Root cause: Deadline at region {:?}", root.origin_region);
             tracing::warn!("Consider: Increase timeout or optimize query");
 
             // Verify the chain structure
@@ -787,23 +781,20 @@ fn e2e_metrics_collection() {
         tracing::info!("  {:?}: {}", kind, count);
     }
 
-    tracing::info!(
-        "Average chain depth: {:.2}",
-        metrics.average_chain_depth()
-    );
+    tracing::info!("Average chain depth: {:.2}", metrics.average_chain_depth());
     tracing::info!("Total cancellations: {}", metrics.count);
 
     // Verify metrics
     assert_eq!(metrics.count, 6);
     assert_eq!(*metrics.by_kind.get(&CancelKind::Timeout).unwrap_or(&0), 1);
     assert_eq!(
-        *metrics.by_kind.get(&CancelKind::ParentCancelled).unwrap_or(&0),
+        *metrics
+            .by_kind
+            .get(&CancelKind::ParentCancelled)
+            .unwrap_or(&0),
         4
     );
-    assert_eq!(
-        *metrics.by_kind.get(&CancelKind::Shutdown).unwrap_or(&0),
-        1
-    );
+    assert_eq!(*metrics.by_kind.get(&CancelKind::Shutdown).unwrap_or(&0), 1);
 
     // Root cause distribution should be different
     assert_eq!(
@@ -811,19 +802,31 @@ fn e2e_metrics_collection() {
         2
     ); // 2 timeouts
     assert_eq!(
-        *metrics.by_root_kind.get(&CancelKind::Deadline).unwrap_or(&0),
+        *metrics
+            .by_root_kind
+            .get(&CancelKind::Deadline)
+            .unwrap_or(&0),
         1
     );
     assert_eq!(
-        *metrics.by_root_kind.get(&CancelKind::PollQuota).unwrap_or(&0),
+        *metrics
+            .by_root_kind
+            .get(&CancelKind::PollQuota)
+            .unwrap_or(&0),
         1
     );
     assert_eq!(
-        *metrics.by_root_kind.get(&CancelKind::CostBudget).unwrap_or(&0),
+        *metrics
+            .by_root_kind
+            .get(&CancelKind::CostBudget)
+            .unwrap_or(&0),
         1
     );
     assert_eq!(
-        *metrics.by_root_kind.get(&CancelKind::Shutdown).unwrap_or(&0),
+        *metrics
+            .by_root_kind
+            .get(&CancelKind::Shutdown)
+            .unwrap_or(&0),
         1
     );
 
@@ -893,7 +896,10 @@ fn e2e_severity_based_handling() {
     let shutdown = CancelReason::shutdown();
 
     let was_strengthened = user.strengthen(&shutdown);
-    assert!(was_strengthened, "should be strengthened when shutdown > user");
+    assert!(
+        was_strengthened,
+        "should be strengthened when shutdown > user"
+    );
     assert_eq!(user.kind, CancelKind::Shutdown);
     tracing::info!(
         original = ?CancelKind::User,
@@ -957,7 +963,10 @@ fn integration_realistic_handler_usage() {
     // Full chain inspection for detailed logging
     let chain: Vec<_> = cx.cancel_chain().collect();
     assert_eq!(chain.len(), 2);
-    tracing::info!(chain_len = chain.len(), "Full chain available for debugging");
+    tracing::info!(
+        chain_len = chain.len(),
+        "Full chain available for debugging"
+    );
 
     test_complete!("integration_realistic_handler_usage");
 }

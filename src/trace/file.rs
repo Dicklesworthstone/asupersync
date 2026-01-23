@@ -853,7 +853,7 @@ impl TraceReader {
     ///
     /// Events are read incrementally from the file.
     /// Automatically handles decompression for compressed files.
-    #[must_use] 
+    #[must_use]
     pub fn events(self) -> TraceEventIterator {
         TraceEventIterator {
             reader: self.reader,
