@@ -51,12 +51,24 @@
 //! - Framework can add domain-specific context
 //! - All capabilities flow through the wrapped Cx
 
+use crate::combinator::select::SelectAll;
 use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
 use crate::runtime::io_driver::IoDriverHandle;
+use crate::runtime::task_handle::JoinError;
+use crate::time::{timeout, TimeSource, WallClock};
 use crate::tracing_compat::{debug, info, trace};
-use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
+use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+/// Get the current wall clock time.
+fn wall_clock_now() -> Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    CLOCK.get_or_init(WallClock::new).now()
+}
 
 /// The capability context for a task.
 ///
@@ -1063,6 +1075,63 @@ impl Cx {
         let mut inner = self.inner.write().expect("lock poisoned");
         inner.cancel_requested = true;
         inner.cancel_reason = Some(reason);
+    }
+
+    /// Races multiple futures, waiting for the first to complete.
+    ///
+    /// This method is used by the `race!` macro. It runs the provided futures
+    /// concurrently (inline, not spawned) and returns the result of the first
+    /// one to complete. Losers are dropped (cancelled).
+    pub async fn race<T>(
+        &self,
+        futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+    ) -> Result<T, JoinError> {
+        if futures.is_empty() {
+            // No futures to race?
+            // This case should be prevented by the macro, but if it happens,
+            // we probably want to return an error or hang forever.
+            // Hanging forever is consistent with `race()` identity (never).
+            // However, returning an error is more practical.
+            return Err(JoinError::Cancelled(CancelReason::race_loser()));
+        }
+        let (res, _) = SelectAll::new(futures).await;
+        Ok(res)
+    }
+
+    /// Races multiple named futures.
+    ///
+    /// Similar to `race`, but accepts names for tracing purposes.
+    pub async fn race_named<T>(
+        &self,
+        futures: Vec<(&'static str, Pin<Box<dyn Future<Output = T> + Send>>)>,
+    ) -> Result<T, JoinError> {
+        let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
+        self.race(futures).await
+    }
+
+    /// Races multiple futures with a timeout.
+    ///
+    /// If the timeout expires before any future completes, returns a cancellation error.
+    pub async fn race_timeout<T>(
+        &self,
+        duration: Duration,
+        futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+    ) -> Result<T, JoinError> {
+        let race_fut = Box::pin(self.race(futures));
+        match timeout(wall_clock_now(), duration, race_fut).await {
+            Ok(res) => res,
+            Err(_) => Err(JoinError::Cancelled(CancelReason::timeout())),
+        }
+    }
+
+    /// Races multiple named futures with a timeout.
+    pub async fn race_timeout_named<T>(
+        &self,
+        duration: Duration,
+        futures: Vec<(&'static str, Pin<Box<dyn Future<Output = T> + Send>>)>,
+    ) -> Result<T, JoinError> {
+        let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
+        self.race_timeout(duration, futures).await
     }
 
     /// Creates a [`Scope`] bound to this context's region.

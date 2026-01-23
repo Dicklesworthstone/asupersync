@@ -103,6 +103,10 @@ pub mod token;
 #[cfg(target_os = "linux")]
 pub mod epoll;
 
+#[cfg(target_os = "linux")]
+#[path = "io_uring.rs"]
+pub mod uring;
+
 #[cfg(any(
     target_os = "macos",
     target_os = "freebsd",
@@ -123,6 +127,8 @@ pub use token::{SlabToken, TokenSlab};
 #[cfg(target_os = "linux")]
 pub use epoll::EpollReactor;
 
+#[cfg(target_os = "linux")]
+pub use uring::IoUringReactor;
 use std::io;
 use std::time::Duration;
 
