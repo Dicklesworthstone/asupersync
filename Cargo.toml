@@ -60,6 +60,9 @@ asupersync-macros = { path = "asupersync-macros", optional = true }
 # Optional LZ4 compression for trace files
 lz4_flex = { version = "0.11", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.11"
+
 [dev-dependencies]
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
