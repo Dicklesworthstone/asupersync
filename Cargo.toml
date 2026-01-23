@@ -23,6 +23,8 @@ proc-macros = ["dep:asupersync-macros"]
 tower = ["dep:tower"]
 # Enable LZ4 compression for trace files.
 trace-compression = ["dep:lz4_flex"]
+# Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
+io-uring = ["dep:io-uring"]
 
 [lib]
 path = "src/lib.rs"
@@ -61,7 +63,7 @@ asupersync-macros = { path = "asupersync-macros", optional = true }
 lz4_flex = { version = "0.11", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-io-uring = "0.7.11"
+io-uring = { version = "0.7.11", optional = true }
 
 [dev-dependencies]
 proptest = "1.6"

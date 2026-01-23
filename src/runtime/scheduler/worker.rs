@@ -84,8 +84,8 @@ impl Worker {
     }
 
     #[allow(clippy::unused_self)]
-    fn execute(&self, task: TaskId) {
-        trace!(task_id = ?task, worker_id = self.id, "executing task (placeholder)");
+    fn execute(&self, _task: TaskId) {
+        trace!(task_id = ?_task, worker_id = self.id, "executing task (placeholder)");
         // Placeholder for execution logic.
         // In real implementation, this would:
         // 1. Get stored future from RuntimeState
