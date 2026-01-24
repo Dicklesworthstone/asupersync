@@ -31,11 +31,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse::Parse,
-    parse_macro_input,
-    punctuated::Punctuated,
-    spanned::Spanned,
-    Error, Expr, Lit, LitStr, Token,
+    parse::Parse, parse_macro_input, punctuated::Punctuated, spanned::Spanned, Error, Expr, Lit,
+    LitStr, Token,
 };
 
 /// Input to the spawn! macro.
@@ -108,10 +105,7 @@ impl Parse for SpawnInput {
             3 => {
                 let scope = items.remove(0);
                 let name = take_str(&items[0]).ok_or_else(|| {
-                    Error::new(
-                        items[0].span(),
-                        "spawn! name must be a string literal",
-                    )
+                    Error::new(items[0].span(), "spawn! name must be a string literal")
                 })?;
                 let future = items.remove(1);
                 (Some(scope), Some(name), future)
@@ -149,10 +143,8 @@ pub fn spawn_impl(input: TokenStream) -> TokenStream {
 }
 
 fn generate_spawn(scope: Option<&Expr>, name: Option<&LitStr>, future: &Expr) -> TokenStream2 {
-    let scope_expr: Expr = scope.map_or_else(
-        || syn::parse_quote! { scope },
-        std::clone::Clone::clone,
-    );
+    let scope_expr: Expr =
+        scope.map_or_else(|| syn::parse_quote! { scope }, std::clone::Clone::clone);
 
     // Generate the spawn call using spawn_registered which handles
     // both creating the task and storing it in the runtime state.

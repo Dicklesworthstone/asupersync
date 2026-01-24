@@ -436,9 +436,8 @@ impl TraceabilityMatrixBuilder {
         description: &str,
         category: &str,
     ) -> Self {
-        self.requirements.push(
-            SpecRequirement::new(section, description).with_category(category),
-        );
+        self.requirements
+            .push(SpecRequirement::new(section, description).with_category(category));
         self
     }
 
@@ -526,8 +525,7 @@ mod tests {
 
     #[test]
     fn test_traceability_entry_new() {
-        let entry =
-            TraceabilityEntry::new("3.2.1", "Requirement", "test_foo", "tests/foo.rs", 42);
+        let entry = TraceabilityEntry::new("3.2.1", "Requirement", "test_foo", "tests/foo.rs", 42);
         assert_eq!(entry.spec_section, "3.2.1");
         assert_eq!(entry.test_name, "test_foo");
         assert_eq!(entry.test_file, PathBuf::from("tests/foo.rs"));

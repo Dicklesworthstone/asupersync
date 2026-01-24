@@ -9,8 +9,7 @@ use quote::quote;
 use syn::{
     braced,
     parse::{Parse, ParseStream},
-    parse_macro_input,
-    Error, Expr, Ident, LitStr, Token,
+    parse_macro_input, Error, Expr, Ident, LitStr, Token,
 };
 
 /// A single race branch.
@@ -34,29 +33,23 @@ struct RaceInput {
 impl Parse for RaceInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() || input.peek(syn::token::Brace) {
-            return Err(Error::new(
-                input.span(),
-                "race! requires cx argument",
-            ));
+            return Err(Error::new(input.span(), "race! requires cx argument"));
         }
 
         let cx: Expr = input.parse()?;
 
-        let _comma: Token![,] = input.parse().map_err(|_| {
-            Error::new(
-                input.span(),
-                "expected comma after cx: race!(cx, { ... })",
-            )
-        })?;
+        let _comma: Token![,] = input
+            .parse()
+            .map_err(|_| Error::new(input.span(), "expected comma after cx: race!(cx, { ... })"))?;
 
         let mut timeout = None;
         if input.peek(Ident) {
             let ident: Ident = input.fork().parse()?;
             if ident == "timeout" {
                 let _: Ident = input.parse()?;
-                let _colon: Token![:] = input.parse().map_err(|_| {
-                    Error::new(input.span(), "expected colon after timeout")
-                })?;
+                let _colon: Token![:] = input
+                    .parse()
+                    .map_err(|_| Error::new(input.span(), "expected colon after timeout"))?;
                 timeout = Some(input.parse()?);
                 let _comma: Token![,] = input.parse().map_err(|_| {
                     Error::new(
@@ -143,10 +136,7 @@ pub fn race_impl(input: TokenStream) -> TokenStream {
 }
 
 fn generate_race(cx: &Expr, timeout: Option<&Expr>, branches: &[RaceBranch]) -> TokenStream2 {
-    let named = branches
-        .first()
-        .and_then(|b| b.name.as_ref())
-        .is_some();
+    let named = branches.first().and_then(|b| b.name.as_ref()).is_some();
 
     let boxed_futures: Vec<TokenStream2> = branches
         .iter()

@@ -42,10 +42,10 @@ pub mod tests;
 pub mod traceability;
 
 pub use bench::{
-    default_benchmarks, run_benchmark_comparison, BenchAllocSnapshot, BenchAllocStats, BenchCategory,
-    BenchComparisonResult, BenchComparisonSummary, BenchConfig, BenchOutput, BenchRunResult,
-    BenchRunSummary, BenchRunner, BenchThresholds, Benchmark, Comparison, ComparisonConfidence,
-    RegressionCheck, RegressionConfig, RegressionMetric, Stats, StatsError,
+    default_benchmarks, run_benchmark_comparison, BenchAllocSnapshot, BenchAllocStats,
+    BenchCategory, BenchComparisonResult, BenchComparisonSummary, BenchConfig, BenchOutput,
+    BenchRunResult, BenchRunSummary, BenchRunner, BenchThresholds, Benchmark, Comparison,
+    ComparisonConfidence, RegressionCheck, RegressionConfig, RegressionMetric, Stats, StatsError,
 };
 pub use logging::{LogCollector, LogConfig, LogEntry, LogLevel};
 pub use runner::{

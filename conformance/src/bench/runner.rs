@@ -75,9 +75,7 @@ impl BenchAllocSnapshot {
         Self {
             allocations: after.allocations.saturating_sub(before.allocations),
             deallocations: after.deallocations.saturating_sub(before.deallocations),
-            bytes_allocated: after
-                .bytes_allocated
-                .saturating_sub(before.bytes_allocated),
+            bytes_allocated: after.bytes_allocated.saturating_sub(before.bytes_allocated),
             bytes_deallocated: after
                 .bytes_deallocated
                 .saturating_sub(before.bytes_deallocated),
@@ -506,9 +504,10 @@ fn evaluate_regression(
     }
 
     if let Some(threshold) = config.thresholds.allocations_ratio {
-        if let (Some(current_alloc), Some(baseline_alloc)) =
-            (current.alloc_stats.as_ref(), baseline.and_then(|b| b.alloc_stats.as_ref()))
-        {
+        if let (Some(current_alloc), Some(baseline_alloc)) = (
+            current.alloc_stats.as_ref(),
+            baseline.and_then(|b| b.alloc_stats.as_ref()),
+        ) {
             metrics.push(regression_metric_count(
                 "allocations",
                 baseline_alloc.total_allocations,
@@ -544,7 +543,11 @@ fn regression_metric_count(
     threshold: f64,
 ) -> RegressionMetric {
     let ratio = if baseline == 0 {
-        if current == 0 { 1.0 } else { f64::INFINITY }
+        if current == 0 {
+            1.0
+        } else {
+            f64::INFINITY
+        }
     } else {
         current as f64 / baseline as f64
     };

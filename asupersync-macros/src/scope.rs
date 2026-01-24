@@ -66,10 +66,7 @@ struct ScopeInput {
 impl Parse for ScopeInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() || input.peek(syn::token::Brace) {
-            return Err(syn::Error::new(
-                input.span(),
-                "scope! requires cx argument",
-            ));
+            return Err(syn::Error::new(input.span(), "scope! requires cx argument"));
         }
 
         // Parse the cx expression

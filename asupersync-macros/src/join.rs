@@ -121,14 +121,15 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
 
     // Generate unique identifiers for futures and results
     let fut_idents: Vec<_> = (0..future_count)
-        .map(|i| {
-            syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site())
-        })
+        .map(|i| syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site()))
         .collect();
 
     let result_idents: Vec<_> = (0..future_count)
         .map(|i| {
-            syn::Ident::new(&format!("__join_result_{i}"), proc_macro2::Span::call_site())
+            syn::Ident::new(
+                &format!("__join_result_{i}"),
+                proc_macro2::Span::call_site(),
+            )
         })
         .collect();
 
@@ -151,7 +152,10 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
         .collect();
 
     // Generate the result tuple
-    let result_tuple: Vec<_> = result_idents.iter().map(|ident| quote! { #ident }).collect();
+    let result_tuple: Vec<_> = result_idents
+        .iter()
+        .map(|ident| quote! { #ident })
+        .collect();
 
     // If cx is provided, we can use it for future enhancements
     // For now, we just acknowledge it in a comment
@@ -222,14 +226,15 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
 
     // Generate unique identifiers for futures and results
     let fut_idents: Vec<_> = (0..future_count)
-        .map(|i| {
-            syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site())
-        })
+        .map(|i| syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site()))
         .collect();
 
     let result_idents: Vec<_> = (0..future_count)
         .map(|i| {
-            syn::Ident::new(&format!("__join_result_{i}"), proc_macro2::Span::call_site())
+            syn::Ident::new(
+                &format!("__join_result_{i}"),
+                proc_macro2::Span::call_site(),
+            )
         })
         .collect();
 
@@ -252,7 +257,10 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
         .collect();
 
     // Generate the result array
-    let result_array: Vec<_> = result_idents.iter().map(|ident| quote! { #ident }).collect();
+    let result_array: Vec<_> = result_idents
+        .iter()
+        .map(|ident| quote! { #ident })
+        .collect();
 
     // If cx is provided, we can use it for future enhancements
     let cx_comment = if cx.is_some() {
