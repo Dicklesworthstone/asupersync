@@ -176,6 +176,7 @@ thread_local! {
 }
 
 /// Guard that restores the previous Cx on drop.
+#[cfg_attr(feature = "test-internals", visibility::make(pub))]
 pub(crate) struct CurrentCxGuard {
     prev: Option<Cx>,
 }
@@ -213,6 +214,7 @@ impl Cx {
     }
 
     /// Creates a new capability context with optional observability state (internal use).
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn new_with_observability(
         region: RegionId,
         task: TaskId,
@@ -310,6 +312,7 @@ impl Cx {
     }
 
     /// Sets the current task context for the duration of the guard.
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
         let prev = CURRENT_CX.with(|slot| {
             let mut guard = slot.borrow_mut();

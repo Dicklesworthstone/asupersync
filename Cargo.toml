@@ -11,7 +11,7 @@ categories = ["asynchronous", "concurrency"]
 [features]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
-test-internals = ["dep:tracing", "dep:tracing-subscriber"]
+test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
 # OpenTelemetry metrics provider (optional).
 metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 # Enable tracing integration for structured logging and spans.
@@ -61,6 +61,8 @@ tower = { version = "0.5.3", optional = true }
 asupersync-macros = { path = "asupersync-macros", optional = true }
 # Optional LZ4 compression for trace files
 lz4_flex = { version = "0.11", optional = true }
+# Optional visibility macro for test-internals feature
+visibility = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }

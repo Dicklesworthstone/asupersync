@@ -34,7 +34,7 @@ use asupersync::cx::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::runtime::reactor::{Interest, LabReactor};
-use asupersync::runtime::{IoDriverHandle, RuntimeBuilder};
+use asupersync::runtime::{IoDriverHandle, Reactor, RuntimeBuilder};
 use asupersync::types::{Budget, RegionId, TaskId};
 use common::*;
 use futures_lite::future::block_on;
@@ -67,7 +67,8 @@ fn init_test(test_name: &str) {
 /// Create a lab reactor with Cx context for testing.
 fn setup_test_cx() -> (Arc<LabReactor>, impl Drop) {
     let reactor = Arc::new(LabReactor::new());
-    let driver = IoDriverHandle::new(Arc::clone(&reactor));
+    let reactor_dyn: Arc<dyn Reactor> = Arc::clone(&reactor) as Arc<dyn Reactor>;
+    let driver = IoDriverHandle::new(reactor_dyn);
     let cx = Cx::new_with_observability(
         RegionId::new_for_test(0, 0),
         TaskId::new_for_test(0, 0),
