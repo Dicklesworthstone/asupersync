@@ -16,7 +16,7 @@ mod imp {
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::io;
-    use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::time::Duration;
 
     const DEFAULT_ENTRIES: u32 = 256;
@@ -30,11 +30,19 @@ mod imp {
     }
 
     /// io_uring-based reactor.
-    #[derive(Debug)]
     pub struct IoUringReactor {
         ring: Mutex<IoUring>,
         registrations: Mutex<HashMap<Token, RegistrationInfo>>,
         wake_fd: OwnedFd,
+    }
+
+    impl std::fmt::Debug for IoUringReactor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("IoUringReactor")
+                .field("registrations", &self.registrations)
+                .field("wake_fd", &self.wake_fd)
+                .finish_non_exhaustive()
+        }
     }
 
     impl IoUringReactor {
@@ -314,12 +322,8 @@ mod imp {
         interest
     }
 
-    fn push_error_to_io(err: io_uring::squeue::PushError) -> io::Error {
-        match err {
-            io_uring::squeue::PushError::Full => {
-                io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
-            }
-        }
+    fn push_error_to_io(_err: io_uring::squeue::PushError) -> io::Error {
+        io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
     }
 
     fn create_eventfd() -> io::Result<OwnedFd> {

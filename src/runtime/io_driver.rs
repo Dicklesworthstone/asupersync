@@ -480,7 +480,7 @@ impl std::fmt::Debug for IoDriver {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::runtime::reactor::{Event, Interest, LabReactor, Token};

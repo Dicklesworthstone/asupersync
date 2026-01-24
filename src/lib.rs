@@ -71,6 +71,7 @@ pub mod io;
 pub mod lab;
 pub mod net;
 pub mod observability;
+#[cfg(unix)]
 pub mod process;
 pub mod record;
 pub mod runtime;

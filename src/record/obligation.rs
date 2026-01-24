@@ -228,13 +228,14 @@ impl ObligationRecord {
         self.resolved_at = Some(now);
         self.abort_reason = None;
 
+        let duration_held = now.duration_since(self.reserved_at);
         info!(
             obligation_id = ?self.id,
             kind = %self.kind,
             duration_held_ns = duration_held,
             "obligation committed"
         );
-        now.duration_since(self.reserved_at)
+        duration_held
     }
 
     /// Aborts the obligation.
@@ -248,6 +249,7 @@ impl ObligationRecord {
         self.resolved_at = Some(now);
         self.abort_reason = Some(reason);
 
+        let duration_held = now.duration_since(self.reserved_at);
         info!(
             obligation_id = ?self.id,
             kind = %self.kind,
@@ -255,7 +257,7 @@ impl ObligationRecord {
             duration_held_ns = duration_held,
             "obligation aborted"
         );
-        now.duration_since(self.reserved_at)
+        duration_held
     }
 
     /// Marks the obligation as leaked.
@@ -272,6 +274,7 @@ impl ObligationRecord {
         self.resolved_at = Some(now);
         self.abort_reason = None;
 
+        let duration_held = now.duration_since(self.reserved_at);
         error!(
             obligation_id = ?self.id,
             kind = %self.kind,
@@ -281,7 +284,7 @@ impl ObligationRecord {
             description = ?self.description,
             "OBLIGATION LEAKED: holder completed without resolving obligation"
         );
-        now.duration_since(self.reserved_at)
+        duration_held
     }
 
     /// Returns true if this obligation leaked.
