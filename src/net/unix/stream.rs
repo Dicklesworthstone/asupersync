@@ -618,7 +618,7 @@ fn send_with_ancillary_impl(
 
     if !ancillary.is_empty() {
         msg.msg_control = ancillary.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = ancillary.len();
+        msg.msg_controllen = ancillary.len() as _;
     }
 
     // SAFETY: sendmsg is a well-defined syscall and we've set up the
@@ -651,7 +651,7 @@ fn recv_with_ancillary_impl(
     msg.msg_iov = &raw mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = ancillary.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = ancillary.capacity();
+    msg.msg_controllen = ancillary.capacity() as _;
 
     // SAFETY: recvmsg is a well-defined syscall and we've set up the
     // msghdr correctly with valid pointers and lengths.
@@ -662,7 +662,7 @@ fn recv_with_ancillary_impl(
         // SAFETY: recvmsg has written msg_controllen bytes of valid
         // control message data to the buffer.
         unsafe {
-            ancillary.set_len(msg.msg_controllen, truncated);
+            ancillary.set_len(msg.msg_controllen as usize, truncated);
         }
         Ok(ret as usize)
     } else {

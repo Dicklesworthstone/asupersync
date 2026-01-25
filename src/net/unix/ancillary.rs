@@ -269,20 +269,19 @@ impl<'a> Iterator for AncillaryMessages<'a> {
                 return None;
             }
 
-            let cmsg_len = (*cmsg_ptr).cmsg_len;
+            let cmsg_len = (*cmsg_ptr).cmsg_len as usize;
             if cmsg_len < mem::size_of::<libc::cmsghdr>() {
                 return None;
             }
 
             // Advance to next message
-            let cmsg_space =
-                libc::CMSG_SPACE((cmsg_len - mem::size_of::<libc::cmsghdr>()) as u32) as usize;
+            let data_len = cmsg_len - mem::size_of::<libc::cmsghdr>();
+            let cmsg_space = libc::CMSG_SPACE(data_len as u32) as usize;
             self.current += cmsg_space.max(mem::size_of::<libc::cmsghdr>());
 
             let level = (*cmsg_ptr).cmsg_level;
             let ty = (*cmsg_ptr).cmsg_type;
             let data_ptr = libc::CMSG_DATA(cmsg_ptr);
-            let data_len = cmsg_len - mem::size_of::<libc::cmsghdr>();
 
             if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
                 let fd_count = data_len / mem::size_of::<RawFd>();
