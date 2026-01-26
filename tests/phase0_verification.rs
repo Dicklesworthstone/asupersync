@@ -556,6 +556,107 @@ fn e2e_obligation_abort_on_cancellation() {
 }
 
 // ============================================================================
+// Scenario 7: Budget exhaustion behavior (deadline-driven cancellation)
+// ============================================================================
+
+#[test]
+fn e2e_budget_exhaustion_triggers_cancellation() {
+    init_test("e2e_budget_exhaustion_triggers_cancellation");
+
+    // This test verifies that budget exhaustion (deadline exceeded) triggers
+    // proper cancellation behavior with the correct cancel reason.
+    let reason = CancelReason::deadline().with_message("budget exhausted");
+    let cleanup = reason.cleanup_budget();
+
+    let mut oracle = CancellationProtocolOracle::new();
+
+    let root = region(0);
+    let worker = task(1);
+
+    // Create region tree
+    oracle.on_region_create(root, None);
+    oracle.on_task_create(worker, root);
+
+    // Task starts running
+    oracle.on_transition(worker, &TaskState::Created, &TaskState::Running, t(0));
+
+    // Budget exhausted at t=100 (deadline exceeded) - region requests cancel
+    oracle.on_region_cancel(root, reason.clone(), t(100));
+    oracle.on_cancel_request(worker, reason.clone(), t(100));
+
+    // Task transitions through cancellation protocol
+    oracle.on_transition(
+        worker,
+        &TaskState::Running,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(100),
+    );
+
+    // Task acknowledges cancellation
+    oracle.on_cancel_ack(worker, t(105));
+    oracle.on_transition(
+        worker,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(105),
+    );
+
+    // Moves to finalizing
+    oracle.on_transition(
+        worker,
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(110),
+    );
+
+    // Task completes as cancelled
+    oracle.on_transition(
+        worker,
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Completed(Outcome::Cancelled(reason.clone())),
+        t(115),
+    );
+
+    // Verify the cancellation protocol was followed correctly
+    let ok = oracle.check().is_ok();
+    assert_with_log!(
+        ok,
+        "cancellation protocol should be valid after budget exhaustion",
+        true,
+        ok
+    );
+
+    // Verify the cancel reason indicates deadline/budget exhaustion
+    let is_deadline = reason.is_time_exceeded();
+    assert_with_log!(
+        is_deadline,
+        "cancel reason should indicate time exceeded (budget exhausted)",
+        true,
+        is_deadline
+    );
+
+    test_complete!("e2e_budget_exhaustion_triggers_cancellation");
+}
+
+// ============================================================================
 // Scenario 10: Stress test - many tasks spawn and complete
 // ============================================================================
 
