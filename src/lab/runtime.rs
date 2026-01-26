@@ -921,6 +921,63 @@ mod tests {
     }
 
     #[test]
+    fn deadline_monitor_e2e_stuck_detection() {
+        init_test("deadline_monitor_e2e_stuck_detection");
+        let mut runtime = LabRuntime::with_seed(42);
+
+        let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_clone = Arc::clone(&warnings);
+
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::ZERO,
+            enabled: true,
+        };
+
+        runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+            warnings_clone.lock().unwrap().push(warning);
+        });
+
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let budget = Budget::new().with_deadline(Time::from_secs(10));
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(root, budget, async {})
+            .expect("create task");
+
+        {
+            let task = runtime.state.tasks.get_mut(task_id.arena_index()).unwrap();
+            let cx = task.cx.as_ref().expect("task cx");
+            cx.checkpoint_with("starting work").expect("checkpoint");
+        }
+
+        runtime.step();
+
+        let warnings = warnings.lock().unwrap();
+        let warning = warnings.first().expect("expected warning");
+        crate::assert_with_log!(
+            warning.task_id == task_id,
+            "task_id",
+            task_id,
+            warning.task_id
+        );
+        crate::assert_with_log!(
+            warning.reason == WarningReason::NoProgress,
+            "reason",
+            WarningReason::NoProgress,
+            warning.reason
+        );
+        crate::assert_with_log!(
+            warning.last_checkpoint_message.as_deref() == Some("starting work"),
+            "checkpoint message",
+            Some("starting work"),
+            warning.last_checkpoint_message.as_deref()
+        );
+        crate::test_complete!("deadline_monitor_e2e_stuck_detection");
+    }
+
+    #[test]
     fn futurelock_emits_trace_event() {
         init_test("futurelock_emits_trace_event");
         let config = LabConfig::new(42)
