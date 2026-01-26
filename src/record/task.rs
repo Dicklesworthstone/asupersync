@@ -6,6 +6,7 @@
 use crate::cx::Cx;
 use crate::tracing_compat::{debug, trace};
 use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId, Time};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// The concrete outcome type stored in task records (Phase 0).
@@ -41,6 +42,88 @@ pub enum TaskState {
     },
     /// Terminal state.
     Completed(TaskOutcome),
+}
+
+/// Coarse-grained task phase for cross-thread reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TaskPhase {
+    /// Task created but not yet running.
+    Created = 0,
+    /// Task currently running.
+    Running = 1,
+    /// Cancellation requested but not yet acknowledged.
+    CancelRequested = 2,
+    /// Task running cancellation cleanup.
+    Cancelling = 3,
+    /// Task running finalizers after cleanup.
+    Finalizing = 4,
+    /// Task completed (terminal).
+    Completed = 5,
+}
+
+/// Atomic task phase cell for cross-thread state checks.
+#[derive(Debug)]
+pub struct TaskPhaseCell {
+    inner: AtomicU8,
+}
+
+impl TaskPhaseCell {
+    /// Creates a new cell initialized to the given phase.
+    #[must_use]
+    pub fn new(phase: TaskPhase) -> Self {
+        Self {
+            inner: AtomicU8::new(phase as u8),
+        }
+    }
+
+    /// Loads the current phase.
+    #[must_use]
+    pub fn load(&self) -> TaskPhase {
+        match self.inner.load(Ordering::Acquire) {
+            0 => TaskPhase::Created,
+            1 => TaskPhase::Running,
+            2 => TaskPhase::CancelRequested,
+            3 => TaskPhase::Cancelling,
+            4 => TaskPhase::Finalizing,
+            _ => TaskPhase::Completed,
+        }
+    }
+
+    /// Stores the new phase.
+    pub fn store(&self, phase: TaskPhase) {
+        self.inner.store(phase as u8, Ordering::Release);
+    }
+}
+
+/// Cross-thread wake dedup state for a task.
+#[derive(Debug, Default)]
+pub struct TaskWakeState {
+    notified: AtomicBool,
+}
+
+impl TaskWakeState {
+    /// Creates a new wake state with no pending notification.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks a pending wake and returns true if this is the first notification.
+    pub fn notify(&self) -> bool {
+        !self.notified.swap(true, Ordering::AcqRel)
+    }
+
+    /// Clears the pending wake flag.
+    pub fn clear(&self) {
+        self.notified.store(false, Ordering::Release);
+    }
+
+    /// Returns true if a wake is pending.
+    #[must_use]
+    pub fn is_notified(&self) -> bool {
+        self.notified.load(Ordering::Acquire)
+    }
 }
 
 impl TaskState {
@@ -81,6 +164,10 @@ pub struct TaskRecord {
     pub owner: RegionId,
     /// Current state of the task.
     pub state: TaskState,
+    /// Cross-thread lifecycle phase (atomic snapshot).
+    pub phase: TaskPhaseCell,
+    /// Cross-thread wake dedup state for this task.
+    pub wake_state: Arc<TaskWakeState>,
     /// Shared capability context state.
     ///
     /// This is shared with the `Cx` held by the user code.
@@ -115,6 +202,8 @@ impl TaskRecord {
             id,
             owner,
             state: TaskState::Created,
+            phase: TaskPhaseCell::new(TaskPhase::Created),
+            wake_state: Arc::new(TaskWakeState::new()),
             cx_inner: None, // Must be set via set_cx_inner or similar
             cx: None,
             created_at,
@@ -164,6 +253,12 @@ impl TaskRecord {
         }
     }
 
+    /// Returns the atomic lifecycle phase for this task.
+    #[must_use]
+    pub fn phase(&self) -> TaskPhase {
+        self.phase.load()
+    }
+
     /// Requests cancellation of this task.
     ///
     /// Returns true if the request was new (not already pending).
@@ -204,6 +299,7 @@ impl TaskRecord {
                 reason: existing_reason,
                 cleanup_budget: existing_budget,
             } => {
+                self.phase.store(TaskPhase::CancelRequested);
                 trace!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
@@ -218,11 +314,36 @@ impl TaskRecord {
             TaskState::Cancelling {
                 reason: existing_reason,
                 cleanup_budget: b,
+            } => {
+                self.phase.store(TaskPhase::Cancelling);
+                trace!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    cancel_kind = ?reason.kind,
+                    "cancel reason strengthened (in cleanup)"
+                );
+                existing_reason.strengthen(&reason);
+                let new_budget = b.combine(cleanup_budget);
+                *b = new_budget;
+                updated_reason_for_inner = Some(existing_reason.clone());
+
+                // Update shared state so user code sees tighter budget immediately
+                if let Some(inner) = &self.cx_inner {
+                    if let Ok(mut guard) = inner.write() {
+                        guard.budget = new_budget;
+                        guard.budget_baseline = new_budget;
+                    }
+                }
+                // Also update polls_remaining to respect tighter quota
+                self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
+
+                false
             }
-            | TaskState::Finalizing {
+            TaskState::Finalizing {
                 reason: existing_reason,
                 cleanup_budget: b,
             } => {
+                self.phase.store(TaskPhase::Finalizing);
                 trace!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
@@ -262,6 +383,7 @@ impl TaskRecord {
                     reason,
                     cleanup_budget,
                 };
+                self.phase.store(TaskPhase::CancelRequested);
                 updated_reason_for_inner = Some(requested_reason);
                 true
             }
@@ -291,6 +413,7 @@ impl TaskRecord {
                     "task state transition"
                 );
                 self.state = TaskState::Running;
+                self.phase.store(TaskPhase::Running);
                 true
             }
             _ => false,
@@ -320,6 +443,7 @@ impl TaskRecord {
             "task completed"
         );
         self.state = TaskState::Completed(outcome);
+        self.phase.store(TaskPhase::Completed);
         true
     }
 
@@ -372,6 +496,7 @@ impl TaskRecord {
                     reason: reason.clone(),
                     cleanup_budget: budget,
                 };
+                self.phase.store(TaskPhase::Cancelling);
                 Some(reason)
             }
             _ => None,
@@ -408,6 +533,7 @@ impl TaskRecord {
                     reason,
                     cleanup_budget: budget,
                 };
+                self.phase.store(TaskPhase::Finalizing);
                 true
             }
             _ => false,
@@ -444,6 +570,7 @@ impl TaskRecord {
             "task finalization done"
         );
         self.state = TaskState::Completed(Outcome::Cancelled(reason));
+        self.phase.store(TaskPhase::Completed);
         true
     }
 
@@ -505,6 +632,7 @@ mod tests {
     use super::*;
     use crate::error::{Error, ErrorKind};
     use crate::util::ArenaIndex;
+    use std::sync::atomic::AtomicUsize;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -517,6 +645,97 @@ mod tests {
 
     fn region() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(0, 0))
+    }
+
+    #[test]
+    fn task_phase_transitions_are_atomic() {
+        init_test("task_phase_transitions_are_atomic");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+
+        crate::assert_with_log!(
+            t.phase() == TaskPhase::Created,
+            "phase created",
+            TaskPhase::Created,
+            t.phase()
+        );
+
+        let started = t.start_running();
+        crate::assert_with_log!(started, "start_running", true, started);
+        crate::assert_with_log!(
+            t.phase() == TaskPhase::Running,
+            "phase running",
+            TaskPhase::Running,
+            t.phase()
+        );
+
+        let requested = t.request_cancel(CancelReason::timeout());
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
+        crate::assert_with_log!(
+            t.phase() == TaskPhase::CancelRequested,
+            "phase cancel requested",
+            TaskPhase::CancelRequested,
+            t.phase()
+        );
+
+        let ack = t.acknowledge_cancel();
+        crate::assert_with_log!(ack.is_some(), "acknowledge_cancel", true, ack.is_some());
+        crate::assert_with_log!(
+            t.phase() == TaskPhase::Cancelling,
+            "phase cancelling",
+            TaskPhase::Cancelling,
+            t.phase()
+        );
+
+        let cleaned = t.cleanup_done();
+        crate::assert_with_log!(cleaned, "cleanup_done", true, cleaned);
+        crate::assert_with_log!(
+            t.phase() == TaskPhase::Finalizing,
+            "phase finalizing",
+            TaskPhase::Finalizing,
+            t.phase()
+        );
+
+        let finalized = t.finalize_done();
+        crate::assert_with_log!(finalized, "finalize_done", true, finalized);
+        crate::assert_with_log!(
+            t.phase() == TaskPhase::Completed,
+            "phase completed",
+            TaskPhase::Completed,
+            t.phase()
+        );
+
+        crate::test_complete!("task_phase_transitions_are_atomic");
+    }
+
+    #[test]
+    fn wake_state_dedups_across_threads() {
+        init_test("wake_state_dedups_across_threads");
+        let state = Arc::new(TaskWakeState::new());
+        let successes = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let state = Arc::clone(&state);
+            let successes = Arc::clone(&successes);
+            handles.push(std::thread::spawn(move || {
+                if state.notify() {
+                    successes.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("thread join");
+        }
+
+        let count = successes.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "single notify wins", 1usize, count);
+        let notified = state.is_notified();
+        crate::assert_with_log!(notified, "notified true", true, notified);
+        state.clear();
+        let cleared = state.is_notified();
+        crate::assert_with_log!(!cleared, "notified cleared", false, cleared);
+        crate::test_complete!("wake_state_dedups_across_threads");
     }
 
     #[test]
