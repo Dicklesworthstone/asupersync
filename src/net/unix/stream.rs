@@ -608,7 +608,7 @@ fn send_with_ancillary_impl(
     use std::mem::MaybeUninit;
 
     let mut iov = libc::iovec {
-        iov_base: buf.as_ptr() as *mut libc::c_void,
+        iov_base: buf.as_ptr().cast::<libc::c_void>().cast_mut(),
         iov_len: buf.len(),
     };
 
@@ -628,7 +628,8 @@ fn send_with_ancillary_impl(
     if ret >= 0 {
         // Clear the ancillary data after successful send
         ancillary.clear();
-        Ok(ret as usize)
+        let len = usize::try_from(ret).unwrap_or(0);
+        Ok(len)
     } else {
         Err(io::Error::last_os_error())
     }
@@ -662,9 +663,10 @@ fn recv_with_ancillary_impl(
         // SAFETY: recvmsg has written msg_controllen bytes of valid
         // control message data to the buffer.
         unsafe {
-            ancillary.set_len(msg.msg_controllen as usize, truncated);
+            ancillary.set_len(msg.msg_controllen, truncated);
         }
-        Ok(ret as usize)
+        let len = usize::try_from(ret).unwrap_or(0);
+        Ok(len)
     } else {
         Err(io::Error::last_os_error())
     }

@@ -323,6 +323,7 @@ impl UnixDatagram {
     /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
     /// ```
     pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
+        let path = path.as_ref().to_path_buf();
         std::future::poll_fn(|cx| match self.inner.send_to(buf, &path) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -641,7 +642,8 @@ impl UnixDatagram {
             };
 
             if ret >= 0 {
-                Poll::Ready(Ok(ret as usize))
+                let len = usize::try_from(ret).unwrap_or(0);
+                Poll::Ready(Ok(len))
             } else {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::WouldBlock {
@@ -690,7 +692,8 @@ impl UnixDatagram {
                         panic!("failed to create placeholder socket address")
                     })
                 });
-                Poll::Ready(Ok((ret as usize, addr)))
+                let len = usize::try_from(ret).unwrap_or(0);
+                Poll::Ready(Ok((len, addr)))
             } else {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::WouldBlock {

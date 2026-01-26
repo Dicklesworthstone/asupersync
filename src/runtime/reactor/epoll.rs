@@ -179,6 +179,7 @@ impl Reactor for EpollReactor {
 
         // Track the registration for modify/deregister
         regs.insert(token, RegistrationInfo { raw_fd, interest });
+        drop(regs);
 
         Ok(())
     }
@@ -201,6 +202,7 @@ impl Reactor for EpollReactor {
 
         // Update our bookkeeping
         info.interest = interest;
+        drop(regs);
 
         Ok(())
     }
@@ -210,6 +212,7 @@ impl Reactor for EpollReactor {
         let info = regs
             .remove(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
+        drop(regs);
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
