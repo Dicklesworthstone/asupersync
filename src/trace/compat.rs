@@ -220,6 +220,10 @@ impl CompatReader {
             }
         }
 
+        // Read compression byte
+        let mut compression_byte = [0u8; 1];
+        reader.read_exact(&mut compression_byte)?;
+
         // Read metadata length
         let mut meta_len_bytes = [0u8; 4];
         reader.read_exact(&mut meta_len_bytes)?;
@@ -758,6 +762,7 @@ mod tests {
         file.write_all(&super::TRACE_FILE_VERSION.to_le_bytes())
             .expect("write version");
         file.write_all(&0u16.to_le_bytes()).expect("write flags");
+        file.write_all(&[0u8]).expect("write compression byte");
 
         // Write metadata
         let metadata = TraceMetadata::new(42);
@@ -832,6 +837,7 @@ mod tests {
         file.write_all(&super::TRACE_FILE_VERSION.to_le_bytes())
             .expect("write version");
         file.write_all(&0u16.to_le_bytes()).expect("write flags");
+        file.write_all(&[0u8]).expect("write compression byte");
 
         let metadata = TraceMetadata::new(42);
         let meta_bytes = rmp_serde::to_vec(&metadata).expect("serialize metadata");

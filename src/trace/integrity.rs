@@ -576,6 +576,15 @@ fn verify_header(
         return !options.fail_fast;
     }
 
+    // Read compression byte (written after flags)
+    let mut compression_byte = [0u8; 1];
+    if reader.read_exact(&mut compression_byte).is_err() {
+        result.add_issue(IntegrityIssue::IoError {
+            message: "failed to read compression byte".to_string(),
+        });
+        return false;
+    }
+
     true
 }
 
