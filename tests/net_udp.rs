@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-#![cfg(feature = "test-internals")]
 //! UDP Integration Tests
 //!
 //! End-to-end integration tests for UDP primitives with real I/O.
