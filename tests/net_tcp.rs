@@ -523,9 +523,8 @@ fn net_tcp_008_socket_options_nodelay() {
         let addr = listener.local_addr()?;
 
         // Spawn accept in background
-        let accept_handle = thread::spawn(move || {
-            block_on(async { listener.accept().await.map(|(s, _)| s) })
-        });
+        let accept_handle =
+            thread::spawn(move || block_on(async { listener.accept().await.map(|(s, _)| s) }));
 
         thread::sleep(Duration::from_millis(10));
 
@@ -565,9 +564,8 @@ fn net_tcp_009_shutdown() {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
-        let accept_handle = thread::spawn(move || {
-            block_on(async { listener.accept().await.map(|(s, _)| s) })
-        });
+        let accept_handle =
+            thread::spawn(move || block_on(async { listener.accept().await.map(|(s, _)| s) }));
 
         thread::sleep(Duration::from_millis(10));
 
@@ -587,9 +585,6 @@ fn net_tcp_009_shutdown() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "shutdown test should complete: {result:?}"
-    );
+    assert!(result.is_ok(), "shutdown test should complete: {result:?}");
     test_complete!("net_tcp_009_shutdown");
 }
