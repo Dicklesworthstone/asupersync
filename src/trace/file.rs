@@ -1486,7 +1486,10 @@ mod tests {
             return;
         };
 
-        let result = writer.write_metadata(&TraceMetadata::new(42));
+        // write_metadata buffers to BufWriter, which may not immediately
+        // write to disk. We need to finish() to flush and detect ENOSPC.
+        let _ = writer.write_metadata(&TraceMetadata::new(42));
+        let result = writer.finish();
         assert!(matches!(
             result,
             Err(TraceFileError::Io(err)) if err.raw_os_error() == Some(ENOSPC)
