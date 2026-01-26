@@ -243,20 +243,27 @@ impl Future for Notified<'_> {
 
                 // Check if we were notified.
                 if let Some(index) = self.waiter_index {
-                    let mut waiters = match self.notify.waiters.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
+                    let notified = {
+                        let mut waiters = match self.notify.waiters.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
 
-                    if index < waiters.len() && waiters[index].notified {
+                        if index < waiters.len() && waiters[index].notified {
+                            true
+                        } else {
+                            // Update waker while we have the lock.
+                            if index < waiters.len() {
+                                waiters[index].waker = Some(cx.waker().clone());
+                            }
+                            false
+                        }
+                    }; // Lock released here before cleanup.
+
+                    if notified {
                         self.cleanup();
                         self.state = NotifiedState::Done;
                         return Poll::Ready(());
-                    }
-
-                    // Update waker.
-                    if index < waiters.len() {
-                        waiters[index].waker = Some(cx.waker().clone());
                     }
                 }
 
