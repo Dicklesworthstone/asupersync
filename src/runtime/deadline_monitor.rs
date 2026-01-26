@@ -438,4 +438,83 @@ mod tests {
         );
         crate::test_complete!("warns_on_both_conditions");
     }
+
+    #[test]
+    fn no_warning_with_recent_checkpoint() {
+        init_test("no_warning_with_recent_checkpoint");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_secs(60),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(5, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1000),
+            Some(Instant::now()),
+            Some("recent checkpoint"),
+        );
+
+        monitor.check(Time::from_secs(10), std::iter::once(&task));
+
+        let recorded = warnings.lock().unwrap();
+        let empty = recorded.is_empty();
+        crate::assert_with_log!(empty, "no warnings", true, empty);
+        crate::test_complete!("no_warning_with_recent_checkpoint");
+    }
+
+    #[test]
+    fn warning_includes_checkpoint_message() {
+        init_test("warning_includes_checkpoint_message");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::ZERO,
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(6, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1000),
+            Some(Instant::now()),
+            Some("checkpoint message"),
+        );
+
+        monitor.check(Time::from_secs(10), std::iter::once(&task));
+
+        let recorded = warnings.lock().unwrap();
+        let warning = recorded.first().cloned().expect("expected warning");
+        crate::assert_with_log!(
+            warning.reason == WarningReason::NoProgress,
+            "reason",
+            WarningReason::NoProgress,
+            warning.reason
+        );
+        crate::assert_with_log!(
+            warning.last_checkpoint_message.as_deref() == Some("checkpoint message"),
+            "checkpoint message",
+            Some("checkpoint message"),
+            warning.last_checkpoint_message.as_deref()
+        );
+        crate::test_complete!("warning_includes_checkpoint_message");
+    }
 }
