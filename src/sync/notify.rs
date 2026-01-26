@@ -243,25 +243,26 @@ impl Future for Notified<'_> {
 
                 // Check if we were notified.
                 if let Some(index) = self.waiter_index {
-                    let notified = {
-                        let mut waiters = match self.notify.waiters.lock() {
-                            Ok(guard) => guard,
-                            Err(poisoned) => poisoned.into_inner(),
-                        };
+                    let mut waiters = match self.notify.waiters.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
 
-                        if index < waiters.len() && waiters[index].notified {
-                            true
-                        } else {
-                            // Update waker while we have the lock.
-                            if index < waiters.len() {
-                                waiters[index].waker = Some(cx.waker().clone());
-                            }
-                            false
+                    if index < waiters.len() {
+                        if waiters[index].notified {
+                            drop(waiters); // Release lock before cleanup.
+                            self.cleanup();
+                            self.state = NotifiedState::Done;
+                            return Poll::Ready(());
                         }
-                    }; // Lock released here before cleanup.
-
-                    if notified {
-                        self.cleanup();
+                        // Update waker while we have the lock.
+                        waiters[index].waker = Some(cx.waker().clone());
+                    } else {
+                        // Entry was popped by another task's cleanup. This only
+                        // happens if our waker was taken by notify_one/notify_waiters,
+                        // which means we were notified.
+                        drop(waiters); // Release lock.
+                        self.waiter_index = None; // Entry no longer exists.
                         self.state = NotifiedState::Done;
                         return Poll::Ready(());
                     }
