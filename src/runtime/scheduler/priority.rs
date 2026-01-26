@@ -266,6 +266,110 @@ impl Scheduler {
         self.cancel_lane.iter().any(|e| e.task == task)
     }
 
+    /// Pops only from the cancel lane.
+    ///
+    /// Use this for strict cancel-first processing in multi-worker scenarios.
+    #[must_use]
+    pub fn pop_cancel_only(&mut self) -> Option<TaskId> {
+        if let Some(entry) = self.cancel_lane.pop_front() {
+            self.scheduled.remove(&entry.task);
+            return Some(entry.task);
+        }
+        None
+    }
+
+    /// Pops only from the cancel lane with RNG tie-breaking.
+    #[must_use]
+    pub fn pop_cancel_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.cancel_lane, rng_hint) {
+            self.scheduled.remove(&task);
+            return Some(task);
+        }
+        None
+    }
+
+    /// Pops only from the timed lane.
+    ///
+    /// Use this for strict lane ordering in multi-worker scenarios.
+    #[must_use]
+    pub fn pop_timed_only(&mut self) -> Option<TaskId> {
+        if let Some(entry) = self.timed_lane.pop_front() {
+            self.scheduled.remove(&entry.task);
+            return Some(entry.task);
+        }
+        None
+    }
+
+    /// Pops only from the timed lane with RNG tie-breaking.
+    #[must_use]
+    pub fn pop_timed_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        if let Some(task) = pop_from_timed_lane_with_hint(&mut self.timed_lane, rng_hint) {
+            self.scheduled.remove(&task);
+            return Some(task);
+        }
+        None
+    }
+
+    /// Pops only from the ready lane.
+    ///
+    /// Use this for strict lane ordering in multi-worker scenarios.
+    #[must_use]
+    pub fn pop_ready_only(&mut self) -> Option<TaskId> {
+        if let Some(entry) = self.ready_lane.pop_front() {
+            self.scheduled.remove(&entry.task);
+            return Some(entry.task);
+        }
+        None
+    }
+
+    /// Pops only from the ready lane with RNG tie-breaking.
+    #[must_use]
+    pub fn pop_ready_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.ready_lane, rng_hint) {
+            self.scheduled.remove(&task);
+            return Some(task);
+        }
+        None
+    }
+
+    /// Steals a batch of ready tasks for another worker.
+    ///
+    /// Only steals from the ready lane to preserve cancel/timed priority semantics.
+    /// Returns the number of tasks stolen.
+    pub fn steal_ready_batch(&mut self, max_steal: usize) -> Vec<(TaskId, u8)> {
+        let steal_count = (self.ready_lane.len() / 2).min(max_steal).max(1);
+        let mut stolen = Vec::with_capacity(steal_count);
+
+        for _ in 0..steal_count {
+            if let Some(entry) = self.ready_lane.pop_front() {
+                self.scheduled.remove(&entry.task);
+                stolen.push((entry.task, entry.priority));
+            } else {
+                break;
+            }
+        }
+
+        stolen
+    }
+
+    /// Returns true if the cancel lane has pending tasks.
+    #[must_use]
+    pub fn has_cancel_work(&self) -> bool {
+        !self.cancel_lane.is_empty()
+    }
+
+    /// Returns true if the timed lane has pending tasks.
+    #[must_use]
+    pub fn has_timed_work(&self) -> bool {
+        !self.timed_lane.is_empty()
+    }
+
+    /// Returns true if the ready lane has pending tasks.
+    #[must_use]
+    pub fn has_ready_work(&self) -> bool {
+        !self.ready_lane.is_empty()
+    }
+
     /// Clears all scheduled tasks.
     pub fn clear(&mut self) {
         self.cancel_lane.clear();

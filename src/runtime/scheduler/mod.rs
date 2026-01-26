@@ -1,14 +1,26 @@
-//! Work-stealing scheduler.
+//! Work-stealing scheduler with 3-lane priority support.
+//!
+//! The scheduler uses three priority lanes:
+//! 1. Cancel lane (highest) - tasks with pending cancellation
+//! 2. Timed lane (EDF) - tasks with deadlines
+//! 3. Ready lane (lowest) - all other ready tasks
+//!
+//! Multi-worker scheduling preserves this strict lane ordering while
+//! supporting work-stealing for load balancing across workers.
 
+pub mod global_injector;
 pub mod global_queue;
 pub mod local_queue;
 pub mod priority;
 pub mod stealing;
+pub mod three_lane;
 pub mod worker;
 
+pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
 pub use local_queue::LocalQueue;
 pub use priority::Scheduler as PriorityScheduler;
+pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use worker::{Parker, Worker};
 
 use crate::types::TaskId;

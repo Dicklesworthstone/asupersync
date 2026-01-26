@@ -101,6 +101,9 @@ mod tests {
     use super::*;
     use crate::types::TaskId;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn task(id: u32) -> TaskId {
         TaskId::new_for_test(1, id)
@@ -174,5 +177,60 @@ mod tests {
         assert_eq!(queue.pop(), Some(task(3)));
         assert_eq!(stealer.steal(), Some(task(2)));
         assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn concurrent_owner_and_stealers_preserve_tasks() {
+        let queue = Arc::new(LocalQueue::new());
+        let total: usize = 512;
+        for id in 0..total {
+            queue.push(task(id as u32));
+        }
+
+        let counts: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..total).map(|_| AtomicUsize::new(0)).collect());
+        let stealer_threads = 4;
+        let barrier = Arc::new(Barrier::new(stealer_threads + 2));
+
+        let queue_owner = Arc::clone(&queue);
+        let counts_owner = Arc::clone(&counts);
+        let barrier_owner = Arc::clone(&barrier);
+        let owner = thread::spawn(move || {
+            barrier_owner.wait();
+            while let Some(task) = queue_owner.pop() {
+                let idx = task.0.index() as usize;
+                counts_owner[idx].fetch_add(1, Ordering::SeqCst);
+                thread::yield_now();
+            }
+        });
+
+        let mut stealers = Vec::new();
+        for _ in 0..stealer_threads {
+            let stealer = queue.stealer();
+            let counts = Arc::clone(&counts);
+            let barrier = Arc::clone(&barrier);
+            stealers.push(thread::spawn(move || {
+                barrier.wait();
+                while let Some(task) = stealer.steal() {
+                    let idx = task.0.index() as usize;
+                    counts[idx].fetch_add(1, Ordering::SeqCst);
+                    thread::yield_now();
+                }
+            }));
+        }
+
+        barrier.wait();
+        owner.join().expect("owner join");
+        for handle in stealers {
+            handle.join().expect("stealer join");
+        }
+
+        let mut total_seen = 0usize;
+        for (idx, count) in counts.iter().enumerate() {
+            let value = count.load(Ordering::SeqCst);
+            assert_eq!(value, 1, "task {idx} seen {value} times");
+            total_seen += value;
+        }
+        assert_eq!(total_seen, total);
     }
 }
