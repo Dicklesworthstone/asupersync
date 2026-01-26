@@ -13,12 +13,14 @@
 //! - [`deadline_monitor`]: Deadline monitoring for approaching timeouts
 //! - [`reactor`]: I/O reactor abstraction
 //! - [`io_driver`]: Reactor driver that dispatches readiness to wakers
+//! - [`region_heap`]: Region-owned heap allocator with quiescent reclamation
 
 pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
 pub mod io_driver;
 pub mod reactor;
+pub mod region_heap;
 pub mod scheduler;
 pub mod state;
 pub mod stored_task;
@@ -33,6 +35,7 @@ pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason};
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
+pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
 pub use scheduler::Scheduler;
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
 pub use stored_task::StoredTask;

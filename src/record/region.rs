@@ -4,7 +4,9 @@
 //! When a region closes, it waits for all children to complete.
 
 use crate::record::finalizer::{Finalizer, FinalizerStack};
+use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
+use crate::types::rref::{RRef, RRefAccess, RRefError};
 use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
@@ -139,6 +141,9 @@ struct RegionInner {
     tasks: Vec<TaskId>,
     finalizers: FinalizerStack,
     cancel_reason: Option<CancelReason>,
+    /// Region-owned heap for task allocations.
+    /// Reclaimed when the region closes to quiescence.
+    heap: RegionHeap,
 }
 
 /// Internal record for a region in the runtime.
@@ -208,6 +213,7 @@ impl RegionRecord {
                 tasks: Vec::new(),
                 finalizers: FinalizerStack::new(),
                 cancel_reason: None,
+                heap: RegionHeap::new(),
             }),
             span,
         }
@@ -359,6 +365,52 @@ impl RegionRecord {
             .is_empty()
     }
 
+    /// Allocates a value in the region's heap.
+    ///
+    /// The allocation remains valid until the region closes to quiescence.
+    /// This ensures that tasks spawned in the region can safely access the data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the heap exceeds its maximum capacity.
+    pub fn heap_alloc<T: Send + Sync + 'static>(&self, value: T) -> HeapIndex {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        inner.heap.alloc(value)
+    }
+
+    /// Returns a reference to a heap-allocated value.
+    ///
+    /// Returns `None` if the index is invalid or the type doesn't match.
+    #[must_use]
+    pub fn heap_get<T>(&self, index: HeapIndex) -> Option<T>
+    where
+        T: Clone + 'static,
+    {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.heap.get::<T>(index).cloned()
+    }
+
+    /// Executes a closure with a reference to a heap-allocated value.
+    ///
+    /// This avoids cloning by giving the closure direct access to the value
+    /// while holding the read lock.
+    ///
+    /// Returns `None` if the index is invalid or the type doesn't match.
+    pub fn heap_with<T: 'static, R, F: FnOnce(&T) -> R>(
+        &self,
+        index: HeapIndex,
+        f: F,
+    ) -> Option<R> {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.heap.get::<T>(index).map(f)
+    }
+
+    /// Returns the number of live heap allocations.
+    #[must_use]
+    pub fn heap_len(&self) -> usize {
+        self.inner.read().expect("lock poisoned").heap.len()
+    }
+
     /// Begins the closing process.
     ///
     /// Returns true if the state changed.
@@ -489,6 +541,34 @@ impl RegionRecord {
     #[must_use]
     pub fn span(&self) -> &Span {
         &self.span
+    }
+}
+
+impl RRefAccess for RegionRecord {
+    fn rref_get<T: Clone + 'static>(&self, rref: &RRef<T>) -> Result<T, RRefError> {
+        if rref.region_id() != self.id {
+            return Err(RRefError::RegionMismatch {
+                expected: rref.region_id(),
+                actual: self.id,
+            });
+        }
+        self.heap_get::<T>(rref.heap_index())
+            .ok_or(RRefError::AllocationInvalid)
+    }
+
+    fn rref_with<T: 'static, R, F: FnOnce(&T) -> R>(
+        &self,
+        rref: &RRef<T>,
+        f: F,
+    ) -> Result<R, RRefError> {
+        if rref.region_id() != self.id {
+            return Err(RRefError::RegionMismatch {
+                expected: rref.region_id(),
+                actual: self.id,
+            });
+        }
+        self.heap_with::<T, R, F>(rref.heap_index(), f)
+            .ok_or(RRefError::AllocationInvalid)
     }
 }
 
