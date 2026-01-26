@@ -12,9 +12,14 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::runtime::reactor::{Event, Events, FaultConfig, Interest, LabReactor, Token};
 use asupersync::types::Budget;
+use asupersync::util::DetRng;
 use common::*;
 use std::future::Future;
+use std::io;
+#[cfg(unix)]
+use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -72,6 +77,16 @@ impl Future for YieldN {
 
 async fn yield_n(n: usize) {
     YieldN { remaining: n }.await;
+}
+
+#[cfg(unix)]
+struct MockSource;
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for MockSource {
+    fn as_raw_fd(&self) -> RawFd {
+        0
+    }
 }
 
 // ============================================================================
@@ -334,6 +349,126 @@ fn test_lab_virtual_time_determinism() {
     );
 
     test_complete!("test_lab_virtual_time_determinism");
+}
+
+// ============================================================================
+// Test: Lab Reactor Event Ordering Determinism
+// ============================================================================
+
+#[cfg(unix)]
+fn run_reactor_event_order(seed: u64) -> (Vec<usize>, Vec<usize>) {
+    let reactor = LabReactor::new();
+    let source = MockSource;
+
+    let tokens: Vec<Token> = (0..5).map(Token::new).collect();
+    for token in &tokens {
+        reactor
+            .register(&source, *token, Interest::READABLE)
+            .expect("register");
+    }
+
+    let mut rng = DetRng::new(seed);
+    let mut order: Vec<usize> = (0..tokens.len()).collect();
+    for i in (1..order.len()).rev() {
+        let j = rng.next_usize(i + 1);
+        order.swap(i, j);
+    }
+
+    for idx in &order {
+        let token = tokens[*idx];
+        reactor.inject_event(token, Event::readable(token), std::time::Duration::from_millis(1));
+    }
+
+    let mut events = Events::with_capacity(16);
+    reactor
+        .poll(&mut events, Some(std::time::Duration::from_millis(1)))
+        .expect("poll");
+
+    let observed: Vec<usize> = events.iter().map(|event| event.token.0).collect();
+    (order, observed)
+}
+
+#[cfg(unix)]
+#[test]
+fn test_lab_reactor_event_ordering_determinism() {
+    init_test("test_lab_reactor_event_ordering_determinism");
+    test_section!("same_seed_ordering");
+
+    let seed = 4242;
+    let (order1, observed1) = run_reactor_event_order(seed);
+    let (order2, observed2) = run_reactor_event_order(seed);
+
+    assert_with_log!(
+        order1 == order2,
+        "Injection order should be deterministic",
+        order1,
+        order2
+    );
+    assert_with_log!(
+        observed1 == observed2,
+        "Observed order should be deterministic",
+        observed1,
+        observed2
+    );
+    assert_with_log!(
+        observed1 == order1,
+        "Observed order should follow injection order",
+        order1,
+        observed1
+    );
+
+    test_complete!("test_lab_reactor_event_ordering_determinism");
+}
+
+// ============================================================================
+// Test: Fault Injection Determinism
+// ============================================================================
+
+#[cfg(unix)]
+fn run_fault_stats(seed: u64) -> (u64, u64, u64) {
+    let reactor = LabReactor::new();
+    let source = MockSource;
+    let token = Token::new((seed % 1024) as usize + 1);
+
+    reactor
+        .register(&source, token, Interest::READABLE)
+        .expect("register");
+
+    let config = FaultConfig::new()
+        .with_error_probability(0.4)
+        .with_error_kinds(vec![io::ErrorKind::ConnectionReset]);
+    reactor.set_fault_config(token, config).expect("set fault");
+
+    for _ in 0..50 {
+        reactor.inject_event(token, Event::readable(token), std::time::Duration::from_millis(1));
+    }
+
+    let mut events = Events::with_capacity(64);
+    reactor
+        .poll(&mut events, Some(std::time::Duration::from_millis(1)))
+        .expect("poll");
+
+    reactor.fault_stats(token).unwrap_or((0, 0, 0))
+}
+
+#[cfg(unix)]
+#[test]
+fn test_lab_fault_injection_determinism() {
+    init_test("test_lab_fault_injection_determinism");
+    test_section!("same_seed_faults");
+
+    let seed = 9001;
+    let stats1 = run_fault_stats(seed);
+    let stats2 = run_fault_stats(seed);
+
+    assert_with_log!(
+        stats1 == stats2,
+        "Fault injection stats should be deterministic",
+        stats1,
+        stats2
+    );
+
+    test_complete!("test_lab_fault_injection_determinism");
 }
 
 // ============================================================================

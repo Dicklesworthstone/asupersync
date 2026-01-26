@@ -397,3 +397,207 @@ fn determinism_two_phase_obligation_trace() {
     });
     test_complete!("determinism_two_phase_obligation_trace");
 }
+
+// ============================================================================
+// Scenario 1: Basic lifecycle (spawn → complete)
+// ============================================================================
+
+#[test]
+fn e2e_basic_lifecycle_spawn_complete() {
+    init_test("e2e_basic_lifecycle_spawn_complete");
+    let mut suite = OracleSuite::new();
+
+    let root = region(0);
+    let worker = task(1);
+
+    // Create root region
+    suite.region_tree.on_region_create(root, None, t(0));
+    suite.quiescence.on_region_create(root, None);
+
+    // Spawn task in region
+    suite.task_leak.on_spawn(worker, root, t(10));
+    suite.quiescence.on_spawn(worker, root);
+
+    // Task completes successfully
+    suite.task_leak.on_complete(worker, t(20));
+    suite.quiescence.on_task_complete(worker);
+
+    // Region closes
+    suite.quiescence.on_region_close(root, t(30));
+    suite.task_leak.on_region_close(root, t(30));
+
+    // Verify all invariants
+    let violations = suite.check_all(t(40));
+    assert_with_log!(
+        violations.is_empty(),
+        "expected no violations in basic lifecycle",
+        "empty",
+        violations
+    );
+    test_complete!("e2e_basic_lifecycle_spawn_complete");
+}
+
+// ============================================================================
+// Scenario 6: Obligation abort on cancellation
+// ============================================================================
+
+#[test]
+fn e2e_obligation_abort_on_cancellation() {
+    init_test("e2e_obligation_abort_on_cancellation");
+    let mut suite = OracleSuite::new();
+
+    let root = region(0);
+    let worker = task(1);
+    let obligation = asupersync::types::ObligationId::new_for_test(0, 0);
+
+    // Create region and spawn task
+    suite.region_tree.on_region_create(root, None, t(0));
+    suite.quiescence.on_region_create(root, None);
+    suite.task_leak.on_spawn(worker, root, t(5));
+    suite.quiescence.on_spawn(worker, root);
+
+    // Task reserves an obligation (e.g., SendPermit)
+    suite
+        .obligation_leak
+        .on_reserve(obligation, worker, root, ObligationKind::SendPermit, t(10));
+
+    // Cancellation is requested while holding the permit
+    let reason = CancelReason::timeout();
+    suite.cancellation_protocol.on_region_cancel(root, reason.clone(), t(15));
+
+    // Obligation is aborted (not leaked) due to cancellation
+    suite.obligation_leak.on_abort(obligation, t(20));
+
+    // Task completes as cancelled
+    suite.task_leak.on_complete(worker, t(25));
+    suite.quiescence.on_task_complete(worker);
+
+    // Region closes
+    suite.quiescence.on_region_close(root, t(30));
+    suite.task_leak.on_region_close(root, t(30));
+
+    // Verify no obligation leaks
+    let violations = suite.check_all(t(40));
+    assert_with_log!(
+        violations.is_empty(),
+        "expected no violations - obligation should be aborted not leaked",
+        "empty",
+        violations
+    );
+    test_complete!("e2e_obligation_abort_on_cancellation");
+}
+
+// ============================================================================
+// Scenario 10: Stress test - many tasks spawn and complete
+// ============================================================================
+
+#[test]
+fn e2e_stress_many_tasks_no_leaks() {
+    init_test("e2e_stress_many_tasks_no_leaks");
+    let mut suite = OracleSuite::new();
+
+    let root = region(0);
+    let num_tasks = 100;
+
+    // Create root region
+    suite.region_tree.on_region_create(root, None, t(0));
+    suite.quiescence.on_region_create(root, None);
+
+    // Spawn many tasks
+    for i in 1..=num_tasks {
+        let worker = task(i);
+        let spawn_time = t((i * 10) as u64);
+        suite.task_leak.on_spawn(worker, root, spawn_time);
+        suite.quiescence.on_spawn(worker, root);
+    }
+
+    // All tasks complete
+    for i in 1..=num_tasks {
+        let worker = task(i);
+        let complete_time = t((1000 + i * 10) as u64);
+        suite.task_leak.on_complete(worker, complete_time);
+        suite.quiescence.on_task_complete(worker);
+    }
+
+    // Region closes
+    suite.quiescence.on_region_close(root, t(3000));
+    suite.task_leak.on_region_close(root, t(3000));
+
+    // Verify no task leaks after stress
+    let violations = suite.check_all(t(3100));
+    assert_with_log!(
+        violations.is_empty(),
+        "expected no violations after stress test with {} tasks",
+        "empty",
+        violations
+    );
+    test_complete!("e2e_stress_many_tasks_no_leaks");
+}
+
+// ============================================================================
+// Scenario: Nested regions with multiple children (stress variant)
+// ============================================================================
+
+#[test]
+fn e2e_stress_nested_regions_multiple_children() {
+    init_test("e2e_stress_nested_regions_multiple_children");
+    let mut suite = OracleSuite::new();
+
+    let root = region(0);
+    let num_children = 10;
+    let tasks_per_child = 5;
+
+    // Create root region
+    suite.region_tree.on_region_create(root, None, t(0));
+    suite.quiescence.on_region_create(root, None);
+
+    // Create multiple child regions, each with multiple tasks
+    for child_idx in 1..=num_children {
+        let child = region(child_idx);
+        let child_create_time = t((child_idx * 100) as u64);
+
+        suite
+            .region_tree
+            .on_region_create(child, Some(root), child_create_time);
+        suite.quiescence.on_region_create(child, Some(root));
+
+        // Spawn tasks in this child region
+        for task_idx in 1..=tasks_per_child {
+            let task_id = (child_idx * 100 + task_idx) as u32;
+            let worker = task(task_id);
+            let spawn_time = t((child_idx * 100 + task_idx * 10) as u64);
+
+            suite.task_leak.on_spawn(worker, child, spawn_time);
+            suite.quiescence.on_spawn(worker, child);
+        }
+
+        // All tasks in this child complete
+        for task_idx in 1..=tasks_per_child {
+            let task_id = (child_idx * 100 + task_idx) as u32;
+            let worker = task(task_id);
+            let complete_time = t((5000 + child_idx * 100 + task_idx * 10) as u64);
+
+            suite.task_leak.on_complete(worker, complete_time);
+            suite.quiescence.on_task_complete(worker);
+        }
+
+        // Child region closes
+        let child_close_time = t((10000 + child_idx * 100) as u64);
+        suite.quiescence.on_region_close(child, child_close_time);
+        suite.task_leak.on_region_close(child, child_close_time);
+    }
+
+    // Root region closes
+    suite.quiescence.on_region_close(root, t(20000));
+    suite.task_leak.on_region_close(root, t(20000));
+
+    // Verify all invariants
+    let violations = suite.check_all(t(21000));
+    assert_with_log!(
+        violations.is_empty(),
+        "expected no violations in nested regions stress test",
+        "empty",
+        violations
+    );
+    test_complete!("e2e_stress_nested_regions_multiple_children");
+}
