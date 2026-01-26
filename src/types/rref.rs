@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn rref_is_copy_and_clone() {
         let region_id = test_region_id();
-        let record = RegionRecord::new(region_id, None, Budget::UNLIMITED);
+        let record = RegionRecord::new(region_id, None, Budget::INFINITE);
         let index = record.heap_alloc(42u32);
         let rref = RRef::<u32>::new(region_id, index);
 
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn rref_equality() {
         let region_id = test_region_id();
-        let record = RegionRecord::new(region_id, None, Budget::UNLIMITED);
+        let record = RegionRecord::new(region_id, None, Budget::INFINITE);
 
         let index1 = record.heap_alloc(1u32);
         let index2 = record.heap_alloc(2u32);
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn rref_accessors() {
         let region_id = test_region_id();
-        let record = RegionRecord::new(region_id, None, Budget::UNLIMITED);
+        let record = RegionRecord::new(region_id, None, Budget::INFINITE);
         let index = record.heap_alloc("hello".to_string());
         let rref = RRef::<String>::new(region_id, index);
 
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn rref_debug_format() {
         let region_id = test_region_id();
-        let record = RegionRecord::new(region_id, None, Budget::UNLIMITED);
+        let record = RegionRecord::new(region_id, None, Budget::INFINITE);
         let index = record.heap_alloc(42u32);
         let rref = RRef::<u32>::new(region_id, index);
 
