@@ -459,14 +459,14 @@ fn e2e_obligation_abort_on_cancellation() {
     // Task reserves an obligation (e.g., SendPermit)
     suite
         .obligation_leak
-        .on_reserve(obligation, worker, root, ObligationKind::SendPermit, t(10));
+        .on_create(obligation, ObligationKind::SendPermit, worker, root);
 
     // Cancellation is requested while holding the permit
     let reason = CancelReason::timeout();
     suite.cancellation_protocol.on_region_cancel(root, reason.clone(), t(15));
 
     // Obligation is aborted (not leaked) due to cancellation
-    suite.obligation_leak.on_abort(obligation, t(20));
+    suite.obligation_leak.on_resolve(obligation, ObligationState::Aborted);
 
     // Task completes as cancelled
     suite.task_leak.on_complete(worker, t(25));

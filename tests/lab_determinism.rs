@@ -13,6 +13,7 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::reactor::{Event, Events, FaultConfig, Interest, LabReactor, Token};
+use asupersync::runtime::Reactor;
 use asupersync::types::Budget;
 use asupersync::util::DetRng;
 use common::*;
