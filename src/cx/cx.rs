@@ -309,11 +309,7 @@ impl Cx {
     /// task/region identifiers outside the scheduler.
     #[must_use]
     pub fn for_request_with_budget(budget: Budget) -> Self {
-        Self::new(
-            RegionId::new_ephemeral(),
-            TaskId::new_ephemeral(),
-            budget,
-        )
+        Self::new(RegionId::new_ephemeral(), TaskId::new_ephemeral(), budget)
     }
 
     /// Creates a request-scoped capability context with an infinite budget.

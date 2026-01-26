@@ -1034,7 +1034,7 @@ where
         self.process_returns();
 
         let state = self.state.lock().expect("pool state lock poisoned");
-        let stats = PoolStats {
+        let pool_stats = PoolStats {
             active: state.active,
             idle: state.idle.len(),
             total: state.active + state.idle.len(),
@@ -1047,10 +1047,10 @@ where
         // Update metrics gauges
         #[cfg(feature = "metrics")]
         if let Some(ref metrics) = self.metrics {
-            metrics.update_gauges(&stats);
+            metrics.update_gauges(&pool_stats);
         }
 
-        stats
+        pool_stats
     }
 
     fn close(&self) -> PoolFuture<'_, ()> {
