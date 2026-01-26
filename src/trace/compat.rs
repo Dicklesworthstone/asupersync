@@ -220,9 +220,11 @@ impl CompatReader {
             }
         }
 
-        // Read compression byte
-        let mut compression_byte = [0u8; 1];
-        reader.read_exact(&mut compression_byte)?;
+        // Read compression byte (only in version 2+)
+        if file_version >= 2 {
+            let mut compression_byte = [0u8; 1];
+            reader.read_exact(&mut compression_byte)?;
+        }
 
         // Read metadata length
         let mut meta_len_bytes = [0u8; 4];
@@ -267,7 +269,13 @@ impl CompatReader {
         reader.read_exact(&mut event_count_bytes)?;
         let event_count = u64::from_le_bytes(event_count_bytes);
 
-        let events_start_pos = HEADER_SIZE as u64 + meta_len as u64 + 8;
+        // Header size depends on version (version 2+ has compression byte)
+        let header_size = if file_version >= 2 {
+            HEADER_SIZE
+        } else {
+            HEADER_SIZE - 1
+        };
+        let events_start_pos = header_size as u64 + meta_len as u64 + 8;
 
         Ok(Self {
             reader,
