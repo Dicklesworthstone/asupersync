@@ -17,7 +17,9 @@ mod common;
 
 use asupersync::channel::{broadcast, mpsc, watch};
 use asupersync::cx::Cx;
-use asupersync::stream::{iter, merge, BroadcastStream, ReceiverStream, Stream, StreamExt, WatchStream};
+use asupersync::stream::{
+    iter, merge, BroadcastStream, ReceiverStream, Stream, StreamExt, WatchStream,
+};
 use common::*;
 use std::cell::RefCell;
 use std::future::Future;

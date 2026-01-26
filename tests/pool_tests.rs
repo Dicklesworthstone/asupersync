@@ -30,13 +30,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Helper to acquire a resource using async acquire().
-fn acquire_resource<R, F>(
-    pool: &GenericPool<R, F>,
-) -> asupersync::sync::PooledResource<R>
+fn acquire_resource<R, F>(pool: &GenericPool<R, F>) -> asupersync::sync::PooledResource<R>
 where
     R: Send + 'static,
-    F: Fn() -> Pin<Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>
-        + Send
+    F: Fn() -> Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
         + Sync
         + 'static,
 {
@@ -727,7 +726,9 @@ fn pool_reuses_returned_resources() {
     test_section!("Second acquisition (should reuse)");
 
     // Now try_acquire should work since resource is in idle pool
-    let r2 = pool.try_acquire().expect("second acquire should succeed (resource should be idle)");
+    let r2 = pool
+        .try_acquire()
+        .expect("second acquire should succeed (resource should be idle)");
     let second_id = r2.id();
     tracing::info!(id = %second_id, "Second resource acquired");
 
