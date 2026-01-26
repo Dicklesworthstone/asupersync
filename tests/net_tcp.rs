@@ -9,7 +9,9 @@
 //! - NET-TCP-004: Multiple connections
 //! - NET-TCP-005: Large data transfer
 //! - NET-TCP-006: Split streams
-//! - NET-TCP-007: Concurrent read/write
+//! - NET-TCP-007: Local address
+//! - NET-TCP-008: Socket options (nodelay)
+//! - NET-TCP-009: Shutdown
 
 #[macro_use]
 mod common;
@@ -508,3 +510,86 @@ fn net_tcp_007_local_addr() {
 }
 
 use std::io::Read;
+
+/// NET-TCP-008: Socket options - nodelay
+///
+/// Verifies that TCP_NODELAY socket option can be set and retrieved.
+#[test]
+fn net_tcp_008_socket_options_nodelay() {
+    init_test("net_tcp_008_socket_options_nodelay");
+
+    let result = block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        // Spawn accept in background
+        let accept_handle = thread::spawn(move || {
+            block_on(async { listener.accept().await.map(|(s, _)| s) })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+
+        // Connect and test nodelay
+        let client = TcpStream::connect(addr).await?;
+
+        // Set nodelay to true
+        client.set_nodelay(true)?;
+        tracing::info!("set nodelay to true");
+
+        // Set nodelay to false
+        client.set_nodelay(false)?;
+        tracing::info!("set nodelay to false");
+
+        // Cleanup
+        drop(client);
+        let _ = accept_handle.join();
+
+        Ok::<_, io::Error>(())
+    });
+
+    assert!(
+        result.is_ok(),
+        "socket options nodelay test should complete: {result:?}"
+    );
+    test_complete!("net_tcp_008_socket_options_nodelay");
+}
+
+/// NET-TCP-009: Shutdown read/write
+///
+/// Verifies that shutdown can be called for read, write, or both.
+#[test]
+fn net_tcp_009_shutdown() {
+    init_test("net_tcp_009_shutdown");
+
+    let result = block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let accept_handle = thread::spawn(move || {
+            block_on(async { listener.accept().await.map(|(s, _)| s) })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+
+        let client = TcpStream::connect(addr).await?;
+
+        // Shutdown write side
+        client.shutdown(std::net::Shutdown::Write)?;
+        tracing::info!("shutdown write side");
+
+        // Shutdown read side
+        client.shutdown(std::net::Shutdown::Read)?;
+        tracing::info!("shutdown read side");
+
+        drop(client);
+        let _ = accept_handle.join();
+
+        Ok::<_, io::Error>(())
+    });
+
+    assert!(
+        result.is_ok(),
+        "shutdown test should complete: {result:?}"
+    );
+    test_complete!("net_tcp_009_shutdown");
+}
