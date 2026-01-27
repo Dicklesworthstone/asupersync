@@ -344,6 +344,12 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    static CURRENT_TIME: AtomicU64 = AtomicU64::new(0);
+
+    fn get_time() -> Time {
+        Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst))
+    }
+
     #[test]
     fn new_creates_sleep_with_deadline() {
         init_test("new_creates_sleep_with_deadline");
@@ -420,11 +426,6 @@ mod tests {
     #[test]
     fn with_time_getter() {
         init_test("with_time_getter");
-        static CURRENT_TIME: AtomicU64 = AtomicU64::new(0);
-
-        fn get_time() -> Time {
-            Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst))
-        }
 
         let sleep = Sleep::with_time_getter(Time::from_secs(5), get_time);
 
