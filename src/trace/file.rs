@@ -1379,7 +1379,8 @@ mod tests {
         write_trace(path, &metadata, &events).expect("write trace");
 
         let file_size = std::fs::metadata(path).expect("metadata").len();
-        let bytes_per_event = file_size as f64 / 1000.0;
+        let file_size = u32::try_from(file_size).expect("trace file size fits u32 for test");
+        let bytes_per_event = f64::from(file_size) / 1000.0;
 
         // Should be well under 64 bytes per event
         assert!(

@@ -254,8 +254,8 @@ pub fn timeout_at<F>(deadline: Time, future: F) -> TimeoutFuture<F> {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::future::{pending, ready};
     use std::future::Future;
+    use std::future::{pending, ready};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
