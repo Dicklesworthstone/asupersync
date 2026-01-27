@@ -549,9 +549,26 @@ mod tests {
         }
     }
 
+    async fn await_handle(cx: &Cx, handle: &LeafHandle) -> Result<LeafOutcome, JoinError> {
+        loop {
+            match handle.try_join() {
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => {
+                    if cx.checkpoint().is_err() {
+                        return Err(JoinError::Cancelled(
+                            crate::types::CancelReason::parent_cancelled(),
+                        ));
+                    }
+                    yield_n(1).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     async fn join_branch(cx: &Cx, left: &LeafHandle, right: &LeafHandle) -> BTreeSet<&'static str> {
-        let left_result = left.join(cx).await;
-        let right_result = right.join(cx).await;
+        let left_result = await_handle(cx, left).await;
+        let right_result = await_handle(cx, right).await;
         let mut set = BTreeSet::new();
         if let Some(label) = result_to_label(&left_result) {
             set.insert(label);
@@ -563,19 +580,39 @@ mod tests {
     }
 
     async fn race_branch(cx: &Cx, left: LeafHandle, right: LeafHandle) -> Option<&'static str> {
-        let winner =
-            crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
-        match winner {
-            crate::combinator::Either::Left(result) => {
-                right.abort();
-                let _ = right.join(cx).await;
-                result_to_label(&result)
+        loop {
+            match left.try_join() {
+                Ok(Some(result)) => {
+                    right.abort();
+                    let _ = await_handle(cx, &right).await;
+                    return result_to_label(&Ok(result));
+                }
+                Err(err) => {
+                    right.abort();
+                    let _ = await_handle(cx, &right).await;
+                    return result_to_label(&Err(err));
+                }
+                Ok(None) => {}
             }
-            crate::combinator::Either::Right(result) => {
-                left.abort();
-                let _ = left.join(cx).await;
-                result_to_label(&result)
+
+            match right.try_join() {
+                Ok(Some(result)) => {
+                    left.abort();
+                    let _ = await_handle(cx, &left).await;
+                    return result_to_label(&Ok(result));
+                }
+                Err(err) => {
+                    left.abort();
+                    let _ = await_handle(cx, &left).await;
+                    return result_to_label(&Err(err));
+                }
+                Ok(None) => {}
             }
+
+            if cx.checkpoint().is_err() {
+                return None;
+            }
+            yield_n(1).await;
         }
     }
 
@@ -666,15 +703,15 @@ mod tests {
                             crate::combinator::Either::Left(result) => {
                                 a2_handle.abort();
                                 c_handle.abort();
-                                let _ = a2_handle.join(&cx).await;
-                                let _ = c_handle.join(&cx).await;
+                                let _ = await_handle(&cx, &a2_handle).await;
+                                let _ = await_handle(&cx, &c_handle).await;
                                 result
                             }
                             crate::combinator::Either::Right(result) => {
                                 a1_handle.abort();
                                 b_handle.abort();
-                                let _ = a1_handle.join(&cx).await;
-                                let _ = b_handle.join(&cx).await;
+                                let _ = await_handle(&cx, &a1_handle).await;
+                                let _ = await_handle(&cx, &b_handle).await;
                                 result
                             }
                         }
@@ -705,7 +742,8 @@ mod tests {
                     let driver_future = async move {
                         let cx = Cx::current().expect("cx set");
                         let race = race_branch(&cx, b_handle, c_handle);
-                        let join = Join2::new(Box::pin(a_handle.join(&cx)), Box::pin(race));
+                        let join =
+                            Join2::new(Box::pin(await_handle(&cx, &a_handle)), Box::pin(race));
                         let (left_result, right_label) = join.await;
                         let mut set = BTreeSet::new();
                         if let Some(label) = result_to_label(&left_result) {

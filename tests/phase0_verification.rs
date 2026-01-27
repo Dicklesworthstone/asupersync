@@ -21,7 +21,7 @@ use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
 use futures_lite::future;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 fn region(n: u32) -> RegionId {
@@ -813,6 +813,78 @@ fn plan_rewrite_equivalence_lab_runtime() {
     test_complete!("plan_rewrite_equivalence_lab_runtime");
 }
 
+#[test]
+fn plan_rewrite_equivalence_lab_runtime_nonbinary() {
+    init_test("plan_rewrite_equivalence_lab_runtime_nonbinary");
+    test_section!("build plans");
+    let original = build_race_join_plan_nonbinary();
+    let mut rewritten = build_race_join_plan_nonbinary();
+    let rules = [RewriteRule::DedupRaceJoin];
+    let report = rewritten.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &rules);
+    assert_with_log!(
+        report.steps().len() == 1,
+        "rewrite applied",
+        1,
+        report.steps().len()
+    );
+
+    test_section!("determinism");
+    let config = LabConfig::new(321).trace_capacity(4096);
+    assert_deterministic(config.clone(), |runtime| {
+        let _ = run_plan(runtime, &original);
+    });
+    assert_deterministic(config.clone(), |runtime| {
+        let _ = run_plan(runtime, &rewritten);
+    });
+
+    test_section!("compare outcomes");
+    let original_outcome = run_plan(&mut LabRuntime::new(config.clone()), &original);
+    let rewritten_outcome = run_plan(&mut LabRuntime::new(config), &rewritten);
+    assert_with_log!(
+        original_outcome == rewritten_outcome,
+        "rewrite preserves outcomes",
+        &original_outcome,
+        &rewritten_outcome
+    );
+    test_complete!("plan_rewrite_equivalence_lab_runtime_nonbinary");
+}
+
+#[test]
+fn plan_rewrite_equivalence_lab_runtime_shared_non_leaf() {
+    init_test("plan_rewrite_equivalence_lab_runtime_shared_non_leaf");
+    test_section!("build plans");
+    let original = build_race_join_plan_shared_non_leaf();
+    let mut rewritten = build_race_join_plan_shared_non_leaf();
+    let rules = [RewriteRule::DedupRaceJoin];
+    let report = rewritten.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &rules);
+    assert_with_log!(
+        report.steps().len() == 1,
+        "rewrite applied",
+        1,
+        report.steps().len()
+    );
+
+    test_section!("determinism");
+    let config = LabConfig::new(987).trace_capacity(4096);
+    assert_deterministic(config.clone(), |runtime| {
+        let _ = run_plan(runtime, &original);
+    });
+    assert_deterministic(config.clone(), |runtime| {
+        let _ = run_plan(runtime, &rewritten);
+    });
+
+    test_section!("compare outcomes");
+    let original_outcome = run_plan(&mut LabRuntime::new(config.clone()), &original);
+    let rewritten_outcome = run_plan(&mut LabRuntime::new(config), &rewritten);
+    assert_with_log!(
+        original_outcome == rewritten_outcome,
+        "rewrite preserves outcomes",
+        &original_outcome,
+        &rewritten_outcome
+    );
+    test_complete!("plan_rewrite_equivalence_lab_runtime_shared_non_leaf");
+}
+
 type NodeValue = BTreeSet<String>;
 
 #[derive(Clone)]
@@ -896,6 +968,35 @@ fn build_race_join_plan() -> PlanDag {
     dag
 }
 
+fn build_race_join_plan_nonbinary() -> PlanDag {
+    let mut dag = PlanDag::new();
+    let leaf_a = dag.leaf("a");
+    let leaf_b = dag.leaf("b");
+    let leaf_c = dag.leaf("c");
+    let leaf_d = dag.leaf("d");
+    let leaf_e = dag.leaf("e");
+    let join1 = dag.join(vec![leaf_a, leaf_b, leaf_c]);
+    let join2 = dag.join(vec![leaf_a, leaf_d]);
+    let join3 = dag.join(vec![leaf_a, leaf_e]);
+    let race = dag.race(vec![join1, join2, join3]);
+    dag.set_root(race);
+    dag
+}
+
+fn build_race_join_plan_shared_non_leaf() -> PlanDag {
+    let mut dag = PlanDag::new();
+    let x = dag.leaf("x");
+    let y = dag.leaf("y");
+    let b = dag.leaf("b");
+    let c = dag.leaf("c");
+    let shared = dag.join(vec![x, y]);
+    let join1 = dag.join(vec![shared, b]);
+    let join2 = dag.join(vec![shared, c]);
+    let race = dag.race(vec![join1, join2]);
+    dag.set_root(race);
+    dag
+}
+
 fn plan_node_count(plan: &PlanDag) -> usize {
     let mut count = 0;
     loop {
@@ -914,6 +1015,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
     let mut handles: Vec<Option<SharedHandle<NodeValue>>> = vec![None; plan_node_count(plan)];
     let mut oracle = LoserDrainOracle::new();
     let mut races = Vec::new();
+    let winners: Arc<Mutex<HashMap<u64, TaskId>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let root_handle = build_node(
         plan,
@@ -922,27 +1024,23 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         &mut handles,
         &mut oracle,
         &mut races,
+        &winners,
         root,
     );
 
     runtime.run_until_quiescent();
 
-    let completions = task_completion_times(runtime);
+    let completion_time = runtime.now();
     for race in races {
+        let fallback = *race.participants.first().expect("race participant");
+        let winner = {
+            let winners = winners.lock().expect("winners lock");
+            winners.get(&race.race_id).copied().unwrap_or(fallback)
+        };
         for participant in &race.participants {
-            let time = completions
-                .get(participant)
-                .copied()
-                .expect("participant completion time");
-            oracle.on_task_complete(*participant, time);
+            oracle.on_task_complete(*participant, completion_time);
         }
-
-        let winner = race_winner(&race.participants, &completions);
-        let winner_time = completions
-            .get(&winner)
-            .copied()
-            .expect("winner completion time");
-        oracle.on_race_complete(race.race_id, winner, winner_time);
+        oracle.on_race_complete(race.race_id, winner, completion_time);
     }
 
     let oracle_ok = oracle.check().is_ok();
@@ -963,6 +1061,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         .expect("root result ok")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_node(
     plan: &PlanDag,
     runtime: &mut LabRuntime,
@@ -970,6 +1069,7 @@ fn build_node(
     handles: &mut Vec<Option<SharedHandle<NodeValue>>>,
     oracle: &mut LoserDrainOracle,
     races: &mut Vec<RaceInfo>,
+    winners: &Arc<Mutex<HashMap<u64, TaskId>>>,
     id: PlanId,
 ) -> SharedHandle<NodeValue> {
     if let Some(existing) = handles.get(id.index()).and_then(|entry| entry.as_ref()) {
@@ -993,7 +1093,11 @@ fn build_node(
         PlanNode::Join { children } => {
             let child_handles = children
                 .iter()
-                .map(|child| build_node(plan, runtime, region, handles, oracle, races, *child))
+                .map(|child| {
+                    build_node(
+                        plan, runtime, region, handles, oracle, races, winners, *child,
+                    )
+                })
                 .collect::<Vec<_>>();
             let future = async move {
                 let cx = Cx::for_testing();
@@ -1009,7 +1113,11 @@ fn build_node(
         PlanNode::Race { children } => {
             let child_handles = children
                 .iter()
-                .map(|child| build_node(plan, runtime, region, handles, oracle, races, *child))
+                .map(|child| {
+                    build_node(
+                        plan, runtime, region, handles, oracle, races, winners, *child,
+                    )
+                })
                 .collect::<Vec<_>>();
             let participants: Vec<TaskId> =
                 child_handles.iter().map(SharedHandle::task_id).collect();
@@ -1018,9 +1126,17 @@ fn build_node(
                 race_id,
                 participants,
             });
+            let winners = Arc::clone(winners);
             let future = async move {
                 let cx = Cx::for_testing();
                 let (winner_result, winner_idx) = race_first(&child_handles).await;
+                if let Some(winner_task) = child_handles.get(winner_idx).map(SharedHandle::task_id)
+                {
+                    winners
+                        .lock()
+                        .expect("winners lock")
+                        .insert(race_id, winner_task);
+                }
                 for (idx, handle) in child_handles.iter().enumerate() {
                     if idx != winner_idx {
                         let _ = handle.join(&cx).await;
@@ -1031,7 +1147,9 @@ fn build_node(
             spawn_node(runtime, region, future)
         }
         PlanNode::Timeout { child, .. } => {
-            let child_handle = build_node(plan, runtime, region, handles, oracle, races, child);
+            let child_handle = build_node(
+                plan, runtime, region, handles, oracle, races, winners, child,
+            );
             let future = async move {
                 let cx = Cx::for_testing();
                 child_handle.join(&cx).await.expect("timeout child")
@@ -1075,40 +1193,11 @@ async fn race_first(handles: &[SharedHandle<NodeValue>]) -> (Result<NodeValue, J
 
 fn leaf_yields(label: &str) -> u32 {
     match label {
-        "a" => 2,
-        "b" => 1,
+        "a" | "y" => 2,
+        "b" | "x" => 1,
         "c" => 3,
+        "d" => 4,
+        "e" => 5,
         _ => 0,
     }
-}
-
-fn task_completion_times(runtime: &LabRuntime) -> std::collections::HashMap<TaskId, Time> {
-    let mut completions = std::collections::HashMap::new();
-    for event in runtime.trace().iter() {
-        if event.kind == TraceEventKind::Complete {
-            if let TraceData::Task { task, .. } = event.data.clone() {
-                completions.entry(task).or_insert(event.time);
-            }
-        }
-    }
-    completions
-}
-
-fn race_winner(
-    participants: &[TaskId],
-    completions: &std::collections::HashMap<TaskId, Time>,
-) -> TaskId {
-    let mut winner = None;
-    for participant in participants {
-        let time = completions
-            .get(participant)
-            .copied()
-            .expect("completion time");
-        match winner {
-            None => winner = Some((*participant, time)),
-            Some((_, best_time)) if time < best_time => winner = Some((*participant, time)),
-            _ => {}
-        }
-    }
-    winner.expect("winner exists").0
 }
