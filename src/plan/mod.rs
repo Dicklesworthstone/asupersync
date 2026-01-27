@@ -202,10 +202,14 @@ impl PlanDag {
     }
 }
 
+pub mod rewrite;
+pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule};
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::collections::{BTreeSet, HashMap};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -285,7 +289,8 @@ mod tests {
         let race = dag.race(vec![join1, join2]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(RewriteConfig::default());
+        let rules = [RewriteRule::DedupRaceJoin];
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &rules);
         crate::assert_with_log!(
             report.steps().len() == 1,
             "rewrite count",
@@ -364,7 +369,8 @@ mod tests {
         let race = dag.race(vec![a, join]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(RewriteConfig::default());
+        let rules = [RewriteRule::DedupRaceJoin];
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &rules);
         crate::assert_with_log!(report.is_empty(), "no rewrite", true, report.is_empty());
         crate::assert_with_log!(
             dag.root() == Some(race),
@@ -373,5 +379,105 @@ mod tests {
             dag.root()
         );
         crate::test_complete!("dedup_race_join_rewrite_skips_non_join_children");
+    }
+
+    #[test]
+    fn dedup_race_join_rewrite_preserves_outcomes() {
+        init_test("dedup_race_join_rewrite_preserves_outcomes");
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let join1 = dag.join(vec![a, b]);
+        let join2 = dag.join(vec![a, c]);
+        let race = dag.race(vec![join1, join2]);
+        dag.set_root(race);
+
+        let root = dag.root().expect("root set");
+        let before = outcome_sets(&dag, root);
+        crate::assert_with_log!(
+            dag.validate().is_ok(),
+            "validate before",
+            true,
+            dag.validate().is_ok()
+        );
+
+        let rules = [RewriteRule::DedupRaceJoin];
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &rules);
+        crate::assert_with_log!(
+            report.steps().len() == 1,
+            "rewrite count",
+            1,
+            report.steps().len()
+        );
+
+        let new_root = dag.root().expect("root set after rewrite");
+        let after = outcome_sets(&dag, new_root);
+        crate::assert_with_log!(before == after, "outcome sets", before, after);
+        crate::assert_with_log!(
+            dag.validate().is_ok(),
+            "validate after",
+            true,
+            dag.validate().is_ok()
+        );
+        crate::test_complete!("dedup_race_join_rewrite_preserves_outcomes");
+    }
+
+    fn outcome_sets(dag: &PlanDag, id: PlanId) -> BTreeSet<Vec<String>> {
+        let mut memo = HashMap::new();
+        outcome_sets_inner(dag, id, &mut memo)
+    }
+
+    fn outcome_sets_inner(
+        dag: &PlanDag,
+        id: PlanId,
+        memo: &mut HashMap<PlanId, BTreeSet<Vec<String>>>,
+    ) -> BTreeSet<Vec<String>> {
+        if let Some(cached) = memo.get(&id) {
+            return cached.clone();
+        }
+
+        let Some(node) = dag.node(id) else {
+            return BTreeSet::new();
+        };
+
+        let result = match node {
+            PlanNode::Leaf { label } => {
+                let mut set = BTreeSet::new();
+                set.insert(vec![label.clone()]);
+                set
+            }
+            PlanNode::Join { children } => {
+                let mut acc = BTreeSet::new();
+                acc.insert(Vec::new());
+                for child in children {
+                    let child_sets = outcome_sets_inner(dag, *child, memo);
+                    let mut next = BTreeSet::new();
+                    for base in &acc {
+                        for child_set in &child_sets {
+                            let mut merged = base.clone();
+                            merged.extend(child_set.iter().cloned());
+                            merged.sort();
+                            merged.dedup();
+                            next.insert(merged);
+                        }
+                    }
+                    acc = next;
+                }
+                acc
+            }
+            PlanNode::Race { children } => {
+                let mut acc = BTreeSet::new();
+                for child in children {
+                    let child_sets = outcome_sets_inner(dag, *child, memo);
+                    acc.extend(child_sets);
+                }
+                acc
+            }
+            PlanNode::Timeout { child, .. } => outcome_sets_inner(dag, *child, memo),
+        };
+
+        memo.insert(id, result.clone());
+        result
     }
 }
