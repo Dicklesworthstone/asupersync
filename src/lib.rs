@@ -52,7 +52,6 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_possible_truncation)]
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
-#![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
 pub mod bytes;
 pub mod channel;

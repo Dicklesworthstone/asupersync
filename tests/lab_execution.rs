@@ -72,6 +72,19 @@ fn schedule_yielding_tasks(
     completions
 }
 
+fn run_and_collect_counts(
+    runtime: &mut LabRuntime,
+    task_count: usize,
+    yields_per_task: usize,
+) -> Vec<usize> {
+    let completions = schedule_yielding_tasks(runtime, task_count, yields_per_task);
+    runtime.run_until_quiescent();
+    completions
+        .iter()
+        .map(|count| count.load(Ordering::SeqCst))
+        .collect()
+}
+
 #[test]
 fn test_lab_executor_runs_task() {
     init_test("test_lab_executor_runs_task");
@@ -164,6 +177,46 @@ fn test_parallel_lab_determinism_multiworker_yields() {
     });
 
     test_complete!("test_parallel_lab_determinism_multiworker_yields");
+}
+
+#[test]
+fn test_parallel_lab_equivalent_to_single_worker_outcomes() {
+    init_test("test_parallel_lab_equivalent_to_single_worker_outcomes");
+    test_section!("setup");
+    let seed = 9001;
+    let task_count = 37;
+    let yields_per_task = 3;
+
+    test_section!("single_worker");
+    let mut single = LabRuntime::new(LabConfig::new(seed).worker_count(1));
+    let single_counts = run_and_collect_counts(&mut single, task_count, yields_per_task);
+
+    test_section!("multi_worker");
+    let mut multi = LabRuntime::new(LabConfig::new(seed).worker_count(4));
+    let multi_counts = run_and_collect_counts(&mut multi, task_count, yields_per_task);
+
+    test_section!("verify");
+    let single_ok = single_counts.iter().all(|count| *count == 1);
+    let multi_ok = multi_counts.iter().all(|count| *count == 1);
+    assert_with_log!(
+        single_ok,
+        "single-worker run should complete each task exactly once",
+        true,
+        single_ok
+    );
+    assert_with_log!(
+        multi_ok,
+        "multi-worker run should complete each task exactly once",
+        true,
+        multi_ok
+    );
+    assert_with_log!(
+        single_counts == multi_counts,
+        "single-worker and multi-worker runs should be outcome-equivalent",
+        single_counts.len(),
+        multi_counts.len()
+    );
+    test_complete!("test_parallel_lab_equivalent_to_single_worker_outcomes");
 }
 
 #[test]
