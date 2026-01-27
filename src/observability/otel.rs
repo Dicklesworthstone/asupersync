@@ -1039,6 +1039,7 @@ mod tests {
         SdkMeterProvider,
     };
     use std::collections::HashSet;
+    use std::path::Path;
 
     const EXPECTED_METRICS: &[&str] = &[
         "asupersync.tasks.spawned",
@@ -1078,6 +1079,28 @@ mod tests {
     fn assert_expected_metrics_present(names: &HashSet<String>, expected: &[&str]) {
         for name in expected {
             assert!(names.contains(*name), "missing metric: {name}");
+        }
+    }
+
+    fn collect_grafana_queries(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    if key == "expr" || key == "query" {
+                        if let serde_json::Value::String(text) = val {
+                            output.push(text.clone());
+                        }
+                    } else {
+                        collect_grafana_queries(val, output);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_grafana_queries(item, output);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1154,6 +1177,34 @@ mod tests {
         );
 
         provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn grafana_dashboard_references_expected_metrics() {
+        init_test_logging();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/grafana_dashboard.json");
+        let contents = std::fs::read_to_string(path).expect("read grafana dashboard");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parse grafana dashboard");
+
+        let mut queries = Vec::new();
+        collect_grafana_queries(&json, &mut queries);
+        assert!(!queries.is_empty(), "expected grafana queries to exist");
+
+        let joined = queries.join("\n");
+        let expected = [
+            "asupersync_tasks_spawned_total",
+            "asupersync_tasks_completed_total",
+            "asupersync_task_duration_seconds",
+            "asupersync_regions_active",
+            "asupersync_cancellations_total",
+        ];
+        for metric in expected {
+            assert!(
+                joined.contains(metric),
+                "missing grafana query metric: {metric}"
+            );
+        }
     }
 
     #[test]
