@@ -86,8 +86,10 @@ pub enum PlanError {
 /// Plan DAG builder and container.
 #[derive(Debug, Default)]
 pub struct PlanDag {
-    nodes: Vec<PlanNode>,
-    root: Option<PlanId>,
+    /// Nodes stored in insertion order.
+    pub(super) nodes: Vec<PlanNode>,
+    /// Root node id, if set.
+    pub(super) root: Option<PlanId>,
 }
 
 impl PlanDag {
@@ -99,32 +101,24 @@ impl PlanDag {
 
     /// Adds a leaf node and returns its id.
     pub fn leaf(&mut self, label: impl Into<String>) -> PlanId {
-        let id = PlanId::new(self.nodes.len());
-        self.nodes.push(PlanNode::Leaf {
+        self.push_node(PlanNode::Leaf {
             label: label.into(),
-        });
-        id
+        })
     }
 
     /// Adds a join node and returns its id.
     pub fn join(&mut self, children: Vec<PlanId>) -> PlanId {
-        let id = PlanId::new(self.nodes.len());
-        self.nodes.push(PlanNode::Join { children });
-        id
+        self.push_node(PlanNode::Join { children })
     }
 
     /// Adds a race node and returns its id.
     pub fn race(&mut self, children: Vec<PlanId>) -> PlanId {
-        let id = PlanId::new(self.nodes.len());
-        self.nodes.push(PlanNode::Race { children });
-        id
+        self.push_node(PlanNode::Race { children })
     }
 
     /// Adds a timeout node and returns its id.
     pub fn timeout(&mut self, child: PlanId, duration: Duration) -> PlanId {
-        let id = PlanId::new(self.nodes.len());
-        self.nodes.push(PlanNode::Timeout { child, duration });
-        id
+        self.push_node(PlanNode::Timeout { child, duration })
     }
 
     /// Sets the root node for this plan.
@@ -142,6 +136,12 @@ impl PlanDag {
     #[must_use]
     pub fn node(&self, id: PlanId) -> Option<&PlanNode> {
         self.nodes.get(id.index())
+    }
+
+    /// Returns a mutable reference to a node by id.
+    #[must_use]
+    pub fn node_mut(&mut self, id: PlanId) -> Option<&mut PlanNode> {
+        self.nodes.get_mut(id.index())
     }
 
     /// Validates the DAG for structural correctness.
@@ -193,6 +193,12 @@ impl PlanDag {
         visiting.remove(&id);
         visited.insert(id);
         Ok(())
+    }
+
+    pub(super) fn push_node(&mut self, node: PlanNode) -> PlanId {
+        let id = PlanId::new(self.nodes.len());
+        self.nodes.push(node);
+        id
     }
 }
 
@@ -265,5 +271,107 @@ mod tests {
         let err = dag.validate().expect_err("cycle should fail");
         assert_eq!(err, PlanError::Cycle { at: timeout });
         crate::test_complete!("cycle_is_reported");
+    }
+
+    #[test]
+    fn dedup_race_join_rewrite_applies() {
+        init_test("dedup_race_join_rewrite_applies");
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let join1 = dag.join(vec![a, b]);
+        let join2 = dag.join(vec![a, c]);
+        let race = dag.race(vec![join1, join2]);
+        dag.set_root(race);
+
+        let report = dag.apply_rewrites(RewriteConfig::default());
+        crate::assert_with_log!(
+            report.steps().len() == 1,
+            "rewrite count",
+            1,
+            report.steps().len()
+        );
+
+        let Some(new_root) = dag.root() else {
+            crate::assert_with_log!(false, "root exists after rewrite", true, false);
+            return;
+        };
+        let Some(root_node) = dag.node(new_root) else {
+            crate::assert_with_log!(false, "root node exists after rewrite", true, false);
+            return;
+        };
+        let PlanNode::Join { children } = root_node else {
+            crate::assert_with_log!(false, "root is join after rewrite", true, false);
+            return;
+        };
+        crate::assert_with_log!(
+            children.contains(&a),
+            "shared child",
+            true,
+            children.contains(&a)
+        );
+        let race_child = children.iter().copied().find(|id| *id != a);
+        let Some(race_child) = race_child else {
+            crate::assert_with_log!(false, "race child exists", true, false);
+            return;
+        };
+        let Some(race_node) = dag.node(race_child) else {
+            crate::assert_with_log!(false, "race node exists", true, false);
+            return;
+        };
+        let PlanNode::Race {
+            children: race_children,
+        } = race_node
+        else {
+            crate::assert_with_log!(false, "race child is race", true, false);
+            return;
+        };
+        crate::assert_with_log!(
+            race_children.len() == 2,
+            "race children",
+            2,
+            race_children.len()
+        );
+        crate::assert_with_log!(
+            race_children.contains(&b),
+            "race contains b",
+            true,
+            race_children.contains(&b)
+        );
+        crate::assert_with_log!(
+            race_children.contains(&c),
+            "race contains c",
+            true,
+            race_children.contains(&c)
+        );
+        crate::assert_with_log!(
+            dag.validate().is_ok(),
+            "validate",
+            true,
+            dag.validate().is_ok()
+        );
+        crate::test_complete!("dedup_race_join_rewrite_applies");
+    }
+
+    #[test]
+    fn dedup_race_join_rewrite_skips_non_join_children() {
+        init_test("dedup_race_join_rewrite_skips_non_join_children");
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        let race = dag.race(vec![a, join]);
+        dag.set_root(race);
+
+        let report = dag.apply_rewrites(RewriteConfig::default());
+        crate::assert_with_log!(report.is_empty(), "no rewrite", true, report.is_empty());
+        crate::assert_with_log!(
+            dag.root() == Some(race),
+            "root unchanged",
+            Some(race),
+            dag.root()
+        );
+        crate::test_complete!("dedup_race_join_rewrite_skips_non_join_children");
     }
 }
