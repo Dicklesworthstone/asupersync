@@ -976,9 +976,9 @@ mod tests {
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
 
             // Create 5 nodes
-            for i in 0..5 {
+            for i in 0u64..5 {
                 let (sink, stream) = mock_channel(config.clone());
-                let id = EndpointId(i as u64);
+                let id = EndpointId(i);
                 let _endpoint = table.register_endpoint(Endpoint::new(id, format!("node{i}")));
                 dispatcher.add_sink(id, Box::new(sink));
                 streams.push(stream);
@@ -1107,8 +1107,7 @@ mod tests {
                     }
                     match stream.next_with_cancel(&cx).await {
                         Ok(Some(_)) => collected += 1,
-                        Ok(None) => break,
-                        Err(StreamError::Cancelled) => break,
+                        Ok(None) | Err(StreamError::Cancelled) => break,
                         Err(e) => panic!("unexpected error: {e:?}"),
                     }
                 }
