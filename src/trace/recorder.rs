@@ -328,8 +328,8 @@ impl TraceRecorder {
         }
     }
 
-    fn handle_limit(&mut self, info: LimitReached) -> bool {
-        let mut action = self.resolve_limit_action(&info);
+    fn handle_limit(&mut self, info: &LimitReached) -> bool {
+        let mut action = self.resolve_limit_action(info);
         if matches!(action, LimitAction::Callback(_)) {
             action = LimitAction::StopRecording;
         }
@@ -383,9 +383,8 @@ impl TraceRecorder {
     }
 
     fn drop_oldest_event(&mut self) -> bool {
-        let trace = match self.trace.as_mut() {
-            Some(trace) => trace,
-            None => return false,
+        let Some(trace) = self.trace.as_mut() else {
+            return false;
         };
         if trace.events.is_empty() {
             return false;
@@ -410,7 +409,7 @@ impl TraceRecorder {
                         max_bytes: self.config.max_memory as u64,
                         needed_bytes: event_size,
                     };
-                    if !self.handle_limit(info) {
+                    if !self.handle_limit(&info) {
                         return false;
                     }
                     continue;
@@ -428,7 +427,7 @@ impl TraceRecorder {
                     max_bytes: max_memory,
                     needed_bytes: event_size,
                 };
-                if !self.handle_limit(info) {
+                if !self.handle_limit(&info) {
                     return false;
                 }
                 continue;
@@ -533,6 +532,7 @@ impl TraceRecorder {
 
     /// Records that I/O became ready.
     #[inline]
+    #[allow(clippy::fn_params_excessive_bools)]
     pub fn record_io_ready(
         &mut self,
         token: u64,
