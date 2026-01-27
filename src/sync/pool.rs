@@ -858,13 +858,15 @@ where
             }
         }
 
-        if let Some(idle) = state.idle.pop_front() {
+        let result = if let Some(idle) = state.idle.pop_front() {
             state.active += 1;
             state.total_acquisitions += 1;
             Some(idle.resource)
         } else {
             None
-        }
+        };
+        drop(state);
+        result
     }
 
     /// Get current total count (active + idle).

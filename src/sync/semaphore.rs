@@ -162,16 +162,12 @@ impl Semaphore {
         );
 
         let mut state = self.state.lock().expect("semaphore lock poisoned");
-        if state.closed {
-            return Err(TryAcquireError);
-        }
-
-        // Strict FIFO
-        if !state.waiters.is_empty() {
-            return Err(TryAcquireError);
-        }
-
-        if state.permits >= count {
+        let result = if state.closed {
+            Err(TryAcquireError)
+        } else if !state.waiters.is_empty() {
+            // Strict FIFO
+            Err(TryAcquireError)
+        } else if state.permits >= count {
             state.permits -= count;
             Ok(SemaphorePermit {
                 semaphore: self,
@@ -179,7 +175,9 @@ impl Semaphore {
             })
         } else {
             Err(TryAcquireError)
-        }
+        };
+        drop(state);
+        result
     }
 
     /// Adds permits back to the semaphore.
@@ -217,7 +215,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
     type Output = Result<SemaphorePermit<'a>, AcquireError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Err(_) = self.cx.checkpoint() {
+        if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
                 let mut state = self
                     .semaphore
@@ -282,7 +280,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             .iter_mut()
             .find(|waiter| waiter.id == waiter_id)
         {
-            existing.waker = context.waker().clone();
+            existing.waker.clone_from(context.waker());
         } else {
             state.waiters.push_back(Waiter {
                 id: waiter_id,
@@ -393,7 +391,7 @@ impl Future for OwnedAcquireFuture {
     type Output = Result<OwnedSemaphorePermit, AcquireError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Err(_) = self.cx.checkpoint() {
+        if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
                 let mut state = self
                     .semaphore
@@ -447,7 +445,7 @@ impl Future for OwnedAcquireFuture {
             .iter_mut()
             .find(|waiter| waiter.id == waiter_id)
         {
-            existing.waker = context.waker().clone();
+            existing.waker.clone_from(context.waker());
         } else {
             state.waiters.push_back(Waiter {
                 id: waiter_id,

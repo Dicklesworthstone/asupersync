@@ -89,7 +89,7 @@ impl std::fmt::Debug for TimerNode {
             .field("level", &self.level.get())
             .field("deadline", &self.deadline.get())
             .field("linked", &self.linked.get())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

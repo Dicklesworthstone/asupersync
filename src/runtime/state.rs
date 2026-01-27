@@ -386,13 +386,14 @@ impl RuntimeState {
             record.id = obligation_id;
         }
 
-        let _span = crate::tracing_compat::debug_span!(
+        let _guard = crate::tracing_compat::debug_span!(
             "obligation_reserve",
             obligation_id = ?obligation_id,
             kind = ?kind,
             holder_task = ?holder,
             region_id = ?region
-        );
+        )
+        .entered();
         crate::tracing_compat::debug!(
             obligation_id = ?obligation_id,
             kind = ?kind,

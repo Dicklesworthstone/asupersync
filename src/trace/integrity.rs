@@ -470,7 +470,7 @@ pub fn verify_trace(
 
     // Verify events if requested
     if options.verify_events {
-        verify_events(&mut reader, &mut result, &options);
+        verify_events(&mut reader, &mut result, options);
     } else {
         // Just count events without full deserialization
         count_events(&mut reader, &mut result);

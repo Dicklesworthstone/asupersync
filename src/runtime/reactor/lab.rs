@@ -716,6 +716,7 @@ impl Reactor for LabReactor {
     fn deregister(&self, token: Token) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap();
         if inner.sockets.remove(&token).is_none() {
+            drop(inner);
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "token not registered",
@@ -734,156 +735,172 @@ impl Reactor for LabReactor {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     fn poll(&self, events: &mut super::Events, timeout: Option<Duration>) -> io::Result<usize> {
         // Clear wake flag at poll entry
         self.woken.store(false, Ordering::SeqCst);
 
-        let mut inner = self.inner.lock().unwrap();
+        let (delivered_events, count) = {
+            let mut inner = self.inner.lock().unwrap();
 
-        // Advance time if timeout provided (simulated)
-        if let Some(d) = timeout {
-            inner.time = inner.time.saturating_add_nanos(d.as_nanos() as u64);
-        }
-
-        let mut ready_events = Vec::new();
-        let mut count = 0;
-        // Pop events that are due
-        while let Some(te) = inner.pending.peek() {
-            if te.time <= inner.time {
-                let te = inner.pending.pop().unwrap();
-                if inner.sockets.contains_key(&te.event.token) {
-                    ready_events.push(te);
-                }
-            } else {
-                break;
+            // Advance time if timeout provided (simulated)
+            if let Some(d) = timeout {
+                inner.time = inner.time.saturating_add_nanos(d.as_nanos() as u64);
             }
-        }
 
-        let LabInner {
-            sockets,
-            pending,
-            time,
-            next_sequence,
-            chaos,
-        } = &mut *inner;
+            let mut ready_events = Vec::new();
+            let mut delivered_events = Vec::new();
 
-        for timed in ready_events {
-            let event = timed.event;
-            let token = event.token;
-
-            // ================================================================
-            // Per-token fault injection (checked first, before global chaos)
-            // ================================================================
-            if let Some(socket) = sockets.get_mut(&token) {
-                if let Some(ref mut fault) = socket.fault {
-                    // Check partition - drop events silently
-                    if fault.config.partitioned {
-                        fault.dropped_event_count += 1;
-                        debug!(
-                            target: "fault",
-                            token = token.0,
-                            injection = "partition_drop",
-                            "event dropped due to partition"
-                        );
-                        continue;
+            // Pop events that are due
+            while let Some(te) = inner.pending.peek() {
+                if te.time <= inner.time {
+                    let te = inner.pending.pop().unwrap();
+                    if inner.sockets.contains_key(&te.event.token) {
+                        ready_events.push(te);
                     }
+                } else {
+                    break;
+                }
+            }
 
-                    // Check pending error (one-shot)
-                    if let Some(kind) = fault.config.pending_error.take() {
-                        fault.last_error_kind = Some(kind);
-                        fault.injected_error_count += 1;
-                        debug!(
-                            target: "fault",
-                            token = token.0,
-                            injection = "pending_error",
-                            error_kind = ?kind,
-                            "injected pending error"
-                        );
-                        events.push(Event::errored(token));
-                        count += 1;
-                        continue;
-                    }
+            {
+                let LabInner {
+                    sockets,
+                    pending,
+                    time,
+                    next_sequence,
+                    chaos,
+                } = &mut *inner;
 
-                    // Check random error injection
-                    if fault.should_inject_random_error() {
-                        if let Some(kind) = fault.next_error_kind() {
-                            fault.last_error_kind = Some(kind);
-                            fault.injected_error_count += 1;
-                            debug!(
-                                target: "fault",
-                                token = token.0,
-                                injection = "random_error",
-                                error_kind = ?kind,
-                                "injected random error"
-                            );
-                            events.push(Event::errored(token));
-                            count += 1;
-                            continue;
+                for timed in ready_events {
+                    let event = timed.event;
+                    let token = event.token;
+
+                    // ================================================================
+                    // Per-token fault injection (checked first, before global chaos)
+                    // ================================================================
+                    if let Some(socket) = sockets.get_mut(&token) {
+                        if let Some(ref mut fault) = socket.fault {
+                            // Check partition - drop events silently
+                            if fault.config.partitioned {
+                                fault.dropped_event_count += 1;
+                                debug!(
+                                    target: "fault",
+                                    token = token.0,
+                                    injection = "partition_drop",
+                                    "event dropped due to partition"
+                                );
+                                continue;
+                            }
+
+                            let mut injected_error =
+                                fault.config.pending_error.take().map(|kind| {
+                                    fault.last_error_kind = Some(kind);
+                                    fault.injected_error_count += 1;
+                                    debug!(
+                                        target: "fault",
+                                        token = token.0,
+                                        injection = "pending_error",
+                                        error_kind = ?kind,
+                                        "injected pending error"
+                                    );
+                                    kind
+                                });
+
+                            // Check random error injection
+                            if injected_error.is_none() && fault.should_inject_random_error() {
+                                if let Some(kind) = fault.next_error_kind() {
+                                    fault.last_error_kind = Some(kind);
+                                    fault.injected_error_count += 1;
+                                    debug!(
+                                        target: "fault",
+                                        token = token.0,
+                                        injection = "random_error",
+                                        error_kind = ?kind,
+                                        "injected random error"
+                                    );
+                                    injected_error = Some(kind);
+                                }
+                            }
+
+                            if injected_error.is_some() {
+                                delivered_events.push(Event::errored(token));
+                                continue;
+                            }
                         }
                     }
+
+                    // ================================================================
+                    // Global chaos injection (if enabled)
+                    // ================================================================
+                    let delivered = if let Some(chaos) = chaos.as_mut() {
+                        let config = &chaos.config;
+
+                        // Check for delay injection
+                        if !timed.delayed && chaos.rng.should_inject_delay(config) {
+                            let delay = chaos.rng.next_delay(config);
+                            if !delay.is_zero() {
+                                let sequence = *next_sequence;
+                                *next_sequence += 1;
+                                let delayed_time =
+                                    time.saturating_add_nanos(delay.as_nanos() as u64);
+                                pending.push(TimedEvent {
+                                    time: delayed_time,
+                                    sequence,
+                                    event,
+                                    delayed: true,
+                                });
+                                chaos.stats.record_delay(delay);
+                                debug!(
+                                    target: "chaos",
+                                    token = token.0,
+                                    injection = "io_delay",
+                                    delay_ns = delay.as_nanos() as u64
+                                );
+                                continue;
+                            }
+                        }
+
+                        // Check for error injection
+                        let mut injected = false;
+                        let mut delivered_event = event;
+                        if chaos.rng.should_inject_io_error(config) {
+                            if let Some(kind) = chaos.rng.next_io_error_kind(config) {
+                                delivered_event = Event::errored(token);
+                                chaos.last_io_error_kind = Some(kind);
+                                chaos.stats.record_io_error();
+                                debug!(
+                                    target: "chaos",
+                                    token = token.0,
+                                    injection = "io_error",
+                                    error_kind = ?kind
+                                );
+                                injected = true;
+                            }
+                        }
+
+                        if !injected {
+                            chaos.stats.record_no_injection();
+                        }
+
+                        Some(delivered_event)
+                    } else {
+                        // No chaos - deliver event as-is
+                        Some(event)
+                    };
+
+                    if let Some(delivered_event) = delivered {
+                        delivered_events.push(delivered_event);
+                    }
                 }
             }
 
-            // ================================================================
-            // Global chaos injection (if enabled)
-            // ================================================================
-            if let Some(chaos) = chaos.as_mut() {
-                let config = &chaos.config;
+            let count = delivered_events.len();
+            (delivered_events, count)
+        };
 
-                // Check for delay injection
-                if !timed.delayed && chaos.rng.should_inject_delay(config) {
-                    let delay = chaos.rng.next_delay(config);
-                    if !delay.is_zero() {
-                        let sequence = *next_sequence;
-                        *next_sequence += 1;
-                        let delayed_time = time.saturating_add_nanos(delay.as_nanos() as u64);
-                        pending.push(TimedEvent {
-                            time: delayed_time,
-                            sequence,
-                            event,
-                            delayed: true,
-                        });
-                        chaos.stats.record_delay(delay);
-                        debug!(
-                            target: "chaos",
-                            token = token.0,
-                            injection = "io_delay",
-                            delay_ns = delay.as_nanos() as u64
-                        );
-                        continue;
-                    }
-                }
-
-                // Check for error injection
-                let mut injected = false;
-                let mut delivered_event = event;
-                if chaos.rng.should_inject_io_error(config) {
-                    if let Some(kind) = chaos.rng.next_io_error_kind(config) {
-                        delivered_event = Event::errored(token);
-                        chaos.last_io_error_kind = Some(kind);
-                        chaos.stats.record_io_error();
-                        debug!(
-                            target: "chaos",
-                            token = token.0,
-                            injection = "io_error",
-                            error_kind = ?kind
-                        );
-                        injected = true;
-                    }
-                }
-
-                if !injected {
-                    chaos.stats.record_no_injection();
-                }
-
-                events.push(delivered_event);
-                count += 1;
-            } else {
-                // No chaos - deliver event as-is
-                events.push(event);
-                count += 1;
-            }
+        for event in delivered_events {
+            events.push(event);
         }
 
         Ok(count)
