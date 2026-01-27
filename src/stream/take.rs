@@ -47,10 +47,7 @@ impl<S: Stream + Unpin> Stream for Take<S> {
 
         let (lower, upper) = self.stream.size_hint();
         let lower = lower.min(self.remaining);
-        let upper = match upper {
-            Some(x) => Some(x.min(self.remaining)),
-            None => Some(self.remaining),
-        };
+        let upper = upper.map_or(Some(self.remaining), |x| Some(x.min(self.remaining)));
 
         (lower, upper)
     }

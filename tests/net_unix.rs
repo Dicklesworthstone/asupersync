@@ -315,15 +315,15 @@ fn net_uds_006_large_data_transfer() {
         });
 
         // Receive all data
-        let mut received = vec![0u8; DATA_SIZE];
-        receiver.read_exact(&mut received)?;
+        let mut received_data = vec![0u8; DATA_SIZE];
+        receiver.read_exact(&mut received_data)?;
         tracing::info!("receiver: all data received");
 
         // Wait for sender
         sender_handle.join().expect("sender panicked")?;
 
         // Verify data integrity
-        assert_eq!(received, data, "received data should match sent data");
+        assert_eq!(received_data, data, "received data should match sent data");
         tracing::info!("data integrity verified");
 
         Ok(())

@@ -237,15 +237,16 @@ fn bench_timer_tick(c: &mut Criterion) {
 fn bench_throughput_10k(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/throughput");
 
-    for &size in &[1000, 10000] {
-        group.throughput(Throughput::Elements(size as u64));
+    for &size in &[1_000usize, 10_000usize] {
+        let size_u64 = u64::try_from(size).expect("size fits u64");
+        group.throughput(Throughput::Elements(size_u64));
 
         // Insert throughput
         group.bench_with_input(BenchmarkId::new("insert", size), &size, |b, &size| {
             b.iter(|| {
                 let mut wheel = TimerWheel::new();
-                for i in 0..size {
-                    wheel.register(Time::from_millis(i as u64 + 1), noop_waker());
+                for i in 0..size_u64 {
+                    wheel.register(Time::from_millis(i + 1), noop_waker());
                 }
                 black_box(wheel.len());
             });
@@ -258,8 +259,8 @@ fn bench_throughput_10k(c: &mut Criterion) {
 
                 for _ in 0..iters {
                     let mut wheel = TimerWheel::new();
-                    let handles: Vec<_> = (0..size)
-                        .map(|i| wheel.register(Time::from_millis(i as u64 + 1), noop_waker()))
+                    let handles: Vec<_> = (0..size_u64)
+                        .map(|i| wheel.register(Time::from_millis(i + 1), noop_waker()))
                         .collect();
 
                     let start = std::time::Instant::now();
@@ -293,7 +294,7 @@ fn bench_throughput_10k(c: &mut Criterion) {
                     }
                     total += start.elapsed();
 
-                    assert_eq!(counter.load(Ordering::Relaxed), size as u64);
+                    assert_eq!(counter.load(Ordering::Relaxed), size_u64);
                 }
                 total
             });
@@ -439,7 +440,7 @@ fn bench_config(c: &mut Criterion) {
     group.bench_function("new_with_config", |b| {
         let config = TimerWheelConfig::new()
             .max_wheel_duration(Duration::from_secs(86400))
-            .max_timer_duration(Duration::from_secs(604800));
+            .max_timer_duration(Duration::from_secs(604_800));
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
 
         b.iter(|| {

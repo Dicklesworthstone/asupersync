@@ -1611,7 +1611,7 @@ proptest! {
         init_test_logging();
         test_phase!("random_ops_no_panic");
 
-        let mut harness = TestHarness::with_root(0xDEADBEEF);
+        let mut harness = TestHarness::with_root(0xDEAD_BEEF);
 
         let mut applied_count = 0;
         let mut applied_ops = Vec::new();
@@ -1656,7 +1656,7 @@ proptest! {
         init_test_logging();
         test_phase!("invariants_maintained_under_stress");
 
-        let mut harness = TestHarness::with_root(0xCAFEBABE);
+        let mut harness = TestHarness::with_root(0xCAFE_BABE);
 
         for op in &ops {
             let _ = op.apply(&mut harness);
@@ -1780,7 +1780,7 @@ proptest! {
         init_test_logging();
         test_phase!("cancellation_propagates_to_children");
 
-        let mut harness = TestHarness::with_root(0xDEADBEEF);
+        let mut harness = TestHarness::with_root(0xDEAD_BEEF);
 
         // Build a tree
         for op in &setup_ops {
@@ -1815,7 +1815,7 @@ proptest! {
         init_test_logging();
         test_phase!("full_lifecycle_preserves_invariants");
 
-        let mut harness = TestHarness::with_root(0xCAFEBABE);
+        let mut harness = TestHarness::with_root(0xCAFE_BABE);
 
         // Build up
         for op in &create_ops {

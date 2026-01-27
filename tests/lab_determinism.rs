@@ -189,15 +189,15 @@ fn test_lab_different_seeds_different_results() {
     let result2 = run_tasks_with_seed(2, task_count, yields_per_task);
     let result3 = run_tasks_with_seed(3, task_count, yields_per_task);
     let result4 = run_tasks_with_seed(1000, task_count, yields_per_task);
-    let result5 = run_tasks_with_seed(0xDEADBEEF, task_count, yields_per_task);
+    let result5 = run_tasks_with_seed(0xDEAD_BEEF, task_count, yields_per_task);
 
     test_section!("verify_different_results");
     // Collect all results
-    let results = vec![&result1, &result2, &result3, &result4, &result5];
+    let result_sets = vec![&result1, &result2, &result3, &result4, &result5];
 
     // Count unique orderings
     let mut unique_orderings = std::collections::HashSet::new();
-    for r in &results {
+    for r in &result_sets {
         unique_orderings.insert(format!("{r:?}"));
     }
 
@@ -491,7 +491,7 @@ fn test_lab_trace_capture_determinism() {
     init_test("test_lab_trace_capture_determinism");
     test_section!("capture_traces");
 
-    let seed = 101112;
+    let seed = 101_112;
     let task_count = 5;
 
     // First run
@@ -695,7 +695,7 @@ fn test_lab_multiple_runs_consistency() {
     init_test("test_lab_multiple_runs_consistency");
     test_section!("verify_10_runs");
 
-    let seed = 0xCAFEBABE;
+    let seed = 0xCAFE_BABE;
 
     // Run 10 times and verify all produce identical results
     verify_deterministic(seed, 10, |s| run_tasks_with_seed(s, 8, 4));
@@ -714,7 +714,7 @@ fn test_lab_quiescence_detection_determinism() {
     init_test("test_lab_quiescence_detection_determinism");
     test_section!("run_to_quiescence");
 
-    let seed = 0xFEEDFACE;
+    let seed = 0xFEED_FACE;
 
     // Helper to run and check quiescence
     let run = |s: u64| -> (bool, u64) {
@@ -838,7 +838,7 @@ fn test_lab_cancel_drain_under_contention_deterministic() {
     init_test("test_lab_cancel_drain_under_contention_deterministic");
     test_section!("run_cancel_stress");
 
-    let seed = 0xA11CE5EED;
+    let seed = 0x000A_11CE_5EED;
     let task_count = 64;
 
     let result1 = run_cancel_drain_stress(seed, task_count);
@@ -935,7 +935,7 @@ fn test_lab_interleaved_completion_determinism() {
     init_test("test_lab_interleaved_completion_determinism");
     test_section!("interleaved_tasks");
 
-    let seed = 0xABCDEF;
+    let seed = 0x00AB_CDEF;
 
     // Create tasks that yield different numbers of times
     let run = |s: u64| -> Vec<(usize, usize)> {

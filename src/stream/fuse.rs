@@ -37,6 +37,6 @@ impl<S: Stream + Unpin> Stream for Fuse<S> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.stream.as_ref().map_or((0, Some(0)), |s| s.size_hint())
+        self.stream.as_ref().map_or((0, Some(0)), Stream::size_hint)
     }
 }

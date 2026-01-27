@@ -235,6 +235,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         // The standard pattern is to register on every poll if pending.
         state.waiters.push_back(context.waker().clone());
         self.registered = true;
+        drop(state);
 
         Poll::Pending
     }
@@ -303,7 +304,7 @@ impl<T> OwnedMutexGuard<T> {
         impl<T> Future for OwnedLockFuture<T> {
             type Output = Result<OwnedMutexGuard<T>, LockError>;
             fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-                if let Err(_) = self.cx.checkpoint() {
+                if self.cx.checkpoint().is_err() {
                     return Poll::Ready(Err(LockError::Cancelled));
                 }
                 if self.mutex.is_poisoned() {
@@ -317,6 +318,7 @@ impl<T> OwnedMutexGuard<T> {
                     }));
                 }
                 state.waiters.push_back(context.waker().clone());
+                drop(state);
                 Poll::Pending
             }
         }

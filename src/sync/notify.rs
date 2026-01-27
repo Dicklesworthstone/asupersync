@@ -229,6 +229,7 @@ impl Future for Notified<'_> {
                 });
                 self.waiter_index = Some(index);
                 self.state = NotifiedState::Waiting;
+                drop(waiters);
 
                 Poll::Pending
             }
@@ -292,6 +293,7 @@ impl Notified<'_> {
             while waiters.last().is_some_and(|e| e.waker.is_none()) {
                 waiters.pop();
             }
+            drop(waiters);
         }
     }
 }

@@ -188,6 +188,7 @@ impl<T> OnceCell<T> {
     ///
     /// If the initialization future is cancelled, the cell remains
     /// uninitialized and a future caller can try again.
+    #[allow(clippy::future_not_send)]
     pub async fn get_or_init<F, Fut>(&self, f: F) -> &T
     where
         F: FnOnce() -> Fut,
@@ -244,6 +245,7 @@ impl<T> OnceCell<T> {
     ///
     /// If the initialization future is cancelled or returns an error,
     /// the cell remains uninitialized and a future caller can try again.
+    #[allow(clippy::future_not_send)]
     pub async fn get_or_try_init<F, Fut, E>(&self, f: F) -> Result<&T, E>
     where
         F: FnOnce() -> Fut,

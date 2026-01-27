@@ -793,19 +793,18 @@ impl Reactor for LabReactor {
                                 continue;
                             }
 
-                            let mut injected_error =
-                                fault.config.pending_error.take().map(|kind| {
-                                    fault.last_error_kind = Some(kind);
-                                    fault.injected_error_count += 1;
-                                    debug!(
-                                        target: "fault",
-                                        token = token.0,
-                                        injection = "pending_error",
-                                        error_kind = ?kind,
-                                        "injected pending error"
-                                    );
-                                    kind
-                                });
+                            let mut injected_error = fault.config.pending_error.take();
+                            if let Some(kind) = injected_error {
+                                fault.last_error_kind = Some(kind);
+                                fault.injected_error_count += 1;
+                                debug!(
+                                    target: "fault",
+                                    token = token.0,
+                                    injection = "pending_error",
+                                    error_kind = ?kind,
+                                    "injected pending error"
+                                );
+                            }
 
                             // Check random error injection
                             if injected_error.is_none() && fault.should_inject_random_error() {

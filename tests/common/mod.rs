@@ -30,9 +30,9 @@ use tracing_subscriber::fmt::format::FmtSpan;
 static INIT_LOGGING: Once = Once::new();
 
 /// Default seed used by test lab helpers.
-pub const DEFAULT_TEST_SEED: u64 = 0xDEADBEEF;
+pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
 /// Default seed for property tests when running under CI.
-pub const DEFAULT_PROPTEST_SEED: u64 = 0x5EED5EED;
+pub const DEFAULT_PROPTEST_SEED: u64 = 0x5EED_5EED;
 
 const PROPTEST_SEED_ENV: &str = "ASUPERSYNC_PROPTEST_SEED";
 const PROPTEST_MAX_SHRINK_ITERS_ENV: &str = "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS";
