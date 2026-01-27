@@ -88,6 +88,39 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
+    use std::io::Cursor;
+
+    #[derive(Serialize)]
+    struct TestData {
+        value: i32,
+    }
+
+    impl Outputtable for TestData {
+        fn human_format(&self) -> String {
+            format!("Value: {}", self.value)
+        }
+    }
+
+    struct TestCmd;
+
+    impl Completable for TestCmd {
+        fn command_name(&self) -> &'static str {
+            "test"
+        }
+
+        fn subcommands(&self) -> Vec<CompletionItem> {
+            vec![CompletionItem::new("run")]
+        }
+
+        fn global_options(&self) -> Vec<CompletionItem> {
+            vec![CompletionItem::new("--help")]
+        }
+
+        fn subcommand_options(&self, _: &str) -> Vec<CompletionItem> {
+            vec![]
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -121,19 +154,6 @@ mod tests {
     #[test]
     fn output_integration() {
         init_test("output_integration");
-        use serde::Serialize;
-        use std::io::Cursor;
-
-        #[derive(Serialize)]
-        struct TestData {
-            value: i32,
-        }
-
-        impl Outputtable for TestData {
-            fn human_format(&self) -> String {
-                format!("Value: {}", self.value)
-            }
-        }
 
         let cursor = Cursor::new(Vec::new());
         let mut output = Output::with_writer(OutputFormat::Json, cursor);
@@ -159,26 +179,6 @@ mod tests {
     #[test]
     fn completion_integration() {
         init_test("completion_integration");
-        struct TestCmd;
-
-        impl Completable for TestCmd {
-            fn command_name(&self) -> &'static str {
-                "test"
-            }
-
-            fn subcommands(&self) -> Vec<CompletionItem> {
-                vec![CompletionItem::new("run")]
-            }
-
-            fn global_options(&self) -> Vec<CompletionItem> {
-                vec![CompletionItem::new("--help")]
-            }
-
-            fn subcommand_options(&self, _: &str) -> Vec<CompletionItem> {
-                vec![]
-            }
-        }
-
         let mut buf = Vec::new();
         generate_completions(Shell::Bash, &TestCmd, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();

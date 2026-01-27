@@ -284,6 +284,7 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[derive(Serialize)]
     struct TestItem {
@@ -370,7 +371,6 @@ mod tests {
     #[test]
     fn output_writer_json_format() {
         init_test("output_writer_json_format");
-        use std::io::Cursor;
 
         let cursor = Cursor::new(Vec::new());
         let mut output = Output::with_writer(OutputFormat::Json, cursor);
@@ -386,7 +386,6 @@ mod tests {
     #[test]
     fn output_writer_human_format() {
         init_test("output_writer_human_format");
-        use std::io::Cursor;
 
         let cursor = Cursor::new(Vec::new());
         let mut output = Output::with_writer(OutputFormat::Human, cursor);
@@ -402,7 +401,6 @@ mod tests {
     #[test]
     fn output_writer_tsv_format() {
         init_test("output_writer_tsv_format");
-        use std::io::Cursor;
 
         let cursor = Cursor::new(Vec::new());
         let mut output = Output::with_writer(OutputFormat::Tsv, cursor);
@@ -418,7 +416,6 @@ mod tests {
     #[test]
     fn output_writer_list_json_is_array() {
         init_test("output_writer_list_json_is_array");
-        use std::io::Cursor;
 
         let cursor = Cursor::new(Vec::new());
         let mut output = Output::with_writer(OutputFormat::Json, cursor);
