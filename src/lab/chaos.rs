@@ -454,6 +454,12 @@ impl ChaosRng {
         bits as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// Returns a random u64 from the underlying deterministic RNG.
+    #[must_use]
+    pub fn next_u64(&mut self) -> u64 {
+        self.inner.next_u64()
+    }
+
     /// Returns true with the given probability.
     #[must_use]
     pub fn should_inject(&mut self, probability: f64) -> bool {

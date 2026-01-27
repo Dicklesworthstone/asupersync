@@ -425,6 +425,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
     /// # Safety
     ///
     /// The `node` must be valid and currently linked in this wheel.
+    #[allow(clippy::needless_pass_by_value)]
     pub unsafe fn cancel(&mut self, node: std::pin::Pin<&mut TimerNode>) {
         if !node.is_linked() {
             return;
@@ -665,6 +666,7 @@ impl HierarchicalTimerWheel {
     /// # Safety
     ///
     /// The `node` must be valid and currently linked in this wheel.
+    #[allow(clippy::needless_pass_by_value)]
     pub unsafe fn cancel(&mut self, node: std::pin::Pin<&mut TimerNode>) {
         if !node.is_linked() {
             return;
@@ -792,6 +794,7 @@ impl HierarchicalTimerWheel {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn cascade(&mut self, level_index: u8, now: Instant, wakers: &mut Vec<Waker>) {
         let (bucket, wrapped) = match level_index {
             1 => self.level1.advance_and_drain(),
@@ -828,6 +831,12 @@ impl HierarchicalTimerWheel {
             .chain(self.level1.iter_deadlines())
             .chain(self.level2.iter_deadlines())
             .chain(self.level3.iter_deadlines())
+    }
+}
+
+impl Default for HierarchicalTimerWheel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

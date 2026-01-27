@@ -212,7 +212,7 @@ impl FaultState {
         if self.config.error_kinds.is_empty() {
             return None;
         }
-        let idx = (self.rng.next_f64() * self.config.error_kinds.len() as f64) as usize;
+        let idx = (self.rng.next_u64() as usize) % self.config.error_kinds.len();
         Some(self.config.error_kinds[idx])
     }
 }
@@ -577,6 +577,7 @@ impl LabReactor {
             "injected connection close"
         );
 
+        drop(inner);
         Ok(())
     }
 
@@ -694,6 +695,7 @@ impl Reactor for LabReactor {
                 fault: None,
             },
         );
+        drop(inner);
         Ok(())
     }
 
@@ -728,9 +730,11 @@ impl Reactor for LabReactor {
             .filter(|te| te.event.token != token)
             .collect();
 
+        drop(inner);
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn poll(&self, events: &mut super::Events, timeout: Option<Duration>) -> io::Result<usize> {
         // Clear wake flag at poll entry
         self.woken.store(false, Ordering::SeqCst);

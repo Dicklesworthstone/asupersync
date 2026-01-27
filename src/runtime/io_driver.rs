@@ -184,7 +184,7 @@ impl IoDriver {
     ///
     /// `true` if the waker was updated, `false` if the token was not found.
     pub fn update_waker(&mut self, token: Token, waker: Waker) -> bool {
-        self.wakers.get_mut(token.0).map_or(false, |slot| {
+        self.wakers.get_mut(token.0).is_some_and(|slot| {
             *slot = waker;
             true
         })
@@ -423,35 +423,36 @@ impl IoRegistration {
 
     /// Updates the interest set for this registration.
     pub fn set_interest(&mut self, interest: Interest) -> io::Result<()> {
-        if let Some(driver) = self.driver.upgrade() {
-            let mut guard = driver.lock().expect("lock poisoned");
-            guard.modify_interest(self.token, interest)?;
-            self.interest = interest;
-            Ok(())
-        } else {
-            Err(io::Error::new(
+        let Some(driver) = self.driver.upgrade() else {
+            return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "I/O driver has been dropped",
-            ))
+            ));
+        };
+        {
+            let mut guard = driver.lock().expect("lock poisoned");
+            guard.modify_interest(self.token, interest)?;
         }
+        self.interest = interest;
+        Ok(())
     }
 
     /// Updates the waker for this registration.
     #[must_use]
     pub fn update_waker(&self, waker: Waker) -> bool {
-        if let Some(driver) = self.driver.upgrade() {
+        self.driver.upgrade().is_some_and(|driver| {
             let mut guard = driver.lock().expect("lock poisoned");
             guard.update_waker(self.token, waker)
-        } else {
-            false
-        }
+        })
     }
 
     /// Explicitly deregisters without waiting for drop.
     pub fn deregister(self) -> io::Result<()> {
         if let Some(driver) = self.driver.upgrade() {
-            let mut guard = driver.lock().expect("lock poisoned");
-            let result = guard.deregister(self.token);
+            let result = {
+                let mut guard = driver.lock().expect("lock poisoned");
+                guard.deregister(self.token)
+            };
             std::mem::forget(self);
             result
         } else {
@@ -476,7 +477,7 @@ impl std::fmt::Debug for IoDriver {
             .field("waker_count", &self.wakers.len())
             .field("events_capacity", &self.events.capacity())
             .field("stats", &self.stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

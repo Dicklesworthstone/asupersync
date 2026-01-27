@@ -570,6 +570,7 @@ impl TaskRecord {
             finalizer_budget_priority = budget.priority,
             "task finalization done"
         );
+        let _ = budget;
         self.state = TaskState::Completed(Outcome::Cancelled(reason));
         self.phase.store(TaskPhase::Completed);
         true

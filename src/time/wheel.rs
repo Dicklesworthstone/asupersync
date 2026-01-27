@@ -765,6 +765,12 @@ impl TimerWheel {
     }
 }
 
+impl Default for TimerWheel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

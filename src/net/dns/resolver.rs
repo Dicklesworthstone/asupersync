@@ -365,10 +365,9 @@ mod tests {
     #[test]
     fn resolver_ip_passthrough() {
         init_test("resolver_ip_passthrough");
-        let resolver = Resolver::new();
 
         // Create a simple blocking test for IP passthrough
-        let result = resolver.query_ip_sync("127.0.0.1");
+        let result = Resolver::query_ip_sync("127.0.0.1");
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         let lookup = result.unwrap();
         let len = lookup.len();
@@ -382,10 +381,9 @@ mod tests {
     #[test]
     fn resolver_localhost() {
         init_test("resolver_localhost");
-        let resolver = Resolver::new();
 
         // Localhost should resolve
-        let result = resolver.query_ip_sync("localhost");
+        let result = Resolver::query_ip_sync("localhost");
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         let lookup = result.unwrap();
         let empty = lookup.is_empty();
@@ -396,10 +394,9 @@ mod tests {
     #[test]
     fn resolver_invalid_host() {
         init_test("resolver_invalid_host");
-        let resolver = Resolver::new();
 
         // Empty hostname
-        let _result = resolver.query_ip_sync("");
+        let _result = Resolver::query_ip_sync("");
         // This may or may not error depending on platform
         // Just ensure it doesn't panic
         crate::test_complete!("resolver_invalid_host");
@@ -412,7 +409,7 @@ mod tests {
         let resolver2 = resolver1.clone();
 
         // Lookup on resolver1
-        let _ = resolver1.query_ip_sync("localhost");
+        let _ = Resolver::query_ip_sync("localhost");
         resolver1.cache.put_ip(
             "test.example",
             &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_secs(300)),
