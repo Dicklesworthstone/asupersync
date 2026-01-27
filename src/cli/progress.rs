@@ -403,6 +403,7 @@ impl ProgressReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -497,7 +498,6 @@ mod tests {
     #[test]
     fn progress_reporter_json_output() {
         init_test("progress_reporter_json_output");
-        use std::io::Cursor;
 
         let cursor = Cursor::new(Vec::new());
         let mut reporter =
