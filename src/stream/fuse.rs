@@ -23,9 +23,8 @@ impl<S: Stream + Unpin> Stream for Fuse<S> {
     type Item = S::Item;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let stream = match self.stream.as_mut() {
-            Some(s) => s,
-            None => return Poll::Ready(None),
+        let Some(stream) = self.stream.as_mut() else {
+            return Poll::Ready(None);
         };
 
         match Pin::new(stream).poll_next(cx) {
@@ -38,9 +37,6 @@ impl<S: Stream + Unpin> Stream for Fuse<S> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.stream {
-            Some(ref s) => s.size_hint(),
-            None => (0, Some(0)),
-        }
+        self.stream.as_ref().map_or((0, Some(0)), |s| s.size_hint())
     }
 }

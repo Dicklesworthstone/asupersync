@@ -274,6 +274,7 @@ impl TaskRecord {
     }
 
     /// Requests cancellation with an explicit cleanup budget.
+    #[allow(clippy::too_many_lines)]
     pub fn request_cancel_with_budget(
         &mut self,
         reason: CancelReason,
@@ -557,7 +558,7 @@ impl TaskRecord {
             return false;
         };
         let reason = reason.clone();
-        let _budget = *cleanup_budget;
+        let budget = *cleanup_budget;
         debug!(
             task_id = ?self.id,
             region_id = ?self.owner,
@@ -565,8 +566,8 @@ impl TaskRecord {
             new_state = "Completed",
             outcome_kind = "Cancelled",
             cancel_kind = ?reason.kind,
-            finalizer_budget_poll_quota = _budget.poll_quota,
-            finalizer_budget_priority = _budget.priority,
+            finalizer_budget_poll_quota = budget.poll_quota,
+            finalizer_budget_priority = budget.priority,
             "task finalization done"
         );
         self.state = TaskState::Completed(Outcome::Cancelled(reason));

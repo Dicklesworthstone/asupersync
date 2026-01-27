@@ -263,7 +263,7 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
             }
 
             // Listen with backlog
-            let backlog = self.backlog.unwrap_or(128) as i32;
+            let backlog = i32::try_from(self.backlog.unwrap_or(128)).unwrap_or(i32::MAX);
             if let Err(e) = socket.listen(backlog) {
                 last_err = Some(e);
                 continue;

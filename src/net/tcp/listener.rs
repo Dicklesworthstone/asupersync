@@ -172,15 +172,15 @@ impl TcpListenerApi for TcpListener {
     }
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
-        TcpListener::poll_accept(self, cx)
+        Self::poll_accept(self, cx)
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        TcpListener::local_addr(self)
+        Self::local_addr(self)
     }
 
     fn set_ttl(&self, ttl: u32) -> io::Result<()> {
-        TcpListener::set_ttl(self, ttl)
+        Self::set_ttl(self, ttl)
     }
 }
 

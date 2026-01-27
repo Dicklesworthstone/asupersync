@@ -184,12 +184,10 @@ impl IoDriver {
     ///
     /// `true` if the waker was updated, `false` if the token was not found.
     pub fn update_waker(&mut self, token: Token, waker: Waker) -> bool {
-        if let Some(slot) = self.wakers.get_mut(token.0) {
+        self.wakers.get_mut(token.0).map_or(false, |slot| {
             *slot = waker;
             true
-        } else {
-            false
-        }
+        })
     }
 
     /// Modifies the interest set for an existing registration.
@@ -340,8 +338,10 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
-        let mut driver = self.inner.lock().expect("lock poisoned");
-        let token = driver.register(source, interest, waker)?;
+        let token = {
+            let mut driver = self.inner.lock().expect("lock poisoned");
+            driver.register(source, interest, waker)?
+        };
         Ok(IoRegistration::new(
             token,
             Arc::downgrade(&self.inner),

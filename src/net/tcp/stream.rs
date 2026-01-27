@@ -368,19 +368,19 @@ impl TcpStreamApi for TcpStream {
     }
 
     fn peer_addr(&self) -> io::Result<SocketAddr> {
-        TcpStream::peer_addr(self)
+        Self::peer_addr(self)
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        TcpStream::local_addr(self)
+        Self::local_addr(self)
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        TcpStream::shutdown(self, how)
+        Self::shutdown(self, how)
     }
 
     fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        TcpStream::set_nodelay(self, nodelay)
+        Self::set_nodelay(self, nodelay)
     }
 
     fn nodelay(&self) -> io::Result<bool> {

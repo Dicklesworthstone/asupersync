@@ -34,7 +34,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 static INIT_LOGGING: Once = Once::new();
 
 /// Default seed used by test lab helpers.
-pub const DEFAULT_TEST_SEED: u64 = 0xDEADBEEF;
+pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
 
 /// Initialize test logging with trace-level output.
 ///

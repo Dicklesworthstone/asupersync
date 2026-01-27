@@ -411,30 +411,30 @@ impl ReplayEvent {
     #[must_use]
     pub const fn estimated_size(&self) -> usize {
         match self {
-            Self::TaskScheduled { .. } => 17,                 // 1 + 8 + 8
-            Self::TaskYielded { .. } => 9,                    // 1 + 8
-            Self::TaskCompleted { .. } => 10,                 // 1 + 8 + 1
-            Self::TaskSpawned { .. } => 25,                   // 1 + 8 + 8 + 8
-            Self::TimeAdvanced { .. } => 17,                  // 1 + 8 + 8
-            Self::TimerCreated { .. } => 17,                  // 1 + 8 + 8
-            Self::TimerFired { .. } => 9,                     // 1 + 8
-            Self::TimerCancelled { .. } => 9,                 // 1 + 8
-            Self::IoReady { .. } => 10,                       // 1 + 8 + 1
-            Self::IoResult { .. } => 17,                      // 1 + 8 + 8
-            Self::IoError { .. } => 10,                       // 1 + 8 + 1
-            Self::RngSeed { .. } => 9,                        // 1 + 8
-            Self::RngValue { .. } => 9,                       // 1 + 8
-            Self::ChaosInjection { task: None, .. } => 11,    // 1 + 1 + 1 + 8
-            Self::ChaosInjection { task: Some(_), .. } => 19, // 1 + 1 + 9 + 8
-            Self::RegionCreated { parent: None, .. } => 17,   // 1 + 8 + 8
-            Self::RegionCreated {
+            Self::TaskYielded { .. }
+            | Self::TimerFired { .. }
+            | Self::TimerCancelled { .. }
+            | Self::RngSeed { .. }
+            | Self::RngValue { .. }
+            | Self::WakerWake { .. } => 9, // 1 + 8
+            Self::TaskCompleted { .. }
+            | Self::IoReady { .. }
+            | Self::IoError { .. }
+            | Self::RegionClosed { .. }
+            | Self::RegionCancelled { .. } => 10, // 1 + 8 + 1
+            Self::TaskScheduled { .. }
+            | Self::TimeAdvanced { .. }
+            | Self::TimerCreated { .. }
+            | Self::IoResult { .. }
+            | Self::RegionCreated { parent: None, .. } => 17, // 1 + 8 + 8
+            Self::TaskSpawned { .. }
+            | Self::RegionCreated {
                 parent: Some(_), ..
-            } => 25, // 1 + 8 + 8 + 8
-            Self::RegionClosed { .. } => 10,                  // 1 + 8 + 1
-            Self::RegionCancelled { .. } => 10,               // 1 + 8 + 1
-            Self::WakerWake { .. } => 9,                      // 1 + 8
-            Self::WakerBatchWake { .. } => 5,                 // 1 + 4
-            Self::Checkpoint { .. } => 25,                    // 1 + 8 + 8 + 4 + 4
+            }
+            | Self::Checkpoint { .. } => 25, // 1 + 8 + 8 + 8
+            Self::ChaosInjection { task: None, .. } => 11, // 1 + 1 + 1 + 8
+            Self::ChaosInjection { task: Some(_), .. } => 19, // 1 + 1 + 9 + 8
+            Self::WakerBatchWake { .. } => 5,              // 1 + 4
         }
     }
 
@@ -467,6 +467,7 @@ impl ReplayEvent {
 
     /// Creates an I/O ready event.
     #[must_use]
+    #[allow(clippy::fn_params_excessive_bools)]
     pub fn io_ready(token: u64, readable: bool, writable: bool, error: bool, hangup: bool) -> Self {
         let mut readiness = 0u8;
         if readable {
@@ -736,9 +737,9 @@ mod tests {
     #[test]
     fn metadata_builder() {
         let meta = TraceMetadata::new(42)
-            .with_config_hash(0xDEADBEEF)
+            .with_config_hash(0xDEAD_BEEF)
             .with_description("test trace");
-        assert_eq!(meta.config_hash, 0xDEADBEEF);
+        assert_eq!(meta.config_hash, 0xDEAD_BEEF);
         assert_eq!(meta.description, Some("test trace".to_string()));
     }
 

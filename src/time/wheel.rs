@@ -1101,16 +1101,16 @@ mod tests {
         // Level 2: ~65s slots, range ~4.6h
         // Level 3: ~4.6h slots, range ~49.7 days (but capped by config at 24h)
         let intervals = [
-            Time::from_millis(10),   // Level 0
-            Time::from_millis(500),  // Level 1
-            Time::from_secs(30),     // Level 1
-            Time::from_secs(120),    // Level 2
-            Time::from_secs(3600),   // Level 2 (1 hour)
-            Time::from_secs(7200),   // Level 2 (2 hours)
-            Time::from_secs(18000),  // Level 3 (5 hours)
-            Time::from_secs(36000),  // Level 3 (10 hours)
-            Time::from_secs(90000),  // Overflow (25 hours, > 24h max_wheel_duration)
-            Time::from_secs(100000), // Overflow (27.8 hours, within 7d max_timer_duration)
+            Time::from_millis(10),    // Level 0
+            Time::from_millis(500),   // Level 1
+            Time::from_secs(30),      // Level 1
+            Time::from_secs(120),     // Level 2
+            Time::from_secs(3600),    // Level 2 (1 hour)
+            Time::from_secs(7200),    // Level 2 (2 hours)
+            Time::from_secs(18000),   // Level 3 (5 hours)
+            Time::from_secs(36000),   // Level 3 (10 hours)
+            Time::from_secs(90000),   // Overflow (25 hours, > 24h max_wheel_duration)
+            Time::from_secs(100_000), // Overflow (27.8 hours, within 7d max_timer_duration)
         ];
 
         for (i, &deadline) in intervals.iter().enumerate() {
@@ -1190,10 +1190,15 @@ mod tests {
         wheel.register(Time::from_millis(10), waker2);
 
         // Only the second timer should fire
-        let wakers = wheel.collect_expired(Time::from_millis(10));
-        crate::assert_with_log!(wakers.len() == 1, "only active fires", 1, wakers.len());
+        let expired_wakers = wheel.collect_expired(Time::from_millis(10));
+        crate::assert_with_log!(
+            expired_wakers.len() == 1,
+            "only active fires",
+            1,
+            expired_wakers.len()
+        );
 
-        for waker in wakers {
+        for waker in expired_wakers {
             waker.wake();
         }
         let count = counter.load(Ordering::SeqCst);
@@ -1208,7 +1213,7 @@ mod tests {
         // Test TimerWheelConfig builder
         let wheel_config = TimerWheelConfig::new()
             .max_wheel_duration(Duration::from_secs(86400))
-            .max_timer_duration(Duration::from_secs(604800));
+            .max_timer_duration(Duration::from_secs(604_800));
         crate::assert_with_log!(
             wheel_config.max_wheel_duration == Duration::from_secs(86400),
             "wheel duration",
@@ -1216,9 +1221,9 @@ mod tests {
             wheel_config.max_wheel_duration.as_secs()
         );
         crate::assert_with_log!(
-            wheel_config.max_timer_duration == Duration::from_secs(604800),
+            wheel_config.max_timer_duration == Duration::from_secs(604_800),
             "timer duration",
-            604800,
+            604_800,
             wheel_config.max_timer_duration.as_secs()
         );
 

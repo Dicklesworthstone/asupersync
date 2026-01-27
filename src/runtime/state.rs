@@ -417,6 +417,7 @@ impl RuntimeState {
     /// Marks an obligation as committed and emits a trace event.
     ///
     /// Returns the duration the obligation was held (nanoseconds).
+    #[allow(clippy::result_large_err)]
     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
         // Extract data first to avoid borrow conflicts with self.next_trace_seq()
         let (duration, id, holder, region, kind) = {
@@ -442,7 +443,7 @@ impl RuntimeState {
             )
         };
 
-        let _span = crate::tracing_compat::debug_span!(
+        let span = crate::tracing_compat::debug_span!(
             "obligation_commit",
             obligation_id = ?id,
             kind = ?kind,
@@ -450,6 +451,7 @@ impl RuntimeState {
             region_id = ?region,
             duration_ns = duration
         );
+        let _span_guard = span.enter();
         crate::tracing_compat::debug!(
             obligation_id = ?id,
             kind = ?kind,
@@ -470,6 +472,7 @@ impl RuntimeState {
     /// Marks an obligation as aborted and emits a trace event.
     ///
     /// Returns the duration the obligation was held (nanoseconds).
+    #[allow(clippy::result_large_err)]
     pub fn abort_obligation(
         &mut self,
         obligation: ObligationId,
@@ -499,7 +502,7 @@ impl RuntimeState {
             )
         };
 
-        let _span = crate::tracing_compat::debug_span!(
+        let span = crate::tracing_compat::debug_span!(
             "obligation_abort",
             obligation_id = ?id,
             kind = ?kind,
@@ -508,6 +511,7 @@ impl RuntimeState {
             duration_ns = duration,
             abort_reason = %reason
         );
+        let _span_guard = span.enter();
         crate::tracing_compat::debug!(
             obligation_id = ?id,
             kind = ?kind,
@@ -529,6 +533,7 @@ impl RuntimeState {
     /// Marks an obligation as leaked and emits a trace + error event.
     ///
     /// Returns the duration the obligation was held (nanoseconds).
+    #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
         // Extract data first to avoid borrow conflicts with self.next_trace_seq()
         let (duration, id, holder, region, kind) = {
@@ -554,7 +559,7 @@ impl RuntimeState {
             )
         };
 
-        let _span = crate::tracing_compat::error_span!(
+        let span = crate::tracing_compat::error_span!(
             "obligation_leak",
             obligation_id = ?id,
             kind = ?kind,
@@ -562,6 +567,7 @@ impl RuntimeState {
             region_id = ?region,
             duration_ns = duration
         );
+        let _span_guard = span.enter();
 
         let seq = self.next_trace_seq();
         self.trace.push(TraceEvent::obligation_leak(
@@ -703,9 +709,9 @@ impl RuntimeState {
             };
 
             let budget = reason.cleanup_budget();
-            if task_record.request_cancel_with_budget(reason.clone(), budget) {
-                tasks_to_cancel.push((task_id, budget.priority));
-            } else if task_record.state.is_cancelling() {
+            if task_record.request_cancel_with_budget(reason.clone(), budget)
+                || task_record.state.is_cancelling()
+            {
                 tasks_to_cancel.push((task_id, budget.priority));
             }
         }
@@ -736,6 +742,7 @@ impl RuntimeState {
     ///     scheduler.move_to_cancel_lane(task_id, priority);
     /// }
     /// ```
+    #[allow(clippy::too_many_lines)]
     pub fn cancel_request(
         &mut self,
         region_id: RegionId,

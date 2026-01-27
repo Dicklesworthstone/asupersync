@@ -278,9 +278,8 @@ impl IntegrityIssue {
             Self::UnsupportedFlags { .. }
             | Self::SchemaMismatch { .. }
             | Self::EventCountMismatch { .. }
-            | Self::Truncated { .. } => IssueSeverity::Error,
-
-            Self::InvalidEvent { .. }
+            | Self::Truncated { .. }
+            | Self::InvalidEvent { .. }
             | Self::TimelineNonMonotonic { .. }
             | Self::IoError { .. } => IssueSeverity::Error,
         }

@@ -263,6 +263,7 @@ impl DeadlineMonitoringBuilder {
         self
     }
 
+    #[allow(clippy::type_complexity)]
     fn finish(
         self,
     ) -> (

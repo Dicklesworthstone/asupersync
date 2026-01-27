@@ -86,22 +86,24 @@ impl DnsCache {
 
     /// Looks up an IP address result from the cache.
     pub fn get_ip(&self, host: &str) -> Option<LookupIp> {
-        let cache = self.ip_cache.read().expect("cache lock poisoned");
+        let entry = {
+            let cache = self.ip_cache.read().expect("cache lock poisoned");
+            cache.get(host).cloned()
+        };
 
-        if let Some(entry) = cache.get(host) {
-            if !entry.is_expired() {
-                let mut stats = self.stats.write().expect("stats lock poisoned");
-                stats.hits += 1;
+        match entry {
+            Some(entry) if !entry.is_expired() => {
+                self.stats.write().expect("stats lock poisoned").hits += 1;
 
                 // Clone and return with original TTL for simplicity
                 // A more sophisticated implementation would adjust the TTL
-                return Some(entry.data.clone());
+                Some(entry.data)
+            }
+            _ => {
+                self.stats.write().expect("stats lock poisoned").misses += 1;
+                None
             }
         }
-
-        let mut stats = self.stats.write().expect("stats lock poisoned");
-        stats.misses += 1;
-        None
     }
 
     /// Inserts an IP address lookup result into the cache.
@@ -116,7 +118,7 @@ impl DnsCache {
 
             // If still at capacity, remove oldest
             if cache.len() >= self.config.max_entries {
-                if let Some(oldest_key) = self.find_oldest_key(&cache) {
+                if let Some(oldest_key) = Self::find_oldest_key(&cache) {
                     cache.remove(&oldest_key);
                     let mut stats = self.stats.write().expect("stats lock poisoned");
                     stats.evictions += 1;
@@ -135,11 +137,15 @@ impl DnsCache {
 
     /// Clears all entries from the cache.
     pub fn clear(&self) {
-        let mut cache = self.ip_cache.write().expect("cache lock poisoned");
-        cache.clear();
+        {
+            let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+            cache.clear();
+        }
 
-        let mut stats = self.stats.write().expect("stats lock poisoned");
-        *stats = CacheStats::default();
+        {
+            let mut stats = self.stats.write().expect("stats lock poisoned");
+            *stats = CacheStats::default();
+        }
     }
 
     /// Evicts expired entries from the cache.
@@ -150,6 +156,7 @@ impl DnsCache {
 
     /// Returns cache statistics.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn stats(&self) -> CacheStats {
         let cache = self.ip_cache.read().expect("cache lock poisoned");
         let stats = self.stats.read().expect("stats lock poisoned");
@@ -182,7 +189,7 @@ impl DnsCache {
         }
     }
 
-    fn find_oldest_key(&self, cache: &HashMap<String, CacheEntry<LookupIp>>) -> Option<String> {
+    fn find_oldest_key(cache: &HashMap<String, CacheEntry<LookupIp>>) -> Option<String> {
         cache
             .iter()
             .min_by_key(|(_, entry)| entry.inserted_at)

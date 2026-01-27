@@ -117,6 +117,7 @@ impl TraceEventSummary {
     }
 
     /// Summarizes trace data for comparison.
+    #[allow(clippy::too_many_lines)]
     fn summarize_data(data: &TraceData) -> String {
         use std::fmt::Write;
 

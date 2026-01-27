@@ -88,7 +88,7 @@ impl fmt::Debug for DeadlineMonitor {
             .field("config", &self.config)
             .field("monitored", &self.monitored)
             .field("last_scan", &self.last_scan)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -142,9 +142,8 @@ impl DeadlineMonitor {
             let Some(inner) = task.cx_inner.as_ref() else {
                 continue;
             };
-            let inner_guard = match inner.read() {
-                Ok(guard) => guard,
-                Err(_) => continue,
+            let Ok(inner_guard) = inner.read() else {
+                continue;
             };
             let Some(deadline) = inner_guard.budget.deadline else {
                 continue;
@@ -226,6 +225,7 @@ impl DeadlineMonitor {
 }
 
 /// Default warning handler that emits a tracing warning.
+#[allow(clippy::needless_pass_by_value)]
 pub fn default_warning_handler(warning: DeadlineWarning) {
     #[cfg(feature = "tracing-integration")]
     {
@@ -246,6 +246,7 @@ pub fn default_warning_handler(warning: DeadlineWarning) {
     }
 }
 
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
 fn fraction_nanos(total_nanos: u64, fraction: f64) -> u64 {
     if total_nanos == 0 {
         return 0;

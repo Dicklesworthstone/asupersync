@@ -250,10 +250,10 @@ mod tests {
         let index2 = record.heap_alloc(2u32);
 
         let rref1a = RRef::<u32>::new(region_id, index1);
-        let rref1b = RRef::<u32>::new(region_id, index1);
+        let rref1_clone = RRef::<u32>::new(region_id, index1);
         let rref2 = RRef::<u32>::new(region_id, index2);
 
-        assert_eq!(rref1a, rref1b);
+        assert_eq!(rref1a, rref1_clone);
         assert_ne!(rref1a, rref2);
     }
 

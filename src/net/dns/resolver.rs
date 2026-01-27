@@ -156,7 +156,7 @@ impl Resolver {
                 crate::runtime::yield_now().await;
             }
 
-            match self.query_ip_sync(host) {
+            match Self::query_ip_sync(host) {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     last_error = Some(e);
@@ -168,7 +168,7 @@ impl Resolver {
     }
 
     /// Performs synchronous DNS lookup using std::net.
-    fn query_ip_sync(&self, host: &str) -> Result<LookupIp, DnsError> {
+    fn query_ip_sync(host: &str) -> Result<LookupIp, DnsError> {
         // Use ToSocketAddrs which performs DNS resolution
         let addr_str = format!("{host}:0");
 

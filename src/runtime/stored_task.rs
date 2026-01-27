@@ -64,29 +64,31 @@ impl StoredTask {
     /// if it needs to be polled again.
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         self.poll_count += 1;
-        let _poll_number = self.poll_count;
+        let poll_number = self.poll_count;
 
-        if let Some(_task_id) = self.task_id {
+        if let Some(task_id) = self.task_id {
             trace!(
-                task_id = ?_task_id,
-                poll_number = _poll_number,
+                task_id = ?task_id,
+                poll_number = poll_number,
                 "task poll started"
             );
+            let _ = (task_id, poll_number);
         }
 
         let result = self.future.as_mut().poll(cx);
 
-        if let Some(_task_id) = self.task_id {
-            let _poll_result = match &result {
+        if let Some(task_id) = self.task_id {
+            let poll_result = match &result {
                 Poll::Ready(()) => "Ready",
                 Poll::Pending => "Pending",
             };
             trace!(
-                task_id = ?_task_id,
-                poll_number = _poll_number,
-                poll_result = _poll_result,
+                task_id = ?task_id,
+                poll_number = poll_number,
+                poll_result = poll_result,
                 "task poll completed"
             );
+            let _ = (task_id, poll_number, poll_result);
         }
 
         result

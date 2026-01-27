@@ -204,6 +204,7 @@ where
 {
     type Output = Result<S::Response, S::Error>;
 
+    #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
@@ -264,14 +265,13 @@ where
                     }
                     Poll::Ready(result) => {
                         // Check if we should retry
-                        let retry_decision = if let Some(req_ref) = request.as_ref() {
-                            match &result {
+                        let retry_decision = request.as_ref().map_or_else(
+                            || None,
+                            |req_ref| match &result {
                                 Ok(res) => policy.retry(req_ref, Ok(res)),
                                 Err(e) => policy.retry(req_ref, Err(e)),
-                            }
-                        } else {
-                            None
-                        };
+                            },
+                        );
 
                         match retry_decision {
                             None => {
@@ -291,7 +291,7 @@ where
                     }
                 },
                 RetryState::Checking {
-                    service: _service,
+                    service,
                     request,
                     mut result,
                     mut retry_future,
@@ -299,7 +299,7 @@ where
                     match Pin::new(&mut retry_future).poll(cx) {
                         Poll::Pending => {
                             this.state = RetryState::Checking {
-                                service: _service,
+                                service,
                                 request,
                                 result,
                                 retry_future,
@@ -313,7 +313,7 @@ where
 
                             if let Some(new_request) = next_request {
                                 this.state = RetryState::PollReady {
-                                    service: _service,
+                                    service,
                                     policy: new_policy,
                                     request: Some(new_request),
                                 };

@@ -820,12 +820,15 @@ mod tests {
                 assert!(reason.contains("FutureEventType") || reason.contains("unknown"));
             });
 
-        let (events, stats) = reader.load_all().expect("load all");
+        let (loaded_events, stats) = reader.load_all().expect("load all");
 
         // Should have read 2 events (skipped the unknown one)
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], ReplayEvent::RngSeed { seed: 100 }));
-        assert!(matches!(events[1], ReplayEvent::TaskYielded { .. }));
+        assert_eq!(loaded_events.len(), 2);
+        assert!(matches!(
+            loaded_events[0],
+            ReplayEvent::RngSeed { seed: 100 }
+        ));
+        assert!(matches!(loaded_events[1], ReplayEvent::TaskYielded { .. }));
 
         // Stats should show 1 skipped event
         assert_eq!(stats.events_read, 2);

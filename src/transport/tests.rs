@@ -453,8 +453,8 @@ mod tests {
                 sink.close().await.unwrap();
 
                 // Collect all received
-                let mut set = SymbolSet::new();
-                let collected = stream.collect_to_set(&mut set).await.unwrap();
+                let mut symbol_set = SymbolSet::new();
+                let collected = stream.collect_to_set(&mut symbol_set).await.unwrap();
                 crate::assert_with_log!(collected == 25, "batch received", 25, collected);
             });
 

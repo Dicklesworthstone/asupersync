@@ -31,6 +31,8 @@ use crate::types::{RegionId, TaskId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+type FilterPredicate = dyn Fn(&dyn FilterableEvent) -> bool + Send + Sync;
+
 // =============================================================================
 // Event Kind Categories
 // =============================================================================
@@ -151,7 +153,7 @@ pub struct TraceFilter {
 
     /// Custom filter predicate (must be Send + Sync for multi-threaded use).
     /// The predicate returns true if the event should be recorded.
-    custom: Option<Arc<dyn Fn(&dyn FilterableEvent) -> bool + Send + Sync>>,
+    custom: Option<Arc<FilterPredicate>>,
 
     /// RNG state for sampling decisions.
     sample_state: u64,
@@ -180,7 +182,7 @@ impl std::fmt::Debug for TraceFilter {
             .field("task_filter", &self.task_filter)
             .field("sample_rate", &self.sample_rate)
             .field("custom", &self.custom.as_ref().map(|_| "<predicate>"))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -461,6 +463,7 @@ impl TraceFilter {
     /// Performs a sampling decision.
     ///
     /// Uses a simple xorshift for fast, reproducible sampling.
+    #[allow(clippy::cast_precision_loss)]
     fn sample(&mut self) -> bool {
         // xorshift64
         let mut x = self.sample_state.wrapping_add(1);

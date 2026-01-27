@@ -158,6 +158,7 @@ impl<'a> SocketAncillary<'a> {
     ///     panic!("Buffer too small for file descriptors");
     /// }
     /// ```
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn add_fds(&mut self, fds: &[RawFd]) -> bool {
         if fds.is_empty() {
             return true;
@@ -250,6 +251,7 @@ pub struct AncillaryMessages<'a> {
 impl<'a> Iterator for AncillaryMessages<'a> {
     type Item = AncillaryMessage<'a>;
 
+    #[allow(clippy::cast_ptr_alignment)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current >= self.buffer.len() {
             return None;
@@ -269,7 +271,7 @@ impl<'a> Iterator for AncillaryMessages<'a> {
                 return None;
             }
 
-            let cmsg_len = (*cmsg_ptr).cmsg_len as usize;
+            let cmsg_len = (*cmsg_ptr).cmsg_len;
             if cmsg_len < mem::size_of::<libc::cmsghdr>() {
                 return None;
             }

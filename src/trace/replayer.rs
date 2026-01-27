@@ -205,6 +205,7 @@ impl TraceReplayer {
     /// Advances to the next event and returns it.
     ///
     /// Returns `None` if the trace has been fully replayed.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&ReplayEvent> {
         if self.completed {
             return None;
