@@ -1034,7 +1034,6 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimeBuilder;
     use crate::test_utils::init_test_logging;
-    use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::{
         data::ResourceMetrics, InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader,
         SdkMeterProvider,
@@ -1081,10 +1080,6 @@ mod tests {
             assert!(names.contains(*name), "missing metric: {name}");
         }
     }
-
-    use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader, SdkMeterProvider,
-    };
 
     #[test]
     fn otel_metrics_exports_in_memory() {
