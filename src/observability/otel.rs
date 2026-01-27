@@ -1032,13 +1032,63 @@ const fn cancel_kind_label(kind: CancelKind) -> &'static str {
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
     use super::*;
+    use crate::runtime::RuntimeBuilder;
+    use crate::test_utils::init_test_logging;
     use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::{
+        data::ResourceMetrics, InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader,
+        SdkMeterProvider,
+    };
+    use std::collections::HashSet;
+
+    const EXPECTED_METRICS: &[&str] = &[
+        "asupersync.tasks.spawned",
+        "asupersync.tasks.completed",
+        "asupersync.tasks.duration",
+        "asupersync.regions.created",
+        "asupersync.regions.closed",
+        "asupersync.regions.lifetime",
+        "asupersync.cancellations",
+        "asupersync.cancellation.drain_duration",
+        "asupersync.deadlines.set",
+        "asupersync.deadlines.exceeded",
+        "asupersync.deadline.warnings_total",
+        "asupersync.deadline.violations_total",
+        "asupersync.deadline.remaining_seconds",
+        "asupersync.checkpoint.interval_seconds",
+        "asupersync.task.stuck_detected_total",
+        "asupersync.obligations.created",
+        "asupersync.obligations.discharged",
+        "asupersync.obligations.leaked",
+        "asupersync.scheduler.poll_time",
+        "asupersync.scheduler.tasks_polled",
+    ];
+
+    fn metric_names(finished: &[ResourceMetrics]) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for resource_metrics in finished {
+            for scope_metrics in &resource_metrics.scope_metrics {
+                for metric in &scope_metrics.metrics {
+                    names.insert(metric.name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    fn assert_expected_metrics_present(names: &HashSet<String>, expected: &[&str]) {
+        for name in expected {
+            assert!(names.contains(*name), "missing metric: {name}");
+        }
+    }
+
     use opentelemetry_sdk::metrics::{
         InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader, SdkMeterProvider,
     };
 
     #[test]
     fn otel_metrics_exports_in_memory() {
+        init_test_logging();
         let exporter = OtelInMemoryExporter::default();
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
@@ -1071,6 +1121,42 @@ mod tests {
         provider.force_flush().expect("force_flush");
         let finished = exporter.get_finished_metrics().expect("finished metrics");
         assert!(!finished.is_empty());
+        let names = metric_names(&finished);
+        assert_expected_metrics_present(&names, EXPECTED_METRICS);
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn otel_metrics_runtime_integration_emits_task_metrics() {
+        init_test_logging();
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let metrics = OtelMetrics::new(meter);
+        let runtime = RuntimeBuilder::new()
+            .metrics(metrics)
+            .build()
+            .expect("runtime build");
+
+        let handle = runtime.handle().spawn(async { 7u8 });
+        let result = runtime.block_on(handle);
+        assert_eq!(result, 7);
+
+        provider.force_flush().expect("force_flush");
+        let finished = exporter.get_finished_metrics().expect("finished metrics");
+        assert!(!finished.is_empty());
+        let names = metric_names(&finished);
+        assert_expected_metrics_present(
+            &names,
+            &[
+                "asupersync.tasks.spawned",
+                "asupersync.tasks.completed",
+                "asupersync.tasks.duration",
+            ],
+        );
 
         provider.shutdown().expect("shutdown");
     }
