@@ -115,13 +115,15 @@ impl DurationHistory {
         if self.samples.len() == self.max_history {
             self.samples.pop_front();
         }
-        self.samples.push_back(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
+        self.samples
+            .push_back(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
     }
 
     fn len(&self) -> usize {
         self.samples.len()
     }
 
+    #[allow(clippy::cast_sign_loss)]
     fn percentile_nanos(&self, percentile: f64) -> Option<u64> {
         if self.samples.is_empty() {
             return None;
@@ -129,8 +131,10 @@ impl DurationHistory {
         let mut values: Vec<u64> = self.samples.iter().copied().collect();
         values.sort_unstable();
         let pct = percentile.clamp(0.0, 1.0);
-        let rank = (pct * values.len() as f64).ceil() as usize;
-        let idx = rank.saturating_sub(1).min(values.len() - 1);
+        let scaled = (pct * 1_000_000.0).round() as u64;
+        let len = values.len() as u64;
+        let rank = (scaled * len).div_ceil(1_000_000);
+        let idx = rank.saturating_sub(1).min(len.saturating_sub(1)) as usize;
         values.get(idx).copied()
     }
 }
@@ -219,7 +223,7 @@ impl DeadlineMonitor {
             let already_violated = self
                 .monitored
                 .get(&task_id)
-                .map_or(false, |entry| entry.violated);
+                .is_some_and(|entry| entry.violated);
             if deadline_exceeded && !already_violated {
                 let over_by = Duration::from_nanos(now.duration_since(deadline));
                 self.emit_deadline_violation(task_type, over_by);
@@ -233,7 +237,8 @@ impl DeadlineMonitor {
         let adaptive = &self.config.adaptive;
         if !adaptive.adaptive_enabled {
             let total_nanos = total.as_nanos().min(u128::from(u64::MAX)) as u64;
-            let fraction_nanos = fraction_nanos(total_nanos, self.config.warning_threshold_fraction);
+            let fraction_nanos =
+                fraction_nanos(total_nanos, self.config.warning_threshold_fraction);
             return Duration::from_nanos(fraction_nanos);
         }
 
@@ -250,16 +255,13 @@ impl DeadlineMonitor {
         fallback.min(total)
     }
 
-    fn emit_deadline_warning(
-        &self,
-        task_type: &str,
-        reason: WarningReason,
-        remaining: Duration,
-    ) {
+    fn emit_deadline_warning(&self, task_type: &str, reason: WarningReason, remaining: Duration) {
         if let Some(provider) = &self.metrics_provider {
             provider.deadline_warning(task_type, reason_label(reason), remaining);
-            if matches!(reason, WarningReason::NoProgress | WarningReason::ApproachingDeadlineNoProgress)
-            {
+            if matches!(
+                reason,
+                WarningReason::NoProgress | WarningReason::ApproachingDeadlineNoProgress
+            ) {
                 provider.task_stuck_detected(task_type);
             }
         }
@@ -284,6 +286,7 @@ impl DeadlineMonitor {
     }
 
     /// Performs a monitoring scan over tasks.
+    #[allow(clippy::too_many_lines)]
     pub fn check<'a, I>(&mut self, now: Time, tasks: I)
     where
         I: IntoIterator<Item = &'a TaskRecord>,
@@ -319,54 +322,14 @@ impl DeadlineMonitor {
 
             let last_checkpoint = inner_guard.checkpoint_state.last_checkpoint;
             let last_message = inner_guard.checkpoint_state.last_message.clone();
-            let task_type = inner_guard
+            let task_type_raw = inner_guard
                 .task_type
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
+            let task_type = normalize_task_type(&task_type_raw).to_string();
             drop(inner_guard);
 
             seen.insert(task.id);
-
-            let entry = self
-                .monitored
-                .entry(task.id)
-                .or_insert_with(|| MonitoredTask {
-                    task_id: task.id,
-                    region_id: task.owner,
-                    deadline,
-                    last_progress: last_checkpoint.unwrap_or(now_instant),
-                    last_checkpoint_seen: last_checkpoint,
-                    warned: false,
-                    violated: false,
-                });
-
-            // Keep metadata up to date.
-            entry.region_id = task.owner;
-            entry.deadline = deadline;
-            if let Some(checkpoint) = last_checkpoint {
-                if entry
-                    .last_checkpoint_seen
-                    .map_or(true, |prev| checkpoint > prev)
-                {
-                    if let Some(prev) = entry.last_checkpoint_seen {
-                        let interval = checkpoint.duration_since(prev);
-                        self.emit_checkpoint_interval(&task_type, interval);
-                    }
-                    entry.last_checkpoint_seen = Some(checkpoint);
-                    entry.last_progress = checkpoint;
-                }
-            }
-
-            let deadline_exceeded = now > deadline;
-            if deadline_exceeded && !entry.violated {
-                entry.violated = true;
-                let over_by = Duration::from_nanos(now.duration_since(deadline));
-                self.emit_deadline_violation(&task_type, over_by);
-            }
-
-            if entry.warned {
-                continue;
-            }
 
             let remaining_nanos = deadline.duration_since(now);
             let remaining = Duration::from_nanos(remaining_nanos);
@@ -381,29 +344,80 @@ impl DeadlineMonitor {
                     <= fraction_nanos(total_nanos, self.config.warning_threshold_fraction)
             };
 
-            let no_progress =
-                now_instant.duration_since(entry.last_progress) >= self.config.checkpoint_timeout;
+            let mut checkpoint_interval = None;
+            let mut deadline_violation = None;
+            let mut warning_to_emit: Option<(DeadlineWarning, WarningReason, Duration)> = None;
 
-            let warning = match (approaching_deadline, no_progress) {
-                (true, true) => Some(WarningReason::ApproachingDeadlineNoProgress),
-                (true, false) => Some(WarningReason::ApproachingDeadline),
-                (false, true) => Some(WarningReason::NoProgress),
-                (false, false) => None,
-            };
-
-            if let Some(reason) = warning {
-                let warning = {
-                    entry.warned = true;
-                    DeadlineWarning {
-                        task_id: entry.task_id,
-                        region_id: entry.region_id,
+            {
+                let entry = self
+                    .monitored
+                    .entry(task.id)
+                    .or_insert_with(|| MonitoredTask {
+                        task_id: task.id,
+                        region_id: task.owner,
                         deadline,
-                        remaining,
-                        last_checkpoint,
-                        last_checkpoint_message: last_message,
-                        reason,
+                        last_progress: last_checkpoint.unwrap_or(now_instant),
+                        last_checkpoint_seen: last_checkpoint,
+                        warned: false,
+                        violated: false,
+                    });
+
+                // Keep metadata up to date.
+                entry.region_id = task.owner;
+                entry.deadline = deadline;
+                if let Some(checkpoint) = last_checkpoint {
+                    if entry
+                        .last_checkpoint_seen
+                        .is_none_or(|prev| checkpoint > prev)
+                    {
+                        if let Some(prev) = entry.last_checkpoint_seen {
+                            checkpoint_interval = Some(checkpoint.duration_since(prev));
+                        }
+                        entry.last_checkpoint_seen = Some(checkpoint);
+                        entry.last_progress = checkpoint;
                     }
-                };
+                }
+
+                let deadline_exceeded = now > deadline;
+                if deadline_exceeded && !entry.violated {
+                    entry.violated = true;
+                    deadline_violation = Some(Duration::from_nanos(now.duration_since(deadline)));
+                }
+
+                if !entry.warned {
+                    let no_progress = now_instant.duration_since(entry.last_progress)
+                        >= self.config.checkpoint_timeout;
+
+                    let warning = match (approaching_deadline, no_progress) {
+                        (true, true) => Some(WarningReason::ApproachingDeadlineNoProgress),
+                        (true, false) => Some(WarningReason::ApproachingDeadline),
+                        (false, true) => Some(WarningReason::NoProgress),
+                        (false, false) => None,
+                    };
+
+                    if let Some(reason) = warning {
+                        entry.warned = true;
+                        let warning = DeadlineWarning {
+                            task_id: entry.task_id,
+                            region_id: entry.region_id,
+                            deadline,
+                            remaining,
+                            last_checkpoint,
+                            last_checkpoint_message: last_message,
+                            reason,
+                        };
+                        warning_to_emit = Some((warning, reason, remaining));
+                    }
+                }
+            }
+
+            if let Some(interval) = checkpoint_interval {
+                self.emit_checkpoint_interval(&task_type, interval);
+            }
+            if let Some(over_by) = deadline_violation {
+                self.emit_deadline_violation(&task_type, over_by);
+            }
+            if let Some((warning, reason, remaining)) = warning_to_emit {
                 self.emit_deadline_warning(&task_type, reason, remaining);
                 self.emit_warning(warning);
             }
@@ -479,6 +493,7 @@ mod tests {
     use super::*;
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
 
     fn init_test(name: &str) {
@@ -493,12 +508,14 @@ mod tests {
         deadline: Time,
         last_checkpoint: Option<Instant>,
         last_message: Option<&str>,
+        task_type: Option<&str>,
     ) -> TaskRecord {
         let budget = Budget::new().with_deadline(deadline);
         let mut record = TaskRecord::new_with_time(task_id, region_id, budget, created_at);
         let mut inner = CxInner::new(region_id, task_id, budget);
         inner.checkpoint_state.last_checkpoint = last_checkpoint;
         inner.checkpoint_state.last_message = last_message.map(std::string::ToString::to_string);
+        inner.task_type = task_type.map(std::string::ToString::to_string);
         record.set_cx_inner(Arc::new(RwLock::new(inner)));
         record
     }
@@ -526,6 +543,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(100),
+            None,
             None,
             None,
         );
@@ -571,6 +589,7 @@ mod tests {
             Time::from_secs(1000),
             Some(stale),
             Some("stuck"),
+            None,
         );
 
         monitor.check(Time::from_secs(100), std::iter::once(&task));
@@ -613,6 +632,7 @@ mod tests {
             Time::from_secs(10),
             None,
             None,
+            None,
         );
 
         monitor.check(Time::from_secs(9), std::iter::once(&task));
@@ -648,6 +668,7 @@ mod tests {
             Time::from_secs(0),
             Time::from_secs(10),
             Some(stale),
+            None,
             None,
         );
 
@@ -692,6 +713,7 @@ mod tests {
             Time::from_secs(1000),
             Some(Instant::now()),
             Some("recent checkpoint"),
+            None,
         );
 
         monitor.check(Time::from_secs(10), std::iter::once(&task));
@@ -726,6 +748,7 @@ mod tests {
             Time::from_secs(1000),
             Some(Instant::now()),
             Some("checkpoint message"),
+            None,
         );
 
         monitor.check(Time::from_secs(10), std::iter::once(&task));
@@ -749,5 +772,268 @@ mod tests {
             warning.last_checkpoint_message.as_deref()
         );
         crate::test_complete!("warning_includes_checkpoint_message");
+    }
+
+    #[derive(Default)]
+    struct TestMetrics {
+        warnings: AtomicU64,
+        violations: AtomicU64,
+        stuck: AtomicU64,
+        remaining_samples: Mutex<Vec<Duration>>,
+        checkpoint_intervals: Mutex<Vec<Duration>>,
+    }
+
+    impl MetricsProvider for TestMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+        fn task_completed(
+            &self,
+            _: TaskId,
+            _: crate::observability::metrics::OutcomeKind,
+            _: Duration,
+        ) {
+        }
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, _: RegionId, _: Duration) {}
+        fn cancellation_requested(&self, _: RegionId, _: crate::types::CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn obligation_created(&self, _: RegionId) {}
+        fn obligation_discharged(&self, _: RegionId) {}
+        fn obligation_leaked(&self, _: RegionId) {}
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {
+            self.warnings.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn deadline_violation(&self, _: &str, _: Duration) {
+            self.violations.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn deadline_remaining(&self, _: &str, remaining: Duration) {
+            self.remaining_samples.lock().unwrap().push(remaining);
+        }
+
+        fn checkpoint_interval(&self, _: &str, interval: Duration) {
+            self.checkpoint_intervals.lock().unwrap().push(interval);
+        }
+
+        fn task_stuck_detected(&self, _: &str) {
+            self.stuck.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn adaptive_threshold_uses_percentile() {
+        init_test("adaptive_threshold_uses_percentile");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.2,
+            checkpoint_timeout: Duration::from_secs(60),
+            adaptive: AdaptiveDeadlineConfig {
+                adaptive_enabled: true,
+                warning_percentile: 0.5,
+                min_samples: 3,
+                max_history: 1000,
+                fallback_threshold: Duration::from_secs(5),
+            },
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        monitor.record_completion(
+            TaskId::new_for_test(10, 0),
+            "alpha",
+            Duration::from_secs(10),
+            None,
+            Time::from_secs(10),
+        );
+        monitor.record_completion(
+            TaskId::new_for_test(11, 0),
+            "alpha",
+            Duration::from_secs(20),
+            None,
+            Time::from_secs(20),
+        );
+        monitor.record_completion(
+            TaskId::new_for_test(12, 0),
+            "alpha",
+            Duration::from_secs(30),
+            None,
+            Time::from_secs(30),
+        );
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(7, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1000),
+            None,
+            None,
+            Some("alpha"),
+        );
+
+        // Elapsed 25s > p50 (20s) => warning
+        monitor.check(Time::from_secs(25), std::iter::once(&task));
+
+        let recorded = warnings.lock().unwrap().clone();
+        crate::assert_with_log!(
+            recorded.as_slice() == [WarningReason::ApproachingDeadline],
+            "adaptive warning",
+            vec![WarningReason::ApproachingDeadline],
+            recorded
+        );
+        crate::test_complete!("adaptive_threshold_uses_percentile");
+    }
+
+    #[test]
+    fn adaptive_threshold_fallback_used() {
+        init_test("adaptive_threshold_fallback_used");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.2,
+            checkpoint_timeout: Duration::from_secs(60),
+            adaptive: AdaptiveDeadlineConfig {
+                adaptive_enabled: true,
+                warning_percentile: 0.9,
+                min_samples: 5,
+                max_history: 1000,
+                fallback_threshold: Duration::from_secs(5),
+            },
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        monitor.record_completion(
+            TaskId::new_for_test(13, 0),
+            "beta",
+            Duration::from_secs(2),
+            None,
+            Time::from_secs(2),
+        );
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(8, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1000),
+            None,
+            None,
+            Some("beta"),
+        );
+
+        // Elapsed 6s > fallback 5s => warning
+        monitor.check(Time::from_secs(6), std::iter::once(&task));
+
+        let recorded = warnings.lock().unwrap().clone();
+        crate::assert_with_log!(
+            recorded.as_slice() == [WarningReason::ApproachingDeadline],
+            "fallback warning",
+            vec![WarningReason::ApproachingDeadline],
+            recorded
+        );
+        crate::test_complete!("adaptive_threshold_fallback_used");
+    }
+
+    #[test]
+    fn deadline_metrics_emitted() {
+        init_test("deadline_metrics_emitted");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::ZERO,
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+        let metrics = Arc::new(TestMetrics::default());
+        monitor.set_metrics_provider(metrics.clone());
+
+        let stale = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        let task = make_task(
+            TaskId::new_for_test(9, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(10),
+            Some(stale),
+            Some("stuck"),
+            Some("gamma"),
+        );
+
+        monitor.check(Time::from_secs(9), std::iter::once(&task));
+
+        let warnings = metrics.warnings.load(Ordering::Relaxed);
+        let stuck = metrics.stuck.load(Ordering::Relaxed);
+        crate::assert_with_log!(warnings == 1, "warnings", 1u64, warnings);
+        crate::assert_with_log!(stuck == 1, "stuck", 1u64, stuck);
+
+        // Record completion with deadline exceeded to emit remaining + violation.
+        monitor.record_completion(
+            TaskId::new_for_test(9, 0),
+            "gamma",
+            Duration::from_secs(12),
+            Some(Time::from_secs(10)),
+            Time::from_secs(12),
+        );
+
+        let violations = metrics.violations.load(Ordering::Relaxed);
+        crate::assert_with_log!(violations == 1, "violations", 1u64, violations);
+        let remaining = metrics.remaining_samples.lock().unwrap().len();
+        crate::assert_with_log!(remaining == 1, "remaining samples", 1usize, remaining);
+        crate::test_complete!("deadline_metrics_emitted");
+    }
+
+    #[test]
+    fn checkpoint_interval_metrics_emitted() {
+        init_test("checkpoint_interval_metrics_emitted");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.2,
+            checkpoint_timeout: Duration::from_secs(60),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+        let metrics = Arc::new(TestMetrics::default());
+        monitor.set_metrics_provider(metrics.clone());
+
+        let first = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+        let second = Instant::now();
+        let task = make_task(
+            TaskId::new_for_test(10, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(100),
+            Some(first),
+            None,
+            Some("delta"),
+        );
+
+        monitor.check(Time::from_secs(1), std::iter::once(&task));
+
+        if let Some(inner) = task.cx_inner.as_ref() {
+            if let Ok(mut guard) = inner.write() {
+                guard.checkpoint_state.last_checkpoint = Some(second);
+            }
+        }
+
+        monitor.check(Time::from_secs(2), std::iter::once(&task));
+
+        let intervals = metrics.checkpoint_intervals.lock().unwrap().len();
+        crate::assert_with_log!(intervals == 1, "checkpoint intervals", 1usize, intervals);
+        crate::test_complete!("checkpoint_interval_metrics_emitted");
     }
 }

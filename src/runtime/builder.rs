@@ -3,7 +3,12 @@
 use crate::error::Error;
 use crate::observability::metrics::MetricsProvider;
 use crate::runtime::config::RuntimeConfig;
-use crate::runtime::deadline_monitor::{default_warning_handler, DeadlineWarning, MonitorConfig};
+use crate::runtime::deadline_monitor::{
+    default_warning_handler, AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig,
+};
+use crate::runtime::scheduler::ThreeLaneScheduler;
+use crate::runtime::RuntimeState;
+use crate::types::Budget;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -246,6 +251,48 @@ impl DeadlineMonitoringBuilder {
         self
     }
 
+    /// Use an explicit adaptive deadline configuration.
+    #[must_use]
+    pub fn adaptive_config(mut self, config: AdaptiveDeadlineConfig) -> Self {
+        self.config.adaptive = config;
+        self
+    }
+
+    /// Enable or disable adaptive deadline thresholds.
+    #[must_use]
+    pub fn adaptive_enabled(mut self, enabled: bool) -> Self {
+        self.config.adaptive.adaptive_enabled = enabled;
+        self
+    }
+
+    /// Set the adaptive warning percentile.
+    #[must_use]
+    pub fn adaptive_warning_percentile(mut self, percentile: f64) -> Self {
+        self.config.adaptive.warning_percentile = percentile;
+        self
+    }
+
+    /// Set the minimum samples required for adaptive thresholds.
+    #[must_use]
+    pub fn adaptive_min_samples(mut self, min_samples: usize) -> Self {
+        self.config.adaptive.min_samples = min_samples;
+        self
+    }
+
+    /// Set the maximum history length per task type.
+    #[must_use]
+    pub fn adaptive_max_history(mut self, max_history: usize) -> Self {
+        self.config.adaptive.max_history = max_history;
+        self
+    }
+
+    /// Set the fallback threshold used before enough samples are collected.
+    #[must_use]
+    pub fn adaptive_fallback_threshold(mut self, threshold: Duration) -> Self {
+        self.config.adaptive.fallback_threshold = threshold;
+        self
+    }
+
     /// Enable or disable deadline monitoring.
     #[must_use]
     pub fn enabled(mut self, enabled: bool) -> Self {
@@ -376,13 +423,58 @@ impl<T> Future for JoinHandle<T> {
 struct RuntimeInner {
     config: RuntimeConfig,
     next_worker_id: AtomicUsize,
+    state: Arc<Mutex<RuntimeState>>,
+    scheduler: ThreeLaneScheduler,
+    worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    root_region: crate::types::RegionId,
 }
 
 impl RuntimeInner {
     fn new(config: RuntimeConfig) -> Self {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let root_region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let mut scheduler = ThreeLaneScheduler::new(config.worker_threads, &state);
+
+        let mut worker_threads = Vec::new();
+        if config.worker_threads > 0 {
+            let workers = scheduler.take_workers();
+            for worker in workers {
+                let name = {
+                    let id = worker.id;
+                    format!("{}-{id}", config.thread_name_prefix)
+                };
+                let on_start = config.on_thread_start.clone();
+                let on_stop = config.on_thread_stop.clone();
+                let mut builder = std::thread::Builder::new().name(name);
+                if config.thread_stack_size > 0 {
+                    builder = builder.stack_size(config.thread_stack_size);
+                }
+                if let Ok(handle) = builder.spawn(move || {
+                    if let Some(callback) = on_start.as_ref() {
+                        callback();
+                    }
+                    let mut worker = worker;
+                    worker.run_loop();
+                    if let Some(callback) = on_stop.as_ref() {
+                        callback();
+                    }
+                }) {
+                    worker_threads.push(handle);
+                }
+            }
+        }
+
         Self {
             config,
             next_worker_id: AtomicUsize::new(0),
+            state,
+            scheduler,
+            worker_threads: Mutex::new(worker_threads),
+            root_region,
         }
     }
 
@@ -396,38 +488,36 @@ impl RuntimeInner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let state = Arc::new(Mutex::new(JoinState::new()));
-        let shared_future = Arc::new(Mutex::new(Some(future)));
-        let config = self.config.clone();
+        let join_state = Arc::new(Mutex::new(JoinState::new()));
+        let join_state_for_task = Arc::clone(&join_state);
 
-        let run_inline = {
-            let state = Arc::clone(&state);
-            let shared_future = Arc::clone(&shared_future);
-            let config = config.clone();
-            move || run_task(&state, &shared_future, &config)
+        let wrapped = async move {
+            let output = future.await;
+            complete_task(&join_state_for_task, output);
         };
 
-        if self.config.worker_threads <= 1 {
-            run_inline();
-            return JoinHandle::new(state);
-        }
+        let task_id = {
+            let mut guard = self.state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(self.root_region, Budget::INFINITE, wrapped)
+                .expect("failed to create runtime task");
+            task_id
+        };
 
-        let thread_state = Arc::clone(&state);
-        let thread_future = Arc::clone(&shared_future);
-        let thread_config = config;
-        let mut builder = std::thread::Builder::new().name(self.next_thread_name());
-        if self.config.thread_stack_size > 0 {
-            builder = builder.stack_size(self.config.thread_stack_size);
-        }
+        self.scheduler
+            .inject_ready(task_id, Budget::INFINITE.priority);
 
-        if builder
-            .spawn(move || run_task(&thread_state, &thread_future, &thread_config))
-            .is_err()
-        {
-            run_inline();
-        }
+        JoinHandle::new(join_state)
+    }
+}
 
-        JoinHandle::new(state)
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        self.scheduler.shutdown();
+        let mut handles = lock_state(&self.worker_threads);
+        for handle in handles.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -536,4 +626,32 @@ impl Wake for NoopWaker {
 
 fn noop_waker() -> Waker {
     Waker::from(Arc::new(NoopWaker))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::init_test_logging;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn runtime_handle_spawn_completes_via_scheduler() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+
+        let handle = runtime.handle().spawn(async move {
+            flag_clone.store(true, Ordering::SeqCst);
+            42u32
+        });
+
+        let result = runtime.block_on(handle);
+        assert_eq!(result, 42);
+        assert!(flag.load(Ordering::SeqCst));
+    }
 }

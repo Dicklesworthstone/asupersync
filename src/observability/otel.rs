@@ -932,20 +932,12 @@ impl MetricsProvider for OtelMetrics {
             KeyValue::new("task_type", task_type),
             KeyValue::new("reason", reason),
         ];
-        if let Some(filtered) = self.check_cardinality("asupersync.deadline.warnings_total", &labels)
+        if let Some(filtered) =
+            self.check_cardinality("asupersync.deadline.warnings_total", &labels)
         {
             self.deadline_warnings.add(1, &filtered);
         }
-
-        if self.should_sample("asupersync.deadline.remaining_seconds") {
-            let labels = [KeyValue::new("task_type", task_type)];
-            if let Some(filtered) =
-                self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
-            {
-                self.deadline_remaining
-                    .record(remaining.as_secs_f64(), &filtered);
-            }
-        }
+        let _ = remaining;
     }
 
     fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
@@ -1066,6 +1058,11 @@ mod tests {
         metrics.drain_completed(RegionId::testing_default(), Duration::from_millis(5));
         metrics.deadline_set(RegionId::testing_default(), Duration::from_secs(2));
         metrics.deadline_exceeded(RegionId::testing_default());
+        metrics.deadline_warning("test", "no_progress", Duration::from_secs(1));
+        metrics.deadline_violation("test", Duration::from_secs(1));
+        metrics.deadline_remaining("test", Duration::from_secs(5));
+        metrics.checkpoint_interval("test", Duration::from_millis(200));
+        metrics.task_stuck_detected("test");
         metrics.obligation_created(RegionId::testing_default());
         metrics.obligation_discharged(RegionId::testing_default());
         metrics.obligation_leaked(RegionId::testing_default());

@@ -32,7 +32,9 @@ pub mod yield_now;
 
 pub use builder::{DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder, RuntimeHandle};
 pub use config::{BlockingPoolConfig, RuntimeConfig};
-pub use deadline_monitor::{DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason};
+pub use deadline_monitor::{
+    AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,
+};
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};

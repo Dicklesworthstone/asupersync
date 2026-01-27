@@ -171,6 +171,28 @@ impl RuntimeState {
         self.io_driver.clone()
     }
 
+    /// Returns a shared reference to a task record by ID.
+    #[must_use]
+    pub fn task(&self, task_id: TaskId) -> Option<&TaskRecord> {
+        self.tasks.get(task_id.arena_index())
+    }
+
+    /// Returns a mutable reference to a task record by ID.
+    pub fn task_mut(&mut self, task_id: TaskId) -> Option<&mut TaskRecord> {
+        self.tasks.get_mut(task_id.arena_index())
+    }
+
+    /// Returns a shared reference to a region record by ID.
+    #[must_use]
+    pub fn region(&self, region_id: RegionId) -> Option<&RegionRecord> {
+        self.regions.get(region_id.arena_index())
+    }
+
+    /// Returns a mutable reference to a region record by ID.
+    pub fn region_mut(&mut self, region_id: RegionId) -> Option<&mut RegionRecord> {
+        self.regions.get_mut(region_id.arena_index())
+    }
+
     /// Returns `true` if this runtime has an I/O driver.
     #[must_use]
     pub fn has_io_driver(&self) -> bool {

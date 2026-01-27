@@ -58,6 +58,7 @@
 #![allow(unsafe_code)]
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
+use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Poller};
 use std::collections::HashMap;
@@ -164,6 +165,12 @@ impl Reactor for EpollReactor {
                 io::ErrorKind::AlreadyExists,
                 "token already registered",
             ));
+        }
+
+        // Ensure the file descriptor is still valid before registering.
+        // This catches cases where the fd was closed but the value reused.
+        if unsafe { fcntl(raw_fd, F_GETFD) } == -1 {
+            return Err(io::Error::last_os_error());
         }
 
         // Create the polling event with the token as the key

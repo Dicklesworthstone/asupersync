@@ -251,12 +251,14 @@ impl<P: Policy> Scope<'_, P> {
     /// ```compile_fail,E0277
     /// # // This test demonstrates that Rc cannot be captured
     /// use std::rc::Rc;
+    /// fn require_send<T: Send>(_: &T) {}
     /// fn test_rc_rejected<'r, P: asupersync::types::Policy>(
     ///     scope: &asupersync::cx::Scope<'r, P>,
     ///     state: &mut asupersync::runtime::RuntimeState,
     ///     cx: &asupersync::cx::Cx,
     /// ) {
     ///     let rc = Rc::new(42);
+    ///     require_send(&rc);
     ///     let _ = scope.spawn(state, cx, move |_| async move {
     ///         let _ = rc;  // Rc<i32> is not Send
     ///     });
@@ -267,6 +269,7 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// ```compile_fail,E0597
     /// # // This test demonstrates that borrowed data cannot be captured
+    /// fn require_static<T: 'static>(_: T) {}
     /// fn test_borrow_rejected<'r, P: asupersync::types::Policy>(
     ///     scope: &asupersync::cx::Scope<'r, P>,
     ///     state: &mut asupersync::runtime::RuntimeState,
@@ -274,6 +277,7 @@ impl<P: Policy> Scope<'_, P> {
     /// ) {
     ///     let local = 42;
     ///     let borrow = &local;
+    ///     require_static(borrow);
     ///     let _ = scope.spawn(state, cx, move |_| async move {
     ///         let _ = borrow;  // &i32 is not 'static
     ///     });

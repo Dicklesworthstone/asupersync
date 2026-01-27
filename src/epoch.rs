@@ -664,7 +664,7 @@ impl EpochBarrier {
         participant_id: &str,
         now: Time,
     ) -> Result<Option<BarrierResult>, Box<Error>> {
-        // Check if already triggered
+        // Fast check if already triggered
         if self.is_triggered() {
             return Err(Box::new(
                 Error::new(ErrorKind::InvalidStateTransition)
@@ -682,7 +682,15 @@ impl EpochBarrier {
                     expected: self.expected,
                     triggered_at: now,
                 };
-                *self.triggered.write().expect("lock poisoned") = Some(result.clone());
+                let mut triggered = self.triggered.write().expect("lock poisoned");
+                if triggered.is_some() {
+                    return Err(Box::new(
+                        Error::new(ErrorKind::InvalidStateTransition)
+                            .with_message("Barrier already triggered"),
+                    ));
+                }
+                *triggered = Some(result.clone());
+                drop(triggered);
                 return Ok(Some(result));
             }
         }
@@ -709,7 +717,15 @@ impl EpochBarrier {
                 expected: self.expected,
                 triggered_at: now,
             };
-            *self.triggered.write().expect("lock poisoned") = Some(result.clone());
+            let mut triggered = self.triggered.write().expect("lock poisoned");
+            if triggered.is_some() {
+                return Err(Box::new(
+                    Error::new(ErrorKind::InvalidStateTransition)
+                        .with_message("Barrier already triggered"),
+                ));
+            }
+            *triggered = Some(result.clone());
+            drop(triggered);
             Ok(Some(result))
         } else {
             Ok(None)

@@ -93,7 +93,7 @@ mod tests {
             }
 
             // Close the region
-            let region_record = state.regions.get_mut(region.arena_index()).expect("region");
+            let region_record = state.region_mut(region).expect("region");
             region_record.begin_close(None);
 
             // Check for update

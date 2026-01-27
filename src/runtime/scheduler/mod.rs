@@ -24,18 +24,11 @@ pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use worker::{Parker, Worker};
 
 use crate::types::TaskId;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 /// Work-stealing scheduler coordinator.
 #[derive(Debug)]
 pub struct WorkStealingScheduler {
-    // Workers are moved out when threads start, so this might become empty.
-    // We keep them here for initialization.
-    workers: Vec<Worker>,
-    global: Arc<GlobalQueue>,
-    shutdown: Arc<AtomicBool>,
-    parkers: Vec<Parker>,
+    inner: ThreeLaneScheduler,
 }
 
 impl WorkStealingScheduler {
@@ -46,55 +39,8 @@ impl WorkStealingScheduler {
         worker_count: usize,
         state: &std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>,
     ) -> Self {
-        let global = Arc::new(GlobalQueue::new());
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let mut workers = Vec::with_capacity(worker_count);
-        let mut stealers = Vec::with_capacity(worker_count);
-        let mut parkers = Vec::with_capacity(worker_count);
-
-        // First pass: create workers and collect stealers
-        // We can't create workers fully yet because they need all stealers.
-        // We create local queues first?
-        // LocalQueue::new() -> (LocalQueue, Stealer) ?
-        // LocalQueue has .stealer().
-
-        // We'll create workers then extract stealers?
-        // No, Worker owns LocalQueue.
-        // We'll create LocalQueues first.
-        let local_queues: Vec<LocalQueue> = (0..worker_count).map(|_| LocalQueue::new()).collect();
-
-        for q in &local_queues {
-            stealers.push(q.stealer());
-        }
-
-        for (id, local) in local_queues.into_iter().enumerate() {
-            let worker_stealers = stealers.clone(); // All stealers (including self? stealing from self is weird but ok)
-                                                    // Ideally filter out self.
-            let my_stealers: Vec<_> = worker_stealers
-                .into_iter()
-                // .filter(|s| ...) // Stealer doesn't have ID.
-                .collect();
-
-            let parker = Parker::new();
-            parkers.push(parker.clone());
-
-            workers.push(Worker {
-                id,
-                local,
-                stealers: my_stealers,
-                global: Arc::clone(&global),
-                state: state.clone(),
-                parker,
-                rng: crate::util::DetRng::new(id as u64),
-                shutdown: Arc::clone(&shutdown),
-            });
-        }
-
         Self {
-            workers,
-            global,
-            shutdown,
-            parkers,
+            inner: ThreeLaneScheduler::new(worker_count, state),
         }
     }
 
@@ -106,26 +52,22 @@ impl WorkStealingScheduler {
     /// For Phase 1 initial implementation, we always push to global queue
     /// to avoid TLS complexity for now.
     pub fn spawn(&self, task: TaskId) {
-        self.global.push(task);
-        // TODO: Wake a worker
+        self.inner.spawn(task, 0);
     }
 
     /// Wakes a task.
     pub fn wake(&self, task: TaskId) {
-        self.spawn(task);
+        self.inner.wake(task, 0);
     }
 
     /// Extract workers to run them in threads.
-    pub fn take_workers(&mut self) -> Vec<Worker> {
-        std::mem::take(&mut self.workers)
+    pub fn take_workers(&mut self) -> Vec<ThreeLaneWorker> {
+        self.inner.take_workers()
     }
 
     /// Signals all workers to shutdown.
     pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        for parker in &self.parkers {
-            parker.unpark();
-        }
+        self.inner.shutdown();
     }
 }
 

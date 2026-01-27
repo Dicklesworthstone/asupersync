@@ -207,8 +207,39 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// Runs a single scheduling step.
+    ///
+    /// Returns `true` if a task was executed.
+    pub(crate) fn run_once(&mut self) -> bool {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        if let Some(task) = self.try_cancel_work() {
+            self.execute(task);
+            return true;
+        }
+
+        if let Some(task) = self.try_timed_work() {
+            self.execute(task);
+            return true;
+        }
+
+        if let Some(task) = self.try_ready_work() {
+            self.execute(task);
+            return true;
+        }
+
+        if let Some(task) = self.try_steal() {
+            self.execute(task);
+            return true;
+        }
+
+        false
+    }
+
     /// Tries to get cancel work from global or local queues.
-    fn try_cancel_work(&mut self) -> Option<TaskId> {
+    pub(crate) fn try_cancel_work(&mut self) -> Option<TaskId> {
         // Global cancel has priority (cross-thread cancellations)
         if let Some(pt) = self.global.pop_cancel() {
             return Some(pt.task);
@@ -221,7 +252,7 @@ impl ThreeLaneWorker {
     }
 
     /// Tries to get timed work from global or local queues.
-    fn try_timed_work(&mut self) -> Option<TaskId> {
+    pub(crate) fn try_timed_work(&mut self) -> Option<TaskId> {
         // Global timed
         if let Some(tt) = self.global.pop_timed() {
             // TODO: Check if deadline is due before executing
@@ -236,7 +267,7 @@ impl ThreeLaneWorker {
     }
 
     /// Tries to get ready work from global or local queues.
-    fn try_ready_work(&mut self) -> Option<TaskId> {
+    pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {
         // Global ready
         if let Some(pt) = self.global.pop_ready() {
             return Some(pt.task);
@@ -251,7 +282,7 @@ impl ThreeLaneWorker {
     /// Tries to steal work from other workers.
     ///
     /// Only steals from ready lanes to preserve cancel/timed priority semantics.
-    fn try_steal(&mut self) -> Option<TaskId> {
+    pub(crate) fn try_steal(&mut self) -> Option<TaskId> {
         if self.stealers.is_empty() {
             return None;
         }
@@ -304,7 +335,7 @@ impl ThreeLaneWorker {
         local.schedule_timed(task, deadline);
     }
 
-    fn execute(&self, task_id: TaskId) {
+    pub(crate) fn execute(&self, task_id: TaskId) {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
         let (mut stored, task_cx, wake_state, priority) = {

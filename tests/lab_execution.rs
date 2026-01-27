@@ -7,7 +7,7 @@ use asupersync::cx::Cx;
 use asupersync::lab::assert_deterministic;
 use asupersync::lab::LabConfig;
 use asupersync::lab::LabRuntime;
-use asupersync::runtime::{DeadlineWarning, MonitorConfig, WarningReason};
+use asupersync::runtime::{AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, WarningReason};
 use asupersync::types::{Budget, Time};
 use common::*;
 use std::future::Future;
@@ -358,6 +358,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline() {
         check_interval: Duration::ZERO,
         warning_threshold_fraction: 0.2,
         checkpoint_timeout: Duration::from_secs(3600),
+        adaptive: AdaptiveDeadlineConfig::default(),
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
@@ -411,6 +412,7 @@ fn test_deadline_monitor_warns_at_threshold_boundary() {
         check_interval: Duration::ZERO,
         warning_threshold_fraction: 0.2,
         checkpoint_timeout: Duration::from_secs(3600),
+        adaptive: AdaptiveDeadlineConfig::default(),
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
@@ -462,6 +464,7 @@ fn test_deadline_monitor_warns_on_no_progress() {
         check_interval: Duration::ZERO,
         warning_threshold_fraction: 0.1,
         checkpoint_timeout: Duration::ZERO,
+        adaptive: AdaptiveDeadlineConfig::default(),
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
@@ -513,6 +516,7 @@ fn test_deadline_monitor_includes_checkpoint_message() {
         check_interval: Duration::ZERO,
         warning_threshold_fraction: 0.2,
         checkpoint_timeout: Duration::from_secs(3600),
+        adaptive: AdaptiveDeadlineConfig::default(),
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
@@ -567,6 +571,7 @@ fn test_deadline_monitor_e2e_stuck_task_detection() {
         check_interval: Duration::ZERO,
         warning_threshold_fraction: 0.2,
         checkpoint_timeout: Duration::ZERO,
+        adaptive: AdaptiveDeadlineConfig::default(),
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {

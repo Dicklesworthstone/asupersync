@@ -24,6 +24,7 @@ use crate::util::DetRng;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
 
 /// The deterministic lab runtime.
 ///
@@ -226,6 +227,7 @@ impl LabRuntime {
     }
 
     /// Executes a single step.
+    #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
         self.steps += 1;
         // Consume RNG state so schedule tie-breaking is deterministic once we
@@ -304,6 +306,31 @@ impl LabRuntime {
                 if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
                         record.complete(crate::types::Outcome::Ok(()));
+                    }
+                }
+
+                if let Some(monitor) = &mut self.deadline_monitor {
+                    if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+                        let now = self.state.now;
+                        let duration =
+                            Duration::from_nanos(now.duration_since(record.created_at()));
+                        let (task_type, deadline) = record
+                            .cx_inner
+                            .as_ref()
+                            .and_then(|inner| inner.read().ok())
+                            .map_or_else(
+                                || ("default".to_string(), None),
+                                |inner| {
+                                    (
+                                        inner
+                                            .task_type
+                                            .clone()
+                                            .unwrap_or_else(|| "default".to_string()),
+                                        inner.budget.deadline,
+                                    )
+                                },
+                            );
+                        monitor.record_completion(task_id, &task_type, duration, deadline, now);
                     }
                 }
 
@@ -921,7 +948,7 @@ mod tests {
     use super::*;
     use crate::record::TaskRecord;
     use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord};
-    use crate::runtime::deadline_monitor::WarningReason;
+    use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
     use crate::types::{Budget, CxInner, ObligationId, Outcome, TaskId};
     use crate::util::ArenaIndex;
     use std::sync::{Arc, Mutex, RwLock};
@@ -1005,6 +1032,7 @@ mod tests {
             check_interval: Duration::from_secs(0),
             warning_threshold_fraction: 1.0,
             checkpoint_timeout: Duration::from_secs(0),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
 
@@ -1070,6 +1098,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
             checkpoint_timeout: Duration::ZERO,
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
 

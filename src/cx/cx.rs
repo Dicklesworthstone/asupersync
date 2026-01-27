@@ -387,11 +387,7 @@ impl Cx {
     /// and metrics to group similar work.
     #[must_use]
     pub fn task_type(&self) -> Option<String> {
-        self.inner
-            .read()
-            .expect("lock poisoned")
-            .task_type
-            .clone()
+        self.inner.read().expect("lock poisoned").task_type.clone()
     }
 
     /// Sets a task type label for adaptive monitoring and metrics.

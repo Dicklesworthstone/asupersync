@@ -817,17 +817,21 @@ fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool,
     let tracked: std::collections::HashSet<_> = task_ids.into_iter().collect();
     let mut terminal = 0usize;
     let mut non_terminal = 0usize;
+    let mut seen_count = 0usize;
 
     for (_, record) in runtime.state.tasks.iter() {
         if !tracked.contains(&record.id) {
             continue;
         }
+        seen_count += 1;
         if record.state.is_terminal() {
             terminal += 1;
         } else {
             non_terminal += 1;
         }
     }
+
+    terminal += tracked.len().saturating_sub(seen_count);
 
     (terminal, non_terminal, runtime.is_quiescent(), steps)
 }

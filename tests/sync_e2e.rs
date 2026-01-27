@@ -25,7 +25,7 @@ use asupersync::Cx;
 use common::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -206,36 +206,34 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
     let rwlock = Arc::new(RwLock::new(42));
-    let max_concurrent = Arc::new(AtomicUsize::new(0));
-    let current_readers = Arc::new(AtomicUsize::new(0));
+    let multi_read_ok = Arc::new(AtomicBool::new(false));
     let num_readers = 5;
 
     for _ in 0..num_readers {
         let rw = rwlock.clone();
-        let max_c = max_concurrent.clone();
-        let current = current_readers.clone();
+        let multi_ok = multi_read_ok.clone();
 
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
 
-                // Scope the guard so it's dropped before yield_now
+                // Scope guards so they're dropped before yield_now
                 // (RwLockReadGuard is not Send across await points)
                 {
                     let guard = rw.read(&cx).expect("read should succeed");
-
-                    // Track concurrent readers while holding lock
-                    let prev = current.fetch_add(1, Ordering::SeqCst);
-                    max_c.fetch_max(prev + 1, Ordering::SeqCst);
+                    let second = rw.try_read();
+                    if let Ok(guard2) = second {
+                        multi_ok.store(true, Ordering::SeqCst);
+                        assert_eq!(*guard2, 42, "second reader sees value");
+                        drop(guard2);
+                    }
 
                     // Verify value
                     assert_eq!(*guard, 42, "should read correct value");
                 }
 
                 yield_now().await;
-
-                current.fetch_sub(1, Ordering::SeqCst);
             })
             .unwrap();
 
@@ -246,9 +244,13 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let max = max_concurrent.load(Ordering::SeqCst);
-    // Multiple readers should be able to hold lock concurrently
-    assert_with_log!(max >= 2, "should have concurrent readers", ">= 2", max);
+    let ok = multi_read_ok.load(Ordering::SeqCst);
+    assert_with_log!(
+        ok,
+        "rwlock allows multiple readers (try_read succeeds while read held)",
+        true,
+        ok
+    );
 
     test_complete!("e2e_sync_010_rwlock_concurrent_readers");
 }
@@ -432,49 +434,44 @@ fn e2e_sync_030_barrier_synchronization() {
     init_test("e2e_sync_030_barrier_synchronization");
     test_section!("setup");
 
-    let mut runtime = LabRuntime::new(LabConfig::default().max_steps(5000));
-    let region = runtime.state.create_root_region(Budget::INFINITE);
-
     let num_tasks = 4;
     let barrier = Arc::new(Barrier::new(num_tasks));
     let pre_barrier = Arc::new(AtomicUsize::new(0));
     let post_barrier = Arc::new(AtomicUsize::new(0));
     let leader_count = Arc::new(AtomicUsize::new(0));
 
+    let mut handles = Vec::new();
     for i in 0..num_tasks {
         let b = barrier.clone();
         let pre = pre_barrier.clone();
         let post = post_barrier.clone();
         let leaders = leader_count.clone();
 
-        let (task_id, _) = runtime
-            .state
-            .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+        handles.push(std::thread::spawn(move || {
+            let cx = Cx::for_testing();
 
-                // Signal arrival
-                pre.fetch_add(1, Ordering::SeqCst);
-                tracing::debug!(task = i, "arrived at barrier");
+            // Signal arrival
+            pre.fetch_add(1, Ordering::SeqCst);
+            tracing::debug!(task = i, "arrived at barrier");
 
-                // Wait at barrier
-                let result = b.wait(&cx).expect("barrier wait should succeed");
+            // Wait at barrier
+            let result = b.wait(&cx).expect("barrier wait should succeed");
 
-                // Track leader
-                if result.is_leader() {
-                    leaders.fetch_add(1, Ordering::SeqCst);
-                }
+            // Track leader
+            if result.is_leader() {
+                leaders.fetch_add(1, Ordering::SeqCst);
+            }
 
-                // Signal departure
-                post.fetch_add(1, Ordering::SeqCst);
-                tracing::debug!(task = i, "passed barrier");
-            })
-            .unwrap();
-
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            // Signal departure
+            post.fetch_add(1, Ordering::SeqCst);
+            tracing::debug!(task = i, "passed barrier");
+        }));
     }
 
     test_section!("run");
-    runtime.run_until_quiescent();
+    for handle in handles {
+        handle.join().expect("barrier thread join");
+    }
 
     test_section!("verify");
     let pre_count = pre_barrier.load(Ordering::SeqCst);
