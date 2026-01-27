@@ -514,9 +514,11 @@ impl RegionRecord {
             .state
             .transition(RegionState::Finalizing, RegionState::Closed)
         {
-            let inner = self.inner.read().expect("lock poisoned");
+            let mut inner = self.inner.write().expect("lock poisoned");
             let _child_count = inner.children.len();
             let _task_count = inner.tasks.len();
+            // Reclaim region-owned heap allocations on quiescence.
+            inner.heap.reclaim_all();
             drop(inner);
 
             self.span.record("state", "Closed");
@@ -660,6 +662,38 @@ mod tests {
 
         assert!(region.begin_close(Some(reason.clone())));
         assert_eq!(region.cancel_reason(), Some(reason));
+    }
+
+    #[test]
+    fn region_heap_reclaimed_on_close() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        let _idx = region.heap_alloc(42u32);
+        assert_eq!(region.heap_len(), 1);
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        assert_eq!(region.heap_len(), 0);
+    }
+
+    #[test]
+    fn rref_invalid_after_close() {
+        let region_id = test_region_id();
+        let region = RegionRecord::new(region_id, None, Budget::default());
+
+        let index = region.heap_alloc(123u32);
+        let rref = RRef::<u32>::new(region_id, index);
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        let err = region
+            .rref_get(&rref)
+            .expect_err("rref should be invalid after close");
+        assert_eq!(err, RRefError::AllocationInvalid);
     }
 
     #[test]
