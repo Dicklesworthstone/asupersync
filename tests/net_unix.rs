@@ -34,6 +34,9 @@ fn init_test(test_name: &str) {
     test_phase!(test_name);
 }
 
+const NET_UDS_DATA_SIZE: usize = 1024 * 1024; // 1 MB
+const NET_UDS_NUM_CLIENTS: usize = 5;
+
 /// Create a unique socket path in a temp directory.
 fn temp_socket_path() -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("create temp dir");
@@ -294,17 +297,15 @@ fn net_uds_005_socket_file_cleanup() {
 fn net_uds_006_large_data_transfer() {
     init_test("net_uds_006_large_data_transfer");
 
-    const DATA_SIZE: usize = 1024 * 1024; // 1 MB
-
     let result: io::Result<()> = (|| {
         // Create a connected pair using blocking std sockets
         let (mut sender, mut receiver) = std_unix::UnixStream::pair()?;
         sender.set_write_timeout(Some(Duration::from_secs(30)))?;
         receiver.set_read_timeout(Some(Duration::from_secs(30)))?;
-        tracing::info!(size = DATA_SIZE, "testing large data transfer");
+        tracing::info!(size = NET_UDS_DATA_SIZE, "testing large data transfer");
 
         // Create test data with pattern
-        let data: Vec<u8> = (0..DATA_SIZE).map(|i| (i % 256) as u8).collect();
+        let data: Vec<u8> = (0..NET_UDS_DATA_SIZE).map(|i| (i % 256) as u8).collect();
 
         // Spawn sender thread
         let data_clone = data.clone();
@@ -315,7 +316,7 @@ fn net_uds_006_large_data_transfer() {
         });
 
         // Receive all data
-        let mut received_data = vec![0u8; DATA_SIZE];
+        let mut received_data = vec![0u8; NET_UDS_DATA_SIZE];
         receiver.read_exact(&mut received_data)?;
         tracing::info!("receiver: all data received");
 
@@ -342,15 +343,16 @@ fn net_uds_006_large_data_transfer() {
 #[test]
 fn net_uds_007_multiple_connections() {
     init_test("net_uds_007_multiple_connections");
-
-    const NUM_CLIENTS: usize = 5;
     let (_dir, socket_path) = temp_socket_path();
     let socket_path_clone = socket_path.clone();
 
     let result = block_on(async {
         // Bind listener
         let listener = UnixListener::bind(&socket_path).await?;
-        tracing::info!(num_clients = NUM_CLIENTS, "testing multiple connections");
+        tracing::info!(
+            num_clients = NET_UDS_NUM_CLIENTS,
+            "testing multiple connections"
+        );
 
         // Track accepted connections
         let accepted_count = Arc::new(AtomicUsize::new(0));
@@ -359,7 +361,7 @@ fn net_uds_007_multiple_connections() {
         // Spawn accept loop
         let accept_handle = thread::spawn(move || {
             block_on(async {
-                for i in 0..NUM_CLIENTS {
+                for i in 0..NET_UDS_NUM_CLIENTS {
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             accepted_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -393,7 +395,7 @@ fn net_uds_007_multiple_connections() {
 
         // Connect multiple clients using blocking std streams
         let mut client_handles = vec![];
-        for i in 0..NUM_CLIENTS {
+        for i in 0..NET_UDS_NUM_CLIENTS {
             let path = socket_path_clone.clone();
             let handle = thread::spawn(move || {
                 let mut client = std_unix::UnixStream::connect(&path)?;
@@ -430,8 +432,8 @@ fn net_uds_007_multiple_connections() {
 
         let total_accepted = accepted_count.load(Ordering::SeqCst);
         assert_eq!(
-            total_accepted, NUM_CLIENTS,
-            "should accept all {NUM_CLIENTS} clients"
+            total_accepted, NET_UDS_NUM_CLIENTS,
+            "should accept all {NET_UDS_NUM_CLIENTS} clients"
         );
         tracing::info!(total_accepted, "all clients handled");
 
