@@ -15,6 +15,7 @@ use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::reactor::{Event, Events, FaultConfig, Interest, LabReactor, Token};
 use asupersync::runtime::Reactor;
+use asupersync::trace::ReplayEvent;
 use asupersync::types::{Budget, CancelReason};
 use asupersync::util::DetRng;
 use common::*;
@@ -542,6 +543,60 @@ fn test_lab_trace_capture_determinism() {
 }
 
 // ============================================================================
+// Test: Replay Trace Determinism (Multi-Worker)
+// ============================================================================
+
+fn record_replay_events(seed: u64, worker_count: usize) -> Vec<ReplayEvent> {
+    let config = LabConfig::new(seed)
+        .worker_count(worker_count)
+        .with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    for _ in 0..6 {
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {
+                yield_n(3).await;
+            })
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let trace = runtime.finish_replay_trace().expect("replay trace");
+    trace.events
+}
+
+#[test]
+fn test_lab_replay_trace_determinism_multiworker() {
+    init_test("test_lab_replay_trace_determinism_multiworker");
+    test_section!("record");
+
+    let seed = 4242;
+    let worker_count = 4;
+
+    let events1 = record_replay_events(seed, worker_count);
+    let events2 = record_replay_events(seed, worker_count);
+
+    test_section!("verify");
+    assert_with_log!(
+        !events1.is_empty(),
+        "replay trace should have events",
+        true,
+        !events1.is_empty()
+    );
+    assert_with_log!(
+        events1 == events2,
+        "replay events should be deterministic across runs",
+        events1.len(),
+        events2.len()
+    );
+
+    test_complete!("test_lab_replay_trace_determinism_multiworker");
+}
+
+// ============================================================================
 // Test: Priority Scheduling Determinism
 // ============================================================================
 
@@ -754,7 +809,7 @@ fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool,
     {
         let mut scheduler = runtime.scheduler.lock().unwrap();
         for (task_id, priority) in tasks_to_cancel {
-            scheduler.move_to_cancel_lane(task_id, priority);
+            scheduler.schedule_cancel(task_id, priority);
         }
     }
 
