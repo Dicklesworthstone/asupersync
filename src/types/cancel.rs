@@ -833,6 +833,11 @@ mod tests {
         crate::test_phase!(test_name);
     }
 
+    fn combine(mut a: CancelReason, b: &CancelReason) -> CancelReason {
+        a.strengthen(b);
+        a
+    }
+
     #[test]
     fn severity_ordering() {
         init_test("severity_ordering");
@@ -961,11 +966,6 @@ mod tests {
     #[test]
     fn strengthen_is_associative() {
         init_test("strengthen_is_associative");
-        fn combine(mut a: CancelReason, b: &CancelReason) -> CancelReason {
-            a.strengthen(b);
-            a
-        }
-
         let a = CancelReason::user("a");
         let b = CancelReason::timeout();
         let c = CancelReason::shutdown();

@@ -426,6 +426,7 @@ mod tests {
     #[test]
     fn with_time_getter() {
         init_test("with_time_getter");
+        CURRENT_TIME.store(0, Ordering::SeqCst);
 
         let sleep = Sleep::with_time_getter(Time::from_secs(5), get_time);
 
