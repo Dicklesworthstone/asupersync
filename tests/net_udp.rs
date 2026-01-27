@@ -24,6 +24,9 @@ fn init_test(test_name: &str) {
     test_phase!(test_name);
 }
 
+const NET_UDP_NUM_DATAGRAMS: usize = 10;
+const NET_UDP_DATAGRAM_SIZE: usize = 1400;
+
 /// NET-UDP-001: Basic send/recv
 ///
 /// Verifies that datagrams can be sent and received.
@@ -120,7 +123,6 @@ fn net_udp_002_connected_mode() {
 /// Verifies that multiple datagrams can be sent and received.
 #[test]
 fn net_udp_003_multiple_datagrams() {
-    const NUM_DATAGRAMS: usize = 10;
     init_test("net_udp_003_multiple_datagrams");
 
     let result = block_on(async {
@@ -130,20 +132,20 @@ fn net_udp_003_multiple_datagrams() {
         let mut client = UdpSocket::bind("127.0.0.1:0").await?;
 
         // Send multiple datagrams
-        for i in 0..NUM_DATAGRAMS {
+        for i in 0..NET_UDP_NUM_DATAGRAMS {
             let msg = format!("datagram {i}");
             let sent = client.send_to(msg.as_bytes(), server_addr).await?;
             assert_eq!(sent, msg.len());
             tracing::debug!(i, "sent datagram");
         }
-        tracing::info!(count = NUM_DATAGRAMS, "all datagrams sent");
+        tracing::info!(count = NET_UDP_NUM_DATAGRAMS, "all datagrams sent");
 
         // Receive all (or as many as we can)
         let mut received_count = 0;
         let mut buf = [0u8; 1024];
 
         // Set a timeout for receiving
-        for _ in 0..NUM_DATAGRAMS {
+        for _ in 0..NET_UDP_NUM_DATAGRAMS {
             match tokio_timeout(Duration::from_millis(100), server.recv_from(&mut buf)).await {
                 Ok(Ok((n, _addr))) => {
                     let msg = std::str::from_utf8(&buf[..n]).unwrap_or("<invalid>");
@@ -169,7 +171,10 @@ fn net_udp_003_multiple_datagrams() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(result.is_ok(), "multiple datagrams test should complete: {result:?}");
+    assert!(
+        result.is_ok(),
+        "multiple datagrams test should complete: {result:?}"
+    );
     test_complete!("net_udp_003_multiple_datagrams");
 }
 
@@ -231,7 +236,10 @@ fn net_udp_004_local_addr() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(result.is_ok(), "local addr test should complete: {result:?}");
+    assert!(
+        result.is_ok(),
+        "local addr test should complete: {result:?}"
+    );
     test_complete!("net_udp_004_local_addr");
 }
 
@@ -241,7 +249,6 @@ fn net_udp_004_local_addr() {
 #[test]
 fn net_udp_005_large_datagram() {
     // Use a size that's within typical MTU (1500 bytes Ethernet, ~1472 for UDP)
-    const DATAGRAM_SIZE: usize = 1400;
     init_test("net_udp_005_large_datagram");
 
     let result = block_on(async {
@@ -251,19 +258,24 @@ fn net_udp_005_large_datagram() {
         let mut client = UdpSocket::bind("127.0.0.1:0").await?;
 
         // Create large datagram with pattern
-        let data: Vec<u8> = (0..DATAGRAM_SIZE).map(|i| (i % 256) as u8).collect();
+        let data: Vec<u8> = (0..NET_UDP_DATAGRAM_SIZE)
+            .map(|i| (i % 256) as u8)
+            .collect();
 
         // Send
         let sent = client.send_to(&data, server_addr).await?;
-        assert_eq!(sent, DATAGRAM_SIZE, "should send full datagram");
-        tracing::info!(size = DATAGRAM_SIZE, "sent large datagram");
+        assert_eq!(sent, NET_UDP_DATAGRAM_SIZE, "should send full datagram");
+        tracing::info!(size = NET_UDP_DATAGRAM_SIZE, "sent large datagram");
 
         // Receive
-        let mut buf = vec![0u8; DATAGRAM_SIZE + 100]; // Extra space
+        let mut buf = vec![0u8; NET_UDP_DATAGRAM_SIZE + 100]; // Extra space
         let (received, _addr) = server.recv_from(&mut buf).await?;
         tracing::info!(received, "received large datagram");
 
-        assert_eq!(received, DATAGRAM_SIZE, "should receive full datagram");
+        assert_eq!(
+            received, NET_UDP_DATAGRAM_SIZE,
+            "should receive full datagram"
+        );
         assert_eq!(&buf[..received], &data[..], "data should match");
 
         Ok::<_, io::Error>(())

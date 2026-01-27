@@ -15,7 +15,7 @@
 // Allow significant_drop_tightening in tests - the scoped blocks are for clarity
 #![allow(clippy::significant_drop_tightening)]
 
-use asupersync::sync::{Mutex, Semaphore};
+use asupersync::sync::{LockError, Mutex, Semaphore};
 use asupersync::Cx;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -114,8 +114,6 @@ fn sync_001b_mutex_try_lock() {
 #[test]
 fn sync_002_mutex_contention_correctness() {
     init_test("sync_002_mutex_contention_correctness");
-    use std::sync::Arc;
-    use std::thread;
 
     let mutex = Arc::new(Mutex::new(0i64));
     let iterations = 1000;
@@ -156,9 +154,6 @@ fn sync_002_mutex_contention_correctness() {
 #[test]
 fn sync_002b_mutex_cancellation() {
     init_test("sync_002b_mutex_cancellation");
-    use asupersync::sync::LockError;
-    use std::sync::Arc;
-    use std::thread;
 
     let mutex = Arc::new(Mutex::new(0));
     let cx_main = Cx::for_testing();

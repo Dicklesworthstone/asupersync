@@ -61,8 +61,8 @@ impl CancelMetrics {
 
     fn average_chain_depth(&self) -> f64 {
         if self.count > 0 {
-            let total = u32::try_from(self.total_chain_depth)
-                .expect("chain depth fits u32 for reporting");
+            let total =
+                u32::try_from(self.total_chain_depth).expect("chain depth fits u32 for reporting");
             let count = u32::try_from(self.count).expect("count fits u32 for reporting");
             f64::from(total) / f64::from(count)
         } else {

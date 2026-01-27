@@ -35,8 +35,7 @@ fn test_epoch_barrier_overflow_race() {
             // arrive() checks is_triggered() at the start!
 
             // If checking is_triggered() is racey (read lock), multiple might pass it.
-            b.arrive(&id, Time::ZERO)
-                .map_or(false, |res| res.is_some())
+            b.arrive(&id, Time::ZERO).map_or(false, |res| res.is_some())
         }));
     }
 
