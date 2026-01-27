@@ -144,7 +144,7 @@ fn test_parallel_lab_completes_without_loss() {
         "> 0",
         steps
     );
-    for (idx, count) in completions.iter().enumerate() {
+    for (_idx, count) in completions.iter().enumerate() {
         let value = count.load(Ordering::SeqCst);
         assert_with_log!(value == 1, "task completed exactly once", 1usize, value);
     }
