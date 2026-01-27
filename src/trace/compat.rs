@@ -38,6 +38,8 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+type SkipHandler = dyn Fn(&str, &[u8]) + Send + Sync;
+
 // =============================================================================
 // Version Compatibility
 // =============================================================================
@@ -174,7 +176,7 @@ pub struct CompatReader {
     events_start_pos: u64,
     schema_version: u32,
     stats: CompatStats,
-    on_skip: Option<Box<dyn Fn(&str, &[u8]) + Send + Sync>>,
+    on_skip: Option<Box<SkipHandler>>,
 }
 
 impl CompatReader {
@@ -449,7 +451,7 @@ impl CompatReader {
 pub struct CompatEventIterator {
     reader: BufReader<File>,
     remaining: u64,
-    on_skip: Option<Box<dyn Fn(&str, &[u8]) + Send + Sync>>,
+    on_skip: Option<Box<SkipHandler>>,
 }
 
 impl Iterator for CompatEventIterator {
@@ -512,6 +514,7 @@ impl Iterator for CompatEventIterator {
 /// to the next version.
 pub trait TraceMigration: Send + Sync {
     /// Source schema version this migration applies to.
+    #[allow(clippy::wrong_self_convention)]
     fn from_version(&self) -> u32;
 
     /// Target schema version after migration.

@@ -18,7 +18,7 @@
 //! use asupersync::trace::integrity::{verify_trace, VerificationOptions};
 //!
 //! // Verify a trace file
-//! let result = verify_trace("trace.bin", VerificationOptions::default())?;
+//! let result = verify_trace("trace.bin", &VerificationOptions::default())?;
 //! if result.is_valid() {
 //!     println!("Trace is valid with {} events", result.event_count);
 //! } else {
@@ -28,7 +28,7 @@
 //! }
 //!
 //! // Strict verification (includes timeline monotonicity)
-//! let result = verify_trace("trace.bin", VerificationOptions::strict())?;
+//! let result = verify_trace("trace.bin", &VerificationOptions::strict())?;
 //! ```
 
 use super::file::{HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
@@ -420,14 +420,14 @@ impl std::fmt::Display for VerificationResult {
 /// # Example
 ///
 /// ```ignore
-/// let result = verify_trace("trace.bin", VerificationOptions::default())?;
+/// let result = verify_trace("trace.bin", &VerificationOptions::default())?;
 /// if result.is_valid() {
 ///     println!("Valid trace with {} events", result.verified_events);
 /// }
 /// ```
 pub fn verify_trace(
     path: impl AsRef<Path>,
-    options: VerificationOptions,
+    options: &VerificationOptions,
 ) -> io::Result<VerificationResult> {
     let path = path.as_ref();
     let file = File::open(path)?;
@@ -447,12 +447,12 @@ pub fn verify_trace(
     }
 
     // Verify header
-    if !verify_header(&mut reader, &mut result, &options) {
+    if !verify_header(&mut reader, &mut result, options) {
         return Ok(result);
     }
 
     // Verify metadata
-    if !verify_metadata(&mut reader, &mut result, &options) {
+    if !verify_metadata(&mut reader, &mut result, options) {
         return Ok(result);
     }
 
@@ -488,7 +488,7 @@ pub fn verify_trace(
 ///
 /// Returns an error if the file cannot be opened.
 pub fn is_trace_valid_quick(path: impl AsRef<Path>) -> io::Result<bool> {
-    let result = verify_trace(path, VerificationOptions::quick())?;
+    let result = verify_trace(path, &VerificationOptions::quick())?;
     Ok(result.is_valid() || !result.has_fatal_issues())
 }
 
@@ -500,7 +500,7 @@ pub fn is_trace_valid_quick(path: impl AsRef<Path>) -> io::Result<bool> {
 ///
 /// Returns an error if the file cannot be opened.
 pub fn find_first_corruption(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
-    let result = verify_trace(path, VerificationOptions::default().with_fail_fast(true))?;
+    let result = verify_trace(path, &VerificationOptions::default().with_fail_fast(true))?;
 
     for issue in result.issues() {
         match issue {
@@ -769,7 +769,8 @@ fn count_events(reader: &mut BufReader<File>, result: &mut VerificationResult) {
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Skip event bytes
-        if reader.seek(SeekFrom::Current(len as i64)).is_err() {
+        let len_i64 = i64::try_from(len).unwrap_or(i64::MAX);
+        if reader.seek(SeekFrom::Current(len_i64)).is_err() {
             result.add_issue(IntegrityIssue::Truncated {
                 at_event: event_index,
             });
@@ -795,8 +796,9 @@ fn count_events(reader: &mut BufReader<File>, result: &mut VerificationResult) {
 /// Extracts a timestamp from a replay event (in nanoseconds).
 fn extract_timestamp(event: &ReplayEvent) -> Option<u64> {
     match event {
-        ReplayEvent::TaskScheduled { at_tick, .. } => Some(*at_tick),
-        ReplayEvent::TaskSpawned { at_tick, .. } => Some(*at_tick),
+        ReplayEvent::TaskScheduled { at_tick, .. } | ReplayEvent::TaskSpawned { at_tick, .. } => {
+            Some(*at_tick)
+        }
         ReplayEvent::TimeAdvanced { to_nanos, .. } => Some(*to_nanos),
         ReplayEvent::TimerCreated { deadline_nanos, .. } => Some(*deadline_nanos),
         _ => None,
@@ -832,7 +834,7 @@ mod tests {
         let events = sample_events(100);
         write_trace(path, &metadata, &events).unwrap();
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         assert!(result.is_valid());
         assert_eq!(result.verified_events, 100);
@@ -849,7 +851,7 @@ mod tests {
         let metadata = TraceMetadata::new(42);
         write_trace(path, &metadata, &[]).unwrap();
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         assert!(result.is_valid());
         assert_eq!(result.verified_events, 0);
@@ -864,7 +866,7 @@ mod tests {
         // Write garbage (must be >= HEADER_SIZE + 8 = 27 bytes to pass size check)
         std::fs::write(path, b"NOT A TRACE FILE - EXTRA PADDING HERE!").unwrap();
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         assert!(!result.is_valid());
         assert!(result.has_fatal_issues());
@@ -889,7 +891,7 @@ mod tests {
         let original_size = file.metadata().unwrap().len();
         file.set_len(original_size / 2).unwrap();
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         assert!(!result.is_valid());
         assert!(result.verified_events < 100);
@@ -907,7 +909,7 @@ mod tests {
         // Write too little data
         std::fs::write(path, b"short").unwrap();
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         assert!(!result.is_valid());
         assert!(result.has_fatal_issues());
@@ -940,7 +942,7 @@ mod tests {
         ];
         write_trace(path, &metadata, &events).unwrap();
 
-        let result = verify_trace(path, VerificationOptions::strict()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::strict()).unwrap();
 
         assert!(!result.is_valid());
         assert!(result
@@ -992,7 +994,7 @@ mod tests {
         file.set_len(original_size - 100).unwrap();
         drop(file);
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         // Should be partially usable
         assert!(result.is_partially_usable());
@@ -1069,7 +1071,7 @@ mod tests {
             file.write_all(b"CORRUPTED_DATA_HERE!").unwrap();
         }
 
-        let result = verify_trace(path, VerificationOptions::default()).unwrap();
+        let result = verify_trace(path, &VerificationOptions::default()).unwrap();
 
         assert!(!result.is_valid());
         // Should have read some events before hitting corruption

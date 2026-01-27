@@ -129,7 +129,7 @@ impl CompressionMode {
     }
 
     /// Returns the compression byte for the file header.
-    fn to_byte(&self) -> u8 {
+    fn to_byte(self) -> u8 {
         match self {
             Self::None => 0,
             #[cfg(feature = "trace-compression")]
@@ -394,7 +394,7 @@ impl TraceWriter {
         }
     }
 
-    fn handle_limit(&mut self, info: LimitReached) -> TraceFileResult<bool> {
+    fn handle_limit(&mut self, info: &LimitReached) -> TraceFileResult<bool> {
         let mut action = self.resolve_limit_action(&info);
         if matches!(action, LimitAction::Callback(_)) {
             action = LimitAction::StopRecording;
@@ -476,10 +476,11 @@ impl TraceWriter {
 
     fn update_event_count_best_effort(&mut self) {
         if let Err(err) = self.update_event_count() {
-            if let TraceFileError::Io(io_err) = &err {
-                if Self::is_disk_full(io_err) {
-                    warn!("trace event count update skipped: disk full");
-                }
+            if matches!(
+                &err,
+                TraceFileError::Io(io_err) if Self::is_disk_full(io_err)
+            ) {
+                warn!("trace event count update skipped: disk full");
             }
             warn!("trace event count update skipped: {err}");
         }
@@ -552,7 +553,7 @@ impl TraceWriter {
                     max_bytes: self.config.max_file_size,
                     needed_bytes: 0,
                 };
-                if !self.handle_limit(info)? {
+                if !self.handle_limit(&info)? {
                     return Ok(());
                 }
             }
@@ -575,7 +576,7 @@ impl TraceWriter {
                 max_bytes: self.config.max_file_size,
                 needed_bytes: estimated_bytes,
             };
-            if !self.handle_limit(info)? {
+            if !self.handle_limit(&info)? {
                 return Ok(());
             }
         }
