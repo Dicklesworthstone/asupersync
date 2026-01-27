@@ -381,6 +381,28 @@ impl Cx {
         self.inner.read().expect("lock poisoned").task
     }
 
+    /// Returns the task type label, if one has been set.
+    ///
+    /// Task types are optional metadata used by adaptive deadline monitoring
+    /// and metrics to group similar work.
+    #[must_use]
+    pub fn task_type(&self) -> Option<String> {
+        self.inner
+            .read()
+            .expect("lock poisoned")
+            .task_type
+            .clone()
+    }
+
+    /// Sets a task type label for adaptive monitoring and metrics.
+    ///
+    /// This is intended to be called early in task execution to associate
+    /// a stable label with the task's behavior profile.
+    pub fn set_task_type(&self, task_type: impl Into<String>) {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        inner.task_type = Some(task_type.into());
+    }
+
     /// Returns the current budget.
     ///
     /// The budget defines resource limits for this task:

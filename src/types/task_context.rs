@@ -64,6 +64,8 @@ pub struct CxInner {
     pub region: RegionId,
     /// The task this context belongs to.
     pub task: TaskId,
+    /// Optional task type label for adaptive monitoring/metrics.
+    pub task_type: Option<String>,
     /// Current budget.
     pub budget: Budget,
     /// Baseline budget used for checkpoint accounting.
@@ -85,6 +87,7 @@ impl CxInner {
         Self {
             region,
             task,
+            task_type: None,
             budget,
             budget_baseline: budget,
             cancel_requested: false,
