@@ -1643,19 +1643,19 @@ mod tests {
                     let p2 = Pin::new(&mut stream2).poll_next(&mut cx);
                     let p3 = Pin::new(&mut stream3).poll_next(&mut cx);
 
-                    let mut any = false;
-                    if matches!(p1, Poll::Ready(Some(Ok(_)))) {
+                    let p1_ready = matches!(p1, Poll::Ready(Some(Ok(_))));
+                    if p1_ready {
                         count1 += 1;
-                        any = true;
                     }
-                    if matches!(p2, Poll::Ready(Some(Ok(_)))) {
+                    let p2_ready = matches!(p2, Poll::Ready(Some(Ok(_))));
+                    if p2_ready {
                         count2 += 1;
-                        any = true;
                     }
-                    if matches!(p3, Poll::Ready(Some(Ok(_)))) {
+                    let p3_ready = matches!(p3, Poll::Ready(Some(Ok(_))));
+                    if p3_ready {
                         count3 += 1;
-                        any = true;
                     }
+                    let any = p1_ready || p2_ready || p3_ready;
                     if !any {
                         break;
                     }

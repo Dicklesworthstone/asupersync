@@ -252,7 +252,7 @@ impl MockConnection {
     }
 
     /// Simulate a query.
-    pub async fn query(&self, _sql: &str) -> Result<(), MockError> {
+    pub fn query(&self, _sql: &str) -> Result<(), MockError> {
         self.query_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
