@@ -850,7 +850,7 @@ mod tests {
         // On Linux, pid should be available and match our process
         #[cfg(target_os = "linux")]
         {
-            let proc_id = std::process::id() as i32;
+            let proc_id = i32::try_from(std::process::id()).expect("process id fits in i32");
             let pid1 = cred1.pid.expect("pid should be available on Linux");
             let pid2 = cred2.pid.expect("pid should be available on Linux");
             crate::assert_with_log!(pid1 == proc_id, "s1 pid", proc_id, pid1);

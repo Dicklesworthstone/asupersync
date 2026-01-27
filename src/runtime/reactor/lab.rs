@@ -1679,6 +1679,10 @@ mod tests {
     mod fault_injection {
         use super::*;
 
+        fn approx_eq(lhs: f64, rhs: f64) -> bool {
+            (lhs - rhs).abs() < f64::EPSILON
+        }
+
         #[test]
         fn fault_config_builder() {
             super::init_test("fault_config_builder");
@@ -1693,8 +1697,9 @@ mod tests {
                 .with_closed(true)
                 .with_pending_error(io::ErrorKind::TimedOut);
 
+            let approx = approx_eq(config.error_probability, 0.5);
             crate::assert_with_log!(
-                config.error_probability == 0.5,
+                approx,
                 "error_probability",
                 0.5f64,
                 config.error_probability
@@ -1724,14 +1729,11 @@ mod tests {
             let config_low = FaultConfig::new().with_error_probability(-0.5);
             let config_high = FaultConfig::new().with_error_probability(1.5);
 
+            let low_ok = approx_eq(config_low.error_probability, 0.0);
+            crate::assert_with_log!(low_ok, "clamped to 0", 0.0f64, config_low.error_probability);
+            let high_ok = approx_eq(config_high.error_probability, 1.0);
             crate::assert_with_log!(
-                config_low.error_probability == 0.0,
-                "clamped to 0",
-                0.0f64,
-                config_low.error_probability
-            );
-            crate::assert_with_log!(
-                config_high.error_probability == 1.0,
+                high_ok,
                 "clamped to 1",
                 1.0f64,
                 config_high.error_probability

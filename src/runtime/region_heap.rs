@@ -538,8 +538,8 @@ mod tests {
         // in parallel tests).
 
         let mut heap = RegionHeap::new();
-        for i in 0..100 {
-            heap.alloc(i as u64);
+        for i in 0u64..100 {
+            heap.alloc(i);
         }
         // Verify heap has 100 allocations
         assert_eq!(heap.len(), 100);

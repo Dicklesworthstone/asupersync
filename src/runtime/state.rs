@@ -2015,10 +2015,22 @@ mod tests {
     use super::*;
     use crate::record::task::TaskState;
     use crate::record::{ObligationKind, ObligationRecord};
+    use crate::runtime::reactor::LabReactor;
     use crate::test_utils::init_test_logging;
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
+
+    struct TestWaker(AtomicBool);
+
+    impl Wake for TestWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -2468,6 +2480,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn cancel_request_builds_cause_chains() {
         init_test("cancel_request_builds_cause_chains");
         let mut state = RuntimeState::new();
@@ -3121,9 +3134,6 @@ mod tests {
     #[test]
     fn with_reactor_creates_state_with_io_driver() {
         init_test("with_reactor_creates_state_with_io_driver");
-        use crate::runtime::reactor::LabReactor;
-        use std::sync::Arc;
-
         let reactor = Arc::new(LabReactor::new());
         let state = RuntimeState::with_reactor(reactor);
 
@@ -3155,10 +3165,6 @@ mod tests {
     #[test]
     fn io_driver_mut_allows_modification() {
         init_test("io_driver_mut_allows_modification");
-        use crate::runtime::reactor::LabReactor;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
 
         struct TestWaker(AtomicBool);
         impl Wake for TestWaker {
@@ -3189,10 +3195,6 @@ mod tests {
     #[test]
     fn is_quiescent_considers_io_driver() {
         init_test("is_quiescent_considers_io_driver");
-        use crate::runtime::reactor::LabReactor;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
 
         struct TestWaker(AtomicBool);
         impl Wake for TestWaker {

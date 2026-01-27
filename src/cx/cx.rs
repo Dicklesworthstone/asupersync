@@ -1350,8 +1350,7 @@ mod tests {
     #[test]
     fn cancel_chain_empty_when_not_cancelled() {
         let cx = test_cx();
-        let chain: Vec<_> = cx.cancel_chain().collect();
-        assert!(chain.is_empty());
+        assert!(cx.cancel_chain().next().is_none());
     }
 
     #[test]
