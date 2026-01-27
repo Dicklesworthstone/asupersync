@@ -6,18 +6,13 @@ use std::fmt::Write;
 use super::{PlanDag, PlanId, PlanNode};
 
 /// Policy controlling which rewrites are allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RewritePolicy {
     /// Conservative: only rewrite when the shared child is a leaf and joins are binary.
+    #[default]
     Conservative,
     /// Assume associativity/commutativity and independence of children.
     AssumeAssociativeComm,
-}
-
-impl Default for RewritePolicy {
-    fn default() -> Self {
-        Self::Conservative
-    }
 }
 
 impl RewritePolicy {

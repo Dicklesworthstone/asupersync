@@ -393,7 +393,10 @@ mod tests {
         let race = dag.race(vec![join1, join2]);
         dag.set_root(race);
 
-        let root = dag.root().expect("root set");
+        let Some(root) = dag.root() else {
+            crate::assert_with_log!(false, "root set", true, false);
+            return;
+        };
         let before = outcome_sets(&dag, root);
         crate::assert_with_log!(
             dag.validate().is_ok(),
@@ -411,7 +414,10 @@ mod tests {
             report.steps().len()
         );
 
-        let new_root = dag.root().expect("root set after rewrite");
+        let Some(new_root) = dag.root() else {
+            crate::assert_with_log!(false, "root set after rewrite", true, false);
+            return;
+        };
         let after = outcome_sets(&dag, new_root);
         crate::assert_with_log!(before == after, "outcome sets", before, after);
         crate::assert_with_log!(
