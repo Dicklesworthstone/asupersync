@@ -8,10 +8,11 @@ use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::RuntimeState;
 use crate::tracing_compat::trace;
-use crate::types::{TaskId, Time};
+use crate::types::{Outcome, TaskId, Time};
 use crate::util::DetRng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
@@ -303,21 +304,103 @@ impl ThreeLaneWorker {
         local.schedule_timed(task, deadline);
     }
 
-    #[allow(clippy::unused_self)]
-    fn execute(&self, _task: TaskId) {
-        trace!(task_id = ?_task, worker_id = self.id, "executing task");
-        // Placeholder for execution logic.
-        // In real implementation, this would:
-        // 1. Get stored future from RuntimeState
-        // 2. Create Waker pointing to this Scheduler/Worker
-        // 3. Poll future
-        // 4. Handle Ready/Pending
+    fn execute(&self, task_id: TaskId) {
+        trace!(task_id = ?task_id, worker_id = self.id, "executing task");
+
+        let (mut stored, task_cx, wake_state, priority) = {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let Some(stored) = state.remove_stored_future(task_id) else {
+                return;
+            };
+            let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+                return;
+            };
+            record.start_running();
+            record.wake_state.clear();
+            let priority = record
+                .cx_inner
+                .as_ref()
+                .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+                .unwrap_or(0);
+            let task_cx = record.cx.clone();
+            let wake_state = Arc::clone(&record.wake_state);
+            drop(state);
+            (stored, task_cx, wake_state, priority)
+        };
+
+        let waker = Waker::from(Arc::new(ThreeLaneWaker {
+            task_id,
+            priority,
+            wake_state,
+            global: Arc::clone(&self.global),
+            parker: self.parker.clone(),
+        }));
+        let mut cx = Context::from_waker(&waker);
+        let _cx_guard = crate::cx::Cx::set_current(task_cx);
+
+        match stored.poll(&mut cx) {
+            Poll::Ready(()) => {
+                let mut state = self.state.lock().expect("runtime state lock poisoned");
+                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                    if !record.state.is_terminal() {
+                        record.complete(Outcome::Ok(()));
+                    }
+                }
+
+                let waiters = state.task_completed(task_id);
+                for waiter in waiters {
+                    if let Some(record) = state.tasks.get(waiter.arena_index()) {
+                        let waiter_priority = record
+                            .cx_inner
+                            .as_ref()
+                            .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+                            .unwrap_or(0);
+                        if record.wake_state.notify() {
+                            self.global.inject_ready(waiter, waiter_priority);
+                            self.parker.unpark();
+                        }
+                    }
+                }
+            }
+            Poll::Pending => {
+                let mut state = self.state.lock().expect("runtime state lock poisoned");
+                state.store_spawned_task(task_id, stored);
+            }
+        }
+    }
+}
+
+struct ThreeLaneWaker {
+    task_id: TaskId,
+    priority: u8,
+    wake_state: Arc<crate::record::task::TaskWakeState>,
+    global: Arc<GlobalInjector>,
+    parker: Parker,
+}
+
+impl ThreeLaneWaker {
+    fn schedule(&self) {
+        if self.wake_state.notify() {
+            self.global.inject_ready(self.task_id, self.priority);
+            self.parker.unpark();
+        }
+    }
+}
+
+impl Wake for ThreeLaneWaker {
+    fn wake(self: Arc<Self>) {
+        self.schedule();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.schedule();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Budget;
     use std::time::Duration;
 
     #[test]
@@ -412,5 +495,52 @@ mod tests {
             stolen_id == TaskId::new_for_test(1, 2) || stolen_id == TaskId::new_for_test(1, 3),
             "Expected ready task, got cancel task"
         );
+    }
+
+    #[test]
+    fn execute_completes_task_and_schedules_waiter() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+        let waiter_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (waiter_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            waiter_id
+        };
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+                record.add_waiter(waiter_id);
+            }
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = scheduler.take_workers().into_iter().next().unwrap();
+
+        worker.execute(task_id);
+
+        let completed = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .tasks
+            .get(task_id.arena_index())
+            .is_none();
+        assert!(completed, "task should be removed after completion");
+
+        let scheduled_task = worker.global.pop_ready().map(|pt| pt.task);
+        assert_eq!(scheduled_task, Some(waiter_id));
     }
 }
