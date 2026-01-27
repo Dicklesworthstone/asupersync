@@ -889,6 +889,7 @@ impl TestLogger {
                 })
                 .collect();
 
+            drop(events);
             spawned.difference(&completed).copied().collect()
         };
 

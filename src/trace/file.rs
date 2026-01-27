@@ -395,7 +395,7 @@ impl TraceWriter {
     }
 
     fn handle_limit(&mut self, info: &LimitReached) -> TraceFileResult<bool> {
-        let mut action = self.resolve_limit_action(&info);
+        let mut action = self.resolve_limit_action(info);
         if matches!(action, LimitAction::Callback(_)) {
             action = LimitAction::StopRecording;
         }

@@ -338,6 +338,7 @@ impl<T> OnceCell<T> {
                 .expect("condvar wait failed");
             guard = new_guard;
         }
+        drop(guard);
     }
 
     /// Wakes all async waiters.
@@ -384,10 +385,8 @@ impl<T: fmt::Debug> fmt::Debug for OnceCell<T> {
 
 impl<T: Clone> Clone for OnceCell<T> {
     fn clone(&self) -> Self {
-        match self.get() {
-            Some(value) => Self::with_value(value.clone()),
-            None => Self::new(),
-        }
+        self.get()
+            .map_or_else(Self::new, |value| Self::with_value(value.clone()))
     }
 }
 

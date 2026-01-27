@@ -90,16 +90,18 @@ impl Worker {
 
         let (mut stored, task_cx, wake_state) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
-            let stored = match state.remove_stored_future(task_id) {
-                Some(stored) => stored,
-                None => return,
+            let Some(stored) = state.remove_stored_future(task_id) else {
+                return;
             };
             let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
                 return;
             };
             record.start_running();
             record.wake_state.clear();
-            (stored, record.cx.clone(), Arc::clone(&record.wake_state))
+            let task_cx = record.cx.clone();
+            let wake_state = Arc::clone(&record.wake_state);
+            drop(state);
+            (stored, task_cx, wake_state)
         };
 
         let waker = Waker::from(Arc::new(WorkStealingWaker {
@@ -125,8 +127,7 @@ impl Worker {
                     state
                         .tasks
                         .get(waiter.arena_index())
-                        .map(|record| record.wake_state.notify())
-                        .unwrap_or(true)
+                        .is_none_or(|record| record.wake_state.notify())
                         .then(|| self.global.push(waiter));
                 }
             }

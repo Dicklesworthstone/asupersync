@@ -111,8 +111,7 @@ impl Entry {
     /// Returns the generation of this entry.
     fn generation(&self) -> u32 {
         match self {
-            Self::Occupied { generation, .. } => *generation,
-            Self::Vacant { generation, .. } => *generation,
+            Self::Occupied { generation, .. } | Self::Vacant { generation, .. } => *generation,
         }
     }
 }
