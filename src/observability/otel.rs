@@ -575,6 +575,12 @@ pub struct OtelMetrics {
     // Budget metrics
     deadlines_set: Counter<u64>,
     deadlines_exceeded: Counter<u64>,
+    // Deadline monitoring metrics
+    deadline_warnings: Counter<u64>,
+    deadline_violations: Counter<u64>,
+    deadline_remaining: Histogram<f64>,
+    checkpoint_interval: Histogram<f64>,
+    task_stuck_detected: Counter<u64>,
     // Obligation metrics
     obligations_active: ObservableGauge<u64>,
     obligations_created: Counter<u64>,
@@ -733,6 +739,26 @@ impl OtelMetrics {
             deadlines_exceeded: meter
                 .u64_counter("asupersync.deadlines.exceeded")
                 .with_description("Deadline exceeded events")
+                .build(),
+            deadline_warnings: meter
+                .u64_counter("asupersync.deadline.warnings_total")
+                .with_description("Deadline warning events")
+                .build(),
+            deadline_violations: meter
+                .u64_counter("asupersync.deadline.violations_total")
+                .with_description("Deadline violation events")
+                .build(),
+            deadline_remaining: meter
+                .f64_histogram("asupersync.deadline.remaining_seconds")
+                .with_description("Time remaining at completion in seconds")
+                .build(),
+            checkpoint_interval: meter
+                .f64_histogram("asupersync.checkpoint.interval_seconds")
+                .with_description("Time between checkpoints in seconds")
+                .build(),
+            task_stuck_detected: meter
+                .u64_counter("asupersync.task.stuck_detected_total")
+                .with_description("Tasks detected as stuck (no progress)")
                 .build(),
             obligations_active,
             obligations_created: meter
@@ -899,6 +925,69 @@ impl MetricsProvider for OtelMetrics {
 
     fn deadline_exceeded(&self, _region_id: RegionId) {
         self.deadlines_exceeded.add(1, &[]);
+    }
+
+    fn deadline_warning(&self, task_type: &str, reason: &'static str, remaining: Duration) {
+        let labels = [
+            KeyValue::new("task_type", task_type),
+            KeyValue::new("reason", reason),
+        ];
+        if let Some(filtered) = self.check_cardinality("asupersync.deadline.warnings_total", &labels)
+        {
+            self.deadline_warnings.add(1, &filtered);
+        }
+
+        if self.should_sample("asupersync.deadline.remaining_seconds") {
+            let labels = [KeyValue::new("task_type", task_type)];
+            if let Some(filtered) =
+                self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
+            {
+                self.deadline_remaining
+                    .record(remaining.as_secs_f64(), &filtered);
+            }
+        }
+    }
+
+    fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
+        let labels = [KeyValue::new("task_type", task_type)];
+        if let Some(filtered) =
+            self.check_cardinality("asupersync.deadline.violations_total", &labels)
+        {
+            self.deadline_violations.add(1, &filtered);
+        }
+    }
+
+    fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
+        if self.should_sample("asupersync.deadline.remaining_seconds") {
+            let labels = [KeyValue::new("task_type", task_type)];
+            if let Some(filtered) =
+                self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
+            {
+                self.deadline_remaining
+                    .record(remaining.as_secs_f64(), &filtered);
+            }
+        }
+    }
+
+    fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
+        if self.should_sample("asupersync.checkpoint.interval_seconds") {
+            let labels = [KeyValue::new("task_type", task_type)];
+            if let Some(filtered) =
+                self.check_cardinality("asupersync.checkpoint.interval_seconds", &labels)
+            {
+                self.checkpoint_interval
+                    .record(interval.as_secs_f64(), &filtered);
+            }
+        }
+    }
+
+    fn task_stuck_detected(&self, task_type: &str) {
+        let labels = [KeyValue::new("task_type", task_type)];
+        if let Some(filtered) =
+            self.check_cardinality("asupersync.task.stuck_detected_total", &labels)
+        {
+            self.task_stuck_detected.add(1, &filtered);
+        }
     }
 
     fn obligation_created(&self, _region_id: RegionId) {

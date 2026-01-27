@@ -106,7 +106,7 @@ mod tests {
     use std::thread;
 
     fn task(id: u32) -> TaskId {
-        TaskId::new_for_test(1, id)
+        TaskId::new_for_test(id, 0)
     }
 
     #[test]

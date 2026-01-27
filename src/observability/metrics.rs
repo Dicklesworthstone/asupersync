@@ -324,6 +324,23 @@ pub trait MetricsProvider: Send + Sync + 'static {
     /// Called when a deadline is exceeded.
     fn deadline_exceeded(&self, region_id: RegionId);
 
+    // === Deadline Monitoring Metrics ===
+
+    /// Called when a deadline warning is emitted.
+    fn deadline_warning(&self, task_type: &str, reason: &'static str, remaining: Duration);
+
+    /// Called when a deadline violation is observed.
+    fn deadline_violation(&self, task_type: &str, over_by: Duration);
+
+    /// Called to record remaining time at task completion.
+    fn deadline_remaining(&self, task_type: &str, remaining: Duration);
+
+    /// Called to record time between progress checkpoints.
+    fn checkpoint_interval(&self, task_type: &str, interval: Duration);
+
+    /// Called when a task is detected as stuck (no progress).
+    fn task_stuck_detected(&self, task_type: &str);
+
     // === Obligation Metrics ===
 
     /// Called when an obligation is created.
@@ -363,6 +380,16 @@ impl MetricsProvider for NoOpMetrics {
     fn deadline_set(&self, _: RegionId, _: Duration) {}
 
     fn deadline_exceeded(&self, _: RegionId) {}
+
+    fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+
+    fn deadline_violation(&self, _: &str, _: Duration) {}
+
+    fn deadline_remaining(&self, _: &str, _: Duration) {}
+
+    fn checkpoint_interval(&self, _: &str, _: Duration) {}
+
+    fn task_stuck_detected(&self, _: &str) {}
 
     fn obligation_created(&self, _: RegionId) {}
 

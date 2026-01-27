@@ -5,11 +5,40 @@
 //! recently. Warnings are emitted at most once per task until the task is
 //! removed from the monitor.
 
+use crate::observability::metrics::MetricsProvider;
 use crate::record::TaskRecord;
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Adaptive threshold configuration for deadline monitoring.
+#[derive(Debug, Clone)]
+pub struct AdaptiveDeadlineConfig {
+    /// Enable adaptive threshold calculation.
+    pub adaptive_enabled: bool,
+    /// Percentile of historical duration to use as warning threshold.
+    pub warning_percentile: f64,
+    /// Minimum samples before adaptive thresholds are used.
+    pub min_samples: usize,
+    /// Maximum history entries to keep per task type.
+    pub max_history: usize,
+    /// Fallback threshold when insufficient history is available.
+    pub fallback_threshold: Duration,
+}
+
+impl Default for AdaptiveDeadlineConfig {
+    fn default() -> Self {
+        Self {
+            adaptive_enabled: false,
+            warning_percentile: 0.90,
+            min_samples: 10,
+            max_history: 1000,
+            fallback_threshold: Duration::from_secs(30),
+        }
+    }
+}
 
 /// Configuration for deadline monitoring.
 #[derive(Debug, Clone)]
@@ -20,6 +49,8 @@ pub struct MonitorConfig {
     pub warning_threshold_fraction: f64,
     /// Warn if no checkpoint for this duration.
     pub checkpoint_timeout: Duration,
+    /// Adaptive warning thresholds based on historical task durations.
+    pub adaptive: AdaptiveDeadlineConfig,
     /// Whether monitoring is enabled.
     pub enabled: bool,
 }
@@ -30,6 +61,7 @@ impl Default for MonitorConfig {
             check_interval: Duration::from_secs(1),
             warning_threshold_fraction: 0.2,
             checkpoint_timeout: Duration::from_secs(30),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         }
     }
@@ -65,13 +97,53 @@ pub enum WarningReason {
     ApproachingDeadlineNoProgress,
 }
 
+#[derive(Debug, Default)]
+struct DurationHistory {
+    samples: VecDeque<u64>,
+    max_history: usize,
+}
+
+impl DurationHistory {
+    fn new(max_history: usize) -> Self {
+        Self {
+            samples: VecDeque::new(),
+            max_history: max_history.max(1),
+        }
+    }
+
+    fn record(&mut self, duration: Duration) {
+        if self.samples.len() == self.max_history {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+
+    fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    fn percentile_nanos(&self, percentile: f64) -> Option<u64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut values: Vec<u64> = self.samples.iter().copied().collect();
+        values.sort_unstable();
+        let pct = percentile.clamp(0.0, 1.0);
+        let rank = (pct * values.len() as f64).ceil() as usize;
+        let idx = rank.saturating_sub(1).min(values.len() - 1);
+        values.get(idx).copied()
+    }
+}
+
 #[derive(Debug)]
 struct MonitoredTask {
     task_id: TaskId,
     region_id: RegionId,
     deadline: Time,
     last_progress: Instant,
+    last_checkpoint_seen: Option<Instant>,
     warned: bool,
+    violated: bool,
 }
 
 /// Monitors tasks for approaching deadlines and lack of progress.
@@ -79,6 +151,8 @@ pub struct DeadlineMonitor {
     config: MonitorConfig,
     on_warning: Option<Box<dyn Fn(DeadlineWarning) + Send + Sync>>,
     monitored: HashMap<TaskId, MonitoredTask>,
+    history: HashMap<String, DurationHistory>,
+    metrics_provider: Option<Arc<dyn MetricsProvider>>,
     last_scan: Option<Instant>,
 }
 
@@ -100,6 +174,8 @@ impl DeadlineMonitor {
             config,
             on_warning: None,
             monitored: HashMap::new(),
+            history: HashMap::new(),
+            metrics_provider: None,
             last_scan: None,
         }
     }
@@ -113,6 +189,98 @@ impl DeadlineMonitor {
     #[must_use]
     pub fn config(&self) -> &MonitorConfig {
         &self.config
+    }
+
+    /// Sets a metrics provider for deadline-related metrics.
+    pub fn set_metrics_provider(&mut self, provider: Arc<dyn MetricsProvider>) {
+        self.metrics_provider = Some(provider);
+    }
+
+    /// Records a completed task duration for adaptive thresholding and metrics.
+    pub fn record_completion(
+        &mut self,
+        task_id: TaskId,
+        task_type: &str,
+        duration: Duration,
+        deadline: Option<Time>,
+        now: Time,
+    ) {
+        let task_type = normalize_task_type(task_type);
+        self.history
+            .entry(task_type.to_string())
+            .or_insert_with(|| DurationHistory::new(self.config.adaptive.max_history))
+            .record(duration);
+
+        if let Some(deadline) = deadline {
+            let remaining = Duration::from_nanos(deadline.duration_since(now));
+            self.emit_deadline_remaining(task_type, remaining);
+
+            let deadline_exceeded = now > deadline;
+            let already_violated = self
+                .monitored
+                .get(&task_id)
+                .map_or(false, |entry| entry.violated);
+            if deadline_exceeded && !already_violated {
+                let over_by = Duration::from_nanos(now.duration_since(deadline));
+                self.emit_deadline_violation(task_type, over_by);
+            }
+        }
+
+        self.monitored.remove(&task_id);
+    }
+
+    fn adaptive_warning_threshold(&self, task_type: &str, total: Duration) -> Duration {
+        let adaptive = &self.config.adaptive;
+        if !adaptive.adaptive_enabled {
+            let total_nanos = total.as_nanos().min(u128::from(u64::MAX)) as u64;
+            let fraction_nanos = fraction_nanos(total_nanos, self.config.warning_threshold_fraction);
+            return Duration::from_nanos(fraction_nanos);
+        }
+
+        let history = self.history.get(task_type);
+        if let Some(history) = history {
+            if history.len() >= adaptive.min_samples {
+                if let Some(pct) = history.percentile_nanos(adaptive.warning_percentile) {
+                    return Duration::from_nanos(pct);
+                }
+            }
+        }
+
+        let fallback = adaptive.fallback_threshold;
+        fallback.min(total)
+    }
+
+    fn emit_deadline_warning(
+        &self,
+        task_type: &str,
+        reason: WarningReason,
+        remaining: Duration,
+    ) {
+        if let Some(provider) = &self.metrics_provider {
+            provider.deadline_warning(task_type, reason_label(reason), remaining);
+            if matches!(reason, WarningReason::NoProgress | WarningReason::ApproachingDeadlineNoProgress)
+            {
+                provider.task_stuck_detected(task_type);
+            }
+        }
+    }
+
+    fn emit_deadline_violation(&self, task_type: &str, over_by: Duration) {
+        if let Some(provider) = &self.metrics_provider {
+            provider.deadline_violation(task_type, over_by);
+        }
+    }
+
+    fn emit_deadline_remaining(&self, task_type: &str, remaining: Duration) {
+        if let Some(provider) = &self.metrics_provider {
+            provider.deadline_remaining(task_type, remaining);
+        }
+    }
+
+    fn emit_checkpoint_interval(&self, task_type: &str, interval: Duration) {
+        if let Some(provider) = &self.metrics_provider {
+            provider.checkpoint_interval(task_type, interval);
+        }
     }
 
     /// Performs a monitoring scan over tasks.
@@ -151,6 +319,10 @@ impl DeadlineMonitor {
 
             let last_checkpoint = inner_guard.checkpoint_state.last_checkpoint;
             let last_message = inner_guard.checkpoint_state.last_message.clone();
+            let task_type = inner_guard
+                .task_type
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
             drop(inner_guard);
 
             seen.insert(task.id);
@@ -163,16 +335,33 @@ impl DeadlineMonitor {
                     region_id: task.owner,
                     deadline,
                     last_progress: last_checkpoint.unwrap_or(now_instant),
+                    last_checkpoint_seen: last_checkpoint,
                     warned: false,
+                    violated: false,
                 });
 
             // Keep metadata up to date.
             entry.region_id = task.owner;
             entry.deadline = deadline;
             if let Some(checkpoint) = last_checkpoint {
-                if checkpoint > entry.last_progress {
+                if entry
+                    .last_checkpoint_seen
+                    .map_or(true, |prev| checkpoint > prev)
+                {
+                    if let Some(prev) = entry.last_checkpoint_seen {
+                        let interval = checkpoint.duration_since(prev);
+                        self.emit_checkpoint_interval(&task_type, interval);
+                    }
+                    entry.last_checkpoint_seen = Some(checkpoint);
                     entry.last_progress = checkpoint;
                 }
+            }
+
+            let deadline_exceeded = now > deadline;
+            if deadline_exceeded && !entry.violated {
+                entry.violated = true;
+                let over_by = Duration::from_nanos(now.duration_since(deadline));
+                self.emit_deadline_violation(&task_type, over_by);
             }
 
             if entry.warned {
@@ -182,9 +371,15 @@ impl DeadlineMonitor {
             let remaining_nanos = deadline.duration_since(now);
             let remaining = Duration::from_nanos(remaining_nanos);
             let total_nanos = deadline.duration_since(task.created_at());
-            let threshold_nanos =
-                fraction_nanos(total_nanos, self.config.warning_threshold_fraction);
-            let approaching_deadline = remaining_nanos <= threshold_nanos;
+            let total = Duration::from_nanos(total_nanos);
+            let adaptive_threshold = self.adaptive_warning_threshold(&task_type, total);
+            let approaching_deadline = if self.config.adaptive.adaptive_enabled {
+                let elapsed = Duration::from_nanos(now.duration_since(task.created_at()));
+                elapsed >= adaptive_threshold
+            } else {
+                remaining_nanos
+                    <= fraction_nanos(total_nanos, self.config.warning_threshold_fraction)
+            };
 
             let no_progress =
                 now_instant.duration_since(entry.last_progress) >= self.config.checkpoint_timeout;
@@ -209,6 +404,7 @@ impl DeadlineMonitor {
                         reason,
                     }
                 };
+                self.emit_deadline_warning(&task_type, reason, remaining);
                 self.emit_warning(warning);
             }
         }
@@ -261,6 +457,23 @@ fn fraction_nanos(total_nanos: u64, fraction: f64) -> u64 {
     scaled.max(0.0).min(u64::MAX as f64) as u64
 }
 
+fn normalize_task_type(task_type: &str) -> &str {
+    let trimmed = task_type.trim();
+    if trimmed.is_empty() {
+        "default"
+    } else {
+        trimmed
+    }
+}
+
+const fn reason_label(reason: WarningReason) -> &'static str {
+    match reason {
+        WarningReason::ApproachingDeadline => "approaching_deadline",
+        WarningReason::NoProgress => "no_progress",
+        WarningReason::ApproachingDeadlineNoProgress => "approaching_deadline_no_progress",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +510,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
             checkpoint_timeout: Duration::from_secs(30),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
         let mut monitor = DeadlineMonitor::new(config);
@@ -338,6 +552,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.1,
             checkpoint_timeout: Duration::from_secs(10),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
         let mut monitor = DeadlineMonitor::new(config);
@@ -380,6 +595,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
             checkpoint_timeout: Duration::from_secs(30),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
         let mut monitor = DeadlineMonitor::new(config);
@@ -414,6 +630,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.5,
             checkpoint_timeout: Duration::from_secs(10),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
         let mut monitor = DeadlineMonitor::new(config);
@@ -457,6 +674,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
             checkpoint_timeout: Duration::from_secs(60),
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
         let mut monitor = DeadlineMonitor::new(config);
@@ -490,6 +708,7 @@ mod tests {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
             checkpoint_timeout: Duration::ZERO,
+            adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
         let mut monitor = DeadlineMonitor::new(config);
