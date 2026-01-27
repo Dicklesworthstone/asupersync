@@ -13,13 +13,15 @@ use asupersync::lab::oracle::{
     OracleSuite,
 };
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy, RewriteRule};
 use asupersync::record::task::TaskState;
 use asupersync::record::{Finalizer, ObligationKind, ObligationState};
-use asupersync::runtime::RuntimeState;
+use asupersync::runtime::{yield_now, JoinError, RuntimeState, TaskHandle};
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
 use futures_lite::future;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 fn region(n: u32) -> RegionId {
@@ -769,4 +771,344 @@ fn e2e_stress_nested_regions_multiple_children() {
         violations
     );
     test_complete!("e2e_stress_nested_regions_multiple_children");
+}
+
+// ============================================================================
+// Scenario: Plan rewrite equivalence (lab runtime + oracles)
+// ============================================================================
+
+#[test]
+fn plan_rewrite_equivalence_lab_runtime() {
+    init_test("plan_rewrite_equivalence_lab_runtime");
+    test_section!("build plans");
+    let original = build_race_join_plan();
+    let mut rewritten = build_race_join_plan();
+    let rules = [RewriteRule::DedupRaceJoin];
+    let report = rewritten.apply_rewrites(RewritePolicy::Conservative, &rules);
+    assert_with_log!(
+        report.steps().len() == 1,
+        "rewrite applied",
+        1,
+        report.steps().len()
+    );
+
+    test_section!("determinism");
+    let config = LabConfig::new(123).trace_capacity(4096);
+    assert_deterministic(config.clone(), |runtime| {
+        let _ = run_plan(runtime, &original);
+    });
+    assert_deterministic(config.clone(), |runtime| {
+        let _ = run_plan(runtime, &rewritten);
+    });
+
+    test_section!("compare outcomes");
+    let original_outcome = run_plan(&mut LabRuntime::new(config.clone()), &original);
+    let rewritten_outcome = run_plan(&mut LabRuntime::new(config), &rewritten);
+    assert_with_log!(
+        original_outcome == rewritten_outcome,
+        "rewrite preserves outcomes",
+        &original_outcome,
+        &rewritten_outcome
+    );
+    test_complete!("plan_rewrite_equivalence_lab_runtime");
+}
+
+type NodeValue = BTreeSet<String>;
+
+#[derive(Clone)]
+struct SharedHandle<T> {
+    inner: Arc<SharedInner<T>>,
+}
+
+struct SharedInner<T> {
+    handle: TaskHandle<T>,
+    cached: Mutex<Option<Result<T, JoinError>>>,
+}
+
+impl<T> SharedHandle<T> {
+    fn new(handle: TaskHandle<T>) -> Self {
+        Self {
+            inner: Arc::new(SharedInner {
+                handle,
+                cached: Mutex::new(None),
+            }),
+        }
+    }
+
+    fn task_id(&self) -> TaskId {
+        self.inner.handle.task_id()
+    }
+
+    fn try_join(&self) -> Option<Result<T, JoinError>>
+    where
+        T: Clone,
+    {
+        let cached = self.inner.cached.lock().expect("cache lock").clone();
+        if let Some(cached) = cached {
+            return Some(cached);
+        }
+
+        match self.inner.handle.try_join() {
+            Ok(Some(value)) => {
+                let result = Ok(value);
+                *self.inner.cached.lock().expect("cache lock") = Some(result.clone());
+                Some(result)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                let result = Err(err);
+                *self.inner.cached.lock().expect("cache lock") = Some(result.clone());
+                Some(result)
+            }
+        }
+    }
+
+    async fn join(&self, cx: &Cx) -> Result<T, JoinError>
+    where
+        T: Clone,
+    {
+        let cached = self.inner.cached.lock().expect("cache lock").clone();
+        if let Some(cached) = cached {
+            return cached;
+        }
+
+        let result = self.inner.handle.join(cx).await;
+        *self.inner.cached.lock().expect("cache lock") = Some(result.clone());
+        result
+    }
+}
+
+#[derive(Debug)]
+struct RaceInfo {
+    race_id: u64,
+    participants: Vec<TaskId>,
+}
+
+fn build_race_join_plan() -> PlanDag {
+    let mut dag = PlanDag::new();
+    let a = dag.leaf("a");
+    let b = dag.leaf("b");
+    let c = dag.leaf("c");
+    let join1 = dag.join(vec![a, b]);
+    let join2 = dag.join(vec![a, c]);
+    let race = dag.race(vec![join1, join2]);
+    dag.set_root(race);
+    dag
+}
+
+fn plan_node_count(plan: &PlanDag) -> usize {
+    let mut count = 0;
+    loop {
+        if plan.node(PlanId::new(count)).is_some() {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
+    let root = plan.root().expect("plan root set");
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let mut handles: Vec<Option<SharedHandle<NodeValue>>> = vec![None; plan_node_count(plan)];
+    let mut oracle = LoserDrainOracle::new();
+    let mut races = Vec::new();
+
+    let root_handle = build_node(
+        plan,
+        runtime,
+        region,
+        &mut handles,
+        &mut oracle,
+        &mut races,
+        root,
+    );
+
+    runtime.run_until_quiescent();
+
+    let completions = task_completion_times(runtime);
+    for race in races {
+        for participant in &race.participants {
+            let time = completions
+                .get(participant)
+                .copied()
+                .expect("participant completion time");
+            oracle.on_task_complete(*participant, time);
+        }
+
+        let winner = race_winner(&race.participants, &completions);
+        let winner_time = completions
+            .get(&winner)
+            .copied()
+            .expect("winner completion time");
+        oracle.on_race_complete(race.race_id, winner, winner_time);
+    }
+
+    let oracle_ok = oracle.check().is_ok();
+    assert_with_log!(oracle_ok, "loser drain oracle", true, oracle_ok);
+
+    let violations = runtime.check_invariants();
+    assert_with_log!(
+        violations.is_empty(),
+        "lab invariants clean",
+        "empty",
+        violations
+    );
+
+    let cx = Cx::for_testing();
+    root_handle
+        .try_join()
+        .unwrap_or_else(|| futures_lite::future::block_on(async { root_handle.join(&cx).await }))
+        .expect("root result ok")
+}
+
+fn build_node(
+    plan: &PlanDag,
+    runtime: &mut LabRuntime,
+    region: RegionId,
+    handles: &mut Vec<Option<SharedHandle<NodeValue>>>,
+    oracle: &mut LoserDrainOracle,
+    races: &mut Vec<RaceInfo>,
+    id: PlanId,
+) -> SharedHandle<NodeValue> {
+    if let Some(existing) = handles.get(id.index()).and_then(|entry| entry.as_ref()) {
+        return existing.clone();
+    }
+
+    let node = plan.node(id).expect("plan node").clone();
+    let handle = match node {
+        PlanNode::Leaf { label } => {
+            let delay = leaf_yields(&label);
+            let future = async move {
+                for _ in 0..delay {
+                    yield_now().await;
+                }
+                let mut set = BTreeSet::new();
+                set.insert(label);
+                set
+            };
+            spawn_node(runtime, region, future)
+        }
+        PlanNode::Join { children } => {
+            let child_handles = children
+                .iter()
+                .map(|child| build_node(plan, runtime, region, handles, oracle, races, *child))
+                .collect::<Vec<_>>();
+            let future = async move {
+                let cx = Cx::for_testing();
+                let mut merged = BTreeSet::new();
+                for handle in child_handles {
+                    let child_set = handle.join(&cx).await.expect("join child");
+                    merged.extend(child_set);
+                }
+                merged
+            };
+            spawn_node(runtime, region, future)
+        }
+        PlanNode::Race { children } => {
+            let child_handles = children
+                .iter()
+                .map(|child| build_node(plan, runtime, region, handles, oracle, races, *child))
+                .collect::<Vec<_>>();
+            let participants: Vec<TaskId> =
+                child_handles.iter().map(SharedHandle::task_id).collect();
+            let race_id = oracle.on_race_start(region, participants.clone(), Time::ZERO);
+            races.push(RaceInfo {
+                race_id,
+                participants,
+            });
+            let future = async move {
+                let cx = Cx::for_testing();
+                let (winner_result, winner_idx) = race_first(&child_handles).await;
+                for (idx, handle) in child_handles.iter().enumerate() {
+                    if idx != winner_idx {
+                        let _ = handle.join(&cx).await;
+                    }
+                }
+                winner_result.expect("race winner ok")
+            };
+            spawn_node(runtime, region, future)
+        }
+        PlanNode::Timeout { child, .. } => {
+            let child_handle = build_node(plan, runtime, region, handles, oracle, races, child);
+            let future = async move {
+                let cx = Cx::for_testing();
+                child_handle.join(&cx).await.expect("timeout child")
+            };
+            spawn_node(runtime, region, future)
+        }
+    };
+
+    if let Some(slot) = handles.get_mut(id.index()) {
+        *slot = Some(handle.clone());
+    }
+    handle
+}
+
+fn spawn_node<F>(runtime: &mut LabRuntime, region: RegionId, future: F) -> SharedHandle<NodeValue>
+where
+    F: std::future::Future<Output = NodeValue> + Send + 'static,
+{
+    let (task_id, handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, future)
+        .expect("create task");
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, 0);
+    SharedHandle::new(handle)
+}
+
+async fn race_first(handles: &[SharedHandle<NodeValue>]) -> (Result<NodeValue, JoinError>, usize) {
+    loop {
+        for (idx, handle) in handles.iter().enumerate() {
+            if let Some(result) = handle.try_join() {
+                return (result, idx);
+            }
+        }
+        yield_now().await;
+    }
+}
+
+fn leaf_yields(label: &str) -> u32 {
+    match label {
+        "a" => 2,
+        "b" => 1,
+        "c" => 3,
+        _ => 0,
+    }
+}
+
+fn task_completion_times(runtime: &LabRuntime) -> std::collections::HashMap<TaskId, Time> {
+    let mut completions = std::collections::HashMap::new();
+    for event in runtime.trace().iter() {
+        if event.kind == TraceEventKind::Complete {
+            if let TraceData::Task { task, .. } = event.data.clone() {
+                completions.entry(task).or_insert(event.time);
+            }
+        }
+    }
+    completions
+}
+
+fn race_winner(
+    participants: &[TaskId],
+    completions: &std::collections::HashMap<TaskId, Time>,
+) -> TaskId {
+    let mut winner = None;
+    for participant in participants {
+        let time = completions
+            .get(participant)
+            .copied()
+            .expect("completion time");
+        match winner {
+            None => winner = Some((*participant, time)),
+            Some((_, best_time)) if time < best_time => winner = Some((*participant, time)),
+            _ => {}
+        }
+    }
+    winner.expect("winner exists").0
 }

@@ -209,7 +209,12 @@ pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule};
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use crate::types::Outcome;
+    use crate::{cx::Cx, runtime::task_handle::JoinError, types::Budget};
     use std::collections::{BTreeSet, HashMap};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -485,5 +490,291 @@ mod tests {
 
         memo.insert(id, result.clone());
         result
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ProgramKind {
+        Original,
+        Rewritten,
+    }
+
+    struct YieldOnce {
+        yielded: bool,
+    }
+
+    impl Future for YieldOnce {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.yielded {
+                Poll::Ready(())
+            } else {
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    async fn yield_n(count: usize) {
+        for _ in 0..count {
+            YieldOnce { yielded: false }.await;
+        }
+    }
+
+    type LeafOutcome = Outcome<&'static str, crate::error::Error>;
+    type LeafHandle = crate::runtime::TaskHandle<LeafOutcome>;
+
+    async fn leaf_task(label: &'static str, yields: usize) -> LeafOutcome {
+        for _ in 0..yields {
+            if let Some(cx) = Cx::current() {
+                if cx.checkpoint().is_err() {
+                    return Outcome::Cancelled(crate::types::CancelReason::race_loser());
+                }
+            }
+            yield_n(1).await;
+        }
+        if let Some(cx) = Cx::current() {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(crate::types::CancelReason::race_loser());
+            }
+        }
+        Outcome::Ok(label)
+    }
+
+    fn result_to_label(result: &Result<LeafOutcome, JoinError>) -> Option<&'static str> {
+        match result {
+            Ok(Outcome::Ok(label)) => Some(label),
+            _ => None,
+        }
+    }
+
+    async fn join_branch(cx: &Cx, left: &LeafHandle, right: &LeafHandle) -> BTreeSet<&'static str> {
+        let left_result = left.join(cx).await;
+        let right_result = right.join(cx).await;
+        let mut set = BTreeSet::new();
+        if let Some(label) = result_to_label(&left_result) {
+            set.insert(label);
+        }
+        if let Some(label) = result_to_label(&right_result) {
+            set.insert(label);
+        }
+        set
+    }
+
+    async fn race_branch(cx: &Cx, left: LeafHandle, right: LeafHandle) -> Option<&'static str> {
+        let winner =
+            crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
+        match winner {
+            crate::combinator::Either::Left(result) => {
+                right.abort();
+                let _ = right.join(cx).await;
+                result_to_label(&result)
+            }
+            crate::combinator::Either::Right(result) => {
+                left.abort();
+                let _ = left.join(cx).await;
+                result_to_label(&result)
+            }
+        }
+    }
+
+    struct Join2<F1: Future, F2: Future> {
+        left: F1,
+        right: F2,
+        left_out: Option<F1::Output>,
+        right_out: Option<F2::Output>,
+    }
+
+    impl<F1: Future, F2: Future> Join2<F1, F2> {
+        fn new(left: F1, right: F2) -> Self {
+            Self {
+                left,
+                right,
+                left_out: None,
+                right_out: None,
+            }
+        }
+    }
+
+    impl<F1, F2> Future for Join2<F1, F2>
+    where
+        F1: Future + Unpin,
+        F2: Future + Unpin,
+        F1::Output: Unpin,
+        F2::Output: Unpin,
+    {
+        type Output = (F1::Output, F2::Output);
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+
+            if this.left_out.is_none() {
+                if let Poll::Ready(value) = Pin::new(&mut this.left).poll(cx) {
+                    this.left_out = Some(value);
+                }
+            }
+
+            if this.right_out.is_none() {
+                if let Poll::Ready(value) = Pin::new(&mut this.right).poll(cx) {
+                    this.right_out = Some(value);
+                }
+            }
+
+            if let (Some(left), Some(right)) = (this.left_out.take(), this.right_out.take()) {
+                return Poll::Ready((left, right));
+            }
+
+            Poll::Pending
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_program(seed: u64, kind: ProgramKind) -> BTreeSet<&'static str> {
+        crate::lab::runtime::test(seed, |runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+
+            let (_driver_id, driver_handle, scheduled) = match kind {
+                ProgramKind::Original => {
+                    let (a1_id, a1_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("a", 2))
+                        .expect("spawn a1");
+                    let (b_id, b_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("b", 1))
+                        .expect("spawn b");
+                    let (a2_id, a2_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("a", 2))
+                        .expect("spawn a2");
+                    let (c_id, c_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("c", 3))
+                        .expect("spawn c");
+
+                    let driver_future = async move {
+                        let cx = Cx::current().expect("cx set");
+                        let join_left = join_branch(&cx, &a1_handle, &b_handle);
+                        let join_right = join_branch(&cx, &a2_handle, &c_handle);
+                        match crate::combinator::Select::new(
+                            Box::pin(join_left),
+                            Box::pin(join_right),
+                        )
+                        .await
+                        {
+                            crate::combinator::Either::Left(result) => {
+                                a2_handle.abort();
+                                c_handle.abort();
+                                let _ = a2_handle.join(&cx).await;
+                                let _ = c_handle.join(&cx).await;
+                                result
+                            }
+                            crate::combinator::Either::Right(result) => {
+                                a1_handle.abort();
+                                b_handle.abort();
+                                let _ = a1_handle.join(&cx).await;
+                                let _ = b_handle.join(&cx).await;
+                                result
+                            }
+                        }
+                    };
+
+                    let (driver_id, driver_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, driver_future)
+                        .expect("spawn driver");
+
+                    let scheduled = vec![a1_id, b_id, a2_id, c_id, driver_id];
+                    (driver_id, driver_handle, scheduled)
+                }
+                ProgramKind::Rewritten => {
+                    let (a_id, a_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("a", 2))
+                        .expect("spawn a");
+                    let (b_id, b_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("b", 1))
+                        .expect("spawn b");
+                    let (c_id, c_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, leaf_task("c", 3))
+                        .expect("spawn c");
+
+                    let driver_future = async move {
+                        let cx = Cx::current().expect("cx set");
+                        let race = race_branch(&cx, b_handle, c_handle);
+                        let join = Join2::new(Box::pin(a_handle.join(&cx)), Box::pin(race));
+                        let (left_result, right_label) = join.await;
+                        let mut set = BTreeSet::new();
+                        if let Some(label) = result_to_label(&left_result) {
+                            set.insert(label);
+                        }
+                        if let Some(label) = right_label {
+                            set.insert(label);
+                        }
+                        set
+                    };
+
+                    let (driver_id, driver_handle) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, driver_future)
+                        .expect("spawn driver");
+
+                    let scheduled = vec![a_id, b_id, c_id, driver_id];
+                    (driver_id, driver_handle, scheduled)
+                }
+            };
+
+            let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+            for task_id in &scheduled {
+                sched.schedule(*task_id, 0);
+            }
+            drop(sched);
+
+            runtime.run_until_quiescent();
+
+            crate::assert_with_log!(
+                runtime.is_quiescent(),
+                "runtime quiescent",
+                true,
+                runtime.is_quiescent()
+            );
+
+            driver_handle
+                .try_join()
+                .expect("driver join ok")
+                .expect("driver ready")
+        })
+    }
+
+    fn expected_sets() -> [BTreeSet<&'static str>; 2] {
+        let mut first = BTreeSet::new();
+        first.insert("a");
+        first.insert("b");
+        let mut second = BTreeSet::new();
+        second.insert("a");
+        second.insert("c");
+        [first, second]
+    }
+
+    #[test]
+    fn dedup_rewrite_lab_equivalence() {
+        init_test("dedup_rewrite_lab_equivalence");
+        let expected = expected_sets();
+        for seed in 0..6 {
+            let original = run_program(seed, ProgramKind::Original);
+            let rewritten = run_program(seed, ProgramKind::Rewritten);
+            crate::assert_with_log!(
+                original == rewritten,
+                "equivalent outcomes",
+                original,
+                rewritten
+            );
+            let matches = expected.iter().any(|set| set == &original);
+            crate::assert_with_log!(matches, "outcome matches expected", expected, original);
+        }
+        crate::test_complete!("dedup_rewrite_lab_equivalence");
     }
 }
