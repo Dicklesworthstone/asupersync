@@ -59,6 +59,35 @@ async fn yield_now() {
     YieldNow { yielded: false }.await;
 }
 
+fn run_sync_determinism_with_seed(seed: u64) -> Vec<usize> {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mutex = Arc::new(Mutex::new(()));
+
+    for i in 0..5 {
+        let m = mutex.clone();
+        let r = results.clone();
+
+        let (task_id, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::for_testing();
+                let _guard = m.lock(&cx).await.expect("lock should succeed");
+                r.lock().unwrap().push(i);
+            })
+            .unwrap();
+
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+
+    let guard = results.lock().unwrap();
+    guard.clone()
+}
+
 // ============================================================================
 // MUTEX TESTS
 // ============================================================================
@@ -759,7 +788,7 @@ fn e2e_sync_101_semaphore_cancel_no_leak() {
 
     // Hold the only permit
     let cx_holder = Cx::for_testing();
-    let _permit = futures_lite::future::block_on(sem.acquire(&cx_holder, 1)).unwrap();
+    let permit = futures_lite::future::block_on(sem.acquire(&cx_holder, 1)).unwrap();
 
     assert_with_log!(
         sem.available_permits() == 0,
@@ -784,7 +813,7 @@ fn e2e_sync_101_semaphore_cancel_no_leak() {
 
     test_section!("verify_no_leak");
     // Release the held permit
-    drop(_permit);
+    drop(permit);
 
     // Should have 1 permit available (no leak from cancelled acquire)
     let available = sem.available_permits();
@@ -804,45 +833,16 @@ fn e2e_sync_101_semaphore_cancel_no_leak() {
 fn e2e_sync_200_determinism() {
     init_test("e2e_sync_200_determinism");
 
-    fn run_with_seed(seed: u64) -> Vec<usize> {
-        let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5000));
-        let region = runtime.state.create_root_region(Budget::INFINITE);
-
-        let results = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mutex = Arc::new(Mutex::new(()));
-
-        for i in 0..5 {
-            let m = mutex.clone();
-            let r = results.clone();
-
-            let (task_id, _) = runtime
-                .state
-                .create_task(region, Budget::INFINITE, async move {
-                    let cx = Cx::for_testing();
-                    let _guard = m.lock(&cx).await.expect("lock should succeed");
-                    r.lock().unwrap().push(i);
-                })
-                .unwrap();
-
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        }
-
-        runtime.run_until_quiescent();
-
-        let guard = results.lock().unwrap();
-        guard.clone()
-    }
-
     test_section!("run_twice");
-    let result1 = run_with_seed(42);
-    let result2 = run_with_seed(42);
+    let result1 = run_sync_determinism_with_seed(42);
+    let result2 = run_sync_determinism_with_seed(42);
 
     test_section!("verify");
     assert_with_log!(
         result1 == result2,
         "same seed should produce same order",
-        result1.clone(),
-        result2
+        &result1,
+        &result2
     );
 
     test_complete!("e2e_sync_200_determinism");

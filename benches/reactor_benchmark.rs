@@ -106,8 +106,9 @@ fn bench_reactor_registration(c: &mut Criterion) {
     });
 
     // Batch registration throughput
-    for &count in &[10, 100] {
-        group.throughput(Throughput::Elements(count as u64));
+    for &count in &[10_usize, 100] {
+        let count_u64 = u64::try_from(count).expect("count fits u64");
+        group.throughput(Throughput::Elements(count_u64));
 
         group.bench_with_input(
             BenchmarkId::new("batch_register", count),
@@ -336,8 +337,9 @@ fn bench_tcp_connection(c: &mut Criterion) {
 fn bench_echo_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("tcp/echo_latency");
 
-    for &size in &[64, 1024, 8192] {
-        group.throughput(Throughput::Bytes(size as u64));
+    for &size in &[64_usize, 1024, 8192] {
+        let size_u64 = u64::try_from(size).expect("size fits u64");
+        group.throughput(Throughput::Bytes(size_u64));
 
         group.bench_with_input(
             BenchmarkId::new("blocking_echo", size),
@@ -352,13 +354,12 @@ fn bench_echo_latency(c: &mut Criterion) {
                     let mut buf = vec![0u8; 65536];
                     loop {
                         match stream.read(&mut buf) {
-                            Ok(0) => break,
+                            Ok(0) | Err(_) => break,
                             Ok(n) => {
                                 if stream.write_all(&buf[..n]).is_err() {
                                     break;
                                 }
                             }
-                            Err(_) => break,
                         }
                     }
                 });
@@ -394,8 +395,9 @@ fn bench_scalability(c: &mut Criterion) {
     let mut group = c.benchmark_group("tcp/scalability");
     group.sample_size(20);
 
-    for &count in &[10, 50] {
-        group.throughput(Throughput::Elements(count as u64));
+    for &count in &[10_usize, 50] {
+        let count_u64 = u64::try_from(count).expect("count fits u64");
+        group.throughput(Throughput::Elements(count_u64));
 
         group.bench_with_input(
             BenchmarkId::new("concurrent_connections", count),
@@ -410,10 +412,7 @@ fn bench_scalability(c: &mut Criterion) {
 
                         // Create connections
                         let handles: Vec<_> = (0..count)
-                            .map(|_| {
-                                let addr = addr;
-                                thread::spawn(move || TcpStream::connect(addr))
-                            })
+                            .map(|_| thread::spawn(move || TcpStream::connect(addr)))
                             .collect();
 
                         let start = Instant::now();

@@ -18,6 +18,7 @@ mod common;
 
 use asupersync::time::{
     interval, interval_at, timeout, timeout_at, Elapsed, Interval, MissedTickBehavior, Sleep,
+    TimerWheel,
 };
 use asupersync::types::{Budget, Time};
 use common::*;
@@ -36,6 +37,14 @@ struct NoopWaker;
 
 impl Wake for NoopWaker {
     fn wake(self: Arc<Self>) {}
+}
+
+struct DropTracker(Arc<AtomicBool>);
+
+impl Drop for DropTracker {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 fn noop_waker() -> Waker {
@@ -645,7 +654,7 @@ fn test_interval_cancel_safe() {
     let _ = int.tick(Time::from_millis(100));
 
     // Drop mid-sequence
-    drop(int);
+    let _ = int;
 
     // Create a new one, should work
     let mut int2 = interval(Time::ZERO, Duration::from_millis(100));
@@ -662,13 +671,6 @@ fn test_timeout_cancel_propagation() {
 
     let dropped = Arc::new(AtomicBool::new(false));
     let dropped_clone = dropped.clone();
-
-    struct DropTracker(Arc<AtomicBool>);
-    impl Drop for DropTracker {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
 
     // Create tracker BEFORE the async block so it exists when the future is dropped.
     // Note: Variables created INSIDE an async block only exist after the future is polled.
@@ -794,8 +796,6 @@ fn test_missed_tick_behavior_display() {
 fn test_timer_wheel_basic_operations() {
     init_test("test_timer_wheel_basic_operations");
     tracing::info!("Testing TimerWheel basic register and expire operations");
-
-    use asupersync::time::TimerWheel;
 
     let mut wheel = TimerWheel::new();
 

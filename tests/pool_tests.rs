@@ -228,11 +228,7 @@ fn pooled_resource_returns_on_drop() {
 
     // Resource should be returned to idle pool
     assert_eq!(stats.active, 0, "Should have 0 active after drop");
-    // Note: idle check is always true for usize but kept for semantic clarity
-    #[allow(unused_comparisons)]
-    {
-        assert!(stats.idle >= 0, "Resource should return to idle");
-    }
+    assert!(stats.idle > 0, "Resource should return to idle");
 
     test_complete!("pooled_resource_returns_on_drop");
 }
@@ -633,33 +629,30 @@ fn e2e_pool_under_load() {
             std::thread::spawn(move || {
                 use asupersync::sync::PooledResource;
                 for j in 0..5 {
-                    match pool.try_acquire() {
-                        Some(conn) => {
-                            let conn: PooledResource<MockConnection> = conn;
-                            tracing::trace!(
-                                worker = %i,
-                                iteration = %j,
-                                conn_id = %conn.get().id(),
-                                "Got connection"
-                            );
+                    if let Some(conn) = pool.try_acquire() {
+                        let conn: PooledResource<MockConnection> = conn;
+                        tracing::trace!(
+                            worker = %i,
+                            iteration = %j,
+                            conn_id = %conn.get().id(),
+                            "Got connection"
+                        );
 
-                            // Simulate query work
-                            std::thread::sleep(Duration::from_millis(1));
+                        // Simulate query work
+                        std::thread::sleep(Duration::from_millis(1));
 
-                            conn.return_to_pool();
-                            completed.fetch_add(1, Ordering::SeqCst);
-                        }
-                        None => {
-                            tracing::trace!(
-                                worker = %i,
-                                iteration = %j,
-                                "No connection available"
-                            );
-                            failed.fetch_add(1, Ordering::SeqCst);
+                        conn.return_to_pool();
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        tracing::trace!(
+                            worker = %i,
+                            iteration = %j,
+                            "No connection available"
+                        );
+                        failed.fetch_add(1, Ordering::SeqCst);
 
-                            // Back off and retry
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
+                        // Back off and retry
+                        std::thread::sleep(Duration::from_millis(1));
                     }
                 }
             })

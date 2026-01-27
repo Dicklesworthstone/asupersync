@@ -17,6 +17,9 @@
 
 use asupersync::sync::{Mutex, Semaphore};
 use asupersync::Cx;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 #[macro_use]
 mod common;
 
@@ -300,9 +303,6 @@ fn sync_005_semaphore_permit_limiting() {
 #[test]
 fn sync_005b_semaphore_concurrent_access() {
     init_test("sync_005b_semaphore_concurrent_access");
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::thread;
 
     let sem = Arc::new(Semaphore::new(3));
     let max_concurrent = Arc::new(AtomicUsize::new(0));

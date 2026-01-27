@@ -19,6 +19,17 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::Write;
+
+fn u64_to_f64(value: u64) -> f64 {
+    let value = u32::try_from(value).expect("value fits u32 for coverage report");
+    f64::from(value)
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    let value = u32::try_from(value).expect("value fits u32 for coverage report");
+    f64::from(value)
+}
 
 /// Information about coverage for a single invariant.
 #[derive(Debug, Clone, Default)]
@@ -57,7 +68,7 @@ impl CoverageInfo {
         if self.checks == 0 {
             100.0
         } else {
-            (self.passes as f64 / self.checks as f64) * 100.0
+            (u64_to_f64(self.passes) / u64_to_f64(self.checks)) * 100.0
         }
     }
 
@@ -68,7 +79,7 @@ impl CoverageInfo {
         if self.checks == 0 {
             0.0
         } else {
-            (self.detections as f64 / self.checks as f64) * 100.0
+            (u64_to_f64(self.detections) / u64_to_f64(self.checks)) * 100.0
         }
     }
 }
@@ -169,7 +180,7 @@ impl InvariantTracker {
             .values()
             .map(CoverageInfo::detection_rate)
             .sum();
-        total / self.invariants.len() as f64
+        total / usize_to_f64(self.invariants.len())
     }
 
     /// Check if all tracked invariants have been checked at least once.
@@ -277,7 +288,7 @@ impl CoverageReport {
         if self.total_invariants == 0 {
             100.0
         } else {
-            (self.checked_invariants as f64 / self.total_invariants as f64) * 100.0
+            (usize_to_f64(self.checked_invariants) / usize_to_f64(self.total_invariants)) * 100.0
         }
     }
 
@@ -296,33 +307,42 @@ impl CoverageReport {
         output.push_str("=============================\n\n");
 
         // Header
-        output.push_str(&format!(
-            "{:<30} {:>10} {:>10} {:>15}\n",
+        writeln!(
+            output,
+            "{:<30} {:>10} {:>10} {:>15}",
             "Invariant", "Checks", "Passes", "Detection Rate"
-        ));
+        )
+        .expect("write header");
         output.push_str(&"-".repeat(67));
         output.push('\n');
 
         // Entries
         for entry in &self.entries {
-            output.push_str(&format!(
-                "{:<30} {:>10} {:>10} {:>14.1}%\n",
+            writeln!(
+                output,
+                "{:<30} {:>10} {:>10} {:>14.1}%",
                 entry.name, entry.checks, entry.passes, entry.detection_rate
-            ));
+            )
+            .expect("write entry");
         }
 
         // Summary
         output.push_str(&"-".repeat(67));
         output.push('\n');
-        output.push_str(&format!(
-            "\nTotal: {} invariants, {:.1}% checked\n",
+        writeln!(output).expect("write summary spacing");
+        writeln!(
+            output,
+            "Total: {} invariants, {:.1}% checked",
             self.total_invariants,
             self.coverage_percentage()
-        ));
-        output.push_str(&format!(
-            "Average detection rate: {:.1}%\n",
+        )
+        .expect("write summary");
+        writeln!(
+            output,
+            "Average detection rate: {:.1}%",
             self.average_detection_rate
-        ));
+        )
+        .expect("write average detection rate");
 
         output
     }

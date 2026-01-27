@@ -227,9 +227,8 @@ fn net_tcp_003_connection_refused() {
 /// Verifies that a listener can accept multiple connections.
 #[test]
 fn net_tcp_004_multiple_connections() {
-    init_test("net_tcp_004_multiple_connections");
-
     const NUM_CLIENTS: usize = 5;
+    init_test("net_tcp_004_multiple_connections");
     let connected_count = Arc::new(AtomicUsize::new(0));
 
     let result = block_on(async {
@@ -317,9 +316,8 @@ fn net_tcp_004_multiple_connections() {
 /// Verifies that large amounts of data can be transferred.
 #[test]
 fn net_tcp_005_large_transfer() {
-    init_test("net_tcp_005_large_transfer");
-
     const DATA_SIZE: usize = 100_000; // 100KB
+    init_test("net_tcp_005_large_transfer");
 
     let result = block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -425,8 +423,8 @@ fn net_tcp_006_split_streams() {
                         tracing::info!("reunited stream successfully");
                         assert!(stream.peer_addr().is_ok());
                     }
-                    Err(_) => {
-                        panic!("reunite should succeed");
+                    Err(err) => {
+                        panic!("reunite should succeed: {err:?}");
                     }
                 }
 

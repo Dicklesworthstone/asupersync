@@ -32,6 +32,45 @@ fn init_test(test_name: &str) {
     test_phase!(test_name);
 }
 
+#[derive(Default)]
+struct CancelMetrics {
+    by_kind: HashMap<CancelKind, usize>,
+    by_root_kind: HashMap<CancelKind, usize>,
+    total_chain_depth: usize,
+    count: usize,
+}
+
+impl CancelMetrics {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&mut self, reason: &CancelReason) {
+        // Count by immediate kind
+        *self.by_kind.entry(reason.kind).or_insert(0) += 1;
+
+        // Count by root cause kind
+        let root = reason.root_cause();
+        *self.by_root_kind.entry(root.kind).or_insert(0) += 1;
+
+        // Track chain depth
+        let depth = reason.chain().count();
+        self.total_chain_depth += depth;
+        self.count += 1;
+    }
+
+    fn average_chain_depth(&self) -> f64 {
+        if self.count > 0 {
+            let total = u32::try_from(self.total_chain_depth)
+                .expect("chain depth fits u32 for reporting");
+            let count = u32::try_from(self.count).expect("count fits u32 for reporting");
+            f64::from(total) / f64::from(count)
+        } else {
+            0.0
+        }
+    }
+}
+
 // ============================================================================
 // CancelReason Construction Tests
 // ============================================================================
@@ -676,53 +715,13 @@ fn e2e_debugging_workflow() {
 /// This test shows how to aggregate cancellation statistics for monitoring
 /// and observability dashboards.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e2e_metrics_collection() {
     init_test("e2e_metrics_collection");
 
     tracing::info!("═══════════════════════════════════════════");
     tracing::info!("E2E: Cancel Attribution Metrics Collection");
     tracing::info!("═══════════════════════════════════════════");
-
-    /// Simple metrics structure for tracking cancellation statistics.
-    struct CancelMetrics {
-        by_kind: HashMap<CancelKind, usize>,
-        by_root_kind: HashMap<CancelKind, usize>,
-        total_chain_depth: usize,
-        count: usize,
-    }
-
-    impl CancelMetrics {
-        fn new() -> Self {
-            Self {
-                by_kind: HashMap::new(),
-                by_root_kind: HashMap::new(),
-                total_chain_depth: 0,
-                count: 0,
-            }
-        }
-
-        fn record(&mut self, reason: &CancelReason) {
-            // Count by immediate kind
-            *self.by_kind.entry(reason.kind).or_insert(0) += 1;
-
-            // Count by root cause kind
-            let root = reason.root_cause();
-            *self.by_root_kind.entry(root.kind).or_insert(0) += 1;
-
-            // Track chain depth
-            let depth = reason.chain().count();
-            self.total_chain_depth += depth;
-            self.count += 1;
-        }
-
-        fn average_chain_depth(&self) -> f64 {
-            if self.count > 0 {
-                self.total_chain_depth as f64 / self.count as f64
-            } else {
-                0.0
-            }
-        }
-    }
 
     let mut metrics = CancelMetrics::new();
 
@@ -833,7 +832,7 @@ fn e2e_metrics_collection() {
     // Total chain depth: 1 + 2 + 3 + 4 + 1 + 2 = 13
     // Average: 13 / 6 = 2.166...
     let avg = metrics.average_chain_depth();
-    assert!(avg > 2.0 && avg < 2.5, "Average chain depth: {}", avg);
+    assert!(avg > 2.0 && avg < 2.5, "Average chain depth: {avg}");
 
     tracing::info!("═══════════════════════════════════════════");
     tracing::info!("E2E metrics collection completed");

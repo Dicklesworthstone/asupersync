@@ -199,7 +199,7 @@ fn test_merge_combinator() {
     // Merge doesn't guarantee order, but all items should be present
     if let Poll::Ready(ref v) = poll {
         let mut sorted = v.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         let ok = sorted == vec![1, 2, 3, 4, 5, 6];
         assert_with_log!(ok, "merge contains all", vec![1, 2, 3, 4, 5, 6], sorted);
     } else {

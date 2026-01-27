@@ -56,7 +56,7 @@ impl PropertyTestConfig {
             seed: read_proptest_seed(),
             cases,
             max_shrink_iters: read_max_shrink_iters()
-                .unwrap_or(ProptestConfig::default().max_shrink_iters),
+                .unwrap_or_else(|| ProptestConfig::default().max_shrink_iters),
         }
     }
 
@@ -179,19 +179,19 @@ where
     Fut: Future<Output = T>,
 {
     let fut = Box::pin(f());
-    match timeout(Time::ZERO, timeout_duration, fut).await {
-        Ok(value) => {
-            tracing::debug!(
-                description = %description,
-                timeout_ms = timeout_duration.as_millis(),
-                "operation completed within timeout"
-            );
-            value
-        }
-        Err(_) => {
-            panic!("operation '{description}' did not complete within {timeout_duration:?}");
-        }
-    }
+    timeout(Time::ZERO, timeout_duration, fut)
+        .await
+        .map_or_else(
+            |_| panic!("operation '{description}' did not complete within {timeout_duration:?}"),
+            |value| {
+                tracing::debug!(
+                    description = %description,
+                    timeout_ms = timeout_duration.as_millis(),
+                    "operation completed within timeout"
+                );
+                value
+            },
+        )
 }
 
 /// Log a test phase transition with a visual separator.

@@ -631,8 +631,8 @@ fn record_failure_to_dir(
         timestamp
     );
     let path = dir.join(filename);
-    let payload = serde_json::to_string_pretty(&ops_to_records(ops))
-        .map_err(|err| std::io::Error::other(err))?;
+    let payload =
+        serde_json::to_string_pretty(&ops_to_records(ops)).map_err(std::io::Error::other)?;
     std::fs::write(&path, payload)?;
     Ok(path)
 }
@@ -940,39 +940,29 @@ impl RegionOp {
                 }
             }
 
-            Self::SpawnTask { region } => {
-                if let Some(region_id) = harness.resolve_region(region) {
-                    harness.spawn_task(region_id).is_some()
-                } else {
-                    false
-                }
-            }
+            Self::SpawnTask { region } => harness
+                .resolve_region(region)
+                .map_or(false, |region_id| harness.spawn_task(region_id).is_some()),
 
             Self::Cancel { region, reason } => {
-                if let Some(region_id) = harness.resolve_region(region) {
+                harness.resolve_region(region).map_or(false, |region_id| {
                     harness.cancel_region(region_id, *reason);
                     true
-                } else {
-                    false
-                }
+                })
             }
 
             Self::CompleteTask { task, outcome } => {
-                if let Some(task_id) = harness.resolve_task(task) {
+                harness.resolve_task(task).map_or(false, |task_id| {
                     harness.complete_task(task_id, *outcome);
                     true
-                } else {
-                    false
-                }
+                })
             }
 
             Self::CloseRegion { region } => {
-                if let Some(region_id) = harness.resolve_region(region) {
+                harness.resolve_region(region).map_or(false, |region_id| {
                     harness.close_region(region_id);
                     true
-                } else {
-                    false
-                }
+                })
             }
 
             Self::AdvanceTime { millis } => {
@@ -980,13 +970,9 @@ impl RegionOp {
                 true
             }
 
-            Self::SetDeadline { region, millis } => {
-                if let Some(region_id) = harness.resolve_region(region) {
-                    harness.set_deadline(region_id, *millis)
-                } else {
-                    false
-                }
-            }
+            Self::SetDeadline { region, millis } => harness
+                .resolve_region(region)
+                .map_or(false, |region_id| harness.set_deadline(region_id, *millis)),
         }
     }
 }

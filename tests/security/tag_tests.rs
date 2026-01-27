@@ -121,7 +121,7 @@ fn verify_accepts_large_data() {
     init_test_logging();
     test_phase!("verify_accepts_large_data");
     let key = AuthKey::from_seed(42);
-    let data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
+    let data: Vec<u8> = (0..10_000u32).map(|i| (i % 256) as u8).collect();
     let symbol = symbol_with(&data);
 
     let tag = AuthenticationTag::compute(&key, &symbol);

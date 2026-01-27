@@ -242,7 +242,7 @@ fn bench_throughput_10k(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size_u64));
 
         // Insert throughput
-        group.bench_with_input(BenchmarkId::new("insert", size), &size, |b, &size| {
+        group.bench_with_input(BenchmarkId::new("insert", size), &size, |b, &_size| {
             b.iter(|| {
                 let mut wheel = TimerWheel::new();
                 for i in 0..size_u64 {
@@ -253,7 +253,7 @@ fn bench_throughput_10k(c: &mut Criterion) {
         });
 
         // Cancel throughput
-        group.bench_with_input(BenchmarkId::new("cancel", size), &size, |b, &size| {
+        group.bench_with_input(BenchmarkId::new("cancel", size), &size, |b, &_size| {
             b.iter_custom(|iters| {
                 let mut total = std::time::Duration::ZERO;
 
@@ -274,7 +274,7 @@ fn bench_throughput_10k(c: &mut Criterion) {
         });
 
         // Fire throughput (all at once)
-        group.bench_with_input(BenchmarkId::new("fire_all", size), &size, |b, &size| {
+        group.bench_with_input(BenchmarkId::new("fire_all", size), &size, |b, &_size| {
             b.iter_custom(|iters| {
                 let mut total = std::time::Duration::ZERO;
 
