@@ -236,9 +236,9 @@ mod tests {
         let rref2 = rref;
         assert_eq!(rref.region_id(), rref2.region_id());
 
-        // Test Clone
-        let rref3 = rref.clone();
-        assert_eq!(rref.heap_index(), rref3.heap_index());
+        // Clone is implied by Copy, assert the trait bound explicitly.
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<RRef<u32>>();
     }
 
     #[test]
@@ -279,6 +279,40 @@ mod tests {
         assert!(debug_str.contains("RRef"));
         assert!(debug_str.contains("region_id"));
         assert!(debug_str.contains("index"));
+    }
+
+    #[test]
+    fn rref_access_through_region_record() {
+        let region_id = test_region_id();
+        let record = RegionRecord::new(region_id, None, Budget::INFINITE);
+        let index = record.heap_alloc("hello".to_string());
+        let rref = RRef::<String>::new(region_id, index);
+
+        let value = record.rref_get(&rref).expect("rref_get");
+        assert_eq!(value, "hello");
+
+        let len = record.rref_with(&rref, String::len).expect("rref_with");
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn rref_region_mismatch_is_error() {
+        let region_a = test_region_id();
+        let region_b = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let record_a = RegionRecord::new(region_a, None, Budget::INFINITE);
+        let record_b = RegionRecord::new(region_b, None, Budget::INFINITE);
+
+        let index = record_a.heap_alloc(7u32);
+        let rref = RRef::<u32>::new(region_a, index);
+
+        let err = record_b.rref_get(&rref).expect_err("region mismatch");
+        assert_eq!(
+            err,
+            RRefError::RegionMismatch {
+                expected: region_a,
+                actual: region_b,
+            }
+        );
     }
 
     // Compile-time test for Send/Sync bounds

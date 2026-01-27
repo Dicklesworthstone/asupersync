@@ -1583,6 +1583,7 @@ mod tests {
     // GenericPool tests
     // ========================================================================
 
+    #[allow(clippy::type_complexity)]
     fn simple_factory() -> std::pin::Pin<
         Box<dyn Future<Output = Result<u32, Box<dyn std::error::Error + Send + Sync>>> + Send>,
     > {

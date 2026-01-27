@@ -3166,13 +3166,6 @@ mod tests {
     fn io_driver_mut_allows_modification() {
         init_test("io_driver_mut_allows_modification");
 
-        struct TestWaker(AtomicBool);
-        impl Wake for TestWaker {
-            fn wake(self: Arc<Self>) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
         let reactor = Arc::new(LabReactor::new());
         let state = RuntimeState::with_reactor(reactor);
 
@@ -3195,13 +3188,6 @@ mod tests {
     #[test]
     fn is_quiescent_considers_io_driver() {
         init_test("is_quiescent_considers_io_driver");
-
-        struct TestWaker(AtomicBool);
-        impl Wake for TestWaker {
-            fn wake(self: Arc<Self>) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
 
         let reactor = Arc::new(LabReactor::new());
         let state = RuntimeState::with_reactor(reactor);

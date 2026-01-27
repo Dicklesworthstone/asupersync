@@ -377,6 +377,10 @@ impl<S: Stream + ?Sized> StreamExt for S {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::{broadcast, mpsc, watch};
+    use crate::cx::Cx;
+    use std::cell::RefCell;
+    use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -399,9 +403,6 @@ mod tests {
     #[test]
     fn stream_ext_chaining() {
         init_test("stream_ext_chaining");
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::Poll;
 
         // Test that combinators can be chained
         let stream = iter(vec![1i32, 2, 3, 4, 5, 6])
@@ -425,9 +426,6 @@ mod tests {
     #[test]
     fn stream_ext_fold_chain() {
         init_test("stream_ext_fold_chain");
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::Poll;
 
         let stream = iter(vec![1i32, 2, 3, 4, 5]).map(|x: i32| x * 2);
 
@@ -760,7 +758,6 @@ mod tests {
     #[test]
     fn test_stream_inspect() {
         init_test("test_stream_inspect");
-        use std::cell::RefCell;
         let stream = iter(vec![1, 2, 3]);
         let items = RefCell::new(Vec::new());
         let mut inspected = stream.inspect(|x| items.borrow_mut().push(*x));
@@ -815,8 +812,6 @@ mod tests {
     #[test]
     fn test_receiver_stream() {
         init_test("test_receiver_stream");
-        use crate::channel::mpsc;
-        use crate::cx::Cx;
 
         let cx = Cx::for_testing();
         let (tx, rx) = mpsc::channel(10);
@@ -856,8 +851,6 @@ mod tests {
     #[test]
     fn test_watch_stream() {
         init_test("test_watch_stream");
-        use crate::channel::watch;
-        use crate::cx::Cx;
 
         let cx = Cx::for_testing();
         let (tx, rx) = watch::channel(0);
@@ -889,8 +882,6 @@ mod tests {
     #[test]
     fn test_broadcast_stream() {
         init_test("test_broadcast_stream");
-        use crate::channel::broadcast;
-        use crate::cx::Cx;
 
         let cx = Cx::for_testing();
         let (tx, rx) = broadcast::channel(10);
@@ -921,8 +912,6 @@ mod tests {
     #[test]
     fn test_forward() {
         init_test("test_forward");
-        use crate::channel::mpsc;
-        use crate::cx::Cx;
 
         let cx = Cx::for_testing();
         let (tx_out, rx_out) = mpsc::channel(10);

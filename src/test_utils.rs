@@ -12,7 +12,6 @@
 //! ```
 //! use asupersync::test_utils::{init_test_logging, run_test};
 //!
-//! #[test]
 //! fn my_async_test() {
 //!     init_test_logging();
 //!     run_test(async {
@@ -116,19 +115,19 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T> + Unpin,
 {
-    match timeout(Time::ZERO, timeout_duration, f()).await {
-        Ok(value) => {
-            tracing::debug!(
-                description = %description,
-                timeout_ms = timeout_duration.as_millis(),
-                "operation completed within timeout"
-            );
-            value
-        }
-        Err(_) => {
-            panic!("operation '{description}' did not complete within {timeout_duration:?}");
-        }
-    }
+    timeout(Time::ZERO, timeout_duration, f())
+        .await
+        .map_or_else(
+            |_| panic!("operation '{description}' did not complete within {timeout_duration:?}"),
+            |value| {
+                tracing::debug!(
+                    description = %description,
+                    timeout_ms = timeout_duration.as_millis(),
+                    "operation completed within timeout"
+                );
+                value
+            },
+        )
 }
 
 /// Log a test phase transition with a visual separator.

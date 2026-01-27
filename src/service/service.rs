@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn thread_local_provider_default() {
-        let provider = ThreadLocalCxProvider::default();
+        let provider = ThreadLocalCxProvider;
         // Just verify it doesn't panic
         let _ = provider.current_cx();
     }
@@ -1123,6 +1123,7 @@ mod tests {
     fn fixed_provider_is_cloneable() {
         let provider = FixedCxProvider::for_testing();
         let cloned = provider.clone();
+        assert!(provider.current_cx().is_some());
         assert!(cloned.current_cx().is_some());
     }
 

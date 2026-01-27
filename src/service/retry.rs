@@ -611,7 +611,7 @@ mod tests {
                     crate::assert_with_log!(ok, "result ok", true, ok);
                     break;
                 }
-                Poll::Pending => continue,
+                Poll::Pending => {}
             }
         }
 
@@ -641,7 +641,7 @@ mod tests {
                     crate::assert_with_log!(err, "result err", true, err);
                     break;
                 }
-                Poll::Pending => continue,
+                Poll::Pending => {}
             }
         }
 
