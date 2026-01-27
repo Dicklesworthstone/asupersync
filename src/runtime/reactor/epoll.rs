@@ -598,7 +598,7 @@ mod tests {
         loop {
             match read_sock.read(&mut drain_buf) {
                 Ok(0) => break,
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) => panic!("drain failed: {err}"),
             }

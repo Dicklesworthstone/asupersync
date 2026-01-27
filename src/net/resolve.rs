@@ -131,6 +131,7 @@ mod tests {
                 while !*ready {
                     ready = cvar.wait(ready).expect("condvar wait failed");
                 }
+                drop(ready);
                 Ok(vec![self.addr].into_iter())
             }
         }
@@ -143,8 +144,7 @@ mod tests {
 
         let mut fut = Box::pin(lookup_one(addr));
         future::block_on(poll_fn(|cx| match fut.as_mut().poll(cx) {
-            Poll::Pending => Poll::Ready(()),
-            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending | Poll::Ready(_) => Poll::Ready(()),
         }));
 
         drop(fut);
@@ -153,5 +153,6 @@ mod tests {
         let mut ready = lock.lock().expect("lock poisoned");
         *ready = true;
         cvar.notify_one();
+        drop(ready);
     }
 }

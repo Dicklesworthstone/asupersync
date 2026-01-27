@@ -214,6 +214,12 @@ pub trait ServiceHandler: Send + Sync {
 mod tests {
     use super::*;
 
+    static METHODS_GREETER: &[MethodDescriptor] = &[MethodDescriptor::unary(
+        "SayHello",
+        "/helloworld.Greeter/SayHello",
+    )];
+    static METHODS_EMPTY: &[MethodDescriptor] = &[];
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -284,12 +290,7 @@ mod tests {
     #[test]
     fn test_service_descriptor() {
         init_test("test_service_descriptor");
-        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::unary(
-            "SayHello",
-            "/helloworld.Greeter/SayHello",
-        )];
-
-        let desc = ServiceDescriptor::new("Greeter", "helloworld", METHODS);
+        let desc = ServiceDescriptor::new("Greeter", "helloworld", METHODS_GREETER);
         let name = desc.full_name();
         crate::assert_with_log!(
             name == "helloworld.Greeter",
@@ -305,8 +306,7 @@ mod tests {
     #[test]
     fn test_service_descriptor_no_package() {
         init_test("test_service_descriptor_no_package");
-        static METHODS: &[MethodDescriptor] = &[];
-        let desc = ServiceDescriptor::new("Service", "", METHODS);
+        let desc = ServiceDescriptor::new("Service", "", METHODS_EMPTY);
         let name = desc.full_name();
         crate::assert_with_log!(name == "Service", "full_name", "Service", name);
         crate::test_complete!("test_service_descriptor_no_package");

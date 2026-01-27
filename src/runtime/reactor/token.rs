@@ -665,11 +665,10 @@ mod tests {
 
         // Verify even tokens are retained, odd are removed.
         for (i, token) in tokens.iter().enumerate() {
+            let contains = slab.contains(*token);
             if i % 2 == 0 {
-                let contains = slab.contains(*token);
                 crate::assert_with_log!(contains, "even token retained", true, contains);
             } else {
-                let contains = slab.contains(*token);
                 crate::assert_with_log!(!contains, "odd token removed", false, contains);
             }
         }

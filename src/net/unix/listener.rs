@@ -391,12 +391,12 @@ mod tests {
         let std_listener = net::UnixListener::bind(&path).expect("bind failed");
 
         // Wrap in async version
-        let _listener = UnixListener::from_std(std_listener).expect("from_std failed");
+        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
         let exists = path.exists();
         crate::assert_with_log!(exists, "socket exists", true, exists);
 
         // Drop async listener
-        drop(_listener);
+        drop(listener);
 
         // Socket file should still exist (from_std doesn't clean up)
         let exists = path.exists();

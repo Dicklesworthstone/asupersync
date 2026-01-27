@@ -1715,6 +1715,7 @@ impl From<EpochError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combinator::{BulkheadPolicy, CircuitBreakerPolicy};
     use crate::time::VirtualClock;
     use futures_lite::future::block_on;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2225,8 +2226,6 @@ mod tests {
     #[test]
     fn test_epoch_wrapped_bulkhead_and_circuit_breaker() {
         init_test("test_epoch_wrapped_bulkhead_and_circuit_breaker");
-        use super::bulkhead_call_in_epoch;
-        use crate::combinator::{BulkheadPolicy, CircuitBreakerPolicy};
 
         let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
         let epoch_source = Arc::new(TestEpochSource::new(EpochId(1)));

@@ -266,13 +266,14 @@ mod tests {
     mod unix_tests {
         use super::*;
         use std::os::unix::io::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        fn accepts_source<T: Source>(_: &T) {}
 
         #[test]
         fn source_wrapper_with_pipe() {
             super::init_test("source_wrapper_with_pipe");
             // Use a real unix stream which is Send + Sync
-            use std::os::unix::net::UnixStream;
-
             let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
             let fd = sock1.as_raw_fd();
             let wrapper = SourceWrapper::new(sock1);
@@ -295,8 +296,6 @@ mod tests {
         #[test]
         fn source_wrapper_has_unique_ids() {
             super::init_test("source_wrapper_has_unique_ids");
-            use std::os::unix::net::UnixStream;
-
             let (sock1, sock2) = UnixStream::pair().expect("failed to create unix stream pair");
             let wrapper1 = SourceWrapper::new(sock1);
             let wrapper2 = SourceWrapper::new(sock2);
@@ -313,8 +312,6 @@ mod tests {
         #[test]
         fn source_wrapper_with_custom_id() {
             super::init_test("source_wrapper_with_custom_id");
-            use std::os::unix::net::UnixStream;
-
             let (sock, _) = UnixStream::pair().expect("failed to create unix stream pair");
             let wrapper = SourceWrapper::with_id(sock, 12345);
 
@@ -330,8 +327,6 @@ mod tests {
         #[test]
         fn source_wrapper_into_inner() {
             super::init_test("source_wrapper_into_inner");
-            use std::os::unix::net::UnixStream;
-
             let (sock, _) = UnixStream::pair().expect("failed to create unix stream pair");
             let expected_fd = sock.as_raw_fd();
             let wrapper = SourceWrapper::new(sock);
@@ -349,8 +344,6 @@ mod tests {
         #[test]
         fn source_wrapper_get_ref() {
             super::init_test("source_wrapper_get_ref");
-            use std::os::unix::net::UnixStream;
-
             let (sock, _) = UnixStream::pair().expect("failed to create unix stream pair");
             let expected_fd = sock.as_raw_fd();
             let wrapper = SourceWrapper::new(sock);
@@ -367,12 +360,9 @@ mod tests {
         #[test]
         fn unix_stream_implements_source() {
             super::init_test("unix_stream_implements_source");
-            use std::os::unix::net::UnixStream;
-
             let (sock, _) = UnixStream::pair().expect("failed to create unix stream pair");
 
             // UnixStream should implement Source automatically
-            fn accepts_source<T: Source>(_: &T) {}
             accepts_source(&sock);
 
             let fd = sock.as_raw_fd();
@@ -383,13 +373,10 @@ mod tests {
         #[test]
         fn source_wrapper_implements_source() {
             super::init_test("source_wrapper_implements_source");
-            use std::os::unix::net::UnixStream;
-
             let (sock, _) = UnixStream::pair().expect("failed to create unix stream pair");
             let wrapper = SourceWrapper::new(sock);
 
             // SourceWrapper should implement Source
-            fn accepts_source<T: Source>(_: &T) {}
             accepts_source(&wrapper);
 
             let fd = wrapper.as_raw_fd();
@@ -400,8 +387,6 @@ mod tests {
         #[test]
         fn source_as_trait_object() {
             super::init_test("source_as_trait_object");
-            use std::os::unix::net::UnixStream;
-
             let (sock, _) = UnixStream::pair().expect("failed to create unix stream pair");
             let expected_fd = sock.as_raw_fd();
             let source: &dyn Source = &sock;

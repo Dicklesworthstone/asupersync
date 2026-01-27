@@ -479,6 +479,9 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct NonClone(i32);
+
     #[test]
     fn basic_send_recv() {
         init_test("basic_send_recv");
@@ -702,9 +705,6 @@ mod tests {
     fn value_is_moved_not_cloned() {
         init_test("value_is_moved_not_cloned");
         // Test that non-Clone types work
-        #[derive(Debug)]
-        struct NonClone(i32);
-
         let cx = test_cx();
         let (tx, rx) = channel::<NonClone>();
 

@@ -829,11 +829,23 @@ fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
     use tempfile::tempdir;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
     }
 
     #[test]
@@ -1054,18 +1066,8 @@ mod tests {
         use crate::runtime::io_driver::IoDriverHandle;
         use crate::runtime::LabReactor;
         use crate::types::{Budget, RegionId, TaskId};
-        use std::sync::Arc;
-        use std::task::{Context, Wake, Waker};
 
         init_test("test_datagram_registers_on_wouldblock");
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-        fn noop_waker() -> Waker {
-            Waker::from(Arc::new(NoopWaker))
-        }
 
         // Create a pair and drain the socket to ensure WouldBlock on recv
         let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
@@ -1124,18 +1126,8 @@ mod tests {
         use crate::runtime::io_driver::IoDriverHandle;
         use crate::runtime::LabReactor;
         use crate::types::{Budget, RegionId, TaskId};
-        use std::sync::Arc;
-        use std::task::{Context, Wake, Waker};
 
         init_test("test_datagram_send_registers_on_wouldblock");
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-        fn noop_waker() -> Waker {
-            Waker::from(Arc::new(NoopWaker))
-        }
 
         // Create a pair
         let (mut a, _b) = UnixDatagram::pair().expect("pair failed");
@@ -1199,7 +1191,7 @@ mod tests {
         // On Linux, pid should be available and match our process
         #[cfg(target_os = "linux")]
         {
-            let proc_id = std::process::id() as i32;
+            let proc_id = i32::try_from(std::process::id()).expect("process id fits in i32");
             let pid_a = cred_a.pid.expect("pid should be available on Linux");
             let pid_b = cred_b.pid.expect("pid should be available on Linux");
             crate::assert_with_log!(pid_a == proc_id, "a pid", proc_id, pid_a);

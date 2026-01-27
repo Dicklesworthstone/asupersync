@@ -1054,6 +1054,7 @@ mod tests {
             WarningReason::ApproachingDeadline | WarningReason::ApproachingDeadlineNoProgress
         );
         crate::assert_with_log!(ok, "reason", true, ok);
+        drop(warnings);
         crate::test_complete!("deadline_monitor_emits_warning");
     }
 
@@ -1111,6 +1112,7 @@ mod tests {
             Some("starting work"),
             warning.last_checkpoint_message.as_deref()
         );
+        drop(warnings);
         crate::test_complete!("deadline_monitor_e2e_stuck_detection");
     }
 
@@ -1317,6 +1319,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn obligation_trace_events_emitted() {
         init_test("obligation_trace_events_emitted");
         let mut runtime = LabRuntime::with_seed(21);

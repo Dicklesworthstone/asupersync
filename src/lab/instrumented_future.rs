@@ -1354,8 +1354,8 @@ mod tests {
                 let result = poll_to_completion(instrumented);
                 // Both completion and cancellation are acceptable
                 match result {
-                    InstrumentedPollResult::Inner(_) => InjectionOutcome::Success,
-                    InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
+                    InstrumentedPollResult::Inner(_)
+                    | InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
                 }
             },
         );

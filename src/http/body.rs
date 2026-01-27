@@ -722,6 +722,7 @@ mod tests {
         std::sync::Arc::new(NoopWaker).into()
     }
 
+    #[allow(clippy::type_complexity)]
     fn poll_body<B: Body + Unpin>(body: &mut B) -> Poll<Option<Result<Frame<B::Data>, B::Error>>> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
