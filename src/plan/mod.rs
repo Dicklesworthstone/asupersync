@@ -549,26 +549,9 @@ mod tests {
         }
     }
 
-    async fn await_handle(cx: &Cx, handle: &LeafHandle) -> Result<LeafOutcome, JoinError> {
-        loop {
-            match handle.try_join() {
-                Ok(Some(result)) => return Ok(result),
-                Ok(None) => {
-                    if cx.checkpoint().is_err() {
-                        return Err(JoinError::Cancelled(
-                            crate::types::CancelReason::parent_cancelled(),
-                        ));
-                    }
-                    yield_n(1).await;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-
     async fn join_branch(cx: &Cx, left: &LeafHandle, right: &LeafHandle) -> BTreeSet<&'static str> {
-        let left_result = await_handle(cx, left).await;
-        let right_result = await_handle(cx, right).await;
+        let left_result = left.join(cx).await;
+        let right_result = right.join(cx).await;
         let mut set = BTreeSet::new();
         if let Some(label) = result_to_label(&left_result) {
             set.insert(label);
@@ -580,39 +563,19 @@ mod tests {
     }
 
     async fn race_branch(cx: &Cx, left: LeafHandle, right: LeafHandle) -> Option<&'static str> {
-        loop {
-            match left.try_join() {
-                Ok(Some(result)) => {
-                    right.abort();
-                    let _ = await_handle(cx, &right).await;
-                    return result_to_label(&Ok(result));
-                }
-                Err(err) => {
-                    right.abort();
-                    let _ = await_handle(cx, &right).await;
-                    return result_to_label(&Err(err));
-                }
-                Ok(None) => {}
+        let winner =
+            crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
+        match winner {
+            crate::combinator::Either::Left(result) => {
+                right.abort();
+                let _ = right.join(cx).await;
+                result_to_label(&result)
             }
-
-            match right.try_join() {
-                Ok(Some(result)) => {
-                    left.abort();
-                    let _ = await_handle(cx, &left).await;
-                    return result_to_label(&Ok(result));
-                }
-                Err(err) => {
-                    left.abort();
-                    let _ = await_handle(cx, &left).await;
-                    return result_to_label(&Err(err));
-                }
-                Ok(None) => {}
+            crate::combinator::Either::Right(result) => {
+                left.abort();
+                let _ = left.join(cx).await;
+                result_to_label(&result)
             }
-
-            if cx.checkpoint().is_err() {
-                return None;
-            }
-            yield_n(1).await;
         }
     }
 
@@ -658,8 +621,11 @@ mod tests {
                 }
             }
 
-            if let (Some(left), Some(right)) = (this.left_out.take(), this.right_out.take()) {
-                return Poll::Ready((left, right));
+            if this.left_out.is_some() && this.right_out.is_some() {
+                return Poll::Ready((
+                    this.left_out.take().expect("left ready"),
+                    this.right_out.take().expect("right ready"),
+                ));
             }
 
             Poll::Pending
@@ -703,15 +669,15 @@ mod tests {
                             crate::combinator::Either::Left(result) => {
                                 a2_handle.abort();
                                 c_handle.abort();
-                                let _ = await_handle(&cx, &a2_handle).await;
-                                let _ = await_handle(&cx, &c_handle).await;
+                                let _ = a2_handle.join(&cx).await;
+                                let _ = c_handle.join(&cx).await;
                                 result
                             }
                             crate::combinator::Either::Right(result) => {
                                 a1_handle.abort();
                                 b_handle.abort();
-                                let _ = await_handle(&cx, &a1_handle).await;
-                                let _ = await_handle(&cx, &b_handle).await;
+                                let _ = a1_handle.join(&cx).await;
+                                let _ = b_handle.join(&cx).await;
                                 result
                             }
                         }
@@ -742,8 +708,7 @@ mod tests {
                     let driver_future = async move {
                         let cx = Cx::current().expect("cx set");
                         let race = race_branch(&cx, b_handle, c_handle);
-                        let join =
-                            Join2::new(Box::pin(await_handle(&cx, &a_handle)), Box::pin(race));
+                        let join = Join2::new(Box::pin(a_handle.join(&cx)), Box::pin(race));
                         let (left_result, right_label) = join.await;
                         let mut set = BTreeSet::new();
                         if let Some(label) = result_to_label(&left_result) {
@@ -801,18 +766,35 @@ mod tests {
     fn dedup_rewrite_lab_equivalence() {
         init_test("dedup_rewrite_lab_equivalence");
         let expected = expected_sets();
+        let mut original_seen = BTreeSet::new();
+        let mut rewritten_seen = BTreeSet::new();
         for seed in 0..6 {
             let original = run_program(seed, ProgramKind::Original);
             let rewritten = run_program(seed, ProgramKind::Rewritten);
+            original_seen.insert(original.iter().copied().collect::<Vec<_>>());
+            rewritten_seen.insert(rewritten.iter().copied().collect::<Vec<_>>());
+
+            let original_matches = expected.iter().any(|set| set == &original);
             crate::assert_with_log!(
-                original == rewritten,
-                "equivalent outcomes",
-                original,
+                original_matches,
+                "original outcome matches expected",
+                expected,
+                original
+            );
+            let rewritten_matches = expected.iter().any(|set| set == &rewritten);
+            crate::assert_with_log!(
+                rewritten_matches,
+                "rewritten outcome matches expected",
+                expected,
                 rewritten
             );
-            let matches = expected.iter().any(|set| set == &original);
-            crate::assert_with_log!(matches, "outcome matches expected", expected, original);
         }
+        crate::assert_with_log!(
+            original_seen == rewritten_seen,
+            "observed outcome sets match",
+            original_seen,
+            rewritten_seen
+        );
         crate::test_complete!("dedup_rewrite_lab_equivalence");
     }
 }

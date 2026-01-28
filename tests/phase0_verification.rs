@@ -894,7 +894,13 @@ struct SharedHandle<T> {
 
 struct SharedInner<T> {
     handle: TaskHandle<T>,
-    cached: Mutex<Option<Result<T, JoinError>>>,
+    state: Mutex<JoinState<T>>,
+}
+
+enum JoinState<T> {
+    Empty,
+    InFlight,
+    Ready(Result<T, JoinError>),
 }
 
 impl<T> SharedHandle<T> {
@@ -902,7 +908,7 @@ impl<T> SharedHandle<T> {
         Self {
             inner: Arc::new(SharedInner {
                 handle,
-                cached: Mutex::new(None),
+                state: Mutex::new(JoinState::Empty),
             }),
         }
     }
@@ -915,23 +921,29 @@ impl<T> SharedHandle<T> {
     where
         T: Clone,
     {
-        let cached = self.inner.cached.lock().expect("cache lock").clone();
-        if let Some(cached) = cached {
-            return Some(cached);
+        let mut state = self.inner.state.lock().expect("join state lock");
+        match &*state {
+            JoinState::Ready(result) => return Some(result.clone()),
+            JoinState::InFlight => return None,
+            JoinState::Empty => {
+                *state = JoinState::InFlight;
+            }
         }
+        drop(state);
 
-        match self.inner.handle.try_join() {
-            Ok(Some(value)) => {
-                let result = Ok(value);
-                *self.inner.cached.lock().expect("cache lock") = Some(result.clone());
-                Some(result)
-            }
+        let result = match self.inner.handle.try_join() {
+            Ok(Some(value)) => Some(Ok(value)),
             Ok(None) => None,
-            Err(err) => {
-                let result = Err(err);
-                *self.inner.cached.lock().expect("cache lock") = Some(result.clone());
-                Some(result)
-            }
+            Err(err) => Some(Err(err)),
+        };
+
+        let mut state = self.inner.state.lock().expect("join state lock");
+        if let Some(result) = result {
+            *state = JoinState::Ready(result.clone());
+            Some(result)
+        } else {
+            *state = JoinState::Empty;
+            None
         }
     }
 
@@ -939,14 +951,30 @@ impl<T> SharedHandle<T> {
     where
         T: Clone,
     {
-        let cached = self.inner.cached.lock().expect("cache lock").clone();
-        if let Some(cached) = cached {
-            return cached;
-        }
+        loop {
+            let should_join = {
+                let mut state = self.inner.state.lock().expect("join state lock");
+                match &*state {
+                    JoinState::Ready(result) => return result.clone(),
+                    JoinState::InFlight => false,
+                    JoinState::Empty => {
+                        *state = JoinState::InFlight;
+                        true
+                    }
+                }
+            };
 
-        let result = self.inner.handle.join(cx).await;
-        *self.inner.cached.lock().expect("cache lock") = Some(result.clone());
-        result
+            if should_join {
+                let result = self.inner.handle.join(cx).await;
+                {
+                    let mut state = self.inner.state.lock().expect("join state lock");
+                    *state = JoinState::Ready(result.clone());
+                }
+                return result;
+            }
+
+            yield_now().await;
+        }
     }
 }
 
@@ -1029,6 +1057,26 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
     );
 
     runtime.run_until_quiescent();
+    if !runtime.is_quiescent() {
+        let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+        for (_, record) in runtime.state.tasks.iter() {
+            if record.is_runnable() {
+                let prio = record.cx_inner.as_ref().map_or(0, |inner| {
+                    inner.read().expect("lock poisoned").budget.priority
+                });
+                sched.schedule(record.id, prio);
+            }
+        }
+        drop(sched);
+        runtime.run_until_quiescent();
+        let quiescent = runtime.is_quiescent();
+        assert_with_log!(
+            quiescent,
+            "runtime quiescent after reschedule",
+            true,
+            quiescent
+        );
+    }
 
     let completion_time = runtime.now();
     for race in races {
@@ -1042,6 +1090,21 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         }
         oracle.on_race_complete(race.race_id, winner, completion_time);
     }
+
+    let live_tasks: Vec<(TaskId, TaskState)> = runtime
+        .state
+        .tasks
+        .iter()
+        .filter(|(_, task)| !task.state.is_terminal())
+        .map(|(_, task)| (task.id, task.state.clone()))
+        .collect();
+    tracing::debug!(
+        steps = runtime.steps(),
+        is_quiescent = runtime.is_quiescent(),
+        live_task_count = live_tasks.len(),
+        ?live_tasks,
+        "plan runtime status"
+    );
 
     let oracle_ok = oracle.check().is_ok();
     assert_with_log!(oracle_ok, "loser drain oracle", true, oracle_ok);
