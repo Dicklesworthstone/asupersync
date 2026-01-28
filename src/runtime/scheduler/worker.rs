@@ -1,9 +1,9 @@
 //! Worker thread logic.
 
+use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
-use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::RuntimeState;
 use crate::tracing_compat::trace;
 use crate::types::Outcome;

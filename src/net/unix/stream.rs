@@ -23,7 +23,7 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
-use crate::runtime::reactor::{Interest, Registration, Source};
+use crate::runtime::reactor::{Interest, Registration};
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{self, SocketAddr};
@@ -83,13 +83,27 @@ pub struct UnixStream {
 // Wrapper to implement Source for net::UnixStream
 struct UnixStreamSource<'a>(&'a net::UnixStream);
 
-impl<'a> Source for UnixStreamSource<'a> {
-    fn raw_fd(&self) -> std::os::unix::io::RawFd {
-        std::os::unix::io::AsRawFd::as_raw_fd(self.0)
+impl<'a> std::os::unix::io::AsRawFd for UnixStreamSource<'a> {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.0.as_raw_fd()
     }
 }
 
+// Source is auto-implemented via blanket impl since we now implement AsRawFd
+
 impl UnixStream {
+    /// Creates a UnixStream from raw parts (internal use).
+    #[must_use]
+    pub(crate) fn from_parts(
+        inner: Arc<net::UnixStream>,
+        registration: Option<Registration>,
+    ) -> Self {
+        Self {
+            inner,
+            registration,
+        }
+    }
+
     /// Connects to a Unix domain socket at the given path.
     ///
     /// # Arguments
@@ -354,9 +368,8 @@ impl UnixStream {
                             }
                         })
                         .await;
-                    } else {
-                        crate::runtime::yield_now().await;
                     }
+                    crate::runtime::yield_now().await;
                 }
                 Err(e) => return Err(e),
             }
@@ -433,9 +446,8 @@ impl UnixStream {
                             }
                         })
                         .await;
-                    } else {
-                        crate::runtime::yield_now().await;
                     }
+                    crate::runtime::yield_now().await;
                 }
                 Err(e) => return Err(e),
             }

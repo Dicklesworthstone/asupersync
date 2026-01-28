@@ -29,7 +29,7 @@
 
 use crate::cx::Cx;
 use crate::net::unix::stream::UnixStream;
-use crate::runtime::reactor::{Interest, Registration, Source};
+use crate::runtime::reactor::{Interest, Registration};
 use crate::stream::Stream;
 use std::future::poll_fn;
 use std::io;
@@ -67,11 +67,13 @@ pub struct UnixListener {
 // Wrapper to implement Source for net::UnixListener
 struct UnixListenerSource<'a>(&'a net::UnixListener);
 
-impl<'a> Source for UnixListenerSource<'a> {
-    fn raw_fd(&self) -> std::os::unix::io::RawFd {
-        std::os::unix::io::AsRawFd::as_raw_fd(self.0)
+impl<'a> std::os::unix::io::AsRawFd for UnixListenerSource<'a> {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.0.as_raw_fd()
     }
 }
+
+// Source is auto-implemented via blanket impl since we now implement AsRawFd
 
 impl UnixListener {
     /// Binds to a filesystem path.
@@ -105,8 +107,10 @@ impl UnixListener {
         inner.set_nonblocking(true)?;
 
         // Register with reactor if available
-        let registration = Cx::current()
-            .and_then(|cx| cx.register_io(&UnixListenerSource(&inner), Interest::READABLE).ok());
+        let registration = Cx::current().and_then(|cx| {
+            cx.register_io(&UnixListenerSource(&inner), Interest::READABLE)
+                .ok()
+        });
 
         Ok(Self {
             inner,
@@ -142,8 +146,10 @@ impl UnixListener {
         inner.set_nonblocking(true)?;
 
         // Register with reactor if available
-        let registration = Cx::current()
-            .and_then(|cx| cx.register_io(&UnixListenerSource(&inner), Interest::READABLE).ok());
+        let registration = Cx::current().and_then(|cx| {
+            cx.register_io(&UnixListenerSource(&inner), Interest::READABLE)
+                .ok()
+        });
 
         Ok(Self {
             inner,
@@ -261,7 +267,8 @@ impl UnixListener {
 
         Ok(Self {
             inner: listener,
-            path: None, // Don't clean up sockets we didn't create
+            path: None,         // Don't clean up sockets we didn't create
+            registration: None, // No reactor registration for externally created listeners
         })
     }
 
