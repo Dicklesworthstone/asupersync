@@ -878,6 +878,7 @@ impl Cx {
 
     /// Generates a random `f64` in `[0, 1)`.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn random_f64(&self) -> f64 {
         (self.random_u64() >> 11) as f64 / (1u64 << 53) as f64
     }

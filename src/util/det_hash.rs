@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn det_hasher_write_u64() {
         let mut h = DetHasher::default();
-        h.write_u64(0xDEADBEEF_CAFEBABE);
+        h.write_u64(0xDEAD_BEEF_CAFE_BABE);
         let _ = h.finish(); // Should not panic
     }
 
@@ -240,14 +240,5 @@ mod tests {
         assert_eq!(h1.finish(), h2.finish());
     }
 
-    #[test]
-    fn det_build_hasher_is_clone() {
-        let builder = DetBuildHasher;
-        let _cloned = builder.clone();
-    }
-
-    #[test]
-    fn det_build_hasher_is_default() {
-        let _builder = DetBuildHasher::default();
-    }
+    // Unit structs are trivially clone/default; no runtime test needed.
 }
