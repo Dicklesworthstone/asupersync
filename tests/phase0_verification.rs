@@ -203,13 +203,15 @@ fn e2e_two_phase_channel_abort_releases_capacity() {
     let (tx, rx) = mpsc::channel::<u32>(1);
     let cx = Cx::for_testing();
 
-    // Reserve a slot and drop the permit (cancel/abort).
-    let permit = tx.reserve(&cx).expect("reserve failed");
-    drop(permit);
+    // Reserve a slot and drop the permit (cancel/abort), then send again.
+    let value = future::block_on(async {
+        let permit = tx.reserve(&cx).await.expect("reserve failed");
+        drop(permit);
 
-    // Capacity should be released so we can send again.
-    tx.send(&cx, 7).expect("send failed");
-    let value = rx.recv(&cx).expect("recv failed");
+        // Capacity should be released so we can send again.
+        tx.send(&cx, 7).await.expect("send failed");
+        rx.recv(&cx).await.expect("recv failed")
+    });
     assert_with_log!(value == 7, "should receive sent value", 7, value);
     test_complete!("e2e_two_phase_channel_abort_releases_capacity");
 }

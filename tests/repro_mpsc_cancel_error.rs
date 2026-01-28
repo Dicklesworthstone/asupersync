@@ -4,9 +4,10 @@
 mod common;
 
 use asupersync::channel::mpsc;
+use asupersync::channel::mpsc::SendError;
 use asupersync::cx::Cx;
-use asupersync::error::SendError;
 use common::*;
+use futures_lite::future::block_on;
 
 #[test]
 fn repro_mpsc_cancel_returns_disconnected() {
@@ -17,14 +18,16 @@ fn repro_mpsc_cancel_returns_disconnected() {
     let cx = Cx::for_testing();
 
     // Fill channel
-    tx.send(&cx, 1).unwrap();
+    block_on(async {
+        tx.send(&cx, 1).await.unwrap();
+    });
 
     // Request cancellation on the context
     cx.set_cancel_requested(true);
 
     // Try to reserve (which would block since channel is full)
     // It should observe cancellation immediately before blocking
-    let result = tx.reserve(&cx);
+    let result = block_on(async { tx.reserve(&cx).await });
 
     test_section!("verify");
     tracing::debug!(result = ?result, "reserve result");

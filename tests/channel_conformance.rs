@@ -41,14 +41,10 @@ impl<T: Send + 'static> MpscSender<T> for MpscSenderWrapper<T> {
         let sender = self.0.clone();
         Box::pin(async move {
             let cx = Cx::for_testing();
-            // Reserve first
-            match sender.reserve(&cx) {
-                Ok(permit) => {
-                    permit.send(value);
-                    Ok(())
-                }
-                Err(_) => Err(value),
-            }
+            // Use the async send method directly
+            sender.send(&cx, value).await.map_err(|e| match e {
+                mpsc::SendError::Disconnected(v) | mpsc::SendError::Cancelled(v) | mpsc::SendError::Full(v) => v,
+            })
         })
     }
 }
@@ -60,7 +56,7 @@ impl<T: Send + 'static> MpscReceiver<T> for MpscReceiverWrapper<T> {
         let receiver = &self.0;
         Box::pin(async move {
             let cx = Cx::for_testing();
-            receiver.recv(&cx).ok()
+            receiver.recv(&cx).await.ok()
         })
     }
 }
@@ -108,7 +104,7 @@ impl<T: Send + Clone + 'static> BroadcastReceiver<T> for BroadcastReceiverWrappe
         let receiver = &mut self.0;
         Box::pin(async move {
             let cx = Cx::for_testing();
-            match receiver.recv(&cx) {
+            match receiver.recv(&cx).await {
                 Ok(v) => Ok(v),
                 Err(broadcast::RecvError::Lagged(n)) => Err(BroadcastRecvError::Lagged(n)),
                 Err(broadcast::RecvError::Closed) => Err(BroadcastRecvError::Closed),
