@@ -399,7 +399,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
 
         loop {
             // Try to read from the decrypted buffer
-            match io::Read::read(&mut self.conn.reader(), buf.initialize_unfilled()) {
+            match io::Read::read(&mut self.conn.reader(), buf.unfilled()) {
                 Ok(n) => {
                     buf.advance(n);
                     if n > 0 {
@@ -525,11 +525,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
 impl<IO: std::fmt::Debug> std::fmt::Debug for TlsStream<IO> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsStream")
-            .field("io", &self.io)
-            #[cfg(feature = "tls")]
-            .field("state", &self.state)
-            .finish_non_exhaustive()
+        #[cfg(feature = "tls")]
+        {
+            f.debug_struct("TlsStream")
+                .field("io", &self.io)
+                .field("state", &self.state)
+                .finish_non_exhaustive()
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            f.debug_struct("TlsStream")
+                .field("io", &self.io)
+                .finish_non_exhaustive()
+        }
     }
 }
 
