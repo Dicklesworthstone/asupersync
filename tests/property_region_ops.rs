@@ -2017,3 +2017,76 @@ fn regression_cases_replay_without_violations() {
         );
     }
 }
+
+#[test]
+fn e2e_property_regression_inventory() {
+    init_test_logging();
+    test_phase!("e2e_property_regression_inventory");
+
+    let regressions = std::fs::read_dir("tests")
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".proptest-regressions")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    let region_ops_dir = Path::new("tests/regressions/region_ops");
+    let region_ops_cases = load_regression_cases(region_ops_dir)
+        .map(|cases| cases.len())
+        .unwrap_or(0);
+
+    tracing::info!(
+        proptest_files = regressions,
+        region_ops_cases = region_ops_cases,
+        "property regression inventory"
+    );
+
+    test_complete!("e2e_property_regression_inventory");
+}
+
+#[test]
+fn e2e_property_invariant_summary() {
+    init_test_logging();
+    test_phase!("e2e_property_invariant_summary");
+
+    let invariants = [
+        ("No orphan tasks", "Every task has a valid parent region"),
+        (
+            "Tree structure",
+            "No cycles, single root, proper parent pointers",
+        ),
+        (
+            "Child tracking",
+            "Parent children list matches child parent pointers",
+        ),
+        ("ID uniqueness", "No duplicate RegionId or TaskId"),
+        ("Cancel propagation", "Cancelled parents cancel descendants"),
+        ("Close ordering", "Region closes only after children close"),
+        (
+            "Outcome collection",
+            "All child outcomes collected before parent completes",
+        ),
+        ("No leaks", "After full close, all resources freed"),
+        (
+            "Budget inheritance",
+            "Child budgets never exceed parent budgets",
+        ),
+    ];
+
+    tracing::info!("Property-test invariants summary:");
+    for (name, description) in invariants {
+        tracing::info!(invariant = name, detail = description, "invariant");
+    }
+
+    test_complete!(
+        "e2e_property_invariant_summary",
+        invariant_count = invariants.len()
+    );
+}
