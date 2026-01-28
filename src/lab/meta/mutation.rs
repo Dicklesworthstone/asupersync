@@ -118,10 +118,7 @@ impl BuiltinMutation {
             Self::Quiescence => {
                 let parent = harness.next_region();
                 let child = harness.next_region();
-                harness
-                    .oracles
-                    .quiescence
-                    .on_region_create(parent, None);
+                harness.oracles.quiescence.on_region_create(parent, None);
                 harness
                     .oracles
                     .quiescence
@@ -133,11 +130,11 @@ impl BuiltinMutation {
                 let region = harness.next_region();
                 let winner = harness.next_task();
                 let loser = harness.next_task();
-                let race_id = harness.oracles.loser_drain.on_race_start(
-                    region,
-                    vec![winner, loser],
-                    now,
-                );
+                let race_id =
+                    harness
+                        .oracles
+                        .loser_drain
+                        .on_race_start(region, vec![winner, loser], now);
                 harness.oracles.loser_drain.on_task_complete(winner, now);
                 harness.oracles.loser_drain.on_task_complete(loser, now);
                 harness
@@ -249,10 +246,7 @@ impl BuiltinMutation {
             Self::Quiescence => {
                 let parent = harness.next_region();
                 let child = harness.next_region();
-                harness
-                    .oracles
-                    .quiescence
-                    .on_region_create(parent, None);
+                harness.oracles.quiescence.on_region_create(parent, None);
                 harness
                     .oracles
                     .quiescence
@@ -263,11 +257,11 @@ impl BuiltinMutation {
                 let region = harness.next_region();
                 let winner = harness.next_task();
                 let loser = harness.next_task();
-                let race_id = harness.oracles.loser_drain.on_race_start(
-                    region,
-                    vec![winner, loser],
-                    now,
-                );
+                let race_id =
+                    harness
+                        .oracles
+                        .loser_drain
+                        .on_race_start(region, vec![winner, loser], now);
                 harness.oracles.loser_drain.on_task_complete(winner, now);
                 harness
                     .oracles
@@ -303,10 +297,11 @@ impl BuiltinMutation {
                     .oracles
                     .ambient_authority
                     .on_task_created(task, region, None, now);
-                harness
-                    .oracles
-                    .ambient_authority
-                    .on_capability_revoked(task, CapabilityKind::Spawn, now);
+                harness.oracles.ambient_authority.on_capability_revoked(
+                    task,
+                    CapabilityKind::Spawn,
+                    now,
+                );
                 harness
                     .oracles
                     .ambient_authority
