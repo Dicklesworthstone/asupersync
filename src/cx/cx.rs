@@ -1488,6 +1488,22 @@ mod tests {
     }
 
     #[test]
+    fn io_not_available_by_default() {
+        let cx = test_cx();
+        assert!(!cx.has_io());
+        assert!(cx.io().is_none());
+    }
+
+    #[test]
+    fn io_available_with_for_testing_with_io() {
+        let cx = Cx::for_testing_with_io();
+        assert!(cx.has_io());
+        let io = cx.io().expect("should have io cap");
+        assert!(!io.is_real_io());
+        assert_eq!(io.name(), "lab");
+    }
+
+    #[test]
     fn checkpoint_without_cancel() {
         let cx = test_cx();
         assert!(cx.checkpoint().is_ok());
