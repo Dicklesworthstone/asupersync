@@ -5,7 +5,7 @@
 //! it runs each test against both runtimes and compares the outcomes.
 
 use crate::logging::{with_test_logger, ConformanceTestLogger, TestEvent};
-use crate::{Checkpoint, ConformanceTest, RuntimeInterface, TestCategory, TestResult};
+use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -142,8 +142,6 @@ pub struct SuiteTestResult {
     pub expected: String,
     /// Test result payload.
     pub result: TestResult,
-    /// Checkpoints captured during execution.
-    pub checkpoints: Vec<Checkpoint>,
     /// Structured events captured during execution.
     pub events: Vec<TestEvent>,
 }
@@ -198,7 +196,6 @@ impl SuiteResult {
             test_name: test.meta.name.clone(),
             category: test.meta.category,
             expected: test.meta.expected.clone(),
-            checkpoints: result.checkpoints.clone(),
             result,
             events,
         });
@@ -680,6 +677,17 @@ pub fn run_comparison<RTA: RuntimeInterface, RTB: RuntimeInterface>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::TestEventKind;
+    use crate::{
+        BroadcastRecvError, BroadcastReceiver, BroadcastSender, MpscReceiver, MpscSender,
+        OneshotRecvError, OneshotSender, WatchRecvError, WatchReceiver, WatchSender,
+    };
+    use std::future::Future;
+    use std::marker::PhantomData;
+    use std::net::SocketAddr;
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     #[test]
     fn run_config_default() {
@@ -815,5 +823,383 @@ mod tests {
         assert_eq!(summary.total, 2);
         assert_eq!(summary.only_b_passed, 1);
         assert!(!summary.all_acceptable());
+    }
+
+    #[test]
+    fn run_all_with_logs_captures_checkpoint() {
+        let runtime = DummyRuntime;
+        let test = ConformanceTest::new(
+            TestMeta {
+                id: "log-001".to_string(),
+                name: "logger checkpoint".to_string(),
+                description: "records checkpoints in logger".to_string(),
+                category: TestCategory::Spawn,
+                tags: vec!["logger".to_string()],
+                expected: "checkpoint is captured".to_string(),
+            },
+            |_rt| {
+                crate::checkpoint("checkpoint-1", serde_json::json!({"value": 1}));
+                TestResult::passed()
+            },
+        );
+
+        let runner = TestRunner::new(&runtime, "dummy", RunConfig::default());
+        let summary = runner.run_all_with_logs(&[test]);
+
+        assert_eq!(summary.total, 1);
+        let events = &summary.results[0].events;
+        assert!(events.iter().any(|e| e.kind == TestEventKind::Checkpoint));
+    }
+
+    #[test]
+    fn run_comparison_with_dummy_runtime() {
+        let runtime_a = DummyRuntime;
+        let runtime_b = DummyRuntime;
+
+        let meta = TestMeta {
+            id: "cmp-001".to_string(),
+            name: "comparison baseline".to_string(),
+            description: "comparison test returns pass".to_string(),
+            category: TestCategory::Spawn,
+            tags: vec!["comparison".to_string()],
+            expected: "both runtimes pass".to_string(),
+        };
+
+        let tests_a = vec![ConformanceTest::new(meta.clone(), |_rt| TestResult::passed())];
+        let tests_b = vec![ConformanceTest::new(meta, |_rt| TestResult::passed())];
+
+        let summary = run_comparison(
+            &runtime_a,
+            "A",
+            &tests_a,
+            &runtime_b,
+            "B",
+            &tests_b,
+            RunConfig::default(),
+        );
+
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.both_passed_equivalent, 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Dummy runtime for runner unit tests
+    // ---------------------------------------------------------------------
+
+    struct DummyRuntime;
+
+    #[derive(Clone)]
+    struct DummyMpscSender<T>(PhantomData<T>);
+
+    struct DummyMpscReceiver<T>(PhantomData<T>);
+
+    #[derive(Clone)]
+    struct DummyOneshotSender<T>(PhantomData<T>);
+
+    #[derive(Clone)]
+    struct DummyBroadcastSender<T>(PhantomData<T>);
+
+    struct DummyBroadcastReceiver<T>(PhantomData<T>);
+
+    #[derive(Clone)]
+    struct DummyWatchSender<T>(PhantomData<T>);
+
+    #[derive(Clone)]
+    struct DummyWatchReceiver<T>(PhantomData<T>);
+
+    struct DummyFile;
+
+    struct DummyTcpListener;
+
+    struct DummyTcpStream;
+
+    struct DummyUdpSocket;
+
+    impl<T: Send> MpscSender<T> for DummyMpscSender<T> {
+        fn send(&self, _value: T) -> Pin<Box<dyn Future<Output = Result<(), T>> + Send + '_>> {
+            Box::pin(async { panic!("dummy mpsc send") })
+        }
+    }
+
+    impl<T: Send> MpscReceiver<T> for DummyMpscReceiver<T> {
+        fn recv(&mut self) -> Pin<Box<dyn Future<Output = Option<T>> + Send + '_>> {
+            Box::pin(async { panic!("dummy mpsc recv") })
+        }
+    }
+
+    impl<T: Send> OneshotSender<T> for DummyOneshotSender<T> {
+        fn send(self, _value: T) -> Result<(), T> {
+            panic!("dummy oneshot send")
+        }
+    }
+
+    impl<T: Send + Clone + 'static> BroadcastSender<T> for DummyBroadcastSender<T> {
+        fn send(&self, _value: T) -> Result<usize, T> {
+            panic!("dummy broadcast send")
+        }
+
+        fn subscribe(&self) -> Box<dyn BroadcastReceiver<T>> {
+            Box::new(DummyBroadcastReceiver(PhantomData))
+        }
+    }
+
+    impl<T: Send + Clone + 'static> BroadcastReceiver<T> for DummyBroadcastReceiver<T> {
+        fn recv(
+            &mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<T, BroadcastRecvError>> + Send + '_>> {
+            Box::pin(async { panic!("dummy broadcast recv") })
+        }
+    }
+
+    impl<T: Send + Sync> WatchSender<T> for DummyWatchSender<T> {
+        fn send(&self, _value: T) -> Result<(), T> {
+            panic!("dummy watch send")
+        }
+    }
+
+    impl<T: Send + Sync + Clone> WatchReceiver<T> for DummyWatchReceiver<T> {
+        fn changed(
+            &mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<(), WatchRecvError>> + Send + '_>> {
+            Box::pin(async { panic!("dummy watch recv") })
+        }
+
+        fn borrow_and_clone(&self) -> T {
+            panic!("dummy watch borrow")
+        }
+    }
+
+    impl crate::AsyncFile for DummyFile {
+        fn write_all<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy file write") })
+        }
+
+        fn read_exact<'a>(
+            &'a mut self,
+            _buf: &'a mut [u8],
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy file read_exact") })
+        }
+
+        fn read_to_end<'a>(
+            &'a mut self,
+            _buf: &'a mut Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy file read_to_end") })
+        }
+
+        fn seek<'a>(
+            &'a mut self,
+            _pos: std::io::SeekFrom,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<u64>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy file seek") })
+        }
+
+        fn sync_all(&self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { panic!("dummy file sync") })
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { panic!("dummy file shutdown") })
+        }
+    }
+
+    impl crate::TcpListener for DummyTcpListener {
+        type Stream = DummyTcpStream;
+
+        fn local_addr(&self) -> std::io::Result<SocketAddr> {
+            panic!("dummy tcp local_addr")
+        }
+
+        fn accept(
+            &self,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = std::io::Result<(Self::Stream, SocketAddr)>> + Send + '_,
+            >,
+        > {
+            Box::pin(async { panic!("dummy tcp accept") })
+        }
+    }
+
+    impl crate::TcpStream for DummyTcpStream {
+        fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+            panic!("dummy tcp peer_addr")
+        }
+
+        fn read_exact<'a>(
+            &'a mut self,
+            _buf: &'a mut [u8],
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy tcp read_exact") })
+        }
+
+        fn write_all<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy tcp write_all") })
+        }
+
+        fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+            Box::pin(async { panic!("dummy tcp shutdown") })
+        }
+    }
+
+    impl crate::UdpSocket for DummyUdpSocket {
+        fn local_addr(&self) -> std::io::Result<SocketAddr> {
+            panic!("dummy udp local_addr")
+        }
+
+        fn send_to<'a>(
+            &'a self,
+            _buf: &'a [u8],
+            _addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy udp send_to") })
+        }
+
+        fn recv_from<'a>(
+            &'a self,
+            _buf: &'a mut [u8],
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<(usize, SocketAddr)>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy udp recv_from") })
+        }
+    }
+
+    impl RuntimeInterface for DummyRuntime {
+        type JoinHandle<T: Send + 'static> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+        type MpscSender<T: Send + 'static> = DummyMpscSender<T>;
+        type MpscReceiver<T: Send + 'static> = DummyMpscReceiver<T>;
+        type OneshotSender<T: Send + 'static> = DummyOneshotSender<T>;
+        type OneshotReceiver<T: Send + 'static> =
+            Pin<Box<dyn Future<Output = Result<T, OneshotRecvError>> + Send>>;
+        type BroadcastSender<T: Send + Clone + 'static> = DummyBroadcastSender<T>;
+        type BroadcastReceiver<T: Send + Clone + 'static> = DummyBroadcastReceiver<T>;
+        type WatchSender<T: Send + Sync + 'static> = DummyWatchSender<T>;
+        type WatchReceiver<T: Send + Sync + Clone + 'static> = DummyWatchReceiver<T>;
+        type File = DummyFile;
+        type TcpListener = DummyTcpListener;
+        type TcpStream = DummyTcpStream;
+        type UdpSocket = DummyUdpSocket;
+
+        fn spawn<F>(&self, future: F) -> Self::JoinHandle<F::Output>
+        where
+            F: Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            Box::pin(async move { future.await })
+        }
+
+        fn block_on<F: Future>(&self, future: F) -> F::Output {
+            block_on_simple(future)
+        }
+
+        fn sleep(&self, _duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn timeout<'a, F: Future + Send + 'a>(
+            &'a self,
+            _duration: Duration,
+            future: F,
+        ) -> Pin<Box<dyn Future<Output = Result<F::Output, crate::TimeoutError>> + Send + 'a>>
+        where
+            F::Output: Send,
+        {
+            Box::pin(async move { Ok(future.await) })
+        }
+
+        fn mpsc_channel<T: Send + 'static>(
+            &self,
+            _capacity: usize,
+        ) -> (Self::MpscSender<T>, Self::MpscReceiver<T>) {
+            (DummyMpscSender(PhantomData), DummyMpscReceiver(PhantomData))
+        }
+
+        fn oneshot_channel<T: Send + 'static>(
+            &self,
+        ) -> (Self::OneshotSender<T>, Self::OneshotReceiver<T>) {
+            let receiver: Self::OneshotReceiver<T> =
+                Box::pin(async { panic!("dummy oneshot recv") });
+            (DummyOneshotSender(PhantomData), receiver)
+        }
+
+        fn broadcast_channel<T: Send + Clone + 'static>(
+            &self,
+            _capacity: usize,
+        ) -> (Self::BroadcastSender<T>, Self::BroadcastReceiver<T>) {
+            (
+                DummyBroadcastSender(PhantomData),
+                DummyBroadcastReceiver(PhantomData),
+            )
+        }
+
+        fn watch_channel<T: Send + Sync + Clone + 'static>(
+            &self,
+            _initial: T,
+        ) -> (Self::WatchSender<T>, Self::WatchReceiver<T>) {
+            (DummyWatchSender(PhantomData), DummyWatchReceiver(PhantomData))
+        }
+
+        fn file_create<'a>(
+            &'a self,
+            _path: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::File>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy file create") })
+        }
+
+        fn file_open<'a>(
+            &'a self,
+            _path: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::File>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy file open") })
+        }
+
+        fn tcp_listen<'a>(
+            &'a self,
+            _addr: &'a str,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::TcpListener>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy tcp listen") })
+        }
+
+        fn tcp_connect<'a>(
+            &'a self,
+            _addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::TcpStream>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy tcp connect") })
+        }
+
+        fn udp_bind<'a>(
+            &'a self,
+            _addr: &'a str,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::UdpSocket>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy udp bind") })
+        }
+    }
+
+    fn block_on_simple<F: Future>(mut future: F) -> F::Output {
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        fn wake(_: *const ()) {}
+        fn wake_by_ref(_: *const ()) {}
+        fn drop(_: *const ()) {}
+
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut context = Context::from_waker(&waker);
+        let mut future = unsafe { Pin::new_unchecked(&mut future) };
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
     }
 }

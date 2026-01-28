@@ -48,39 +48,45 @@ jobs:
         working-directory: conformance
         run: cargo build
 
-      - name: Run conformance tests
-        working-directory: conformance
-        run: |
-          cargo test -- --nocapture 2>&1 | tee ../conformance_output.log
+      - name: Run conformance suite
+        run: ./scripts/run_conformance_suite.sh
         continue-on-error: true
 
       - name: Parse test results
         id: parse_results
         run: |
-          # Count passed and failed tests
-          PASSED=$(grep -c "test.*ok$" conformance_output.log 2>/dev/null || echo "0")
-          FAILED=$(grep -c "test.*FAILED" conformance_output.log 2>/dev/null || echo "0")
-          TOTAL=$((PASSED + FAILED))
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
 
-          if [ "$TOTAL" -gt 0 ]; then
-            COVERAGE=$((PASSED * 100 / TOTAL))
-          else
-            COVERAGE=0
-          fi
+          path = pathlib.Path("target/conformance-results/latest.json")
+          data = json.loads(path.read_text())
+          results = data.get("results", {})
 
-          echo "passed=$PASSED" >> $GITHUB_OUTPUT
-          echo "failed=$FAILED" >> $GITHUB_OUTPUT
-          echo "total=$TOTAL" >> $GITHUB_OUTPUT
-          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          passed = int(results.get("passed", 0))
+          failed = int(results.get("failed", 0))
+          total = int(results.get("total", 0))
 
-          echo "### Conformance Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-          echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
-          echo "| Total | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-          echo "| Pass Rate | $COVERAGE% |" >> $GITHUB_STEP_SUMMARY
+          coverage = int((passed * 100 / total) if total else 0)
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"passed={passed}\n")
+              handle.write(f"failed={failed}\n")
+              handle.write(f"total={total}\n")
+              handle.write(f"coverage={coverage}\n")
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("### Conformance Test Results\n\n")
+              handle.write("| Metric | Value |\n")
+              handle.write("|--------|-------|\n")
+              handle.write(f"| Passed | {passed} |\n")
+              handle.write(f"| Failed | {failed} |\n")
+              handle.write(f"| Total | {total} |\n")
+              handle.write(f"| Pass Rate | {coverage}% |\n")
+          PY
 
       - name: Check coverage threshold
         run: |
@@ -102,7 +108,7 @@ jobs:
         if: always()
         with:
           name: conformance-log
-          path: conformance_output.log
+          path: target/conformance-results/latest.log
           retention-days: 14
 
   performance-bounds:
