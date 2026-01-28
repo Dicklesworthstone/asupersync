@@ -148,7 +148,7 @@ impl TlsConnection {
 impl<IO> TlsStream<IO> {
     /// Create a new client TLS stream.
     pub(crate) fn new_client(io: IO, conn: ClientConnection) -> Self {
-        TlsStream {
+        Self {
             io,
             conn: TlsConnection::Client(conn),
             state: TlsState::Handshaking,
@@ -157,7 +157,7 @@ impl<IO> TlsStream<IO> {
 
     /// Create a new server TLS stream.
     pub(crate) fn new_server(io: IO, conn: ServerConnection) -> Self {
-        TlsStream {
+        Self {
             io,
             conn: TlsConnection::Server(conn),
             state: TlsState::Handshaking,
@@ -253,7 +253,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                             "connection closed during handshake".into(),
                         )));
                     }
-                    Poll::Ready(Ok(_)) => continue,
+                    Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
                         return Poll::Ready(Err(TlsError::Io(e)));
                     }
@@ -269,7 +269,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                             "connection closed during handshake".into(),
                         )));
                     }
-                    Poll::Ready(Ok(_)) => continue,
+                    Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
                         return Poll::Ready(Err(TlsError::Io(e)));
                     }
@@ -362,7 +362,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => continue,
+                Poll::Ready(Ok(_)) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(TlsError::Io(e))),
                 Poll::Pending => return Poll::Pending,
             }
@@ -391,7 +391,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             match self.poll_handshake(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)));
+                    return Poll::Ready(Err(io::Error::other(e)));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -426,7 +426,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                             e.to_string(),
                         )));
                     }
-                    continue;
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
@@ -454,7 +453,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
             match self.poll_handshake(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)));
+                    return Poll::Ready(Err(io::Error::other(e)));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -469,7 +468,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => continue,
+                Poll::Ready(Ok(_)) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
                     // If we wrote some data to the TLS session, report success
@@ -489,7 +488,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => continue,
+                Poll::Ready(Ok(_)) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }
@@ -510,7 +509,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => continue,
+                Poll::Ready(Ok(_)) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }
