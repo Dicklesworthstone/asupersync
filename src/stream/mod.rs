@@ -817,8 +817,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(10);
         let mut stream = ReceiverStream::new(cx.clone(), rx);
 
-        tx.send(&cx, 1).unwrap();
-        tx.send(&cx, 2).unwrap();
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
         drop(tx);
 
         let waker = noop_waker();

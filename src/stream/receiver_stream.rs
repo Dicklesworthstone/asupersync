@@ -10,9 +10,10 @@
 //! integration in a later phase.
 
 use crate::channel::mpsc;
+use crate::channel::mpsc::RecvError;
 use crate::cx::Cx;
-use crate::error::RecvError;
 use crate::stream::Stream;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -58,15 +59,19 @@ impl<T> ReceiverStream<T> {
 impl<T> Stream for ReceiverStream<T> {
     type Item = T;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        match this.inner.recv(&this.cx) {
-            Ok(item) => {
+        // Poll the recv future using std::pin::pin! for safe pinning
+        let recv_future = this.inner.recv(&this.cx);
+        let mut pinned = std::pin::pin!(recv_future);
+        match pinned.as_mut().poll(poll_cx) {
+            Poll::Ready(Ok(item)) => {
                 this.cx.trace("stream::ReceiverStream yielded item");
                 Poll::Ready(Some(item))
             }
-            Err(RecvError::Disconnected | RecvError::Cancelled) => Poll::Ready(None),
-            Err(RecvError::Empty) => Poll::Pending,
+            Poll::Ready(Err(RecvError::Disconnected | RecvError::Cancelled)) => Poll::Ready(None),
+            Poll::Ready(Err(RecvError::Empty)) => Poll::Pending,
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -99,9 +104,9 @@ mod tests {
         let cx_recv = Cx::for_testing();
         let (tx, rx) = mpsc::channel(4);
 
-        tx.send(&cx_send, 1).expect("send 1");
-        tx.send(&cx_send, 2).expect("send 2");
-        tx.send(&cx_send, 3).expect("send 3");
+        tx.try_send(1).expect("send 1");
+        tx.try_send(2).expect("send 2");
+        tx.try_send(3).expect("send 3");
         drop(tx);
 
         let mut stream = ReceiverStream::new(cx_recv, rx);

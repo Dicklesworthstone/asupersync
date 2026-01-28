@@ -1,8 +1,8 @@
 //! Helpers for forwarding streams to channels.
 
 use crate::channel::mpsc;
+use crate::channel::mpsc::SendError;
 use crate::cx::Cx;
-use crate::error::SendError;
 use crate::runtime::yield_now;
 use crate::stream::{Stream, StreamExt};
 
@@ -19,8 +19,8 @@ impl<T> SinkStream<T> {
     }
 
     /// Send item through the channel.
-    pub fn send(&self, cx: &Cx, item: T) -> Result<(), SendError<T>> {
-        self.sender.send(cx, item)
+    pub async fn send(&self, cx: &Cx, item: T) -> Result<(), SendError<T>> {
+        self.sender.send(cx, item).await
     }
 
     /// Send all items from stream.
