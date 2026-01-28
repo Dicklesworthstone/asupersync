@@ -321,10 +321,10 @@ impl UnixStream {
 
         // Ensure registered
         if self.registration.is_none() {
-             // In a real implementation we would lazily register here using Cx::current().
-             // But self is immutable.
-             // For now we assume registered or fail? Or busy loop?
-             // Falling back to busy loop if not registered is a safe compatibility path.
+            // In a real implementation we would lazily register here using Cx::current().
+            // But self is immutable.
+            // For now we assume registered or fail? Or busy loop?
+            // Falling back to busy loop if not registered is a safe compatibility path.
         }
 
         loop {
@@ -338,21 +338,22 @@ impl UnixStream {
                         // We need to use poll_fn.
                         // This method should be rewritten to use poll_fn like accept().
                         // For now, retaining busy loop if not registered, but this is suboptimal.
-                        
+
                         // BUT wait, we can't update waker without &mut Context.
                         // We need to rewrite this method to use poll_fn.
-                        
+
                         // Refactoring to use poll_fn below...
                         return std::future::poll_fn(|cx| {
-                             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
+                            match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                                 Ok(n) => Poll::Ready(Ok(n)),
                                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                     reg.update_waker(cx.waker().clone());
                                     Poll::Pending
                                 }
                                 Err(e) => Poll::Ready(Err(e)),
-                             }
-                        }).await;
+                            }
+                        })
+                        .await;
                     } else {
                         crate::runtime::yield_now().await;
                     }
@@ -422,15 +423,16 @@ impl UnixStream {
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     if let Some(reg) = &self.registration {
                         return std::future::poll_fn(|cx| {
-                             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
+                            match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                                 Ok(n) => Poll::Ready(Ok(n)),
                                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                     reg.update_waker(cx.waker().clone());
                                     Poll::Pending
                                 }
                                 Err(e) => Poll::Ready(Err(e)),
-                             }
-                        }).await;
+                            }
+                        })
+                        .await;
                     } else {
                         crate::runtime::yield_now().await;
                     }
