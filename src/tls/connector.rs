@@ -163,7 +163,9 @@ impl TlsConnectorBuilder {
     #[cfg(feature = "tls-webpki-roots")]
     pub fn with_webpki_roots(mut self) -> Self {
         for cert in webpki_roots::TLS_SERVER_ROOTS.iter() {
-            let _ = self.root_certs.add(&Certificate::from_der(cert.subject_public_key_info.to_vec()));
+            let _ = self.root_certs.add(&Certificate::from_der(
+                cert.subject_public_key_info.to_vec(),
+            ));
         }
         #[cfg(feature = "tracing-integration")]
         tracing::debug!("Added webpki root certificates");
@@ -317,7 +319,10 @@ mod tests {
     #[test]
     fn test_builder_alpn_http() {
         let builder = TlsConnectorBuilder::new().alpn_http();
-        assert_eq!(builder.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            builder.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
     }
 
     #[test]
@@ -356,10 +361,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn test_build_with_alpn() {
-        let connector = TlsConnectorBuilder::new()
-            .alpn_http()
-            .build()
-            .unwrap();
+        let connector = TlsConnectorBuilder::new().alpn_http().build().unwrap();
 
         assert_eq!(
             connector.config().alpn_protocols,

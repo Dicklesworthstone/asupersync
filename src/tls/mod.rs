@@ -1,5 +1,9 @@
 //! TLS/SSL support via rustls.
 //!
+// Allow clippy lints that are allowed at the crate level but not picked up in this module
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::return_self_not_must_use)]
+//!
 //! This module provides TLS client and server support built on rustls.
 //! It integrates with the asupersync async runtime's I/O traits.
 //!

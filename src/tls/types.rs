@@ -29,9 +29,7 @@ impl Certificate {
     /// Create a certificate from DER-encoded bytes (stub when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_der(der: impl Into<Vec<u8>>) -> Self {
-        Self {
-            _data: der.into(),
-        }
+        Self { _data: der.into() }
     }
 
     /// Get the inner rustls certificate.
@@ -116,9 +114,7 @@ impl PrivateKey {
     /// Create a private key from PKCS#8 DER-encoded bytes (stub when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_pkcs8_der(der: impl Into<Vec<u8>>) -> Self {
-        Self {
-            _data: der.into(),
-        }
+        Self { _data: der.into() }
     }
 
     /// Get the inner rustls private key.
@@ -163,9 +159,7 @@ impl RootCertStore {
     /// Create an empty root certificate store (stub when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn empty() -> Self {
-        Self {
-            certs: Vec::new(),
-        }
+        Self { certs: Vec::new() }
     }
 
     /// Add a certificate to the store.

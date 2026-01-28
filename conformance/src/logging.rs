@@ -4,6 +4,7 @@
 //! capturing logs during test runs and reporting them in results.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -199,6 +200,191 @@ impl std::fmt::Debug for LogCollector {
             .field("min_level", &self.min_level)
             .finish()
     }
+}
+
+// ============================================================================
+// Conformance Test Logger
+// ============================================================================
+
+/// Event types recorded during a conformance test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TestEventKind {
+    /// A named phase transition in the test.
+    Phase,
+    /// An assertion evaluated during the test.
+    Assertion,
+    /// Runtime-level event details captured during the test.
+    RuntimeEvent,
+    /// A warning emitted by the test.
+    Warning,
+    /// A checkpoint marker with structured data.
+    Checkpoint,
+}
+
+/// Structured event recorded during a conformance test run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestEvent {
+    /// Event kind.
+    pub kind: TestEventKind,
+    /// Event name or description.
+    pub name: String,
+    /// Timestamp in milliseconds since test start.
+    pub timestamp_ms: u64,
+    /// Structured details for the event.
+    pub details: serde_json::Value,
+}
+
+impl TestEvent {
+    /// Create a new test event.
+    pub fn new(
+        kind: TestEventKind,
+        name: impl Into<String>,
+        timestamp_ms: u64,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            timestamp_ms,
+            details,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ConformanceTestLogState {
+    test_name: String,
+    spec_section: String,
+    start_time: Instant,
+    events: Vec<TestEvent>,
+}
+
+/// Structured logger for conformance test execution.
+#[derive(Clone)]
+pub struct ConformanceTestLogger {
+    inner: Arc<Mutex<ConformanceTestLogState>>,
+}
+
+impl ConformanceTestLogger {
+    /// Create a new logger for a conformance test.
+    pub fn new(test_name: impl Into<String>, spec_section: impl Into<String>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ConformanceTestLogState {
+                test_name: test_name.into(),
+                spec_section: spec_section.into(),
+                start_time: Instant::now(),
+                events: Vec::new(),
+            })),
+        }
+    }
+
+    /// Record a phase transition.
+    pub fn phase(&self, name: &'static str) {
+        self.record(TestEventKind::Phase, name, serde_json::Value::Null);
+    }
+
+    /// Record an assertion and panic if it fails.
+    #[track_caller]
+    pub fn assert_with_context(&self, condition: bool, description: &str) {
+        let location = std::panic::Location::caller().to_string();
+        let details = serde_json::json!({
+            "passed": condition,
+            "location": location,
+        });
+        self.record(TestEventKind::Assertion, description, details);
+        assert!(
+            condition,
+            "Conformance assertion failed: {}",
+            description
+        );
+    }
+
+    /// Record a runtime event with structured details.
+    pub fn runtime_event(&self, description: &str, details: serde_json::Value) {
+        self.record(TestEventKind::RuntimeEvent, description, details);
+    }
+
+    /// Record a warning event.
+    pub fn warning(&self, message: &str) {
+        self.record(TestEventKind::Warning, message, serde_json::Value::Null);
+    }
+
+    /// Record a checkpoint.
+    pub fn checkpoint(&self, name: &str, data: serde_json::Value) {
+        self.record(TestEventKind::Checkpoint, name, data);
+    }
+
+    /// Return a snapshot of recorded events.
+    pub fn events(&self) -> Vec<TestEvent> {
+        self.inner
+            .lock()
+            .expect("conformance log lock poisoned")
+            .events
+            .clone()
+    }
+
+    /// Get the test name.
+    pub fn test_name(&self) -> String {
+        self.inner
+            .lock()
+            .expect("conformance log lock poisoned")
+            .test_name
+            .clone()
+    }
+
+    /// Get the spec section label.
+    pub fn spec_section(&self) -> String {
+        self.inner
+            .lock()
+            .expect("conformance log lock poisoned")
+            .spec_section
+            .clone()
+    }
+
+    fn record(&self, kind: TestEventKind, name: &str, details: serde_json::Value) {
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("conformance log lock poisoned");
+        let timestamp_ms = guard.start_time.elapsed().as_millis() as u64;
+        guard
+            .events
+            .push(TestEvent::new(kind, name, timestamp_ms, details));
+    }
+}
+
+thread_local! {
+    static CURRENT_TEST_LOGGER: RefCell<Option<ConformanceTestLogger>> =
+        const { RefCell::new(None) };
+}
+
+/// Execute a closure with a logger installed for checkpoint capture.
+pub fn with_test_logger<T>(logger: &ConformanceTestLogger, f: impl FnOnce() -> T) -> T {
+    struct Guard {
+        prev: Option<ConformanceTestLogger>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let prev = self.prev.take();
+            CURRENT_TEST_LOGGER.with(|slot| {
+                *slot.borrow_mut() = prev;
+            });
+        }
+    }
+
+    let prev = CURRENT_TEST_LOGGER.with(|slot| slot.replace(Some(logger.clone())));
+    let _guard = Guard { prev };
+    f()
+}
+
+/// Record a checkpoint into the current test logger, if one is installed.
+pub fn record_checkpoint(name: &str, data: serde_json::Value) {
+    CURRENT_TEST_LOGGER.with(|slot| {
+        if let Some(logger) = slot.borrow().as_ref() {
+            logger.checkpoint(name, data);
+        }
+    });
 }
 
 /// Configuration for logging output.

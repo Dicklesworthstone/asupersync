@@ -37,6 +37,7 @@ use std::time::Duration;
 
 pub mod bench;
 pub mod logging;
+pub mod report;
 pub mod runner;
 pub mod tests;
 pub mod traceability;
@@ -47,10 +48,15 @@ pub use bench::{
     BenchRunResult, BenchRunSummary, BenchRunner, BenchThresholds, Benchmark, Comparison,
     ComparisonConfidence, RegressionCheck, RegressionConfig, RegressionMetric, Stats, StatsError,
 };
-pub use logging::{LogCollector, LogConfig, LogEntry, LogLevel};
+pub use logging::{
+    ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent,
+    TestEventKind,
+};
+pub use report::{render_console_summary, write_json_report};
 pub use runner::{
     compare_results, run_comparison, ComparisonResult, ComparisonStatus, ComparisonSummary,
-    RunConfig, RunSummary, SingleRunResult, TestRunner,
+    RunConfig, RunSummary, SingleRunResult, SuiteResult, SuiteTestResult, TestRunner,
+    run_conformance_suite,
 };
 pub use traceability::{
     CiReport, CoverageStats, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
@@ -129,9 +135,8 @@ impl Checkpoint {
 
 /// Helper function to record a checkpoint.
 pub fn checkpoint(name: &str, data: serde_json::Value) {
-    // In a real implementation, this would push to thread-local storage
-    // For now, it's a placeholder that tests can use
-    let _ = Checkpoint::new(name, data);
+    let _ = Checkpoint::new(name, data.clone());
+    crate::logging::record_checkpoint(name, data);
 }
 
 // ============================================================================

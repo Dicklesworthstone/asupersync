@@ -4,7 +4,8 @@
 //! implementations and collects results. When running in comparison mode,
 //! it runs each test against both runtimes and compares the outcomes.
 
-use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestResult};
+use crate::logging::{with_test_logger, ConformanceTestLogger, TestEvent};
+use crate::{Checkpoint, ConformanceTest, RuntimeInterface, TestCategory, TestResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -126,6 +127,82 @@ pub struct SingleRunResult {
     pub category: TestCategory,
     /// The test result.
     pub result: TestResult,
+}
+
+/// Result of running a test with structured events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteTestResult {
+    /// Test ID.
+    pub test_id: String,
+    /// Test name.
+    pub test_name: String,
+    /// Test category.
+    pub category: TestCategory,
+    /// Expected behavior description.
+    pub expected: String,
+    /// Test result payload.
+    pub result: TestResult,
+    /// Checkpoints captured during execution.
+    pub checkpoints: Vec<Checkpoint>,
+    /// Structured events captured during execution.
+    pub events: Vec<TestEvent>,
+}
+
+/// Summary of a full conformance suite run with structured events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteResult {
+    /// Runtime name.
+    pub runtime_name: String,
+    /// Total number of tests executed.
+    pub total: usize,
+    /// Number of tests that passed.
+    pub passed: usize,
+    /// Number of tests that failed.
+    pub failed: usize,
+    /// Number of tests that were skipped.
+    pub skipped: usize,
+    /// Total execution time.
+    pub duration_ms: u64,
+    /// Individual test results.
+    pub results: Vec<SuiteTestResult>,
+}
+
+impl SuiteResult {
+    /// Create a new suite result.
+    pub fn new(runtime_name: impl Into<String>) -> Self {
+        Self {
+            runtime_name: runtime_name.into(),
+            total: 0,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            results: Vec::new(),
+        }
+    }
+
+    fn push<RT: RuntimeInterface>(
+        &mut self,
+        test: &ConformanceTest<RT>,
+        result: TestResult,
+        events: Vec<TestEvent>,
+    ) {
+        if result.passed {
+            self.passed += 1;
+        } else {
+            self.failed += 1;
+        }
+
+        self.results.push(SuiteTestResult {
+            test_id: test.meta.id.clone(),
+            test_name: test.meta.name.clone(),
+            category: test.meta.category,
+            expected: test.meta.expected.clone(),
+            checkpoints: result.checkpoints.clone(),
+            result,
+            events,
+        });
+    }
 }
 
 /// Result of comparing a test run between two runtimes.
@@ -329,6 +406,28 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
         summary
     }
 
+    /// Run all tests with structured logging enabled.
+    pub fn run_all_with_logs(&self, tests: &[ConformanceTest<RT>]) -> SuiteResult {
+        let start = Instant::now();
+        let filtered = self.filter_tests(tests);
+
+        let mut summary = SuiteResult::new(self.runtime_name);
+
+        for test in filtered {
+            let (result, events) = self.run_single_with_logger(test);
+            let passed = result.passed;
+            summary.push(test, result, events);
+
+            if !passed && self.config.fail_fast {
+                break;
+            }
+        }
+
+        summary.total = summary.results.len();
+        summary.duration_ms = start.elapsed().as_millis() as u64;
+        summary
+    }
+
     /// Run a single test.
     pub fn run_single(&self, test: &ConformanceTest<RT>) -> TestResult {
         let start = Instant::now();
@@ -357,6 +456,48 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
                     .with_duration(duration.as_millis() as u64)
             }
         }
+    }
+
+    /// Run a single test and return structured events.
+    pub fn run_single_with_logger(
+        &self,
+        test: &ConformanceTest<RT>,
+    ) -> (TestResult, Vec<TestEvent>) {
+        let logger = ConformanceTestLogger::new(&test.meta.name, &test.meta.expected);
+        let start = Instant::now();
+
+        let result = with_test_logger(&logger, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test.run(self.runtime)))
+        });
+
+        let duration = start.elapsed();
+
+        let mut test_result = match result {
+            Ok(mut test_result) => {
+                test_result.duration_ms = Some(duration.as_millis() as u64);
+                test_result
+            }
+            Err(panic) => {
+                let message = if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+
+                TestResult::failed(format!("Test panicked: {message}"))
+                    .with_duration(duration.as_millis() as u64)
+            }
+        };
+
+        // Ensure duration is always set.
+        if test_result.duration_ms.is_none() {
+            test_result.duration_ms = Some(duration.as_millis() as u64);
+        }
+
+        let events = logger.events();
+        (test_result, events)
     }
 
     /// Filter tests based on configuration.
@@ -393,6 +534,17 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
             })
             .collect()
     }
+}
+
+/// Run the full conformance suite and collect structured logs.
+pub fn run_conformance_suite<RT: RuntimeInterface>(
+    runtime: &RT,
+    runtime_name: &str,
+    config: RunConfig,
+) -> SuiteResult {
+    let tests = crate::tests::all_tests::<RT>();
+    let runner = TestRunner::new(runtime, runtime_name, config);
+    runner.run_all_with_logs(&tests)
 }
 
 /// Compare test results between two runtimes.
