@@ -518,11 +518,29 @@ impl RateLimiter {
         let entry = queue.iter_mut().find(|entry| entry.result.is_none())?;
 
         let cost_fixed = u64::from(entry.cost) * FIXED_POINT_SCALE;
-        let current = self.tokens_fixed.load(Ordering::SeqCst);
 
-        if current >= cost_fixed {
-            // Grant this entry
-            self.tokens_fixed.fetch_sub(cost_fixed, Ordering::SeqCst);
+        // CAS loop to consume tokens safely (prevents TOCTOU race with try_acquire)
+        let tokens_consumed = loop {
+            let current = self.tokens_fixed.load(Ordering::SeqCst);
+            if current < cost_fixed {
+                break false; // Not enough tokens
+            }
+            if self
+                .tokens_fixed
+                .compare_exchange(
+                    current,
+                    current - cost_fixed,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                break true; // Successfully consumed tokens
+            }
+            // CAS failed, another thread consumed tokens, retry
+        };
+
+        if tokens_consumed {
             entry.result = Some(Ok(()));
 
             // Record wait time
@@ -706,19 +724,30 @@ impl SlidingWindowRateLimiter {
 
     /// Try to acquire without waiting.
     #[must_use]
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
         self.cleanup_old(now);
 
-        let usage = self.current_usage(now);
-        if usage + cost <= self.policy.rate {
-            let mut window = self.window.write().expect("lock poisoned");
-            window.push_back((now.as_millis(), cost));
-            drop(window);
+        let now_millis = now.as_millis();
+        let period_millis = self.policy.period.as_millis() as u64;
 
+        // Hold write lock during both usage check and entry addition to prevent TOCTOU
+        let mut window = self.window.write().expect("lock poisoned");
+
+        // Calculate usage while holding write lock
+        let usage: u32 = window
+            .iter()
+            .filter(|(t, _)| now_millis.saturating_sub(*t) < period_millis)
+            .map(|(_, c)| c)
+            .sum();
+
+        if usage + cost <= self.policy.rate {
+            window.push_back((now_millis, cost));
+            drop(window);
             self.metrics.write().expect("lock poisoned").total_allowed += 1;
             true
         } else {
+            drop(window);
             self.metrics.write().expect("lock poisoned").total_rejected += 1;
             false
         }
