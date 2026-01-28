@@ -114,16 +114,18 @@ impl UnixStream {
         let inner = net::UnixStream::connect(path)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor
-        let cx = Cx::current();
-        let registration = cx.register_io(
-            &UnixStreamSource(&inner),
-            Interest::READABLE | Interest::WRITABLE,
-        )?;
+        // Register with reactor if available
+        let registration = Cx::current().and_then(|cx| {
+            cx.register_io(
+                &UnixStreamSource(&inner),
+                Interest::READABLE | Interest::WRITABLE,
+            )
+            .ok()
+        });
 
         Ok(Self {
             inner: Arc::new(inner),
-            registration: Some(registration),
+            registration,
         })
     }
 
@@ -153,16 +155,18 @@ impl UnixStream {
         let inner = net::UnixStream::connect_addr(&addr)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor
-        let cx = Cx::current();
-        let registration = cx.register_io(
-            &UnixStreamSource(&inner),
-            Interest::READABLE | Interest::WRITABLE,
-        )?;
+        // Register with reactor if available
+        let registration = Cx::current().and_then(|cx| {
+            cx.register_io(
+                &UnixStreamSource(&inner),
+                Interest::READABLE | Interest::WRITABLE,
+            )
+            .ok()
+        });
 
         Ok(Self {
             inner: Arc::new(inner),
-            registration: Some(registration),
+            registration,
         })
     }
 

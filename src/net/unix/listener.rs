@@ -27,16 +27,16 @@
 //! For abstract namespace sockets (Linux only), no cleanup is needed as the
 //! kernel handles it automatically.
 
-use crate::net::unix::stream::UnixStream;
-use crate::stream::Stream;
 use crate::cx::Cx;
-use crate::runtime::reactor::{Registration, Interest, Source};
+use crate::net::unix::stream::UnixStream;
+use crate::runtime::reactor::{Interest, Registration, Source};
+use crate::stream::Stream;
+use std::future::poll_fn;
 use std::io;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::future::poll_fn;
 
 /// A Unix domain socket listener.
 ///
@@ -104,14 +104,14 @@ impl UnixListener {
         let inner = net::UnixListener::bind(path)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor
-        let cx = Cx::current();
-        let registration = cx.register_io(&UnixListenerSource(&inner), Interest::READABLE)?;
+        // Register with reactor if available
+        let registration = Cx::current()
+            .and_then(|cx| cx.register_io(&UnixListenerSource(&inner), Interest::READABLE).ok());
 
         Ok(Self {
             inner,
             path: Some(path.to_path_buf()),
-            registration: Some(registration),
+            registration,
         })
     }
 
@@ -141,14 +141,14 @@ impl UnixListener {
         let inner = net::UnixListener::bind_addr(&addr)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor
-        let cx = Cx::current();
-        let registration = cx.register_io(&UnixListenerSource(&inner), Interest::READABLE)?;
+        // Register with reactor if available
+        let registration = Cx::current()
+            .and_then(|cx| cx.register_io(&UnixListenerSource(&inner), Interest::READABLE).ok());
 
         Ok(Self {
             inner,
             path: None, // No filesystem path for abstract sockets
-            registration: Some(registration),
+            registration,
         })
     }
 
@@ -186,32 +186,32 @@ impl UnixListener {
                     // For now, let's assume UnixStream handles its own registration or we do it here.
                     // Since UnixStream doesn't have an async constructor for from_std, we return it unregistered
                     // but it will be registered on first I/O? No, async methods on UnixStream expect registration.
-                    
+
                     // Actually, UnixStream::from_std returns a wrapper. That wrapper should probably facilitate registration.
                     // But we can't register it here easily without moving it into an async block or similar.
                     // However, UnixStream::from_std is synchronous.
-                    
-                    // Let's rely on UnixStream::from_std returning a valid stream, 
+
+                    // Let's rely on UnixStream::from_std returning a valid stream,
                     // and the user will likely use it in an async context where they might register it?
                     // No, `UnixStream` wraps `inner`. It should handle registration.
-                    
+
                     // Let's create an unregistered UnixStream and let the user (or read/write calls) handle it?
                     // Ideally `accept` should return a registered stream.
-                    
+
                     // Implementation note: we return unregistered stream here because we are inside poll_fn which is sync.
                     // The caller of accept might want to register it.
                     // Or we can register it using `Cx::current()` inside `poll_fn`? Yes we can!
                     // Cx::current() is available in thread-local storage if we are in a task.
-                    
+
                     // BUT `poll_fn` gives us `&mut Context`. It doesn't give us `Cx`.
                     // We can try `Cx::current()` if we assume we are in a runtime task.
-                    
+
                     // Actually, the `Cx` in `poll_fn` is `std::task::Context`.
                     // We need `crate::cx::Cx`.
-                    
+
                     // Let's just return unregistered stream for now and let `UnixStream` operations handle lazy registration or assume explicit registration?
                     // `UnixStream` in Phase 2 should probably hold `Option<Registration>`.
-                    
+
                     Poll::Ready(Ok((UnixStream::from_std(stream), addr)))
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -222,7 +222,8 @@ impl UnixListener {
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
-        }).await
+        })
+        .await
     }
 
     /// Returns the local socket address.
