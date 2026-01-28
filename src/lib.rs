@@ -87,6 +87,8 @@ pub mod test_logging;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
 pub mod time;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod trace;
 pub mod tracing_compat;
 pub mod transport;

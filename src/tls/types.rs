@@ -124,7 +124,7 @@ impl PrivateKey {
     /// Get the inner rustls private key.
     #[cfg(feature = "tls")]
     pub(crate) fn clone_inner(&self) -> PrivateKeyDer<'static> {
-        (*self.inner).clone()
+        (*self.inner).clone_key()
     }
 }
 
@@ -137,7 +137,7 @@ impl std::fmt::Debug for PrivateKey {
 }
 
 /// A store of trusted root certificates.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RootCertStore {
     #[cfg(feature = "tls")]
     inner: rustls::RootCertStore,
@@ -145,10 +145,27 @@ pub struct RootCertStore {
     certs: Vec<Certificate>,
 }
 
+impl Default for RootCertStore {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl RootCertStore {
     /// Create an empty root certificate store.
+    #[cfg(feature = "tls")]
     pub fn empty() -> Self {
-        Self::default()
+        Self {
+            inner: rustls::RootCertStore::empty(),
+        }
+    }
+
+    /// Create an empty root certificate store (stub when TLS is disabled).
+    #[cfg(not(feature = "tls"))]
+    pub fn empty() -> Self {
+        Self {
+            certs: Vec::new(),
+        }
     }
 
     /// Add a certificate to the store.
