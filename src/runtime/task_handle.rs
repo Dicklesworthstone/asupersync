@@ -119,6 +119,7 @@ impl<T> TaskHandle<T> {
         JoinFuture {
             handle: self,
             inner: self.receiver.recv(cx),
+            completed: false,
         }
     }
 
@@ -144,9 +145,20 @@ impl<T> TaskHandle<T> {
     /// This is a request - the task may not stop immediately. The task
     /// will observe the cancellation at its next checkpoint.
     pub fn abort(&self) {
+        self.abort_with_reason(CancelReason::user("abort"));
+    }
+
+    /// Aborts the task (requests cancellation) with an explicit reason.
+    ///
+    /// The reason is only set if none is already present, to avoid clobbering
+    /// more specific cancellation attribution.
+    pub fn abort_with_reason(&self, reason: CancelReason) {
         if let Some(inner) = self.inner.upgrade() {
             if let Ok(mut lock) = inner.write() {
                 lock.cancel_requested = true;
+                if lock.cancel_reason.is_none() {
+                    lock.cancel_reason = Some(reason);
+                }
             }
         }
     }
@@ -159,6 +171,7 @@ impl<T> TaskHandle<T> {
 pub struct JoinFuture<'a, T> {
     handle: &'a TaskHandle<T>,
     inner: oneshot::RecvFuture<'a, Result<T, JoinError>>,
+    completed: bool,
 }
 
 impl<T> std::future::Future for JoinFuture<'_, T> {
@@ -168,10 +181,15 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
+        let this = &mut *self;
         // JoinError needs to be mapped if recv fails with RecvError
-        match std::pin::Pin::new(&mut self.inner).poll(cx) {
-            std::task::Poll::Ready(Ok(res)) => std::task::Poll::Ready(res),
+        match std::pin::Pin::new(&mut this.inner).poll(cx) {
+            std::task::Poll::Ready(Ok(res)) => {
+                this.completed = true;
+                std::task::Poll::Ready(res)
+            }
             std::task::Poll::Ready(Err(_)) => {
+                this.completed = true;
                 std::task::Poll::Ready(Err(JoinError::Cancelled(CancelReason::race_loser())))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -183,7 +201,9 @@ impl<T> Drop for JoinFuture<'_, T> {
     fn drop(&mut self) {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
-        self.handle.abort();
+        if !self.completed {
+            self.handle.abort();
+        }
     }
 }
 

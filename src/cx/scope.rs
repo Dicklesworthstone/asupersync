@@ -103,7 +103,7 @@ use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
-use crate::types::{Budget, PanicPayload, Policy, RegionId, TaskId};
+use crate::types::{Budget, CancelReason, PanicPayload, Policy, RegionId, TaskId};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -691,13 +691,13 @@ impl<P: Policy> Scope<'_, P> {
         match Select::new(f1, f2).await {
             Either::Left(res) => {
                 // h1 finished first
-                h2.abort();
+                h2.abort_with_reason(CancelReason::race_loser());
                 let _ = h2.join(cx).await; // Drain h2
                 res
             }
             Either::Right(res) => {
                 // h2 finished first
-                h1.abort();
+                h1.abort_with_reason(CancelReason::race_loser());
                 let _ = h1.join(cx).await; // Drain h1
                 res
             }
@@ -731,7 +731,7 @@ impl<P: Policy> Scope<'_, P> {
         // Cancel and drain losers
         for (i, handle) in handles.iter().enumerate() {
             if i != winner_idx {
-                handle.abort();
+                handle.abort_with_reason(CancelReason::race_loser());
             }
         }
 

@@ -35,10 +35,12 @@
 //! handshake completes, read/write operations follow the cancel-safety
 //! properties of the underlying I/O traits.
 
+mod acceptor;
 mod connector;
 mod error;
 mod types;
 
+pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
 pub use connector::{TlsConnector, TlsConnectorBuilder};
 pub use error::TlsError;
 pub use types::{Certificate, CertificateChain, PrivateKey, RootCertStore};
