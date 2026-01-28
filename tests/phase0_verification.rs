@@ -14,7 +14,7 @@ use asupersync::lab::oracle::{
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy, RewriteRule};
-use asupersync::record::task::TaskState;
+use asupersync::record::task::{TaskPhase, TaskState};
 use asupersync::record::{Finalizer, ObligationKind, ObligationState};
 use asupersync::runtime::{yield_now, JoinError, RuntimeState, TaskHandle};
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
@@ -1039,6 +1039,7 @@ fn plan_node_count(plan: &PlanDag) -> usize {
     count
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
     let root = plan.root().expect("plan root set");
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -1060,6 +1061,33 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
 
     runtime.run_until_quiescent();
     if !runtime.is_quiescent() {
+        let mut live_tasks: Vec<(TaskId, TaskState, TaskPhase, u64, Option<u64>)> = runtime
+            .state
+            .tasks
+            .iter()
+            .map(|(_, record)| {
+                (
+                    record.id,
+                    record.state.clone(),
+                    record.phase(),
+                    record.last_polled_step,
+                    None,
+                )
+            })
+            .collect();
+        for entry in &mut live_tasks {
+            let poll_count = runtime
+                .state
+                .get_stored_future(entry.0)
+                .map(|stored| stored.poll_count());
+            entry.4 = poll_count;
+        }
+        tracing::debug!(
+            steps = runtime.steps(),
+            live_task_count = live_tasks.len(),
+            ?live_tasks,
+            "plan runtime not quiescent before reschedule"
+        );
         let mut sched = runtime.scheduler.lock().expect("scheduler lock");
         for (_, record) in runtime.state.tasks.iter() {
             if record.is_runnable() {
@@ -1072,6 +1100,35 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         drop(sched);
         runtime.run_until_quiescent();
         let quiescent = runtime.is_quiescent();
+        if !quiescent {
+            let mut live_tasks: Vec<(TaskId, TaskState, TaskPhase, u64, Option<u64>)> = runtime
+                .state
+                .tasks
+                .iter()
+                .map(|(_, record)| {
+                    (
+                        record.id,
+                        record.state.clone(),
+                        record.phase(),
+                        record.last_polled_step,
+                        None,
+                    )
+                })
+                .collect();
+            for entry in &mut live_tasks {
+                let poll_count = runtime
+                    .state
+                    .get_stored_future(entry.0)
+                    .map(|stored| stored.poll_count());
+                entry.4 = poll_count;
+            }
+            tracing::debug!(
+                steps = runtime.steps(),
+                live_task_count = live_tasks.len(),
+                ?live_tasks,
+                "plan runtime not quiescent after reschedule"
+            );
+        }
         assert_with_log!(
             quiescent,
             "runtime quiescent after reschedule",
@@ -1237,11 +1294,20 @@ where
         .state
         .create_task(region, Budget::INFINITE, future)
         .expect("create task");
+    let priority = runtime
+        .state
+        .tasks
+        .iter()
+        .find(|(_, record)| record.id == task_id)
+        .and_then(|(_, record)| record.cx_inner.as_ref())
+        .map_or(0, |inner| {
+            inner.read().expect("lock poisoned").budget.priority
+        });
     runtime
         .scheduler
         .lock()
         .expect("scheduler lock")
-        .schedule(task_id, 0);
+        .schedule(task_id, priority);
     SharedHandle::new(handle)
 }
 
