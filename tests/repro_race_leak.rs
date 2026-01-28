@@ -111,11 +111,20 @@ fn repro_race_leak() {
         assert!(stored_winner.poll(&mut ctx).is_ready()); // Winner finishes
         assert!(stored_loser.poll(&mut ctx).is_pending()); // Loser is pending
 
+        let loser_task_id = loser_handle.task_id();
+
         // Now race the handles using Cx::race (simulating what race! macro does)
-        let cx_for_race = cx.clone();
-        let race_future = cx_for_race.race(vec![
-            Box::pin(winner_handle.join(&cx)),
-            Box::pin(loser_handle.join(&cx)),
+        let race_future = cx.race(vec![
+            {
+                let cx = cx.clone();
+                let handle = winner_handle;
+                Box::pin(async move { handle.join(&cx).await })
+            },
+            {
+                let cx = cx.clone();
+                let handle = loser_handle;
+                Box::pin(async move { handle.join(&cx).await })
+            },
         ]);
 
         // Await the race
@@ -137,7 +146,7 @@ fn repro_race_leak() {
         // We can check if the loser task's context has cancellation requested.
         // We need to peek into the stored task or the runtime state.
 
-        let task_record = state.task(loser_handle.task_id()).expect("task record");
+        let task_record = state.task(loser_task_id).expect("task record");
         let inner = task_record
             .cx_inner
             .as_ref()
@@ -164,6 +173,7 @@ fn repro_race_leak() {
                 std::future::pending::<&str>().await
             })
             .unwrap();
+        let loser_task_id2 = loser_handle2.task_id();
 
         assert!(stored_winner2.poll(&mut ctx).is_ready());
         assert!(stored_loser2.poll(&mut ctx).is_pending());
@@ -173,9 +183,7 @@ fn repro_race_leak() {
             .await
             .unwrap();
 
-        let task_record2 = state
-            .task(loser_handle2.task_id())
-            .expect("task record 2");
+        let task_record2 = state.task(loser_task_id2).expect("task record 2");
         let inner2 = task_record2
             .cx_inner
             .as_ref()
