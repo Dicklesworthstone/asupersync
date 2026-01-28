@@ -274,36 +274,53 @@ impl RateLimiter {
     }
 
     /// Refill tokens based on elapsed time.
+    ///
+    /// Uses CAS on `last_refill` to ensure only one thread adds tokens for any
+    /// given time period, preventing double-refill race conditions.
     #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
     fn refill(&self, now: Time) {
         let now_millis = now.as_millis();
-        let last = self.last_refill.load(Ordering::SeqCst);
-
-        if now_millis <= last {
-            return;
-        }
-
-        // Calculate tokens to add
-        let elapsed_ms = now_millis - last;
         let period_ms = self.policy.period.as_millis() as f64;
         let tokens_per_ms = (f64::from(self.policy.rate) / period_ms) * FIXED_POINT_SCALE as f64;
-        let tokens_to_add = (elapsed_ms as f64 * tokens_per_ms) as u64;
-
         let max_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
 
-        // CAS loop to update
+        // CAS loop on last_refill to claim the refill operation
         loop {
-            let current = self.tokens_fixed.load(Ordering::SeqCst);
-            let new_tokens = (current + tokens_to_add).min(max_tokens);
+            let last = self.last_refill.load(Ordering::SeqCst);
 
-            if self
-                .tokens_fixed
-                .compare_exchange(current, new_tokens, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                self.last_refill.store(now_millis, Ordering::SeqCst);
-                break;
+            if now_millis <= last {
+                return; // Already refilled up to this time
             }
+
+            // Try to claim this refill by updating last_refill first
+            if self
+                .last_refill
+                .compare_exchange(last, now_millis, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                // Someone else updated last_refill, retry
+                continue;
+            }
+
+            // We won the race - now calculate and add tokens
+            let elapsed_ms = now_millis - last;
+            let tokens_to_add = (elapsed_ms as f64 * tokens_per_ms) as u64;
+
+            // CAS loop to add tokens
+            loop {
+                let current = self.tokens_fixed.load(Ordering::SeqCst);
+                let new_tokens = (current + tokens_to_add).min(max_tokens);
+
+                if self
+                    .tokens_fixed
+                    .compare_exchange(current, new_tokens, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+
+            return;
         }
     }
 
