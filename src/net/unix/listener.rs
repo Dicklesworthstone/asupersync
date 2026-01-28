@@ -182,6 +182,21 @@ impl UnixListener {
     /// ```
     #[allow(clippy::future_not_send)]
     pub async fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
+        if self.registration.is_none() {
+            loop {
+                match self.inner.accept() {
+                    Ok((stream, addr)) => {
+                        stream.set_nonblocking(true)?;
+                        return Ok((UnixStream::from_std(stream), addr));
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        crate::runtime::yield_now().await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
         poll_fn(|cx| {
             match self.inner.accept() {
                 Ok((stream, addr)) => {
@@ -222,6 +237,7 @@ impl UnixListener {
                     Poll::Ready(Ok((UnixStream::from_std(stream), addr)))
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // Safe: we only reach here when registration is present.
                     if let Some(reg) = &self.registration {
                         reg.update_waker(cx.waker().clone());
                     }
