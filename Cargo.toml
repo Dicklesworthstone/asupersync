@@ -26,7 +26,7 @@ trace-compression = ["dep:lz4_flex"]
 # Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls
-tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring"]
+tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring", "dep:rustls-pemfile"]
 # Enable native root certificates for TLS
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
@@ -76,6 +76,8 @@ rustls-pki-types = { version = "1.12", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 # Optional webpki root certificates
 webpki-roots = { version = "0.26", optional = true }
+# PEM file parsing for TLS certificates
+rustls-pemfile = { version = "2.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }
