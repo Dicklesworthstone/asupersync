@@ -25,6 +25,12 @@ tower = ["dep:tower"]
 trace-compression = ["dep:lz4_flex"]
 # Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
+# Enable TLS support via rustls
+tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring"]
+# Enable native root certificates for TLS
+tls-native-roots = ["tls", "dep:rustls-native-certs"]
+# Enable webpki root certificates for TLS
+tls-webpki-roots = ["tls", "dep:webpki-roots"]
 
 [lib]
 path = "src/lib.rs"
@@ -63,9 +69,20 @@ asupersync-macros = { path = "asupersync-macros", optional = true }
 lz4_flex = { version = "0.11", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
+# TLS support via rustls
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
+rustls-pki-types = { version = "1.12", optional = true }
+# Optional native root certificates
+rustls-native-certs = { version = "0.8", optional = true }
+# Optional webpki root certificates
+webpki-roots = { version = "0.26", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }
+
+# Rustls crypto provider - ring is the most widely used
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
 proptest = "1.6"
