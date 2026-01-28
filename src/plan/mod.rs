@@ -567,12 +567,12 @@ mod tests {
             crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
         match winner {
             crate::combinator::Either::Left(result) => {
-                right.abort();
+                right.abort_with_reason(crate::types::CancelReason::race_loser());
                 let _ = right.join(cx).await;
                 result_to_label(&result)
             }
             crate::combinator::Either::Right(result) => {
-                left.abort();
+                left.abort_with_reason(crate::types::CancelReason::race_loser());
                 let _ = left.join(cx).await;
                 result_to_label(&result)
             }
@@ -667,15 +667,19 @@ mod tests {
                         .await
                         {
                             crate::combinator::Either::Left(result) => {
-                                a2_handle.abort();
-                                c_handle.abort();
+                                a2_handle
+                                    .abort_with_reason(crate::types::CancelReason::race_loser());
+                                c_handle
+                                    .abort_with_reason(crate::types::CancelReason::race_loser());
                                 let _ = a2_handle.join(&cx).await;
                                 let _ = c_handle.join(&cx).await;
                                 result
                             }
                             crate::combinator::Either::Right(result) => {
-                                a1_handle.abort();
-                                b_handle.abort();
+                                a1_handle
+                                    .abort_with_reason(crate::types::CancelReason::race_loser());
+                                b_handle
+                                    .abort_with_reason(crate::types::CancelReason::race_loser());
                                 let _ = a1_handle.join(&cx).await;
                                 let _ = b_handle.join(&cx).await;
                                 result
