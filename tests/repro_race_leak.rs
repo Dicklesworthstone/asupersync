@@ -60,6 +60,12 @@ impl Drop for DroppableFuture {
     }
 }
 
+struct NoopWaker;
+
+impl std::task::Wake for NoopWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
 #[test]
 fn repro_race_leak() {
     init_test_logging();
@@ -77,15 +83,14 @@ fn repro_race_leak() {
         let loser_flag_clone = loser_flag.clone();
 
         // Spawn a loser task that never finishes but has a drop guard
-        let (loser_handle, mut stored_loser) =
-            scope
-                .spawn(&mut state, &cx, move |_| async move {
-                    // This task runs forever. If it's cancelled, it should be dropped.
-                    let fut = DroppableFuture::new(loser_flag_clone);
-                    fut.await;
-                    "loser"
-                })
-                .expect("spawn failed");
+        let (loser_handle, mut stored_loser) = scope
+            .spawn(&mut state, &cx, move |_| async move {
+                // This task runs forever. If it's cancelled, it should be dropped.
+                let fut = DroppableFuture::new(loser_flag_clone);
+                fut.await;
+                "loser"
+            })
+            .expect("spawn failed");
 
         // Spawn a winner task that finishes immediately
         let (winner_handle, mut stored_winner) = scope
@@ -98,10 +103,6 @@ fn repro_race_leak() {
         // Here we simulate the executor.
 
         // Create a waker
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut ctx = Context::from_waker(&waker);
 
@@ -145,10 +146,7 @@ fn repro_race_leak() {
         // We need to peek into the stored task or the runtime state.
 
         let task_record = state.task(loser_task_id).expect("task record");
-        let inner = task_record
-            .cx_inner
-            .as_ref()
-            .expect("cx inner missing");
+        let inner = task_record.cx_inner.as_ref().expect("cx inner missing");
         let is_cancelled = inner.read().unwrap().cancel_requested;
 
         tracing::debug!(is_cancelled, "loser cancelled");
@@ -182,16 +180,16 @@ fn repro_race_leak() {
             .unwrap();
 
         let task_record2 = state.task(loser_task_id2).expect("task record 2");
-        let inner2 = task_record2
-            .cx_inner
-            .as_ref()
-            .expect("cx inner 2 missing");
+        let inner2 = task_record2.cx_inner.as_ref().expect("cx inner 2 missing");
         let is_cancelled2 = inner2.read().unwrap().cancel_requested;
 
         tracing::debug!(is_cancelled2, "loser2 cancelled");
 
         // Expect TRUE
-        assert!(is_cancelled2, "Loser task SHOULD be cancelled by Scope::race");
+        assert!(
+            is_cancelled2,
+            "Loser task SHOULD be cancelled by Scope::race"
+        );
     });
 
     test_complete!("repro_race_leak");
