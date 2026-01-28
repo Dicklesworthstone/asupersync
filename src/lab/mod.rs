@@ -51,6 +51,7 @@ pub mod chaos;
 pub mod config;
 pub mod injection;
 pub mod instrumented_future;
+pub mod meta;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
@@ -73,6 +74,10 @@ pub use oracle::{
     FinalizerId, FinalizerOracle, FinalizerViolation, LoserDrainOracle, LoserDrainViolation,
     ObligationLeakOracle, ObligationLeakViolation, OracleSuite, OracleViolation, QuiescenceOracle,
     QuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
+};
+pub use meta::{
+    builtin_mutations, invariant_from_violation, BuiltinMutation, MetaCoverageEntry,
+    MetaCoverageReport, MetaReport, MetaResult, MetaRunner, ALL_ORACLE_INVARIANTS,
 };
 pub use runtime::LabRuntime;
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};
