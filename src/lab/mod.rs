@@ -69,15 +69,15 @@ pub use instrumented_future::{
     InjectionResult, InjectionRunner, InjectionStrategy, InstrumentedFuture,
     InstrumentedPollResult,
 };
+pub use meta::{
+    builtin_mutations, invariant_from_violation, BuiltinMutation, MetaCoverageEntry,
+    MetaCoverageReport, MetaReport, MetaResult, MetaRunner, ALL_ORACLE_INVARIANTS,
+};
 pub use oracle::{
     assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,
     FinalizerId, FinalizerOracle, FinalizerViolation, LoserDrainOracle, LoserDrainViolation,
     ObligationLeakOracle, ObligationLeakViolation, OracleSuite, OracleViolation, QuiescenceOracle,
     QuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
-};
-pub use meta::{
-    builtin_mutations, invariant_from_violation, BuiltinMutation, MetaCoverageEntry,
-    MetaCoverageReport, MetaReport, MetaResult, MetaRunner, ALL_ORACLE_INVARIANTS,
 };
 pub use runtime::LabRuntime;
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};
