@@ -77,10 +77,11 @@ impl MetaHarness {
         task
     }
 
-    pub(crate) fn close_region(&mut self, region: RegionId) {
+    pub(crate) fn close_region(&self, region: RegionId) {
         if let Some(record) = self.runtime.state.region(region) {
             let _ = record.begin_close(None);
             let _ = record.begin_drain();
+            let _ = record.begin_finalize();
             let _ = record.complete_close();
         }
     }
@@ -94,20 +95,27 @@ impl MetaHarness {
     }
 }
 
+/// Result of a single meta mutation run.
 #[derive(Debug, Clone)]
 pub struct MetaResult {
+    /// Mutation identifier.
     pub mutation: &'static str,
+    /// Invariant expected to fail under mutation.
     pub invariant: &'static str,
+    /// Violations from the baseline (control) run.
     pub baseline_violations: Vec<OracleViolation>,
+    /// Violations from the mutated run.
     pub mutation_violations: Vec<OracleViolation>,
 }
 
 impl MetaResult {
+    /// Returns true if the baseline run produced no violations.
     #[must_use]
     pub fn baseline_clean(&self) -> bool {
         self.baseline_violations.is_empty()
     }
 
+    /// Returns true if the expected invariant was detected in the mutated run.
     #[must_use]
     pub fn mutation_detected(&self) -> bool {
         self.mutation_violations
@@ -116,19 +124,24 @@ impl MetaResult {
     }
 }
 
+/// Coverage entry for a single invariant.
 #[derive(Debug, Clone)]
 pub struct MetaCoverageEntry {
+    /// Invariant name.
     pub invariant: &'static str,
+    /// Mutations that triggered this invariant.
     pub tests: Vec<&'static str>,
 }
 
 impl MetaCoverageEntry {
+    /// Returns true if at least one mutation covered this invariant.
     #[must_use]
     pub fn is_covered(&self) -> bool {
         !self.tests.is_empty()
     }
 }
 
+/// Coverage report across all invariants.
 #[derive(Debug, Clone)]
 pub struct MetaCoverageReport {
     entries: Vec<MetaCoverageEntry>,
@@ -137,7 +150,7 @@ pub struct MetaCoverageReport {
 impl MetaCoverageReport {
     fn from_map(
         all_invariants: &[&'static str],
-        map: BTreeMap<&'static str, BTreeSet<&'static str>>,
+        map: &BTreeMap<&'static str, BTreeSet<&'static str>>,
     ) -> Self {
         let mut entries = Vec::with_capacity(all_invariants.len());
         for &invariant in all_invariants {
@@ -150,11 +163,13 @@ impl MetaCoverageReport {
         Self { entries }
     }
 
+    /// Returns the coverage entries in invariant order.
     #[must_use]
     pub fn entries(&self) -> &[MetaCoverageEntry] {
         &self.entries
     }
 
+    /// Returns invariants with zero coverage.
     #[must_use]
     pub fn missing_invariants(&self) -> Vec<&'static str> {
         self.entries
@@ -164,6 +179,7 @@ impl MetaCoverageReport {
             .collect()
     }
 
+    /// Renders a human-readable coverage report.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
@@ -177,6 +193,7 @@ impl MetaCoverageReport {
         out
     }
 
+    /// Renders a JSON coverage report.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         let invariants = self
@@ -196,6 +213,7 @@ impl MetaCoverageReport {
     }
 }
 
+/// Report for a full meta-test run.
 #[derive(Debug, Clone)]
 pub struct MetaReport {
     results: Vec<MetaResult>,
@@ -203,16 +221,19 @@ pub struct MetaReport {
 }
 
 impl MetaReport {
+    /// Returns all per-mutation results.
     #[must_use]
     pub fn results(&self) -> &[MetaResult] {
         &self.results
     }
 
+    /// Returns the coverage report.
     #[must_use]
     pub fn coverage(&self) -> &MetaCoverageReport {
         &self.coverage
     }
 
+    /// Returns results where baseline was dirty or mutation not detected.
     #[must_use]
     pub fn failures(&self) -> Vec<&MetaResult> {
         self.results
@@ -221,6 +242,7 @@ impl MetaReport {
             .collect()
     }
 
+    /// Renders a human-readable meta report.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
@@ -245,6 +267,7 @@ impl MetaReport {
         out
     }
 
+    /// Renders a JSON meta report.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         let failures = self
@@ -283,17 +306,20 @@ impl MetaReport {
     }
 }
 
+/// Runner for meta-testing built-in oracle mutations.
 #[derive(Debug, Clone)]
 pub struct MetaRunner {
     seed: u64,
 }
 
 impl MetaRunner {
+    /// Creates a new meta runner with a deterministic seed.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
         Self { seed }
     }
 
+    /// Runs all provided mutations and returns a report.
     #[must_use]
     pub fn run<I>(&self, mutations: I) -> MetaReport
     where
@@ -332,7 +358,7 @@ impl MetaRunner {
             results.push(result);
         }
 
-        let coverage = MetaCoverageReport::from_map(ALL_ORACLE_INVARIANTS, coverage_map);
+        let coverage = MetaCoverageReport::from_map(ALL_ORACLE_INVARIANTS, &coverage_map);
         MetaReport { results, coverage }
     }
 }

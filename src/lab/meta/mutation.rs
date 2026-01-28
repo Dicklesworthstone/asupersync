@@ -6,16 +6,26 @@ use crate::types::{Budget, CancelReason};
 
 use super::runner::MetaHarness;
 
+/// Invariant name for the task leak oracle.
 pub const INVARIANT_TASK_LEAK: &str = "task_leak";
+/// Invariant name for the obligation leak oracle.
 pub const INVARIANT_OBLIGATION_LEAK: &str = "obligation_leak";
+/// Invariant name for the quiescence oracle.
 pub const INVARIANT_QUIESCENCE: &str = "quiescence";
+/// Invariant name for the loser drain oracle.
 pub const INVARIANT_LOSER_DRAIN: &str = "loser_drain";
+/// Invariant name for the finalizer oracle.
 pub const INVARIANT_FINALIZER: &str = "finalizer";
+/// Invariant name for the region tree oracle.
 pub const INVARIANT_REGION_TREE: &str = "region_tree";
+/// Invariant name for the ambient authority oracle.
 pub const INVARIANT_AMBIENT_AUTHORITY: &str = "ambient_authority";
+/// Invariant name for the deadline monotonicity oracle.
 pub const INVARIANT_DEADLINE_MONOTONE: &str = "deadline_monotone";
+/// Invariant name for the cancellation protocol oracle.
 pub const INVARIANT_CANCELLATION_PROTOCOL: &str = "cancellation_protocol";
 
+/// Ordered list of all oracle invariants covered by the meta runner.
 pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_TASK_LEAK,
     INVARIANT_QUIESCENCE,
@@ -28,19 +38,31 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_DEADLINE_MONOTONE,
 ];
 
+/// Built-in mutations used to validate oracle detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinMutation {
+    /// Region closes with a live task.
     TaskLeak,
+    /// Region closes with a reserved obligation.
     ObligationLeak,
+    /// Region closes with live child/child tasks.
     Quiescence,
+    /// Race completes without draining losers.
     LoserDrain,
+    /// Region closes before finalizers run.
     Finalizer,
+    /// Region tree has multiple roots.
     RegionTreeMultipleRoots,
+    /// Task performs spawn effect without Spawn capability.
     AmbientAuthoritySpawnWithoutCapability,
+    /// Child deadline is looser than parent.
     DeadlineMonotoneChildUnbounded,
+    /// Cancel does not propagate to child region.
     CancelPropagationMissingChild,
 }
 
+/// Returns all built-in mutations in a stable order.
+#[must_use]
 pub fn builtin_mutations() -> Vec<BuiltinMutation> {
     vec![
         BuiltinMutation::TaskLeak,
@@ -56,6 +78,8 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
 }
 
 impl BuiltinMutation {
+    /// Returns a stable name for the mutation.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::TaskLeak => "mutation_task_leak",
@@ -72,6 +96,8 @@ impl BuiltinMutation {
         }
     }
 
+    /// Returns the invariant expected to fail for this mutation.
+    #[must_use]
     pub fn invariant(self) -> &'static str {
         match self {
             Self::TaskLeak => INVARIANT_TASK_LEAK,
@@ -86,266 +112,307 @@ impl BuiltinMutation {
         }
     }
 
-    pub fn apply_baseline(self, harness: &mut MetaHarness) {
-        let now = harness.now();
+    pub(crate) fn apply_baseline(self, harness: &mut MetaHarness) {
         match self {
-            Self::TaskLeak => {
-                let region = harness.next_region();
-                let task = harness.next_task();
-                harness.oracles.task_leak.on_spawn(task, region, now);
-                harness.oracles.task_leak.on_complete(task, now);
-                harness.oracles.task_leak.on_region_close(region, now);
-            }
-            Self::ObligationLeak => {
-                let region = harness.create_root_region();
-                let task = harness.create_runtime_task(region);
-                let obligation = harness
-                    .runtime
-                    .state
-                    .create_obligation(ObligationKind::SendPermit, task, region, None)
-                    .expect("create obligation");
-                harness
-                    .runtime
-                    .state
-                    .commit_obligation(obligation)
-                    .expect("commit obligation");
-                harness.close_region(region);
-                harness
-                    .oracles
-                    .obligation_leak
-                    .snapshot_from_state(&harness.runtime.state, now);
-            }
-            Self::Quiescence => {
-                let parent = harness.next_region();
-                let child = harness.next_region();
-                harness.oracles.quiescence.on_region_create(parent, None);
-                harness
-                    .oracles
-                    .quiescence
-                    .on_region_create(child, Some(parent));
-                harness.oracles.quiescence.on_region_close(child, now);
-                harness.oracles.quiescence.on_region_close(parent, now);
-            }
-            Self::LoserDrain => {
-                let region = harness.next_region();
-                let winner = harness.next_task();
-                let loser = harness.next_task();
-                let race_id =
-                    harness
-                        .oracles
-                        .loser_drain
-                        .on_race_start(region, vec![winner, loser], now);
-                harness.oracles.loser_drain.on_task_complete(winner, now);
-                harness.oracles.loser_drain.on_task_complete(loser, now);
-                harness
-                    .oracles
-                    .loser_drain
-                    .on_race_complete(race_id, winner, now);
-            }
-            Self::Finalizer => {
-                let region = harness.next_region();
-                let finalizer = harness.next_finalizer();
-                harness
-                    .oracles
-                    .finalizer
-                    .on_register(finalizer, region, now);
-                harness.oracles.finalizer.on_run(finalizer, now);
-                harness.oracles.finalizer.on_region_close(region, now);
-            }
-            Self::RegionTreeMultipleRoots => {
-                let root = harness.next_region();
-                let child = harness.next_region();
-                harness
-                    .oracles
-                    .region_tree
-                    .on_region_create(root, None, now);
-                harness
-                    .oracles
-                    .region_tree
-                    .on_region_create(child, Some(root), now);
-            }
-            Self::AmbientAuthoritySpawnWithoutCapability => {
-                let region = harness.next_region();
-                let task = harness.next_task();
-                let child = harness.next_task();
-                harness
-                    .oracles
-                    .ambient_authority
-                    .on_task_created(task, region, None, now);
-                harness
-                    .oracles
-                    .ambient_authority
-                    .on_spawn_effect(task, child, now);
-            }
-            Self::DeadlineMonotoneChildUnbounded => {
-                let parent = harness.next_region();
-                let child = harness.next_region();
-                let parent_budget = Budget::with_deadline_secs(10);
-                let child_budget = Budget::with_deadline_secs(5);
-                harness.oracles.deadline_monotone.on_region_create(
-                    parent,
-                    None,
-                    &parent_budget,
-                    now,
-                );
-                harness.oracles.deadline_monotone.on_region_create(
-                    child,
-                    Some(parent),
-                    &child_budget,
-                    now,
-                );
-            }
-            Self::CancelPropagationMissingChild => {
-                let parent = harness.next_region();
-                let child = harness.next_region();
-                harness
-                    .oracles
-                    .cancellation_protocol
-                    .on_region_create(parent, None);
-                harness
-                    .oracles
-                    .cancellation_protocol
-                    .on_region_create(child, Some(parent));
-                harness.oracles.cancellation_protocol.on_region_cancel(
-                    parent,
-                    CancelReason::shutdown(),
-                    now,
-                );
-                harness.oracles.cancellation_protocol.on_region_cancel(
-                    child,
-                    CancelReason::parent_cancelled(),
-                    now,
-                );
-            }
+            Self::TaskLeak => baseline_task_leak(harness),
+            Self::ObligationLeak => baseline_obligation_leak(harness),
+            Self::Quiescence => baseline_quiescence(harness),
+            Self::LoserDrain => baseline_loser_drain(harness),
+            Self::Finalizer => baseline_finalizer(harness),
+            Self::RegionTreeMultipleRoots => baseline_region_tree(harness),
+            Self::AmbientAuthoritySpawnWithoutCapability => baseline_ambient_authority(harness),
+            Self::DeadlineMonotoneChildUnbounded => baseline_deadline_monotone(harness),
+            Self::CancelPropagationMissingChild => baseline_cancel_propagation(harness),
         }
     }
 
-    pub fn apply_mutation(self, harness: &mut MetaHarness) {
-        let now = harness.now();
+    pub(crate) fn apply_mutation(self, harness: &mut MetaHarness) {
         match self {
-            Self::TaskLeak => {
-                let region = harness.next_region();
-                let task = harness.next_task();
-                harness.oracles.task_leak.on_spawn(task, region, now);
-                harness.oracles.task_leak.on_region_close(region, now);
-            }
-            Self::ObligationLeak => {
-                let region = harness.create_root_region();
-                let task = harness.create_runtime_task(region);
-                let _obligation = harness
-                    .runtime
-                    .state
-                    .create_obligation(ObligationKind::SendPermit, task, region, None)
-                    .expect("create obligation");
-                harness.close_region(region);
-                harness
-                    .oracles
-                    .obligation_leak
-                    .snapshot_from_state(&harness.runtime.state, now);
-            }
-            Self::Quiescence => {
-                let parent = harness.next_region();
-                let child = harness.next_region();
-                harness.oracles.quiescence.on_region_create(parent, None);
-                harness
-                    .oracles
-                    .quiescence
-                    .on_region_create(child, Some(parent));
-                harness.oracles.quiescence.on_region_close(parent, now);
-            }
-            Self::LoserDrain => {
-                let region = harness.next_region();
-                let winner = harness.next_task();
-                let loser = harness.next_task();
-                let race_id =
-                    harness
-                        .oracles
-                        .loser_drain
-                        .on_race_start(region, vec![winner, loser], now);
-                harness.oracles.loser_drain.on_task_complete(winner, now);
-                harness
-                    .oracles
-                    .loser_drain
-                    .on_race_complete(race_id, winner, now);
-            }
-            Self::Finalizer => {
-                let region = harness.next_region();
-                let finalizer = harness.next_finalizer();
-                harness
-                    .oracles
-                    .finalizer
-                    .on_register(finalizer, region, now);
-                harness.oracles.finalizer.on_region_close(region, now);
-            }
-            Self::RegionTreeMultipleRoots => {
-                let root_a = harness.next_region();
-                let root_b = harness.next_region();
-                harness
-                    .oracles
-                    .region_tree
-                    .on_region_create(root_a, None, now);
-                harness
-                    .oracles
-                    .region_tree
-                    .on_region_create(root_b, None, now);
-            }
-            Self::AmbientAuthoritySpawnWithoutCapability => {
-                let region = harness.next_region();
-                let task = harness.next_task();
-                let child = harness.next_task();
-                harness
-                    .oracles
-                    .ambient_authority
-                    .on_task_created(task, region, None, now);
-                harness.oracles.ambient_authority.on_capability_revoked(
-                    task,
-                    CapabilityKind::Spawn,
-                    now,
-                );
-                harness
-                    .oracles
-                    .ambient_authority
-                    .on_spawn_effect(task, child, now);
-            }
-            Self::DeadlineMonotoneChildUnbounded => {
-                let parent = harness.next_region();
-                let child = harness.next_region();
-                let parent_budget = Budget::with_deadline_secs(10);
-                let child_budget = Budget::INFINITE;
-                harness.oracles.deadline_monotone.on_region_create(
-                    parent,
-                    None,
-                    &parent_budget,
-                    now,
-                );
-                harness.oracles.deadline_monotone.on_region_create(
-                    child,
-                    Some(parent),
-                    &child_budget,
-                    now,
-                );
-            }
-            Self::CancelPropagationMissingChild => {
-                let parent = harness.next_region();
-                let child = harness.next_region();
-                harness
-                    .oracles
-                    .cancellation_protocol
-                    .on_region_create(parent, None);
-                harness
-                    .oracles
-                    .cancellation_protocol
-                    .on_region_create(child, Some(parent));
-                harness.oracles.cancellation_protocol.on_region_cancel(
-                    parent,
-                    CancelReason::shutdown(),
-                    now,
-                );
-            }
+            Self::TaskLeak => mutation_task_leak(harness),
+            Self::ObligationLeak => mutation_obligation_leak(harness),
+            Self::Quiescence => mutation_quiescence(harness),
+            Self::LoserDrain => mutation_loser_drain(harness),
+            Self::Finalizer => mutation_finalizer(harness),
+            Self::RegionTreeMultipleRoots => mutation_region_tree(harness),
+            Self::AmbientAuthoritySpawnWithoutCapability => mutation_ambient_authority(harness),
+            Self::DeadlineMonotoneChildUnbounded => mutation_deadline_monotone(harness),
+            Self::CancelPropagationMissingChild => mutation_cancel_propagation(harness),
         }
     }
 }
 
+fn baseline_task_leak(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let task = harness.next_task();
+    harness.oracles.task_leak.on_spawn(task, region, now);
+    harness.oracles.task_leak.on_complete(task, now);
+    harness.oracles.task_leak.on_region_close(region, now);
+}
+
+fn mutation_task_leak(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let task = harness.next_task();
+    harness.oracles.task_leak.on_spawn(task, region, now);
+    harness.oracles.task_leak.on_region_close(region, now);
+}
+
+fn baseline_obligation_leak(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.create_root_region();
+    let task = harness.create_runtime_task(region);
+    let obligation = harness
+        .runtime
+        .state
+        .create_obligation(ObligationKind::SendPermit, task, region, None)
+        .expect("create obligation");
+    harness
+        .runtime
+        .state
+        .commit_obligation(obligation)
+        .expect("commit obligation");
+    harness.close_region(region);
+    harness
+        .oracles
+        .obligation_leak
+        .snapshot_from_state(&harness.runtime.state, now);
+}
+
+fn mutation_obligation_leak(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.create_root_region();
+    let task = harness.create_runtime_task(region);
+    let _obligation = harness
+        .runtime
+        .state
+        .create_obligation(ObligationKind::SendPermit, task, region, None)
+        .expect("create obligation");
+    harness.close_region(region);
+    harness
+        .oracles
+        .obligation_leak
+        .snapshot_from_state(&harness.runtime.state, now);
+}
+
+fn baseline_quiescence(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let parent = harness.next_region();
+    let child = harness.next_region();
+    harness.oracles.quiescence.on_region_create(parent, None);
+    harness
+        .oracles
+        .quiescence
+        .on_region_create(child, Some(parent));
+    harness.oracles.quiescence.on_region_close(child, now);
+    harness.oracles.quiescence.on_region_close(parent, now);
+}
+
+fn mutation_quiescence(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let parent = harness.next_region();
+    let child = harness.next_region();
+    harness.oracles.quiescence.on_region_create(parent, None);
+    harness
+        .oracles
+        .quiescence
+        .on_region_create(child, Some(parent));
+    harness.oracles.quiescence.on_region_close(parent, now);
+}
+
+fn baseline_loser_drain(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let winner = harness.next_task();
+    let loser = harness.next_task();
+    let race_id = harness
+        .oracles
+        .loser_drain
+        .on_race_start(region, vec![winner, loser], now);
+    harness.oracles.loser_drain.on_task_complete(winner, now);
+    harness.oracles.loser_drain.on_task_complete(loser, now);
+    harness
+        .oracles
+        .loser_drain
+        .on_race_complete(race_id, winner, now);
+}
+
+fn mutation_loser_drain(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let winner = harness.next_task();
+    let loser = harness.next_task();
+    let race_id = harness
+        .oracles
+        .loser_drain
+        .on_race_start(region, vec![winner, loser], now);
+    harness.oracles.loser_drain.on_task_complete(winner, now);
+    harness
+        .oracles
+        .loser_drain
+        .on_race_complete(race_id, winner, now);
+}
+
+fn baseline_finalizer(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let finalizer = harness.next_finalizer();
+    harness
+        .oracles
+        .finalizer
+        .on_register(finalizer, region, now);
+    harness.oracles.finalizer.on_run(finalizer, now);
+    harness.oracles.finalizer.on_region_close(region, now);
+}
+
+fn mutation_finalizer(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let finalizer = harness.next_finalizer();
+    harness
+        .oracles
+        .finalizer
+        .on_register(finalizer, region, now);
+    harness.oracles.finalizer.on_region_close(region, now);
+}
+
+fn baseline_region_tree(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let root = harness.next_region();
+    let child = harness.next_region();
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(root, None, now);
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(child, Some(root), now);
+}
+
+fn mutation_region_tree(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let root_a = harness.next_region();
+    let root_b = harness.next_region();
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(root_a, None, now);
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(root_b, None, now);
+}
+
+fn baseline_ambient_authority(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let task = harness.next_task();
+    let child = harness.next_task();
+    harness
+        .oracles
+        .ambient_authority
+        .on_task_created(task, region, None, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_spawn_effect(task, child, now);
+}
+
+fn mutation_ambient_authority(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let task = harness.next_task();
+    let child = harness.next_task();
+    harness
+        .oracles
+        .ambient_authority
+        .on_task_created(task, region, None, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_capability_revoked(task, CapabilityKind::Spawn, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_spawn_effect(task, child, now);
+}
+
+fn baseline_deadline_monotone(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let parent = harness.next_region();
+    let child = harness.next_region();
+    let parent_budget = Budget::with_deadline_secs(10);
+    let child_budget = Budget::with_deadline_secs(5);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(parent, None, &parent_budget, now);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(child, Some(parent), &child_budget, now);
+}
+
+fn mutation_deadline_monotone(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let parent = harness.next_region();
+    let child = harness.next_region();
+    let parent_budget = Budget::with_deadline_secs(10);
+    let child_budget = Budget::INFINITE;
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(parent, None, &parent_budget, now);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(child, Some(parent), &child_budget, now);
+}
+
+fn baseline_cancel_propagation(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let parent = harness.next_region();
+    let child = harness.next_region();
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(parent, None);
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(child, Some(parent));
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_cancel(parent, CancelReason::shutdown(), now);
+    harness.oracles.cancellation_protocol.on_region_cancel(
+        child,
+        CancelReason::parent_cancelled(),
+        now,
+    );
+}
+
+fn mutation_cancel_propagation(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let parent = harness.next_region();
+    let child = harness.next_region();
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(parent, None);
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(child, Some(parent));
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_cancel(parent, CancelReason::shutdown(), now);
+}
+
+/// Maps an oracle violation to its invariant name.
+#[must_use]
 pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
     match violation {
         OracleViolation::TaskLeak(_) => INVARIANT_TASK_LEAK,
