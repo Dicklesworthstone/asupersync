@@ -319,6 +319,9 @@ impl<T: std::fmt::Debug> std::fmt::Debug for WeakSender<T> {
 }
 
 impl<T> WeakSender<T> {
+    /// Attempts to upgrade this weak sender to a strong sender.
+    ///
+    /// Returns `None` if all senders have been dropped.
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared.upgrade().and_then(|shared| {
             {
@@ -350,6 +353,7 @@ pub struct SendPermit<'a, T> {
 }
 
 impl<T> SendPermit<'_, T> {
+    /// Commits the reserved slot, enqueuing the value.
     pub fn send(mut self, value: T) {
         self.sent = true;
         let mut inner = self
@@ -367,6 +371,7 @@ impl<T> SendPermit<'_, T> {
         }
     }
 
+    /// Aborts the reserved slot without sending.
     pub fn abort(mut self) {
         self.sent = true;
         let mut inner = self
@@ -416,10 +421,12 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Creates a receive future for the next value.
     pub fn recv<'a>(&'a self, cx: &'a Cx) -> Recv<'a, T> {
         Recv { receiver: self, cx }
     }
 
+    /// Attempts to receive a value without blocking.
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
 
@@ -440,6 +447,7 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Returns true if all senders have been dropped.
     pub fn is_closed(&self) -> bool {
         self.shared
             .inner
@@ -448,6 +456,7 @@ impl<T> Receiver<T> {
             .is_closed()
     }
 
+    /// Returns true if there are any queued messages.
     pub fn has_messages(&self) -> bool {
         !self
             .shared
@@ -458,6 +467,7 @@ impl<T> Receiver<T> {
             .is_empty()
     }
 
+    /// Returns the number of queued messages.
     pub fn len(&self) -> usize {
         self.shared
             .inner
@@ -467,6 +477,7 @@ impl<T> Receiver<T> {
             .len()
     }
 
+    /// Returns true if the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.shared
             .inner
@@ -476,6 +487,7 @@ impl<T> Receiver<T> {
             .is_empty()
     }
 
+    /// Returns the channel capacity.
     pub fn capacity(&self) -> usize {
         self.shared
             .inner

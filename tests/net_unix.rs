@@ -56,28 +56,31 @@ fn net_uds_001_basic_connect_accept() {
     let socket_path_clone = socket_path.clone();
 
     let result = block_on(async {
-        // Bind listener
-        let listener = UnixListener::bind(&socket_path).await?;
-        tracing::info!(path = ?socket_path, "listener bound");
-
-        // Spawn accept in background thread
+        // Spawn accept in background thread (listener is created inside thread).
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let path_for_thread = socket_path.clone();
         let accept_handle = thread::spawn(move || {
             block_on(async {
+                let listener = UnixListener::bind(&path_for_thread).await?;
+                tracing::info!(path = ?path_for_thread, "listener bound");
+                let _ = ready_tx.send(());
                 let (stream, addr) = listener.accept().await?;
                 tracing::info!(?addr, "accepted connection");
-                Ok::<_, io::Error>(stream)
+                drop(stream);
+                Ok::<_, io::Error>(())
             })
         });
 
-        // Give listener time to start
-        thread::sleep(Duration::from_millis(10));
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))?;
 
         // Connect
         let client = UnixStream::connect(&socket_path_clone).await?;
         tracing::info!("client connected");
 
         // Wait for accept
-        let _server = accept_handle.join().expect("accept thread panicked")?;
+        accept_handle.join().expect("accept thread panicked")?;
 
         // Verify client has valid peer address
         let peer_addr = client.peer_addr()?;
@@ -104,12 +107,13 @@ fn net_uds_002_echo_roundtrip() {
     let socket_path_clone = socket_path.clone();
 
     let result = block_on(async {
-        // Bind listener
-        let listener = UnixListener::bind(&socket_path).await?;
-
         // Spawn echo server using blocking std I/O
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let path_for_thread = socket_path.clone();
         let server_handle = thread::spawn(move || {
             block_on(async {
+                let listener = UnixListener::bind(&path_for_thread).await?;
+                let _ = ready_tx.send(());
                 let (stream, _) = listener.accept().await?;
                 // Get underlying std stream for blocking I/O
                 let std_stream = stream.as_std().try_clone()?;
@@ -133,8 +137,9 @@ fn net_uds_002_echo_roundtrip() {
             })
         });
 
-        // Give server time to start
-        thread::sleep(Duration::from_millis(10));
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))?;
 
         // Connect using blocking std stream
         let mut client = std_unix::UnixStream::connect(&socket_path_clone)?;
@@ -348,8 +353,6 @@ fn net_uds_007_multiple_connections() {
     let socket_path_clone = socket_path.clone();
 
     let result = block_on(async {
-        // Bind listener
-        let listener = UnixListener::bind(&socket_path).await?;
         tracing::info!(
             num_clients = NET_UDS_NUM_CLIENTS,
             "testing multiple connections"
@@ -359,9 +362,13 @@ fn net_uds_007_multiple_connections() {
         let accepted_count = Arc::new(AtomicUsize::new(0));
         let accepted_count_clone = accepted_count.clone();
 
-        // Spawn accept loop
+        // Spawn accept loop (listener is created inside thread).
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let path_for_thread = socket_path.clone();
         let accept_handle = thread::spawn(move || {
             block_on(async {
+                let listener = UnixListener::bind(&path_for_thread).await?;
+                let _ = ready_tx.send(());
                 for i in 0..NET_UDS_NUM_CLIENTS {
                     match listener.accept().await {
                         Ok((stream, _)) => {
@@ -391,8 +398,9 @@ fn net_uds_007_multiple_connections() {
             })
         });
 
-        // Give server time to start
-        thread::sleep(Duration::from_millis(10));
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))?;
 
         // Connect multiple clients using blocking std streams
         let mut client_handles = vec![];

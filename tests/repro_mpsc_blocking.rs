@@ -32,10 +32,10 @@ fn repro_mpsc_deadlock_in_single_threaded_runtime() {
             tracing::info!("Receiver started");
 
             // Try to receive
-            let val = rx.recv(&cx).expect("recv 1");
+            let val = rx.recv(&cx).await.expect("recv 1");
             tracing::info!("Received {}", val);
 
-            let val = rx.recv(&cx).expect("recv 2");
+            let val = rx.recv(&cx).await.expect("recv 2");
             tracing::info!("Received {}", val);
         })
         .expect("create receiver");
@@ -48,7 +48,7 @@ fn repro_mpsc_deadlock_in_single_threaded_runtime() {
             tracing::info!("Sender started");
 
             // Send 1 - succeeds (fills capacity)
-            tx.send(&cx, 1).expect("send 1");
+            tx.send(&cx, 1).await.expect("send 1");
             tracing::info!("Sent 1");
 
             // Send 2 - should block until receiver runs
@@ -56,7 +56,7 @@ fn repro_mpsc_deadlock_in_single_threaded_runtime() {
             // This blocks the OS thread.
             // The receiver task is on the SAME OS thread.
             // So the receiver never runs. Deadlock.
-            tx.send(&cx, 2).expect("send 2");
+            tx.send(&cx, 2).await.expect("send 2");
             tracing::info!("Sent 2");
         })
         .expect("create sender");

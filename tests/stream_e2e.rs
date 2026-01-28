@@ -421,9 +421,9 @@ fn test_receiver_stream_basic() {
     let stream = ReceiverStream::new(cx.clone(), rx);
 
     // Send items
-    tx.send(&cx, 1).unwrap();
-    tx.send(&cx, 2).unwrap();
-    tx.send(&cx, 3).unwrap();
+    tx.try_send(1).expect("send 1");
+    tx.try_send(2).expect("send 2");
+    tx.try_send(3).expect("send 3");
     drop(tx);
 
     let waker = noop_waker();
@@ -485,9 +485,9 @@ fn test_broadcast_stream_multiple_items() {
     let mut stream = BroadcastStream::new(cx.clone(), rx);
 
     // Send items
-    tx.send(&cx, 10).unwrap();
-    tx.send(&cx, 20).unwrap();
-    tx.send(&cx, 30).unwrap();
+    tx.send(&cx, 10).expect("send 10");
+    tx.send(&cx, 20).expect("send 20");
+    tx.send(&cx, 30).expect("send 30");
 
     let waker = noop_waker();
     let mut cx_task = Context::from_waker(&waker);
