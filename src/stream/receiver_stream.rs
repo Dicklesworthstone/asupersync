@@ -70,8 +70,7 @@ impl<T> Stream for ReceiverStream<T> {
                 Poll::Ready(Some(item))
             }
             Poll::Ready(Err(RecvError::Disconnected | RecvError::Cancelled)) => Poll::Ready(None),
-            Poll::Ready(Err(RecvError::Empty)) => Poll::Pending,
-            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(RecvError::Empty)) | Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -100,7 +99,7 @@ mod tests {
     #[test]
     fn receiver_stream_reads_messages() {
         init_test("receiver_stream_reads_messages");
-        let cx_send = Cx::for_testing();
+        let _cx_send = Cx::for_testing();
         let cx_recv = Cx::for_testing();
         let (tx, rx) = mpsc::channel(4);
 
