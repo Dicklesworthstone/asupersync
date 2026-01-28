@@ -80,7 +80,7 @@ impl std::error::Error for IoNotAvailable {}
 
 impl From<IoNotAvailable> for io::Error {
     fn from(_: IoNotAvailable) -> Self {
-        io::Error::new(io::ErrorKind::Unsupported, "I/O capability not available")
+        Self::new(io::ErrorKind::Unsupported, "I/O capability not available")
     }
 }
 

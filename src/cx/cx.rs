@@ -428,7 +428,7 @@ impl Cx {
     /// ```
     #[must_use]
     pub fn io(&self) -> Option<&dyn crate::io::IoCap> {
-        self.io_cap.as_ref().map(|cap| cap.as_ref())
+        self.io_cap.as_ref().map(AsRef::as_ref)
     }
 
     /// Returns true if I/O capability is available.
