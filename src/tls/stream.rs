@@ -61,85 +61,85 @@ enum TlsConnection {
 impl TlsConnection {
     fn is_handshaking(&self) -> bool {
         match self {
-            TlsConnection::Client(c) => c.is_handshaking(),
-            TlsConnection::Server(s) => s.is_handshaking(),
+            Self::Client(c) => c.is_handshaking(),
+            Self::Server(s) => s.is_handshaking(),
         }
     }
 
     fn wants_read(&self) -> bool {
         match self {
-            TlsConnection::Client(c) => c.wants_read(),
-            TlsConnection::Server(s) => s.wants_read(),
+            Self::Client(c) => c.wants_read(),
+            Self::Server(s) => s.wants_read(),
         }
     }
 
     fn wants_write(&self) -> bool {
         match self {
-            TlsConnection::Client(c) => c.wants_write(),
-            TlsConnection::Server(s) => s.wants_write(),
+            Self::Client(c) => c.wants_write(),
+            Self::Server(s) => s.wants_write(),
         }
     }
 
     fn reader(&mut self) -> rustls::Reader<'_> {
         match self {
-            TlsConnection::Client(c) => c.reader(),
-            TlsConnection::Server(s) => s.reader(),
+            Self::Client(c) => c.reader(),
+            Self::Server(s) => s.reader(),
         }
     }
 
     fn writer(&mut self) -> rustls::Writer<'_> {
         match self {
-            TlsConnection::Client(c) => c.writer(),
-            TlsConnection::Server(s) => s.writer(),
+            Self::Client(c) => c.writer(),
+            Self::Server(s) => s.writer(),
         }
     }
 
     fn read_tls(&mut self, rd: &mut dyn io::Read) -> io::Result<usize> {
         match self {
-            TlsConnection::Client(c) => c.read_tls(rd),
-            TlsConnection::Server(s) => s.read_tls(rd),
+            Self::Client(c) => c.read_tls(rd),
+            Self::Server(s) => s.read_tls(rd),
         }
     }
 
     fn write_tls(&mut self, wr: &mut dyn io::Write) -> io::Result<usize> {
         match self {
-            TlsConnection::Client(c) => c.write_tls(wr),
-            TlsConnection::Server(s) => s.write_tls(wr),
+            Self::Client(c) => c.write_tls(wr),
+            Self::Server(s) => s.write_tls(wr),
         }
     }
 
     fn process_new_packets(&mut self) -> Result<rustls::IoState, rustls::Error> {
         match self {
-            TlsConnection::Client(c) => c.process_new_packets(),
-            TlsConnection::Server(s) => s.process_new_packets(),
+            Self::Client(c) => c.process_new_packets(),
+            Self::Server(s) => s.process_new_packets(),
         }
     }
 
     fn send_close_notify(&mut self) {
         match self {
-            TlsConnection::Client(c) => c.send_close_notify(),
-            TlsConnection::Server(s) => s.send_close_notify(),
+            Self::Client(c) => c.send_close_notify(),
+            Self::Server(s) => s.send_close_notify(),
         }
     }
 
     fn protocol_version(&self) -> Option<rustls::ProtocolVersion> {
         match self {
-            TlsConnection::Client(c) => c.protocol_version(),
-            TlsConnection::Server(s) => s.protocol_version(),
+            Self::Client(c) => c.protocol_version(),
+            Self::Server(s) => s.protocol_version(),
         }
     }
 
     fn alpn_protocol(&self) -> Option<&[u8]> {
         match self {
-            TlsConnection::Client(c) => c.alpn_protocol(),
-            TlsConnection::Server(s) => s.alpn_protocol(),
+            Self::Client(c) => c.alpn_protocol(),
+            Self::Server(s) => s.alpn_protocol(),
         }
     }
 
     fn sni_hostname(&self) -> Option<&str> {
         match self {
-            TlsConnection::Client(_) => None,
-            TlsConnection::Server(s) => s.server_name(),
+            Self::Client(_) => None,
+            Self::Server(s) => s.server_name(),
         }
     }
 }
