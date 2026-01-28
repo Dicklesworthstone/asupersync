@@ -114,6 +114,7 @@ impl<T> TaskHandle<T> {
     ///     Err(JoinError::Panicked(p)) => println!("Task panicked: {p}"),
     /// }
     /// ```
+    #[must_use]
     pub fn join<'a>(&'a self, cx: &'a Cx) -> JoinFuture<'a, T> {
         JoinFuture {
             handle: self,
@@ -160,7 +161,7 @@ pub struct JoinFuture<'a, T> {
     inner: oneshot::RecvFuture<'a, Result<T, JoinError>>,
 }
 
-impl<'a, T> std::future::Future for JoinFuture<'a, T> {
+impl<T> std::future::Future for JoinFuture<'_, T> {
     type Output = Result<T, JoinError>;
 
     fn poll(
@@ -178,7 +179,7 @@ impl<'a, T> std::future::Future for JoinFuture<'a, T> {
     }
 }
 
-impl<'a, T> Drop for JoinFuture<'a, T> {
+impl<T> Drop for JoinFuture<'_, T> {
     fn drop(&mut self) {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.

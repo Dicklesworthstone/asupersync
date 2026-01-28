@@ -1,3 +1,5 @@
+//! Repro test for race loser cancellation behavior.
+
 mod common;
 use common::*;
 
@@ -16,10 +18,6 @@ struct Flag {
 impl Flag {
     fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self { set: false }))
-    }
-
-    fn is_set(flag: &Arc<Mutex<Self>>) -> bool {
-        flag.lock().unwrap().set
     }
 
     fn set(flag: &Arc<Mutex<Self>>) {
