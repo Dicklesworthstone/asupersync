@@ -19,6 +19,7 @@ pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
 pub mod io_driver;
+pub mod io_op;
 pub mod reactor;
 pub mod region_heap;
 pub mod scheduler;
@@ -37,6 +38,7 @@ pub use deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,
 };
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
+pub use io_op::IoOp;
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
 pub use scheduler::Scheduler;
