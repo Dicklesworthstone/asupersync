@@ -74,7 +74,7 @@ impl CertificateChain {
     /// Convert to rustls certificate chain.
     #[cfg(feature = "tls")]
     pub(crate) fn into_inner(self) -> Vec<CertificateDer<'static>> {
-        self.certs.into_iter().map(|c| c.into_inner()).collect()
+        self.certs.into_iter().map(Certificate::into_inner).collect()
     }
 }
 

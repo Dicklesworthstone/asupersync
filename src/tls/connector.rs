@@ -181,8 +181,8 @@ impl TlsConnectorBuilder {
     }
 
     /// Add a single root certificate.
-    pub fn add_root_certificate(mut self, cert: Certificate) -> Self {
-        if let Err(e) = self.root_certs.add(&cert) {
+    pub fn add_root_certificate(mut self, cert: &Certificate) -> Self {
+        if let Err(e) = self.root_certs.add(cert) {
             #[cfg(feature = "tracing-integration")]
             tracing::warn!(error = %e, "Failed to add root certificate");
             let _ = e; // Suppress unused warning when tracing is disabled
