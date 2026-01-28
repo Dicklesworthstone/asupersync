@@ -815,7 +815,7 @@ mod tests {
 
         let cx = Cx::for_testing();
         let (tx, rx) = mpsc::channel(10);
-        let mut stream = ReceiverStream::new(cx.clone(), rx);
+        let mut stream = ReceiverStream::new(cx, rx);
 
         tx.try_send(1).unwrap();
         tx.try_send(2).unwrap();
