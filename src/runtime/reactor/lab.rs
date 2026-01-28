@@ -776,56 +776,59 @@ impl Reactor for LabReactor {
                     let event = timed.event;
                     let token = event.token;
 
+                    let Some(socket) = sockets.get_mut(&token) else {
+                        continue;
+                    };
+                    let registered_interest = socket.interest;
+
                     // ================================================================
                     // Per-token fault injection (checked first, before global chaos)
                     // ================================================================
-                    if let Some(socket) = sockets.get_mut(&token) {
-                        if let Some(ref mut fault) = socket.fault {
-                            // Check partition - drop events silently
-                            if fault.config.partitioned {
-                                fault.dropped_event_count += 1;
-                                debug!(
-                                    target: "fault",
-                                    token = token.0,
-                                    injection = "partition_drop",
-                                    "event dropped due to partition"
-                                );
-                                continue;
-                            }
+                    if let Some(ref mut fault) = socket.fault {
+                        // Check partition - drop events silently
+                        if fault.config.partitioned {
+                            fault.dropped_event_count += 1;
+                            debug!(
+                                target: "fault",
+                                token = token.0,
+                                injection = "partition_drop",
+                                "event dropped due to partition"
+                            );
+                            continue;
+                        }
 
-                            let mut injected_error = fault.config.pending_error.take();
-                            if let Some(kind) = injected_error {
+                        let mut injected_error = fault.config.pending_error.take();
+                        if let Some(kind) = injected_error {
+                            fault.last_error_kind = Some(kind);
+                            fault.injected_error_count += 1;
+                            debug!(
+                                target: "fault",
+                                token = token.0,
+                                injection = "pending_error",
+                                error_kind = ?kind,
+                                "injected pending error"
+                            );
+                        }
+
+                        // Check random error injection
+                        if injected_error.is_none() && fault.should_inject_random_error() {
+                            if let Some(kind) = fault.next_error_kind() {
                                 fault.last_error_kind = Some(kind);
                                 fault.injected_error_count += 1;
                                 debug!(
                                     target: "fault",
                                     token = token.0,
-                                    injection = "pending_error",
+                                    injection = "random_error",
                                     error_kind = ?kind,
-                                    "injected pending error"
+                                    "injected random error"
                                 );
+                                injected_error = Some(kind);
                             }
+                        }
 
-                            // Check random error injection
-                            if injected_error.is_none() && fault.should_inject_random_error() {
-                                if let Some(kind) = fault.next_error_kind() {
-                                    fault.last_error_kind = Some(kind);
-                                    fault.injected_error_count += 1;
-                                    debug!(
-                                        target: "fault",
-                                        token = token.0,
-                                        injection = "random_error",
-                                        error_kind = ?kind,
-                                        "injected random error"
-                                    );
-                                    injected_error = Some(kind);
-                                }
-                            }
-
-                            if injected_error.is_some() {
-                                delivered_events.push(Event::errored(token));
-                                continue;
-                            }
+                        if injected_error.is_some() {
+                            delivered_events.push(Event::errored(token));
+                            continue;
                         }
                     }
 
@@ -889,7 +892,17 @@ impl Reactor for LabReactor {
                     };
 
                     if let Some(delivered_event) = delivered {
-                        delivered_events.push(delivered_event);
+                        let mut ready = delivered_event.ready & registered_interest;
+                        if delivered_event.is_error() {
+                            ready = ready.add(Interest::ERROR);
+                        }
+                        if delivered_event.is_hangup() {
+                            ready = ready.add(Interest::HUP);
+                        }
+
+                        if !ready.is_empty() {
+                            delivered_events.push(Event::new(token, ready));
+                        }
                     }
                 }
             }

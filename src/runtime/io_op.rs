@@ -21,6 +21,7 @@ pub struct IoOp {
 
 impl IoOp {
     /// Submit a new I/O operation obligation.
+    #[allow(clippy::result_large_err)]
     pub fn submit(
         state: &mut RuntimeState,
         holder: TaskId,
@@ -39,16 +40,19 @@ impl IoOp {
     }
 
     /// Completes the I/O operation, committing the obligation.
+    #[allow(clippy::result_large_err)]
     pub fn complete(self, state: &mut RuntimeState) -> Result<u64, Error> {
         state.commit_obligation(self.obligation)
     }
 
     /// Cancels the I/O operation, aborting the obligation with `Cancel`.
+    #[allow(clippy::result_large_err)]
     pub fn cancel(self, state: &mut RuntimeState) -> Result<u64, Error> {
         state.abort_obligation(self.obligation, ObligationAbortReason::Cancel)
     }
 
     /// Aborts the I/O operation with an explicit reason.
+    #[allow(clippy::result_large_err)]
     pub fn abort(
         self,
         state: &mut RuntimeState,
@@ -78,20 +82,16 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn io_op_submit_complete_emits_trace() {
         init_test("io_op_submit_complete_emits_trace");
         let mut state = RuntimeState::new();
-        let region = state.create_root_region(Budget::INFINITE);
-        let task_id = create_task(&mut state, region);
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = create_task(&mut state, root);
 
         state.now = Time::from_nanos(10);
-        let op = IoOp::submit(
-            &mut state,
-            task_id,
-            region,
-            Some("io submit".to_string()),
-        )
-        .expect("submit io op");
+        let op = IoOp::submit(&mut state, task_id, root, Some("io submit".to_string()))
+            .expect("submit io op");
         let obligation_id = op.id();
 
         state.now = Time::from_nanos(25);
@@ -107,7 +107,7 @@ mod tests {
             TraceData::Obligation {
                 obligation,
                 task,
-                region,
+                region: event_region,
                 kind,
                 state: ob_state,
                 duration_ns,
@@ -120,7 +120,7 @@ mod tests {
                     *obligation
                 );
                 crate::assert_with_log!(*task == task_id, "task", task_id, *task);
-                crate::assert_with_log!(*region == region, "region", region, *region);
+                crate::assert_with_log!(*event_region == root, "region", root, *event_region);
                 crate::assert_with_log!(
                     *kind == ObligationKind::IoOp,
                     "kind",
@@ -158,7 +158,7 @@ mod tests {
             TraceData::Obligation {
                 obligation,
                 task,
-                region,
+                region: event_region,
                 kind,
                 state: ob_state,
                 duration_ns,
@@ -171,7 +171,7 @@ mod tests {
                     *obligation
                 );
                 crate::assert_with_log!(*task == task_id, "task", task_id, *task);
-                crate::assert_with_log!(*region == region, "region", region, *region);
+                crate::assert_with_log!(*event_region == root, "region", root, *event_region);
                 crate::assert_with_log!(
                     *kind == ObligationKind::IoOp,
                     "kind",
@@ -206,11 +206,11 @@ mod tests {
     fn io_op_cancel_emits_trace() {
         init_test("io_op_cancel_emits_trace");
         let mut state = RuntimeState::new();
-        let region = state.create_root_region(Budget::INFINITE);
-        let task_id = create_task(&mut state, region);
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = create_task(&mut state, root);
 
         state.now = Time::from_nanos(100);
-        let op = IoOp::submit(&mut state, task_id, region, None).expect("submit io op");
+        let op = IoOp::submit(&mut state, task_id, root, None).expect("submit io op");
         let obligation_id = op.id();
 
         state.now = Time::from_nanos(130);
@@ -226,7 +226,7 @@ mod tests {
             TraceData::Obligation {
                 obligation,
                 task,
-                region,
+                region: event_region,
                 kind,
                 state: ob_state,
                 duration_ns,
@@ -239,7 +239,7 @@ mod tests {
                     *obligation
                 );
                 crate::assert_with_log!(*task == task_id, "task", task_id, *task);
-                crate::assert_with_log!(*region == region, "region", region, *region);
+                crate::assert_with_log!(*event_region == root, "region", root, *event_region);
                 crate::assert_with_log!(
                     *kind == ObligationKind::IoOp,
                     "kind",

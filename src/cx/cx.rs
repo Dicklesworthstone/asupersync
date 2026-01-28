@@ -232,7 +232,15 @@ impl Cx {
         io_driver: Option<IoDriverHandle>,
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
-        Self::new_with_io(region, task, budget, observability, io_driver, None, entropy)
+        Self::new_with_io(
+            region,
+            task,
+            budget,
+            observability,
+            io_driver,
+            None,
+            entropy,
+        )
     }
 
     /// Creates a new capability context with optional I/O capability (internal use).
