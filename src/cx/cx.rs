@@ -59,6 +59,7 @@ use crate::runtime::task_handle::JoinError;
 use crate::time::{timeout, TimeSource, WallClock};
 use crate::tracing_compat::{debug, info, trace};
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
+use crate::util::{EntropySource, OsEntropy};
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
@@ -132,6 +133,7 @@ pub struct Cx {
     pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
     observability: Arc<std::sync::RwLock<ObservabilityState>>,
     io_driver: Option<IoDriverHandle>,
+    entropy: Arc<dyn EntropySource>,
 }
 
 /// Internal observability state shared by `Cx` clones.
@@ -199,7 +201,7 @@ impl Cx {
     #[must_use]
     #[allow(dead_code)]
     pub(crate) fn new(region: RegionId, task: TaskId, budget: Budget) -> Self {
-        Self::new_with_observability(region, task, budget, None, None)
+        Self::new_with_observability(region, task, budget, None, None, None)
     }
 
     /// Creates a new capability context from shared state (internal use).
@@ -214,6 +216,7 @@ impl Cx {
                 region, task,
             ))),
             io_driver: None,
+            entropy: Arc::new(OsEntropy),
         }
     }
 
@@ -225,11 +228,13 @@ impl Cx {
         budget: Budget,
         observability: Option<ObservabilityState>,
         io_driver: Option<IoDriverHandle>,
+        entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
         let inner = Arc::new(std::sync::RwLock::new(CxInner::new(region, task, budget)));
         let observability_state =
             observability.unwrap_or_else(|| ObservabilityState::new(region, task));
         let observability = Arc::new(std::sync::RwLock::new(observability_state));
+        let entropy = entropy.unwrap_or_else(|| Arc::new(OsEntropy));
 
         debug!(
             task_id = ?task,
@@ -246,6 +251,7 @@ impl Cx {
             inner,
             observability,
             io_driver,
+            entropy,
         }
     }
 
@@ -828,6 +834,62 @@ impl Cx {
         obs.derive_child(region, task)
     }
 
+    /// Returns the entropy source for this context.
+    #[must_use]
+    pub fn entropy(&self) -> &dyn EntropySource {
+        self.entropy.as_ref()
+    }
+
+    /// Derives an entropy source for a child task.
+    pub(crate) fn child_entropy(&self, task: TaskId) -> Arc<dyn EntropySource> {
+        self.entropy.fork(task)
+    }
+
+    /// Generates a random `u64` using the context entropy source.
+    #[must_use]
+    pub fn random_u64(&self) -> u64 {
+        self.entropy.next_u64()
+    }
+
+    /// Fills a buffer with random bytes using the context entropy source.
+    pub fn random_bytes(&self, dest: &mut [u8]) {
+        self.entropy.fill_bytes(dest);
+    }
+
+    /// Generates a random `usize` in `[0, bound)` with rejection sampling.
+    #[must_use]
+    pub fn random_usize(&self, bound: usize) -> usize {
+        assert!(bound > 0, "bound must be non-zero");
+        let bound_u64 = bound as u64;
+        let threshold = u64::MAX - (u64::MAX % bound_u64);
+        loop {
+            let value = self.random_u64();
+            if value < threshold {
+                return (value % bound_u64) as usize;
+            }
+        }
+    }
+
+    /// Generates a random boolean.
+    #[must_use]
+    pub fn random_bool(&self) -> bool {
+        self.random_u64() & 1 == 1
+    }
+
+    /// Generates a random `f64` in `[0, 1)`.
+    #[must_use]
+    pub fn random_f64(&self) -> f64 {
+        (self.random_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Shuffles a slice in place using Fisher-Yates.
+    pub fn shuffle<T>(&self, slice: &mut [T]) {
+        for i in (1..slice.len()).rev() {
+            let j = self.random_usize(i + 1);
+            slice.swap(i, j);
+        }
+    }
+
     /// Sets the cancellation flag (internal use).
     #[allow(dead_code)]
     pub(crate) fn set_cancel_internal(&self, value: bool) {
@@ -1305,13 +1367,24 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::ArenaIndex;
+    use crate::util::{ArenaIndex, DetEntropy};
 
     fn test_cx() -> Cx {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
+        )
+    }
+
+    fn test_cx_with_entropy(seed: u64) -> Cx {
+        Cx::new_with_observability(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(Arc::new(DetEntropy::new(seed))),
         )
     }
 
@@ -1370,6 +1443,38 @@ mod tests {
             cx.checkpoint().is_err(),
             "Cx remains masked after panic! mask_depth leaked."
         );
+    }
+
+    #[test]
+    fn random_usize_in_range() {
+        let cx = test_cx_with_entropy(123);
+        for _ in 0..100 {
+            let value = cx.random_usize(7);
+            assert!(value < 7);
+        }
+    }
+
+    #[test]
+    fn shuffle_deterministic() {
+        let cx1 = test_cx_with_entropy(42);
+        let cx2 = test_cx_with_entropy(42);
+
+        let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut b = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        cx1.shuffle(&mut a);
+        cx2.shuffle(&mut b);
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn random_f64_range() {
+        let cx = test_cx_with_entropy(7);
+        for _ in 0..100 {
+            let value = cx.random_f64();
+            assert!((0.0..1.0).contains(&value));
+        }
     }
 
     // ========================================================================

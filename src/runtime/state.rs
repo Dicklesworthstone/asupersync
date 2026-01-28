@@ -22,7 +22,7 @@ use crate::types::policy::PolicyAction;
 use crate::types::{
     Budget, CancelKind, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
 };
-use crate::util::Arena;
+use crate::util::{Arena, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
@@ -102,6 +102,8 @@ pub struct RuntimeState {
     /// When present, the runtime can wait on I/O events via the reactor.
     /// When `None`, the runtime operates in pure Lab mode without real I/O.
     io_driver: Option<IoDriverHandle>,
+    /// Entropy source for capability-based randomness.
+    entropy_source: Arc<dyn EntropySource>,
 }
 
 impl RuntimeState {
@@ -121,6 +123,7 @@ impl RuntimeState {
             trace_seq: 0,
             stored_futures: HashMap::new(),
             io_driver: None,
+            entropy_source: Arc::new(OsEntropy),
         }
     }
 
@@ -154,6 +157,7 @@ impl RuntimeState {
             trace_seq: 0,
             stored_futures: HashMap::new(),
             io_driver: Some(IoDriverHandle::new(reactor)),
+            entropy_source: Arc::new(OsEntropy),
         }
     }
 
@@ -187,6 +191,17 @@ impl RuntimeState {
     #[must_use]
     pub fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.io_driver.clone()
+    }
+
+    /// Returns the entropy source for this runtime.
+    #[must_use]
+    pub fn entropy_source(&self) -> Arc<dyn EntropySource> {
+        self.entropy_source.clone()
+    }
+
+    /// Sets the entropy source for this runtime.
+    pub fn set_entropy_source(&mut self, source: Arc<dyn EntropySource>) {
+        self.entropy_source = source;
     }
 
     /// Returns a shared reference to a task record by ID.
@@ -379,12 +394,14 @@ impl RuntimeState {
         }
 
         // Create the task's capability context
+        let entropy = self.entropy_source.fork(task_id);
         let cx = crate::cx::Cx::new_with_observability(
             region,
             task_id,
             budget,
             None,
             self.io_driver_handle(),
+            Some(entropy),
         );
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 

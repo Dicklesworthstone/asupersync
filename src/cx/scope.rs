@@ -327,6 +327,7 @@ impl<P: Policy> Scope<'_, P> {
 
         // Create the child task's capability context
         let child_observability = cx.child_observability(self.region, task_id);
+        let child_entropy = cx.child_entropy(task_id);
         let io_driver = state.io_driver_handle();
         let child_cx = Cx::new_with_observability(
             self.region,
@@ -334,6 +335,7 @@ impl<P: Policy> Scope<'_, P> {
             self.budget,
             Some(child_observability),
             io_driver,
+            Some(child_entropy),
         );
 
         // Create the TaskHandle
@@ -590,6 +592,7 @@ impl<P: Policy> Scope<'_, P> {
 
         // Create the child task's capability context
         let child_observability = cx.child_observability(self.region, task_id);
+        let child_entropy = cx.child_entropy(task_id);
         let io_driver = state.io_driver_handle();
         let child_cx = Cx::new_with_observability(
             self.region,
@@ -597,6 +600,7 @@ impl<P: Policy> Scope<'_, P> {
             self.budget,
             Some(child_observability),
             io_driver,
+            Some(child_entropy),
         );
 
         // Create the TaskHandle

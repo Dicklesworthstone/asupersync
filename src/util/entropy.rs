@@ -8,7 +8,7 @@ use crate::util::DetRng;
 use std::sync::{Arc, Mutex};
 
 /// Core trait for entropy providers.
-pub trait EntropySource: Send + Sync + 'static {
+pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
     /// Fill a buffer with entropy bytes.
     fn fill_bytes(&self, dest: &mut [u8]);
 
@@ -150,5 +150,214 @@ impl ThreadLocalEntropy {
             .wrapping_mul(0x517c_c1b7_2722_0a95)
             .wrapping_add(thread_index as u64);
         DetEntropy::new(seed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // DetEntropy Core Functionality
+    // =========================================================================
+
+    #[test]
+    fn det_entropy_same_seed_same_sequence() {
+        let e1 = DetEntropy::new(42);
+        let e2 = DetEntropy::new(42);
+
+        for _ in 0..32 {
+            assert_eq!(e1.next_u64(), e2.next_u64());
+        }
+    }
+
+    #[test]
+    fn det_entropy_different_seeds_different_sequences() {
+        let e1 = DetEntropy::new(12345);
+        let e2 = DetEntropy::new(54321);
+
+        let v1 = e1.next_u64();
+        let v2 = e2.next_u64();
+        assert_ne!(v1, v2, "Different seeds should produce different values");
+    }
+
+    #[test]
+    fn det_entropy_fill_bytes_deterministic() {
+        let e1 = DetEntropy::new(42);
+        let e2 = DetEntropy::new(42);
+
+        let mut buf1 = [0u8; 64];
+        let mut buf2 = [0u8; 64];
+
+        e1.fill_bytes(&mut buf1);
+        e2.fill_bytes(&mut buf2);
+
+        assert_eq!(buf1, buf2);
+    }
+
+    #[test]
+    fn det_entropy_fork_deterministic() {
+        let parent1 = DetEntropy::new(99);
+        let parent2 = DetEntropy::new(99);
+        let task = TaskId::new_for_test(7, 0);
+
+        let child1 = parent1.fork(task);
+        let child2 = parent2.fork(task);
+
+        for _ in 0..16 {
+            assert_eq!(child1.next_u64(), child2.next_u64());
+        }
+    }
+
+    #[test]
+    fn det_entropy_fork_different_tasks_different_sequences() {
+        let parent = DetEntropy::new(42);
+
+        let task1 = TaskId::new_for_test(1, 0);
+        let task2 = TaskId::new_for_test(2, 0);
+
+        let child1 = parent.fork(task1);
+        let child2 = parent.fork(task2);
+
+        assert_ne!(
+            child1.next_u64(),
+            child2.next_u64(),
+            "Different task IDs should produce different children"
+        );
+    }
+
+    #[test]
+    fn det_entropy_sequential_forks_different() {
+        let parent = DetEntropy::new(42);
+        let task_id = TaskId::new_for_test(1, 0);
+
+        let child1 = parent.fork(task_id);
+        let child2 = parent.fork(task_id);
+
+        assert_ne!(
+            child1.next_u64(),
+            child2.next_u64(),
+            "Sequential forks of same task should differ (fork counter)"
+        );
+    }
+
+    #[test]
+    fn det_entropy_source_id() {
+        let e = DetEntropy::new(42);
+        assert_eq!(e.source_id(), "deterministic");
+    }
+
+    // =========================================================================
+    // OsEntropy Tests
+    // =========================================================================
+
+    #[test]
+    fn os_entropy_produces_different_values() {
+        let os = OsEntropy;
+        let v1 = os.next_u64();
+        let v2 = os.next_u64();
+
+        // Extremely unlikely to be equal
+        assert_ne!(v1, v2, "OS entropy should produce different values");
+    }
+
+    #[test]
+    fn os_entropy_fill_bytes_works() {
+        let os = OsEntropy;
+        let mut buf = [0u8; 32];
+        os.fill_bytes(&mut buf);
+
+        // Check not all zeros (astronomically unlikely with real entropy)
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "OS entropy should produce non-zero bytes"
+        );
+    }
+
+    #[test]
+    fn os_entropy_source_id() {
+        let os = OsEntropy;
+        assert_eq!(os.source_id(), "os");
+    }
+
+    #[test]
+    fn os_entropy_fork_returns_os_entropy() {
+        let os = OsEntropy;
+        let task_id = TaskId::new_for_test(1, 0);
+        let forked = os.fork(task_id);
+        assert_eq!(forked.source_id(), "os");
+    }
+
+    // =========================================================================
+    // Edge Cases
+    // =========================================================================
+
+    #[test]
+    fn det_entropy_zero_seed_works() {
+        let e = DetEntropy::new(0);
+        let _ = e.next_u64(); // Should not panic
+    }
+
+    #[test]
+    fn det_entropy_max_seed_works() {
+        let e = DetEntropy::new(u64::MAX);
+        let _ = e.next_u64(); // Should not panic or overflow
+    }
+
+    #[test]
+    fn det_entropy_fill_zero_bytes() {
+        let e = DetEntropy::new(42);
+        let mut buf: [u8; 0] = [];
+        e.fill_bytes(&mut buf); // Should not panic
+    }
+
+    // =========================================================================
+    // ThreadLocalEntropy Tests
+    // =========================================================================
+
+    #[test]
+    fn thread_local_entropy_deterministic() {
+        let tl1 = ThreadLocalEntropy::new(1234);
+        let tl2 = ThreadLocalEntropy::new(1234);
+
+        let e1 = tl1.for_thread(3);
+        let e2 = tl2.for_thread(3);
+
+        assert_eq!(e1.next_u64(), e2.next_u64());
+    }
+
+    #[test]
+    fn thread_local_entropy_different_threads() {
+        let tl = ThreadLocalEntropy::new(12345);
+
+        let e0 = tl.for_thread(0);
+        let e1 = tl.for_thread(1);
+
+        assert_ne!(e0.next_u64(), e1.next_u64());
+    }
+
+    // =========================================================================
+    // Thread Safety Tests
+    // =========================================================================
+
+    #[test]
+    fn det_entropy_thread_safe() {
+        use std::thread;
+
+        let e = Arc::new(DetEntropy::new(42));
+        let mut handles = vec![];
+
+        for _ in 0..4 {
+            let entropy = Arc::clone(&e);
+            handles.push(thread::spawn(move || {
+                for _ in 0..1000 {
+                    let _ = entropy.next_u64();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
     }
 }

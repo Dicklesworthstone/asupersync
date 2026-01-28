@@ -470,6 +470,7 @@ mod tests {
             Budget::INFINITE,
             None,
             Some(driver),
+            None,
         );
         let _guard = Cx::set_current(Some(cx));
 

@@ -63,6 +63,11 @@ use crate::util::DetRng;
 pub struct LabConfig {
     /// Random seed for deterministic scheduling.
     pub seed: u64,
+    /// Seed for deterministic entropy sources.
+    ///
+    /// By default this matches `seed`, but can be overridden to decouple
+    /// scheduler decisions from entropy generation.
+    pub entropy_seed: u64,
     /// Number of virtual workers to model in the lab scheduler.
     ///
     /// This does not spawn threads; it controls deterministic multi-worker simulation.
@@ -98,6 +103,7 @@ impl LabConfig {
     pub const fn new(seed: u64) -> Self {
         Self {
             seed,
+            entropy_seed: seed,
             worker_count: 1,
             panic_on_obligation_leak: true,
             trace_capacity: 4096,
@@ -140,6 +146,13 @@ impl LabConfig {
     #[must_use]
     pub const fn worker_count(mut self, count: usize) -> Self {
         self.worker_count = if count == 0 { 1 } else { count };
+        self
+    }
+
+    /// Sets the entropy seed used for capability-based randomness.
+    #[must_use]
+    pub const fn entropy_seed(mut self, seed: u64) -> Self {
+        self.entropy_seed = seed;
         self
     }
 
@@ -247,6 +260,12 @@ mod tests {
         let config = LabConfig::default();
         let ok = config.seed == 42;
         crate::assert_with_log!(ok, "seed", 42, config.seed);
+        crate::assert_with_log!(
+            config.entropy_seed == 42,
+            "entropy_seed",
+            42,
+            config.entropy_seed
+        );
         crate::assert_with_log!(
             config.worker_count == 1,
             "worker_count",

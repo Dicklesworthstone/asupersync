@@ -20,7 +20,7 @@ use crate::trace::TraceBuffer;
 use crate::trace::{TraceData, TraceEvent};
 use crate::types::{ObligationId, TaskId};
 use crate::types::{Severity, Time};
-use crate::util::DetRng;
+use crate::util::{DetEntropy, DetRng};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -64,6 +64,7 @@ impl LabRuntime {
         let rng = config.rng();
         let chaos_rng = config.chaos.as_ref().map(ChaosRng::from_config);
         let mut state = RuntimeState::new();
+        state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
         state.trace = TraceBuffer::new(config.trace_capacity);
 
         // Initialize replay recorder if configured
