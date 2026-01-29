@@ -18,6 +18,7 @@
 pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
+pub mod env_config;
 pub mod io_driver;
 pub mod io_op;
 pub mod reactor;
