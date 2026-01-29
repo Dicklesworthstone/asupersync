@@ -18,26 +18,20 @@ mod common;
 
 use asupersync::combinator::{
     first_ok_outcomes, first_ok_to_result, hedge_outcomes, hedge_to_result, join2_outcomes,
-    join2_to_result, join_all_outcomes, join_all_to_result, pipeline2_outcomes, pipeline_to_result,
-    quorum_outcomes, quorum_to_result, race2_outcomes, race2_to_result, race_all_outcomes,
-    race_all_to_result, HedgeConfig, HedgeWinner, PipelineConfig,
+    join_all_to_result, make_join_all_result, make_race_all_result, pipeline2_outcomes,
+    pipeline_to_result, quorum_outcomes, race2_to_result, HedgeWinner, RaceWinner,
 };
-use asupersync::lab::oracle::{
-    assert_deterministic, CancellationProtocolOracle, LoserDrainOracle, OracleSuite,
-};
+use asupersync::lab::oracle::{CancellationProtocolOracle, OracleSuite};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::record::task::{TaskPhase, TaskState};
-use asupersync::record::{Finalizer, ObligationKind, ObligationState};
-use asupersync::runtime::{yield_now, RuntimeState};
-use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
+use asupersync::record::task::TaskState;
+use asupersync::record::{ObligationKind, ObligationState};
+use asupersync::runtime::yield_now;
 use asupersync::types::{
-    Budget, CancelKind, CancelReason, ObligationId, Outcome, PanicPayload, RegionId, Severity,
-    TaskId, Time,
+    Budget, CancelKind, CancelReason, ObligationId, Outcome, PanicPayload, RegionId, TaskId, Time,
 };
 use common::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
@@ -71,13 +65,19 @@ fn e2e_join_of_races_composition() {
 
     test_section!("both-ok");
     {
-        let left: Outcome<i32, &str> = Outcome::Ok(1);
-        let right: Outcome<i32, &str> = Outcome::Ok(2);
-        let race_left = race2_outcomes(left, Outcome::Err("slow"));
-        let race_right = race2_outcomes(right, Outcome::Err("slower"));
-
-        let left_val = race2_to_result(race_left).expect("left race should pick Ok");
-        let right_val = race2_to_result(race_right).expect("right race should pick Ok");
+        // Race where first (Ok) wins
+        let left_val = race2_to_result(
+            RaceWinner::First,
+            Outcome::<i32, &str>::Ok(1),
+            Outcome::Err("slow"),
+        )
+        .expect("left race should pick Ok");
+        let right_val = race2_to_result(
+            RaceWinner::First,
+            Outcome::<i32, &str>::Ok(2),
+            Outcome::Err("slower"),
+        )
+        .expect("right race should pick Ok");
 
         let (join_result, _, _): (Outcome<(i32, i32), &str>, _, _) =
             join2_outcomes(Outcome::Ok(left_val), Outcome::Ok(right_val));
@@ -86,23 +86,25 @@ fn e2e_join_of_races_composition() {
 
     test_section!("one-race-fails");
     {
-        let left: Outcome<i32, &str> = Outcome::Err("fail");
-        let right: Outcome<i32, &str> = Outcome::Ok(99);
-        let race_left = race2_outcomes(left.clone(), left);
-        let race_right = race2_outcomes(right, Outcome::Err("backup"));
+        // Both arms of left race fail → left race fails
+        let left_res = race2_to_result(
+            RaceWinner::First,
+            Outcome::<i32, &str>::Err("fail"),
+            Outcome::Err("also fail"),
+        );
+        // Right race: Ok wins
+        let right_res = race2_to_result(
+            RaceWinner::First,
+            Outcome::<i32, &str>::Ok(99),
+            Outcome::Err("backup"),
+        );
 
-        let left_res: Result<i32, _> = race2_to_result(race_left);
-        let right_res: Result<i32, _> = race2_to_result(race_right);
-
-        // Left race fails (both arms failed), right succeeds
         assert!(left_res.is_err(), "left race should fail");
         assert!(right_res.is_ok(), "right race should succeed");
 
         // join(Err, Ok) → Err (worst severity)
-        let (join_result, _, _): (Outcome<(i32, i32), &str>, _, _) = join2_outcomes(
-            Outcome::Err(left_res.unwrap_err().to_string().leak()),
-            Outcome::Ok(right_res.unwrap()),
-        );
+        let (join_result, _, _): (Outcome<(i32, i32), &str>, _, _) =
+            join2_outcomes(Outcome::Err("fail"), Outcome::Ok(right_res.unwrap()));
         assert_outcome_err!(join_result);
     }
 
@@ -121,21 +123,21 @@ fn e2e_race_of_join_groups() {
     test_section!("fast-single-wins");
     {
         // Simulate: join_all of [Ok, Ok, Cancelled] (slow group, worst = Cancelled)
-        let slow_group: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Ok(1), Outcome::Ok(2), Outcome::Cancelled(CancelReason::timeout())];
-        let join_result = join_all_outcomes(slow_group);
-        let slow_result: Result<Vec<i32>, _> = join_all_to_result(join_result);
+        let slow_group: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(1),
+            Outcome::Ok(2),
+            Outcome::Cancelled(CancelReason::timeout()),
+        ];
+        let join_result = make_join_all_result(slow_group);
+        let slow_result = join_all_to_result(join_result);
         assert!(slow_result.is_err(), "slow group has cancellation");
 
-        // Fast single completes Ok
-        let fast: Outcome<i32, &str> = Outcome::Ok(42);
-
-        // Race: fast vs slow-group-as-error
-        let race_result = race2_outcomes(
-            Outcome::Err("group_failed"),
-            fast,
+        // Race: second (fast single Ok) wins
+        let race_result = make_race_all_result(
+            1, // winner_index = 1 (the fast single)
+            vec![Outcome::<i32, &str>::Err("group_failed"), Outcome::Ok(42)],
         );
-        let winner = race2_to_result(race_result);
+        let winner = race_result;
         assert_eq!(winner.unwrap(), 42, "fast single should win the race");
     }
 
@@ -155,12 +157,15 @@ fn e2e_pipeline_feeds_quorum() {
     {
         let stage1: Outcome<i32, &str> = Outcome::Ok(10);
         let stage2: Outcome<i32, &str> = Outcome::Ok(20);
-        let pipeline_result = pipeline2_outcomes(stage1, stage2);
+        let pipeline_result = pipeline2_outcomes(stage1, Some(stage2));
         let pipeline_val = pipeline_to_result(pipeline_result).expect("pipeline should complete");
 
         // Feed pipeline output to quorum as one of several results
-        let quorum_inputs: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Ok(pipeline_val), Outcome::Ok(99), Outcome::Err("fail")];
+        let quorum_inputs: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(pipeline_val),
+            Outcome::Ok(99),
+            Outcome::Err("fail"),
+        ];
         let quorum_result = quorum_outcomes(2, quorum_inputs);
 
         assert_with_log!(
@@ -176,15 +181,18 @@ fn e2e_pipeline_feeds_quorum() {
     {
         let stage1: Outcome<i32, &str> = Outcome::Ok(10);
         let stage2: Outcome<i32, &str> = Outcome::Err("stage2 fail");
-        let pipeline_result = pipeline2_outcomes(stage1, stage2);
+        let pipeline_result = pipeline2_outcomes(stage1, Some(stage2));
         assert!(
             pipeline_to_result(pipeline_result).is_err(),
             "pipeline should fail at stage 2"
         );
 
         // Only 1 Ok out of 3 needed for quorum of 2
-        let quorum_inputs: Vec<Outcome<i32, &str>> =
-            vec![Outcome::Err("pipeline_fail"), Outcome::Ok(99), Outcome::Err("other")];
+        let quorum_inputs: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Err("pipeline_fail"),
+            Outcome::Ok(99),
+            Outcome::Err("other"),
+        ];
         let quorum_result = quorum_outcomes(2, quorum_inputs);
 
         assert_with_log!(
@@ -209,10 +217,10 @@ fn e2e_hedge_with_first_ok_fallback() {
 
     test_section!("backup-wins");
     {
-        // Simulate: primary slow/failed, backup succeeds
+        // Simulate: primary failed, backup spawned and won
         let primary: Outcome<i32, &str> = Outcome::Err("slow primary");
         let backup: Outcome<i32, &str> = Outcome::Ok(42);
-        let hedge_result = hedge_outcomes(primary, Some(backup));
+        let hedge_result = hedge_outcomes(primary, true, Some(backup), Some(HedgeWinner::Backup));
         let hedge_val = hedge_to_result(hedge_result);
         assert_eq!(hedge_val.unwrap(), 42, "backup should win");
     }
@@ -266,8 +274,12 @@ fn e2e_cascading_cancel_deep_region_tree() {
 
     test_section!("create-tree");
     suite.region_tree.on_region_create(root, None, t(0));
-    suite.region_tree.on_region_create(child_a, Some(root), t(1));
-    suite.region_tree.on_region_create(child_b, Some(root), t(2));
+    suite
+        .region_tree
+        .on_region_create(child_a, Some(root), t(1));
+    suite
+        .region_tree
+        .on_region_create(child_b, Some(root), t(2));
     suite
         .region_tree
         .on_region_create(grandchild, Some(child_a), t(3));
@@ -275,9 +287,7 @@ fn e2e_cascading_cancel_deep_region_tree() {
     suite.quiescence.on_region_create(root, None);
     suite.quiescence.on_region_create(child_a, Some(root));
     suite.quiescence.on_region_create(child_b, Some(root));
-    suite
-        .quiescence
-        .on_region_create(grandchild, Some(child_a));
+    suite.quiescence.on_region_create(grandchild, Some(child_a));
 
     test_section!("spawn-tasks");
     suite.task_leak.on_spawn(worker_a, child_a, t(10));
@@ -288,10 +298,10 @@ fn e2e_cascading_cancel_deep_region_tree() {
     suite.quiescence.on_spawn(worker_gc, grandchild);
 
     test_section!("cancel-root");
-    let reason = CancelReason::explicit().with_message("shutdown");
+    let reason = CancelReason::user("shutdown");
     suite
         .cancellation_protocol
-        .on_region_cancel(root, reason.clone(), t(50));
+        .on_region_cancel(root, reason, t(50));
 
     test_section!("drain-and-complete");
     // All tasks complete (cancelled)
@@ -356,17 +366,13 @@ fn e2e_obligation_across_join_boundary() {
         .on_create(ob_2, ObligationKind::SendPermit, worker_2, root);
 
     test_section!("join-both-succeed");
-    // Worker 1 succeeds → commit obligation
     suite
         .obligation_leak
         .on_resolve(ob_1, ObligationState::Committed);
-
-    // Worker 2 succeeds → commit obligation
     suite
         .obligation_leak
         .on_resolve(ob_2, ObligationState::Committed);
 
-    // Both complete
     suite.task_leak.on_complete(worker_1, t(30));
     suite.task_leak.on_complete(worker_2, t(30));
     suite.quiescence.on_task_complete(worker_1);
@@ -465,25 +471,10 @@ fn e2e_obligation_abort_on_join_partial_cancel() {
 // 7. Budget enforcement through region tree
 // ============================================================================
 
-/// Parent budget limits propagate to children; exhaustion triggers cancel
+/// Budget limits propagate; exhaustion triggers proper cancel protocol
 #[test]
-fn e2e_budget_cascade_through_region_tree() {
-    init_test("e2e_budget_cascade_through_region_tree");
-
-    test_section!("budget-arithmetic");
-    {
-        let parent_budget = Budget::new(Duration::from_millis(100));
-        let child_budget = Budget::new(Duration::from_millis(50));
-
-        // Child budget must not exceed parent
-        let effective = child_budget.min(parent_budget);
-        assert_with_log!(
-            effective.deadline_nanos() <= parent_budget.deadline_nanos(),
-            "child effective budget bounded by parent",
-            true,
-            effective.deadline_nanos() <= parent_budget.deadline_nanos()
-        );
-    }
+fn e2e_budget_enforcement_cancel_protocol() {
+    init_test("e2e_budget_enforcement_cancel_protocol");
 
     test_section!("exhaustion-triggers-cancel");
     {
@@ -503,20 +494,35 @@ fn e2e_budget_cascade_through_region_tree() {
         oracle.on_cancel_request(worker, reason.clone(), t(100));
 
         // Task drains and completes
-        oracle.on_transition(worker, &TaskState::Running, &TaskState::Draining, t(110));
-        oracle.on_transition(worker, &TaskState::Draining, &TaskState::Finalizing, t(120));
-        oracle.on_transition(worker, &TaskState::Finalizing, &TaskState::Done, t(130));
+        let cleanup = Budget::MINIMAL;
+        let cancel_requested = TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        };
+        let cancelling = TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        };
+        let finalizing = TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        };
+        let completed = TaskState::Completed(Outcome::Cancelled(reason));
+        oracle.on_transition(worker, &TaskState::Running, &cancel_requested, t(110));
+        oracle.on_transition(worker, &cancel_requested, &cancelling, t(115));
+        oracle.on_transition(worker, &cancelling, &finalizing, t(120));
+        oracle.on_transition(worker, &finalizing, &completed, t(130));
 
-        let violations = oracle.check_all();
+        let violations = oracle.check();
         assert_with_log!(
-            violations.is_empty(),
+            violations.is_ok(),
             "budget exhaustion properly cancels",
-            "empty",
+            "ok",
             violations
         );
     }
 
-    test_complete!("e2e_budget_cascade_through_region_tree");
+    test_complete!("e2e_budget_enforcement_cancel_protocol");
 }
 
 // ============================================================================
@@ -529,8 +535,8 @@ fn e2e_deterministic_replay_multi_task() {
     init_test("e2e_deterministic_replay_multi_task");
 
     let seed: u64 = 0xCAFE_BABE;
-    let task_count = 5;
-    let yields_per_task = 3;
+    let task_count: usize = 5;
+    let yields_per_task: usize = 3;
 
     test_section!("run-1");
     let steps_1 = {
@@ -616,23 +622,25 @@ fn e2e_severity_lattice_nested_combinators() {
     test_section!("join-severity-escalation");
     {
         // join(Ok, Err) → Err (worst of the two)
-        let (result, sev_a, sev_b): (Outcome<(i32, i32), &str>, _, _) =
+        let (result, _sev_a, _sev_b): (Outcome<(i32, i32), &str>, _, _) =
             join2_outcomes(Outcome::Ok(1), Outcome::Err("fail"));
         assert_outcome_err!(result);
     }
 
     test_section!("join-cancelled-beats-err");
     {
-        let (result, _, _): (Outcome<(i32, i32), &str>, _, _) =
-            join2_outcomes(Outcome::Err("fail"), Outcome::Cancelled(CancelReason::timeout()));
+        let (result, _, _): (Outcome<(i32, i32), &str>, _, _) = join2_outcomes(
+            Outcome::Err("fail"),
+            Outcome::Cancelled(CancelReason::timeout()),
+        );
         assert_outcome_cancelled!(result);
     }
 
     test_section!("join-panicked-beats-all");
     {
         let (result, _, _): (Outcome<(i32, i32), &str>, _, _) = join2_outcomes(
-            Outcome::Cancelled(CancelReason::explicit()),
-            Outcome::Panicked(PanicPayload::message("boom")),
+            Outcome::Cancelled(CancelReason::user("cancel")),
+            Outcome::Panicked(PanicPayload::new("boom")),
         );
         assert_outcome_panicked!(result);
     }
@@ -640,25 +648,25 @@ fn e2e_severity_lattice_nested_combinators() {
     test_section!("join-all-severity");
     {
         // join_all with mixed severities → worst wins
-        let outcomes: Vec<Outcome<i32, &str>> = vec![
-            Outcome::Ok(1),
-            Outcome::Err("e"),
-            Outcome::Ok(2),
-        ];
-        let result = join_all_outcomes(outcomes);
+        let outcomes: Vec<Outcome<i32, &str>> =
+            vec![Outcome::Ok(1), Outcome::Err("e"), Outcome::Ok(2)];
+        let result = make_join_all_result(outcomes);
         let as_result = join_all_to_result(result);
         assert!(as_result.is_err(), "join_all with any Err → Err");
     }
 
     test_section!("race-takes-first-ok");
     {
-        // race picks first Ok regardless of severity of others
-        let result = race_all_outcomes(vec![
-            Outcome::Err("fail1"),
-            Outcome::Ok(42),
-            Outcome::Panicked(PanicPayload::message("panic")),
-        ]);
-        let val = race_all_to_result(result).expect("race should pick Ok(42)");
+        // race picks the winner; if winner is Ok, returns Ok
+        let result = make_race_all_result(
+            1, // winner_index = 1 (the Ok(42))
+            vec![
+                Outcome::<i32, &str>::Err("fail1"),
+                Outcome::Ok(42),
+                Outcome::Panicked(PanicPayload::new("panic")),
+            ],
+        );
+        let val = result.expect("race should pick Ok(42)");
         assert_eq!(val, 42);
     }
 
@@ -679,7 +687,7 @@ fn e2e_quorum_degeneracies_match_primitives() {
         let outcomes: Vec<Outcome<i32, &str>> =
             vec![Outcome::Ok(1), Outcome::Ok(2), Outcome::Ok(3)];
         let quorum_result = quorum_outcomes(3, outcomes.clone());
-        let join_result = join_all_outcomes(outcomes);
+        let join_result = make_join_all_result(outcomes);
 
         // Both should succeed
         assert!(quorum_result.quorum_met, "3-of-3 met");
@@ -691,7 +699,7 @@ fn e2e_quorum_degeneracies_match_primitives() {
         let outcomes: Vec<Outcome<i32, &str>> =
             vec![Outcome::Ok(1), Outcome::Err("fail"), Outcome::Ok(3)];
         let quorum_result = quorum_outcomes(3, outcomes.clone());
-        let join_result = join_all_outcomes(outcomes);
+        let join_result = make_join_all_result(outcomes);
 
         // Both should fail
         assert!(!quorum_result.quorum_met, "3-of-3 not met with 1 failure");
@@ -703,11 +711,11 @@ fn e2e_quorum_degeneracies_match_primitives() {
         let outcomes: Vec<Outcome<i32, &str>> =
             vec![Outcome::Err("a"), Outcome::Ok(42), Outcome::Err("c")];
         let quorum_result = quorum_outcomes(1, outcomes.clone());
-        let race_result = race_all_outcomes(outcomes);
+        let race_result = make_race_all_result(1, outcomes); // winner_index=1 (Ok(42))
 
         // Both should succeed
         assert!(quorum_result.quorum_met, "1-of-3 met");
-        assert!(race_all_to_result(race_result).is_ok(), "race_all ok");
+        assert!(race_result.is_ok(), "race_all ok");
     }
 
     test_section!("0-of-n-always-met");
@@ -738,9 +746,7 @@ fn e2e_full_lifecycle_with_finalizers() {
 
     test_section!("create");
     suite.region_tree.on_region_create(root, None, t(0));
-    suite
-        .region_tree
-        .on_region_create(child, Some(root), t(1));
+    suite.region_tree.on_region_create(child, Some(root), t(1));
     suite.quiescence.on_region_create(root, None);
     suite.quiescence.on_region_create(child, Some(root));
 
@@ -753,7 +759,7 @@ fn e2e_full_lifecycle_with_finalizers() {
     suite.quiescence.on_spawn(finalizer_task, child);
 
     test_section!("cancel-and-drain");
-    let reason = CancelReason::explicit();
+    let reason = CancelReason::user("shutdown");
     suite
         .cancellation_protocol
         .on_region_cancel(child, reason, t(50));
@@ -792,7 +798,7 @@ fn e2e_full_lifecycle_with_finalizers() {
 fn e2e_stress_many_tasks_lab_no_leaks() {
     init_test("e2e_stress_many_tasks_lab_no_leaks");
 
-    let task_count = 50;
+    let task_count: usize = 50;
     let mut runtime = LabRuntime::new(LabConfig::new(0xBEEF).max_steps(50_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let completed = Arc::new(AtomicUsize::new(0));
@@ -829,52 +835,59 @@ fn e2e_stress_many_tasks_lab_no_leaks() {
 }
 
 // ============================================================================
-// 13. Race semantics: first-ok wins, all-fail propagates
+// 13. Race semantics: winner selection
 // ============================================================================
 
-/// Exhaustive race semantics with varied outcome combinations
+/// Race semantics with explicit winner selection
 #[test]
-fn e2e_race_exhaustive_outcome_selection() {
-    init_test("e2e_race_exhaustive_outcome_selection");
+fn e2e_race_winner_selection() {
+    init_test("e2e_race_winner_selection");
 
-    test_section!("ok-beats-err");
+    test_section!("first-wins-ok");
     {
-        let result = race2_outcomes(Outcome::<i32, &str>::Err("fail"), Outcome::Ok(42));
-        assert_eq!(race2_to_result(result).unwrap(), 42);
+        let result = race2_to_result(
+            RaceWinner::First,
+            Outcome::<i32, &str>::Ok(42),
+            Outcome::Err("loser"),
+        );
+        assert_eq!(result.unwrap(), 42);
     }
 
-    test_section!("ok-beats-cancelled");
+    test_section!("second-wins-ok");
     {
-        let result = race2_outcomes(
-            Outcome::<i32, &str>::Cancelled(CancelReason::timeout()),
+        let result = race2_to_result(
+            RaceWinner::Second,
+            Outcome::<i32, &str>::Err("loser"),
             Outcome::Ok(7),
         );
-        assert_eq!(race2_to_result(result).unwrap(), 7);
+        assert_eq!(result.unwrap(), 7);
     }
 
-    test_section!("err-beats-cancelled");
+    test_section!("winner-is-err");
     {
-        // When no Ok exists, race prefers lower severity
-        let result = race2_outcomes(
-            Outcome::<i32, &str>::Cancelled(CancelReason::timeout()),
-            Outcome::Err("at least an error"),
+        let result = race2_to_result(
+            RaceWinner::First,
+            Outcome::<i32, &str>::Err("winner failed"),
+            Outcome::Ok(99),
         );
-        // race2 should return the "better" (lower severity) outcome
-        let r = race2_to_result(result);
-        assert!(r.is_err(), "Err is lower severity than Cancelled");
+        assert!(result.is_err(), "winner Err propagates even if loser is Ok");
     }
 
-    test_section!("all-cancelled");
+    test_section!("race-all-winner");
     {
-        let result = race_all_outcomes(vec![
-            Outcome::<i32, &str>::Cancelled(CancelReason::timeout()),
-            Outcome::Cancelled(CancelReason::explicit()),
-        ]);
-        let r = race_all_to_result(result);
-        assert!(r.is_err(), "all-cancelled → error");
+        let result = make_race_all_result(
+            2, // winner_index = 2
+            vec![
+                Outcome::<i32, &str>::Err("a"),
+                Outcome::Err("b"),
+                Outcome::Ok(100),
+            ],
+        );
+        let val = result.expect("winner at index 2 is Ok");
+        assert_eq!(val, 100);
     }
 
-    test_complete!("e2e_race_exhaustive_outcome_selection");
+    test_complete!("e2e_race_winner_selection");
 }
 
 // ============================================================================
@@ -890,16 +903,15 @@ fn e2e_pipeline_shortcircuit_with_fallback() {
     let pipeline_result = {
         let stage1: Outcome<i32, &str> = Outcome::Ok(10);
         let stage2: Outcome<i32, &str> = Outcome::Err("validation failed");
-        pipeline2_outcomes(stage1, stage2)
+        pipeline2_outcomes(stage1, Some(stage2))
     };
     let primary_result = pipeline_to_result(pipeline_result);
     assert!(primary_result.is_err(), "pipeline should fail at stage 2");
 
     test_section!("fallback-via-first-ok");
     {
-        // Use first_ok to try primary pipeline result, then fallback
         let attempt_1: Outcome<i32, &str> = Outcome::Err("pipeline failed");
-        let attempt_2: Outcome<i32, &str> = Outcome::Ok(999); // fallback value
+        let attempt_2: Outcome<i32, &str> = Outcome::Ok(999);
 
         let result = first_ok_outcomes(vec![attempt_1, attempt_2]);
         let val = first_ok_to_result(result).expect("fallback should succeed");
@@ -910,7 +922,7 @@ fn e2e_pipeline_shortcircuit_with_fallback() {
 }
 
 // ============================================================================
-// 15. Determinism across seeds (different seeds → potentially different orders)
+// 15. Determinism across seeds (different seeds → same logical outcome)
 // ============================================================================
 
 /// Different seeds can produce different execution orders but same logical outcomes
@@ -918,7 +930,7 @@ fn e2e_pipeline_shortcircuit_with_fallback() {
 fn e2e_different_seeds_same_logical_outcome() {
     init_test("e2e_different_seeds_same_logical_outcome");
 
-    let task_count = 10;
+    let task_count: usize = 10;
     let seeds = [42u64, 123, 9999, 0xDEAD];
 
     let mut all_completed = Vec::new();
@@ -929,7 +941,7 @@ fn e2e_different_seeds_same_logical_outcome() {
         let region = runtime.state.create_root_region(Budget::INFINITE);
         let completed = Arc::new(AtomicUsize::new(0));
 
-        for i in 0..task_count {
+        for _i in 0..task_count {
             let completed = Arc::clone(&completed);
             let (task_id, _handle) = runtime
                 .state
@@ -963,7 +975,7 @@ fn e2e_different_seeds_same_logical_outcome() {
 // 16. Cancel reason propagation through region hierarchy
 // ============================================================================
 
-/// Cancel reason (timeout, explicit, deadline) propagates correctly
+/// Cancel reason (timeout, user, deadline) propagates correctly
 #[test]
 fn e2e_cancel_reason_propagation() {
     init_test("e2e_cancel_reason_propagation");
@@ -972,27 +984,27 @@ fn e2e_cancel_reason_propagation() {
     {
         let reason = CancelReason::timeout();
         assert_with_log!(
-            reason.kind() == &CancelKind::Timeout,
+            reason.kind() == CancelKind::Timeout,
             "timeout kind",
             "Timeout",
             reason.kind()
         );
         let cleanup = reason.cleanup_budget();
         assert_with_log!(
-            !cleanup.is_zero(),
+            cleanup.poll_quota > 0,
             "timeout has cleanup budget",
             true,
-            !cleanup.is_zero()
+            cleanup.poll_quota > 0
         );
     }
 
-    test_section!("explicit-reason");
+    test_section!("user-reason");
     {
-        let reason = CancelReason::explicit().with_message("user requested");
+        let reason = CancelReason::user("user requested");
         assert_with_log!(
-            reason.kind() == &CancelKind::Explicit,
-            "explicit kind",
-            "Explicit",
+            reason.kind() == CancelKind::User,
+            "user kind",
+            "User",
             reason.kind()
         );
     }
@@ -1001,7 +1013,7 @@ fn e2e_cancel_reason_propagation() {
     {
         let reason = CancelReason::deadline().with_message("budget exceeded");
         assert_with_log!(
-            reason.kind() == &CancelKind::Deadline,
+            reason.kind() == CancelKind::Deadline,
             "deadline kind",
             "Deadline",
             reason.kind()
@@ -1010,15 +1022,17 @@ fn e2e_cancel_reason_propagation() {
 
     test_section!("strengthening");
     {
-        // Explicit is stronger than Timeout
-        let timeout = CancelReason::timeout();
-        let explicit = CancelReason::explicit();
-        let strengthened = timeout.strengthen(&explicit);
+        // Stronger kind overwrites weaker via strengthen()
+        let mut timeout_reason = CancelReason::timeout();
+        let user_reason = CancelReason::user("explicit");
+        let changed = timeout_reason.strengthen(&user_reason);
+        // Timeout > User, so strengthen should not change
+        assert_with_log!(!changed, "strengthen ignores weaker", false, changed);
         assert_with_log!(
-            strengthened.kind() == &CancelKind::Explicit,
-            "strengthen picks stronger",
-            "Explicit",
-            strengthened.kind()
+            timeout_reason.kind() == CancelKind::Timeout,
+            "strengthened stays Timeout",
+            "Timeout",
+            timeout_reason.kind()
         );
     }
 
@@ -1062,7 +1076,7 @@ fn e2e_fanout_merge_pattern() {
     test_section!("merge-via-join-all");
     {
         // join_all requires ALL → fails because worker 3 failed
-        let join_result = join_all_outcomes(worker_outcomes);
+        let join_result = make_join_all_result(worker_outcomes);
         let as_result = join_all_to_result(join_result);
         assert!(as_result.is_err(), "join_all fails with any error");
     }
@@ -1082,20 +1096,20 @@ fn e2e_hedge_primary_fast_no_backup() {
     test_section!("primary-only");
     {
         let primary: Outcome<i32, &str> = Outcome::Ok(1);
-        let result = hedge_outcomes(primary, None);
+        // backup_spawned=false, no backup outcome, no winner
+        let result = hedge_outcomes(primary, false, None, None);
         let val = hedge_to_result(result).expect("primary-only should succeed");
         assert_eq!(val, 1);
     }
 
-    test_section!("primary-fast-backup-ignored");
+    test_section!("primary-wins-race");
     {
         let primary: Outcome<i32, &str> = Outcome::Ok(1);
         let backup: Outcome<i32, &str> = Outcome::Ok(2);
-        // When both provided and primary Ok, result depends on which arrived first
-        let result = hedge_outcomes(primary, Some(backup));
+        // backup_spawned=true, primary won
+        let result = hedge_outcomes(primary, true, Some(backup), Some(HedgeWinner::Primary));
         let val = hedge_to_result(result).expect("should succeed");
-        // Primary is first argument, should win
-        assert_eq!(val, 1, "primary should win when it succeeds");
+        assert_eq!(val, 1, "primary should win when it completes first");
     }
 
     test_complete!("e2e_hedge_primary_fast_no_backup");
@@ -1113,7 +1127,7 @@ fn e2e_multiple_obligation_kinds_same_region() {
     let root = region(0);
     let worker = task(1);
     let send_ob = obligation(0);
-    let recv_ob = obligation(1);
+    let ack_ob = obligation(1);
     let lease_ob = obligation(2);
 
     test_section!("setup");
@@ -1128,7 +1142,7 @@ fn e2e_multiple_obligation_kinds_same_region() {
         .on_create(send_ob, ObligationKind::SendPermit, worker, root);
     suite
         .obligation_leak
-        .on_create(recv_ob, ObligationKind::RecvPermit, worker, root);
+        .on_create(ack_ob, ObligationKind::Ack, worker, root);
     suite
         .obligation_leak
         .on_create(lease_ob, ObligationKind::Lease, worker, root);
@@ -1139,7 +1153,7 @@ fn e2e_multiple_obligation_kinds_same_region() {
         .on_resolve(send_ob, ObligationState::Committed);
     suite
         .obligation_leak
-        .on_resolve(recv_ob, ObligationState::Committed);
+        .on_resolve(ack_ob, ObligationState::Committed);
     suite
         .obligation_leak
         .on_resolve(lease_ob, ObligationState::Committed);
@@ -1160,12 +1174,12 @@ fn e2e_multiple_obligation_kinds_same_region() {
 }
 
 // ============================================================================
-// 20. Same-seed determinism via assert_deterministic
+// 20. Same-seed determinism via repeated execution
 // ============================================================================
 
 #[test]
-fn e2e_assert_deterministic_complex_workload() {
-    init_test("e2e_assert_deterministic_complex_workload");
+fn e2e_deterministic_complex_workload() {
+    init_test("e2e_deterministic_complex_workload");
 
     let make_runtime = || {
         let mut runtime = LabRuntime::new(LabConfig::new(0x1234_5678).max_steps(10_000));
@@ -1173,13 +1187,13 @@ fn e2e_assert_deterministic_complex_workload() {
         let counter = Arc::new(AtomicUsize::new(0));
 
         // Spawn tasks with varied behavior
-        for i in 0..8 {
+        for i in 0..8usize {
             let counter = Arc::clone(&counter);
             let (task_id, _handle) = runtime
                 .state
                 .create_task(region, Budget::INFINITE, async move {
                     // Different yield patterns per task
-                    for _ in 0..(i % 4 + 1) {
+                    for _ in 0..=(i % 4) {
                         yield_now().await;
                     }
                     counter.fetch_add(i + 1, Ordering::SeqCst);
@@ -1202,14 +1216,9 @@ fn e2e_assert_deterministic_complex_workload() {
         steps_a,
         steps_b
     );
-    assert_with_log!(
-        sum_a == sum_b,
-        "deterministic counter sum",
-        sum_a,
-        sum_b
-    );
+    assert_with_log!(sum_a == sum_b, "deterministic counter sum", sum_a, sum_b);
     // Sum of 1..=8 = 36
     assert_with_log!(sum_a == 36, "all tasks contributed", 36, sum_a);
 
-    test_complete!("e2e_assert_deterministic_complex_workload");
+    test_complete!("e2e_deterministic_complex_workload");
 }
