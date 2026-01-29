@@ -1,4 +1,11 @@
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    clippy::drop_non_drop,
+    clippy::items_after_statements,
+    clippy::len_zero,
+    clippy::redundant_closure_for_method_calls,
+    clippy::unused_io_amount
+)]
 //! Async Networking Verification Suite (bd-14yh)
 //!
 //! Comprehensive verification for the async networking layer ensuring

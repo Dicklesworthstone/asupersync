@@ -12,6 +12,8 @@
 //!
 //! Bead: bd-hszn
 
+#![allow(clippy::items_after_statements, clippy::let_unit_value)]
+
 #[macro_use]
 mod common;
 
@@ -383,7 +385,7 @@ fn grpc_verify_009_codec_max_message_size() {
     let mut buf = BytesMut::new();
     buf.put_u8(0); // not compressed
     buf.put_u32(200); // length exceeds max
-    buf.extend_from_slice(&vec![0u8; 200]);
+    buf.extend_from_slice(&[0u8; 200]);
     let err = codec.decode(&mut buf);
     assert!(matches!(err, Err(GrpcError::MessageTooLarge)));
 
@@ -593,11 +595,10 @@ fn grpc_verify_016_streaming_request_placeholder() {
 
     use asupersync::grpc::Streaming;
 
-    let waker = futures_lite::future::block_on(async {
+    let () = futures_lite::future::block_on(async {
         // StreamingRequest default
         let _sr: StreamingRequest<String> = StreamingRequest::default();
     });
-    let _ = waker;
 
     // Poll directly
     let mut sr = StreamingRequest::<i32>::new();

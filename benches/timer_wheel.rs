@@ -932,6 +932,7 @@ fn bench_comparison_expire(c: &mut Criterion) {
 // COMPARISON: MIXED WORKLOAD (insert, tick, cancel cycle)
 // =============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn bench_comparison_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("comparison/mixed");
 

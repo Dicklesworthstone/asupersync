@@ -2240,10 +2240,7 @@ fn property_cancel_coverage() {
     // cancel_propagation should definitely be checked
     assert_coverage(&tracker, &["cancel_propagation", "close_ordering"]);
 
-    test_complete!(
-        "property_cancel_coverage",
-        checks = tracker.total_checks()
-    );
+    test_complete!("property_cancel_coverage", checks = tracker.total_checks());
 }
 
 // ============================================================================
@@ -2268,14 +2265,17 @@ fn mutation_detect_orphan_tasks() {
 
     // Normal state should pass
     let violations = check_all_invariants_tracked(&harness, &mut tracker);
-    assert!(violations.is_empty(), "Valid state had violations: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Valid state had violations: {violations:?}"
+    );
 
     // Mutate: add a fake task ID that doesn't exist in the runtime
     // This simulates an orphan task by adding a stale reference
     let fake_task = TaskId::new_for_test(9999, 0);
     harness.tasks.push(fake_task);
 
-    let violations = check_all_invariants_tracked(&harness, &mut tracker);
+    let _violations = check_all_invariants_tracked(&harness, &mut tracker);
     // The orphan check may or may not fire depending on whether the task
     // record exists in the arena — record detection either way
     tracker.record_detection("no_orphan_tasks");
@@ -2381,7 +2381,10 @@ fn mutation_detection_rate_report() {
         // Cancel child1 to exercise cancel_propagation
         harness.cancel_region(child1, CancelKind::User);
         let violations = check_all_invariants_tracked(&harness, &mut tracker);
-        assert!(violations.is_empty(), "Seed {seed} after cancel: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "Seed {seed} after cancel: {violations:?}"
+        );
 
         let _ = child2;
     }

@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+#![allow(missing_docs, clippy::items_after_statements)]
 //! Async Filesystem Verification Suite (bd-js88)
 //!
 //! Comprehensive verification for the async filesystem layer ensuring
@@ -209,8 +209,8 @@ fn fs_verify_004_file_set_len() {
         let dir = tempdir()?;
         let path = dir.path().join("setlen.txt");
 
-        let _file = File::create(&path).await?;
-        drop(_file);
+        let file = File::create(&path).await?;
+        drop(file);
         // Write 10 bytes
         let mut file = OpenOptions::new()
             .read(true)
@@ -347,12 +347,12 @@ fn fs_verify_008_open_options_create_new() {
         let path = dir.path().join("create_new.txt");
 
         // First create should succeed
-        let _file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .await?;
-        drop(_file);
+        drop(file);
 
         // Second create_new should fail
         let err = OpenOptions::new()

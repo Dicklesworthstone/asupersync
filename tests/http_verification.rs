@@ -3,6 +3,8 @@
 //! Comprehensive verification for the HTTP layer ensuring protocol compliance,
 //! cancel-correctness, request/response lifecycle, and web framework integration.
 
+#![allow(clippy::items_after_statements)]
+
 mod common;
 use common::*;
 
@@ -82,7 +84,7 @@ fn pool_basic_lifecycle() {
     let mut pool = Pool::with_config(config);
 
     let key = PoolKey::new("localhost", 8080, false);
-    pool.register_connecting(key.clone(), Time::ZERO, 1);
+    pool.register_connecting(key, Time::ZERO, 1);
 
     let stats = pool.stats();
     assert!(stats.total_connections >= 1);

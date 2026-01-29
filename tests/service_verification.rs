@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+#![allow(missing_docs, clippy::items_after_statements)]
 //! Service Layer Verification Suite (bd-221m)
 //!
 //! Comprehensive verification for the service layer (tower-style composable
@@ -520,7 +520,7 @@ fn svc_verify_013_concurrency_limit_enforced() {
     init_test("svc_verify_013_concurrency_limit_enforced");
 
     let semaphore = Arc::new(asupersync::sync::Semaphore::new(1));
-    let layer = ConcurrencyLimitLayer::with_semaphore(semaphore.clone());
+    let layer = ConcurrencyLimitLayer::with_semaphore(semaphore);
 
     // Create two services sharing the same semaphore
     let mut svc1 = layer.layer(NeverCompleteService);
@@ -553,7 +553,7 @@ fn svc_verify_014_concurrency_limit_shared() {
     init_test("svc_verify_014_concurrency_limit_shared");
 
     let semaphore = Arc::new(asupersync::sync::Semaphore::new(2));
-    let layer = ConcurrencyLimitLayer::with_semaphore(semaphore.clone());
+    let layer = ConcurrencyLimitLayer::with_semaphore(semaphore);
 
     assert_eq!(layer.max_concurrency(), 2);
     assert_eq!(layer.available(), 2);
