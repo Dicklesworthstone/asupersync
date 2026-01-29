@@ -90,6 +90,7 @@ impl<T: SymbolSink + Unpin> RaptorQSenderBuilder<T> {
     /// # Errors
     ///
     /// Returns an error if no transport has been provided.
+    #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<RaptorQSender<T>, Error> {
         let transport = self.transport.ok_or_else(|| {
             Error::new(ErrorKind::InvalidEncodingParams)
@@ -186,6 +187,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiverBuilder<S> {
     /// # Errors
     ///
     /// Returns an error if no source has been provided.
+    #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<RaptorQReceiver<S>, Error> {
         let source = self.source.ok_or_else(|| {
             Error::new(ErrorKind::InvalidEncodingParams)

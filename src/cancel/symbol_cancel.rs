@@ -182,7 +182,7 @@ impl SymbolCancelToken {
     /// Requests cancellation with the given reason.
     ///
     /// Returns true if this call triggered the cancellation (first caller wins).
-    #[must_use]
+    #[allow(clippy::must_use_candidate)]
     pub fn cancel(&self, reason: &CancelReason, now: Time) -> bool {
         if self
             .state
@@ -273,7 +273,6 @@ impl SymbolCancelToken {
     ///
     /// Note: This creates a new token state; it does not link to the original.
     #[must_use]
-
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < TOKEN_WIRE_SIZE {
             return None;
@@ -829,14 +828,17 @@ impl CleanupCoordinator {
     }
 
     /// Registers symbols as pending for an object.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn register_pending(&self, object_id: ObjectId, symbol: Symbol, now: Time) {
-        let mut guard = self.pending.write().expect("lock poisoned");
-        let set = guard.entry(object_id).or_insert_with(|| PendingSymbolSet {
-            object_id,
-            symbols: Vec::new(),
-            total_bytes: 0,
-            _created_at: now,
-        });
+        let mut pending = self.pending.write().expect("lock poisoned");
+        let set = pending
+            .entry(object_id)
+            .or_insert_with(|| PendingSymbolSet {
+                object_id,
+                symbols: Vec::new(),
+                total_bytes: 0,
+                _created_at: now,
+            });
 
         set.total_bytes += symbol.len();
         set.symbols.push(symbol);
@@ -1045,7 +1047,7 @@ mod tests {
     #[test]
     fn test_token_serialization() {
         let mut rng = DetRng::new(42);
-        let obj = ObjectId::new(0x1234_5678_9abc_def0, 0xfedcba9876543210);
+        let obj = ObjectId::new(0x1234_5678_9abc_def0, 0xfedc_ba98_7654_3210);
         let token = SymbolCancelToken::new(obj, &mut rng);
 
         let bytes = token.to_bytes();

@@ -214,6 +214,7 @@ impl FromRequestParts for Path<String> {
     }
 }
 
+#[allow(clippy::implicit_hasher)]
 impl FromRequestParts for Path<HashMap<String, String>> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         Ok(Self(req.path_params.clone()))
@@ -237,6 +238,7 @@ impl FromRequestParts for Path<HashMap<String, String>> {
 #[derive(Debug, Clone)]
 pub struct Query<T>(pub T);
 
+#[allow(clippy::implicit_hasher)]
 impl FromRequestParts for Query<HashMap<String, String>> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         let qs = req.query.as_deref().unwrap_or("");
@@ -338,6 +340,7 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
 #[derive(Debug, Clone)]
 pub struct Form<T>(pub T);
 
+#[allow(clippy::implicit_hasher)]
 impl FromRequest for Form<HashMap<String, String>> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
         let body_str = std::str::from_utf8(req.body.as_ref())
@@ -400,6 +403,7 @@ impl FromRequest for RawBody {
 
 // ─── HeaderMap Extractor ─────────────────────────────────────────────────────
 
+#[allow(clippy::implicit_hasher)]
 impl FromRequestParts for HashMap<String, String> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         Ok(req.headers.clone())

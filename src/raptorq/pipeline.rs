@@ -78,6 +78,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
     /// Encodes data and sends symbols through the transport.
     ///
     /// The capability context is checked for cancellation at each symbol boundary.
+    #[allow(clippy::result_large_err)]
     pub fn send_object(
         &mut self,
         cx: &Cx,
@@ -143,6 +144,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
     }
 
     /// Sends pre-encoded authenticated symbols.
+    #[allow(clippy::result_large_err)]
     pub fn send_symbols(
         &mut self,
         cx: &Cx,
@@ -208,6 +210,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
     ///
     /// Reads symbols from the source until enough are collected to
     /// decode, then returns the reconstructed data.
+    #[allow(clippy::result_large_err)]
     pub fn receive_object(
         &mut self,
         cx: &Cx,
@@ -285,6 +288,8 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 // Helpers
 // =========================================================================
 
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_sign_loss)]
 fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> usize {
     if symbol_size == 0 {
         return 0;
@@ -295,6 +300,7 @@ fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> u
 }
 
 /// Synchronous single-poll for sending a symbol.
+#[allow(clippy::result_large_err)]
 fn poll_send_blocking<T: SymbolSink + Unpin>(
     sink: &mut T,
     symbol: AuthenticatedSymbol,
@@ -316,20 +322,21 @@ fn poll_send_blocking<T: SymbolSink + Unpin>(
 }
 
 /// Synchronous single-poll for flushing.
+#[allow(clippy::result_large_err)]
 fn poll_flush_blocking<T: SymbolSink + Unpin>(sink: &mut T) -> Result<(), Error> {
     let waker = std::task::Waker::noop();
     let mut ctx = Context::from_waker(waker);
 
     match Pin::new(sink).poll_flush(&mut ctx) {
-        Poll::Ready(Ok(())) => Ok(()),
         Poll::Ready(Err(e)) => {
             Err(Error::new(ErrorKind::DispatchFailed).with_message(e.to_string()))
         }
-        Poll::Pending => Ok(()), // Best-effort flush in sync context
+        Poll::Ready(Ok(())) | Poll::Pending => Ok(()), // Best-effort flush in sync context
     }
 }
 
 /// Synchronous single-poll for receiving a symbol.
+#[allow(clippy::result_large_err)]
 fn poll_next_blocking<S: SymbolStream + Unpin>(
     stream: &mut S,
 ) -> Result<Option<AuthenticatedSymbol>, Error> {
