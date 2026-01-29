@@ -46,8 +46,10 @@ impl<'a> VirtualClient<'a> {
     pub fn post(&self, path: &str, body: impl Into<Bytes>) -> Response {
         let mut req = Request::new("POST", path);
         req.body = body.into();
-        req.headers
-            .insert("content-type".to_string(), "application/octet-stream".to_string());
+        req.headers.insert(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        );
         self.server.handle(req)
     }
 
@@ -157,10 +159,7 @@ mod tests {
     fn test_server() -> VirtualServer {
         let router = Router::new()
             .route("/hello", get(FnHandler::new(|| "world")))
-            .route(
-                "/echo",
-                post(FnHandler::new(|| StatusCode::CREATED)),
-            );
+            .route("/echo", post(FnHandler::new(|| StatusCode::CREATED)));
         VirtualServer::new(router)
     }
 

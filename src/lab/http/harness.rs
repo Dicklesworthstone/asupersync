@@ -423,11 +423,15 @@ mod tests {
         harness.get("/fail");
 
         let trace = harness.trace();
-        let trace_2xx = RequestTrace { entries: trace.to_vec() };
+        let trace_2xx = RequestTrace {
+            entries: trace.to_vec(),
+        };
         let successes = trace_2xx.by_status_class(2);
         assert_eq!(successes.len(), 2);
 
-        let trace_5xx = RequestTrace { entries: trace.to_vec() };
+        let trace_5xx = RequestTrace {
+            entries: trace.to_vec(),
+        };
         let errors = trace_5xx.by_status_class(5);
         assert_eq!(errors.len(), 1);
     }
@@ -440,7 +444,9 @@ mod tests {
         harness.get("/users");
 
         let trace = harness.trace();
-        let trace_health = RequestTrace { entries: trace.to_vec() };
+        let trace_health = RequestTrace {
+            entries: trace.to_vec(),
+        };
         let health = trace_health.by_path_prefix("/health");
         assert_eq!(health.len(), 1);
     }

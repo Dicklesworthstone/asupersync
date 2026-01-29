@@ -14,7 +14,7 @@ mod common;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::reactor::{Event, Events, FaultConfig, Interest, LabReactor, Token};
-use asupersync::runtime::Reactor;
+use asupersync::runtime::{IoOp, Reactor};
 use asupersync::trace::ReplayEvent;
 use asupersync::types::{Budget, CancelReason};
 use asupersync::util::DetRng;
@@ -25,7 +25,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -90,6 +90,16 @@ impl std::os::fd::AsRawFd for MockSource {
     fn as_raw_fd(&self) -> RawFd {
         0
     }
+}
+
+struct NoopWaker;
+
+impl Wake for NoopWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn noop_waker() -> Waker {
+    Waker::from(Arc::new(NoopWaker))
 }
 
 // ============================================================================
@@ -986,4 +996,206 @@ fn test_lab_interleaved_completion_determinism() {
     );
 
     test_complete!("test_lab_interleaved_completion_determinism");
+}
+
+// ============================================================================
+// Test: I/O E2E Scenarios (cancel, close, replay)
+// ============================================================================
+
+fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {
+            loop {
+                let Some(cx) = Cx::current() else {
+                    return;
+                };
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                yield_n(1).await;
+            }
+        })
+        .expect("create task");
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("io op".to_string()),
+    )
+    .expect("submit io op");
+
+    for _ in 0..4 {
+        runtime.step_for_test();
+    }
+
+    let cancel_reason = CancelReason::shutdown();
+    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    {
+        let mut scheduler = runtime.scheduler.lock().unwrap();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+
+    let _ = io_op.cancel(&mut runtime.state).expect("cancel io op");
+    let steps = runtime.run_until_quiescent();
+    let pending = runtime.state.pending_obligation_count();
+    let violations = runtime.check_invariants().len();
+
+    (runtime.is_quiescent(), pending, violations, steps)
+}
+
+#[test]
+fn test_lab_io_inflight_cancel_deterministic() {
+    init_test("test_lab_io_inflight_cancel_deterministic");
+    test_section!("run_cancel_scenario");
+
+    let seed = 0xDEAD_BEEF;
+    let result1 = run_io_cancel_scenario(seed);
+    let result2 = run_io_cancel_scenario(seed);
+
+    test_section!("verify_determinism");
+    assert_with_log!(
+        result1 == result2,
+        "I/O cancel scenario should be deterministic",
+        result1,
+        result2
+    );
+
+    test_section!("verify_invariants");
+    assert_with_log!(result1.0, "runtime should be quiescent", true, result1.0);
+    assert_with_log!(
+        result1.1 == 0,
+        "no pending obligations after I/O cancel",
+        0,
+        result1.1
+    );
+    assert_with_log!(
+        result1.2 == 0,
+        "no invariant violations after I/O cancel",
+        0,
+        result1.2
+    );
+
+    tracing::info!(
+        seed = seed,
+        steps = result1.3,
+        "I/O cancel scenario verified"
+    );
+
+    test_complete!("test_lab_io_inflight_cancel_deterministic");
+}
+
+#[test]
+fn test_lab_io_quiescence_waits_for_obligation() {
+    init_test("test_lab_io_quiescence_waits_for_obligation");
+    test_section!("setup");
+
+    let mut runtime = LabRuntime::new(LabConfig::new(7));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task");
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("io op".to_string()),
+    )
+    .expect("submit io op");
+
+    // Let the task complete; I/O obligation should keep runtime non-quiescent.
+    runtime.step_for_test();
+    runtime.step_for_test();
+
+    test_section!("verify_blocked_quiescence");
+    assert_with_log!(
+        !runtime.is_quiescent(),
+        "pending I/O obligation should block quiescence",
+        false,
+        runtime.is_quiescent()
+    );
+
+    let _ = io_op.complete(&mut runtime.state).expect("complete io op");
+    let steps = runtime.run_until_quiescent();
+
+    test_section!("verify_quiescence");
+    assert_with_log!(
+        runtime.is_quiescent(),
+        "runtime should be quiescent after I/O completion",
+        true,
+        runtime.is_quiescent()
+    );
+    assert_with_log!(
+        runtime.state.pending_obligation_count() == 0,
+        "no pending obligations after completion",
+        0,
+        runtime.state.pending_obligation_count()
+    );
+
+    tracing::info!(steps = steps, "I/O obligation resolved");
+    test_complete!("test_lab_io_quiescence_waits_for_obligation");
+}
+
+#[cfg(unix)]
+fn run_io_replay(seed: u64) -> Vec<ReplayEvent> {
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let _region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let driver = runtime.state.io_driver_handle().expect("io driver handle");
+    let registration = driver
+        .register(&MockSource, Interest::READABLE, noop_waker())
+        .expect("register source");
+    let token = registration.token();
+
+    runtime
+        .lab_reactor()
+        .inject_event(token, Event::readable(token), std::time::Duration::ZERO);
+    runtime.step_for_test();
+    runtime.step_for_test();
+
+    let trace = runtime.finish_replay_trace().expect("replay trace");
+    trace.events
+}
+
+#[test]
+#[cfg(unix)]
+fn test_lab_io_replay_determinism() {
+    init_test("test_lab_io_replay_determinism");
+    test_section!("record_replay_events");
+
+    let seed = 4242;
+    let events1 = run_io_replay(seed);
+    let events2 = run_io_replay(seed);
+
+    test_section!("verify_determinism");
+    assert_with_log!(
+        events1 == events2,
+        "I/O replay events should be deterministic",
+        events1,
+        events2
+    );
+    assert_with_log!(
+        events1
+            .iter()
+            .any(|event| matches!(event, ReplayEvent::IoReady { .. })),
+        "replay should capture I/O readiness",
+        true,
+        events1
+            .iter()
+            .any(|event| matches!(event, ReplayEvent::IoReady { .. }))
+    );
+
+    test_complete!("test_lab_io_replay_determinism");
 }

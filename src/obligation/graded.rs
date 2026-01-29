@@ -336,7 +336,10 @@ impl Drop for GradedScope {
             panic!(
                 "SCOPE LEAKED: scope '{}' dropped with {} outstanding obligation(s) \
                  ({} reserved, {} resolved). Call .close() before scope exit.",
-                self.label, self.outstanding(), self.reserved, self.resolved,
+                self.label,
+                self.outstanding(),
+                self.reserved,
+                self.resolved,
             );
         }
     }
