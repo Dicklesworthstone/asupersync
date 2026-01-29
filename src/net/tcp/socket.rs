@@ -142,6 +142,7 @@ impl TcpSocket {
         }
 
         // Async connect using TcpStream::connect
+        // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
         TcpStream::connect(addr).await
     }
 }

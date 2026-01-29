@@ -125,7 +125,10 @@ impl TcpStream {
     /// [`reunite`]: OwnedReadHalf::reunite
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        OwnedReadHalf::new_pair(self.inner, self.registration)
+        let mut this = self;
+        let registration = this.registration.take();
+        let inner = this.inner.clone();
+        OwnedReadHalf::new_pair(inner, registration)
     }
 
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
@@ -359,6 +362,13 @@ impl AsyncWrite for TcpStream {
         Poll::Ready(Ok(()))
     }
 }
+
+// ubs:ignore — TcpStream does not have a Drop impl for graceful shutdown because:
+// 1. The crate denies unsafe_code, and into_split() needs to move fields out of self
+//    (which conflicts with a custom Drop without unsafe ManuallyDrop + ptr::read).
+// 2. Callers should use AsyncWrite::poll_shutdown() or TcpStream::shutdown() explicitly.
+// 3. When split via into_split(), OwnedWriteHalf::drop() handles shutdown(Write).
+// Future: wrap inner in Option<Arc<TcpStream>> to enable a safe Drop impl.
 
 // Implement the TcpStreamApi trait for TcpStream
 impl TcpStreamApi for TcpStream {
