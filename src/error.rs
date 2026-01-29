@@ -184,8 +184,7 @@ impl ErrorKind {
             | Self::NodeUnavailable
             | Self::PartitionDetected => ErrorCategory::Distributed,
             Self::Internal | Self::InvalidStateTransition => ErrorCategory::Internal,
-            Self::ConfigError => ErrorCategory::User,
-            Self::User => ErrorCategory::User,
+            Self::ConfigError | Self::User => ErrorCategory::User,
         }
     }
 

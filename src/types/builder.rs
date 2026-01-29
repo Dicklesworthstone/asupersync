@@ -799,6 +799,7 @@ pub mod validate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn build_error_missing_required() {

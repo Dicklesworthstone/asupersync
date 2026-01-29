@@ -216,7 +216,7 @@ impl FromRequestParts for Path<String> {
 
 impl FromRequestParts for Path<HashMap<String, String>> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
-        Ok(Path(req.path_params.clone()))
+        Ok(Self(req.path_params.clone()))
     }
 }
 
@@ -240,7 +240,7 @@ pub struct Query<T>(pub T);
 impl FromRequestParts for Query<HashMap<String, String>> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         let qs = req.query.as_deref().unwrap_or("");
-        Ok(Query(parse_urlencoded(qs)))
+        Ok(Self(parse_urlencoded(qs)))
     }
 }
 
@@ -343,7 +343,7 @@ impl FromRequest for Form<HashMap<String, String>> {
         let body_str = std::str::from_utf8(req.body.as_ref())
             .map_err(|e| ExtractionError::bad_request(format!("invalid UTF-8 body: {e}")))?;
 
-        Ok(Form(parse_urlencoded(body_str)))
+        Ok(Self(parse_urlencoded(body_str)))
     }
 }
 
@@ -376,7 +376,7 @@ impl FromRequestParts for State<String> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         req.extensions
             .get("state")
-            .map(|s| State(s.to_string()))
+            .map(|s| Self(s.to_string()))
             .ok_or_else(|| {
                 ExtractionError::new(
                     super::response::StatusCode::INTERNAL_SERVER_ERROR,
@@ -394,7 +394,7 @@ pub struct RawBody(pub Bytes);
 
 impl FromRequest for RawBody {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
-        Ok(RawBody(req.body))
+        Ok(Self(req.body))
     }
 }
 

@@ -86,7 +86,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
     ) -> Result<SendOutcome, Error> {
         // Validate data size.
         let max_size = (self.config.encoding.max_block_size as u64)
-            * (self.config.encoding.symbol_size as u64);
+            * u64::from(self.config.encoding.symbol_size);
         if data.len() as u64 > max_size {
             return Err(Error::data_too_large(data.len() as u64, max_size));
         }
@@ -234,27 +234,24 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
         while !decoder.is_complete() {
             cx.checkpoint()?;
 
-            match poll_next_blocking(&mut self.source)? {
-                Some(auth_symbol) => {
-                    // Skip symbols for other objects.
-                    if auth_symbol.symbol().object_id() != params.object_id {
-                        continue;
-                    }
-
-                    let _ = decoder.feed(auth_symbol);
-                    symbols_received += 1;
-
-                    if let Some(ref mut m) = self.metrics {
-                        m.counter("raptorq.symbols_received").increment();
-                    }
+            if let Some(auth_symbol) = poll_next_blocking(&mut self.source)? {
+                // Skip symbols for other objects.
+                if auth_symbol.symbol().object_id() != params.object_id {
+                    continue;
                 }
-                None => {
-                    let progress = decoder.progress();
-                    return Err(Error::insufficient_symbols(
-                        progress.symbols_received as u32,
-                        progress.symbols_needed_estimate as u32,
-                    ));
+
+                let _ = decoder.feed(auth_symbol);
+                symbols_received += 1;
+
+                if let Some(ref mut m) = self.metrics {
+                    m.counter("raptorq.symbols_received").increment();
                 }
+            } else {
+                let progress = decoder.progress();
+                return Err(Error::insufficient_symbols(
+                    progress.symbols_received as u32,
+                    progress.symbols_needed_estimate as u32,
+                ));
             }
         }
 
@@ -344,7 +341,6 @@ fn poll_next_blocking<S: SymbolStream + Unpin>(
         Poll::Ready(Some(Err(e))) => {
             Err(Error::new(ErrorKind::StreamEnded).with_message(e.to_string()))
         }
-        Poll::Ready(None) => Ok(None),
-        Poll::Pending => Ok(None), // No symbol available in sync context
+        Poll::Ready(None) | Poll::Pending => Ok(None), // No symbol available in sync context
     }
 }

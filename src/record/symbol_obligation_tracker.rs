@@ -108,6 +108,7 @@ pub struct SymbolObligation {
 
 impl SymbolObligation {
     /// Creates a new symbol transmit obligation.
+    #[must_use]
     pub fn transmit(
         id: ObligationId,
         holder: TaskId,
@@ -129,6 +130,7 @@ impl SymbolObligation {
     }
 
     /// Creates a new symbol acknowledgment obligation.
+    #[must_use]
     pub fn ack(
         id: ObligationId,
         holder: TaskId,
@@ -145,6 +147,7 @@ impl SymbolObligation {
     }
 
     /// Creates a decoding progress obligation.
+    #[must_use]
     pub fn decoding(
         id: ObligationId,
         holder: TaskId,
@@ -166,6 +169,7 @@ impl SymbolObligation {
     }
 
     /// Creates a lease obligation.
+    #[must_use]
     pub fn lease(
         id: ObligationId,
         holder: TaskId,
@@ -193,19 +197,14 @@ impl SymbolObligation {
     /// Returns true if this obligation is within its valid epoch window.
     #[must_use]
     pub fn is_epoch_valid(&self, current_epoch: EpochId) -> bool {
-        match self.valid_epoch {
-            None => true,
-            Some(window) => current_epoch >= window.start && current_epoch <= window.end,
-        }
+        self.valid_epoch
+            .is_none_or(|window| current_epoch >= window.start && current_epoch <= window.end)
     }
 
     /// Returns true if this obligation has passed its deadline.
     #[must_use]
     pub fn is_expired(&self, now: Time) -> bool {
-        match self.deadline {
-            None => false,
-            Some(deadline) => now > deadline,
-        }
+        self.deadline.is_some_and(|deadline| now > deadline)
     }
 
     /// Commits the obligation (successful resolution).
@@ -292,6 +291,7 @@ pub struct SymbolObligationTracker {
 
 impl SymbolObligationTracker {
     /// Creates a new tracker for the given region.
+    #[must_use]
     pub fn new(region_id: RegionId) -> Self {
         Self {
             obligations: HashMap::new(),
@@ -337,16 +337,14 @@ impl SymbolObligationTracker {
         commit: bool,
         now: Time,
     ) -> Option<SymbolObligation> {
-        if let Some(mut ob) = self.obligations.remove(&id) {
+        self.obligations.remove(&id).map(|mut ob| {
             if commit {
                 ob.commit(now);
             } else {
                 ob.abort(now);
             }
-            Some(ob)
-        } else {
-            None
-        }
+            ob
+        })
     }
 
     /// Returns an iterator over all pending obligations.
@@ -355,6 +353,7 @@ impl SymbolObligationTracker {
     }
 
     /// Returns obligations for a specific symbol.
+    #[must_use]
     pub fn by_symbol(&self, symbol_id: SymbolId) -> Vec<&SymbolObligation> {
         self.by_symbol
             .get(&symbol_id)

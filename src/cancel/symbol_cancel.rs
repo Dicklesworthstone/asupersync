@@ -182,7 +182,8 @@ impl SymbolCancelToken {
     /// Requests cancellation with the given reason.
     ///
     /// Returns true if this call triggered the cancellation (first caller wins).
-    pub fn cancel(&self, reason: CancelReason, now: Time) -> bool {
+    #[must_use]
+    pub fn cancel(&self, reason: &CancelReason, now: Time) -> bool {
         if self
             .state
             .cancelled
@@ -196,12 +197,13 @@ impl SymbolCancelToken {
 
             // Notify listeners
             for listener in self.state.listeners.read().expect("lock poisoned").iter() {
-                listener.on_cancel(&reason, now);
+                listener.on_cancel(reason, now);
             }
 
             // Cancel children
             for child in self.state.children.read().expect("lock poisoned").iter() {
-                child.cancel(CancelReason::parent_cancelled(), now);
+                let parent_reason = CancelReason::parent_cancelled();
+                child.cancel(&parent_reason, now);
             }
 
             true
@@ -220,7 +222,8 @@ impl SymbolCancelToken {
         // If already cancelled, cancel child immediately
         if self.is_cancelled() {
             if let Some(at) = self.cancelled_at() {
-                child.cancel(CancelReason::parent_cancelled(), at);
+                let parent_reason = CancelReason::parent_cancelled();
+                child.cancel(&parent_reason, at);
             }
         } else {
             // Register child for future propagation
@@ -269,6 +272,8 @@ impl SymbolCancelToken {
     /// Deserializes a token from bytes.
     ///
     /// Note: This creates a new token state; it does not link to the original.
+    #[must_use]
+    
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < TOKEN_WIRE_SIZE {
             return None;
@@ -456,6 +461,7 @@ impl CancelMessage {
     }
 
     /// Deserializes from bytes.
+    #[must_use] 
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < MESSAGE_WIRE_SIZE {
             return None;
@@ -624,7 +630,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     pub fn prepare_cancel(
         &self,
         object_id: ObjectId,
-        reason: CancelReason,
+        reason: &CancelReason,
         now: Time,
     ) -> CancelMessage {
         // Cancel local token
@@ -634,7 +640,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             .expect("lock poisoned")
             .get(&object_id)
         {
-            token.cancel(reason.clone(), now);
+            token.cancel(reason, now);
         }
 
         let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
@@ -675,27 +681,30 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             .get(&msg.object_id())
         {
             let reason = CancelReason::new(msg.kind());
-            token.cancel(reason, now);
+            token.cancel(&reason, now);
         }
 
         // Forward if allowed
-        if let Some(forwarded) = msg.forwarded() {
-            self.metrics.write().expect("lock poisoned").forwarded += 1;
-            Some(forwarded)
-        } else {
-            self.metrics
-                .write()
-                .expect("lock poisoned")
-                .max_hops_reached += 1;
-            None
-        }
+        msg.forwarded().map_or_else(
+            || {
+                self.metrics
+                    .write()
+                    .expect("lock poisoned")
+                    .max_hops_reached += 1;
+                None
+            },
+            |forwarded| {
+                self.metrics.write().expect("lock poisoned").forwarded += 1;
+                Some(forwarded)
+            },
+        )
     }
 
     /// Initiates cancellation and broadcasts to peers.
     pub async fn cancel(
         &self,
         object_id: ObjectId,
-        reason: CancelReason,
+        reason: &CancelReason,
         now: Time,
     ) -> crate::error::Result<usize> {
         let msg = self.prepare_cancel(object_id, reason, now);
@@ -729,7 +738,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
 
         // Simple eviction when capacity exceeded
         if seen.len() > self.max_seen {
-            let to_remove: Vec<_> = seen.iter().take(self.max_seen / 2).cloned().collect();
+            let to_remove: Vec<_> = seen.iter().take(self.max_seen / 2).copied().collect();
             for key in to_remove {
                 seen.remove(&key);
             }
@@ -746,6 +755,7 @@ pub trait CleanupHandler: Send + Sync {
     /// Called to clean up symbols for a cancelled object.
     ///
     /// Returns the number of symbols cleaned up.
+    #[allow(clippy::result_large_err)]
     fn cleanup(&self, object_id: ObjectId, symbols: Vec<Symbol>) -> crate::error::Result<usize>;
 
     /// Returns the name of this handler (for logging).
@@ -820,16 +830,13 @@ impl CleanupCoordinator {
 
     /// Registers symbols as pending for an object.
     pub fn register_pending(&self, object_id: ObjectId, symbol: Symbol, now: Time) {
-        let mut pending = self.pending.write().expect("lock poisoned");
-
-        let set = pending
-            .entry(object_id)
-            .or_insert_with(|| PendingSymbolSet {
-                object_id,
-                symbols: Vec::new(),
-                total_bytes: 0,
-                _created_at: now,
-            });
+        let mut guard = self.pending.write().expect("lock poisoned");
+        let set = guard.entry(object_id).or_insert_with(|| PendingSymbolSet {
+            object_id,
+            symbols: Vec::new(),
+            total_bytes: 0,
+            _created_at: now,
+        });
 
         set.total_bytes += symbol.len();
         set.symbols.push(symbol);
@@ -973,13 +980,13 @@ mod tests {
         let reason = CancelReason::user("test");
 
         // First cancel succeeds
-        assert!(token.cancel(reason, now));
+        assert!(token.cancel(&reason, now));
         assert!(token.is_cancelled());
         assert_eq!(token.reason().unwrap().kind, CancelKind::User);
         assert_eq!(token.cancelled_at(), Some(now));
 
         // Second cancel returns false
-        assert!(!token.cancel(CancelReason::timeout(), Time::from_millis(200)));
+        assert!(!token.cancel(&CancelReason::timeout(), Time::from_millis(200)));
 
         // Reason unchanged
         assert_eq!(token.reason().unwrap().kind, CancelKind::User);
@@ -991,7 +998,7 @@ mod tests {
         let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         let reason = CancelReason::timeout().with_message("timed out");
-        token.cancel(reason, Time::from_millis(500));
+        token.cancel(&reason, Time::from_millis(500));
 
         let stored = token.reason().unwrap();
         assert_eq!(stored.kind, CancelKind::Timeout);
@@ -1007,7 +1014,7 @@ mod tests {
         assert!(!child.is_cancelled());
 
         // Cancel parent
-        parent.cancel(CancelReason::user("test"), Time::from_millis(100));
+        parent.cancel(&CancelReason::user("test"), Time::from_millis(100));
 
         // Child should be cancelled too
         assert!(child.is_cancelled());
@@ -1030,7 +1037,7 @@ mod tests {
 
         assert!(!notified.load(Ordering::SeqCst));
 
-        token.cancel(CancelReason::user("test"), Time::from_millis(100));
+        token.cancel(&CancelReason::user("test"), Time::from_millis(100));
 
         assert!(notified.load(Ordering::SeqCst));
     }

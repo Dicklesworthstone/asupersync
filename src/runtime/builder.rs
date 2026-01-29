@@ -200,6 +200,7 @@ impl RuntimeBuilder {
     /// unparseable value (e.g., `ASUPERSYNC_WORKER_THREADS=abc`).
     ///
     /// See [`env_config`](super::env_config) for the full list of supported variables.
+    #[allow(clippy::result_large_err)]
     pub fn with_env_overrides(mut self) -> Result<Self, Error> {
         crate::runtime::env_config::apply_env_overrides(&mut self.config).map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())

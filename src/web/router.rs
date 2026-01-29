@@ -247,7 +247,7 @@ impl RoutePattern {
 /// ```
 pub struct Router {
     routes: Vec<(RoutePattern, MethodRouter)>,
-    nested: Vec<(String, Router)>,
+    nested: Vec<(String, Self)>,
     fallback: Option<Box<dyn Handler>>,
 }
 
@@ -272,7 +272,7 @@ impl Router {
 
     /// Mount a sub-router at the given prefix.
     #[must_use]
-    pub fn nest(mut self, prefix: &str, router: Router) -> Self {
+    pub fn nest(mut self, prefix: &str, router: Self) -> Self {
         self.nested.push((prefix.to_string(), router));
         self
     }
@@ -288,6 +288,7 @@ impl Router {
     ///
     /// Routes are checked in registration order. Nested routers are checked
     /// after top-level routes.
+    #[must_use] 
     pub fn handle(&self, mut req: Request) -> Response {
         // Check top-level routes.
         for (pattern, method_router) in &self.routes {

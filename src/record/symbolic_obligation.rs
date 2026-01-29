@@ -716,15 +716,20 @@ impl SymbolicObligationRegistry {
     /// Checks for pending obligations in a region (blocks region close).
     #[must_use]
     pub fn has_pending_in_region(&self, region: RegionId) -> bool {
-        let by_region = self.by_region.read().expect("lock poisoned");
-        let by_id = self.by_id.read().expect("lock poisoned");
+        let ids = {
+            let by_region = self.by_region.read().expect("lock poisoned");
+            by_region.get(&region).cloned()
+        };
 
-        if let Some(ids) = by_region.get(&region) {
-            for id in ids {
-                if let Some(entry) = by_id.get(id) {
-                    if !entry.state.is_terminal() {
-                        return true;
-                    }
+        let Some(ids) = ids else {
+            return false;
+        };
+
+        let by_id = self.by_id.read().expect("lock poisoned");
+        for id in &ids {
+            if let Some(entry) = by_id.get(id) {
+                if !entry.state.is_terminal() {
+                    return true;
                 }
             }
         }
@@ -735,23 +740,28 @@ impl SymbolicObligationRegistry {
     /// Gets pending obligations in a region.
     #[must_use]
     pub fn pending_in_region(&self, region: RegionId) -> Vec<ObligationSummary> {
-        let by_region = self.by_region.read().expect("lock poisoned");
-        let by_id = self.by_id.read().expect("lock poisoned");
-
         let mut result = Vec::new();
 
-        if let Some(ids) = by_region.get(&region) {
-            for id in ids {
-                if let Some(entry) = by_id.get(id) {
-                    if !entry.state.is_terminal() {
-                        result.push(ObligationSummary {
-                            id: entry.id,
-                            kind: entry.kind,
-                            object_id: entry.object_id,
-                            holder: entry.holder,
-                            state: entry.state,
-                        });
-                    }
+        let ids = {
+            let by_region = self.by_region.read().expect("lock poisoned");
+            by_region.get(&region).cloned()
+        };
+
+        let Some(ids) = ids else {
+            return result;
+        };
+
+        let by_id = self.by_id.read().expect("lock poisoned");
+        for id in &ids {
+            if let Some(entry) = by_id.get(id) {
+                if !entry.state.is_terminal() {
+                    result.push(ObligationSummary {
+                        id: entry.id,
+                        kind: entry.kind,
+                        object_id: entry.object_id,
+                        holder: entry.holder,
+                        state: entry.state,
+                    });
                 }
             }
         }
