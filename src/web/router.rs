@@ -340,7 +340,7 @@ fn strip_prefix(path: &str, prefix: &str) -> Option<String> {
 
     normalized_path
         .strip_prefix(normalized_prefix)
-        .map_or(None, |rest| {
+        .and_then(|rest| {
             if rest.starts_with('/') || rest.is_empty() {
                 Some(if rest.is_empty() {
                     "/".to_string()
