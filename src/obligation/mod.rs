@@ -19,6 +19,10 @@
 //! 5. **Lyapunov governor** ([`lyapunov`]): A potential-function-based
 //!    scheduling governor that drives cancellation drain toward quiescence.
 //!
+//! 6. **Guarded recursion lens** ([`guarded`]): Maps the "later" modality
+//!    (▸A) onto actors, leases, regions, and budgets — formalizing how
+//!    time-indexed invariants are preserved across unfolding steps.
+//!
 //! # Static Leak Checker
 //!
 //! The checker operates on a simple structured IR ([`Body`]) rather than Rust
@@ -54,6 +58,7 @@
 
 pub mod dialectica;
 pub mod graded;
+pub mod guarded;
 mod leak_check;
 pub mod lyapunov;
 pub mod marking;
