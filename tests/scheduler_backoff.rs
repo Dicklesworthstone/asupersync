@@ -1,3 +1,6 @@
+#![allow(missing_docs)]
+//! Scheduler backoff tests.
+
 use asupersync::runtime::scheduler::WorkStealingScheduler;
 use asupersync::runtime::RuntimeState;
 use std::sync::{Arc, Mutex};
