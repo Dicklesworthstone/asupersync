@@ -860,6 +860,7 @@ impl RuntimeState {
     /// }
     /// ```
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::used_underscore_binding)]
     pub fn cancel_request(
         &mut self,
         region_id: RegionId,
@@ -1087,6 +1088,7 @@ impl RuntimeState {
     ///
     /// This checks if the owning region can advance its state.
     /// Returns the task's waiters that should be woken.
+    #[allow(clippy::used_underscore_binding)]
     pub fn task_completed(&mut self, task_id: TaskId) -> Vec<TaskId> {
         // Remove the task record to prevent memory leaks
         let Some(task) = self.tasks.remove(task_id.arena_index()) else {

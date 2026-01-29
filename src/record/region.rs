@@ -669,14 +669,15 @@ impl RegionRecord {
     ///
     /// Called when all finalizers have run and obligations resolved.
     /// Returns true if the state changed.
+    #[allow(clippy::used_underscore_binding)]
     pub fn complete_close(&self) -> bool {
         if self
             .state
             .transition(RegionState::Finalizing, RegionState::Closed)
         {
             let mut inner = self.inner.write().expect("lock poisoned");
-            let child_count = inner.children.len();
-            let task_count = inner.tasks.len();
+            let _child_count = inner.children.len();
+            let _task_count = inner.tasks.len();
             // Reclaim region-owned heap allocations on quiescence.
             inner.heap.reclaim_all();
             drop(inner);
@@ -687,8 +688,8 @@ impl RegionRecord {
                 region_id = ?self.id,
                 from_state = "Finalizing",
                 to_state = "Closed",
-                final_child_count = child_count,
-                final_task_count = task_count,
+                final_child_count = _child_count,
+                final_task_count = _task_count,
                 "region closed"
             );
             true

@@ -432,6 +432,7 @@ impl Budget {
     /// assert!(budget.consume_cost(70));   // 0 remaining
     /// assert!(!budget.consume_cost(1));   // fails, quota exhausted
     /// ```
+    #[allow(clippy::used_underscore_binding)]
     pub fn consume_cost(&mut self, cost: u64) -> bool {
         match self.cost_quota {
             None => {

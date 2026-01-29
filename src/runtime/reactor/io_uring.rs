@@ -10,6 +10,9 @@
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 mod imp {
     #![allow(unsafe_code)]
+    #![allow(clippy::significant_drop_tightening)]
+    #![allow(clippy::significant_drop_in_scrutinee)]
+    #![allow(clippy::cast_sign_loss)]
 
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
     use io_uring::{opcode, types, IoUring};

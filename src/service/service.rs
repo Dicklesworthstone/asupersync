@@ -695,13 +695,10 @@ where
 
     fn call(&mut self, request: Request) -> Self::Future {
         // Get Cx from provider
-        let cx = match self.provider.current_cx() {
-            Some(cx) => cx,
-            None => {
-                return Box::pin(std::future::ready(Err(ProviderAdapterError::NoCx(
-                    NoCxAvailable,
-                ))));
-            }
+        let Some(cx) = self.provider.current_cx() else {
+            return Box::pin(std::future::ready(Err(ProviderAdapterError::NoCx(
+                NoCxAvailable,
+            ))));
         };
 
         let service = std::sync::Arc::clone(&self.service);
@@ -773,6 +770,8 @@ where
     type Response = S::Response;
     type Error = TowerAdapterError<S::Error>;
 
+    #[allow(clippy::await_holding_lock)]
+    #[allow(clippy::future_not_send)]
     async fn call(&self, cx: &Cx, request: Request) -> Result<Self::Response, Self::Error> {
         use std::future::poll_fn;
 
