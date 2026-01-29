@@ -246,6 +246,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             }
 
             // Write TLS data if we have any
+            let mut write_would_block = false;
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
                     Poll::Ready(Ok(0)) => {
@@ -257,7 +258,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                     Poll::Ready(Err(e)) => {
                         return Poll::Ready(Err(TlsError::Io(e)));
                     }
-                    Poll::Pending => break,
+                    Poll::Pending => {
+                        write_would_block = true;
+                        break;
+                    }
                 }
             }
 
@@ -275,6 +279,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                     }
                     Poll::Pending => return Poll::Pending,
                 }
+            } else if write_would_block {
+                // Can't write and nothing to read - we're blocked on write
+                return Poll::Pending;
             }
         }
     }
