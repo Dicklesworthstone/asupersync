@@ -234,6 +234,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             if let Err(e) = self.conn.process_new_packets() {
                 #[cfg(feature = "tracing-integration")]
                 tracing::error!(error = %e, "TLS error during handshake");
+                self.state = TlsState::Closed;
                 return Poll::Ready(Err(TlsError::Handshake(e.to_string())));
             }
 
@@ -257,6 +258,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                     }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
+                        self.state = TlsState::Closed;
                         return Poll::Ready(Err(TlsError::Io(e)));
                     }
                     Poll::Pending => {
@@ -277,6 +279,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                     }
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => {
+                        self.state = TlsState::Closed;
                         return Poll::Ready(Err(TlsError::Io(e)));
                     }
                     Poll::Pending => return Poll::Pending,

@@ -75,6 +75,7 @@ fn setup_test_cx() -> (Arc<LabReactor>, impl Drop) {
         Budget::INFINITE,
         None,
         Some(driver),
+        None, // entropy
     );
     let guard = Cx::set_current(Some(cx));
     (reactor, guard)

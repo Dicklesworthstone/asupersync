@@ -275,6 +275,7 @@ impl TaskRecord {
 
     /// Requests cancellation with an explicit cleanup budget.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::used_underscore_binding)]
     pub fn request_cancel_with_budget(
         &mut self,
         reason: CancelReason,
@@ -369,12 +370,12 @@ impl TaskRecord {
                 false
             }
             TaskState::Created | TaskState::Running => {
-                let prev_state = self.state_name();
+                let _prev_state = self.state_name();
                 let requested_reason = reason.clone();
                 debug!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
-                    old_state = prev_state,
+                    old_state = _prev_state,
                     new_state = "CancelRequested",
                     cancel_kind = ?reason.kind,
                     cleanup_poll_quota = cleanup_budget.poll_quota,
@@ -424,12 +425,13 @@ impl TaskRecord {
     /// Completes the task with the given outcome.
     ///
     /// Returns true if the state changed.
+    #[allow(clippy::used_underscore_binding)]
     pub fn complete(&mut self, outcome: TaskOutcome) -> bool {
         if self.state.is_terminal() {
             return false;
         }
-        let prev_state = self.state_name();
-        let outcome_label = match &outcome {
+        let _prev_state = self.state_name();
+        let _outcome_label = match &outcome {
             Outcome::Ok(()) => "Ok",
             Outcome::Err(_) => "Err",
             Outcome::Cancelled(_) => "Cancelled",
@@ -438,9 +440,9 @@ impl TaskRecord {
         debug!(
             task_id = ?self.id,
             region_id = ?self.owner,
-            old_state = prev_state,
+            old_state = _prev_state,
             new_state = "Completed",
-            outcome_kind = outcome_label,
+            outcome_kind = _outcome_label,
             "task completed"
         );
         self.state = TaskState::Completed(outcome);
