@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Asupersync Debug Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 16px; }
+  h1 { color: #0ff; margin-bottom: 8px; }
+  .meta { color: #888; font-size: 12px; margin-bottom: 16px; }
+  .toolbar { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .toolbar input[type="text"] { background: #16213e; border: 1px solid #0f3460; color: #e0e0e0; padding: 4px 8px;
+    border-radius: 3px; font-family: monospace; font-size: 13px; width: 200px; }
+  .toolbar label { font-size: 12px; color: #888; cursor: pointer; }
+  .toolbar label input { margin-right: 4px; }
+  .section { background: #16213e; border: 1px solid #0f3460; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
+  .section h2 { color: #e94560; font-size: 14px; margin-bottom: 8px; }
+  #error { color: #e94560; display: none; margin-bottom: 8px; }
+  .counter { display: inline-block; background: #0f3460; border-radius: 3px; padding: 2px 8px; margin: 2px; }
+  /* Tree view */
+  .tree { font-size: 13px; line-height: 1.6; }
+  .tree-node { position: relative; }
+  .tree-row { display: flex; align-items: center; gap: 4px; padding: 1px 4px; border-radius: 3px; cursor: pointer; }
+  .tree-row:hover { background: rgba(15,52,96,0.6); }
+  .tree-row.selected { background: #0f3460; }
+  .tree-children { padding-left: 20px; border-left: 1px solid #0f3460; margin-left: 8px; }
+  .tree-children.collapsed { display: none; }
+  .toggle { display: inline-block; width: 16px; text-align: center; color: #888; font-size: 11px;
+    user-select: none; cursor: pointer; }
+  .toggle:hover { color: #0ff; }
+  .icon { font-size: 12px; }
+  .node-label { color: #e0e0e0; }
+  .node-id { color: #0ff; }
+  .node-name { color: #aaa; font-style: italic; }
+  .node-state { font-weight: bold; }
+  .node-extra { color: #666; font-size: 11px; }
+  /* State colors */
+  .st-open, .st-running, .st-created { color: #4caf50; }
+  .st-closing, .st-cancelling, .st-cancelrequested { color: #ff9800; }
+  .st-draining { color: #ff5722; }
+  .st-finalizing { color: #ce93d8; }
+  .st-closed, .st-completed { color: #666; }
+  .st-error, .st-panicked { color: #e94560; }
+  /* Detail panel */
+  #detail { display: none; }
+  #detail.visible { display: block; }
+  #detail pre { background: #0d1b30; padding: 8px; border-radius: 3px; font-size: 12px;
+    overflow-x: auto; max-height: 300px; overflow-y: auto; }
+  /* Events table */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: #0ff; padding: 4px 8px; border-bottom: 1px solid #0f3460; }
+  td { padding: 4px 8px; border-bottom: 1px solid #0f3460; }
+  /* Animation */
+  .tree-node.changed { animation: flash 0.6s ease; }
+  @keyframes flash { 0%,100% { background: transparent; } 50% { background: rgba(0,255,255,0.1); } }
+  .tree-node.new { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; } }
+  .tree-node.removing { animation: fadeOut 0.3s ease forwards; }
+  @keyframes fadeOut { to { opacity: 0; height: 0; overflow: hidden; } }
+  .empty { color: #666; font-style: italic; }
+  /* Timeline */
+  .timeline-bar { position: relative; height: 28px; background: #0d1b30; border-radius: 3px;
+    margin-bottom: 8px; cursor: pointer; overflow: hidden; }
+  .timeline-fill { position: absolute; top: 0; left: 0; height: 100%; background: #0f3460; }
+  .timeline-cursor { position: absolute; top: 0; width: 2px; height: 100%; background: #0ff;
+    pointer-events: none; }
+  .timeline-marker { position: absolute; top: 4px; width: 6px; height: 6px; border-radius: 50%;
+    transform: translateX(-3px); }
+  .timeline-marker.task { background: #4caf50; }
+  .timeline-marker.region { background: #2196f3; }
+  .timeline-marker.obligation { background: #ff9800; }
+  .timeline-marker.cancel { background: #e94560; }
+  .timeline-marker.io { background: #ce93d8; }
+  .timeline-labels { display: flex; justify-content: space-between; font-size: 11px; color: #666;
+    margin-bottom: 8px; }
+  .timeline-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .timeline-controls button { background: #0f3460; border: 1px solid #0f3460; color: #e0e0e0;
+    padding: 2px 10px; border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 12px; }
+  .timeline-controls button:hover { background: #1a3a6a; }
+  .timeline-controls button.active { background: #0ff; color: #1a1a2e; }
+  .timeline-controls select { background: #0f3460; border: 1px solid #0f3460; color: #e0e0e0;
+    padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 12px; }
+  .timeline-events { max-height: 280px; overflow-y: auto; }
+  .tl-event { display: flex; gap: 8px; padding: 2px 4px; font-size: 12px; border-radius: 2px; cursor: pointer; }
+  .tl-event:hover { background: rgba(15,52,96,0.6); }
+  .tl-event.selected { background: #0f3460; }
+  .tl-event .tl-time { color: #0ff; min-width: 110px; }
+  .tl-event .tl-kind { min-width: 120px; }
+  .tl-event .tl-detail { color: #888; }
+  /* Post-mortem file loader */
+  #file-loader { display: none; margin-bottom: 12px; }
+  #file-loader.visible { display: block; }
+  #file-loader input[type="file"] { display: none; }
+  .file-btn { background: #0f3460; border: 1px solid #0ff; color: #0ff; padding: 6px 16px;
+    border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 13px; }
+  .file-btn:hover { background: #1a3a6a; }
+  .mode-badge { display: inline-block; background: #0f3460; border-radius: 3px; padding: 1px 8px;
+    font-size: 11px; margin-left: 8px; }
+  .mode-badge.live { color: #4caf50; border: 1px solid #4caf50; }
+  .mode-badge.file { color: #ff9800; border: 1px solid #ff9800; }
+  /* Export */
+  .export-btn { background: #0f3460; border: 1px solid #0f3460; color: #888; padding: 2px 10px;
+    border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 11px; float: right; }
+  .export-btn:hover { color: #e0e0e0; }
+</style>
+</head>
+<body>
+<h1>Asupersync Debug Dashboard <span id="mode-badge" class="mode-badge">detecting...</span></h1>
+<div class="meta">
+  <span id="refresh-info"></span> | <span id="last-update">loading...</span>
+  <button class="export-btn" id="export-btn" title="Export current snapshot as JSON">Export JSON</button>
+</div>
+<div id="error"></div>
+<div id="file-loader" class="section">
+  <h2>Load Trace Data</h2>
+  <p style="margin-bottom:8px;color:#888;font-size:12px">
+    Open a snapshot JSON or trace file for post-mortem analysis.
+  </p>
+  <label class="file-btn" for="trace-file">Choose File</label>
+  <input type="file" id="trace-file" accept=".json">
+  <span id="file-name" style="margin-left:8px;color:#888;font-size:12px"></span>
+</div>
+<div class="toolbar">
+  <input type="text" id="search" placeholder="Search by name or ID...">
+  <label><input type="checkbox" id="hide-closed"> Hide closed/completed</label>
+  <label><input type="checkbox" id="errors-only"> Errors only</label>
+</div>
+<div class="section">
+  <h2>Summary</h2>
+  <div id="summary">Loading...</div>
+</div>
+<div class="section">
+  <h2>Region / Task Hierarchy</h2>
+  <div id="tree" class="tree">Loading...</div>
+</div>
+<div class="section" id="detail">
+  <h2>Details</h2>
+  <pre id="detail-content"></pre>
+</div>
+<div class="section">
+  <h2>Event Timeline</h2>
+  <div class="timeline-controls">
+    <button id="tl-play" title="Play/pause">&#9654;</button>
+    <button id="tl-step-back" title="Step back">&#9664;&#9664;</button>
+    <button id="tl-step-fwd" title="Step forward">&#9654;&#9654;</button>
+    <select id="tl-filter">
+      <option value="all">All events</option>
+      <option value="task">Task events</option>
+      <option value="region">Region events</option>
+      <option value="obligation">Obligation events</option>
+      <option value="cancel">Cancellation</option>
+      <option value="io">I/O events</option>
+    </select>
+    <span id="tl-info" style="color:#888;font-size:11px"></span>
+  </div>
+  <div id="timeline-bar" class="timeline-bar">
+    <div id="tl-fill" class="timeline-fill"></div>
+    <div id="tl-cursor" class="timeline-cursor"></div>
+  </div>
+  <div class="timeline-labels">
+    <span id="tl-start">--</span>
+    <span id="tl-end">--</span>
+  </div>
+  <div id="timeline-events" class="timeline-events">Loading...</div>
+</div>
+<script>
+// ===== Configuration =====
+var CONFIG = {
+  refreshMs: parseInt(new URLSearchParams(location.search).get('refresh') || '2000'),
+  mode: 'detecting' // 'live' or 'file'
+};
+
+var prevSnap = null;
+var collapsed = {};
+var selected = null;
+
+function esc(s) { var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+
+function stateOf(obj) {
+  if (!obj || !obj.state) return 'Unknown';
+  return typeof obj.state === 'string' ? obj.state : Object.keys(obj.state)[0];
+}
+
+function stateIcon(s) {
+  var m = { Open:'\u25CF', Running:'\u25CF', Created:'\u25CB',
+    Closing:'\u26A0\uFE0F', Cancelling:'\u26A0\uFE0F', CancelRequested:'\u26A0\uFE0F',
+    Draining:'\uD83D\uDD04', Finalizing:'\u23F3',
+    Closed:'\u2713', Completed:'\u2713',
+    Reserved:'\u25CB', Committed:'\u2713', Aborted:'\u2717', Leaked:'\u2717',
+    Panicked:'\u2717' };
+  return m[s] || '\u25CF';
+}
+
+function stateClass(s) { return 'st-' + (s || 'unknown').toLowerCase(); }
+
+// ===== Tree =====
+function buildTree(snap) {
+  var regionMap = {};
+  snap.regions.forEach(function(r) { regionMap[r.id.index] = r; });
+  var tasksByRegion = {};
+  snap.tasks.forEach(function(t) {
+    var rid = t.region_id.index;
+    if (!tasksByRegion[rid]) tasksByRegion[rid] = [];
+    tasksByRegion[rid].push(t);
+  });
+  var obligMap = {};
+  snap.obligations.forEach(function(o) { obligMap[o.id.index] = o; });
+  var roots = snap.regions.filter(function(r) { return !r.parent_id; });
+  var childRegions = {};
+  snap.regions.forEach(function(r) {
+    if (r.parent_id) {
+      var pid = r.parent_id.index;
+      if (!childRegions[pid]) childRegions[pid] = [];
+      childRegions[pid].push(r);
+    }
+  });
+  return { regionMap: regionMap, tasksByRegion: tasksByRegion, obligMap: obligMap,
+    roots: roots, childRegions: childRegions };
+}
+
+function matchesFilter(state) {
+  var hideClosed = document.getElementById('hide-closed').checked;
+  var errorsOnly = document.getElementById('errors-only').checked;
+  var s = state.toLowerCase();
+  if (hideClosed && (s === 'closed' || s === 'completed')) return false;
+  if (errorsOnly && s !== 'panicked' && s !== 'leaked' && s !== 'aborted' && s !== 'error') return false;
+  return true;
+}
+
+function matchesSearch(text) {
+  var q = document.getElementById('search').value.toLowerCase();
+  if (!q) return true;
+  return text.toLowerCase().indexOf(q) !== -1;
+}
+
+function renderRegion(r, tree, depth) {
+  var st = stateOf(r);
+  var label = 'Region[' + r.id.index + ']' + (r.name ? ' ' + r.name : '');
+  if (!matchesSearch(label + ' ' + st)) return '';
+  if (!matchesFilter(st)) return '';
+  var key = 'r-' + r.id.index;
+  var isCollapsed = collapsed[key];
+  var children = tree.childRegions[r.id.index] || [];
+  var tasks = tree.tasksByRegion[r.id.index] || [];
+  var hasChildren = children.length > 0 || tasks.length > 0;
+  var toggle = hasChildren ? (isCollapsed ? '\u25B6' : '\u25BC') : '\u00B7';
+  var sel = selected === key ? ' selected' : '';
+  var h = '<div class="tree-node" data-key="' + key + '">';
+  h += '<div class="tree-row' + sel + '" data-key="' + key + '" data-type="region" data-id="' + r.id.index + '">';
+  h += '<span class="toggle" data-key="' + key + '">' + toggle + '</span>';
+  h += '<span class="icon ' + stateClass(st) + '">' + stateIcon(st) + '</span>';
+  h += '<span class="node-id">' + esc(label) + '</span>';
+  h += ' <span class="node-state ' + stateClass(st) + '">(' + esc(st) + ')</span>';
+  h += ' <span class="node-extra">[' + r.child_count + ' children, ' + r.task_count + ' tasks]</span>';
+  h += '</div>';
+  if (hasChildren) {
+    h += '<div class="tree-children' + (isCollapsed ? ' collapsed' : '') + '">';
+    children.forEach(function(c) { h += renderRegion(c, tree, depth + 1); });
+    tasks.forEach(function(t) { h += renderTask(t, tree); });
+    h += '</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+function renderTask(t, tree) {
+  var st = stateOf(t);
+  var label = 'Task[' + t.id.index + ']' + (t.name ? ' ' + t.name : '');
+  if (!matchesSearch(label + ' ' + st)) return '';
+  if (!matchesFilter(st)) return '';
+  var key = 't-' + t.id.index;
+  var hasObligs = t.obligations && t.obligations.length > 0;
+  var isCollapsed = collapsed[key];
+  var toggle = hasObligs ? (isCollapsed ? '\u25B6' : '\u25BC') : '\u00B7';
+  var sel = selected === key ? ' selected' : '';
+  var h = '<div class="tree-node" data-key="' + key + '">';
+  h += '<div class="tree-row' + sel + '" data-key="' + key + '" data-type="task" data-id="' + t.id.index + '">';
+  h += '<span class="toggle" data-key="' + key + '">' + toggle + '</span>';
+  h += '<span class="icon ' + stateClass(st) + '">' + stateIcon(st) + '</span>';
+  h += '<span class="node-id">' + esc(label) + '</span>';
+  h += ' <span class="node-state ' + stateClass(st) + '">(' + esc(st) + ')</span>';
+  h += ' <span class="node-extra">polls:' + t.poll_count + '</span>';
+  h += '</div>';
+  if (hasObligs) {
+    h += '<div class="tree-children' + (isCollapsed ? ' collapsed' : '') + '">';
+    t.obligations.forEach(function(oid) {
+      var o = tree.obligMap[oid.index];
+      if (o) h += renderObligation(o);
+    });
+    h += '</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+function renderObligation(o) {
+  var st = stateOf(o);
+  if (!matchesFilter(st)) return '';
+  var key = 'o-' + o.id.index;
+  var sel = selected === key ? ' selected' : '';
+  return '<div class="tree-node" data-key="' + key + '">' +
+    '<div class="tree-row' + sel + '" data-key="' + key + '" data-type="obligation" data-id="' + o.id.index + '">' +
+    '<span class="toggle">\u00B7</span>' +
+    '<span class="icon ' + stateClass(st) + '">' + stateIcon(st) + '</span>' +
+    '<span class="node-id">Obligation[' + o.id.index + ']</span>' +
+    ' <span class="node-state ' + stateClass(st) + '">(' + esc(st) + ')</span>' +
+    '</div></div>';
+}
+
+function renderTree(snap) {
+  var tree = buildTree(snap);
+  if (tree.roots.length === 0 && snap.tasks.length === 0) {
+    return '<div class="empty">No regions or tasks</div>';
+  }
+  var h = '';
+  tree.roots.forEach(function(r) { h += renderRegion(r, tree, 0); });
+  var renderedRegions = new Set(snap.regions.map(function(r) { return r.id.index; }));
+  snap.tasks.forEach(function(t) {
+    if (!renderedRegions.has(t.region_id.index)) {
+      h += renderTask(t, tree);
+    }
+  });
+  return h || '<div class="empty">All items filtered out</div>';
+}
+
+// ===== Render =====
+function render(snap) {
+  document.getElementById('last-update').textContent = 'ts=' + snap.timestamp + ' | ' + new Date().toISOString();
+  document.getElementById('summary').innerHTML =
+    '<span class="counter">Regions: ' + snap.regions.length + '</span>' +
+    '<span class="counter">Tasks: ' + snap.tasks.length + '</span>' +
+    '<span class="counter">Obligations: ' + snap.obligations.length + '</span>' +
+    '<span class="counter">Events: ' + snap.recent_events.length + '</span>';
+
+  document.getElementById('tree').innerHTML = renderTree(snap);
+  renderTimeline(snap);
+  prevSnap = snap;
+}
+
+// ===== Tree interaction =====
+document.getElementById('tree').addEventListener('click', function(ev) {
+  var tgt = ev.target;
+  if (tgt.classList.contains('toggle')) {
+    var key = tgt.getAttribute('data-key');
+    collapsed[key] = !collapsed[key];
+    if (prevSnap) render(prevSnap);
+    return;
+  }
+  var row = tgt.closest('.tree-row');
+  if (row) {
+    selected = row.getAttribute('data-key');
+    showDetail(row.getAttribute('data-type'), row.getAttribute('data-id'));
+    if (prevSnap) render(prevSnap);
+  }
+});
+
+function showDetail(type, id) {
+  if (!prevSnap) return;
+  var obj = null;
+  if (type === 'region') obj = prevSnap.regions.find(function(r) { return String(r.id.index) === id; });
+  else if (type === 'task') obj = prevSnap.tasks.find(function(t) { return String(t.id.index) === id; });
+  else if (type === 'obligation') obj = prevSnap.obligations.find(function(o) { return String(o.id.index) === id; });
+  var panel = document.getElementById('detail');
+  if (obj) {
+    panel.classList.add('visible');
+    document.getElementById('detail-content').textContent = JSON.stringify(obj, null, 2);
+  } else {
+    panel.classList.remove('visible');
+  }
+}
+
+document.getElementById('search').addEventListener('input', function() { if (prevSnap) render(prevSnap); });
+document.getElementById('hide-closed').addEventListener('change', function() { if (prevSnap) render(prevSnap); });
+document.getElementById('errors-only').addEventListener('change', function() { if (prevSnap) render(prevSnap); });
+
+// ===== Timeline =====
+var tlPlaying = false;
+var tlCursorIdx = -1;
+var tlSelectedEvt = null;
+
+function eventCategory(kind) {
+  var k = typeof kind === 'string' ? kind : Object.keys(kind)[0];
+  if (k.indexOf('Cancel') >= 0) return 'cancel';
+  if (k.indexOf('Region') >= 0) return 'region';
+  if (k.indexOf('Obligation') >= 0) return 'obligation';
+  if (k.indexOf('Io') >= 0 || k.indexOf('IO') >= 0) return 'io';
+  return 'task';
+}
+
+function eventKindStr(kind) {
+  return typeof kind === 'string' ? kind : Object.keys(kind)[0];
+}
+
+function fmtNs(ns) {
+  if (ns === 0 || ns === undefined) return '0';
+  var s = ns / 1e9;
+  var ms = ns / 1e6;
+  if (s >= 1) return s.toFixed(3) + 's';
+  return ms.toFixed(3) + 'ms';
+}
+
+function eventDataStr(data) {
+  if (!data || data === 'None') return '';
+  if (typeof data === 'object') {
+    if (data.Task) return 'Task[' + data.Task.task.index + '] Region[' + data.Task.region.index + ']';
+    if (data.Region) return 'Region[' + data.Region.region.index + ']';
+    if (data.Obligation) return 'Oblig[' + data.Obligation.obligation.index + '] Task[' + data.Obligation.task.index + ']';
+  }
+  return '';
+}
+
+function filterEvents(events) {
+  var f = document.getElementById('tl-filter').value;
+  if (f === 'all') return events;
+  return events.filter(function(e) { return eventCategory(e.kind) === f; });
+}
+
+function renderTimeline(snap) {
+  var events = snap.recent_events || [];
+  var filtered = filterEvents(events);
+  var bar = document.getElementById('timeline-bar');
+  var barW = bar.offsetWidth || 600;
+  bar.querySelectorAll('.timeline-marker').forEach(function(m) { m.remove(); });
+  if (events.length === 0) {
+    document.getElementById('tl-start').textContent = '--';
+    document.getElementById('tl-end').textContent = '--';
+    document.getElementById('tl-info').textContent = '0 events';
+    document.getElementById('timeline-events').innerHTML = '<div class="empty">No events</div>';
+    return;
+  }
+  var minT = events[0].time;
+  var maxT = events[events.length - 1].time;
+  var span = maxT - minT || 1;
+  document.getElementById('tl-start').textContent = fmtNs(minT);
+  document.getElementById('tl-end').textContent = fmtNs(maxT);
+  document.getElementById('tl-info').textContent = filtered.length + ' / ' + events.length + ' events';
+  filtered.forEach(function(e) {
+    var pct = ((e.time - minT) / span) * 100;
+    var marker = document.createElement('div');
+    marker.className = 'timeline-marker ' + eventCategory(e.kind);
+    marker.style.left = pct + '%';
+    marker.title = eventKindStr(e.kind) + ' @' + fmtNs(e.time);
+    bar.appendChild(marker);
+  });
+  var cursor = document.getElementById('tl-cursor');
+  if (tlCursorIdx >= 0 && tlCursorIdx < filtered.length) {
+    var ce = filtered[tlCursorIdx];
+    cursor.style.left = (((ce.time - minT) / span) * 100) + '%';
+    cursor.style.display = 'block';
+  } else {
+    cursor.style.left = '100%';
+    cursor.style.display = 'block';
+  }
+  document.getElementById('tl-fill').style.width = '100%';
+  var h = '';
+  filtered.forEach(function(e, i) {
+    var sel = tlSelectedEvt === e.seq ? ' selected' : '';
+    h += '<div class="tl-event' + sel + '" data-idx="' + i + '" data-seq="' + e.seq + '">';
+    h += '<span class="tl-time">' + fmtNs(e.time) + '</span>';
+    h += '<span class="tl-kind ' + stateClass(eventKindStr(e.kind)) + '">' + esc(eventKindStr(e.kind)) + '</span>';
+    h += '<span class="tl-detail">' + esc(eventDataStr(e.data)) + '</span>';
+    h += '</div>';
+  });
+  document.getElementById('timeline-events').innerHTML = h || '<div class="empty">All events filtered</div>';
+}
+
+document.getElementById('timeline-bar').addEventListener('click', function(ev) {
+  if (!prevSnap || !prevSnap.recent_events.length) return;
+  var bar = document.getElementById('timeline-bar');
+  var rect = bar.getBoundingClientRect();
+  var pct = (ev.clientX - rect.left) / rect.width;
+  var events = filterEvents(prevSnap.recent_events);
+  var idx = Math.round(pct * (events.length - 1));
+  tlCursorIdx = Math.max(0, Math.min(idx, events.length - 1));
+  renderTimeline(prevSnap);
+});
+
+document.getElementById('timeline-events').addEventListener('click', function(ev) {
+  var row = ev.target.closest('.tl-event');
+  if (!row || !prevSnap) return;
+  var seq = parseInt(row.getAttribute('data-seq'), 10);
+  tlSelectedEvt = seq;
+  var evt = prevSnap.recent_events.find(function(e) { return e.seq === seq; });
+  if (evt) {
+    var panel = document.getElementById('detail');
+    panel.classList.add('visible');
+    document.getElementById('detail-content').textContent = JSON.stringify(evt, null, 2);
+  }
+  renderTimeline(prevSnap);
+});
+
+var playInterval = null;
+document.getElementById('tl-play').addEventListener('click', function() {
+  tlPlaying = !tlPlaying;
+  this.textContent = tlPlaying ? '\u23F8' : '\u25B6';
+  this.classList.toggle('active', tlPlaying);
+  if (tlPlaying) {
+    if (tlCursorIdx < 0) tlCursorIdx = 0;
+    playInterval = setInterval(function() {
+      if (!prevSnap) return;
+      var events = filterEvents(prevSnap.recent_events);
+      if (tlCursorIdx < events.length - 1) {
+        tlCursorIdx++;
+        renderTimeline(prevSnap);
+      } else {
+        tlPlaying = false;
+        document.getElementById('tl-play').textContent = '\u25B6';
+        document.getElementById('tl-play').classList.remove('active');
+        clearInterval(playInterval);
+      }
+    }, 200);
+  } else { clearInterval(playInterval); }
+});
+
+document.getElementById('tl-step-back').addEventListener('click', function() {
+  if (!prevSnap) return;
+  var events = filterEvents(prevSnap.recent_events);
+  if (tlCursorIdx > 0) { tlCursorIdx--; renderTimeline(prevSnap); }
+  else if (tlCursorIdx < 0 && events.length > 0) { tlCursorIdx = events.length - 1; renderTimeline(prevSnap); }
+});
+document.getElementById('tl-step-fwd').addEventListener('click', function() {
+  if (!prevSnap) return;
+  var events = filterEvents(prevSnap.recent_events);
+  if (tlCursorIdx < events.length - 1) { tlCursorIdx++; renderTimeline(prevSnap); }
+});
+
+document.getElementById('tl-filter').addEventListener('change', function() {
+  tlCursorIdx = -1;
+  if (prevSnap) renderTimeline(prevSnap);
+});
+
+// ===== Export =====
+document.getElementById('export-btn').addEventListener('click', function() {
+  if (!prevSnap) return;
+  var blob = new Blob([JSON.stringify(prevSnap, null, 2)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'asupersync-snapshot-' + prevSnap.timestamp + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// ===== Post-mortem file loader =====
+document.getElementById('trace-file').addEventListener('change', function(ev) {
+  var file = ev.target.files[0];
+  if (!file) return;
+  document.getElementById('file-name').textContent = file.name;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var data = JSON.parse(e.target.result);
+      // Accept either a RuntimeSnapshot directly or an array of events.
+      if (data.timestamp !== undefined && data.regions !== undefined) {
+        render(data);
+      } else if (Array.isArray(data)) {
+        // Treat as event list.
+        render({ timestamp: 0, regions: [], tasks: [], obligations: [], recent_events: data });
+      } else {
+        document.getElementById('error').textContent = 'Unrecognized JSON format';
+        document.getElementById('error').style.display = 'block';
+      }
+    } catch (err) {
+      document.getElementById('error').textContent = 'Parse error: ' + err;
+      document.getElementById('error').style.display = 'block';
+    }
+  };
+  reader.readAsText(file);
+});
+
+// ===== Mode detection and polling =====
+var pollTimer = null;
+
+function setMode(mode) {
+  CONFIG.mode = mode;
+  var badge = document.getElementById('mode-badge');
+  badge.textContent = mode === 'live' ? 'LIVE' : 'FILE';
+  badge.className = 'mode-badge ' + mode;
+  if (mode === 'live') {
+    document.getElementById('refresh-info').textContent = 'Auto-refresh: ' + (CONFIG.refreshMs / 1000) + 's';
+    document.getElementById('file-loader').classList.remove('visible');
+  } else {
+    document.getElementById('refresh-info').textContent = 'Post-mortem mode';
+    document.getElementById('file-loader').classList.add('visible');
+    document.getElementById('summary').textContent = 'Load a snapshot or trace file to begin.';
+    document.getElementById('tree').innerHTML = '<div class="empty">No data loaded</div>';
+    document.getElementById('timeline-events').innerHTML = '<div class="empty">No events</div>';
+  }
+}
+
+function poll() {
+  fetch('/debug/snapshot')
+    .then(function(r) { return r.json(); })
+    .then(function(snap) {
+      document.getElementById('error').style.display = 'none';
+      render(snap);
+    })
+    .catch(function(err) {
+      document.getElementById('error').textContent = 'Fetch error: ' + err;
+      document.getElementById('error').style.display = 'block';
+    });
+}
+
+function startLive() {
+  setMode('live');
+  poll();
+  pollTimer = setInterval(poll, CONFIG.refreshMs);
+}
+
+// Detect mode: try fetching from the server.
+if (location.protocol === 'file:') {
+  setMode('file');
+} else {
+  fetch('/debug/snapshot')
+    .then(function(r) {
+      if (r.ok) {
+        return r.json().then(function(snap) {
+          setMode('live');
+          render(snap);
+          pollTimer = setInterval(poll, CONFIG.refreshMs);
+        });
+      } else {
+        setMode('file');
+      }
+    })
+    .catch(function() {
+      setMode('file');
+    });
+}
+</script>
+</body>
+</html>
