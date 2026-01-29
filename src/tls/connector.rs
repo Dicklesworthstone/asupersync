@@ -275,11 +275,22 @@ impl TlsConnectorBuilder {
         // Create the config builder with the crypto provider and protocol versions.
         let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()));
         let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
-            let min = self.min_protocol.map(|v| v.get_u16());
-            let max = self.max_protocol.map(|v| v.get_u16());
+            // Convert protocol versions to ordinals for comparison.
+            // TLS 1.2 = 0x0303, TLS 1.3 = 0x0304
+            fn version_ordinal(v: rustls::ProtocolVersion) -> u16 {
+                match v {
+                    rustls::ProtocolVersion::TLSv1_2 => 0x0303,
+                    rustls::ProtocolVersion::TLSv1_3 => 0x0304,
+                    // For unknown versions, use a high value so they're excluded by default
+                    _ => 0xFFFF,
+                }
+            }
 
-            if let (Some(min), Some(max)) = (min, max) {
-                if min > max {
+            let min = self.min_protocol.map(version_ordinal);
+            let max = self.max_protocol.map(version_ordinal);
+
+            if let (Some(min_ord), Some(max_ord)) = (min, max) {
+                if min_ord > max_ord {
                     return Err(TlsError::Configuration(
                         "min_protocol_version is greater than max_protocol_version".into(),
                     ));
@@ -288,11 +299,11 @@ impl TlsConnectorBuilder {
 
             let mut versions = Vec::new();
             for v in rustls::ALL_VERSIONS {
-                let ordinal = v.version.get_u16();
+                let ordinal = version_ordinal(v.version);
                 let within_min = min.map_or(true, |m| ordinal >= m);
                 let within_max = max.map_or(true, |m| ordinal <= m);
                 if within_min && within_max {
-                    versions.push(*v);
+                    versions.push(v);
                 }
             }
 
