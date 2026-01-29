@@ -44,6 +44,7 @@
 
 pub mod graded;
 mod leak_check;
+pub mod marking;
 
 pub use leak_check::{
     Body, CheckResult, Diagnostic, DiagnosticKind, Instruction, LeakChecker, ObligationVar,

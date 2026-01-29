@@ -63,10 +63,8 @@ impl VarState {
             (Self::MayHold(k1), Self::MayHold(k2)) if k1 == k2 => Self::MayHold(k1),
 
             // Held in one path, not in another => MayHold.
-            (Self::Held(k), Self::Resolved)
-            | (Self::Resolved, Self::Held(k))
-            | (Self::Held(k), Self::Empty)
-            | (Self::Empty, Self::Held(k)) => Self::MayHold(k),
+            (Self::Held(k), Self::Resolved | Self::Empty)
+            | (Self::Resolved | Self::Empty, Self::Held(k)) => Self::MayHold(k),
 
             // MayHold propagates.
             (Self::MayHold(k), _) | (_, Self::MayHold(k)) => Self::MayHold(k),
