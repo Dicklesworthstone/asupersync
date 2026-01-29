@@ -685,12 +685,14 @@ impl<P: Policy> Scope<'_, P> {
         h1: TaskHandle<T>,
         h2: TaskHandle<T>,
     ) -> Result<T, JoinError> {
-        let f1 = Box::pin(h1.join(cx));
-        let f2 = Box::pin(h2.join(cx));
+        let f1 = Box::pin(h1.join_with_drop_reason(cx, CancelReason::race_loser()));
+        let f2 = Box::pin(h2.join_with_drop_reason(cx, CancelReason::race_loser()));
 
         match Select::new(f1, f2).await {
             Either::Left(res) => {
                 // h1 finished first
+                // h2 was dropped and aborted by JoinFuture::drop
+                // We manually ensure it's cancelled (idempotent) and drain it
                 h2.abort_with_reason(CancelReason::race_loser());
                 let _ = h2.join(cx).await; // Drain h2
                 res
@@ -722,11 +724,16 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<(T, usize), JoinError> {
         use crate::combinator::select::SelectAll;
 
-        let futures: Vec<_> = handles.iter().map(|h| Box::pin(h.join(cx))).collect();
+        let futures: Vec<_> = handles
+            .iter()
+            .map(|h| Box::pin(h.join_with_drop_reason(cx, CancelReason::race_loser())))
+            .collect();
 
         let (result, winner_idx) = SelectAll::new(futures).await;
 
         // Cancel and drain losers
+        // Note: Losers were already aborted when SelectAll dropped their futures.
+        // The abort reason was set to RaceLost by JoinFuture::drop.
         for (i, handle) in handles.iter().enumerate() {
             if i != winner_idx {
                 handle.abort_with_reason(CancelReason::race_loser());

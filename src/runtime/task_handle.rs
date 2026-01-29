@@ -120,6 +120,27 @@ impl<T> TaskHandle<T> {
             handle: self,
             inner: self.receiver.recv(cx),
             completed: false,
+            drop_reason: None,
+        }
+    }
+
+    /// Waits for the task to complete, aborting with a specific reason if dropped.
+    ///
+    /// This is like `join()`, but allows specifying the cancellation reason that
+    /// should be used if the join future is dropped before completion. This is
+    /// useful for combinators like `race` that want to attribute cancellation
+    /// to "losing the race".
+    #[must_use]
+    pub fn join_with_drop_reason<'a>(
+        &'a self,
+        cx: &'a Cx,
+        reason: CancelReason,
+    ) -> JoinFuture<'a, T> {
+        JoinFuture {
+            handle: self,
+            inner: self.receiver.recv(cx),
+            completed: false,
+            drop_reason: Some(reason),
         }
     }
 
@@ -172,6 +193,7 @@ pub struct JoinFuture<'a, T> {
     handle: &'a TaskHandle<T>,
     inner: oneshot::RecvFuture<'a, Result<T, JoinError>>,
     completed: bool,
+    drop_reason: Option<CancelReason>,
 }
 
 impl<T> std::future::Future for JoinFuture<'_, T> {
@@ -202,7 +224,11 @@ impl<T> Drop for JoinFuture<'_, T> {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
         if !self.completed {
-            self.handle.abort();
+            if let Some(reason) = self.drop_reason.take() {
+                self.handle.abort_with_reason(reason);
+            } else {
+                self.handle.abort();
+            }
         }
     }
 }
