@@ -80,6 +80,7 @@ pub mod observability;
 pub mod plan;
 #[cfg(unix)]
 pub mod process;
+pub mod raptorq;
 pub mod record;
 pub mod remote;
 pub mod runtime;
