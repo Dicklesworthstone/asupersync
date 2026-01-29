@@ -256,11 +256,13 @@ pub struct Json<T>(pub T);
 
 impl<T: serde::Serialize> IntoResponse for Json<T> {
     fn into_response(self) -> Response {
-        match serde_json::to_vec(&self.0) {
-            Ok(body) => Response::new(StatusCode::OK, Bytes::from(body))
-                .header("content-type", "application/json"),
-            Err(_) => Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
-        }
+        serde_json::to_vec(&self.0).map_or_else(
+            |_| Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+            |body| {
+                Response::new(StatusCode::OK, Bytes::from(body))
+                    .header("content-type", "application/json")
+            },
+        )
     }
 }
 

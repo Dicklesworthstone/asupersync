@@ -94,11 +94,10 @@ impl MethodRouter {
 
     /// Dispatch a request to the appropriate method handler.
     fn dispatch(&self, req: Request) -> Response {
-        if let Some(handler) = self.handlers.get(&req.method.to_uppercase()) {
-            handler.call(req)
-        } else {
-            StatusCode::METHOD_NOT_ALLOWED.into_response()
-        }
+        self.handlers.get(&req.method.to_uppercase()).map_or_else(
+            || StatusCode::METHOD_NOT_ALLOWED.into_response(),
+            |handler| handler.call(req),
+        )
     }
 }
 
@@ -154,13 +153,16 @@ impl RoutePattern {
             .split('/')
             .filter(|s| !s.is_empty())
             .map(|s| {
-                if let Some(param) = s.strip_prefix(':') {
-                    Segment::Param(param.to_string())
-                } else if s == "*" {
-                    Segment::Wildcard
-                } else {
-                    Segment::Literal(s.to_string())
-                }
+                s.strip_prefix(':').map_or_else(
+                    || {
+                        if s == "*" {
+                            Segment::Wildcard
+                        } else {
+                            Segment::Literal(s.to_string())
+                        }
+                    },
+                    |param| Segment::Param(param.to_string()),
+                )
             })
             .collect();
 
@@ -336,19 +338,19 @@ fn strip_prefix(path: &str, prefix: &str) -> Option<String> {
         return Some("/".to_string());
     }
 
-    if let Some(rest) = normalized_path.strip_prefix(normalized_prefix) {
-        if rest.starts_with('/') || rest.is_empty() {
-            Some(if rest.is_empty() {
-                "/".to_string()
+    normalized_path
+        .strip_prefix(normalized_prefix)
+        .map_or(None, |rest| {
+            if rest.starts_with('/') || rest.is_empty() {
+                Some(if rest.is_empty() {
+                    "/".to_string()
+                } else {
+                    rest.to_string()
+                })
             } else {
-                rest.to_string()
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    }
+                None
+            }
+        })
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
