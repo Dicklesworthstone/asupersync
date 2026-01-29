@@ -1334,14 +1334,6 @@ impl Cx {
         &self,
         futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
     ) -> Result<T, JoinError> {
-        if futures.is_empty() {
-            // No futures to race?
-            // This case should be prevented by the macro, but if it happens,
-            // we probably want to return an error or hang forever.
-            // Hanging forever is consistent with `race()` identity (never).
-            // However, returning an error is more practical.
-            return Err(JoinError::Cancelled(CancelReason::race_loser()));
-        }
         let (res, _) = SelectAll::new(futures).await;
         Ok(res)
     }
