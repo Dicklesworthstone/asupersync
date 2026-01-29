@@ -1,0 +1,1086 @@
+//! Lyapunov-guided scheduling governor for cancellation convergence.
+//!
+//! # Purpose
+//!
+//! A Lyapunov function `V(Σ)` maps runtime state `Σ` to a non-negative real
+//! number such that `V` decreases along valid scheduling trajectories toward
+//! quiescence. This provides a principled argument that cancellation converges:
+//!
+//! ```text
+//! V(Σ) ≥ 0           (non-negativity)
+//! V(Σ) = 0 ⟺ Σ is quiescent  (zero iff quiescent)
+//! Σ →ₛ Σ' ⟹ V(Σ') ≤ V(Σ)    (monotone decrease under scheduling steps)
+//! ```
+//!
+//! # Potential Function
+//!
+//! The candidate potential function combines four observable components:
+//!
+//! ```text
+//! V(Σ) = w_t · |live_tasks(Σ)|
+//!      + w_o · Σ_{o ∈ obligations} age(o, now)
+//!      + w_r · |draining_regions(Σ)|
+//!      + w_d · Σ_{t ∈ tasks} max(0, 1 - slack(t, now) / D₀)
+//! ```
+//!
+//! Where:
+//! - `w_t, w_o, w_r, w_d` are non-negative weights
+//! - `live_tasks(Σ)` = tasks not in terminal state
+//! - `age(o, now)` = `now - o.reserved_at` for pending obligations
+//! - `draining_regions(Σ)` = regions in Draining/Finalizing state
+//! - `slack(t, now)` = `t.deadline - now` (positive = ahead, negative = overdue)
+//! - `D₀` = normalization constant for deadline slack
+//!
+//! # Governor
+//!
+//! The [`LyapunovGovernor`] observes runtime state, computes the potential,
+//! and produces scheduling priority suggestions that preferentially schedule
+//! tasks whose completion maximally decreases `V`.
+//!
+//! # Usage
+//!
+//! ```
+//! use asupersync::obligation::lyapunov::{
+//!     LyapunovGovernor, PotentialWeights, StateSnapshot, SchedulingSuggestion,
+//! };
+//! use asupersync::types::Time;
+//!
+//! let weights = PotentialWeights::default();
+//! let mut governor = LyapunovGovernor::new(weights);
+//!
+//! // Take a snapshot of runtime state.
+//! let snapshot = StateSnapshot {
+//!     time: Time::ZERO,
+//!     live_tasks: 5,
+//!     pending_obligations: 3,
+//!     obligation_age_sum_ns: 150,
+//!     draining_regions: 1,
+//!     deadline_pressure: 0.0,
+//! };
+//!
+//! let v = governor.compute_potential(&snapshot);
+//! assert!(v > 0.0);
+//!
+//! // After some scheduling steps...
+//! let snapshot2 = StateSnapshot {
+//!     time: Time::from_nanos(100),
+//!     live_tasks: 3,
+//!     pending_obligations: 1,
+//!     obligation_age_sum_ns: 50,
+//!     draining_regions: 0,
+//!     deadline_pressure: 0.0,
+//! };
+//!
+//! let v2 = governor.compute_potential(&snapshot2);
+//! assert!(v2 < v);
+//! ```
+
+use crate::types::Time;
+use std::fmt;
+
+// ============================================================================
+// Potential Weights
+// ============================================================================
+
+/// Weights for the Lyapunov potential function components.
+///
+/// Each weight must be non-negative. The default weights are tuned for
+/// cancellation drain scenarios where obligation resolution is the bottleneck.
+#[derive(Debug, Clone, Copy)]
+pub struct PotentialWeights {
+    /// Weight for live task count.
+    pub w_tasks: f64,
+    /// Weight for pending obligation age (ns).
+    pub w_obligation_age: f64,
+    /// Weight for draining/finalizing region count.
+    pub w_draining_regions: f64,
+    /// Weight for deadline pressure.
+    pub w_deadline_pressure: f64,
+}
+
+impl PotentialWeights {
+    /// Creates weights with all components equal.
+    #[must_use]
+    pub const fn uniform(w: f64) -> Self {
+        Self {
+            w_tasks: w,
+            w_obligation_age: w,
+            w_draining_regions: w,
+            w_deadline_pressure: w,
+        }
+    }
+
+    /// Creates weights emphasizing obligation drain (cancel-aware scheduling).
+    #[must_use]
+    pub const fn obligation_focused() -> Self {
+        Self {
+            w_tasks: 1.0,
+            w_obligation_age: 10.0,
+            w_draining_regions: 5.0,
+            w_deadline_pressure: 2.0,
+        }
+    }
+
+    /// Creates weights emphasizing deadline compliance.
+    #[must_use]
+    pub const fn deadline_focused() -> Self {
+        Self {
+            w_tasks: 1.0,
+            w_obligation_age: 2.0,
+            w_draining_regions: 3.0,
+            w_deadline_pressure: 10.0,
+        }
+    }
+
+    /// Validates that all weights are non-negative.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.w_tasks >= 0.0
+            && self.w_obligation_age >= 0.0
+            && self.w_draining_regions >= 0.0
+            && self.w_deadline_pressure >= 0.0
+    }
+}
+
+impl Default for PotentialWeights {
+    fn default() -> Self {
+        Self {
+            w_tasks: 1.0,
+            w_obligation_age: 5.0,
+            w_draining_regions: 3.0,
+            w_deadline_pressure: 2.0,
+        }
+    }
+}
+
+// ============================================================================
+// State Snapshot
+// ============================================================================
+
+/// A snapshot of observable runtime state for potential computation.
+///
+/// This is a lightweight aggregate of the state components that feed
+/// the Lyapunov potential function. It can be constructed from
+/// `RuntimeState` or assembled manually in tests.
+#[derive(Debug, Clone)]
+pub struct StateSnapshot {
+    /// Current virtual time.
+    pub time: Time,
+    /// Number of live (non-terminal) tasks.
+    pub live_tasks: u32,
+    /// Number of pending (unresolved) obligations.
+    pub pending_obligations: u32,
+    /// Sum of ages (in nanoseconds) of all pending obligations.
+    ///
+    /// `Σ (now - obligation.reserved_at)` for each pending obligation.
+    pub obligation_age_sum_ns: u64,
+    /// Number of regions in Draining or Finalizing state.
+    pub draining_regions: u32,
+    /// Aggregate deadline pressure in `[0.0, ∞)`.
+    ///
+    /// Sum of `max(0, 1 - slack / D₀)` for each task with a deadline,
+    /// where `slack = deadline - now` and `D₀` is a normalization constant.
+    pub deadline_pressure: f64,
+}
+
+impl StateSnapshot {
+    /// Returns true if the snapshot represents quiescent state.
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        self.live_tasks == 0 && self.pending_obligations == 0 && self.draining_regions == 0
+    }
+}
+
+impl fmt::Display for StateSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Σ(t={}, tasks={}, obligations={}, age_sum={}ns, draining={}, deadline_p={:.2})",
+            self.time,
+            self.live_tasks,
+            self.pending_obligations,
+            self.obligation_age_sum_ns,
+            self.draining_regions,
+            self.deadline_pressure,
+        )
+    }
+}
+
+// ============================================================================
+// Potential Record
+// ============================================================================
+
+/// The computed potential with component breakdown.
+#[derive(Debug, Clone)]
+pub struct PotentialRecord {
+    /// The snapshot used to compute this potential.
+    pub snapshot: StateSnapshot,
+    /// Total potential value.
+    pub total: f64,
+    /// Contribution from live tasks.
+    pub task_component: f64,
+    /// Contribution from obligation age.
+    pub obligation_component: f64,
+    /// Contribution from draining regions.
+    pub region_component: f64,
+    /// Contribution from deadline pressure.
+    pub deadline_component: f64,
+}
+
+impl PotentialRecord {
+    /// Returns true if the potential is zero (quiescent).
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        self.total == 0.0
+    }
+}
+
+impl fmt::Display for PotentialRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "V={:.2} [tasks={:.2}, obligations={:.2}, regions={:.2}, deadlines={:.2}]",
+            self.total,
+            self.task_component,
+            self.obligation_component,
+            self.region_component,
+            self.deadline_component,
+        )
+    }
+}
+
+// ============================================================================
+// Scheduling Suggestion
+// ============================================================================
+
+/// A scheduling suggestion from the governor.
+///
+/// The governor suggests which class of tasks should be prioritized
+/// to maximally decrease the potential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingSuggestion {
+    /// Prioritize tasks holding pending obligations (maximize obligation drain).
+    DrainObligations,
+    /// Prioritize tasks in draining regions (maximize region cleanup).
+    DrainRegions,
+    /// Prioritize tasks with tight deadlines (minimize deadline violations).
+    MeetDeadlines,
+    /// No preference — any scheduling order is acceptable.
+    NoPreference,
+}
+
+impl SchedulingSuggestion {
+    /// Returns a short description.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::DrainObligations => "prioritize obligation holders",
+            Self::DrainRegions => "prioritize draining region tasks",
+            Self::MeetDeadlines => "prioritize deadline-critical tasks",
+            Self::NoPreference => "no scheduling preference",
+        }
+    }
+}
+
+impl fmt::Display for SchedulingSuggestion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.description())
+    }
+}
+
+// ============================================================================
+// Convergence Verdict
+// ============================================================================
+
+/// Verdict from convergence analysis.
+#[derive(Debug, Clone)]
+pub struct ConvergenceVerdict {
+    /// Whether the potential is monotonically non-increasing.
+    pub monotone: bool,
+    /// Whether the final state is quiescent (V = 0).
+    pub reached_quiescence: bool,
+    /// Maximum potential observed.
+    pub v_max: f64,
+    /// Final potential observed.
+    pub v_final: f64,
+    /// Number of steps where potential increased (violations).
+    pub increase_count: usize,
+    /// Maximum single-step increase (worst violation).
+    pub max_increase: f64,
+    /// Total number of steps analyzed.
+    pub steps: usize,
+}
+
+impl ConvergenceVerdict {
+    /// Returns true if the system converged (monotone + quiescent).
+    #[must_use]
+    pub fn converged(&self) -> bool {
+        self.monotone && self.reached_quiescence
+    }
+}
+
+impl fmt::Display for ConvergenceVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Convergence Verdict")?;
+        writeln!(f, "===================")?;
+        writeln!(f, "Steps:      {}", self.steps)?;
+        writeln!(f, "Monotone:   {}", self.monotone)?;
+        writeln!(f, "Quiescent:  {}", self.reached_quiescence)?;
+        writeln!(f, "Converged:  {}", self.converged())?;
+        writeln!(f, "V_max:      {:.4}", self.v_max)?;
+        writeln!(f, "V_final:    {:.4}", self.v_final)?;
+        if !self.monotone {
+            writeln!(f, "Violations: {}", self.increase_count)?;
+            writeln!(f, "Max increase: {:.4}", self.max_increase)?;
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// LyapunovGovernor
+// ============================================================================
+
+/// Lyapunov-guided scheduling governor.
+///
+/// Observes runtime state snapshots, computes potential functions, and
+/// provides scheduling suggestions that drive the system toward quiescence.
+#[derive(Debug)]
+pub struct LyapunovGovernor {
+    /// Weights for the potential function.
+    weights: PotentialWeights,
+    /// History of computed potentials (for convergence analysis).
+    history: Vec<PotentialRecord>,
+}
+
+impl LyapunovGovernor {
+    /// Creates a new governor with the given weights.
+    #[must_use]
+    pub fn new(weights: PotentialWeights) -> Self {
+        assert!(weights.is_valid(), "weights must be non-negative");
+        Self {
+            weights,
+            history: Vec::new(),
+        }
+    }
+
+    /// Creates a governor with default weights.
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(PotentialWeights::default())
+    }
+
+    /// Computes the potential function for a state snapshot.
+    ///
+    /// Records the result in the history for convergence analysis.
+    pub fn compute_potential(&mut self, snapshot: &StateSnapshot) -> f64 {
+        let record = self.compute(snapshot);
+        let total = record.total;
+        self.history.push(record);
+        total
+    }
+
+    /// Computes the potential function with full breakdown (does not record).
+    #[must_use]
+    pub fn compute_record(&self, snapshot: &StateSnapshot) -> PotentialRecord {
+        self.compute(snapshot)
+    }
+
+    /// Suggests a scheduling action based on the current potential breakdown.
+    ///
+    /// The suggestion prioritizes the component with the highest weighted
+    /// contribution, since reducing that component decreases V most.
+    #[must_use]
+    pub fn suggest(&self, snapshot: &StateSnapshot) -> SchedulingSuggestion {
+        if snapshot.is_quiescent() {
+            return SchedulingSuggestion::NoPreference;
+        }
+
+        let record = self.compute(snapshot);
+
+        // Find the dominant component.
+        let components = [
+            (
+                record.obligation_component,
+                SchedulingSuggestion::DrainObligations,
+            ),
+            (record.region_component, SchedulingSuggestion::DrainRegions),
+            (
+                record.deadline_component,
+                SchedulingSuggestion::MeetDeadlines,
+            ),
+        ];
+
+        components
+            .iter()
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .filter(|(v, _)| *v > 0.0)
+            .map_or(SchedulingSuggestion::NoPreference, |(_, s)| *s)
+    }
+
+    /// Analyzes the recorded history for convergence properties.
+    ///
+    /// Returns a verdict on whether the potential was monotonically
+    /// non-increasing and whether quiescence was reached.
+    #[must_use]
+    pub fn analyze_convergence(&self) -> ConvergenceVerdict {
+        if self.history.is_empty() {
+            return ConvergenceVerdict {
+                monotone: true,
+                reached_quiescence: false,
+                v_max: 0.0,
+                v_final: 0.0,
+                increase_count: 0,
+                max_increase: 0.0,
+                steps: 0,
+            };
+        }
+
+        let mut monotone = true;
+        let mut increase_count = 0;
+        let mut max_increase = 0.0_f64;
+        let mut v_max = 0.0_f64;
+
+        for window in self.history.windows(2) {
+            let prev = window[0].total;
+            let curr = window[1].total;
+            v_max = v_max.max(prev).max(curr);
+
+            let delta = curr - prev;
+            if delta > f64::EPSILON {
+                monotone = false;
+                increase_count += 1;
+                max_increase = max_increase.max(delta);
+            }
+        }
+
+        v_max = v_max.max(self.history.first().map_or(0.0, |r| r.total));
+
+        let v_final = self.history.last().map_or(0.0, |r| r.total);
+        let reached_quiescence = v_final.abs() < f64::EPSILON;
+
+        ConvergenceVerdict {
+            monotone,
+            reached_quiescence,
+            v_max,
+            v_final,
+            increase_count,
+            max_increase,
+            steps: self.history.len(),
+        }
+    }
+
+    /// Returns the potential history.
+    #[must_use]
+    pub fn history(&self) -> &[PotentialRecord] {
+        &self.history
+    }
+
+    /// Clears the history.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
+    /// Returns the weights.
+    #[must_use]
+    pub const fn weights(&self) -> &PotentialWeights {
+        &self.weights
+    }
+
+    fn compute(&self, snapshot: &StateSnapshot) -> PotentialRecord {
+        let task_component = self.weights.w_tasks * f64::from(snapshot.live_tasks);
+
+        // Normalize obligation age to seconds for stability.
+        let age_seconds = snapshot.obligation_age_sum_ns as f64 / 1_000_000_000.0;
+        let obligation_component = self.weights.w_obligation_age * age_seconds;
+
+        let region_component =
+            self.weights.w_draining_regions * f64::from(snapshot.draining_regions);
+
+        let deadline_component = self.weights.w_deadline_pressure * snapshot.deadline_pressure;
+
+        let total = task_component + obligation_component + region_component + deadline_component;
+
+        PotentialRecord {
+            snapshot: snapshot.clone(),
+            total,
+            task_component,
+            obligation_component,
+            region_component,
+            deadline_component,
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn quiescent_snapshot() -> StateSnapshot {
+        StateSnapshot {
+            time: Time::ZERO,
+            live_tasks: 0,
+            pending_obligations: 0,
+            obligation_age_sum_ns: 0,
+            draining_regions: 0,
+            deadline_pressure: 0.0,
+        }
+    }
+
+    fn active_snapshot(tasks: u32, obligations: u32, age_ns: u64, draining: u32) -> StateSnapshot {
+        StateSnapshot {
+            time: Time::from_nanos(age_ns),
+            live_tasks: tasks,
+            pending_obligations: obligations,
+            obligation_age_sum_ns: age_ns,
+            draining_regions: draining,
+            deadline_pressure: 0.0,
+        }
+    }
+
+    // ---- Potential function properties --------------------------------------
+
+    #[test]
+    fn potential_zero_iff_quiescent() {
+        init_test("potential_zero_iff_quiescent");
+        let governor = LyapunovGovernor::with_defaults();
+
+        let v = governor.compute_record(&quiescent_snapshot());
+        let is_zero = v.is_zero();
+        crate::assert_with_log!(is_zero, "quiescent is zero", true, is_zero);
+
+        let v_active = governor.compute_record(&active_snapshot(1, 0, 0, 0));
+        let not_zero = !v_active.is_zero();
+        crate::assert_with_log!(not_zero, "active is not zero", true, not_zero);
+        crate::test_complete!("potential_zero_iff_quiescent");
+    }
+
+    #[test]
+    fn potential_non_negative() {
+        init_test("potential_non_negative");
+        let governor = LyapunovGovernor::with_defaults();
+
+        // Test many state combinations.
+        let configs = [
+            (0, 0, 0, 0),
+            (1, 0, 0, 0),
+            (0, 1, 100, 0),
+            (5, 3, 1000, 2),
+            (100, 50, 1_000_000_000, 10),
+        ];
+
+        for (tasks, obligations, age, draining) in configs {
+            let snap = active_snapshot(tasks, obligations, age, draining);
+            let v = governor.compute_record(&snap);
+            let non_neg = v.total >= 0.0;
+            crate::assert_with_log!(non_neg, format!("non-negative for {snap}"), true, non_neg);
+        }
+        crate::test_complete!("potential_non_negative");
+    }
+
+    #[test]
+    fn potential_increases_with_more_tasks() {
+        init_test("potential_increases_with_more_tasks");
+        let governor = LyapunovGovernor::with_defaults();
+
+        let v1 = governor.compute_record(&active_snapshot(1, 0, 0, 0));
+        let v2 = governor.compute_record(&active_snapshot(5, 0, 0, 0));
+        let v3 = governor.compute_record(&active_snapshot(10, 0, 0, 0));
+
+        let inc1 = v2.total > v1.total;
+        crate::assert_with_log!(inc1, "more tasks = higher V", true, inc1);
+        let inc2 = v3.total > v2.total;
+        crate::assert_with_log!(inc2, "even more tasks", true, inc2);
+        crate::test_complete!("potential_increases_with_more_tasks");
+    }
+
+    #[test]
+    fn potential_increases_with_obligation_age() {
+        init_test("potential_increases_with_obligation_age");
+        let governor = LyapunovGovernor::with_defaults();
+
+        let v1 = governor.compute_record(&active_snapshot(1, 1, 100, 0));
+        let v2 = governor.compute_record(&active_snapshot(1, 1, 1_000_000_000, 0));
+
+        let inc = v2.total > v1.total;
+        crate::assert_with_log!(inc, "older obligations = higher V", true, inc);
+        crate::test_complete!("potential_increases_with_obligation_age");
+    }
+
+    #[test]
+    fn potential_increases_with_draining_regions() {
+        init_test("potential_increases_with_draining_regions");
+        let governor = LyapunovGovernor::with_defaults();
+
+        let v1 = governor.compute_record(&active_snapshot(1, 0, 0, 0));
+        let v2 = governor.compute_record(&active_snapshot(1, 0, 0, 3));
+
+        let inc = v2.total > v1.total;
+        crate::assert_with_log!(inc, "draining regions increase V", true, inc);
+        crate::test_complete!("potential_increases_with_draining_regions");
+    }
+
+    #[test]
+    fn potential_deadline_pressure() {
+        init_test("potential_deadline_pressure");
+        let governor = LyapunovGovernor::with_defaults();
+
+        let snap_no_pressure = StateSnapshot {
+            time: Time::ZERO,
+            live_tasks: 1,
+            pending_obligations: 0,
+            obligation_age_sum_ns: 0,
+            draining_regions: 0,
+            deadline_pressure: 0.0,
+        };
+
+        let snap_high_pressure = StateSnapshot {
+            deadline_pressure: 5.0,
+            ..snap_no_pressure.clone()
+        };
+
+        let v1 = governor.compute_record(&snap_no_pressure);
+        let v2 = governor.compute_record(&snap_high_pressure);
+
+        let inc = v2.total > v1.total;
+        crate::assert_with_log!(inc, "deadline pressure increases V", true, inc);
+        crate::test_complete!("potential_deadline_pressure");
+    }
+
+    // ---- Convergence properties --------------------------------------------
+
+    #[test]
+    fn convergence_monotone_drain() {
+        init_test("convergence_monotone_drain");
+        // Simulate a monotone cancellation drain:
+        // Tasks and obligations decrease over time.
+        let mut governor = LyapunovGovernor::with_defaults();
+
+        let trajectory = vec![
+            active_snapshot(10, 5, 500_000_000, 3),
+            active_snapshot(8, 4, 400_000_000, 3),
+            active_snapshot(6, 3, 250_000_000, 2),
+            active_snapshot(4, 2, 100_000_000, 1),
+            active_snapshot(2, 1, 30_000_000, 1),
+            active_snapshot(1, 0, 0, 0),
+            quiescent_snapshot(),
+        ];
+
+        for snap in &trajectory {
+            governor.compute_potential(snap);
+        }
+
+        let verdict = governor.analyze_convergence();
+        let mono = verdict.monotone;
+        crate::assert_with_log!(mono, "monotone", true, mono);
+        let converged = verdict.converged();
+        crate::assert_with_log!(converged, "converged", true, converged);
+        let v_final = verdict.v_final;
+        crate::assert_with_log!(v_final == 0.0, "v_final", 0.0, v_final);
+        crate::test_complete!("convergence_monotone_drain");
+    }
+
+    #[test]
+    fn convergence_non_monotone_detected() {
+        init_test("convergence_non_monotone_detected");
+        // A trajectory where the potential temporarily increases
+        // (e.g., new work spawned during drain).
+        let mut governor = LyapunovGovernor::with_defaults();
+
+        let trajectory = vec![
+            active_snapshot(5, 2, 100_000_000, 1),
+            active_snapshot(3, 1, 50_000_000, 1),
+            active_snapshot(6, 3, 200_000_000, 2), // Spike: new work!
+            active_snapshot(4, 2, 100_000_000, 1),
+            active_snapshot(1, 0, 0, 0),
+            quiescent_snapshot(),
+        ];
+
+        for snap in &trajectory {
+            governor.compute_potential(snap);
+        }
+
+        let verdict = governor.analyze_convergence();
+        let not_mono = !verdict.monotone;
+        crate::assert_with_log!(not_mono, "not monotone", true, not_mono);
+        let violations = verdict.increase_count;
+        crate::assert_with_log!(violations >= 1, "has violations", true, violations >= 1);
+        // Still reaches quiescence.
+        let quiescent = verdict.reached_quiescence;
+        crate::assert_with_log!(quiescent, "reached quiescence", true, quiescent);
+        crate::test_complete!("convergence_non_monotone_detected");
+    }
+
+    #[test]
+    fn convergence_stuck_not_quiescent() {
+        init_test("convergence_stuck_not_quiescent");
+        // A trajectory that levels off without reaching quiescence.
+        let mut governor = LyapunovGovernor::with_defaults();
+
+        let trajectory = vec![
+            active_snapshot(5, 3, 300_000_000, 2),
+            active_snapshot(3, 2, 200_000_000, 1),
+            active_snapshot(2, 2, 200_000_000, 1),
+            active_snapshot(2, 2, 200_000_000, 1), // Stuck.
+        ];
+
+        for snap in &trajectory {
+            governor.compute_potential(snap);
+        }
+
+        let verdict = governor.analyze_convergence();
+        let not_converged = !verdict.converged();
+        crate::assert_with_log!(not_converged, "not converged", true, not_converged);
+        let not_quiescent = !verdict.reached_quiescence;
+        crate::assert_with_log!(not_quiescent, "not quiescent", true, not_quiescent);
+        crate::test_complete!("convergence_stuck_not_quiescent");
+    }
+
+    // ---- Scheduling suggestions --------------------------------------------
+
+    #[test]
+    fn suggest_no_preference_when_quiescent() {
+        init_test("suggest_no_preference_when_quiescent");
+        let governor = LyapunovGovernor::with_defaults();
+        let suggestion = governor.suggest(&quiescent_snapshot());
+        let is_no_pref = suggestion == SchedulingSuggestion::NoPreference;
+        crate::assert_with_log!(is_no_pref, "no preference when quiescent", true, is_no_pref);
+        crate::test_complete!("suggest_no_preference_when_quiescent");
+    }
+
+    #[test]
+    fn suggest_drain_obligations_when_dominant() {
+        init_test("suggest_drain_obligations_when_dominant");
+        let governor = LyapunovGovernor::new(PotentialWeights::obligation_focused());
+
+        let snap = StateSnapshot {
+            time: Time::from_nanos(1_000_000_000),
+            live_tasks: 1,
+            pending_obligations: 10,
+            obligation_age_sum_ns: 5_000_000_000, // 5 seconds total age.
+            draining_regions: 0,
+            deadline_pressure: 0.0,
+        };
+
+        let suggestion = governor.suggest(&snap);
+        let is_obligations = suggestion == SchedulingSuggestion::DrainObligations;
+        crate::assert_with_log!(
+            is_obligations,
+            "suggests draining obligations",
+            true,
+            is_obligations
+        );
+        crate::test_complete!("suggest_drain_obligations_when_dominant");
+    }
+
+    #[test]
+    fn suggest_drain_regions_when_dominant() {
+        init_test("suggest_drain_regions_when_dominant");
+        let governor = LyapunovGovernor::with_defaults();
+
+        let snap = StateSnapshot {
+            time: Time::ZERO,
+            live_tasks: 1,
+            pending_obligations: 0,
+            obligation_age_sum_ns: 0,
+            draining_regions: 10, // Many draining regions.
+            deadline_pressure: 0.0,
+        };
+
+        let suggestion = governor.suggest(&snap);
+        let is_regions = suggestion == SchedulingSuggestion::DrainRegions;
+        crate::assert_with_log!(is_regions, "suggests draining regions", true, is_regions);
+        crate::test_complete!("suggest_drain_regions_when_dominant");
+    }
+
+    #[test]
+    fn suggest_meet_deadlines_when_dominant() {
+        init_test("suggest_meet_deadlines_when_dominant");
+        let governor = LyapunovGovernor::new(PotentialWeights::deadline_focused());
+
+        let snap = StateSnapshot {
+            time: Time::ZERO,
+            live_tasks: 1,
+            pending_obligations: 0,
+            obligation_age_sum_ns: 0,
+            draining_regions: 0,
+            deadline_pressure: 10.0, // Heavy deadline pressure.
+        };
+
+        let suggestion = governor.suggest(&snap);
+        let is_deadlines = suggestion == SchedulingSuggestion::MeetDeadlines;
+        crate::assert_with_log!(
+            is_deadlines,
+            "suggests meeting deadlines",
+            true,
+            is_deadlines
+        );
+        crate::test_complete!("suggest_meet_deadlines_when_dominant");
+    }
+
+    // ---- Weight configurations ---------------------------------------------
+
+    #[test]
+    fn weights_uniform() {
+        init_test("weights_uniform");
+        let w = PotentialWeights::uniform(1.0);
+        let valid = w.is_valid();
+        crate::assert_with_log!(valid, "uniform valid", true, valid);
+        let all_eq = w.w_tasks == w.w_obligation_age
+            && w.w_obligation_age == w.w_draining_regions
+            && w.w_draining_regions == w.w_deadline_pressure;
+        crate::assert_with_log!(all_eq, "all equal", true, all_eq);
+        crate::test_complete!("weights_uniform");
+    }
+
+    #[test]
+    fn weights_obligation_focused() {
+        init_test("weights_obligation_focused");
+        let w = PotentialWeights::obligation_focused();
+        let valid = w.is_valid();
+        crate::assert_with_log!(valid, "obligation focused valid", true, valid);
+        let ob_dominant = w.w_obligation_age > w.w_tasks;
+        crate::assert_with_log!(
+            ob_dominant,
+            "obligations weighted higher",
+            true,
+            ob_dominant
+        );
+        crate::test_complete!("weights_obligation_focused");
+    }
+
+    #[test]
+    fn weights_deadline_focused() {
+        init_test("weights_deadline_focused");
+        let w = PotentialWeights::deadline_focused();
+        let valid = w.is_valid();
+        crate::assert_with_log!(valid, "deadline focused valid", true, valid);
+        let dl_dominant = w.w_deadline_pressure > w.w_tasks;
+        crate::assert_with_log!(dl_dominant, "deadlines weighted higher", true, dl_dominant);
+        crate::test_complete!("weights_deadline_focused");
+    }
+
+    // ---- Component isolation -----------------------------------------------
+
+    #[test]
+    fn component_isolation_tasks_only() {
+        init_test("component_isolation_tasks_only");
+        let governor = LyapunovGovernor::new(PotentialWeights {
+            w_tasks: 1.0,
+            w_obligation_age: 0.0,
+            w_draining_regions: 0.0,
+            w_deadline_pressure: 0.0,
+        });
+
+        let snap = active_snapshot(5, 3, 1_000_000_000, 2);
+        let record = governor.compute_record(&snap);
+
+        let only_tasks = record.obligation_component == 0.0
+            && record.region_component == 0.0
+            && record.deadline_component == 0.0;
+        crate::assert_with_log!(only_tasks, "only task component", true, only_tasks);
+        let expected = 5.0;
+        let close = (record.total - expected).abs() < f64::EPSILON;
+        crate::assert_with_log!(close, "total = 5.0", true, close);
+        crate::test_complete!("component_isolation_tasks_only");
+    }
+
+    // ---- Governor reuse ----------------------------------------------------
+
+    #[test]
+    fn governor_reuse_and_clear() {
+        init_test("governor_reuse_and_clear");
+        let mut governor = LyapunovGovernor::with_defaults();
+
+        governor.compute_potential(&active_snapshot(5, 3, 100_000_000, 1));
+        governor.compute_potential(&quiescent_snapshot());
+
+        let len = governor.history().len();
+        crate::assert_with_log!(len == 2, "history has 2 entries", 2, len);
+
+        governor.clear_history();
+        let len = governor.history().len();
+        crate::assert_with_log!(len == 0, "cleared", 0, len);
+        crate::test_complete!("governor_reuse_and_clear");
+    }
+
+    // ---- Deterministic experiment: cancel drain ----------------------------
+
+    #[test]
+    fn experiment_cancel_drain_converges() {
+        init_test("experiment_cancel_drain_converges");
+        // Simulate a structured concurrency cancellation scenario:
+        //
+        // Region r0 with 5 child tasks, each holding 1 obligation.
+        // Parent cancels all children. Each step:
+        // 1. One task observes cancellation, aborts its obligation, completes.
+        // 2. Eventually region drains to quiescence.
+        //
+        // The Lyapunov potential should decrease monotonically.
+
+        let mut governor = LyapunovGovernor::new(PotentialWeights::obligation_focused());
+
+        // Step 0: 5 tasks, 5 obligations, 1 draining region.
+        governor.compute_potential(&StateSnapshot {
+            time: Time::ZERO,
+            live_tasks: 5,
+            pending_obligations: 5,
+            obligation_age_sum_ns: 500_000_000, // 100ms each.
+            draining_regions: 1,
+            deadline_pressure: 0.0,
+        });
+
+        // Step 1: Task 0 aborts obligation, completes.
+        governor.compute_potential(&StateSnapshot {
+            time: Time::from_nanos(100_000_000),
+            live_tasks: 4,
+            pending_obligations: 4,
+            obligation_age_sum_ns: 480_000_000,
+            draining_regions: 1,
+            deadline_pressure: 0.0,
+        });
+
+        // Step 2: Task 1 aborts, completes.
+        governor.compute_potential(&StateSnapshot {
+            time: Time::from_nanos(200_000_000),
+            live_tasks: 3,
+            pending_obligations: 3,
+            obligation_age_sum_ns: 360_000_000,
+            draining_regions: 1,
+            deadline_pressure: 0.0,
+        });
+
+        // Step 3: Task 2 aborts, completes.
+        governor.compute_potential(&StateSnapshot {
+            time: Time::from_nanos(300_000_000),
+            live_tasks: 2,
+            pending_obligations: 2,
+            obligation_age_sum_ns: 220_000_000,
+            draining_regions: 1,
+            deadline_pressure: 0.0,
+        });
+
+        // Step 4: Task 3 aborts, completes.
+        governor.compute_potential(&StateSnapshot {
+            time: Time::from_nanos(400_000_000),
+            live_tasks: 1,
+            pending_obligations: 1,
+            obligation_age_sum_ns: 80_000_000,
+            draining_regions: 1,
+            deadline_pressure: 0.0,
+        });
+
+        // Step 5: Last task aborts, region finishes draining.
+        governor.compute_potential(&StateSnapshot {
+            time: Time::from_nanos(500_000_000),
+            live_tasks: 0,
+            pending_obligations: 0,
+            obligation_age_sum_ns: 0,
+            draining_regions: 0,
+            deadline_pressure: 0.0,
+        });
+
+        let verdict = governor.analyze_convergence();
+        let converged = verdict.converged();
+        crate::assert_with_log!(converged, "cancel drain converges", true, converged);
+
+        let mono = verdict.monotone;
+        crate::assert_with_log!(mono, "monotone decrease", true, mono);
+
+        let v_max = verdict.v_max;
+        let has_max = v_max > 0.0;
+        crate::assert_with_log!(has_max, "had nonzero peak", true, has_max);
+
+        // Print the trajectory for inspection.
+        for (i, record) in governor.history().iter().enumerate() {
+            tracing::info!("Step {i}: {record}");
+        }
+
+        crate::test_complete!("experiment_cancel_drain_converges");
+    }
+
+    #[test]
+    fn experiment_deadline_aware_drain() {
+        init_test("experiment_deadline_aware_drain");
+        // Simulate a drain with deadline-aware scheduling:
+        // Tasks have tight deadlines, governor should suggest MeetDeadlines.
+
+        let governor = LyapunovGovernor::new(PotentialWeights::deadline_focused());
+
+        let snap = StateSnapshot {
+            time: Time::from_nanos(900_000_000), // 900ms into a 1s deadline.
+            live_tasks: 3,
+            pending_obligations: 2,
+            obligation_age_sum_ns: 200_000_000,
+            draining_regions: 1,
+            deadline_pressure: 8.5, // High pressure.
+        };
+
+        let suggestion = governor.suggest(&snap);
+        let is_deadlines = suggestion == SchedulingSuggestion::MeetDeadlines;
+        crate::assert_with_log!(
+            is_deadlines,
+            "deadline-focused governor meets deadlines",
+            true,
+            is_deadlines
+        );
+
+        let record = governor.compute_record(&snap);
+        let dl_dominant = record.deadline_component > record.obligation_component
+            && record.deadline_component > record.region_component;
+        crate::assert_with_log!(
+            dl_dominant,
+            "deadline component dominates",
+            true,
+            dl_dominant
+        );
+        crate::test_complete!("experiment_deadline_aware_drain");
+    }
+
+    // ---- Display impls -----------------------------------------------------
+
+    #[test]
+    fn display_impls() {
+        init_test("lyapunov_display_impls");
+
+        let snap = active_snapshot(3, 2, 100_000_000, 1);
+        let s = format!("{snap}");
+        let has_sigma = s.contains("Σ(");
+        crate::assert_with_log!(has_sigma, "snapshot display", true, has_sigma);
+
+        let governor = LyapunovGovernor::with_defaults();
+        let record = governor.compute_record(&snap);
+        let s = format!("{record}");
+        let has_v = s.contains("V=");
+        crate::assert_with_log!(has_v, "record display", true, has_v);
+
+        let suggestion = SchedulingSuggestion::DrainObligations;
+        let s = format!("{suggestion}");
+        let has_priority = s.contains("prioritize");
+        crate::assert_with_log!(has_priority, "suggestion display", true, has_priority);
+
+        let verdict = ConvergenceVerdict {
+            monotone: true,
+            reached_quiescence: true,
+            v_max: 10.0,
+            v_final: 0.0,
+            increase_count: 0,
+            max_increase: 0.0,
+            steps: 5,
+        };
+        let s = format!("{verdict}");
+        let has_converged = s.contains("Converged");
+        crate::assert_with_log!(has_converged, "verdict display", true, has_converged);
+
+        crate::test_complete!("lyapunov_display_impls");
+    }
+}

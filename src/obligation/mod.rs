@@ -16,6 +16,9 @@
 //!    effects as Dialectica morphisms (forward value + backward obligation)
 //!    and encodes five contracts that the obligation system must satisfy.
 //!
+//! 5. **Lyapunov governor** ([`lyapunov`]): A potential-function-based
+//!    scheduling governor that drives cancellation drain toward quiescence.
+//!
 //! # Static Leak Checker
 //!
 //! The checker operates on a simple structured IR ([`Body`]) rather than Rust
@@ -52,6 +55,7 @@
 pub mod dialectica;
 pub mod graded;
 mod leak_check;
+pub mod lyapunov;
 pub mod marking;
 
 pub use leak_check::{

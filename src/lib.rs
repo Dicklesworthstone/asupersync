@@ -53,6 +53,8 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_possible_truncation)]
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
+// Test harness builds a large test table in one frame.
+#![cfg_attr(test, allow(clippy::large_stack_frames))]
 
 pub mod actor;
 pub mod bytes;
