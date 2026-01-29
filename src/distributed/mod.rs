@@ -13,14 +13,20 @@
 //! - [`assignment`]: Symbol-to-replica assignment strategies
 //! - [`distribution`]: Quorum-based symbol distribution
 //! - [`recovery`]: Region recovery protocol
+//! - [`bridge`]: Local-to-distributed region bridge
 
 pub mod assignment;
+pub mod bridge;
 pub mod distribution;
 pub mod encoding;
 pub mod recovery;
 pub mod snapshot;
 
 pub use assignment::{AssignmentStrategy, ReplicaAssignment, SymbolAssigner};
+pub use bridge::{
+    BridgeConfig, CloseResult, ConflictResolution, DistributedToLocal, EffectiveState,
+    LocalToDistributed, RegionBridge, RegionMode, SyncMode, SyncResult, SyncState, UpgradeResult,
+};
 pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
@@ -32,3 +38,6 @@ pub use recovery::{
     RecoveryTrigger, StateDecoder,
 };
 pub use snapshot::{BudgetSnapshot, RegionSnapshot, SnapshotError, TaskSnapshot, TaskState};
+
+#[cfg(test)]
+mod tests;
