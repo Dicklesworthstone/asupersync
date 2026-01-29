@@ -176,6 +176,34 @@ There is an even deeper view (useful later, not required day‑1): the space of 
 
 **Tie-in to DPOR/Mazurkiewicz:** adjacent swaps of independent actions are 2-cells; the space of schedules is a cubical complex. Geodesic normalization picks a shortest path in that complex. DPOR already picks one representative per trace class; this normalization makes that representative deterministic and human-readable for replay and debugging.
 
+#### Experiment: persistent directed homology for schedule prioritization (Phase 5+)
+
+**Goal:** prioritize schedules that expose "essential holes" (ordering constraints, deadlock shapes) in the execution space.
+
+**Data required from executions:**
+
+* event structure / partial order with independence relation `I`
+* happens-before edges and resource-acquire edges
+* cancellation points (to identify truncated regions)
+* schedule prefix lengths (for filtration)
+
+**Heuristic sketch:**
+
+1. Build a directed cubical complex from the event structure: a k-cell exists when k independent actions commute.
+2. Define a filtration by schedule prefix (or by "commutation depth" / context switch budget).
+3. Compute persistent homology (start with H1) on this filtration.
+4. Rank schedules by **novelty** (new homology classes) and **persistence** (long-lived classes).
+5. Prefer schedules that increase persistence score or reveal a new class.
+
+**Toy example (classic deadlock shape):**
+
+* Two tasks acquire locks in opposite order: `A: L1 → L2`, `B: L2 → L1`.
+* The independence relation admits interleavings that form a cycle in the wait-for graph.
+* The cubical complex contains a 1-cycle corresponding to "either order leads to deadlock".
+* The heuristic should prioritize the schedule prefix that creates the cycle early, surfacing the deadlock faster than uniform exploration.
+
+**Success metric:** compared to uniform exploration, the heuristic reaches known deadlock or ordering bugs in fewer schedules (lower expected exploration count) in a deterministic lab benchmark.
+
 ### 3.3 Budgets compose by a product semiring (min core)
 
 Budgets propagate by “stricter wins”:
