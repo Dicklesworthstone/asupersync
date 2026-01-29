@@ -65,11 +65,11 @@ use asupersync::lab::{NetworkConditions, NetworkConfig, NetworkFault, SimulatedN
 use asupersync::net::dns::{CacheConfig, DnsCache};
 use asupersync::net::tcp::TcpListenerBuilder;
 use asupersync::net::{lookup_all, lookup_one, TcpListener, TcpSocket, TcpStream, UdpSocket};
+use asupersync::stream::Stream;
 use common::*;
 use futures_lite::future::block_on;
 use std::io::{self, Write};
 use std::net::{SocketAddr, SocketAddrV6};
-use asupersync::stream::Stream;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
@@ -205,9 +205,8 @@ fn net_verify_005_tcp_socket_bind_connect() {
         let listener_addr = listener.local_addr()?;
         tracing::info!(?listener_addr, "listener ready");
 
-        let accept_handle = thread::spawn(move || {
-            block_on(async { listener.accept().await.map(|(s, _)| s) })
-        });
+        let accept_handle =
+            thread::spawn(move || block_on(async { listener.accept().await.map(|(s, _)| s) }));
 
         thread::sleep(Duration::from_millis(10));
 
@@ -229,6 +228,8 @@ fn net_verify_005_tcp_socket_bind_connect() {
             }
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                 tracing::info!(?e, "Phase 0: TcpSocket connect not yet supported");
+                // Unblock the accept thread by making a dummy connection
+                let _ = TcpStream::connect(listener_addr).await;
             }
             Err(e) => return Err(e),
         }
@@ -255,12 +256,8 @@ fn net_verify_006_tcp_socket_family_mismatch() {
     let socket = TcpSocket::new_v4().unwrap();
 
     // Try binding an IPv4 socket to an IPv6 address
-    let v6_addr: SocketAddr = SocketAddr::V6(SocketAddrV6::new(
-        std::net::Ipv6Addr::LOCALHOST,
-        0,
-        0,
-        0,
-    ));
+    let v6_addr: SocketAddr =
+        SocketAddr::V6(SocketAddrV6::new(std::net::Ipv6Addr::LOCALHOST, 0, 0, 0));
     let result = socket.bind(v6_addr);
 
     assert!(result.is_err(), "binding v4 socket to v6 addr should fail");
@@ -391,10 +388,7 @@ fn net_verify_010_tcp_connect_timeout() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "connect_timeout should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "connect_timeout should succeed: {result:?}");
     test_complete!("net_verify_010_tcp_connect_timeout");
 }
 
@@ -529,10 +523,7 @@ fn net_verify_013_tcp_stream_borrowed_split() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "borrowed split should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "borrowed split should succeed: {result:?}");
     test_complete!("net_verify_013_tcp_stream_borrowed_split");
 }
 
@@ -572,10 +563,7 @@ fn net_verify_014_tcp_stream_keepalive() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "keepalive test should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "keepalive test should succeed: {result:?}");
     test_complete!("net_verify_014_tcp_stream_keepalive");
 }
 
@@ -660,10 +648,7 @@ fn net_verify_017_udp_peer_addr_after_connect() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "peer_addr test should succeed: {result:?}"
-    );
+    assert!(result.is_ok(), "peer_addr test should succeed: {result:?}");
     test_complete!("net_verify_017_udp_peer_addr_after_connect");
 }
 
@@ -1219,9 +1204,7 @@ fn net_verify_032_sim_multi_host() {
     });
 
     // Create a 4-host mesh
-    let hosts: Vec<_> = (0..4)
-        .map(|i| net.add_host(format!("node-{i}")))
-        .collect();
+    let hosts: Vec<_> = (0..4).map(|i| net.add_host(format!("node-{i}"))).collect();
 
     // Each host sends to every other host
     for &src in &hosts {
@@ -1269,7 +1252,11 @@ fn net_verify_033_sim_partition_heal() {
     net.send(a, b, Bytes::copy_from_slice(b"before-partition"));
     net.run_until_idle();
     let inbox_before = net.inbox(b).expect("inbox");
-    assert_eq!(inbox_before.len(), 1, "message should arrive before partition");
+    assert_eq!(
+        inbox_before.len(),
+        1,
+        "message should arrive before partition"
+    );
     tracing::info!("pre-partition communication verified");
 
     // Partition the network
