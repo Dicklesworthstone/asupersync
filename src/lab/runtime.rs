@@ -12,6 +12,7 @@ use crate::record::ObligationKind;
 use crate::runtime::deadline_monitor::{
     default_warning_handler, DeadlineMonitor, DeadlineWarning, MonitorConfig,
 };
+use crate::runtime::reactor::LabReactor;
 use crate::runtime::RuntimeState;
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
@@ -37,6 +38,8 @@ use std::time::Duration;
 pub struct LabRuntime {
     /// Runtime state (public for tests and oracle access).
     pub state: RuntimeState,
+    /// Lab reactor for deterministic I/O simulation.
+    lab_reactor: Arc<LabReactor>,
     /// Scheduler.
     pub scheduler: Arc<Mutex<LabScheduler>>,
     /// Configuration.
@@ -63,7 +66,11 @@ impl LabRuntime {
     pub fn new(config: LabConfig) -> Self {
         let rng = config.rng();
         let chaos_rng = config.chaos.as_ref().map(ChaosRng::from_config);
-        let mut state = RuntimeState::new();
+        let lab_reactor = config.chaos.as_ref().map_or_else(
+            || Arc::new(LabReactor::new()),
+            |chaos| Arc::new(LabReactor::with_chaos(chaos.clone())),
+        );
+        let mut state = RuntimeState::with_reactor(lab_reactor.clone());
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
         state.trace = TraceBuffer::new(config.trace_capacity);
 
@@ -79,6 +86,7 @@ impl LabRuntime {
 
         Self {
             state,
+            lab_reactor,
             scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,
             rng,
@@ -113,6 +121,12 @@ impl LabRuntime {
     #[must_use]
     pub const fn config(&self) -> &LabConfig {
         &self.config
+    }
+
+    /// Returns a handle to the lab reactor for deterministic I/O injection.
+    #[must_use]
+    pub fn lab_reactor(&self) -> &Arc<LabReactor> {
+        &self.lab_reactor
     }
 
     /// Returns a reference to the trace buffer.
@@ -172,6 +186,7 @@ impl LabRuntime {
         let from = self.virtual_time;
         self.virtual_time = self.virtual_time.saturating_add_nanos(nanos);
         self.state.now = self.virtual_time;
+        self.lab_reactor.advance_time(Duration::from_nanos(nanos));
         // Record time advancement
         self.replay_recorder
             .record_time_advanced(from, self.virtual_time);
@@ -183,6 +198,7 @@ impl LabRuntime {
             let from = self.virtual_time;
             self.virtual_time = time;
             self.state.now = self.virtual_time;
+            self.lab_reactor.advance_time_to(time);
             // Record time advancement
             self.replay_recorder
                 .record_time_advanced(from, self.virtual_time);
@@ -236,6 +252,7 @@ impl LabRuntime {
         let rng_value = self.rng.next_u64();
         self.replay_recorder.record_rng_value(rng_value);
         self.check_futurelocks();
+        self.poll_io();
 
         // 1. Choose a worker and pop a task (deterministic multi-worker model)
         let worker_count = self.config.worker_count.max(1);
@@ -383,6 +400,18 @@ impl LabRuntime {
         if let Some(monitor) = &mut self.deadline_monitor {
             let now = self.state.now;
             monitor.check(now, self.state.tasks.iter().map(|(_, record)| record));
+        }
+    }
+
+    fn poll_io(&self) {
+        let Some(mut driver) = self.state.io_driver_mut() else {
+            return;
+        };
+        if let Err(_error) = driver.turn(Some(Duration::ZERO)) {
+            crate::tracing_compat::warn!(
+                error = ?_error,
+                "lab runtime io_driver poll failed"
+            );
         }
     }
 
