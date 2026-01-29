@@ -154,7 +154,7 @@ impl fmt::Display for TaskId {
 ///
 /// Obligations represent resources that must be resolved (commit, abort, ack, etc.)
 /// before their owning region can close.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObligationId(pub(crate) ArenaIndex);
 
 impl ObligationId {

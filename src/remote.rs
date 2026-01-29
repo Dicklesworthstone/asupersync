@@ -36,7 +36,7 @@ static REMOTE_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Nodes are opaque identifiers. The runtime does not interpret them beyond
 /// equality comparison and display. The transport layer maps `NodeId` to
 /// actual network addresses.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(String);
 
 impl NodeId {
@@ -64,7 +64,7 @@ impl fmt::Display for NodeId {
 /// Remote task IDs are separate from local [`TaskId`]s because the remote
 /// task may not have an arena slot in the local runtime. The local proxy
 /// task that owns the [`RemoteHandle`] has a regular `TaskId`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RemoteTaskId(u64);
 
 impl RemoteTaskId {
@@ -72,6 +72,12 @@ impl RemoteTaskId {
     #[must_use]
     pub fn next() -> Self {
         Self(REMOTE_TASK_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Creates a remote task ID from a raw value.
+    #[must_use]
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
     }
 
     /// Returns the raw numeric identifier.

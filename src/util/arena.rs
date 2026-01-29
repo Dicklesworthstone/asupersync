@@ -13,7 +13,7 @@
 use core::fmt;
 
 /// An index into an arena with a generation counter for ABA safety.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ArenaIndex {
     index: u32,
     generation: u32,
