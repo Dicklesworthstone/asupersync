@@ -772,6 +772,27 @@ pub enum ReceivedFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn data_frame_triggers_connection_window_update_on_low_watermark() {
+        let mut conn = Connection::server(Settings::default());
+        let payload_len = (DEFAULT_CONNECTION_WINDOW_SIZE / 2) + 2;
+        let data = Bytes::from(vec![0_u8; payload_len as usize]);
+        let frame = Frame::Data(DataFrame::new(1, data, false));
+
+        conn.process_frame(frame).expect("process data frame");
+
+        assert!(conn.has_pending_frames(), "expected WINDOW_UPDATE");
+        let pending = conn.next_frame().expect("pending frame");
+        match pending {
+            Frame::WindowUpdate(update) => {
+                assert_eq!(update.stream_id, 0);
+                assert_eq!(update.increment, payload_len as u32);
+            }
+            other => panic!("expected WINDOW_UPDATE, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_frame_codec_decode() {
