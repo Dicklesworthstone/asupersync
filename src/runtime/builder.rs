@@ -175,6 +175,89 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Apply environment variable overrides to the current configuration.
+    ///
+    /// Only environment variables that are set are applied. Unset variables
+    /// leave the current configuration unchanged.
+    ///
+    /// # Precedence
+    ///
+    /// Environment variables override config file values and defaults, but
+    /// programmatic settings applied *after* this call take highest priority.
+    ///
+    /// Typical usage:
+    ///
+    /// ```ignore
+    /// let runtime = RuntimeBuilder::new()
+    ///     .with_env_overrides()?   // env vars override defaults
+    ///     .worker_threads(4)       // programmatic override (highest priority)
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an environment variable is set but contains an
+    /// unparseable value (e.g., `ASUPERSYNC_WORKER_THREADS=abc`).
+    ///
+    /// See [`env_config`](super::env_config) for the full list of supported variables.
+    pub fn with_env_overrides(mut self) -> Result<Self, Error> {
+        crate::runtime::env_config::apply_env_overrides(&mut self.config).map_err(|e| {
+            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+        })?;
+        Ok(self)
+    }
+
+    /// Load configuration from a TOML file.
+    ///
+    /// Values from the file are applied as a base; environment variables
+    /// and programmatic settings take precedence.
+    ///
+    /// Requires the `config-file` feature.
+    ///
+    /// ```ignore
+    /// let runtime = RuntimeBuilder::from_toml("config/runtime.toml")?
+    ///     .with_env_overrides()?   // env vars override file values
+    ///     .worker_threads(4)       // programmatic override (highest priority)
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "config-file")]
+    pub fn from_toml(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let toml_config =
+            crate::runtime::env_config::parse_toml_file(path.as_ref()).map_err(|e| {
+                Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+            })?;
+        let mut config = RuntimeConfig::default();
+        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
+        Ok(Self { config })
+    }
+
+    /// Load configuration from a TOML string.
+    ///
+    /// Values from the string are applied as a base; environment variables
+    /// and programmatic settings take precedence.
+    ///
+    /// Requires the `config-file` feature.
+    ///
+    /// ```ignore
+    /// let toml = r#"
+    /// [scheduler]
+    /// worker_threads = 4
+    /// poll_budget = 256
+    /// "#;
+    /// let runtime = RuntimeBuilder::from_toml_str(toml)?
+    ///     .with_env_overrides()?
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "config-file")]
+    pub fn from_toml_str(toml: &str) -> Result<Self, Error> {
+        let toml_config = crate::runtime::env_config::parse_toml_str(toml).map_err(|e| {
+            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+        })?;
+        let mut config = RuntimeConfig::default();
+        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
+        Ok(Self { config })
+    }
+
     /// Build a runtime from this configuration.
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<Runtime, Error> {
