@@ -21,11 +21,14 @@
 //! - [`compat`]: Forward/backward compatibility and migration support
 //! - [`independence`]: Independence relation over trace events for DPOR
 //! - [`canonicalize`]: Foata normal form for trace equivalence classes
+//! - [`dpor`]: DPOR race detection and backtracking
+//! - [`tla_export`]: TLA+ export for model checking
 
 pub mod buffer;
 pub mod canonicalize;
 pub mod compat;
 pub mod distributed;
+pub mod dpor;
 pub mod event;
 pub mod file;
 pub mod filter;
@@ -36,6 +39,7 @@ pub mod recorder;
 pub mod replay;
 pub mod replayer;
 pub mod streaming;
+pub mod tla_export;
 
 pub use buffer::TraceBuffer;
 pub use canonicalize::{canonicalize, trace_fingerprint, FoataTrace};
@@ -43,12 +47,18 @@ pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
 };
+pub use dpor::{
+    detect_races, estimated_classes, racing_events, BacktrackPoint, Race, RaceAnalysis,
+};
 pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
 pub use file::{
     read_trace, write_trace, CompressionMode, TraceEventIterator, TraceFileConfig, TraceFileError,
     TraceReader, TraceWriter, TRACE_FILE_VERSION, TRACE_MAGIC,
 };
 pub use filter::{EventCategory, FilterBuilder, FilterableEvent, TraceFilter};
+pub use independence::{
+    accesses_conflict, independent, resource_footprint, AccessMode, Resource, ResourceAccess,
+};
 pub use integrity::{
     find_first_corruption, is_trace_valid_quick, verify_trace, IntegrityIssue, IssueSeverity,
     VerificationOptions, VerificationResult,
@@ -61,11 +71,9 @@ pub use replay::{
     CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, ReplayTraceError, TraceMetadata,
     REPLAY_SCHEMA_VERSION,
 };
-pub use independence::{
-    accesses_conflict, independent, resource_footprint, AccessMode, Resource, ResourceAccess,
-};
 pub use replayer::{Breakpoint, DivergenceError, ReplayError, ReplayMode, TraceReplayer};
 pub use streaming::{
     ReplayCheckpoint, ReplayProgress, StreamingReplayError, StreamingReplayResult,
     StreamingReplayer,
 };
+pub use tla_export::{TlaExporter, TlaModule, TlaStateSnapshot};

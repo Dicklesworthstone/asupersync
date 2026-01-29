@@ -49,6 +49,7 @@
 
 pub mod chaos;
 pub mod config;
+pub mod explorer;
 pub mod injection;
 pub mod instrumented_future;
 pub mod meta;
@@ -62,6 +63,10 @@ pub use crate::util::{
     disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled, StrictEntropyGuard,
 };
 pub use config::LabConfig;
+pub use explorer::{
+    CoverageMetrics, ExplorationReport, ExplorerConfig, RunResult, ScheduleExplorer,
+    ViolationReport,
+};
 pub use injection::{
     lab, LabBuilder, LabInjectionConfig, LabInjectionReport, LabInjectionResult, LabInjectionRunner,
 };
