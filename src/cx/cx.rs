@@ -692,14 +692,14 @@ impl Cx {
             )
         };
 
-        self.check_cancel_from_values(
+        Self::check_cancel_from_values(
             cancel_requested,
             mask_depth,
             task,
             region,
             budget,
             budget_baseline,
-            cancel_reason,
+            cancel_reason.as_ref(),
         )
     }
 
@@ -743,14 +743,14 @@ impl Cx {
             )
         };
 
-        self.check_cancel_from_values(
+        Self::check_cancel_from_values(
             cancel_requested,
             mask_depth,
             task,
             region,
             budget,
             budget_baseline,
-            cancel_reason,
+            cancel_reason.as_ref(),
         )
     }
 
@@ -790,14 +790,13 @@ impl Cx {
     #[allow(clippy::result_large_err)]
     #[allow(clippy::too_many_arguments)]
     fn check_cancel_from_values(
-        &self,
         cancel_requested: bool,
         mask_depth: u32,
         task: TaskId,
         region: RegionId,
         budget: Budget,
         budget_baseline: Budget,
-        cancel_reason: Option<CancelReason>,
+        cancel_reason: Option<&CancelReason>,
     ) -> Result<(), crate::error::Error> {
         let polls_used = if budget_baseline.poll_quota == u32::MAX {
             None
@@ -815,7 +814,6 @@ impl Cx {
             &region,
             &budget,
             &budget_baseline,
-            &cancel_reason,
             &polls_used,
             &cost_used,
             &time_remaining,
@@ -831,6 +829,7 @@ impl Cx {
             cost_used = ?cost_used,
             cost_remaining = ?budget.cost_quota,
             deadline = ?budget.deadline,
+            cancel_reason = ?cancel_reason,
             cancel_requested,
             mask_depth,
             "checkpoint"
@@ -899,14 +898,14 @@ impl Cx {
             )
         };
 
-        self.check_cancel_from_values(
+        Self::check_cancel_from_values(
             cancel_requested,
             mask_depth,
             task,
             region,
             budget,
             budget_baseline,
-            cancel_reason,
+            cancel_reason.as_ref(),
         )
     }
 
