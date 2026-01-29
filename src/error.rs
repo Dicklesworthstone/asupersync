@@ -137,6 +137,10 @@ pub enum ErrorKind {
     /// Invalid state transition.
     InvalidStateTransition,
 
+    // === Configuration ===
+    /// Configuration error (invalid env var, bad config file, etc.).
+    ConfigError,
+
     // === User ===
     /// User-provided error.
     User,
@@ -180,6 +184,7 @@ impl ErrorKind {
             | Self::NodeUnavailable
             | Self::PartitionDetected => ErrorCategory::Distributed,
             Self::Internal | Self::InvalidStateTransition => ErrorCategory::Internal,
+            Self::ConfigError => ErrorCategory::User,
             Self::User => ErrorCategory::User,
         }
     }
@@ -213,7 +218,8 @@ impl ErrorKind {
             | Self::Internal
             | Self::InvalidStateTransition
             | Self::ProtocolError
-            | Self::ConnectionRefused => Recoverability::Permanent,
+            | Self::ConnectionRefused
+            | Self::ConfigError => Recoverability::Permanent,
 
             // Context-dependent errors
             Self::DeadlineExceeded
@@ -277,7 +283,8 @@ impl ErrorKind {
             | Self::ConnectionRefused
             | Self::ProtocolError
             | Self::LeaseExpired
-            | Self::PartitionDetected => RecoveryAction::Propagate,
+            | Self::PartitionDetected
+            | Self::ConfigError => RecoveryAction::Propagate,
 
             // Escalate - serious problem, should cancel related work
             Self::ObligationLeak
