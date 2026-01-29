@@ -213,11 +213,11 @@ impl ThreeLaneWorker {
                     break;
                 }
                 // Note: Checking local lock is expensive, so we skip it in spin loop
-                // relying on global injector or wakeups to break the loop via 'break' 
-                // if we were to check properly. 
+                // relying on global injector or wakeups to break the loop via 'break'
+                // if we were to check properly.
                 // But actually, we should check if we can make progress.
                 // For simplicity matching worker.rs:
-                
+
                 if backoff < SPIN_LIMIT {
                     std::hint::spin_loop();
                     backoff += 1;
