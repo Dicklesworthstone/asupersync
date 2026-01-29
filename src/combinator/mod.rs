@@ -23,6 +23,7 @@ pub mod circuit_breaker;
 pub mod first_ok;
 pub mod hedge;
 pub mod join;
+pub mod laws;
 pub mod map_reduce;
 pub mod pipeline;
 pub mod quorum;
