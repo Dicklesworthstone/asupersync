@@ -677,13 +677,30 @@ impl Cx {
     /// ```
     #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
-        // Record progress checkpoint
-        {
+        // Record progress checkpoint and check cancellation under a single lock
+        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let mut inner = self.inner.write().expect("lock poisoned");
             inner.checkpoint_state.record();
-        }
-        // Check for cancellation
-        self.check_cancel()
+            (
+                inner.cancel_requested,
+                inner.mask_depth,
+                inner.task,
+                inner.region,
+                inner.budget,
+                inner.budget_baseline,
+                inner.cancel_reason.clone(),
+            )
+        };
+
+        self.check_cancel_from_values(
+            cancel_requested,
+            mask_depth,
+            task,
+            region,
+            budget,
+            budget_baseline,
+            cancel_reason,
+        )
     }
 
     /// Checks for cancellation with a progress message.
@@ -711,13 +728,30 @@ impl Cx {
     /// ```
     #[allow(clippy::result_large_err)]
     pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {
-        // Record progress checkpoint with message
-        {
+        // Record progress checkpoint and check cancellation under a single lock
+        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let mut inner = self.inner.write().expect("lock poisoned");
             inner.checkpoint_state.record_with_message(msg.into());
-        }
-        // Delegate to cancellation check logic (but don't double-record)
-        self.check_cancel()
+            (
+                inner.cancel_requested,
+                inner.mask_depth,
+                inner.task,
+                inner.region,
+                inner.budget,
+                inner.budget_baseline,
+                inner.cancel_reason.clone(),
+            )
+        };
+
+        self.check_cancel_from_values(
+            cancel_requested,
+            mask_depth,
+            task,
+            region,
+            budget,
+            budget_baseline,
+            cancel_reason,
+        )
     }
 
     /// Returns a snapshot of the current checkpoint state.
@@ -752,22 +786,19 @@ impl Cx {
             .clone()
     }
 
-    /// Internal: checks cancellation without recording a checkpoint.
+    /// Internal: checks cancellation from extracted values.
     #[allow(clippy::result_large_err)]
-    fn check_cancel(&self) -> Result<(), crate::error::Error> {
-        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
-            let inner = self.inner.read().expect("lock poisoned");
-            (
-                inner.cancel_requested,
-                inner.mask_depth,
-                inner.task,
-                inner.region,
-                inner.budget,
-                inner.budget_baseline,
-                inner.cancel_reason.clone(),
-            )
-        };
-
+    #[allow(clippy::too_many_arguments)]
+    fn check_cancel_from_values(
+        &self,
+        cancel_requested: bool,
+        mask_depth: u32,
+        task: TaskId,
+        region: RegionId,
+        budget: Budget,
+        budget_baseline: Budget,
+        cancel_reason: Option<CancelReason>,
+    ) -> Result<(), crate::error::Error> {
         let polls_used = if budget_baseline.poll_quota == u32::MAX {
             None
         } else {
@@ -850,6 +881,33 @@ impl Cx {
         } else {
             Ok(())
         }
+    }
+
+    /// Internal: checks cancellation without recording a checkpoint.
+    #[allow(clippy::result_large_err)]
+    fn check_cancel(&self) -> Result<(), crate::error::Error> {
+        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
+            let inner = self.inner.read().expect("lock poisoned");
+            (
+                inner.cancel_requested,
+                inner.mask_depth,
+                inner.task,
+                inner.region,
+                inner.budget,
+                inner.budget_baseline,
+                inner.cancel_reason.clone(),
+            )
+        };
+
+        self.check_cancel_from_values(
+            cancel_requested,
+            mask_depth,
+            task,
+            region,
+            budget,
+            budget_baseline,
+            cancel_reason,
+        )
     }
 
     /// Executes a closure with cancellation masked.

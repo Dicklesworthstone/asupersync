@@ -430,7 +430,13 @@ impl Connection {
             .map_err(|_| H2Error::flow_control("data too large for window"))?;
         self.recv_window -= window_delta;
 
-        // TODO: Auto-send WINDOW_UPDATE when window gets low
+        let low_watermark = DEFAULT_CONNECTION_WINDOW_SIZE / 2;
+        if self.recv_window < low_watermark {
+            let increment = i64::from(DEFAULT_CONNECTION_WINDOW_SIZE) - i64::from(self.recv_window);
+            let increment = u32::try_from(increment)
+                .map_err(|_| H2Error::flow_control("window increment too large"))?;
+            self.send_connection_window_update(increment)?;
+        }
 
         Ok(Some(ReceivedFrame::Data {
             stream_id: frame.stream_id,
