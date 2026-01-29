@@ -755,3 +755,194 @@ fn budget_zero_is_absorbing_for_quotas() {
     );
     test_complete!("budget_zero_is_absorbing_for_quotas");
 }
+
+// ============================================================================
+// Coverage-Tracked Algebraic Law Tests (asupersync-9w45)
+// ============================================================================
+
+use common::coverage::{assert_coverage, InvariantTracker};
+use proptest::test_runner::TestRunner;
+use std::cell::RefCell;
+
+/// All algebraic law categories that should be covered by property tests.
+const ALL_LAW_CATEGORIES: &[&str] = &[
+    "outcome_lattice",
+    "budget_semiring",
+    "cancel_strengthen",
+    "timeout_composition",
+    "join_combinator",
+    "race_combinator",
+    "time_arithmetic",
+];
+
+/// Runs representative property tests from each law category with coverage tracking.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn algebraic_law_coverage() {
+    init_test_logging();
+    test_phase!("algebraic_law_coverage");
+
+    let tracker = RefCell::new(InvariantTracker::new());
+    let config = test_proptest_config(50);
+
+    // 1. Outcome Lattice Laws
+    {
+        let mut runner = TestRunner::new(config.clone());
+        runner
+            .run(&(arb_outcome(), arb_outcome()), |(a, b)| {
+                let mut t = tracker.borrow_mut();
+                // Commutativity
+                let ab = join_outcomes(a.clone(), b.clone());
+                let ba = join_outcomes(b.clone(), a.clone());
+                let comm = ab.severity() == ba.severity();
+                t.check("outcome_lattice", comm);
+                prop_assert!(comm);
+                // Worst-takes-all
+                let worst = a.severity().max(b.severity());
+                let takes_worst = ab.severity() >= worst;
+                t.check("outcome_lattice", takes_worst);
+                prop_assert!(takes_worst);
+                Ok(())
+            })
+            .expect("outcome lattice laws should hold");
+    }
+
+    // 2. Budget Semiring Laws
+    {
+        let mut runner = TestRunner::new(config.clone());
+        runner
+            .run(&(arb_budget(), arb_budget(), arb_budget()), |(a, b, c)| {
+                let mut t = tracker.borrow_mut();
+                // Associativity
+                let assoc = a.combine(b).combine(c) == a.combine(b.combine(c));
+                t.check("budget_semiring", assoc);
+                prop_assert!(assoc);
+                // Commutativity
+                let comm = a.combine(b) == b.combine(a);
+                t.check("budget_semiring", comm);
+                prop_assert!(comm);
+                Ok(())
+            })
+            .expect("budget semiring laws should hold");
+    }
+
+    // 3. CancelReason Strengthen Laws
+    {
+        let mut runner = TestRunner::new(config.clone());
+        runner
+            .run(&(arb_cancel_kind(), arb_cancel_kind()), |(k1, k2)| {
+                let mut t = tracker.borrow_mut();
+                let mut a = CancelReason::new(k1);
+                let original_sev = a.kind.severity();
+                let b = CancelReason::new(k2);
+                a.strengthen(&b);
+                // Monotonicity
+                let monotone = a.kind.severity() >= original_sev;
+                t.check("cancel_strengthen", monotone);
+                prop_assert!(monotone);
+                Ok(())
+            })
+            .expect("cancel strengthen laws should hold");
+    }
+
+    // 4. Timeout Composition Laws
+    {
+        let mut runner = TestRunner::new(config.clone());
+        runner
+            .run(
+                &(0u64..=u64::MAX / 2, 0u64..=u64::MAX / 2),
+                |(d1_nanos, d2_nanos)| {
+                    let mut t = tracker.borrow_mut();
+                    let d1 = Time::from_nanos(d1_nanos);
+                    let d2 = Time::from_nanos(d2_nanos);
+                    // Min composition
+                    let effective = effective_deadline(d1, Some(d2));
+                    let is_min = effective == d1.min(d2);
+                    t.check("timeout_composition", is_min);
+                    prop_assert!(is_min);
+                    // Tightening
+                    let tightens = effective <= d1;
+                    t.check("timeout_composition", tightens);
+                    prop_assert!(tightens);
+                    Ok(())
+                },
+            )
+            .expect("timeout composition laws should hold");
+    }
+
+    // 5. Join Combinator Laws
+    {
+        let mut runner = TestRunner::new(config.clone());
+        runner
+            .run(&(arb_outcome(), arb_outcome()), |(a, b)| {
+                let mut t = tracker.borrow_mut();
+                let (ab, _, _) = join2_outcomes(a.clone(), b.clone());
+                let (ba, _, _) = join2_outcomes(b, a);
+                let comm = ab.severity() == ba.severity();
+                t.check("join_combinator", comm);
+                prop_assert!(comm);
+                Ok(())
+            })
+            .expect("join combinator laws should hold");
+    }
+
+    // 6. Race Combinator Laws
+    {
+        let mut runner = TestRunner::new(config.clone());
+        runner
+            .run(
+                &(arb_outcome(), arb_outcome(), arb_race_winner()),
+                |(a, b, winner)| {
+                    let mut t = tracker.borrow_mut();
+                    let (w_ab, _, l_ab) = race2_outcomes(winner, a.clone(), b.clone());
+                    let flipped = match winner {
+                        RaceWinner::First => RaceWinner::Second,
+                        RaceWinner::Second => RaceWinner::First,
+                    };
+                    let (w_ba, _, l_ba) = race2_outcomes(flipped, b, a);
+                    let comm =
+                        w_ab.severity() == w_ba.severity() && l_ab.severity() == l_ba.severity();
+                    t.check("race_combinator", comm);
+                    prop_assert!(comm);
+                    Ok(())
+                },
+            )
+            .expect("race combinator laws should hold");
+    }
+
+    // 7. Time Arithmetic Laws
+    {
+        let mut runner = TestRunner::new(config);
+        runner
+            .run(&(arb_time(), arb_time()), |(t1, t2)| {
+                let mut t = tracker.borrow_mut();
+                // Total order
+                let count = [t1 < t2, t1 == t2, t1 > t2].iter().filter(|&&x| x).count();
+                let total_order = count == 1;
+                t.check("time_arithmetic", total_order);
+                prop_assert!(total_order);
+                // Min commutativity
+                let min_comm = t1.min(t2) == t2.min(t1);
+                t.check("time_arithmetic", min_comm);
+                prop_assert!(min_comm);
+                Ok(())
+            })
+            .expect("time arithmetic laws should hold");
+    }
+
+    let tracker = tracker.into_inner();
+    let report = tracker.report();
+    eprintln!("\n{report}");
+
+    // Assert all law categories were exercised
+    assert_coverage(&tracker, ALL_LAW_CATEGORIES);
+
+    tracing::info!(
+        total_checks = tracker.total_checks(),
+        total_passes = tracker.total_passes(),
+        law_categories = tracker.invariant_count(),
+        "algebraic law coverage complete"
+    );
+
+    test_complete!("algebraic_law_coverage", checks = tracker.total_checks());
+}
