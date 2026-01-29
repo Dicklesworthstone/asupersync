@@ -300,6 +300,7 @@ impl Resolver {
             .set_nonblocking(true)
             .map_err(|e| DnsError::Io(e.to_string()))?;
 
+        // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
         Ok(TcpStream::from_std(stream))
     }
 

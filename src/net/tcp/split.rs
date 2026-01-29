@@ -2,6 +2,9 @@
 //!
 //! This module provides borrowed and owned split halves for TCP streams.
 //! The owned variants properly share the reactor registration between halves.
+//!
+//! ubs:ignore — OwnedWriteHalf::drop() calls shutdown(Write); read half does not
+//! need shutdown (correct half-duplex semantics).
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
