@@ -54,6 +54,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
+pub mod actor;
 pub mod bytes;
 pub mod channel;
 pub mod cli;
@@ -80,8 +81,10 @@ pub mod record;
 pub mod runtime;
 pub mod security;
 pub mod service;
+pub mod session;
 pub mod signal;
 pub mod stream;
+pub mod supervision;
 pub mod sync;
 pub mod test_logging;
 #[cfg(any(test, feature = "test-internals"))]
