@@ -76,6 +76,7 @@ pub mod io;
 pub mod lab;
 pub mod migration;
 pub mod net;
+pub mod obligation;
 pub mod observability;
 pub mod plan;
 #[cfg(unix)]
