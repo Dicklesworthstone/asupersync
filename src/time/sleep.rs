@@ -252,6 +252,8 @@ impl Future for Sleep {
                         let state_clone = Arc::clone(&self.state);
                         drop(state);
 
+                        // ubs:ignore — intentional fire-and-forget: short-lived timer thread
+                        // self-terminates after sleeping; JoinHandle detach is correct here
                         std::thread::spawn(move || {
                             std::thread::sleep(duration);
                             let mut state = state_clone.lock().expect("sleep state lock poisoned");

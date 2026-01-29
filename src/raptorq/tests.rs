@@ -164,8 +164,9 @@ fn sender_rejects_oversized_data() {
         .unwrap();
 
     // Create data larger than max_block_size * symbol_size.
-    let max = (sender.config().encoding.max_block_size as u64)
-        * (sender.config().encoding.symbol_size as u64);
+    let max = u64::try_from(sender.config().encoding.max_block_size)
+        .expect("max_block_size fits u64")
+        * u64::from(sender.config().encoding.symbol_size);
     let data = vec![0u8; (max + 1) as usize];
     let result = sender.send_object(&cx, ObjectId::new_for_test(99), &data);
 

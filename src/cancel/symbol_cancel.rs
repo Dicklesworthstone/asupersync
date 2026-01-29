@@ -758,7 +758,7 @@ pub trait CleanupHandler: Send + Sync {
     fn cleanup(&self, object_id: ObjectId, symbols: Vec<Symbol>) -> crate::error::Result<usize>;
 
     /// Returns the name of this handler (for logging).
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 }
 
 /// A set of symbols pending cleanup.
@@ -1214,7 +1214,7 @@ mod tests {
                 Ok(0)
             }
 
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "test"
             }
         }

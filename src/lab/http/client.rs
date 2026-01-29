@@ -38,6 +38,7 @@ impl<'a> VirtualClient<'a> {
     }
 
     /// Send a GET request.
+    #[must_use]
     pub fn get(&self, path: &str) -> Response {
         self.server.handle(Request::new("GET", path))
     }
@@ -54,6 +55,7 @@ impl<'a> VirtualClient<'a> {
     }
 
     /// Send a POST request with a JSON body.
+    #[must_use]
     pub fn post_json(&self, path: &str, json: &str) -> Response {
         let mut req = Request::new("POST", path);
         req.body = Bytes::from(json.to_string());
@@ -70,6 +72,7 @@ impl<'a> VirtualClient<'a> {
     }
 
     /// Send a DELETE request.
+    #[must_use]
     pub fn delete(&self, path: &str) -> Response {
         self.server.handle(Request::new("DELETE", path))
     }
@@ -90,6 +93,7 @@ impl<'a> VirtualClient<'a> {
     }
 
     /// Send a custom request built with [`RequestBuilder`].
+    #[must_use]
     pub fn send(&self, req: Request) -> Response {
         self.server.handle(req)
     }
@@ -116,7 +120,7 @@ pub struct RequestBuilder<'a> {
     body: Bytes,
 }
 
-impl<'a> RequestBuilder<'a> {
+impl RequestBuilder<'_> {
     /// Add a header.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -141,6 +145,7 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Send the request and return the response.
+    #[must_use]
     pub fn send(self) -> Response {
         let mut req = Request::new(&self.method, &self.path);
         req.headers = self.headers;

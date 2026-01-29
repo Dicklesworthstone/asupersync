@@ -778,7 +778,9 @@ mod tests {
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
         let mut conn = Connection::server(Settings::default());
         let payload_len = (DEFAULT_CONNECTION_WINDOW_SIZE / 2) + 2;
-        let data = Bytes::from(vec![0_u8; payload_len as usize]);
+        let payload_len_usize = usize::try_from(payload_len).expect("payload_len non-negative");
+        let payload_len_u32 = u32::try_from(payload_len).expect("payload_len fits u32");
+        let data = Bytes::from(vec![0_u8; payload_len_usize]);
         let frame = Frame::Data(DataFrame::new(1, data, false));
 
         conn.process_frame(frame).expect("process data frame");
@@ -788,7 +790,7 @@ mod tests {
         match pending {
             Frame::WindowUpdate(update) => {
                 assert_eq!(update.stream_id, 0);
-                assert_eq!(update.increment, payload_len as u32);
+                assert_eq!(update.increment, payload_len_u32);
             }
             other => panic!("expected WINDOW_UPDATE, got {other:?}"),
         }

@@ -212,7 +212,7 @@ fn recovery_with_mixed_source_and_repair() {
         .map(|(i, s)| CollectedSymbol {
             symbol: s.clone(),
             source_replica: format!("r{}", i % 3),
-            collected_at: Time::from_secs(i as u64),
+            collected_at: Time::from_secs(u64::try_from(i).expect("index fits u64")),
             verified: true,
         })
         .collect();
@@ -719,12 +719,12 @@ fn collector_dedup_and_metrics_comprehensive() {
     ));
 
     // Add 8 unique symbols from different replicas.
-    for i in 0..8 {
+    for i in 0u32..8 {
         let sym = crate::types::symbol::Symbol::new_for_test(1, 0, i, &[i as u8; 128]);
         let accepted = collector.add_collected(CollectedSymbol {
             symbol: sym,
             source_replica: format!("r{}", i % 3),
-            collected_at: Time::from_secs(i as u64),
+            collected_at: Time::from_secs(u64::from(i)),
             verified: false,
         });
         assert!(accepted);
@@ -735,7 +735,7 @@ fn collector_dedup_and_metrics_comprehensive() {
     assert!(collector.can_decode());
 
     // Add duplicates (same ESI).
-    for i in 0..4 {
+    for i in 0u32..4 {
         let sym = crate::types::symbol::Symbol::new_for_test(1, 0, i, &[i as u8; 128]);
         let accepted = collector.add_collected(CollectedSymbol {
             symbol: sym,

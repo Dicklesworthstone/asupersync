@@ -260,6 +260,8 @@ impl Delay {
             let deadline = self.deadline;
             let state_clone = Arc::clone(&self.state);
             drop(state);
+            // ubs:ignore — intentional fire-and-forget: short-lived timer thread
+            // self-terminates after sleeping; JoinHandle detach is correct here
             std::thread::spawn(move || {
                 let now = Instant::now();
                 if deadline > now {

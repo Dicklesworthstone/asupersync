@@ -15,7 +15,7 @@ static EPHEMERAL_TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// A unique identifier for a region in the runtime.
 ///
 /// Regions form a tree structure and own all work spawned within them.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RegionId(pub(crate) ArenaIndex);
 
 impl RegionId {
