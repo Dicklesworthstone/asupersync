@@ -47,10 +47,10 @@
 //! // Same seed → same ordering every time
 //! ```
 
-mod server;
 mod client;
 mod harness;
+mod server;
 
+pub use client::{RequestBuilder, VirtualClient};
+pub use harness::{RequestTrace, TestHarness, TraceEntry};
 pub use server::VirtualServer;
-pub use client::{VirtualClient, RequestBuilder};
-pub use harness::{TestHarness, RequestTrace, TraceEntry};

@@ -68,6 +68,9 @@ pub use explorer::{
     CoverageMetrics, ExplorationReport, ExplorerConfig, RunResult, ScheduleExplorer,
     ViolationReport,
 };
+pub use http::{
+    RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer,
+};
 pub use injection::{
     lab, LabBuilder, LabInjectionConfig, LabInjectionReport, LabInjectionResult, LabInjectionRunner,
 };
@@ -90,6 +93,5 @@ pub use oracle::{
     ObligationLeakOracle, ObligationLeakViolation, OracleSuite, OracleViolation, QuiescenceOracle,
     QuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
-pub use http::{RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer};
 pub use runtime::LabRuntime;
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};
