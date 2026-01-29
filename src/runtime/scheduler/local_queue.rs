@@ -40,6 +40,13 @@ impl LocalQueue {
         queue.pop_back()
     }
 
+    /// Returns true if the local queue is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let queue = self.inner.lock().expect("local queue lock poisoned");
+        queue.is_empty()
+    }
+
     /// Creates a stealer for this queue.
     #[must_use]
     pub fn stealer(&self) -> Stealer {

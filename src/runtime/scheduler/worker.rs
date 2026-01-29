@@ -106,9 +106,30 @@ impl Worker {
                 }
             }
 
-            // 5. Park until woken
-            // TODO: exponential backoff before parking
-            self.parker.park();
+            // 5. Backoff before parking
+            // We spin/yield briefly to avoid the high latency of parking/unparking
+            // if new work arrives immediately.
+            let mut backoff = 0;
+            const SPIN_LIMIT: u32 = 64;
+            const YIELD_LIMIT: u32 = 16;
+
+            loop {
+                // Check queues again (abbreviated check)
+                if !self.local.is_empty() || !self.global.is_empty() {
+                    break;
+                }
+
+                if backoff < SPIN_LIMIT {
+                    std::hint::spin_loop();
+                    backoff += 1;
+                } else if backoff < SPIN_LIMIT + YIELD_LIMIT {
+                    std::thread::yield_now();
+                    backoff += 1;
+                } else {
+                    self.parker.park();
+                    break;
+                }
+            }
         }
     }
 

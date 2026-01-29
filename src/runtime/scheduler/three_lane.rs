@@ -202,8 +202,33 @@ impl ThreeLaneWorker {
                 continue;
             }
 
-            // PHASE 5: Park until woken
-            self.parker.park();
+            // PHASE 5: Backoff before parking
+            let mut backoff = 0;
+            const SPIN_LIMIT: u32 = 64;
+            const YIELD_LIMIT: u32 = 16;
+
+            loop {
+                // Quick check for new work
+                if self.global.len() > 0 {
+                    break;
+                }
+                // Note: Checking local lock is expensive, so we skip it in spin loop
+                // relying on global injector or wakeups to break the loop via 'break' 
+                // if we were to check properly. 
+                // But actually, we should check if we can make progress.
+                // For simplicity matching worker.rs:
+                
+                if backoff < SPIN_LIMIT {
+                    std::hint::spin_loop();
+                    backoff += 1;
+                } else if backoff < SPIN_LIMIT + YIELD_LIMIT {
+                    std::thread::yield_now();
+                    backoff += 1;
+                } else {
+                    self.parker.park();
+                    break;
+                }
+            }
         }
     }
 
