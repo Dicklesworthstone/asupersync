@@ -1,6 +1,6 @@
-//! Obligation analysis: static leak checking and graded type experiments.
+//! Obligation analysis: static leak checking, graded types, marking, and contracts.
 //!
-//! This module provides two complementary approaches to obligation safety:
+//! This module provides four complementary approaches to obligation safety:
 //!
 //! 1. **Static leak checking** ([`leak_check`]): Abstract interpretation over
 //!    a structured IR to detect code paths where obligations may leak.
@@ -8,6 +8,13 @@
 //! 2. **Graded types** ([`graded`]): A type-level encoding where obligations
 //!    carry resource annotations, making leaks into compile warnings or
 //!    runtime panics via `#[must_use]` and `Drop`.
+//!
+//! 3. **VASS marking analysis** ([`marking`]): Projects trace events into a
+//!    vector-addition system for coverability-style analyses on bounded models.
+//!
+//! 4. **Dialectica contracts** ([`dialectica`]): Formalizes the two-phase
+//!    effects as Dialectica morphisms (forward value + backward obligation)
+//!    and encodes five contracts that the obligation system must satisfy.
 //!
 //! # Static Leak Checker
 //!
@@ -42,6 +49,7 @@
 //! ob.resolve(Resolution::Commit); // Must resolve before scope exit
 //! ```
 
+pub mod dialectica;
 pub mod graded;
 mod leak_check;
 pub mod marking;

@@ -8,7 +8,7 @@ use crate::types::{ObligationId, RegionId, TaskId, Time};
 use core::fmt;
 
 /// The kind of obligation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ObligationKind {
     /// A send permit for a channel.
     SendPermit,

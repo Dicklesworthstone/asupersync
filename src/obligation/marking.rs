@@ -61,7 +61,7 @@
 use crate::record::ObligationKind;
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 // ============================================================================
@@ -141,9 +141,8 @@ impl MarkingEvent {
 ///
 /// Filters and projects the full trace into only the events relevant
 /// for VASS marking analysis.
+#[must_use]
 pub fn project_trace(events: &[TraceEvent]) -> Vec<MarkingEvent> {
-    // Track obligation metadata so we can reconstruct kind/region for commits/aborts.
-    let mut obligation_meta: HashMap<ObligationId, (ObligationKind, RegionId)> = HashMap::new();
     let mut projected = Vec::new();
 
     for event in events {
@@ -158,7 +157,6 @@ pub fn project_trace(events: &[TraceEvent]) -> Vec<MarkingEvent> {
                     ..
                 },
             ) => {
-                obligation_meta.insert(*obligation, (*kind, *region));
                 projected.push(MarkingEvent::new(
                     event.time,
                     MarkingEventKind::Reserve {
@@ -242,11 +240,33 @@ pub fn project_trace(events: &[TraceEvent]) -> Vec<MarkingEvent> {
 }
 
 // ============================================================================
-// ObligationMarking (the vector state)
+// Obligation kind index (avoids requiring Hash/Ord on ObligationKind)
+// ============================================================================
+
+/// Map `ObligationKind` to a compact index for use as a key component.
+const fn kind_index(kind: ObligationKind) -> u8 {
+    match kind {
+        ObligationKind::SendPermit => 0,
+        ObligationKind::Ack => 1,
+        ObligationKind::Lease => 2,
+        ObligationKind::IoOp => 3,
+    }
+}
+
+/// All obligation kinds in index order.
+const ALL_KINDS: [ObligationKind; 4] = [
+    ObligationKind::SendPermit,
+    ObligationKind::Ack,
+    ObligationKind::Lease,
+    ObligationKind::IoOp,
+];
+
+// ============================================================================
+// MarkingDimension
 // ============================================================================
 
 /// Composite key for a marking dimension: (kind, region).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkingDimension {
     /// The obligation kind.
     pub kind: ObligationKind,
@@ -260,14 +280,22 @@ impl fmt::Display for MarkingDimension {
     }
 }
 
+/// Internal key for HashMap: (kind_index, RegionId).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DimKey(u8, RegionId);
+
+// ============================================================================
+// ObligationMarking (the vector state)
+// ============================================================================
+
 /// The obligation marking vector M ∈ ℕ^(K × R).
 ///
 /// Each entry counts the number of pending (unresolved) obligations
 /// of a given kind in a given region.
 #[derive(Debug, Clone, Default)]
 pub struct ObligationMarking {
-    /// The marking vector: dimension → count.
-    counts: BTreeMap<MarkingDimension, u32>,
+    /// The marking vector: (kind_index, region) → count.
+    counts: HashMap<DimKey, u32>,
 }
 
 impl ObligationMarking {
@@ -279,16 +307,16 @@ impl ObligationMarking {
 
     /// Increment the count for a dimension (Reserve transition).
     pub fn increment(&mut self, kind: ObligationKind, region: RegionId) {
-        let dim = MarkingDimension { kind, region };
-        *self.counts.entry(dim).or_insert(0) += 1;
+        let key = DimKey(kind_index(kind), region);
+        *self.counts.entry(key).or_insert(0) += 1;
     }
 
     /// Decrement the count for a dimension (Commit/Abort/Leak transition).
     ///
     /// Returns `false` if the count was already zero (invalid transition).
     pub fn decrement(&mut self, kind: ObligationKind, region: RegionId) -> bool {
-        let dim = MarkingDimension { kind, region };
-        match self.counts.get_mut(&dim) {
+        let key = DimKey(kind_index(kind), region);
+        match self.counts.get_mut(&key) {
             Some(count) if *count > 0 => {
                 *count -= 1;
                 true
@@ -300,8 +328,8 @@ impl ObligationMarking {
     /// Returns the count for a specific dimension.
     #[must_use]
     pub fn get(&self, kind: ObligationKind, region: RegionId) -> u32 {
-        let dim = MarkingDimension { kind, region };
-        self.counts.get(&dim).copied().unwrap_or(0)
+        let key = DimKey(kind_index(kind), region);
+        self.counts.get(&key).copied().unwrap_or(0)
     }
 
     /// Returns the total pending obligations across all dimensions.
@@ -315,7 +343,7 @@ impl ObligationMarking {
     pub fn region_pending(&self, region: RegionId) -> u32 {
         self.counts
             .iter()
-            .filter(|(dim, _)| dim.region == region)
+            .filter(|(DimKey(_, r), _)| *r == region)
             .map(|(_, count)| *count)
             .sum()
     }
@@ -326,14 +354,26 @@ impl ObligationMarking {
         self.counts.values().all(|&c| c == 0)
     }
 
-    /// Returns all non-zero dimensions.
+    /// Returns all non-zero dimensions (sorted by kind index for determinism).
     #[must_use]
     pub fn non_zero(&self) -> Vec<(MarkingDimension, u32)> {
-        self.counts
+        let mut result: Vec<_> = self
+            .counts
             .iter()
             .filter(|(_, &c)| c > 0)
-            .map(|(dim, count)| (*dim, *count))
-            .collect()
+            .map(|(DimKey(ki, region), count)| {
+                (
+                    MarkingDimension {
+                        kind: ALL_KINDS[*ki as usize],
+                        region: *region,
+                    },
+                    *count,
+                )
+            })
+            .collect();
+        // Sort by kind index for deterministic output.
+        result.sort_by_key(|(dim, _)| kind_index(dim.kind));
+        result
     }
 
     /// Take a snapshot of the current marking.
@@ -566,8 +606,8 @@ pub struct MarkingAnalyzer {
     stats: AnalysisStats,
     /// All regions seen.
     all_regions: HashSet<RegionId>,
-    /// All kinds seen.
-    all_kinds: HashSet<ObligationKind>,
+    /// Kinds seen (indexed by kind_index).
+    kinds_seen: [bool; 4],
 }
 
 impl MarkingAnalyzer {
@@ -607,7 +647,7 @@ impl MarkingAnalyzer {
                 total_leaked: self.stats.total_leaked,
                 max_pending: self.timeline.max_pending(),
                 distinct_regions: self.all_regions.len(),
-                distinct_kinds: self.all_kinds.len(),
+                distinct_kinds: self.kinds_seen.iter().filter(|&&b| b).count(),
             },
         }
     }
@@ -629,7 +669,7 @@ impl MarkingAnalyzer {
         self.closed_regions.clear();
         self.stats = AnalysisStats::default();
         self.all_regions.clear();
-        self.all_kinds.clear();
+        self.kinds_seen = [false; 4];
     }
 
     fn snapshot(&mut self, cause: &str) {
@@ -647,13 +687,11 @@ impl MarkingAnalyzer {
 
     fn process_event(&mut self, event: &MarkingEvent) {
         match &event.kind {
-            MarkingEventKind::Reserve {
-                kind, region, ..
-            } => {
+            MarkingEventKind::Reserve { kind, region, .. } => {
                 self.marking.increment(*kind, *region);
                 self.stats.total_reserved += 1;
                 self.all_regions.insert(*region);
-                self.all_kinds.insert(*kind);
+                self.kinds_seen[kind_index(*kind) as usize] = true;
                 self.timeline.snapshots.push(MarkingSnapshot {
                     time: event.time,
                     marking: self.marking.snapshot(),
@@ -993,7 +1031,12 @@ mod tests {
         let leak_count = result.leak_count();
         crate::assert_with_log!(leak_count == 1, "leak count", 1, leak_count);
         let kind = result.leaks[0].kind;
-        crate::assert_with_log!(kind == ObligationKind::Ack, "kind", ObligationKind::Ack, kind);
+        crate::assert_with_log!(
+            kind == ObligationKind::Ack,
+            "kind",
+            ObligationKind::Ack,
+            kind
+        );
         crate::test_complete!("partial_leak_one_region");
     }
 

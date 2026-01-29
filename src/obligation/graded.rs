@@ -124,7 +124,6 @@ impl GradedObligation {
     /// ```text
     /// Γ ⊢ reserve(K, desc) : Obligation<K>     [+1 resource]
     /// ```
-    #[must_use]
     pub fn reserve(kind: ObligationKind, description: impl Into<String>) -> Self {
         Self {
             kind,
@@ -141,6 +140,7 @@ impl GradedObligation {
     /// ```
     ///
     /// Returns a [`ResolvedProof`] token that proves the obligation was handled.
+    #[must_use]
     pub fn resolve(mut self, resolution: Resolution) -> ResolvedProof {
         self.resolved = true;
         ResolvedProof {
@@ -171,6 +171,7 @@ impl GradedObligation {
     ///
     /// Use only for FFI boundaries, test harnesses, or migration paths.
     /// This intentionally leaks the obligation.
+    #[must_use]
     pub fn into_raw(mut self) -> RawObligation {
         self.resolved = true; // Disarm the bomb.
         RawObligation {
@@ -182,15 +183,14 @@ impl GradedObligation {
 
 impl Drop for GradedObligation {
     fn drop(&mut self) {
-        if !self.resolved {
-            // In lab/debug mode: panic to surface the bug immediately.
-            // In production: this could log+metric instead of panicking.
-            panic!(
-                "OBLIGATION LEAKED: {} obligation '{}' was dropped without being resolved. \
-                 Call .resolve(Resolution::Commit) or .resolve(Resolution::Abort) before scope exit.",
-                self.kind, self.description,
-            );
-        }
+        // In lab/debug mode: panic to surface the bug immediately.
+        // In production: this could log+metric instead of panicking.
+        assert!(
+            self.resolved,
+            "OBLIGATION LEAKED: {} obligation '{}' was dropped without being resolved. \
+             Call .resolve(Resolution::Commit) or .resolve(Resolution::Abort) before scope exit.",
+            self.kind, self.description,
+        );
     }
 }
 
@@ -332,16 +332,15 @@ impl GradedScope {
 
 impl Drop for GradedScope {
     fn drop(&mut self) {
-        if !self.closed && self.outstanding() > 0 {
-            panic!(
-                "SCOPE LEAKED: scope '{}' dropped with {} outstanding obligation(s) \
-                 ({} reserved, {} resolved). Call .close() before scope exit.",
-                self.label,
-                self.outstanding(),
-                self.reserved,
-                self.resolved,
-            );
-        }
+        assert!(
+            self.closed || self.outstanding() == 0,
+            "SCOPE LEAKED: scope '{}' dropped with {} outstanding obligation(s) \
+             ({} reserved, {} resolved). Call .close() before scope exit.",
+            self.label,
+            self.outstanding(),
+            self.reserved,
+            self.resolved,
+        );
     }
 }
 
@@ -417,7 +416,7 @@ impl std::error::Error for ScopeLeakError {}
 /// into compile warnings or runtime panics, while correct usage compiles
 /// and runs cleanly.
 pub mod toy_api {
-    use super::*;
+    use super::{GradedObligation, ObligationKind, Resolution, ResolvedProof};
 
     /// A toy channel that uses graded obligations for the two-phase send.
     pub struct ToyChannel {
@@ -442,6 +441,7 @@ pub mod toy_api {
         /// - `resolve(Abort)` — permit is cancelled
         ///
         /// Dropping the permit without resolving panics.
+        #[must_use]
         pub fn reserve_send(&self) -> Option<GradedObligation> {
             if self.messages.len() < self.capacity {
                 Some(GradedObligation::reserve(
@@ -460,6 +460,7 @@ pub mod toy_api {
         }
 
         /// Abort a send: cancels the permit without sending.
+        #[must_use]
         pub fn abort_send(&self, permit: GradedObligation) -> ResolvedProof {
             permit.resolve(Resolution::Abort)
         }

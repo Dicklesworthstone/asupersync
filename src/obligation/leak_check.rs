@@ -58,22 +58,17 @@ impl VarState {
         match (self, other) {
             // Identity cases.
             (Self::Empty, Self::Empty) => Self::Empty,
-            (Self::Resolved, Self::Resolved) => Self::Resolved,
+            (Self::Resolved | Self::Empty, Self::Resolved) | (Self::Resolved, Self::Empty) => {
+                Self::Resolved
+            }
             (Self::Held(k1), Self::Held(k2)) if k1 == k2 => Self::Held(k1),
             (Self::MayHold(k1), Self::MayHold(k2)) if k1 == k2 => Self::MayHold(k1),
 
             // Held in one path, not in another => MayHold.
-            (Self::Held(k), Self::Resolved | Self::Empty)
-            | (Self::Resolved | Self::Empty, Self::Held(k)) => Self::MayHold(k),
-
-            // MayHold propagates.
-            (Self::MayHold(k), _) | (_, Self::MayHold(k)) => Self::MayHold(k),
-
-            // Resolved + Empty: no leak concern.
-            (Self::Resolved, Self::Empty) | (Self::Empty, Self::Resolved) => Self::Resolved,
-
-            // Different kinds held: use first (shouldn't happen in well-formed IR).
-            (Self::Held(k), Self::Held(_)) => Self::MayHold(k),
+            (Self::Held(k), Self::Resolved | Self::Empty | Self::Held(_))
+            | (Self::Resolved | Self::Empty, Self::Held(k))
+            | (Self::MayHold(k), _)
+            | (_, Self::MayHold(k)) => Self::MayHold(k),
         }
     }
 
@@ -135,7 +130,7 @@ pub enum Instruction {
     /// After the branch, abstract states from all arms are joined.
     Branch {
         /// Branch arms (e.g., if/else = 2 arms, match = N arms).
-        arms: Vec<Vec<Instruction>>,
+        arms: Vec<Vec<Self>>,
     },
 }
 
