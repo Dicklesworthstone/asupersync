@@ -50,6 +50,7 @@
 pub mod chaos;
 pub mod config;
 pub mod explorer;
+pub mod http;
 pub mod injection;
 pub mod instrumented_future;
 pub mod meta;
@@ -89,5 +90,6 @@ pub use oracle::{
     ObligationLeakOracle, ObligationLeakViolation, OracleSuite, OracleViolation, QuiescenceOracle,
     QuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
+pub use http::{RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer};
 pub use runtime::LabRuntime;
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};
