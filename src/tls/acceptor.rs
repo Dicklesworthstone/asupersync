@@ -102,7 +102,6 @@ pub struct TlsAcceptorBuilder {
     key: PrivateKey,
     client_auth: ClientAuth,
     alpn_protocols: Vec<Vec<u8>>,
-    session_memory_limit: usize,
     max_fragment_size: Option<usize>,
 }
 
@@ -114,7 +113,6 @@ impl TlsAcceptorBuilder {
             key,
             client_auth: ClientAuth::None,
             alpn_protocols: Vec::new(),
-            session_memory_limit: 256 * 1024 * 1024, // 256 MB default
             max_fragment_size: None,
         }
     }
@@ -163,14 +161,6 @@ impl TlsAcceptorBuilder {
     /// HTTP/2 is preferred over HTTP/1.1.
     pub fn alpn_http(self) -> Self {
         self.alpn_protocols(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
-    }
-
-    /// Set session memory limit (for session resumption cache).
-    ///
-    /// Default is 256 MB.
-    pub fn session_memory_limit(mut self, bytes: usize) -> Self {
-        self.session_memory_limit = bytes;
-        self
     }
 
     /// Set maximum TLS fragment size.
