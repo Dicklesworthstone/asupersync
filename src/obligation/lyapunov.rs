@@ -491,6 +491,8 @@ impl LyapunovGovernor {
         let task_component = self.weights.w_tasks * f64::from(snapshot.live_tasks);
 
         // Normalize obligation age to seconds for stability.
+        // Potential is heuristic; precision loss is acceptable for large ages.
+        #[allow(clippy::cast_precision_loss)]
         let age_seconds = snapshot.obligation_age_sum_ns as f64 / 1_000_000_000.0;
         let obligation_component = self.weights.w_obligation_age * age_seconds;
 
@@ -643,12 +645,11 @@ mod tests {
             deadline_pressure: 0.0,
         };
 
+        let v1 = governor.compute_record(&snap_no_pressure);
         let snap_high_pressure = StateSnapshot {
             deadline_pressure: 5.0,
-            ..snap_no_pressure.clone()
+            ..snap_no_pressure
         };
-
-        let v1 = governor.compute_record(&snap_no_pressure);
         let v2 = governor.compute_record(&snap_high_pressure);
 
         let inc = v2.total > v1.total;
@@ -835,9 +836,10 @@ mod tests {
         let w = PotentialWeights::uniform(1.0);
         let valid = w.is_valid();
         crate::assert_with_log!(valid, "uniform valid", true, valid);
-        let all_eq = w.w_tasks == w.w_obligation_age
-            && w.w_obligation_age == w.w_draining_regions
-            && w.w_draining_regions == w.w_deadline_pressure;
+        let eps = f64::EPSILON;
+        let all_eq = (w.w_tasks - w.w_obligation_age).abs() < eps
+            && (w.w_obligation_age - w.w_draining_regions).abs() < eps
+            && (w.w_draining_regions - w.w_deadline_pressure).abs() < eps;
         crate::assert_with_log!(all_eq, "all equal", true, all_eq);
         crate::test_complete!("weights_uniform");
     }
