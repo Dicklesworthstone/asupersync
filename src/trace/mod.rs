@@ -30,6 +30,7 @@ pub mod compat;
 pub mod distributed;
 pub mod dpor;
 pub mod event;
+pub mod event_structure;
 pub mod file;
 pub mod filter;
 pub mod format;
@@ -51,6 +52,7 @@ pub use dpor::{
     detect_races, estimated_classes, racing_events, BacktrackPoint, Race, RaceAnalysis,
 };
 pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
+pub use event_structure::{Event, EventId, EventStructure, HdaCell, HdaComplex};
 pub use file::{
     read_trace, write_trace, CompressionMode, TraceEventIterator, TraceFileConfig, TraceFileError,
     TraceReader, TraceWriter, TRACE_FILE_VERSION, TRACE_MAGIC,
