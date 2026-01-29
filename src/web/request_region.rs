@@ -170,7 +170,7 @@ pub struct RequestContext<'a> {
     request: &'a Request,
 }
 
-impl<'a> RequestContext<'a> {
+impl RequestContext<'_> {
     /// Returns the HTTP request.
     #[must_use]
     pub fn request(&self) -> &Request {
@@ -345,13 +345,14 @@ where
 
 /// Extract a human-readable message from a panic payload.
 fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+    payload.downcast_ref::<&str>().map_or_else(
+        || {
+            payload
+                .downcast_ref::<String>()
+                .map_or_else(|| "unknown panic".to_string(), Clone::clone)
+        },
+        |s| (*s).to_string(),
+    )
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

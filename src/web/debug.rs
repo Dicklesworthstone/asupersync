@@ -4,6 +4,9 @@
 //! runtime snapshot data. The server runs in a background thread using
 //! `std::net::TcpListener` — no async runtime required.
 //!
+//! ubs:ignore — synchronous debug server; TcpStreams are short-lived
+//! (one request/response cycle) and close-on-drop is acceptable here.
+//!
 //! # Endpoints
 //!
 //! - `GET /debug` — HTML dashboard with auto-refresh

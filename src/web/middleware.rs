@@ -270,18 +270,19 @@ impl<H: Handler> BulkheadMiddleware<H> {
 
 impl<H: Handler> Handler for BulkheadMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let permit = self.bulkhead.try_acquire(1);
-        match permit {
-            Some(p) => {
+        self.bulkhead.try_acquire(1).map_or_else(
+            || {
+                Response::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    b"Service Unavailable: concurrency limit reached".to_vec(),
+                )
+            },
+            |p| {
                 let resp = self.inner.call(req);
                 p.release_to(&self.bulkhead);
                 resp
-            }
-            None => Response::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                b"Service Unavailable: concurrency limit reached".to_vec(),
-            ),
-        }
+            },
+        )
     }
 }
 
@@ -343,9 +344,7 @@ impl<H: Handler> Handler for RetryMiddleware<H> {
 
         for attempt in 0..max {
             // Clone request for retry (first attempt uses original).
-            let try_req = if attempt == 0 {
-                req.clone()
-            } else {
+            if attempt != 0 {
                 // Sleep before retry (Phase 0: blocking sleep).
                 if !delay.is_zero() {
                     std::thread::sleep(delay);
@@ -355,8 +354,8 @@ impl<H: Handler> Handler for RetryMiddleware<H> {
                     (delay.as_secs_f64() * self.policy.multiplier)
                         .min(self.policy.max_delay.as_secs_f64()),
                 );
-                req.clone()
-            };
+            }
+            let try_req = req.clone();
 
             let resp = self.inner.call(try_req);
             if !resp.status.is_server_error() {
