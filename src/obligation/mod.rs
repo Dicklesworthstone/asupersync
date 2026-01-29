@@ -1,22 +1,19 @@
-//! Static obligation leak checking via abstract interpretation.
+//! Obligation analysis: static leak checking and graded type experiments.
 //!
-//! Provides a prototype checker that detects code paths where obligations
-//! (reserve/commit/abort) may leak — i.e., scope exits while an obligation
-//! is still held and unresolved.
+//! This module provides two complementary approaches to obligation safety:
 //!
-//! # Architecture
+//! 1. **Static leak checking** ([`leak_check`]): Abstract interpretation over
+//!    a structured IR to detect code paths where obligations may leak.
+//!
+//! 2. **Graded types** ([`graded`]): A type-level encoding where obligations
+//!    carry resource annotations, making leaks into compile warnings or
+//!    runtime panics via `#[must_use]` and `Drop`.
+//!
+//! # Static Leak Checker
 //!
 //! The checker operates on a simple structured IR ([`Body`]) rather than Rust
 //! source code directly. This allows testing the analysis logic independently
 //! from the Rust parser/type system.
-//!
-//! 1. **IR**: A sequence of [`Instruction`]s representing obligation operations
-//! 2. **Abstract Domain**: [`VarState`] tracks whether each obligation variable
-//!    is empty, held, may-hold (uncertain), or resolved
-//! 3. **Checker**: Walks the IR, maintains abstract state, emits diagnostics
-//!    at scope boundaries and function exits
-//!
-//! # Example
 //!
 //! ```
 //! use asupersync::obligation::{Body, Instruction, LeakChecker, ObligationVar};
@@ -32,7 +29,20 @@
 //! assert!(!result.is_clean());
 //! assert_eq!(result.leaks().len(), 1);
 //! ```
+//!
+//! # Graded Types
+//!
+//! The graded surface makes obligation leaks a type-level concern:
+//!
+//! ```
+//! use asupersync::obligation::graded::{GradedObligation, Resolution};
+//! use asupersync::record::ObligationKind;
+//!
+//! let ob = GradedObligation::reserve(ObligationKind::SendPermit, "test");
+//! ob.resolve(Resolution::Commit); // Must resolve before scope exit
+//! ```
 
+pub mod graded;
 mod leak_check;
 
 pub use leak_check::{
