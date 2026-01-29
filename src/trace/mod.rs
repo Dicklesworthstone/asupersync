@@ -20,8 +20,10 @@
 //! - [`filter`]: Trace event filtering during recording
 //! - [`compat`]: Forward/backward compatibility and migration support
 //! - [`independence`]: Independence relation over trace events for DPOR
+//! - [`canonicalize`]: Foata normal form for trace equivalence classes
 
 pub mod buffer;
+pub mod canonicalize;
 pub mod compat;
 pub mod distributed;
 pub mod event;
@@ -36,6 +38,7 @@ pub mod replayer;
 pub mod streaming;
 
 pub use buffer::TraceBuffer;
+pub use canonicalize::{canonicalize, trace_fingerprint, FoataTrace};
 pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
