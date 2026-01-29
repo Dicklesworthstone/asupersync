@@ -9,7 +9,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Duration;
 
 /// Identifier for a simulated host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostId(u64);
 
 impl HostId {
