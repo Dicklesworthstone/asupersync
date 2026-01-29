@@ -276,12 +276,10 @@ impl RegionOutcome {
                 let body = format!("Internal Server Error: {err}");
                 Response::new(StatusCode::INTERNAL_SERVER_ERROR, body.into_bytes())
             }
-            Self::Cancelled => {
-                Response::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    b"Service Unavailable: request cancelled".to_vec(),
-                )
-            }
+            Self::Cancelled => Response::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                b"Service Unavailable: request cancelled".to_vec(),
+            ),
             Self::Panicked(msg) => {
                 let body = format!("Internal Server Error: handler panicked: {msg}");
                 Response::new(StatusCode::INTERNAL_SERVER_ERROR, body.into_bytes())
@@ -465,9 +463,7 @@ mod tests {
         let req = test_request("GET", "/err");
         let region = RequestRegion::new(&cx, req);
 
-        let outcome = region.run_sync(|_ctx| {
-            Err(Error::new(crate::error::ErrorKind::Internal))
-        });
+        let outcome = region.run_sync(|_ctx| Err(Error::new(crate::error::ErrorKind::Internal)));
 
         assert!(outcome.is_error());
         let resp = outcome.into_response();
@@ -493,7 +489,8 @@ mod tests {
     fn context_accessors() {
         let cx = test_cx();
         let mut req = test_request("DELETE", "/users/99");
-        req.headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        req.headers
+            .insert("Authorization".to_string(), "Bearer token".to_string());
         let mut params = std::collections::HashMap::new();
         params.insert("id".to_string(), "99".to_string());
         req.path_params = params;
