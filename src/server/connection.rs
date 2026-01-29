@@ -216,9 +216,22 @@ impl ConnectionManager {
             return self.shutdown_signal.collect_stats(0, 0);
         }
 
-        // Wait for connections to close, checking the drain deadline periodically.
-        // Since we don't have a timer in this module, we poll in a loop checking
-        // both the connection count and the deadline.
+        // Spawn a deadline timer thread that notifies when the drain deadline
+        // expires. This ensures the loop below always wakes up to check the
+        // deadline, even if no connections close in the interim.
+        // ubs:ignore — fire-and-forget by design; Arc<Notify> keeps allocation alive,
+        // thread exits after sleep, spurious post-return notification is harmless
+        let _deadline_timer = self.shutdown_signal.drain_deadline().map(|deadline| {
+            let notify = self.all_closed.clone();
+            std::thread::spawn(move || {
+                let now = std::time::Instant::now();
+                if let Some(remaining) = deadline.checked_duration_since(now) {
+                    std::thread::sleep(remaining);
+                }
+                notify.notify_waiters();
+            })
+        });
+
         loop {
             if self.is_empty() {
                 // All connections drained gracefully
@@ -238,7 +251,7 @@ impl ConnectionManager {
                 }
             }
 
-            // Wait for the next connection close notification
+            // Wait for the next connection close or deadline notification
             self.all_closed.notified().await;
         }
     }
