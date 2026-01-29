@@ -314,7 +314,7 @@ impl RecoveryCollector {
     ) -> Result<bool, Error> {
         if let Some(params) = &self.object_params {
             let max_expected =
-                params.total_source_symbols() + u32::from(self.config.min_symbols);
+                params.total_source_symbols() + self.config.min_symbols;
             if cs.symbol.esi() > max_expected + 100 {
                 self.metrics.symbols_corrupt += 1;
                 return Err(Error::new(ErrorKind::CorruptedSymbol)
@@ -331,8 +331,12 @@ impl RecoveryCollector {
 impl std::fmt::Debug for RecoveryCollector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecoveryCollector")
+            .field("config", &self.config)
             .field("collected", &self.collected.len())
+            .field("seen_esi", &self.seen_esi.len())
+            .field("object_params", &self.object_params)
             .field("phase", &self.progress.phase)
+            .field("metrics", &self.metrics)
             .field("cancelled", &self.cancelled)
             .finish()
     }
@@ -471,19 +475,7 @@ impl StateDecoder {
         }
 
         // Separate source and repair symbols.
-        let mut source_by_esi: Vec<Option<&Symbol>> = vec![None; k as usize];
-        let mut repair_symbols: Vec<&Symbol> = Vec::new();
-
-        for sym in &self.symbols {
-            if sym.kind() == SymbolKind::Source {
-                let esi = sym.esi() as usize;
-                if esi < k as usize {
-                    source_by_esi[esi] = Some(sym);
-                }
-            } else {
-                repair_symbols.push(sym);
-            }
-        }
+        let (source_by_esi, repair_symbols) = self.partition_symbols(k);
 
         // Count missing source symbols.
         let missing: Vec<usize> = source_by_esi
@@ -493,105 +485,18 @@ impl StateDecoder {
             .collect();
 
         if missing.is_empty() {
-            // All source symbols present: concatenate and truncate.
-            let mut data = Vec::with_capacity(params.object_size as usize);
-            for src in source_by_esi.iter().flatten() {
-                data.extend_from_slice(src.data());
-            }
-            data.truncate(params.object_size as usize);
+            let data = Self::concatenate_sources(&source_by_esi, params.object_size as usize);
             self.decoder_state = DecoderState::Complete;
             return Ok(data);
         }
 
-        // Attempt XOR parity recovery if we have enough repair symbols.
         if repair_symbols.len() >= missing.len() {
-            let symbol_size = if let Some(s) = source_by_esi.iter().flatten().next() {
-                s.len()
-            } else {
-                return Err(Error::new(ErrorKind::DecodingFailed)
-                    .with_message("no source symbols available for size reference"));
-            };
-
-            // For each missing source symbol, try to reconstruct via XOR
-            // with a repair symbol and all other source symbols.
-            for (repair_idx, &missing_esi) in missing.iter().enumerate() {
-                if repair_idx >= repair_symbols.len() {
-                    break;
-                }
-                let repair = repair_symbols[repair_idx];
-
-                // Reconstruct: missing = repair XOR all_other_sources
-                let mut recovered = vec![0u8; symbol_size];
-                let repair_data = repair.data();
-                let copy_len = std::cmp::min(recovered.len(), repair_data.len());
-                recovered[..copy_len].copy_from_slice(&repair_data[..copy_len]);
-
-                for (esi, slot) in source_by_esi.iter().enumerate() {
-                    if esi != missing_esi {
-                        if let Some(src) = slot {
-                            xor_into(&mut recovered, src.data());
-                        }
-                    }
-                }
-
-                // Create recovered source symbol.
-                let id = crate::types::symbol::SymbolId::new(
-                    params.object_id,
-                    0,
-                    missing_esi as u32,
-                );
-                source_by_esi[missing_esi] =
-                    None; // Will use inline data below
-                // Store inline since we can't put owned Symbol in borrowed slot
-                // Instead, collect the data directly.
-                let _ = id; // used below in concatenation
-                let _ = recovered; // used below
-            }
-
-            // Re-attempt with recovered symbols - for simplicity in Phase 0,
-            // just concatenate what we have and any recovered data.
-            let mut data = Vec::with_capacity(params.object_size as usize);
-            for (esi, slot) in source_by_esi.iter().enumerate() {
-                if let Some(src) = slot {
-                    data.extend_from_slice(src.data());
-                } else {
-                    // Recover inline.
-                    let repair_idx_for_esi = missing.iter().position(|&m| m == esi);
-                    if let Some(ri) = repair_idx_for_esi {
-                        if ri < repair_symbols.len() {
-                            let symbol_size_inner =
-                                source_by_esi.iter().flatten().next().map_or(
-                                    params.symbol_size as usize,
-                                    |s| s.len(),
-                                );
-                            let mut recovered = vec![0u8; symbol_size_inner];
-                            let rd = repair_symbols[ri].data();
-                            let cl = std::cmp::min(recovered.len(), rd.len());
-                            recovered[..cl].copy_from_slice(&rd[..cl]);
-
-                            for (other_esi, other_slot) in source_by_esi.iter().enumerate()
-                            {
-                                if other_esi != esi {
-                                    if let Some(src) = other_slot {
-                                        xor_into(&mut recovered, src.data());
-                                    }
-                                }
-                            }
-                            data.extend_from_slice(&recovered);
-                        } else {
-                            // Pad with zeros for missing, unrecoverable symbols.
-                            data.extend(std::iter::repeat(0u8).take(
-                                params.symbol_size as usize,
-                            ));
-                        }
-                    } else {
-                        data.extend(
-                            std::iter::repeat(0u8).take(params.symbol_size as usize),
-                        );
-                    }
-                }
-            }
-            data.truncate(params.object_size as usize);
+            let data = Self::recover_with_xor_parity(
+                &source_by_esi,
+                &repair_symbols,
+                &missing,
+                params,
+            )?;
             self.decoder_state = DecoderState::Complete;
             return Ok(data);
         }
@@ -607,6 +512,97 @@ impl StateDecoder {
             self.symbols.len() as u32,
             k,
         ))
+    }
+
+    /// Partitions accumulated symbols into source (by ESI slot) and repair.
+    fn partition_symbols(&self, k: u32) -> (Vec<Option<&Symbol>>, Vec<&Symbol>) {
+        let mut source_by_esi: Vec<Option<&Symbol>> = vec![None; k as usize];
+        let mut repair_symbols: Vec<&Symbol> = Vec::new();
+
+        for sym in &self.symbols {
+            if sym.kind() == SymbolKind::Source {
+                let esi = sym.esi() as usize;
+                if esi < k as usize {
+                    source_by_esi[esi] = Some(sym);
+                }
+            } else {
+                repair_symbols.push(sym);
+            }
+        }
+        (source_by_esi, repair_symbols)
+    }
+
+    /// Concatenates all present source symbols and truncates to object size.
+    fn concatenate_sources(source_by_esi: &[Option<&Symbol>], object_size: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(object_size);
+        for src in source_by_esi.iter().flatten() {
+            data.extend_from_slice(src.data());
+        }
+        data.truncate(object_size);
+        data
+    }
+
+    /// Recovers missing source symbols via XOR parity with repair symbols.
+    fn recover_with_xor_parity(
+        source_by_esi: &[Option<&Symbol>],
+        repair_symbols: &[&Symbol],
+        missing: &[usize],
+        params: &ObjectParams,
+    ) -> Result<Vec<u8>, Error> {
+        let symbol_size = source_by_esi
+            .iter()
+            .flatten()
+            .next()
+            .map(|s| s.len())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::DecodingFailed)
+                    .with_message("no source symbols available for size reference")
+            })?;
+
+        let mut data = Vec::with_capacity(params.object_size as usize);
+        for (esi, slot) in source_by_esi.iter().enumerate() {
+            if let Some(src) = slot {
+                data.extend_from_slice(src.data());
+            } else {
+                let recovered =
+                    Self::xor_recover_symbol(esi, source_by_esi, repair_symbols, missing, symbol_size, params);
+                data.extend_from_slice(&recovered);
+            }
+        }
+        data.truncate(params.object_size as usize);
+        Ok(data)
+    }
+
+    /// Recovers a single missing source symbol via XOR with a repair symbol.
+    fn xor_recover_symbol(
+        esi: usize,
+        source_by_esi: &[Option<&Symbol>],
+        repair_symbols: &[&Symbol],
+        missing: &[usize],
+        symbol_size: usize,
+        params: &ObjectParams,
+    ) -> Vec<u8> {
+        let repair_idx = missing.iter().position(|&m| m == esi);
+        let Some(ri) = repair_idx else {
+            return vec![0u8; params.symbol_size as usize];
+        };
+        if ri >= repair_symbols.len() {
+            return vec![0u8; params.symbol_size as usize];
+        }
+
+        let mut recovered = vec![0u8; symbol_size];
+        let rd = repair_symbols[ri].data();
+        let cl = std::cmp::min(recovered.len(), rd.len());
+        recovered[..cl].copy_from_slice(&rd[..cl]);
+
+        for (other_esi, other_slot) in source_by_esi.iter().enumerate() {
+            if other_esi != esi {
+                if let Some(src) = other_slot {
+                    xor_into(&mut recovered, src.data());
+                }
+            }
+        }
+        recovered
     }
 
     /// Convenience: decode and deserialize directly to [`RegionSnapshot`].
@@ -625,7 +621,9 @@ impl StateDecoder {
 impl std::fmt::Debug for StateDecoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateDecoder")
+            .field("config", &self.config)
             .field("symbols", &self.symbols.len())
+            .field("seen_esi", &self.seen_esi.len())
             .field("state", &self.decoder_state)
             .finish()
     }
@@ -719,7 +717,7 @@ impl RecoveryOrchestrator {
     pub fn recover_from_symbols(
         &mut self,
         trigger: &RecoveryTrigger,
-        symbols: Vec<CollectedSymbol>,
+        symbols: &[CollectedSymbol],
         params: ObjectParams,
         duration: Duration,
     ) -> Result<RecoveryResult, Error> {
@@ -732,7 +730,7 @@ impl RecoveryOrchestrator {
         self.collector.object_params = Some(params);
 
         // Feed symbols to collector (deduplication).
-        for cs in &symbols {
+        for cs in symbols {
             self.collector.add_collected(cs.clone());
         }
 
@@ -774,6 +772,9 @@ impl RecoveryOrchestrator {
 impl std::fmt::Debug for RecoveryOrchestrator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecoveryOrchestrator")
+            .field("config", &self.config)
+            .field("collector", &self.collector)
+            .field("decoder", &self.decoder)
             .field("attempt", &self.attempt)
             .field("recovering", &self.recovering)
             .field("cancelled", &self.cancelled)
@@ -789,8 +790,10 @@ impl std::fmt::Debug for RecoveryOrchestrator {
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;
+    use crate::distributed::encoding::{EncodedState, EncodingConfig, StateEncoder};
     use crate::distributed::snapshot::{BudgetSnapshot, TaskSnapshot, TaskState};
     use crate::record::region::RegionState;
+    use crate::types::symbol::ObjectId;
     use crate::types::{RegionId, TaskId};
     use crate::util::DetRng;
 
@@ -1033,7 +1036,7 @@ mod tests {
         let result = orchestrator
             .recover_from_symbols(
                 &trigger,
-                symbols,
+                &symbols,
                 encoded.params,
                 Duration::from_millis(10),
             )
@@ -1079,7 +1082,7 @@ mod tests {
 
         let result = orchestrator.recover_from_symbols(
             &trigger,
-            symbols,
+            &symbols,
             params,
             Duration::from_millis(10),
         );
@@ -1146,7 +1149,7 @@ mod tests {
         let result = orchestrator
             .recover_from_symbols(
                 &trigger,
-                symbols,
+                &symbols,
                 encoded.params,
                 Duration::from_millis(50),
             )
