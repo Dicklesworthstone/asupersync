@@ -12,6 +12,7 @@
 //! - [`rref`]: Region-owned reference for Send tasks
 
 pub mod budget;
+pub mod builder;
 pub mod cancel;
 pub mod id;
 pub mod outcome;
@@ -24,6 +25,7 @@ pub mod task_context;
 pub mod typed_symbol;
 
 pub use budget::{backlog_bound, delay_bound, Budget, CurveBudget, CurveError, MinPlusCurve};
+pub use builder::{BuildError, BuildResult};
 pub use cancel::{CancelAttributionConfig, CancelKind, CancelReason};
 pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
