@@ -912,10 +912,10 @@ impl TraceReader {
     #[cfg(feature = "trace-compression")]
     fn read_compressed_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
         // Refill buffer if needed
-        if self.buffer_pos >= self.decompressed_buffer.len() {
-            if !self.refill_decompressed_buffer()? {
-                return Ok(None);
-            }
+        if self.buffer_pos >= self.decompressed_buffer.len()
+            && !self.refill_decompressed_buffer()?
+        {
+            return Ok(None);
         }
 
         // Read event length from buffer

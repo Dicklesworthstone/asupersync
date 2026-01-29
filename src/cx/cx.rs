@@ -223,6 +223,7 @@ impl Cx {
     }
 
     /// Creates a new capability context with optional observability state (internal use).
+    #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn new_with_observability(
         region: RegionId,
@@ -393,6 +394,7 @@ impl Cx {
     }
 
     /// Sets the current task context for the duration of the guard.
+    #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
         let prev = CURRENT_CX.with(|slot| {
@@ -1073,17 +1075,20 @@ impl Cx {
     /// This method only sets the local cancellation flag. In a real runtime,
     /// cancellation propagates through the region tree via `cancel_request()`.
     pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {
-        let mut inner = self.inner.write().expect("lock poisoned");
-        let region = inner.region;
-        let task = inner.task;
+        let (region, task) = {
+            let mut inner = self.inner.write().expect("lock poisoned");
+            let region = inner.region;
+            let task = inner.task;
 
-        let mut reason = CancelReason::new(kind).with_region(region).with_task(task);
-        if let Some(msg) = message {
-            reason = reason.with_message(msg);
-        }
+            let mut reason = CancelReason::new(kind).with_region(region).with_task(task);
+            if let Some(msg) = message {
+                reason = reason.with_message(msg);
+            }
 
-        inner.cancel_requested = true;
-        inner.cancel_reason = Some(reason);
+            inner.cancel_requested = true;
+            inner.cancel_reason = Some(reason);
+            (region, task)
+        };
 
         debug!(
             task_id = ?task,
@@ -1092,6 +1097,7 @@ impl Cx {
             cancel_message = message,
             "cancel initiated via cancel_with"
         );
+        let _ = (region, task);
     }
 
     /// Cancels without building a full attribution chain (performance-critical path).
@@ -1120,20 +1126,24 @@ impl Cx {
     /// assert!(cx.is_cancel_requested());
     /// ```
     pub fn cancel_fast(&self, kind: CancelKind) {
-        let mut inner = self.inner.write().expect("lock poisoned");
-        let region = inner.region;
+        let region = {
+            let mut inner = self.inner.write().expect("lock poisoned");
+            let region = inner.region;
 
-        // Minimal attribution: just kind and region
-        let reason = CancelReason::new(kind).with_region(region);
+            // Minimal attribution: just kind and region
+            let reason = CancelReason::new(kind).with_region(region);
 
-        inner.cancel_requested = true;
-        inner.cancel_reason = Some(reason);
+            inner.cancel_requested = true;
+            inner.cancel_reason = Some(reason);
+            region
+        };
 
         trace!(
             region_id = ?region,
             cancel_kind = ?kind,
             "cancel_fast initiated"
         );
+        let _ = region;
     }
 
     /// Gets the cancellation reason if this context is cancelled.

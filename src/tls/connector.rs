@@ -272,11 +272,46 @@ impl TlsConnectorBuilder {
             tracing::warn!("Building TlsConnector with no root certificates");
         }
 
-        // Create the config builder with the crypto provider
-        let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| TlsError::Configuration(e.to_string()))?
-            .with_root_certificates(self.root_certs.into_inner());
+        // Create the config builder with the crypto provider and protocol versions.
+        let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()));
+        let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
+            let min = self.min_protocol.map(|v| v.get_u16());
+            let max = self.max_protocol.map(|v| v.get_u16());
+
+            if let (Some(min), Some(max)) = (min, max) {
+                if min > max {
+                    return Err(TlsError::Configuration(
+                        "min_protocol_version is greater than max_protocol_version".into(),
+                    ));
+                }
+            }
+
+            let mut versions = Vec::new();
+            for v in rustls::ALL_VERSIONS {
+                let ordinal = v.version.get_u16();
+                let within_min = min.map_or(true, |m| ordinal >= m);
+                let within_max = max.map_or(true, |m| ordinal <= m);
+                if within_min && within_max {
+                    versions.push(*v);
+                }
+            }
+
+            if versions.is_empty() {
+                return Err(TlsError::Configuration(
+                    "no supported TLS protocol versions within requested range".into(),
+                ));
+            }
+
+            builder
+                .with_protocol_versions(&versions)
+                .map_err(|e| TlsError::Configuration(e.to_string()))?
+        } else {
+            builder
+                .with_safe_default_protocol_versions()
+                .map_err(|e| TlsError::Configuration(e.to_string()))?
+        };
+
+        let builder = builder.with_root_certificates(self.root_certs.into_inner());
 
         // Set client identity if provided
         let mut config = if let Some((chain, key)) = self.client_identity {

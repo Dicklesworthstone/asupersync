@@ -784,7 +784,7 @@ where
         // Check budget for waiting on readiness
         // Note: min_budget_for_wait is compared against poll_quota
         let budget = cx.budget();
-        if (budget.poll_quota as u64) < self.config.min_budget_for_wait {
+        if u64::from(budget.poll_quota) < self.config.min_budget_for_wait {
             return Err(TowerAdapterError::Overloaded);
         }
 
@@ -830,13 +830,10 @@ where
             }
             CancellationMode::TimeoutFallback => {
                 // If we have a fallback timeout, use it
-                if let Some(_timeout) = self.config.fallback_timeout {
-                    // Note: Full timeout implementation would require async runtime support
-                    // For now, just await the future directly
-                    future.await.map_err(TowerAdapterError::Service)
-                } else {
-                    future.await.map_err(TowerAdapterError::Service)
-                }
+                // Note: Full timeout implementation would require async runtime support
+                // For now, just await the future directly (timeout is a no-op placeholder)
+                let _ = self.config.fallback_timeout;
+                future.await.map_err(TowerAdapterError::Service)
             }
         }
     }

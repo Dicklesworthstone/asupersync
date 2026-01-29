@@ -37,7 +37,6 @@ fn test_race_empty_is_never() {
     test_complete!("test_race_empty_is_never");
 }
 
-
 #[test]
 fn test_race_identity_law_violation() {
     init_test_logging();

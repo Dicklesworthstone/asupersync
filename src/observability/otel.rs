@@ -241,15 +241,27 @@ impl CardinalityTracker {
 // Custom Exporters
 // =============================================================================
 
+/// Labels for a metric data point.
+pub type MetricLabels = Vec<(String, String)>;
+
+/// A counter data point: (name, labels, value).
+pub type CounterDataPoint = (String, MetricLabels, u64);
+
+/// A gauge data point: (name, labels, value).
+pub type GaugeDataPoint = (String, MetricLabels, i64);
+
+/// A histogram data point: (name, labels, count, sum).
+pub type HistogramDataPoint = (String, MetricLabels, u64, f64);
+
 /// Snapshot of metrics at a point in time.
 #[derive(Debug, Clone, Default)]
 pub struct MetricsSnapshot {
     /// Counter values: (name, labels, value).
-    pub counters: Vec<(String, Vec<(String, String)>, u64)>,
+    pub counters: Vec<CounterDataPoint>,
     /// Gauge values: (name, labels, value).
-    pub gauges: Vec<(String, Vec<(String, String)>, i64)>,
+    pub gauges: Vec<GaugeDataPoint>,
     /// Histogram values: (name, labels, count, sum).
-    pub histograms: Vec<(String, Vec<(String, String)>, u64, f64)>,
+    pub histograms: Vec<HistogramDataPoint>,
 }
 
 impl MetricsSnapshot {
@@ -357,10 +369,7 @@ impl StdoutExporter {
         if labels.is_empty() {
             String::new()
         } else {
-            let parts: Vec<_> = labels
-                .iter()
-                .map(|(k, v)| format!("{}=\"{}\"", k, v))
-                .collect();
+            let parts: Vec<_> = labels.iter().map(|(k, v)| format!("{k}=\"{v}\"")).collect();
             format!("{{{}}}", parts.join(","))
         }
     }
@@ -608,6 +617,7 @@ impl std::fmt::Debug for OtelMetrics {
 }
 
 #[derive(Debug, Default)]
+#[allow(clippy::struct_field_names)]
 struct MetricsState {
     active_tasks: AtomicU64,
     active_regions: AtomicU64,
@@ -661,6 +671,7 @@ impl OtelMetrics {
 
     /// Constructs a new OpenTelemetry metrics provider with configuration.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new_with_config(meter: Meter, config: MetricsConfig) -> Self {
         let state = Arc::new(MetricsState::default());
 

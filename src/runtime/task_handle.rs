@@ -155,9 +155,7 @@ impl<T> TaskHandle<T> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),
-            Err(oneshot::TryRecvError::Closed) => {
-                Err(JoinError::Cancelled(CancelReason::race_loser()))
-            }
+            Err(oneshot::TryRecvError::Closed) => Err(JoinError::Cancelled(self.closed_reason())),
         }
     }
 
@@ -182,6 +180,18 @@ impl<T> TaskHandle<T> {
                 }
             }
         }
+    }
+
+    fn closed_reason(&self) -> CancelReason {
+        self.inner
+            .upgrade()
+            .and_then(|inner| {
+                inner
+                    .read()
+                    .ok()
+                    .and_then(|lock| lock.cancel_reason.clone())
+            })
+            .unwrap_or_else(|| CancelReason::user("join channel closed"))
     }
 }
 
@@ -212,7 +222,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
             }
             std::task::Poll::Ready(Err(_)) => {
                 this.completed = true;
-                std::task::Poll::Ready(Err(JoinError::Cancelled(CancelReason::race_loser())))
+                std::task::Poll::Ready(Err(JoinError::Cancelled(this.handle.closed_reason())))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
@@ -237,7 +247,7 @@ impl<T> Drop for JoinFuture<'_, T> {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use crate::types::Budget;
+    use crate::types::{Budget, CancelKind};
     use crate::util::ArenaIndex;
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -337,6 +347,37 @@ mod tests {
             _ => panic!("expected Cancelled"),
         }
         crate::test_complete!("task_handle_cancelled");
+    }
+
+    #[test]
+    fn join_closed_uses_cancel_reason() {
+        init_test("join_closed_uses_cancel_reason");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+
+        {
+            let mut lock = cx.inner.write().expect("lock poisoned");
+            lock.cancel_requested = true;
+            lock.cancel_reason = Some(CancelReason::timeout());
+        }
+
+        drop(tx);
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+
+        let result = block_on(handle.join(&cx));
+        match result {
+            Err(JoinError::Cancelled(r)) => {
+                crate::assert_with_log!(
+                    r.kind == CancelKind::Timeout,
+                    "cancel kind is timeout",
+                    CancelKind::Timeout,
+                    r.kind
+                );
+            }
+            _ => panic!("expected Cancelled"),
+        }
+        crate::test_complete!("join_closed_uses_cancel_reason");
     }
 
     #[test]

@@ -1035,15 +1035,17 @@ where
     fn stats(&self) -> PoolStats {
         self.process_returns();
 
-        let state = self.state.lock().expect("pool state lock poisoned");
-        let pool_stats = PoolStats {
-            active: state.active,
-            idle: state.idle.len(),
-            total: state.active + state.idle.len(),
-            max_size: self.config.max_size,
-            waiters: state.waiters.len(),
-            total_acquisitions: state.total_acquisitions,
-            total_wait_time: state.total_wait_time,
+        let pool_stats = {
+            let state = self.state.lock().expect("pool state lock poisoned");
+            PoolStats {
+                active: state.active,
+                idle: state.idle.len(),
+                total: state.active + state.idle.len(),
+                max_size: self.config.max_size,
+                waiters: state.waiters.len(),
+                total_acquisitions: state.total_acquisitions,
+                total_wait_time: state.total_wait_time,
+            }
         };
 
         // Update metrics gauges
@@ -1121,7 +1123,7 @@ impl DestroyReason {
 
 #[cfg(feature = "metrics")]
 mod pool_metrics {
-    use super::*;
+    use super::{DestroyReason, Duration, PoolStats};
     use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
     use opentelemetry::KeyValue;
     use std::sync::atomic::{AtomicU64, Ordering};

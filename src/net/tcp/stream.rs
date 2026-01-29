@@ -29,6 +29,7 @@ impl TcpStream {
     /// Create a TcpStream from a standard library TcpStream.
     ///
     /// This is used for testing to wrap a synchronous stream into an async one.
+    #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn from_std(stream: net::TcpStream) -> Self {
         Self {
