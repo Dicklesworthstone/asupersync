@@ -69,6 +69,9 @@ impl Worker {
 
     /// Runs the worker scheduling loop.
     pub fn run_loop(&mut self) {
+        const SPIN_LIMIT: u32 = 64;
+        const YIELD_LIMIT: u32 = 16;
+
         while !self.shutdown.load(Ordering::Relaxed) {
             // 1. Try local queue (LIFO)
             if let Some(task) = self.local.pop() {
@@ -110,8 +113,6 @@ impl Worker {
             // We spin/yield briefly to avoid the high latency of parking/unparking
             // if new work arrives immediately.
             let mut backoff = 0;
-            const SPIN_LIMIT: u32 = 64;
-            const YIELD_LIMIT: u32 = 16;
 
             loop {
                 // Check queues again (abbreviated check)

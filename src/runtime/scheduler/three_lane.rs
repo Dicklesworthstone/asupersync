@@ -177,6 +177,9 @@ impl ThreeLaneWorker {
     /// 4. Steal from other workers
     /// 5. Park
     pub fn run_loop(&mut self) {
+        const SPIN_LIMIT: u32 = 64;
+        const YIELD_LIMIT: u32 = 16;
+
         while !self.shutdown.load(Ordering::Relaxed) {
             // PHASE 1: Cancel work (highest priority, never starve)
             if let Some(task) = self.try_cancel_work() {
@@ -204,12 +207,10 @@ impl ThreeLaneWorker {
 
             // PHASE 5: Backoff before parking
             let mut backoff = 0;
-            const SPIN_LIMIT: u32 = 64;
-            const YIELD_LIMIT: u32 = 16;
 
             loop {
                 // Quick check for new work
-                if self.global.len() > 0 {
+                if !self.global.is_empty() {
                     break;
                 }
                 // Note: Checking local lock is expensive, so we skip it in spin loop

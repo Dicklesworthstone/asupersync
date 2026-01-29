@@ -56,6 +56,7 @@
 
 pub mod actor;
 pub mod bytes;
+pub mod cancel;
 pub mod channel;
 pub mod cli;
 pub mod codec;
@@ -64,6 +65,7 @@ pub mod config;
 pub mod conformance;
 pub mod cx;
 pub mod decoding;
+pub mod distributed;
 pub mod encoding;
 pub mod epoch;
 pub mod error;
@@ -72,6 +74,7 @@ pub mod grpc;
 pub mod http;
 pub mod io;
 pub mod lab;
+pub mod migration;
 pub mod net;
 pub mod observability;
 pub mod plan;
@@ -98,6 +101,7 @@ pub mod tracing_compat;
 pub mod transport;
 pub mod types;
 pub mod util;
+pub mod web;
 
 // Re-exports for convenient access to core types
 pub use config::{
