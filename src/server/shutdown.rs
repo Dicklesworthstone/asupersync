@@ -37,7 +37,6 @@ impl ShutdownPhase {
             0 => Self::Running,
             1 => Self::Draining,
             2 => Self::ForceClosing,
-            3 => Self::Stopped,
             _ => Self::Stopped,
         }
     }
@@ -71,6 +70,7 @@ struct SignalState {
     controller: ShutdownController,
     phase_notify: Notify,
     drain_deadline: std::sync::Mutex<Option<Instant>>,
+    drain_start: std::sync::Mutex<Option<Instant>>,
 }
 
 /// Broadcast signal for server shutdown coordination.
@@ -111,6 +111,7 @@ impl ShutdownSignal {
                 controller: ShutdownController::new(),
                 phase_notify: Notify::new(),
                 drain_deadline: std::sync::Mutex::new(None),
+                drain_start: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -162,6 +163,7 @@ impl ShutdownSignal {
     /// The caller should stop accepting new connections after this call.
     ///
     /// Returns `false` if shutdown was already initiated.
+    #[must_use]
     pub fn begin_drain(&self, timeout: Duration) -> bool {
         let result = self.state.phase.compare_exchange(
             ShutdownPhase::Running as u8,
@@ -170,13 +172,22 @@ impl ShutdownSignal {
             Ordering::Acquire,
         );
         if result.is_ok() {
+            let now = Instant::now();
             {
                 let mut deadline = self
                     .state
                     .drain_deadline
                     .lock()
                     .expect("drain_deadline lock poisoned");
-                *deadline = Some(Instant::now() + timeout);
+                *deadline = Some(now + timeout);
+            }
+            {
+                let mut start = self
+                    .state
+                    .drain_start
+                    .lock()
+                    .expect("drain_start lock poisoned");
+                *start = Some(now);
             }
             self.state.controller.shutdown();
             self.state.phase_notify.notify_waiters();
@@ -190,6 +201,7 @@ impl ShutdownSignal {
     ///
     /// Called when the drain timeout has expired and remaining connections
     /// must be terminated. Returns `false` if not currently draining.
+    #[must_use]
     pub fn begin_force_close(&self) -> bool {
         let result = self.state.phase.compare_exchange(
             ShutdownPhase::Draining as u8,
@@ -221,6 +233,39 @@ impl ShutdownSignal {
     pub async fn phase_changed(&self) -> ShutdownPhase {
         self.state.phase_notify.notified().await;
         self.phase()
+    }
+
+    /// Returns the instant when drain began, if applicable.
+    #[must_use]
+    pub fn drain_start(&self) -> Option<Instant> {
+        self.state
+            .drain_start
+            .lock()
+            .expect("drain_start lock poisoned")
+            .as_ref()
+            .copied()
+    }
+
+    /// Collects shutdown statistics.
+    ///
+    /// Call after `mark_stopped()` to get the final stats. The `drained` count
+    /// is the number of connections that completed gracefully, and `force_closed`
+    /// is the number that were force-closed after the drain timeout.
+    ///
+    /// # Arguments
+    ///
+    /// * `drained` — Number of connections that completed during drain phase.
+    /// * `force_closed` — Number of connections force-closed after timeout.
+    #[must_use]
+    pub fn collect_stats(&self, drained: usize, force_closed: usize) -> ShutdownStats {
+        let duration = self
+            .drain_start()
+            .map_or(Duration::ZERO, |start| start.elapsed());
+        ShutdownStats {
+            drained,
+            force_closed,
+            duration,
+        }
     }
 
     /// Triggers an immediate stop (skips drain phase).
@@ -342,7 +387,8 @@ mod tests {
     fn force_close_from_draining() {
         init_test("force_close_from_draining");
         let signal = ShutdownSignal::new();
-        signal.begin_drain(Duration::from_secs(1));
+        let began = signal.begin_drain(Duration::from_secs(1));
+        crate::assert_with_log!(began, "begin drain", true, began);
 
         let forced = signal.begin_force_close();
         crate::assert_with_log!(forced, "force close", true, forced);
@@ -376,8 +422,10 @@ mod tests {
     fn mark_stopped() {
         init_test("mark_stopped");
         let signal = ShutdownSignal::new();
-        signal.begin_drain(Duration::from_secs(1));
-        signal.begin_force_close();
+        let began = signal.begin_drain(Duration::from_secs(1));
+        crate::assert_with_log!(began, "begin drain", true, began);
+        let forced = signal.begin_force_close();
+        crate::assert_with_log!(forced, "force close", true, forced);
         signal.mark_stopped();
 
         crate::assert_with_log!(
@@ -414,7 +462,8 @@ mod tests {
         let not_shutting = receiver.is_shutting_down();
         crate::assert_with_log!(!not_shutting, "not shutting", false, not_shutting);
 
-        signal.begin_drain(Duration::from_secs(30));
+        let began = signal.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "begin drain", true, began);
 
         let shutting = receiver.is_shutting_down();
         crate::assert_with_log!(shutting, "shutting down", true, shutting);
@@ -443,7 +492,8 @@ mod tests {
         let signal = ShutdownSignal::new();
         let cloned = signal.clone();
 
-        signal.begin_drain(Duration::from_secs(30));
+        let began = signal.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "begin drain", true, began);
 
         crate::assert_with_log!(
             cloned.is_draining(),
@@ -452,5 +502,291 @@ mod tests {
             cloned.is_draining()
         );
         crate::test_complete!("clone_shares_state");
+    }
+
+    // ====================================================================
+    // Async integration tests
+    // ====================================================================
+
+    #[test]
+    fn phase_changed_fires_on_drain() {
+        init_test("phase_changed_fires_on_drain");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let signal2 = signal.clone();
+
+            // Spawn a thread that will begin drain after a short delay
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                let began = signal2.begin_drain(Duration::from_secs(30));
+                assert!(began, "begin drain should succeed");
+            });
+
+            // Wait for the phase change
+            let new_phase = signal.phase_changed().await;
+            crate::assert_with_log!(
+                new_phase == ShutdownPhase::Draining,
+                "phase after drain",
+                ShutdownPhase::Draining,
+                new_phase
+            );
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("phase_changed_fires_on_drain");
+    }
+
+    #[test]
+    fn phase_changed_fires_on_force_close() {
+        init_test("phase_changed_fires_on_force_close");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let began = signal.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "begin drain", true, began);
+
+            let signal2 = signal.clone();
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                let forced = signal2.begin_force_close();
+                assert!(forced, "force close should succeed");
+            });
+
+            let new_phase = signal.phase_changed().await;
+            crate::assert_with_log!(
+                new_phase == ShutdownPhase::ForceClosing,
+                "phase after force close",
+                ShutdownPhase::ForceClosing,
+                new_phase
+            );
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("phase_changed_fires_on_force_close");
+    }
+
+    #[test]
+    fn phase_changed_fires_on_mark_stopped() {
+        init_test("phase_changed_fires_on_mark_stopped");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let began = signal.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "begin drain", true, began);
+            let forced = signal.begin_force_close();
+            crate::assert_with_log!(forced, "force close", true, forced);
+
+            let signal2 = signal.clone();
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                signal2.mark_stopped();
+            });
+
+            let new_phase = signal.phase_changed().await;
+            crate::assert_with_log!(
+                new_phase == ShutdownPhase::Stopped,
+                "phase after stopped",
+                ShutdownPhase::Stopped,
+                new_phase
+            );
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("phase_changed_fires_on_mark_stopped");
+    }
+
+    #[test]
+    fn phase_changed_fires_on_immediate() {
+        init_test("phase_changed_fires_on_immediate");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let signal2 = signal.clone();
+
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                signal2.trigger_immediate();
+            });
+
+            let new_phase = signal.phase_changed().await;
+            crate::assert_with_log!(
+                new_phase == ShutdownPhase::Stopped,
+                "phase after immediate",
+                ShutdownPhase::Stopped,
+                new_phase
+            );
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("phase_changed_fires_on_immediate");
+    }
+
+    #[test]
+    fn full_lifecycle_phase_transitions() {
+        init_test("full_lifecycle_phase_transitions");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+
+            // Phase 1: Running
+            crate::assert_with_log!(
+                signal.phase() == ShutdownPhase::Running,
+                "starts running",
+                ShutdownPhase::Running,
+                signal.phase()
+            );
+
+            // Phase 2: Draining (triggered from another thread)
+            {
+                let sig = signal.clone();
+                let h = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    let began = sig.begin_drain(Duration::from_secs(1));
+                    assert!(began, "begin drain should succeed");
+                });
+                let p = signal.phase_changed().await;
+                crate::assert_with_log!(
+                    p == ShutdownPhase::Draining,
+                    "draining",
+                    ShutdownPhase::Draining,
+                    p
+                );
+                h.join().expect("thread panicked");
+            }
+
+            // Phase 3: ForceClosing
+            {
+                let sig = signal.clone();
+                let h = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    let forced = sig.begin_force_close();
+                    assert!(forced, "force close should succeed");
+                });
+                let p = signal.phase_changed().await;
+                crate::assert_with_log!(
+                    p == ShutdownPhase::ForceClosing,
+                    "force closing",
+                    ShutdownPhase::ForceClosing,
+                    p
+                );
+                h.join().expect("thread panicked");
+            }
+
+            // Phase 4: Stopped
+            {
+                let sig = signal.clone();
+                let h = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    sig.mark_stopped();
+                });
+                let p = signal.phase_changed().await;
+                crate::assert_with_log!(
+                    p == ShutdownPhase::Stopped,
+                    "stopped",
+                    ShutdownPhase::Stopped,
+                    p
+                );
+                h.join().expect("thread panicked");
+            }
+        });
+        crate::test_complete!("full_lifecycle_phase_transitions");
+    }
+
+    #[test]
+    fn subscriber_receives_drain_signal() {
+        init_test("subscriber_receives_drain_signal");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let mut receiver = signal.subscribe();
+
+            let not_shutting = receiver.is_shutting_down();
+            crate::assert_with_log!(!not_shutting, "not shutting down", false, not_shutting);
+
+            // Trigger drain from thread
+            let sig = signal.clone();
+            let h = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                let began = sig.begin_drain(Duration::from_secs(30));
+                assert!(began, "begin drain should succeed");
+            });
+
+            // Wait for the underlying signal
+            receiver.wait().await;
+
+            let shutting = receiver.is_shutting_down();
+            crate::assert_with_log!(shutting, "is shutting down", true, shutting);
+
+            h.join().expect("thread panicked");
+        });
+        crate::test_complete!("subscriber_receives_drain_signal");
+    }
+
+    // ====================================================================
+    // Stats collection tests
+    // ====================================================================
+
+    #[test]
+    fn collect_stats_before_drain() {
+        init_test("collect_stats_before_drain");
+        let signal = ShutdownSignal::new();
+
+        let stats = signal.collect_stats(0, 0);
+        crate::assert_with_log!(stats.drained == 0, "drained", 0, stats.drained);
+        crate::assert_with_log!(
+            stats.force_closed == 0,
+            "force_closed",
+            0,
+            stats.force_closed
+        );
+        // Duration should be zero since drain hasn't started
+        crate::assert_with_log!(
+            stats.duration == Duration::ZERO,
+            "duration zero",
+            Duration::ZERO,
+            stats.duration
+        );
+        crate::test_complete!("collect_stats_before_drain");
+    }
+
+    #[test]
+    fn collect_stats_after_drain() {
+        init_test("collect_stats_after_drain");
+        let signal = ShutdownSignal::new();
+
+        let began = signal.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "drain started", true, began);
+
+        // Small sleep to ensure measurable duration
+        std::thread::sleep(Duration::from_millis(5));
+
+        let stats = signal.collect_stats(10, 3);
+        crate::assert_with_log!(stats.drained == 10, "drained", 10, stats.drained);
+        crate::assert_with_log!(
+            stats.force_closed == 3,
+            "force_closed",
+            3,
+            stats.force_closed
+        );
+
+        let nonzero = stats.duration > Duration::ZERO;
+        crate::assert_with_log!(nonzero, "nonzero duration", true, nonzero);
+        crate::test_complete!("collect_stats_after_drain");
+    }
+
+    #[test]
+    fn drain_start_tracking() {
+        init_test("drain_start_tracking");
+        let signal = ShutdownSignal::new();
+
+        let before = signal.drain_start();
+        crate::assert_with_log!(
+            before.is_none(),
+            "no start before drain",
+            true,
+            before.is_none()
+        );
+
+        let began = signal.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "drain started", true, began);
+
+        let after = signal.drain_start();
+        crate::assert_with_log!(after.is_some(), "start after drain", true, after.is_some());
+        crate::test_complete!("drain_start_tracking");
     }
 }

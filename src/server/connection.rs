@@ -98,6 +98,7 @@ impl ConnectionManager {
     ///
     /// Returns a [`ConnectionGuard`] that automatically deregisters the connection
     /// when dropped. Returns `None` if the server is at capacity or shutting down.
+    #[must_use]
     pub fn register(&self, addr: SocketAddr) -> Option<ConnectionGuard> {
         // Reject new connections during shutdown
         if self.shutdown_signal.is_shutting_down() {
@@ -122,6 +123,7 @@ impl ConnectionManager {
             connected_at: Instant::now(),
         };
         connections.insert(id, info);
+        drop(connections);
 
         Some(ConnectionGuard {
             id,
@@ -185,6 +187,61 @@ impl ConnectionManager {
     pub const fn max_connections(&self) -> Option<usize> {
         self.max_connections
     }
+
+    /// Orchestrates a graceful drain with timeout, returning shutdown statistics.
+    ///
+    /// This method:
+    /// 1. Records the active connection count at drain start
+    /// 2. Waits for connections to close or the drain deadline to expire
+    /// 3. If deadline expires, transitions to force-close phase
+    /// 4. Returns [`ShutdownStats`] with drained vs force-closed counts
+    ///
+    /// The caller must have already called [`ShutdownSignal::begin_drain`] before
+    /// calling this method. The caller is responsible for force-closing connections
+    /// after this method transitions to `ForceClosing` phase.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// signal.begin_drain(Duration::from_secs(30));
+    /// let stats = manager.drain_with_stats().await;
+    /// signal.mark_stopped();
+    /// println!("Drained: {}, Force-closed: {}", stats.drained, stats.force_closed);
+    /// ```
+    pub async fn drain_with_stats(&self) -> super::shutdown::ShutdownStats {
+        let initial_count = self.active_count();
+
+        if initial_count == 0 {
+            self.shutdown_signal.mark_stopped();
+            return self.shutdown_signal.collect_stats(0, 0);
+        }
+
+        // Wait for connections to close, checking the drain deadline periodically.
+        // Since we don't have a timer in this module, we poll in a loop checking
+        // both the connection count and the deadline.
+        loop {
+            if self.is_empty() {
+                // All connections drained gracefully
+                let drained = initial_count;
+                self.shutdown_signal.mark_stopped();
+                return self.shutdown_signal.collect_stats(drained, 0);
+            }
+
+            // Check if drain deadline has passed
+            if let Some(deadline) = self.shutdown_signal.drain_deadline() {
+                if std::time::Instant::now() >= deadline {
+                    // Timeout expired — transition to force close
+                    let remaining = self.active_count();
+                    let drained = initial_count.saturating_sub(remaining);
+                    let _ = self.shutdown_signal.begin_force_close();
+                    return self.shutdown_signal.collect_stats(drained, remaining);
+                }
+            }
+
+            // Wait for the next connection close notification
+            self.all_closed.notified().await;
+        }
+    }
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -193,7 +250,7 @@ impl std::fmt::Debug for ConnectionManager {
             .field("active", &self.active_count())
             .field("max", &self.max_connections)
             .field("phase", &self.shutdown_signal.phase())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -224,10 +281,10 @@ impl Drop for ConnectionGuard {
             .lock()
             .expect("connection registry lock poisoned");
         connections.remove(&self.id);
-        if connections.is_empty() {
-            drop(connections);
-            self.all_closed.notify_waiters();
-        }
+        // Notify on every removal so drain_with_stats can re-check deadlines.
+        // wait_all_closed loops on is_empty(), so extra wakeups are harmless.
+        drop(connections);
+        self.all_closed.notify_waiters();
     }
 }
 
@@ -235,7 +292,7 @@ impl std::fmt::Debug for ConnectionGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionGuard")
             .field("id", &self.id)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -315,7 +372,8 @@ mod tests {
         let has_g1 = g1.is_some();
         crate::assert_with_log!(has_g1, "accepted before shutdown", true, has_g1);
 
-        signal.begin_drain(Duration::from_secs(30));
+        let began = signal.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "begin drain", true, began);
 
         let g2 = manager.register(test_addr(2));
         let has_g2 = g2.is_some();
@@ -432,5 +490,296 @@ mod tests {
         let not_empty = !manager.is_empty();
         crate::assert_with_log!(not_empty, "not empty", true, not_empty);
         crate::test_complete!("is_empty_check");
+    }
+
+    // ====================================================================
+    // Async integration tests
+    // ====================================================================
+
+    #[test]
+    fn wait_all_closed_resolves_when_empty() {
+        init_test("wait_all_closed_resolves_when_empty");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal);
+
+            // No connections — should resolve immediately
+            manager.wait_all_closed().await;
+
+            let empty = manager.is_empty();
+            crate::assert_with_log!(empty, "is empty", true, empty);
+        });
+        crate::test_complete!("wait_all_closed_resolves_when_empty");
+    }
+
+    #[test]
+    fn wait_all_closed_resolves_after_drop() {
+        init_test("wait_all_closed_resolves_after_drop");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal);
+
+            // Register some connections
+            let g1 = manager.register(test_addr(1)).expect("register");
+            let g2 = manager.register(test_addr(2)).expect("register");
+
+            let count = manager.active_count();
+            crate::assert_with_log!(count == 2, "two active", 2, count);
+
+            // Drop connections from a thread after a delay
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                drop(g1);
+                drop(g2);
+            });
+
+            // Wait for all to close — should resolve after thread drops guards
+            manager.wait_all_closed().await;
+
+            let empty = manager.is_empty();
+            crate::assert_with_log!(empty, "all closed", true, empty);
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("wait_all_closed_resolves_after_drop");
+    }
+
+    #[test]
+    fn wait_all_closed_with_staggered_drops() {
+        init_test("wait_all_closed_with_staggered_drops");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal);
+
+            let g1 = manager.register(test_addr(1)).expect("register");
+            let g2 = manager.register(test_addr(2)).expect("register");
+            let g3 = manager.register(test_addr(3)).expect("register");
+
+            let count = manager.active_count();
+            crate::assert_with_log!(count == 3, "three active", 3, count);
+
+            // Drop connections one at a time from a thread
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                drop(g1);
+                std::thread::sleep(Duration::from_millis(10));
+                drop(g2);
+                std::thread::sleep(Duration::from_millis(10));
+                drop(g3);
+            });
+
+            manager.wait_all_closed().await;
+
+            let empty = manager.is_empty();
+            crate::assert_with_log!(empty, "all closed after stagger", true, empty);
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("wait_all_closed_with_staggered_drops");
+    }
+
+    #[test]
+    fn drain_rejects_then_wait_for_inflight() {
+        init_test("drain_rejects_then_wait_for_inflight");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal.clone());
+
+            // Register a connection before shutdown
+            let g1 = manager.register(test_addr(1)).expect("register");
+            let count = manager.active_count();
+            crate::assert_with_log!(count == 1, "one active", 1, count);
+
+            // Begin drain
+            let began = signal.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "drain started", true, began);
+
+            // New connections should be rejected
+            let g2 = manager.register(test_addr(2));
+            let rejected = g2.is_none();
+            crate::assert_with_log!(rejected, "rejected during drain", true, rejected);
+
+            // Existing connection still tracked
+            let count = manager.active_count();
+            crate::assert_with_log!(count == 1, "in-flight still active", 1, count);
+
+            // Drop the in-flight connection from a thread
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                drop(g1);
+            });
+
+            // Wait for all to close
+            manager.wait_all_closed().await;
+
+            let empty = manager.is_empty();
+            crate::assert_with_log!(empty, "drained", true, empty);
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("drain_rejects_then_wait_for_inflight");
+    }
+
+    #[test]
+    fn full_server_lifecycle() {
+        init_test("full_server_lifecycle");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(Some(100), signal.clone());
+
+            // Phase 1: Accept connections
+            let guards: Vec<_> = (0..5)
+                .filter_map(|i| manager.register(test_addr(8080 + i)))
+                .collect();
+            let count = manager.active_count();
+            crate::assert_with_log!(count == 5, "five connected", 5, count);
+
+            // Phase 2: Begin drain
+            let initiated = signal.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(initiated, "drain started", true, initiated);
+
+            // New connections rejected
+            let rejected = manager.register(test_addr(9000)).is_none();
+            crate::assert_with_log!(rejected, "new conn rejected", true, rejected);
+
+            // Phase 3: In-flight connections complete (simulate from thread)
+            let handle = std::thread::spawn(move || {
+                // Simulate gradual connection completion
+                for guard in guards {
+                    std::thread::sleep(Duration::from_millis(5));
+                    drop(guard);
+                }
+            });
+
+            // Wait for all to close
+            manager.wait_all_closed().await;
+
+            let empty = manager.is_empty();
+            crate::assert_with_log!(empty, "all drained", true, empty);
+
+            // Phase 4: Mark stopped
+            let forced = signal.begin_force_close();
+            crate::assert_with_log!(forced, "force close", true, forced);
+            signal.mark_stopped();
+
+            let stopped = signal.is_stopped();
+            crate::assert_with_log!(stopped, "stopped", true, stopped);
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("full_server_lifecycle");
+    }
+
+    #[test]
+    fn drain_with_stats_empty() {
+        init_test("drain_with_stats_empty");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal.clone());
+
+            // Begin drain with no active connections
+            let began = signal.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "drain started", true, began);
+
+            let stats = manager.drain_with_stats().await;
+
+            let drained = stats.drained;
+            crate::assert_with_log!(drained == 0, "zero drained", 0, drained);
+
+            let fc = stats.force_closed;
+            crate::assert_with_log!(fc == 0, "zero force-closed", 0, fc);
+
+            // Should have transitioned to Stopped
+            let stopped = signal.is_stopped();
+            crate::assert_with_log!(stopped, "stopped", true, stopped);
+        });
+        crate::test_complete!("drain_with_stats_empty");
+    }
+
+    #[test]
+    fn drain_with_stats_all_drained() {
+        init_test("drain_with_stats_all_drained");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal.clone());
+
+            // Register 3 connections
+            let g1 = manager.register(test_addr(1)).expect("register 1");
+            let g2 = manager.register(test_addr(2)).expect("register 2");
+            let g3 = manager.register(test_addr(3)).expect("register 3");
+
+            // Begin drain with generous timeout
+            let began = signal.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "drain started", true, began);
+
+            // Drop all connections from a thread (simulating graceful close)
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                drop(g1);
+                std::thread::sleep(Duration::from_millis(10));
+                drop(g2);
+                std::thread::sleep(Duration::from_millis(10));
+                drop(g3);
+            });
+
+            let stats = manager.drain_with_stats().await;
+
+            let drained = stats.drained;
+            crate::assert_with_log!(drained == 3, "three drained", 3, drained);
+
+            let fc = stats.force_closed;
+            crate::assert_with_log!(fc == 0, "zero force-closed", 0, fc);
+
+            let stopped = signal.is_stopped();
+            crate::assert_with_log!(stopped, "stopped", true, stopped);
+
+            let phase = signal.phase();
+            let is_stopped = phase == ShutdownPhase::Stopped;
+            crate::assert_with_log!(is_stopped, "phase stopped", "Stopped", phase);
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("drain_with_stats_all_drained");
+    }
+
+    #[test]
+    fn drain_with_stats_timeout_force_close() {
+        init_test("drain_with_stats_timeout_force_close");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal.clone());
+
+            // Register 3 connections — only 1 will close before timeout
+            let g1 = manager.register(test_addr(1)).expect("register 1");
+            let _g2 = manager.register(test_addr(2)).expect("register 2");
+            let _g3 = manager.register(test_addr(3)).expect("register 3");
+
+            // Very short drain timeout so it expires quickly
+            let began = signal.begin_drain(Duration::from_millis(50));
+            crate::assert_with_log!(began, "drain started", true, began);
+
+            // Drop one connection quickly, leave two lingering
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                drop(g1);
+            });
+
+            let stats = manager.drain_with_stats().await;
+
+            // 1 drained gracefully, 2 force-closed
+            let drained = stats.drained;
+            crate::assert_with_log!(drained == 1, "one drained", 1, drained);
+
+            let fc = stats.force_closed;
+            crate::assert_with_log!(fc == 2, "two force-closed", 2, fc);
+
+            // Should have transitioned to ForceClosing
+            let phase = signal.phase();
+            let is_force = phase == ShutdownPhase::ForceClosing;
+            crate::assert_with_log!(is_force, "phase force-closing", "ForceClosing", phase);
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("drain_with_stats_timeout_force_close");
     }
 }
