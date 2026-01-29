@@ -722,8 +722,6 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<(T, usize), JoinError> {
         use crate::combinator::select::SelectAll;
 
-        assert!(!handles.is_empty(), "race_all called with empty handles");
-
         let futures: Vec<_> = handles.iter().map(|h| Box::pin(h.join(cx))).collect();
 
         let (result, winner_idx) = SelectAll::new(futures).await;
