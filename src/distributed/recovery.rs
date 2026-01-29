@@ -308,20 +308,15 @@ impl RecoveryCollector {
     ///
     /// Rejects symbols that have an ESI beyond the expected range if
     /// object parameters are known.
-    pub fn add_collected_with_verify(
-        &mut self,
-        cs: CollectedSymbol,
-    ) -> Result<bool, Error> {
+    pub fn add_collected_with_verify(&mut self, cs: CollectedSymbol) -> Result<bool, Error> {
         if let Some(params) = &self.object_params {
-            let max_expected =
-                params.total_source_symbols() + self.config.min_symbols;
+            let max_expected = params.total_source_symbols() + self.config.min_symbols;
             if cs.symbol.esi() > max_expected + 100 {
                 self.metrics.symbols_corrupt += 1;
-                return Err(Error::new(ErrorKind::CorruptedSymbol)
-                    .with_message(format!(
-                        "ESI {} exceeds expected range for object",
-                        cs.symbol.esi()
-                    )));
+                return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(format!(
+                    "ESI {} exceeds expected range for object",
+                    cs.symbol.esi()
+                )));
             }
         }
         Ok(self.add_collected(cs))
@@ -463,15 +458,9 @@ impl StateDecoder {
         let k = params.min_symbols_for_decode();
         if self.symbols.len() < k as usize {
             self.decoder_state = DecoderState::Failed {
-                reason: format!(
-                    "insufficient: have {}, need {k}",
-                    self.symbols.len()
-                ),
+                reason: format!("insufficient: have {}, need {k}", self.symbols.len()),
             };
-            return Err(Error::insufficient_symbols(
-                self.symbols.len() as u32,
-                k,
-            ));
+            return Err(Error::insufficient_symbols(self.symbols.len() as u32, k));
         }
 
         // Separate source and repair symbols.
@@ -491,12 +480,8 @@ impl StateDecoder {
         }
 
         if repair_symbols.len() >= missing.len() {
-            let data = Self::recover_with_xor_parity(
-                &source_by_esi,
-                &repair_symbols,
-                &missing,
-                params,
-            )?;
+            let data =
+                Self::recover_with_xor_parity(&source_by_esi, &repair_symbols, &missing, params)?;
             self.decoder_state = DecoderState::Complete;
             return Ok(data);
         }
@@ -508,10 +493,7 @@ impl StateDecoder {
                 repair_symbols.len()
             ),
         };
-        Err(Error::insufficient_symbols(
-            self.symbols.len() as u32,
-            k,
-        ))
+        Err(Error::insufficient_symbols(self.symbols.len() as u32, k))
     }
 
     /// Partitions accumulated symbols into source (by ESI slot) and repair.
@@ -564,8 +546,14 @@ impl StateDecoder {
             if let Some(src) = slot {
                 data.extend_from_slice(src.data());
             } else {
-                let recovered =
-                    Self::xor_recover_symbol(esi, source_by_esi, repair_symbols, missing, symbol_size, params);
+                let recovered = Self::xor_recover_symbol(
+                    esi,
+                    source_by_esi,
+                    repair_symbols,
+                    missing,
+                    symbol_size,
+                    params,
+                );
                 data.extend_from_slice(&recovered);
             }
         }
@@ -606,10 +594,7 @@ impl StateDecoder {
     }
 
     /// Convenience: decode and deserialize directly to [`RegionSnapshot`].
-    pub fn decode_snapshot(
-        &mut self,
-        params: &ObjectParams,
-    ) -> Result<RegionSnapshot, Error> {
+    pub fn decode_snapshot(&mut self, params: &ObjectParams) -> Result<RegionSnapshot, Error> {
         let data = self.decode(params)?;
         RegionSnapshot::from_bytes(&data).map_err(|e| {
             Error::new(ErrorKind::DecodingFailed)
@@ -676,10 +661,7 @@ pub struct RecoveryOrchestrator {
 impl RecoveryOrchestrator {
     /// Creates a new orchestrator.
     #[must_use]
-    pub fn new(
-        recovery_config: RecoveryConfig,
-        decoding_config: RecoveryDecodingConfig,
-    ) -> Self {
+    pub fn new(recovery_config: RecoveryConfig, decoding_config: RecoveryDecodingConfig) -> Self {
         let collector = RecoveryCollector::new(recovery_config.clone());
         let decoder = StateDecoder::new(decoding_config);
         Self {
@@ -952,11 +934,12 @@ mod tests {
     #[test]
     fn decoder_rejects_insufficient_symbols() {
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
-        let params = ObjectParams::new_for_test(1, 1000);
+        // K = 10 symbols needed (object_size=1280*10, symbol_size=1280).
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 12800, 1280, 1, 10);
 
         // Add fewer than K symbols.
         for i in 0..2 {
-            let sym = Symbol::new_for_test(1, 0, i, &[0u8; 128]);
+            let sym = Symbol::new_for_test(1, 0, i, &[0u8; 1280]);
             decoder.add_symbol(&sym).unwrap();
         }
 
@@ -1028,10 +1011,8 @@ mod tests {
             reason: None,
         };
 
-        let mut orchestrator = RecoveryOrchestrator::new(
-            RecoveryConfig::default(),
-            RecoveryDecodingConfig::default(),
-        );
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
 
         let result = orchestrator
             .recover_from_symbols(
@@ -1050,10 +1031,8 @@ mod tests {
 
     #[test]
     fn orchestrator_cancellation() {
-        let mut orchestrator = RecoveryOrchestrator::new(
-            RecoveryConfig::default(),
-            RecoveryDecodingConfig::default(),
-        );
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
 
         assert!(!orchestrator.is_recovering());
         orchestrator.cancel("test cancellation");
@@ -1071,14 +1050,10 @@ mod tests {
         let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 10);
 
         // Provide only 2 symbols (need 10).
-        let symbols: Vec<CollectedSymbol> = (0..2)
-            .map(|i| make_collected_symbol(i))
-            .collect();
+        let symbols: Vec<CollectedSymbol> = (0..2).map(make_collected_symbol).collect();
 
-        let mut orchestrator = RecoveryOrchestrator::new(
-            RecoveryConfig::default(),
-            RecoveryDecodingConfig::default(),
-        );
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
 
         let result = orchestrator.recover_from_symbols(
             &trigger,
@@ -1141,10 +1116,8 @@ mod tests {
             last_known_sequence: 41,
         };
 
-        let mut orchestrator = RecoveryOrchestrator::new(
-            RecoveryConfig::default(),
-            RecoveryDecodingConfig::default(),
-        );
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
 
         let result = orchestrator
             .recover_from_symbols(
