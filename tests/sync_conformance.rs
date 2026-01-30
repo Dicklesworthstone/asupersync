@@ -6,18 +6,18 @@
 //! Test Coverage:
 //! - SYNC-001: Mutex Basic Lock/Unlock
 //! - SYNC-002: Mutex Contention Correctness
-//! - SYNC-003: RwLock Reader/Writer Priority (TODO: awaits RwLock)
-//! - SYNC-004: Barrier Synchronization (TODO: awaits Barrier)
+//! - SYNC-003: RwLock Reader/Writer Priority
+//! - SYNC-004: Barrier Synchronization
 //! - SYNC-005: Semaphore Permit Limiting
-//! - SYNC-006: OnceCell Initialization (TODO: awaits OnceCell)
-//! - SYNC-007: Condvar Notification (TODO: awaits Condvar)
+//! - SYNC-006: OnceCell Initialization
+//! - SYNC-007: Notify (Condvar-style) Notification
 
 // Allow significant_drop_tightening in tests - the scoped blocks are for clarity
 #![allow(clippy::significant_drop_tightening)]
 
-use asupersync::sync::{LockError, Mutex, Semaphore};
+use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
 use asupersync::Cx;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 #[macro_use]
