@@ -944,3 +944,267 @@ fn svc_verify_027_error_display() {
 
     test_complete!("svc_verify_027_error_display");
 }
+
+// =============================================================================
+// Tower Adapter Integration (SVC-TOWER-001+)
+// =============================================================================
+
+#[cfg(feature = "tower")]
+mod tower_adapter_tests {
+    use super::{init_test, noop_waker, run_test_with_cx};
+    use asupersync::runtime::yield_now;
+    use asupersync::service::{
+        AdapterConfig, AsupersyncAdapter, AsupersyncService, AsupersyncServiceExt,
+        CancellationMode, TowerAdapterError,
+    };
+    use asupersync::{Budget, Cx};
+    use std::convert::Infallible;
+    use std::future;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tower::{Layer, Service, ServiceBuilder};
+
+    #[derive(Clone)]
+    struct AddOneService;
+
+    impl AsupersyncService<i32> for AddOneService {
+        type Response = i32;
+        type Error = Infallible;
+
+        async fn call(&self, _cx: &Cx, req: i32) -> Result<Self::Response, Self::Error> {
+            Ok(req + 1)
+        }
+    }
+
+    #[test]
+    fn tower_adapter_explicit_cx_call() {
+        init_test("tower_adapter_explicit_cx_call");
+
+        let mut adapter = AddOneService.into_tower();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let request_cx = Cx::for_testing();
+
+        let future = adapter.call((request_cx, 41));
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+        test_complete!("tower_adapter_explicit_cx_call");
+    }
+
+    #[test]
+    fn tower_adapter_with_provider_no_cx_error() {
+        init_test("tower_adapter_with_provider_no_cx_error");
+
+        let mut adapter = AddOneService.into_tower_with_provider();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let future = adapter.call(10);
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+
+        match result {
+            Poll::Ready(Err(err)) => {
+                assert!(format!("{err}").contains("no Cx available"));
+            }
+            _ => panic!("expected ProviderAdapterError::NoCx"),
+        }
+
+        test_complete!("tower_adapter_with_provider_no_cx_error");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn tower_adapter_with_provider_uses_current_cx() {
+        init_test("tower_adapter_with_provider_uses_current_cx");
+
+        let request_cx = Cx::for_testing();
+        let _guard = Cx::set_current(Some(request_cx));
+
+        let mut adapter = AddOneService.into_tower_with_provider();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let future = adapter.call(41);
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+        test_complete!("tower_adapter_with_provider_uses_current_cx");
+    }
+
+    #[derive(Clone)]
+    struct TowerAddOne;
+
+    impl Service<i32> for TowerAddOne {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = future::Ready<Result<i32, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            future::ready(Ok(req + 1))
+        }
+    }
+
+    #[test]
+    fn tower_adapter_tower_to_asupersync_basic() {
+        init_test("tower_adapter_tower_to_asupersync_basic");
+
+        run_test_with_cx(|cx| async move {
+            let adapter = AsupersyncAdapter::new(TowerAddOne);
+            let response = adapter.call(&cx, 41).await.expect("call failed");
+            assert_eq!(response, 42);
+        });
+
+        test_complete!("tower_adapter_tower_to_asupersync_basic");
+    }
+
+    #[test]
+    fn tower_adapter_cancelled_before_call() {
+        init_test("tower_adapter_cancelled_before_call");
+
+        run_test_with_cx(|cx| async move {
+            cx.set_cancel_requested(true);
+            let adapter = AsupersyncAdapter::new(TowerAddOne);
+            let err = adapter
+                .call(&cx, 1)
+                .await
+                .expect_err("expected cancellation");
+            assert!(matches!(err, TowerAdapterError::Cancelled));
+        });
+
+        test_complete!("tower_adapter_cancelled_before_call");
+    }
+
+    #[test]
+    fn tower_adapter_overloaded_on_low_budget() {
+        init_test("tower_adapter_overloaded_on_low_budget");
+
+        let cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+        let adapter = AsupersyncAdapter::new(TowerAddOne);
+
+        run_test_with_cx(|_| async move {
+            let err = adapter.call(&cx, 1).await.expect_err("expected overload");
+            assert!(matches!(err, TowerAdapterError::Overloaded));
+        });
+
+        test_complete!("tower_adapter_overloaded_on_low_budget");
+    }
+
+    #[derive(Clone)]
+    struct CancelDuringCall {
+        cx: Cx,
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Service<()> for CancelDuringCall {
+        type Response = ();
+        type Error = &'static str;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            let cx = self.cx.clone();
+            let hits = Arc::clone(&self.hits);
+            Box::pin(async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                yield_now().await;
+                cx.set_cancel_requested(true);
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn tower_adapter_strict_reports_cancellation_ignored() {
+        init_test("tower_adapter_strict_reports_cancellation_ignored");
+
+        run_test_with_cx(|cx| async move {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let service = CancelDuringCall {
+                cx: cx.clone(),
+                hits: Arc::clone(&hits),
+            };
+            let config = AdapterConfig::new().cancellation_mode(CancellationMode::Strict);
+            let adapter = AsupersyncAdapter::with_config(service, config);
+
+            let err = adapter
+                .call(&cx, ())
+                .await
+                .expect_err("expected cancellation error");
+            assert!(matches!(err, TowerAdapterError::CancellationIgnored));
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        });
+
+        test_complete!("tower_adapter_strict_reports_cancellation_ignored");
+    }
+
+    #[derive(Clone)]
+    struct AddOneLayer;
+
+    #[derive(Clone)]
+    struct AddOne<S> {
+        inner: S,
+    }
+
+    impl<S> Layer<S> for AddOneLayer {
+        type Service = AddOne<S>;
+
+        fn layer(&self, inner: S) -> Self::Service {
+            Self::Service { inner }
+        }
+    }
+
+    impl<S> Service<i32> for AddOne<S>
+    where
+        S: Service<i32, Response = i32>,
+    {
+        type Response = i32;
+        type Error = S::Error;
+        type Future = S::Future;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.inner.poll_ready(cx)
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            self.inner.call(req + 1)
+        }
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn tower_adapter_e2e_middleware_stack() {
+        init_test("tower_adapter_e2e_middleware_stack");
+
+        let request_cx = Cx::for_testing();
+        let _guard = Cx::set_current(Some(request_cx));
+
+        let service = AddOneService.into_tower_with_provider();
+        let mut service = ServiceBuilder::new().layer(AddOneLayer).service(service);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ready = service.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let future = service.call(20);
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+
+        assert!(matches!(result, Poll::Ready(Ok(22))));
+        test_complete!("tower_adapter_e2e_middleware_stack");
+    }
+}
