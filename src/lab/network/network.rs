@@ -491,6 +491,7 @@ fn bytes_to_nanos(len: usize, bandwidth: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::lab::network::NetworkConfig;
+    use crate::lab::network::LatencyModel;
 
     #[test]
     fn deterministic_delivery_same_seed() {
@@ -522,6 +523,174 @@ mod tests {
             assert_eq!(p1.received_at, p2.received_at);
             assert_eq!(p1.payload[..], p2.payload[..]);
         }
+    }
+
+    #[test]
+    fn multiple_hosts_receive() {
+        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+        let h3 = net.add_host("h3");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"one"));
+        net.send(h1, h3, Bytes::copy_from_slice(b"two"));
+        net.run_until_idle();
+
+        assert_eq!(net.inbox(h2).unwrap().len(), 1);
+        assert_eq!(net.inbox(h3).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fixed_latency_respected() {
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                latency: LatencyModel::Fixed(Duration::from_millis(10)),
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"delay"));
+        net.run_for(Duration::from_millis(9));
+        assert!(net.inbox(h2).unwrap().is_empty());
+
+        net.run_for(Duration::from_millis(1));
+        assert_eq!(net.inbox(h2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn uniform_latency_within_bounds() {
+        let min = Duration::from_millis(5);
+        let max = Duration::from_millis(15);
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                latency: LatencyModel::Uniform { min, max },
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        for _ in 0..50 {
+            net.send(h1, h2, Bytes::copy_from_slice(b"x"));
+        }
+        net.run_until_idle();
+
+        for packet in net.inbox(h2).unwrap() {
+            let nanos = packet.received_at.duration_since(packet.sent_at);
+            let latency = Duration::from_nanos(nanos);
+            assert!(latency >= min && latency <= max);
+        }
+    }
+
+    #[test]
+    fn packet_loss_drops_all() {
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                packet_loss: 1.0,
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"drop"));
+        net.run_until_idle();
+
+        assert!(net.inbox(h2).unwrap().is_empty());
+        assert_eq!(net.metrics().packets_dropped, 1);
+    }
+
+    #[test]
+    fn packet_corruption_marks_payload() {
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                packet_corrupt: 1.0,
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        let payload = Bytes::copy_from_slice(&[0b0000_0001]);
+        net.send(h1, h2, payload.clone());
+        net.run_until_idle();
+
+        let packet = &net.inbox(h2).unwrap()[0];
+        assert!(packet.corrupted);
+        assert_ne!(packet.payload[..], payload[..]);
+        assert_eq!(net.metrics().packets_corrupted, 1);
+    }
+
+    #[test]
+    fn bandwidth_limiting_spaces_packets() {
+        let config = NetworkConfig {
+            enable_bandwidth: true,
+            default_bandwidth: 1_000,
+            default_conditions: NetworkConditions::ideal(),
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        let payload = Bytes::copy_from_slice(&vec![0u8; 1000]);
+        net.send(h1, h2, payload.clone());
+        net.send(h1, h2, payload);
+        net.run_until_idle();
+
+        let inbox = net.inbox(h2).unwrap();
+        assert_eq!(inbox.len(), 2);
+        assert_eq!(inbox[0].received_at.as_nanos(), 1_000_000_000);
+        assert_eq!(inbox[1].received_at.as_nanos(), 2_000_000_000);
+    }
+
+    #[test]
+    fn trace_capture_records_events() {
+        let config = NetworkConfig {
+            capture_trace: true,
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"trace"));
+        net.run_until_idle();
+
+        let trace = net.trace();
+        assert!(trace.iter().any(|e| e.kind == NetworkTraceKind::Send));
+        assert!(trace.iter().any(|e| e.kind == NetworkTraceKind::Deliver));
+    }
+
+    #[test]
+    fn host_crash_and_restart() {
+        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"first"));
+        net.run_until_idle();
+        assert_eq!(net.inbox(h2).unwrap().len(), 1);
+
+        net.inject_fault(&Fault::HostCrash { host: h2 });
+        net.send(h1, h2, Bytes::copy_from_slice(b"drop"));
+        net.run_until_idle();
+        assert!(net.inbox(h2).unwrap().is_empty());
+
+        net.inject_fault(&Fault::HostRestart { host: h2 });
+        net.send(h1, h2, Bytes::copy_from_slice(b"after"));
+        net.run_until_idle();
+        assert_eq!(net.inbox(h2).unwrap().len(), 1);
     }
 
     #[test]

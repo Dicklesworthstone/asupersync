@@ -332,4 +332,72 @@ mod tests {
             assert_eq!(model.sample(&mut rng1), model.sample(&mut rng2));
         }
     }
+
+    #[test]
+    fn latency_models_constant_cases() {
+        let mut rng = DetRng::new(7);
+        let fixed = LatencyModel::Fixed(Duration::from_millis(5));
+        assert_eq!(fixed.sample(&mut rng), Duration::from_millis(5));
+
+        let uniform = LatencyModel::Uniform {
+            min: Duration::from_millis(3),
+            max: Duration::from_millis(3),
+        };
+        assert_eq!(uniform.sample(&mut rng), Duration::from_millis(3));
+
+        let normal = LatencyModel::Normal {
+            mean: Duration::from_millis(12),
+            std_dev: Duration::ZERO,
+        };
+        assert_eq!(normal.sample(&mut rng), Duration::from_millis(12));
+
+        let log_normal = LatencyModel::LogNormal {
+            mu: 0.0,
+            sigma: 0.0,
+        };
+        assert_eq!(log_normal.sample(&mut rng), duration_from_secs_f64(1.0));
+
+        let bimodal_low = LatencyModel::Bimodal {
+            low: Duration::from_millis(4),
+            high: Duration::from_millis(9),
+            high_probability: 0.0,
+        };
+        assert_eq!(bimodal_low.sample(&mut rng), Duration::from_millis(4));
+
+        let bimodal_high = LatencyModel::Bimodal {
+            low: Duration::from_millis(4),
+            high: Duration::from_millis(9),
+            high_probability: 1.0,
+        };
+        assert_eq!(bimodal_high.sample(&mut rng), Duration::from_millis(9));
+    }
+
+    #[test]
+    fn jitter_models_respect_bounds() {
+        let mut rng = DetRng::new(99);
+        let uniform = JitterModel::Uniform {
+            max: Duration::from_millis(6),
+        };
+        for _ in 0..100 {
+            assert!(uniform.sample(&mut rng) <= Duration::from_millis(6));
+        }
+
+        let bursty_normal = JitterModel::Bursty {
+            normal_jitter: Duration::from_millis(2),
+            burst_jitter: Duration::from_millis(10),
+            burst_probability: 0.0,
+        };
+        for _ in 0..100 {
+            assert!(bursty_normal.sample(&mut rng) <= Duration::from_millis(2));
+        }
+
+        let bursty_burst = JitterModel::Bursty {
+            normal_jitter: Duration::from_millis(2),
+            burst_jitter: Duration::from_millis(10),
+            burst_probability: 1.0,
+        };
+        for _ in 0..100 {
+            assert!(bursty_burst.sample(&mut rng) <= Duration::from_millis(10));
+        }
+    }
 }
