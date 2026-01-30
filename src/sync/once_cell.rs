@@ -14,8 +14,8 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Condvar, Mutex as StdMutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 /// State values for OnceCell.
@@ -43,9 +43,17 @@ impl fmt::Display for OnceCellError {
 
 impl std::error::Error for OnceCellError {}
 
+/// A queued waiter for cell initialization.
+#[derive(Debug)]
+struct InitWaiter {
+    waker: Waker,
+    /// Flag indicating whether this waiter is still queued.
+    queued: Arc<AtomicBool>,
+}
+
 /// Internal state holding waiters.
 struct WaiterState {
-    waiters: Vec<Waker>,
+    waiters: Vec<InitWaiter>,
 }
 
 /// A cell that can be initialized exactly once.
@@ -225,7 +233,7 @@ impl<T> OnceCell<T> {
             }
             Err(INITIALIZING) => {
                 // Another task is initializing. Wait for it.
-                WaitInit { cell: self }.await;
+                WaitInit { cell: self, waiter: None }.await;
                 self.value.get().expect("should be initialized after wait")
             }
             Err(INITIALIZED) => {
@@ -290,7 +298,7 @@ impl<T> OnceCell<T> {
             }
             Err(INITIALIZING) => {
                 // Another task is initializing. Wait for it.
-                WaitInit { cell: self }.await;
+                WaitInit { cell: self, waiter: None }.await;
                 // The other task might have failed, check state.
                 if self.is_initialized() {
                     Ok(self.value.get().expect("should be initialized"))
@@ -345,26 +353,52 @@ impl<T> OnceCell<T> {
 
     /// Wakes all async waiters.
     fn wake_all(&self) {
-        let wakers: Vec<Waker> = {
+        let wakers: Vec<(Waker, Arc<AtomicBool>)> = {
             let mut guard = match self.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            std::mem::take(&mut guard.waiters)
+            guard
+                .waiters
+                .drain(..)
+                .map(|w| (w.waker, w.queued))
+                .collect()
         };
 
-        for waker in wakers {
+        for (waker, queued) in wakers {
+            queued.store(false, Ordering::Release);
             waker.wake();
         }
     }
 
-    /// Registers a waker for async waiting.
-    fn register_waker(&self, waker: &Waker) {
+    /// Registers a waker for async waiting with tracking to prevent unbounded growth.
+    fn register_waker(&self, waker: &Waker, waiter_flag: &Option<Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
         let mut guard = match self.waiters.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard.waiters.push(waker.clone());
+
+        match waiter_flag {
+            Some(flag) if !flag.load(Ordering::Acquire) => {
+                // We were woken but not ready yet - re-register
+                flag.store(true, Ordering::Release);
+                guard.waiters.push(InitWaiter {
+                    waker: waker.clone(),
+                    queued: Arc::clone(flag),
+                });
+                None
+            }
+            Some(_) => None, // Still queued, don't add again
+            None => {
+                // First time - create new waiter
+                let flag = Arc::new(AtomicBool::new(true));
+                guard.waiters.push(InitWaiter {
+                    waker: waker.clone(),
+                    queued: Arc::clone(&flag),
+                });
+                Some(flag)
+            }
+        }
     }
 }
 
@@ -424,15 +458,19 @@ impl Drop for InitGuard<'_> {
 /// Future that waits for initialization to complete.
 struct WaitInit<'a, T> {
     cell: &'a OnceCell<T>,
+    /// Tracks whether we've registered a waiter to prevent unbounded queue growth.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl<T> Future for WaitInit<'_, T> {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let state = self.cell.state.load(Ordering::Acquire);
         if state == INITIALIZING {
-            self.cell.register_waker(cx.waker());
+            if let Some(new_waiter) = self.cell.register_waker(cx.waker(), &self.waiter) {
+                self.waiter = Some(new_waiter);
+            }
             // Double-check after registering.
             if self.cell.state.load(Ordering::Acquire) == INITIALIZING {
                 Poll::Pending
