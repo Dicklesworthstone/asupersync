@@ -1659,17 +1659,16 @@ mod tests {
                 .expect("metadata")
                 .len();
 
+            #[allow(clippy::cast_precision_loss)]
             let ratio = uncompressed_size as f64 / compressed_size as f64;
             println!(
-                "Compression ratio: {:.2}x ({} -> {} bytes)",
-                ratio, uncompressed_size, compressed_size
+                "Compression ratio: {ratio:.2}x ({uncompressed_size} -> {compressed_size} bytes)"
             );
 
             // LZ4 should achieve at least 2x compression on this repetitive data
             assert!(
                 ratio > 2.0,
-                "Compression ratio {:.2}x is below expected 2x minimum",
-                ratio
+                "Compression ratio {ratio:.2}x is below expected 2x minimum"
             );
         }
 

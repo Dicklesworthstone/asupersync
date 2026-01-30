@@ -1,4 +1,5 @@
 //! Asupersync CLI tools (feature-gated).
+#![allow(clippy::result_large_err)]
 
 use asupersync::cli::{
     parse_color_choice, parse_output_format, CliError, ColorChoice, CommonArgs, Output,
@@ -220,16 +221,12 @@ impl Outputtable for TraceEventRow {
         let time = self
             .time_nanos
             .map(Time::from_nanos)
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "-".to_string());
+            .map_or_else(|| "-".to_string(), |t| t.to_string());
         format!("#{:06} [{time}] {:?}", self.index, self.event)
     }
 
     fn tsv_format(&self) -> String {
-        let time = self
-            .time_nanos
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "".to_string());
+        let time = self.time_nanos.map_or_else(String::new, |t| t.to_string());
         format!("{}\t{}\t{}\t{:?}", self.index, self.kind, time, self.event)
     }
 }
@@ -376,6 +373,11 @@ fn trace_info(path: &Path) -> Result<TraceInfo, CliError> {
     let file_version = read_trace_version(path)?;
     let mut reader = TraceReader::open(path).map_err(|err| trace_file_error(path, err))?;
     let metadata = reader.metadata().clone();
+    let schema_version = metadata.version;
+    let seed = metadata.seed;
+    let recorded_at = metadata.recorded_at;
+    let config_hash = metadata.config_hash;
+    let description = metadata.description;
     let event_count = reader.event_count();
     let compression = reader.compression();
     let size_bytes = file_size(path)?;
@@ -385,16 +387,16 @@ fn trace_info(path: &Path) -> Result<TraceInfo, CliError> {
     Ok(TraceInfo {
         file: path.display().to_string(),
         file_version,
-        schema_version: metadata.version,
+        schema_version,
         compressed: compression.is_compressed(),
         compression: compression_label(compression),
         size_bytes,
         event_count,
         duration_nanos,
-        created_at: format_timestamp(metadata.recorded_at),
-        seed: metadata.seed,
-        config_hash: metadata.config_hash,
-        description: metadata.description.clone(),
+        created_at: format_timestamp(recorded_at),
+        seed,
+        config_hash,
+        description,
     })
 }
 
@@ -466,7 +468,7 @@ fn trace_verify(
         options.check_monotonicity = true;
     }
 
-    let result = verify_trace(path, &options).map_err(|err| io_error(path, err))?;
+    let result = verify_trace(path, &options).map_err(|err| io_error(path, &err))?;
     let issues = result
         .issues()
         .iter()
@@ -598,10 +600,10 @@ fn export_trace(path: &Path, format: ExportFormat) -> Result<(), CliError> {
 }
 
 fn read_trace_version(path: &Path) -> Result<u16, CliError> {
-    let mut file = File::open(path).map_err(|err| io_error(path, err))?;
+    let mut file = File::open(path).map_err(|err| io_error(path, &err))?;
     let mut magic = [0u8; 11];
     file.read_exact(&mut magic)
-        .map_err(|err| io_error(path, err))?;
+        .map_err(|err| io_error(path, &err))?;
     if magic != *TRACE_MAGIC {
         return Err(CliError::new("invalid_trace", "Invalid trace file magic")
             .detail("File does not appear to be a valid Asupersync trace"));
@@ -609,7 +611,7 @@ fn read_trace_version(path: &Path) -> Result<u16, CliError> {
 
     let mut version_bytes = [0u8; 2];
     file.read_exact(&mut version_bytes)
-        .map_err(|err| io_error(path, err))?;
+        .map_err(|err| io_error(path, &err))?;
     let version = u16::from_le_bytes(version_bytes);
     if version > TRACE_FILE_VERSION {
         return Err(
@@ -625,7 +627,7 @@ fn read_trace_version(path: &Path) -> Result<u16, CliError> {
 fn file_size(path: &Path) -> Result<u64, CliError> {
     std::fs::metadata(path)
         .map(|meta| meta.len())
-        .map_err(|err| io_error(path, err))
+        .map_err(|err| io_error(path, &err))
 }
 
 fn compute_duration_nanos(reader: &mut TraceReader) -> Result<Option<u64>, TraceFileError> {
@@ -709,13 +711,13 @@ fn format_timestamp(recorded_at_nanos: u64) -> Option<String> {
     if recorded_at_nanos == 0 {
         return None;
     }
-    let timestamp =
-        time::OffsetDateTime::from_unix_timestamp_nanos(recorded_at_nanos as i128).ok()?;
-    Some(
-        timestamp
-            .format(&time::format_description::well_known::Rfc3339)
-            .ok()?,
-    )
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(recorded_at_nanos))
+        .ok()
+        .and_then(|timestamp| {
+            timestamp
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
 }
 
 fn issue_severity_label(severity: IssueSeverity) -> &'static str {
@@ -728,7 +730,7 @@ fn issue_severity_label(severity: IssueSeverity) -> &'static str {
 
 fn trace_file_error(path: &Path, err: TraceFileError) -> CliError {
     match err {
-        TraceFileError::Io(io_err) => io_error(path, io_err),
+        TraceFileError::Io(io_err) => io_error(path, &io_err),
         TraceFileError::InvalidMagic => {
             CliError::new("invalid_trace", "Invalid trace file").detail("Invalid magic bytes")
         }
@@ -773,7 +775,7 @@ fn trace_file_error(path: &Path, err: TraceFileError) -> CliError {
     .context("path", path.display().to_string())
 }
 
-fn io_error(path: &Path, err: io::Error) -> CliError {
+fn io_error(path: &Path, err: &io::Error) -> CliError {
     let mut error = match err.kind() {
         io::ErrorKind::NotFound => {
             CliError::new("file_not_found", "File not found").detail(err.to_string())
@@ -797,9 +799,10 @@ fn write_cli_error(err: &CliError, format: OutputFormat, color: ColorChoice) -> 
         OutputFormat::Human => {
             writeln!(stderr, "{}", err.human_format(color.should_colorize()))
         }
-        OutputFormat::Json => writeln!(stderr, "{}", err.json_format()),
+        OutputFormat::Json | OutputFormat::StreamJson => {
+            writeln!(stderr, "{}", err.json_format())
+        }
         OutputFormat::JsonPretty => writeln!(stderr, "{}", err.json_pretty_format()),
-        OutputFormat::StreamJson => writeln!(stderr, "{}", err.json_format()),
         OutputFormat::Tsv => {
             let mut line = String::new();
             let _ = write!(line, "{}\t{}\t{}", err.error_type, err.title, err.detail);
@@ -809,20 +812,26 @@ fn write_cli_error(err: &CliError, format: OutputFormat, color: ColorChoice) -> 
 }
 
 fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
 
-    let bytes_f = bytes as f64;
-    if bytes_f >= GB {
-        format!("{:.2} GB ({bytes} bytes)", bytes_f / GB)
-    } else if bytes_f >= MB {
-        format!("{:.2} MB ({bytes} bytes)", bytes_f / MB)
-    } else if bytes_f >= KB {
-        format!("{:.2} KB ({bytes} bytes)", bytes_f / KB)
+    if bytes >= GB {
+        format_scaled(bytes, GB, "GB")
+    } else if bytes >= MB {
+        format_scaled(bytes, MB, "MB")
+    } else if bytes >= KB {
+        format_scaled(bytes, KB, "KB")
     } else {
         format!("{bytes} bytes")
     }
+}
+
+fn format_scaled(bytes: u64, unit: u64, label: &str) -> String {
+    let whole = bytes / unit;
+    let rem = bytes % unit;
+    let decimals = (rem * 100) / unit;
+    format!("{whole}.{decimals:02} {label} ({bytes} bytes)")
 }
 
 #[cfg(test)]

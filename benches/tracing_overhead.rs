@@ -105,7 +105,7 @@ fn bench_trace_write_lz4(c: &mut Criterion) {
         b.iter(|| {
             let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
             write_trace_file(&path, config, &events);
-        })
+        });
     });
 }
 
@@ -123,7 +123,7 @@ fn bench_trace_read_lz4(c: &mut Criterion) {
             let reader = TraceReader::open(&path).expect("open trace reader");
             let loaded = reader.load_all().expect("load trace");
             black_box(loaded.len());
-        })
+        });
     });
 }
 

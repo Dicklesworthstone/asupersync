@@ -166,3 +166,90 @@ fn replayer_run_to_breakpoint() {
     );
     test_complete!("replayer_run_to_breakpoint");
 }
+
+#[test]
+fn e2e_debugging_workflow_record_save_load_step() {
+    init_test("e2e_debugging_workflow_record_save_load_step");
+
+    // Phase 1: Record execution
+    test_section!("record");
+    let trace = record_simple_trace();
+    let event_count = trace.len();
+    tracing::info!(event_count, "Recorded trace");
+    assert!(event_count > 0, "must record events");
+
+    // Phase 2: Persist trace to file
+    test_section!("persist");
+    let temp = NamedTempFile::new().expect("tempfile");
+    let path = temp.path();
+    let mut writer = TraceWriter::create(path).expect("create writer");
+    writer
+        .write_metadata(&trace.metadata)
+        .expect("write metadata");
+    for event in &trace.events {
+        writer.write_event(event).expect("write event");
+    }
+    writer.finish().expect("finish writer");
+    tracing::info!(?path, "Trace persisted to file");
+
+    // Phase 3: Load trace from file (simulating later debug session)
+    test_section!("load");
+    let reader = TraceReader::open(path).expect("open reader");
+    let loaded_metadata = reader.metadata().clone();
+    let loaded_events: Vec<_> = reader.events().map(|e| e.expect("read event")).collect();
+    let loaded_trace = ReplayTrace {
+        metadata: loaded_metadata,
+        events: loaded_events,
+    };
+    tracing::info!(events = loaded_trace.len(), "Loaded trace from file");
+
+    // Phase 4: Step through events one by one (debugging workflow)
+    test_section!("step-through");
+    let mut replayer = TraceReplayer::new(loaded_trace);
+    let mut stepped = 0;
+    while let Ok(Some(_event)) = replayer.step() {
+        stepped += 1;
+        tracing::debug!(
+            index = replayer.current_index(),
+            remaining = replayer.remaining_events().len(),
+            "Stepped event"
+        );
+    }
+    assert_with_log!(
+        stepped == event_count,
+        "stepped all events",
+        event_count,
+        stepped
+    );
+    assert_with_log!(
+        replayer.is_completed(),
+        "replayer completed",
+        true,
+        replayer.is_completed()
+    );
+
+    // Phase 5: Seek back and set breakpoint (interactive debugging)
+    test_section!("seek-and-breakpoint");
+    replayer.reset();
+    assert_with_log!(
+        replayer.current_index() == 0,
+        "reset to start",
+        0usize,
+        replayer.current_index()
+    );
+
+    let mid = event_count / 2;
+    if mid > 0 {
+        replayer.set_mode(ReplayMode::RunTo(Breakpoint::EventIndex(mid)));
+        let processed = replayer.run().expect("run to midpoint");
+        tracing::info!(processed, mid, "Hit breakpoint at midpoint");
+        assert_with_log!(
+            replayer.at_breakpoint(),
+            "at midpoint breakpoint",
+            true,
+            replayer.at_breakpoint()
+        );
+    }
+
+    test_complete!("e2e_debugging_workflow_record_save_load_step");
+}
