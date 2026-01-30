@@ -117,6 +117,8 @@ pub struct Stream {
     recv_window: i32,
     /// Initial window size (for window update calculations).
     initial_send_window: i32,
+    /// Initial receive window size (for auto WINDOW_UPDATE threshold).
+    initial_recv_window: i32,
     /// Priority specification.
     priority: PrioritySpec,
     /// Pending data to send (buffered due to flow control).
@@ -150,6 +152,7 @@ impl Stream {
             send_window: initial_send_window,
             recv_window: default_recv_window,
             initial_send_window,
+            initial_recv_window: default_recv_window,
             priority: PrioritySpec {
                 exclusive: false,
                 dependency: 0,
@@ -240,6 +243,21 @@ impl Stream {
     pub fn consume_recv_window(&mut self, amount: u32) {
         let amount = i32::try_from(amount).expect("window size exceeds i32");
         self.recv_window -= amount;
+    }
+
+    /// Check if the receive window is low enough to warrant an automatic WINDOW_UPDATE.
+    ///
+    /// Returns `Some(increment)` when the recv window has dropped below 50% of
+    /// its initial value. The increment replenishes the window back to its initial size.
+    #[must_use]
+    pub fn auto_window_update_increment(&self) -> Option<u32> {
+        let low_watermark = self.initial_recv_window / 2;
+        if self.recv_window < low_watermark {
+            let increment = i64::from(self.initial_recv_window) - i64::from(self.recv_window);
+            u32::try_from(increment).ok().filter(|&inc| inc > 0)
+        } else {
+            None
+        }
     }
 
     /// Set the priority.

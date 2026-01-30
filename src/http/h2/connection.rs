@@ -425,6 +425,20 @@ impl Connection {
             u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
         stream.recv_data(payload_len, frame.end_stream)?;
 
+        // Auto stream-level WINDOW_UPDATE when recv window drops below 50%.
+        if let Some(increment) = stream.auto_window_update_increment() {
+            // Cannot call send_stream_window_update while stream is borrowed,
+            // so we update the stream's recv_window and queue the op directly.
+            stream.update_recv_window(
+                i32::try_from(increment)
+                    .map_err(|_| H2Error::flow_control("stream window increment too large"))?,
+            )?;
+            self.pending_ops.push_back(PendingOp::WindowUpdate {
+                stream_id: frame.stream_id,
+                increment,
+            });
+        }
+
         // Update connection-level window
         let window_delta = i32::try_from(payload_len)
             .map_err(|_| H2Error::flow_control("data too large for window"))?;
@@ -675,8 +689,54 @@ impl Connection {
                 data,
                 end_stream,
             } => {
-                // TODO: Handle flow control properly
-                Some(Frame::Data(DataFrame::new(stream_id, data, end_stream)))
+                // Determine the maximum sendable bytes from both windows.
+                let conn_avail = self.send_window.max(0).cast_unsigned();
+                let stream_avail = self
+                    .streams
+                    .get(stream_id)
+                    .map_or(0, |s| s.send_window().max(0).cast_unsigned());
+                let max_send = conn_avail.min(stream_avail) as usize;
+
+                if max_send == 0 && !data.is_empty() {
+                    // No send window available; re-queue for later.
+                    self.pending_ops.push_back(PendingOp::Data {
+                        stream_id,
+                        data,
+                        end_stream,
+                    });
+                    return self.next_frame();
+                }
+
+                let send_len = data.len().min(max_send);
+                let (to_send, remainder) = if send_len < data.len() {
+                    (data.slice(..send_len), Some(data.slice(send_len..)))
+                } else {
+                    (data, None)
+                };
+
+                // Re-queue leftover data (end_stream only on the final piece).
+                let actually_end = end_stream && remainder.is_none();
+                if let Some(rest) = remainder {
+                    self.pending_ops.push_front(PendingOp::Data {
+                        stream_id,
+                        data: rest,
+                        end_stream,
+                    });
+                }
+
+                // Consume send windows.
+                let consumed =
+                    u32::try_from(to_send.len()).expect("send_len already clamped to u32 range");
+                self.send_window -= consumed.cast_signed();
+                if let Some(stream) = self.streams.get_mut(stream_id) {
+                    stream.consume_send_window(consumed);
+                }
+
+                Some(Frame::Data(DataFrame::new(
+                    stream_id,
+                    to_send,
+                    actually_end,
+                )))
             }
             PendingOp::RstStream {
                 stream_id,
