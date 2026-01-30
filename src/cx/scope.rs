@@ -373,8 +373,8 @@ impl<P: Policy> Scope<'_, P> {
             }
         };
 
-        // Create stored task
-        let stored = StoredTask::new(wrapped);
+        // Create stored task with task_id for poll tracing
+        let stored = StoredTask::new_with_id(wrapped, task_id);
 
         Ok((handle, stored))
     }
@@ -635,7 +635,7 @@ impl<P: Policy> Scope<'_, P> {
             }
         };
 
-        let stored = StoredTask::new(wrapped);
+        let stored = StoredTask::new_with_id(wrapped, task_id);
 
         Ok((handle, stored))
     }

@@ -8,6 +8,7 @@ use crate::tracing_compat::{debug, trace};
 use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 /// The concrete outcome type stored in task records (Phase 0).
 pub type TaskOutcome = Outcome<(), crate::error::Error>;
@@ -182,6 +183,10 @@ pub struct TaskRecord {
 
     /// Number of polls remaining (for budget tracking).
     pub polls_remaining: u32,
+    /// Total number of polls executed (for completion metrics).
+    pub total_polls: u64,
+    /// Wall-clock instant when the task was created (for duration tracking).
+    pub created_instant: Instant,
     /// Lab-only: last step this task was polled (for futurelock detection).
     pub last_polled_step: u64,
     /// Tasks waiting for this task to complete.
@@ -208,6 +213,8 @@ impl TaskRecord {
             cx: None,
             created_at,
             polls_remaining: budget.poll_quota,
+            total_polls: 0,
+            created_instant: Instant::now(),
             last_polled_step: 0,
             waiters: Vec::new(),
         }
@@ -232,6 +239,13 @@ impl TaskRecord {
     /// Records that the task was polled on the given lab step.
     pub fn mark_polled(&mut self, step: u64) {
         self.last_polled_step = step;
+    }
+
+    /// Increments the total poll counter for this task.
+    ///
+    /// Call this each time the task is polled to maintain accurate metrics.
+    pub fn increment_polls(&mut self) {
+        self.total_polls += 1;
     }
 
     /// Returns true if the task can be polled.
@@ -425,7 +439,7 @@ impl TaskRecord {
     /// Completes the task with the given outcome.
     ///
     /// Returns true if the state changed.
-    #[allow(clippy::used_underscore_binding)]
+    #[allow(clippy::used_underscore_binding, clippy::no_effect_underscore_binding)]
     pub fn complete(&mut self, outcome: TaskOutcome) -> bool {
         if self.state.is_terminal() {
             return false;
@@ -437,12 +451,16 @@ impl TaskRecord {
             Outcome::Cancelled(_) => "Cancelled",
             Outcome::Panicked(_) => "Panicked",
         };
+        let _duration_us = self.created_instant.elapsed().as_micros() as u64;
+        let _total_polls = self.total_polls;
         debug!(
             task_id = ?self.id,
             region_id = ?self.owner,
             old_state = _prev_state,
             new_state = "Completed",
             outcome_kind = _outcome_label,
+            duration_us = _duration_us,
+            poll_count = _total_polls,
             "task completed"
         );
         self.state = TaskState::Completed(outcome);
@@ -551,6 +569,7 @@ impl TaskRecord {
     /// ```text
     /// Finalizing { .. } → Completed(Cancelled(reason))
     /// ```
+    #[allow(clippy::no_effect_underscore_binding)]
     pub fn finalize_done(&mut self) -> bool {
         let TaskState::Finalizing {
             reason,
@@ -561,6 +580,8 @@ impl TaskRecord {
         };
         let reason = reason.clone();
         let budget = *cleanup_budget;
+        let _duration_us = self.created_instant.elapsed().as_micros() as u64;
+        let _total_polls = self.total_polls;
         debug!(
             task_id = ?self.id,
             region_id = ?self.owner,
@@ -570,6 +591,8 @@ impl TaskRecord {
             cancel_kind = ?reason.kind,
             finalizer_budget_poll_quota = budget.poll_quota,
             finalizer_budget_priority = budget.priority,
+            duration_us = _duration_us,
+            poll_count = _total_polls,
             "task finalization done"
         );
         let _ = budget;

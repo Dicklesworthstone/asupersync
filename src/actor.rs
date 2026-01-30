@@ -376,7 +376,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             }
         };
 
-        let stored = StoredTask::new(wrapped);
+        let stored = StoredTask::new_with_id(wrapped, task_id);
 
         let handle = ActorHandle {
             sender: msg_tx,
@@ -472,7 +472,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             let _ = result_tx.send(&cx_for_send, result);
         };
 
-        let stored = StoredTask::new(wrapped);
+        let stored = StoredTask::new_with_id(wrapped, task_id);
 
         let handle = ActorHandle {
             sender: msg_tx,
