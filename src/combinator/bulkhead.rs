@@ -456,8 +456,7 @@ impl Bulkhead {
         let permit = self.try_acquire(weight).ok_or(BulkheadError::Full)?;
 
         // Use catch_unwind to ensure permit is released even if op panics.
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(op));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(op));
 
         permit.release_to(self);
 
