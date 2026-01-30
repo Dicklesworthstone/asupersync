@@ -32,14 +32,15 @@ mod common;
 
 use asupersync::cx::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::{TcpListener, TcpStream};
-use asupersync::runtime::reactor::{Interest, LabReactor};
-use asupersync::runtime::{IoDriverHandle, Reactor, RuntimeBuilder};
-use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::runtime::reactor::{Interest, LabReactor, Token};
+use asupersync::runtime::{IoDriverHandle, IoOp, Reactor};
+use asupersync::types::{Budget, CancelReason, RegionId, TaskId};
 use common::*;
 use futures_lite::future::block_on;
 use std::future::Future;
-use std::io::{self, Write};
+use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -82,6 +83,7 @@ fn setup_test_cx() -> (Arc<LabReactor>, impl Drop) {
 }
 
 /// Create a connected TCP pair for testing.
+#[allow(dead_code)]
 fn create_connected_pair() -> io::Result<(TcpStream, std::net::TcpStream)> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -295,42 +297,47 @@ fn io_cancel_005_registration_cleanup_on_drop() {
 
     let (reactor, _guard) = setup_test_cx();
     let initial_count = reactor.registration_count();
+    assert_eq!(initial_count, 0, "lab reactor should start empty");
 
-    let result = block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
+    // Use a pipe fd as a dummy Source for registration.
+    let (pipe_r, pipe_w) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    pipe_r
+        .set_nonblocking(true)
+        .expect("set nonblocking on read end");
 
-        // Connect in background
-        let connect_handle = thread::spawn(move || block_on(TcpStream::connect(addr)));
+    let token = Token::new(42);
 
-        // Accept
-        let (mut stream, _) = listener.accept().await?;
+    // Register the source — count should increase.
+    reactor
+        .register(&pipe_r, token, Interest::READABLE)
+        .expect("register");
+    assert_eq!(
+        reactor.registration_count(),
+        1,
+        "should have 1 registration"
+    );
 
-        // Trigger registration by attempting I/O
-        let mut buf = [0u8; 1024];
-        let mut read_buf = ReadBuf::new(&mut buf);
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+    // Deregister — simulates cleanup on Drop.
+    reactor.deregister(token).expect("deregister");
+    assert_eq!(
+        reactor.registration_count(),
+        0,
+        "should be back to 0 after deregister"
+    );
 
-        // This should register with the reactor
-        let _ = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
+    // Also verify double-deregister returns an error (no leaks or double-free).
+    assert!(
+        reactor.deregister(token).is_err(),
+        "double deregister should fail"
+    );
 
-        // Get client
-        let _ = connect_handle.join();
+    drop(pipe_w);
+    drop(pipe_r);
 
-        // Stream dropped here
-        Ok::<_, io::Error>(())
-    });
-
-    // After drop, registration count should return to initial
     let final_count = reactor.registration_count();
     tracing::info!(initial_count, final_count, "registration counts");
+    assert_eq!(final_count, 0, "no leaked registrations");
 
-    assert!(
-        result.is_ok(),
-        "registration cleanup test should complete: {:?}",
-        result
-    );
     test_complete!("io_cancel_005_registration_cleanup_on_drop");
 }
 
@@ -644,4 +651,72 @@ fn io_cancel_wouldblock_registers_interest() {
     drop(client);
 
     test_complete!("io_cancel_wouldblock_registers_interest");
+}
+
+// ============================================================================
+// IO-CANCEL-009: IoOp cancellation clears obligation (oracle-friendly)
+// ============================================================================
+
+/// Verifies that cancelling an IoOp leaves no pending obligations.
+#[test]
+fn io_cancel_009_io_op_cancel_clears_obligation() {
+    init_test("io_cancel_009_io_op_cancel_clears_obligation");
+
+    let mut runtime = LabRuntime::new(LabConfig::new(42));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {
+            loop {
+                let Some(cx) = Cx::current() else {
+                    return;
+                };
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                asupersync::runtime::yield_now().await;
+            }
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("io op".to_string()),
+    )
+    .expect("submit io op");
+
+    for _ in 0..3 {
+        runtime.step_for_test();
+    }
+
+    let cancel_reason = CancelReason::shutdown();
+    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    {
+        let mut scheduler = runtime.scheduler.lock().unwrap();
+        for (task, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task, priority);
+        }
+    }
+
+    let _ = io_op.cancel(&mut runtime.state).expect("cancel io op");
+    runtime.run_until_quiescent();
+
+    let pending = runtime.state.pending_obligation_count();
+    let violations = runtime.check_invariants();
+
+    assert!(
+        pending == 0,
+        "no pending obligations after IoOp cancel: {pending}"
+    );
+    assert!(
+        violations.is_empty(),
+        "expected no invariant violations after IoOp cancel: {violations:?}"
+    );
+
+    test_complete!("io_cancel_009_io_op_cancel_clears_obligation");
 }
