@@ -16,6 +16,7 @@
 //! - IO-CANCEL-007: Nested task cancellation propagates to I/O
 //! - IO-CANCEL-008: Multiple concurrent I/O operations cancel correctly
 //! - IO-CANCEL-009: IoOp cancel clears obligation and invariants
+//! - IO-CANCEL-010: Region close waits for IoOp obligations
 //!
 //! # Key Invariants
 //!
@@ -37,7 +38,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::runtime::reactor::{Interest, LabReactor, Token};
 use asupersync::runtime::{IoDriverHandle, IoOp, Reactor};
-use asupersync::types::{Budget, CancelReason, RegionId, TaskId};
+use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
 use common::*;
 use futures_lite::future::block_on;
 use std::future::Future;
@@ -737,4 +738,95 @@ fn io_cancel_009_io_op_cancel_clears_obligation() {
     );
 
     test_complete!("io_cancel_009_io_op_cancel_clears_obligation");
+}
+
+// ============================================================================
+// IO-CANCEL-010: Region close waits for IoOp obligations
+// ============================================================================
+
+/// Verifies that region close is blocked while IoOp obligations are pending.
+#[test]
+fn io_cancel_010_region_close_waits_for_io_obligations() {
+    init_test("io_cancel_010_region_close_waits_for_io_obligations");
+
+    let mut runtime = LabRuntime::new(LabConfig::new(7));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {
+            loop {
+                let Some(cx) = Cx::current() else {
+                    return;
+                };
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                asupersync::runtime::yield_now().await;
+            }
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("io op".to_string()),
+    )
+    .expect("submit io op");
+
+    let pending_before = runtime
+        .state
+        .regions
+        .get(region.arena_index())
+        .expect("region")
+        .pending_obligations();
+    assert!(
+        pending_before > 0,
+        "io obligation should be tracked before close: {pending_before}"
+    );
+
+    let cancel_reason = CancelReason::shutdown();
+    {
+        let region_record = runtime
+            .state
+            .regions
+            .get(region.arena_index())
+            .expect("region");
+        region_record.begin_close(Some(cancel_reason.clone()));
+        region_record.begin_finalize();
+    }
+
+    if let Some(task) = runtime.state.tasks.get_mut(task_id.arena_index()) {
+        task.complete(Outcome::Cancelled(cancel_reason.clone()));
+    }
+
+    let can_close_with_pending = runtime.state.can_region_complete_close(region);
+    assert!(
+        !can_close_with_pending,
+        "region close should wait for io obligations"
+    );
+
+    io_op.cancel(&mut runtime.state).expect("cancel io op");
+
+    let pending_after = runtime
+        .state
+        .regions
+        .get(region.arena_index())
+        .expect("region")
+        .pending_obligations();
+    assert_eq!(
+        pending_after, 0,
+        "pending obligations should clear after io cancel"
+    );
+
+    let can_close_after = runtime.state.can_region_complete_close(region);
+    assert!(
+        can_close_after,
+        "region should close after io obligations resolve"
+    );
+
+    test_complete!("io_cancel_010_region_close_waits_for_io_obligations");
 }
