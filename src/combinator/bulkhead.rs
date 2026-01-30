@@ -446,6 +446,8 @@ impl Bulkhead {
     }
 
     /// Execute an operation with weighted bulkhead protection.
+    ///
+    /// The permit is always released, even if the operation panics.
     pub fn call_weighted<T, E, F>(&self, weight: u32, op: F) -> Result<T, BulkheadError<E>>
     where
         F: FnOnce() -> Result<T, E>,
@@ -453,16 +455,19 @@ impl Bulkhead {
     {
         let permit = self.try_acquire(weight).ok_or(BulkheadError::Full)?;
 
-        let result = op();
+        // Use catch_unwind to ensure permit is released even if op panics.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(op));
 
         permit.release_to(self);
 
         match result {
-            Ok(value) => {
+            Ok(Ok(value)) => {
                 self.metrics.write().expect("lock poisoned").total_executed += 1;
                 Ok(value)
             }
-            Err(e) => Err(BulkheadError::Inner(e)),
+            Ok(Err(e)) => Err(BulkheadError::Inner(e)),
+            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
         }
     }
 
@@ -1215,6 +1220,34 @@ mod tests {
         let result: Result<i32, BulkheadError<&str>> = bh.call(|| Ok(42));
 
         assert!(matches!(result, Err(BulkheadError::Full)));
+    }
+
+    #[test]
+    fn call_releases_permit_on_panic() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            ..Default::default()
+        });
+
+        // Verify starting capacity
+        assert_eq!(bh.available(), 1);
+
+        // Call that panics
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            bh.call(|| -> Result<(), &str> { panic!("intentional test panic") })
+        }));
+
+        // Should have panicked
+        assert!(result.is_err());
+
+        // Permit should be released despite panic
+        assert_eq!(bh.available(), 1, "permit should be released after panic");
+
+        // Should be able to acquire again
+        let permit = bh.try_acquire(1);
+        assert!(permit.is_some(), "should be able to acquire after panic");
     }
 
     // =========================================================================
