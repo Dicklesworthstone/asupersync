@@ -25,9 +25,11 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// A specification requirement that should be covered by tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +111,94 @@ impl TraceabilityEntry {
     }
 }
 
+/// Warning emitted while scanning for traceability metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanWarning {
+    /// File that triggered the warning.
+    pub file: PathBuf,
+    /// Line number in the file (1-based).
+    pub line: u32,
+    /// Warning message.
+    pub message: String,
+}
+
+impl ScanWarning {
+    fn new(file: PathBuf, line: u32, message: impl Into<String>) -> Self {
+        Self {
+            file,
+            line,
+            message: message.into(),
+        }
+    }
+}
+
+/// Result of scanning source files for `#[conformance]` attributes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceabilityScan {
+    /// Discovered traceability entries.
+    pub entries: Vec<TraceabilityEntry>,
+    /// Non-fatal warnings encountered during scanning.
+    pub warnings: Vec<ScanWarning>,
+}
+
+/// Errors that prevent traceability scanning from completing.
+#[derive(Debug)]
+pub struct TraceabilityScanError {
+    /// Path that triggered the error.
+    pub path: PathBuf,
+    /// Underlying I/O error.
+    pub source: io::Error,
+}
+
+impl fmt::Display for TraceabilityScanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "traceability scan failed for {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for TraceabilityScanError {}
+
+/// Scan a list of paths for `#[conformance]` attributes.
+///
+/// Directories are walked recursively and `.rs` files are scanned.
+pub fn scan_conformance_attributes(
+    paths: &[PathBuf],
+) -> Result<TraceabilityScan, TraceabilityScanError> {
+    let mut files = Vec::new();
+    for path in paths {
+        collect_rs_files(path, &mut files)?;
+    }
+
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    for file in files {
+        let scan = scan_file_for_conformance(&file)?;
+        entries.extend(scan.entries);
+        warnings.extend(scan.warnings);
+    }
+
+    Ok(TraceabilityScan { entries, warnings })
+}
+
+/// Derive requirements from traceability entries.
+pub fn requirements_from_entries(entries: &[TraceabilityEntry]) -> Vec<SpecRequirement> {
+    let mut by_section: BTreeMap<String, String> = BTreeMap::new();
+    for entry in entries {
+        by_section
+            .entry(entry.spec_section.clone())
+            .or_insert_with(|| entry.requirement.clone());
+    }
+    by_section
+        .into_iter()
+        .map(|(section, description)| SpecRequirement::new(section, description))
+        .collect()
+}
+
 /// A matrix tracking specification requirements and their test coverage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceabilityMatrix {
@@ -129,6 +219,18 @@ impl TraceabilityMatrix {
             entries: Vec::new(),
             coverage_cache: HashMap::new(),
         }
+    }
+
+    /// Create a traceability matrix from requirements and entries.
+    pub fn from_entries(
+        requirements: Vec<SpecRequirement>,
+        entries: Vec<TraceabilityEntry>,
+    ) -> Self {
+        let mut matrix = TraceabilityMatrix::new(requirements);
+        for entry in entries {
+            matrix.add_entry(entry);
+        }
+        matrix
     }
 
     /// Create an empty matrix.
@@ -501,6 +603,278 @@ macro_rules! trace_entries {
     };
 }
 
+fn collect_rs_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), TraceabilityScanError> {
+    if path.is_dir() {
+        let entries = fs::read_dir(path).map_err(|err| TraceabilityScanError {
+            path: path.to_path_buf(),
+            source: err,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|err| TraceabilityScanError {
+                path: path.to_path_buf(),
+                source: err,
+            })?;
+            let entry_path = entry.path();
+            collect_rs_files(&entry_path, out)?;
+        }
+        return Ok(());
+    }
+
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext == "rs")
+        .unwrap_or(false)
+    {
+        out.push(path.to_path_buf());
+    }
+
+    Ok(())
+}
+
+fn scan_file_for_conformance(path: &Path) -> Result<TraceabilityScan, TraceabilityScanError> {
+    let content = fs::read_to_string(path).map_err(|err| TraceabilityScanError {
+        path: path.to_path_buf(),
+        source: err,
+    })?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut pending = Vec::new();
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("#[conformance") {
+            let mut attr = trimmed.to_string();
+            let start_line = index + 1;
+            while !attr.contains(']') && index + 1 < lines.len() {
+                index += 1;
+                attr.push('\n');
+                attr.push_str(lines[index]);
+            }
+            match parse_conformance_attribute(&attr) {
+                Ok(args) => pending.push(args),
+                Err(message) => warnings.push(ScanWarning::new(
+                    path.to_path_buf(),
+                    start_line as u32,
+                    message,
+                )),
+            }
+            index += 1;
+            continue;
+        }
+
+        if let Some(name) = parse_fn_name(trimmed) {
+            if !pending.is_empty() {
+                let line_number = (index + 1) as u32;
+                for args in pending.drain(..) {
+                    entries.push(TraceabilityEntry::new(
+                        args.spec,
+                        args.requirement,
+                        name.clone(),
+                        path.to_path_buf(),
+                        line_number,
+                    ));
+                }
+            }
+        }
+
+        index += 1;
+    }
+
+    if !pending.is_empty() {
+        for args in pending {
+            warnings.push(ScanWarning::new(
+                path.to_path_buf(),
+                0,
+                format!(
+                    "conformance attribute for spec '{}' was not followed by a test function",
+                    args.spec
+                ),
+            ));
+        }
+    }
+
+    Ok(TraceabilityScan { entries, warnings })
+}
+
+#[derive(Debug, Clone)]
+struct ConformanceArgs {
+    spec: String,
+    requirement: String,
+}
+
+fn parse_conformance_attribute(input: &str) -> Result<ConformanceArgs, String> {
+    let start = input
+        .find("conformance")
+        .ok_or_else(|| "missing conformance attribute".to_string())?;
+    let after = &input[start..];
+    let open = after
+        .find('(')
+        .ok_or_else(|| "conformance attribute missing '('".to_string())?;
+    let close = after
+        .rfind(')')
+        .ok_or_else(|| "conformance attribute missing ')'".to_string())?;
+    if close <= open {
+        return Err("conformance attribute has malformed arguments".to_string());
+    }
+    let args = &after[open + 1..close];
+    parse_conformance_args(args)
+}
+
+fn parse_conformance_args(input: &str) -> Result<ConformanceArgs, String> {
+    let mut spec = None;
+    let mut requirement = None;
+
+    for part in split_args(input) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (key, value) = split_key_value(part)?;
+        let value = parse_string_literal(value)?;
+        match key {
+            "spec" => spec = Some(value),
+            "requirement" => requirement = Some(value),
+            other => {
+                return Err(format!(
+                    "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
+                ))
+            }
+        }
+    }
+
+    let spec = spec.ok_or_else(|| "conformance attribute missing 'spec'".to_string())?;
+    let requirement = requirement
+        .ok_or_else(|| "conformance attribute missing 'requirement'".to_string())?;
+
+    Ok(ConformanceArgs { spec, requirement })
+}
+
+fn split_args(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escape = false;
+
+    for ch in input.chars() {
+        if in_string {
+            current.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                current.push(ch);
+            }
+            ',' => {
+                parts.push(current);
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+
+    parts
+}
+
+fn split_key_value(input: &str) -> Result<(&str, &str), String> {
+    let mut iter = input.splitn(2, '=');
+    let key = iter
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "conformance attribute expects key = \"value\" pairs".to_string())?;
+    let value = iter
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("conformance attribute missing value for '{key}'"))?;
+    Ok((key, value))
+}
+
+fn parse_string_literal(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('"') || !trimmed.ends_with('"') {
+        return Err(format!(
+            "conformance attribute values must be string literals, got: {trimmed}"
+        ));
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let next = chars.next().ok_or_else(|| {
+                "conformance attribute contains dangling escape sequence".to_string()
+            })?;
+            match next {
+                '\\' => out.push('\\'),
+                '"' => out.push('"'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => {
+                    return Err(format!(
+                        "conformance attribute contains unsupported escape: \\{other}"
+                    ))
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_fn_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('#')
+    {
+        return None;
+    }
+
+    let mut saw_fn = false;
+    for token in trimmed.split_whitespace() {
+        if saw_fn {
+            let name = token
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect::<String>();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(name);
+        }
+        if token == "fn" {
+            saw_fn = true;
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +1036,45 @@ mod tests {
         let report = matrix.ci_report();
         assert!(report.passed);
         assert!(report.missing_sections.is_empty());
+    }
+
+    #[test]
+    fn test_scan_conformance_attributes_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("example.rs");
+        let contents = concat!(
+            "#[conformance(spec = \"3.2.1\", requirement = \"Region close waits\")]\n",
+            "#[test]\n",
+            "fn test_region_close() {}\n"
+        );
+        std::fs::write(&file, contents).unwrap();
+
+        let scan = scan_conformance_attributes(&[file.clone()]).unwrap();
+        assert!(scan.warnings.is_empty());
+        assert_eq!(scan.entries.len(), 1);
+        let entry = &scan.entries[0];
+        assert_eq!(entry.spec_section, "3.2.1");
+        assert_eq!(entry.requirement, "Region close waits");
+        assert_eq!(entry.test_name, "test_region_close");
+        assert_eq!(entry.test_line, 3);
+    }
+
+    #[test]
+    fn test_scan_multiple_conformance_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("example.rs");
+        let contents = concat!(
+            "#[conformance(spec = \"3.2.1\", requirement = \"Region close waits\")]\n",
+            "#[conformance(spec = \"3.2.2\", requirement = \"No orphan tasks\")]\n",
+            "#[test]\n",
+            "fn test_region_close() {}\n"
+        );
+        std::fs::write(&file, contents).unwrap();
+
+        let scan = scan_conformance_attributes(&[file.clone()]).unwrap();
+        assert!(scan.warnings.is_empty());
+        assert_eq!(scan.entries.len(), 2);
+        assert!(scan.entries.iter().any(|entry| entry.spec_section == "3.2.1"));
+        assert!(scan.entries.iter().any(|entry| entry.spec_section == "3.2.2"));
     }
 }

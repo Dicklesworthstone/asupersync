@@ -59,8 +59,9 @@ pub use runner::{
     run_conformance_suite,
 };
 pub use traceability::{
-    CiReport, CoverageStats, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
-    TraceabilityMatrixBuilder,
+    scan_conformance_attributes, requirements_from_entries, CiReport, CoverageStats,
+    ScanWarning, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
+    TraceabilityMatrixBuilder, TraceabilityScan, TraceabilityScanError,
 };
 
 // ============================================================================
