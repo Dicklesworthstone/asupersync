@@ -372,13 +372,13 @@ impl<T> OnceCell<T> {
     }
 
     /// Registers a waker for async waiting with tracking to prevent unbounded growth.
-    fn register_waker(&self, waker: &Waker, waiter_flag: &Option<Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
+    fn register_waker(&self, waker: &Waker, waiter_flag: Option<&Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
         let mut guard = match self.waiters.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        match waiter_flag {
+        let result = match waiter_flag {
             Some(flag) if !flag.load(Ordering::Acquire) => {
                 // We were woken but not ready yet - re-register
                 flag.store(true, Ordering::Release);
@@ -398,7 +398,9 @@ impl<T> OnceCell<T> {
                 });
                 Some(flag)
             }
-        }
+        };
+        drop(guard);
+        result
     }
 }
 
@@ -468,7 +470,7 @@ impl<T> Future for WaitInit<'_, T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let state = self.cell.state.load(Ordering::Acquire);
         if state == INITIALIZING {
-            if let Some(new_waiter) = self.cell.register_waker(cx.waker(), &self.waiter) {
+            if let Some(new_waiter) = self.cell.register_waker(cx.waker(), self.waiter.as_ref()) {
                 self.waiter = Some(new_waiter);
             }
             // Double-check after registering.
