@@ -9,11 +9,19 @@ mod common;
 use asupersync::io::{
     copy, copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf, SplitStream,
 };
+use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::runtime::reactor::{Event, Interest};
+use asupersync::runtime::IoOp;
+use asupersync::trace::ReplayTrace;
+use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
 use common::*;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
+#[cfg(unix)]
+use std::{os::unix::io::AsRawFd, os::unix::net::UnixStream};
 
 // ============================================================================
 // Test Infrastructure
@@ -52,6 +60,111 @@ fn poll_ready<F: std::future::Future>(
         }
     }
     None
+}
+
+#[cfg(unix)]
+struct TestSource {
+    stream: UnixStream,
+    _peer: UnixStream,
+}
+
+#[cfg(unix)]
+impl TestSource {
+    fn new() -> Self {
+        let (stream, peer) = UnixStream::pair().expect("unix stream pair");
+        stream.set_nonblocking(true).expect("set nonblocking");
+        peer.set_nonblocking(true).expect("set nonblocking");
+        Self {
+            stream,
+            _peer: peer,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for TestSource {
+    fn as_raw_fd(&self) -> i32 {
+        self.stream.as_raw_fd()
+    }
+}
+
+#[cfg(unix)]
+fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> TaskId {
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {
+            loop {
+                let Some(cx) = asupersync::cx::Cx::current() else {
+                    return;
+                };
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                asupersync::runtime::yield_now().await;
+            }
+        })
+        .expect("create task");
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    task_id
+}
+
+#[cfg(unix)]
+fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) {
+    let tasks = runtime.state.cancel_request(region, reason, None);
+    let mut scheduler = runtime.scheduler.lock().unwrap();
+    for (task, priority) in tasks {
+        scheduler.schedule_cancel(task, priority);
+    }
+}
+
+#[cfg(unix)]
+fn record_io_replay_trace(seed: u64) -> ReplayTrace {
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let task_id = spawn_cancellable_task(&mut runtime, region);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("e2e io op".to_string()),
+    )
+    .expect("submit io op");
+
+    let source = TestSource::new();
+    let waker = noop_waker();
+    let registration = runtime
+        .state
+        .io_driver_handle()
+        .expect("io driver handle")
+        .register(&source, Interest::READABLE, waker)
+        .expect("register io");
+    let token = registration.token();
+
+    runtime
+        .lab_reactor()
+        .inject_event(token, Event::readable(token), Duration::from_millis(1));
+    runtime.advance_time(1_000_000);
+    runtime.step_for_test();
+
+    let cancel_reason = CancelReason::shutdown();
+    cancel_region(&mut runtime, region, &cancel_reason);
+    io_op.cancel(&mut runtime.state).expect("cancel io op");
+    runtime.run_until_quiescent();
+
+    let pending = runtime.state.pending_obligation_count();
+    let violations = runtime.check_invariants();
+    assert!(
+        pending == 0,
+        "expected no pending obligations after cancel: {pending}"
+    );
+    assert!(
+        violations.is_empty(),
+        "expected no invariant violations after cancel: {violations:?}"
+    );
+
+    runtime.finish_replay_trace().expect("replay trace")
 }
 
 // ============================================================================
@@ -210,6 +323,24 @@ fn io_e2e_cancel_read_to_end_partial() {
 }
 
 #[test]
+fn io_e2e_fault_injection_partial_read_then_cancel() {
+    init_test("io_e2e_fault_injection_partial_read_then_cancel");
+    let chunks = vec![b"partial".to_vec(), b" payload".to_vec()];
+    let mut reader = StallingReader::new(chunks);
+    let mut out = Vec::new();
+    let mut fut = reader.read_to_end(&mut out);
+    let mut fut = Pin::new(&mut fut);
+
+    let poll = poll_once(&mut fut);
+    let pending = matches!(poll, Poll::Pending);
+    assert_with_log!(pending, "first poll pending", true, pending);
+    assert_with_log!(out == b"partial", "partial buffer", b"partial", out);
+
+    // Drop to simulate cancellation after partial read and fault stall.
+    test_complete!("io_e2e_fault_injection_partial_read_then_cancel");
+}
+
+#[test]
 fn io_e2e_copy_bidirectional() {
     init_test("io_e2e_copy_bidirectional");
     let mut stream_a = TestStream::new(b"ping");
@@ -274,4 +405,108 @@ fn io_e2e_split_read_write() {
         inner.written()
     );
     test_complete!("io_e2e_split_read_write");
+}
+
+// ============================================================================
+// Deterministic I/O E2E Scenarios (asupersync-ds8.4.1)
+// ============================================================================
+
+#[cfg(unix)]
+#[test]
+fn io_e2e_lab_cancel_inflight_io_op() {
+    init_test("io_e2e_lab_cancel_inflight_io_op");
+    let mut runtime = LabRuntime::new(LabConfig::new(42));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let task_id = spawn_cancellable_task(&mut runtime, region);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("inflight read".to_string()),
+    )
+    .expect("submit io op");
+
+    let cancel_reason = CancelReason::parent_cancelled();
+    cancel_region(&mut runtime, region, &cancel_reason);
+    io_op.cancel(&mut runtime.state).expect("cancel io op");
+    runtime.run_until_quiescent();
+
+    let pending = runtime.state.pending_obligation_count();
+    let violations = runtime.check_invariants();
+    assert!(
+        pending == 0,
+        "expected no pending obligations after cancel: {pending}"
+    );
+    assert!(
+        violations.is_empty(),
+        "expected no invariant violations after cancel: {violations:?}"
+    );
+    assert!(runtime.state.is_quiescent(), "runtime should be quiescent");
+    test_complete!("io_e2e_lab_cancel_inflight_io_op");
+}
+
+#[cfg(unix)]
+#[test]
+fn io_e2e_lab_region_close_waits_for_io_op() {
+    init_test("io_e2e_lab_region_close_waits_for_io_op");
+    let mut runtime = LabRuntime::new(LabConfig::new(7));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let task_id = spawn_cancellable_task(&mut runtime, region);
+
+    let io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("region close io".to_string()),
+    )
+    .expect("submit io op");
+
+    let cancel_reason = CancelReason::shutdown();
+    {
+        let region_record = runtime.state.region_mut(region).expect("region");
+        region_record.begin_close(Some(cancel_reason.clone()));
+        region_record.begin_finalize();
+    }
+
+    if let Some(task) = runtime.state.task_mut(task_id) {
+        task.complete(Outcome::Cancelled(cancel_reason));
+    }
+
+    let can_close_with_pending = runtime.state.can_region_complete_close(region);
+    assert!(
+        !can_close_with_pending,
+        "region close should wait for io obligations"
+    );
+
+    io_op.cancel(&mut runtime.state).expect("cancel io op");
+    let can_close_after = runtime.state.can_region_complete_close(region);
+    assert!(
+        can_close_after,
+        "region close should complete after io op cancel"
+    );
+
+    test_complete!("io_e2e_lab_region_close_waits_for_io_op");
+}
+
+#[cfg(unix)]
+#[test]
+fn io_e2e_lab_replay_determinism_for_io_events() {
+    init_test("io_e2e_lab_replay_determinism_for_io_events");
+    let trace_a = record_io_replay_trace(123);
+    let trace_b = record_io_replay_trace(123);
+
+    assert_with_log!(
+        trace_a.metadata.seed == trace_b.metadata.seed,
+        "seed match",
+        trace_a.metadata.seed,
+        trace_b.metadata.seed
+    );
+    assert_with_log!(
+        trace_a.events == trace_b.events,
+        "replay events deterministic",
+        trace_a.events.len(),
+        trace_b.events.len()
+    );
+    test_complete!("io_e2e_lab_replay_determinism_for_io_events");
 }
