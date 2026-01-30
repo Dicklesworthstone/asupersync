@@ -528,15 +528,50 @@ fn decode_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
     Ok(value)
 }
 
-/// Encode a string (with optional Huffman encoding).
-fn encode_string(dst: &mut BytesMut, value: &str, use_huffman: bool) {
-    // For simplicity, we only implement literal encoding (no Huffman)
-    // A full implementation would include Huffman encoding
-    let _ = use_huffman; // TODO: Implement Huffman encoding
+/// Huffman-encode a byte slice per RFC 7541 Appendix B.
+///
+/// Packs variable-length Huffman codes into whole bytes with EOS-padding
+/// (all-1s) in the final partial byte, as required by Section 5.2.
+fn encode_huffman(src: &[u8]) -> Vec<u8> {
+    let mut dst = Vec::new();
+    let mut accumulator: u64 = 0;
+    let mut bits: u32 = 0;
 
-    let bytes = value.as_bytes();
-    encode_integer(dst, bytes.len(), 7, 0x00);
-    dst.extend_from_slice(bytes);
+    for &byte in src {
+        let (code, code_bits) = HUFFMAN_TABLE[byte as usize];
+        let code_bits_u32 = u32::from(code_bits);
+        accumulator = (accumulator << code_bits_u32) | u64::from(code);
+        bits += code_bits_u32;
+
+        while bits >= 8 {
+            bits -= 8;
+            dst.push((accumulator >> bits) as u8);
+            accumulator &= (1u64 << bits) - 1;
+        }
+    }
+
+    // Pad remaining bits with EOS prefix (all 1s) per RFC 7541 Section 5.2.
+    if bits > 0 {
+        let padding = 8 - bits;
+        accumulator = (accumulator << padding) | ((1u64 << padding) - 1);
+        dst.push(accumulator as u8);
+    }
+
+    dst
+}
+
+/// Encode a string (with optional Huffman encoding per RFC 7541 Section 5.2).
+fn encode_string(dst: &mut BytesMut, value: &str, use_huffman: bool) {
+    if use_huffman {
+        let encoded = encode_huffman(value.as_bytes());
+        // High bit (0x80) signals Huffman-encoded string.
+        encode_integer(dst, encoded.len(), 7, 0x80);
+        dst.extend_from_slice(&encoded);
+    } else {
+        let bytes = value.as_bytes();
+        encode_integer(dst, bytes.len(), 7, 0x00);
+        dst.extend_from_slice(bytes);
+    }
 }
 
 /// Decode a string (handling Huffman encoding).
@@ -983,5 +1018,77 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name, ":method");
         assert_eq!(headers[0].value, "GET");
+    }
+
+    #[test]
+    fn test_huffman_encode_decode_roundtrip() {
+        let inputs = [
+            "www.example.com",
+            "no-cache",
+            "custom-key",
+            "custom-value",
+            "",
+            "a",
+            "Hello, World!",
+        ];
+
+        for &input in &inputs {
+            let encoded = encode_huffman(input.as_bytes());
+            let encoded_bytes = Bytes::from(encoded);
+            let decoded = decode_huffman(&encoded_bytes).unwrap();
+            assert_eq!(decoded, input, "roundtrip failed for {input:?}");
+        }
+    }
+
+    #[test]
+    fn test_huffman_encoding_is_smaller() {
+        let input = b"www.example.com";
+        let encoded = encode_huffman(input);
+        assert!(
+            encoded.len() < input.len(),
+            "huffman should compress ASCII text: {} >= {}",
+            encoded.len(),
+            input.len()
+        );
+    }
+
+    #[test]
+    fn test_string_encoding_huffman_roundtrip() {
+        let mut buf = BytesMut::new();
+        encode_string(&mut buf, "hello", true);
+
+        // First byte should have high bit set (Huffman flag).
+        assert_ne!(buf[0] & 0x80, 0, "huffman flag should be set");
+
+        let mut src = buf.freeze();
+        let decoded = decode_string(&mut src).unwrap();
+        assert_eq!(decoded, "hello");
+    }
+
+    #[test]
+    fn test_encoder_decoder_roundtrip_with_huffman() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(true);
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/index.html"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "www.example.com"),
+            Header::new("accept-encoding", "gzip, deflate"),
+        ];
+
+        let mut encoded_block = BytesMut::new();
+        encoder.encode(&headers, &mut encoded_block);
+
+        let mut decoder = Decoder::new();
+        let mut src = encoded_block.freeze();
+        let decoded_headers = decoder.decode(&mut src).unwrap();
+
+        assert_eq!(decoded_headers.len(), headers.len());
+        for (orig, dec) in headers.iter().zip(decoded_headers.iter()) {
+            assert_eq!(orig.name, dec.name, "name mismatch for {:?}", orig.name);
+            assert_eq!(orig.value, dec.value, "value mismatch for {:?}", orig.name);
+        }
     }
 }
