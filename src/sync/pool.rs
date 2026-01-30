@@ -306,6 +306,7 @@ pub trait AsyncResourceFactory: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Create a new resource asynchronously.
+    #[allow(clippy::type_complexity)]
     fn create(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>>;
@@ -747,6 +748,7 @@ where
     ///
     /// When set and `config.health_check_on_acquire` is true, idle resources
     /// are checked before being returned from `acquire()`.
+    #[allow(clippy::type_complexity)]
     health_check_fn: Option<Box<dyn Fn(&R) -> bool + Send + Sync>>,
     /// Optional metrics handle for observability.
     #[cfg(feature = "metrics")]
@@ -864,13 +866,15 @@ where
         for _ in 0..target {
             match self.create_resource().await {
                 Ok(resource) => {
-                    let mut state = self.state.lock().expect("pool state lock poisoned");
-                    state.idle.push_back(IdleResource {
-                        resource,
-                        idle_since: Instant::now(),
-                        created_at: Instant::now(),
-                    });
-                    state.total_created += 1;
+                    {
+                        let mut state = self.state.lock().expect("pool state lock poisoned");
+                        state.idle.push_back(IdleResource {
+                            resource,
+                            idle_since: Instant::now(),
+                            created_at: Instant::now(),
+                        });
+                        state.total_created += 1;
+                    }
                     created += 1;
                 }
                 Err(e) => match self.config.warmup_failure_strategy {
@@ -895,10 +899,9 @@ where
 
     /// Check whether an idle resource passes the configured health check.
     fn is_healthy(&self, resource: &R) -> bool {
-        match self.health_check_fn {
-            Some(ref check) => check(resource),
-            None => true,
-        }
+        self.health_check_fn
+            .as_ref()
+            .is_none_or(|check| check(resource))
     }
 
     /// Process returned resources from the return channel.
@@ -1098,32 +1101,26 @@ where
             // Try to get a healthy idle resource.
             // When health_check_on_acquire is enabled, unhealthy resources
             // are silently discarded and the next idle resource is tried.
-            loop {
-                match self.try_get_idle() {
-                    Some(resource) => {
-                        if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
-                            // Unhealthy: undo the active count bump from try_get_idle
-                            let mut state = self.state.lock().expect("pool state lock poisoned");
-                            state.active = state.active.saturating_sub(1);
-                            // Also undo the acquisition count for discarded resources
-                            state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
-                            drop(state);
-                            continue;
-                        }
-
-                        let acquire_duration = acquire_start.elapsed();
-
-                        // Record metrics
-                        #[cfg(feature = "metrics")]
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.record_acquired(acquire_duration);
-                            self.update_metrics_gauges();
-                        }
-
-                        return Ok(PooledResource::new(resource, self.return_tx.clone()));
-                    }
-                    None => break,
+            while let Some(resource) = self.try_get_idle() {
+                if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
+                    // Unhealthy: undo the active count bump from try_get_idle
+                    let mut state = self.state.lock().expect("pool state lock poisoned");
+                    state.active = state.active.saturating_sub(1);
+                    state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
+                    drop(state);
+                    continue;
                 }
+
+                let acquire_duration = acquire_start.elapsed();
+
+                // Record metrics
+                #[cfg(feature = "metrics")]
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_acquired(acquire_duration);
+                    self.update_metrics_gauges();
+                }
+
+                return Ok(PooledResource::new(resource, self.return_tx.clone()));
             }
 
             // Try to create a new resource if under capacity
@@ -2108,7 +2105,7 @@ mod tests {
 
         // Factory produces (id, healthy_flag) tuples
         let counter = std::sync::atomic::AtomicU32::new(0);
-        let factory = || {
+        let factory = move || {
             let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>((id, true)) })
                 as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
@@ -2143,7 +2140,7 @@ mod tests {
         init_test("health_check_passes_healthy_resource");
 
         let counter = std::sync::atomic::AtomicU32::new(0);
-        let factory = || {
+        let factory = move || {
             let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
                 as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
@@ -2172,7 +2169,7 @@ mod tests {
         init_test("health_check_disabled_skips_check");
 
         let counter = std::sync::atomic::AtomicU32::new(0);
-        let factory = || {
+        let factory = move || {
             let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
                 as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
