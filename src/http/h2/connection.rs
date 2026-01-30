@@ -833,6 +833,7 @@ pub enum ReceivedFrame {
 mod tests {
     use super::*;
     use crate::bytes::Bytes;
+    use crate::http::h2::settings;
 
     #[test]
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
@@ -847,15 +848,21 @@ mod tests {
         conn.process_frame(headers).expect("process headers frame");
         conn.process_frame(frame).expect("process data frame");
 
-        assert!(conn.has_pending_frames(), "expected WINDOW_UPDATE");
-        let pending = conn.next_frame().expect("pending frame");
-        match pending {
-            Frame::WindowUpdate(update) => {
-                assert_eq!(update.stream_id, 0);
-                assert_eq!(update.increment, payload_len_u32);
+        assert!(conn.has_pending_frames(), "expected WINDOW_UPDATE(s)");
+        // Both stream-level and connection-level WINDOW_UPDATEs may be queued.
+        let mut found_connection_update = false;
+        while let Some(pending) = conn.next_frame() {
+            if let Frame::WindowUpdate(update) = pending {
+                if update.stream_id == 0 {
+                    assert_eq!(update.increment, payload_len_u32);
+                    found_connection_update = true;
+                }
             }
-            other => panic!("expected WINDOW_UPDATE, got {other:?}"),
         }
+        assert!(
+            found_connection_update,
+            "expected connection-level WINDOW_UPDATE"
+        );
     }
 
     #[test]
@@ -961,6 +968,150 @@ mod tests {
                 assert!(h.end_headers);
             }
             _ => panic!("expected HEADERS frame"),
+        }
+    }
+
+    #[test]
+    fn data_frame_triggers_stream_window_update_on_low_watermark() {
+        let mut conn = Connection::server(Settings::default());
+        // Open a stream via headers.
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).expect("process headers");
+
+        let initial_window = settings::DEFAULT_INITIAL_WINDOW_SIZE;
+        // Send data that crosses the 50% threshold for the *stream*.
+        let payload_len = initial_window / 2 + 2;
+        let data = Bytes::from(vec![0_u8; payload_len as usize]);
+        let frame = Frame::Data(DataFrame::new(1, data, false));
+        conn.process_frame(frame).expect("process data");
+
+        // Drain pending frames; look for a stream-level WINDOW_UPDATE (stream_id != 0).
+        let mut found_stream_update = false;
+        while let Some(f) = conn.next_frame() {
+            if let Frame::WindowUpdate(wu) = f {
+                if wu.stream_id == 1 {
+                    found_stream_update = true;
+                    assert_eq!(wu.increment, payload_len);
+                }
+            }
+        }
+        assert!(
+            found_stream_update,
+            "expected stream-level WINDOW_UPDATE for stream 1"
+        );
+    }
+
+    #[test]
+    fn data_frame_no_stream_window_update_when_above_watermark() {
+        let mut conn = Connection::server(Settings::default());
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).expect("process headers");
+
+        // Small payload: stays above the watermark.
+        let data = Bytes::from(vec![0_u8; 100]);
+        let frame = Frame::Data(DataFrame::new(1, data, false));
+        conn.process_frame(frame).expect("process data");
+
+        // No stream-level WINDOW_UPDATE should be queued.
+        while let Some(f) = conn.next_frame() {
+            if let Frame::WindowUpdate(wu) = f {
+                assert_ne!(wu.stream_id, 1, "unexpected stream-level WINDOW_UPDATE");
+            }
+        }
+    }
+
+    #[test]
+    fn send_data_respects_send_window() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "POST"),
+            Header::new(":path", "/upload"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        // Drain the HEADERS frame.
+        let _ = conn.next_frame().unwrap();
+
+        // Shrink the connection send window to a small value.
+        // Default is 65535; reduce it so only 100 bytes can be sent.
+        conn.send_window = 100;
+
+        // Queue 300 bytes of data.
+        let data = Bytes::from(vec![0xAB_u8; 300]);
+        conn.send_data(stream_id, data, true).unwrap();
+
+        // First frame: should be clamped to 100 bytes (connection window limit).
+        let frame1 = conn.next_frame().expect("expected first DATA frame");
+        match frame1 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 100, "should be clamped to send window");
+                assert!(!d.end_stream, "not the final chunk");
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+
+        // Connection window is now 0; next call should re-queue and return None
+        // (since there's no other frame type pending, it recurses but data is re-queued).
+        // Replenish the window so remaining data can flow.
+        conn.send_window = 300;
+        let frame2 = conn.next_frame().expect("expected second DATA frame");
+        match frame2 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 200, "remaining 200 bytes");
+                assert!(d.end_stream, "final chunk should carry end_stream");
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+
+        assert!(!conn.has_pending_frames(), "all data should be sent");
+    }
+
+    #[test]
+    fn send_data_respects_stream_send_window() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "POST"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame().unwrap(); // drain HEADERS
+
+        // Shrink the *stream* send window to 50 bytes (connection window stays large).
+        conn.stream_mut(stream_id)
+            .unwrap()
+            .consume_send_window(65535 - 50);
+
+        let data = Bytes::from(vec![0xCD_u8; 200]);
+        conn.send_data(stream_id, data, true).unwrap();
+
+        let frame1 = conn.next_frame().expect("expected first DATA frame");
+        match frame1 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 50, "clamped to stream send window");
+                assert!(!d.end_stream);
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+
+        // Restore stream window and send remaining.
+        conn.stream_mut(stream_id)
+            .unwrap()
+            .update_send_window(200)
+            .unwrap();
+        let frame2 = conn.next_frame().expect("expected second DATA frame");
+        match frame2 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 150);
+                assert!(d.end_stream);
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
         }
     }
 }

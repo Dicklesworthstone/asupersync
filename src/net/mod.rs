@@ -21,6 +21,7 @@ pub use tcp::listener::{Incoming, TcpListener};
 pub use tcp::socket::TcpSocket;
 pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};
 pub use tcp::stream::TcpStream;
+pub use tcp::stream::TcpStreamBuilder;
 pub use udp::{RecvStream, SendSink, UdpSocket};
 #[cfg(unix)]
 pub use unix::{
