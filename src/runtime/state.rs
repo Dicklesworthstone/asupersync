@@ -418,9 +418,9 @@ impl RuntimeState {
             let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
         };
 
-        // Store the wrapped future
+        // Store the wrapped future with task_id for poll tracing
         self.stored_futures
-            .insert(task_id, StoredTask::new(wrapped_future));
+            .insert(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
         // Trace task creation
         debug!(

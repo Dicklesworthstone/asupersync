@@ -10,6 +10,25 @@ use crate::types::TaskId;
 use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
 
+/// Source attribution for wake events.
+///
+/// Tracks what caused a task to be woken, enabling causality analysis
+/// in tracing output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeSource {
+    /// Woken by a timer expiry.
+    Timer,
+    /// Woken by an I/O readiness event.
+    Io {
+        /// The file descriptor (Unix) or socket (Windows) that became ready.
+        fd: i32,
+    },
+    /// Woken explicitly by user code or another task.
+    Explicit,
+    /// Wake source not specified (legacy path).
+    Unknown,
+}
+
 /// Shared state for the waker system.
 #[derive(Debug, Default)]
 pub struct WakerState {
@@ -24,12 +43,22 @@ impl WakerState {
         Self::default()
     }
 
-    /// Creates a waker for a specific task.
+    /// Creates a waker for a specific task with unknown wake source.
     #[must_use]
     pub fn waker_for(self: &Arc<Self>, task: TaskId) -> Waker {
+        self.waker_for_source(task, WakeSource::Unknown)
+    }
+
+    /// Creates a waker for a specific task with an attributed wake source.
+    ///
+    /// The `source` is recorded when the waker fires, enabling causality
+    /// analysis in tracing output.
+    #[must_use]
+    pub fn waker_for_source(self: &Arc<Self>, task: TaskId, source: WakeSource) -> Waker {
         Waker::from(Arc::new(TaskWaker {
             state: Arc::clone(self),
             task,
+            source,
         }))
     }
 
@@ -46,11 +75,18 @@ impl WakerState {
         !woken.is_empty()
     }
 
-    fn wake(&self, task: TaskId) {
+    fn wake(&self, task: TaskId, source: WakeSource) {
         let mut woken = self.woken.lock().expect("lock poisoned");
         if !woken.contains(&task) {
+            let _source_label = match source {
+                WakeSource::Timer => "timer",
+                WakeSource::Io { .. } => "io",
+                WakeSource::Explicit => "explicit",
+                WakeSource::Unknown => "unknown",
+            };
             trace!(
                 task_id = ?task,
+                wake_source = _source_label,
                 "task woken"
             );
             woken.push(task);
@@ -62,15 +98,16 @@ impl WakerState {
 struct TaskWaker {
     state: Arc<WakerState>,
     task: TaskId,
+    source: WakeSource,
 }
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        self.state.wake(self.task);
+        self.state.wake(self.task, self.source);
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        self.state.wake(self.task);
+        self.state.wake(self.task, self.source);
     }
 }
 
@@ -126,5 +163,93 @@ mod tests {
         let woken = state.drain_woken();
         crate::assert_with_log!(woken.len() == 1, "woken list should dedup", 1, woken.len());
         crate::test_complete!("dedup_multiple_wakes");
+    }
+
+    #[test]
+    fn waker_for_source_timer() {
+        init_test("waker_for_source_timer");
+        let state = Arc::new(WakerState::new());
+        let waker = state.waker_for_source(task(1), WakeSource::Timer);
+
+        waker.wake_by_ref();
+        let woken = state.drain_woken();
+        crate::assert_with_log!(
+            woken == vec![task(1)],
+            "timer waker should wake task",
+            vec![task(1)],
+            woken
+        );
+        crate::test_complete!("waker_for_source_timer");
+    }
+
+    #[test]
+    fn waker_for_source_io() {
+        init_test("waker_for_source_io");
+        let state = Arc::new(WakerState::new());
+        let waker = state.waker_for_source(task(2), WakeSource::Io { fd: 7 });
+
+        waker.wake();
+        let woken = state.drain_woken();
+        crate::assert_with_log!(
+            woken == vec![task(2)],
+            "io waker should wake task",
+            vec![task(2)],
+            woken
+        );
+        crate::test_complete!("waker_for_source_io");
+    }
+
+    #[test]
+    fn waker_for_source_explicit() {
+        init_test("waker_for_source_explicit");
+        let state = Arc::new(WakerState::new());
+        let waker = state.waker_for_source(task(3), WakeSource::Explicit);
+
+        waker.wake_by_ref();
+        let woken = state.drain_woken();
+        crate::assert_with_log!(
+            woken == vec![task(3)],
+            "explicit waker should wake task",
+            vec![task(3)],
+            woken
+        );
+        crate::test_complete!("waker_for_source_explicit");
+    }
+
+    #[test]
+    fn wake_source_equality() {
+        init_test("wake_source_equality");
+        let timer = WakeSource::Timer;
+        let io = WakeSource::Io { fd: 3 };
+        let explicit = WakeSource::Explicit;
+        let unknown = WakeSource::Unknown;
+
+        crate::assert_with_log!(
+            timer == WakeSource::Timer,
+            "timer eq",
+            true,
+            timer == WakeSource::Timer
+        );
+        crate::assert_with_log!(timer != io, "timer != io", true, timer != io);
+        crate::assert_with_log!(io != explicit, "io != explicit", true, io != explicit);
+        crate::assert_with_log!(
+            explicit != unknown,
+            "explicit != unknown",
+            true,
+            explicit != unknown
+        );
+        crate::assert_with_log!(
+            WakeSource::Io { fd: 3 } == WakeSource::Io { fd: 3 },
+            "io fd eq",
+            true,
+            WakeSource::Io { fd: 3 } == WakeSource::Io { fd: 3 }
+        );
+        crate::assert_with_log!(
+            WakeSource::Io { fd: 3 } != WakeSource::Io { fd: 5 },
+            "io fd neq",
+            true,
+            WakeSource::Io { fd: 3 } != WakeSource::Io { fd: 5 }
+        );
+        crate::test_complete!("wake_source_equality");
     }
 }

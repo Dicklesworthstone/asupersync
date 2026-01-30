@@ -21,6 +21,8 @@ pub struct StoredTask {
     task_id: Option<TaskId>,
     /// Poll counter (for tracing).
     poll_count: u64,
+    /// Budget polls remaining (set by executor before each poll, for tracing).
+    polls_remaining: Option<u32>,
 }
 
 impl StoredTask {
@@ -36,6 +38,7 @@ impl StoredTask {
             future: Box::pin(future),
             task_id: None,
             poll_count: 0,
+            polls_remaining: None,
         }
     }
 
@@ -50,6 +53,7 @@ impl StoredTask {
             future: Box::pin(future),
             task_id: Some(task_id),
             poll_count: 0,
+            polls_remaining: None,
         }
     }
 
@@ -58,21 +62,32 @@ impl StoredTask {
         self.task_id = Some(task_id);
     }
 
+    /// Sets the budget polls remaining for the next poll trace.
+    ///
+    /// The executor should call this before each `poll()` to include
+    /// budget information in the trace output.
+    pub fn set_polls_remaining(&mut self, remaining: u32) {
+        self.polls_remaining = Some(remaining);
+    }
+
     /// Polls the stored task.
     ///
     /// Returns `Poll::Ready(())` when the task is complete, or `Poll::Pending`
     /// if it needs to be polled again.
+    #[allow(clippy::used_underscore_binding)]
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         self.poll_count += 1;
         let poll_number = self.poll_count;
 
         if let Some(task_id) = self.task_id {
+            let _budget_remaining = self.polls_remaining.unwrap_or(0);
             trace!(
                 task_id = ?task_id,
                 poll_number = poll_number,
+                budget_remaining = _budget_remaining,
                 "task poll started"
             );
-            let _ = (task_id, poll_number);
+            let _ = (task_id, poll_number, _budget_remaining);
         }
 
         let result = self.future.as_mut().poll(cx);
