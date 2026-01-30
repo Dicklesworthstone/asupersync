@@ -952,6 +952,7 @@ fn svc_verify_027_error_display() {
 #[cfg(feature = "tower")]
 mod tower_adapter_tests {
     use super::{init_test, noop_waker, run_test_with_cx};
+    use crate::test_complete;
     use asupersync::runtime::yield_now;
     use asupersync::service::{
         AdapterConfig, AsupersyncAdapter, AsupersyncService, AsupersyncServiceExt,

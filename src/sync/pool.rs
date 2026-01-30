@@ -313,10 +313,7 @@ pub trait AsyncResourceFactory: Send + Sync {
     /// Destroy a resource (optional cleanup before drop).
     ///
     /// The default implementation simply drops the resource.
-    fn destroy(
-        &self,
-        _resource: Self::Resource,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn destroy(&self, _resource: Self::Resource) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
 }
@@ -836,10 +833,7 @@ where
     ///     .with_health_check(|conn: &TcpStream| conn.peer_addr().is_ok());
     /// ```
     #[must_use]
-    pub fn with_health_check(
-        mut self,
-        check: impl Fn(&R) -> bool + Send + Sync + 'static,
-    ) -> Self {
+    pub fn with_health_check(mut self, check: impl Fn(&R) -> bool + Send + Sync + 'static) -> Self {
         self.health_check_fn = Some(Box::new(check));
         self
     }
@@ -1101,18 +1095,35 @@ where
                 }
             }
 
-            // Try to get an idle resource
-            if let Some(resource) = self.try_get_idle() {
-                let acquire_duration = acquire_start.elapsed();
+            // Try to get a healthy idle resource.
+            // When health_check_on_acquire is enabled, unhealthy resources
+            // are silently discarded and the next idle resource is tried.
+            loop {
+                match self.try_get_idle() {
+                    Some(resource) => {
+                        if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
+                            // Unhealthy: undo the active count bump from try_get_idle
+                            let mut state = self.state.lock().expect("pool state lock poisoned");
+                            state.active = state.active.saturating_sub(1);
+                            // Also undo the acquisition count for discarded resources
+                            state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
+                            drop(state);
+                            continue;
+                        }
 
-                // Record metrics
-                #[cfg(feature = "metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.record_acquired(acquire_duration);
-                    self.update_metrics_gauges();
+                        let acquire_duration = acquire_start.elapsed();
+
+                        // Record metrics
+                        #[cfg(feature = "metrics")]
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.record_acquired(acquire_duration);
+                            self.update_metrics_gauges();
+                        }
+
+                        return Ok(PooledResource::new(resource, self.return_tx.clone()));
+                    }
+                    None => break,
                 }
-
-                return Ok(PooledResource::new(resource, self.return_tx.clone()));
             }
 
             // Try to create a new resource if under capacity
@@ -2085,5 +2096,293 @@ mod tests {
         );
 
         crate::test_complete!("load_test_many_acquire_return_cycles");
+    }
+
+    // ========================================================================
+    // Health check tests (asupersync-cl94)
+    // ========================================================================
+
+    #[test]
+    fn health_check_evicts_unhealthy_idle_resource() {
+        init_test("health_check_evicts_unhealthy_idle_resource");
+
+        // Factory produces (id, healthy_flag) tuples
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>((id, true)) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(5).health_check_on_acquire(true);
+        // Health check: only resources with id != 0 pass
+        let pool = GenericPool::new(factory, config)
+            .with_health_check(|&(id, _healthy): &(u32, bool)| id != 0);
+
+        let cx = crate::cx::Cx::for_testing();
+
+        // Acquire resource #0
+        let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+        assert_eq!(r0.0, 0u32, "first resource should be id 0");
+        // Return it to the idle pool
+        r0.return_to_pool();
+
+        // Now acquire again — id 0 should fail health check, so pool creates id 1
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("second acquire");
+        assert_eq!(r1.0, 1u32, "unhealthy id 0 should be evicted, got new id 1");
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 1, "one resource active");
+        assert_eq!(stats.idle, 0, "no idle resources (id 0 was evicted)");
+
+        crate::test_complete!("health_check_evicts_unhealthy_idle_resource");
+    }
+
+    #[test]
+    fn health_check_passes_healthy_resource() {
+        init_test("health_check_passes_healthy_resource");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(5).health_check_on_acquire(true);
+        // All resources pass health check
+        let pool = GenericPool::new(factory, config).with_health_check(|_id: &u32| true);
+
+        let cx = crate::cx::Cx::for_testing();
+
+        // Acquire and return resource #0
+        let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+        assert_eq!(*r0, 0u32);
+        r0.return_to_pool();
+
+        // Acquire again — should reuse #0 since it passes health check
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("second acquire");
+        assert_eq!(*r1, 0, "healthy resource should be reused");
+
+        crate::test_complete!("health_check_passes_healthy_resource");
+    }
+
+    #[test]
+    fn health_check_disabled_skips_check() {
+        init_test("health_check_disabled_skips_check");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        // health_check_on_acquire defaults to false
+        let config = PoolConfig::with_max_size(5);
+        // Health check that rejects everything — but it's disabled
+        let pool = GenericPool::new(factory, config).with_health_check(|_id: &u32| false);
+
+        let cx = crate::cx::Cx::for_testing();
+
+        let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+        assert_eq!(*r0, 0);
+        r0.return_to_pool();
+
+        // Should still return #0 because health check is not enabled
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("second acquire");
+        assert_eq!(
+            *r1, 0,
+            "health check disabled, resource reused despite failing check"
+        );
+
+        crate::test_complete!("health_check_disabled_skips_check");
+    }
+
+    // ========================================================================
+    // Warmup tests (asupersync-cl94)
+    // ========================================================================
+
+    #[test]
+    fn warmup_creates_resources() {
+        init_test("warmup_creates_resources");
+
+        let config = PoolConfig::with_max_size(10).warmup_connections(3);
+        let pool = GenericPool::new(simple_factory, config);
+
+        let created = futures_lite::future::block_on(pool.warmup()).expect("warmup should succeed");
+        assert_eq!(created, 3, "should create 3 warmup resources");
+
+        let stats = pool.stats();
+        assert_eq!(stats.idle, 3, "3 idle resources after warmup");
+        assert_eq!(stats.active, 0, "no active resources");
+
+        crate::test_complete!("warmup_creates_resources");
+    }
+
+    #[test]
+    fn warmup_zero_is_noop() {
+        init_test("warmup_zero_is_noop");
+
+        let config = PoolConfig::with_max_size(10).warmup_connections(0);
+        let pool = GenericPool::new(simple_factory, config);
+
+        let created = futures_lite::future::block_on(pool.warmup()).expect("warmup should succeed");
+        assert_eq!(created, 0, "zero warmup creates nothing");
+
+        let stats = pool.stats();
+        assert_eq!(stats.idle, 0, "no idle resources");
+
+        crate::test_complete!("warmup_zero_is_noop");
+    }
+
+    #[test]
+    fn warmup_fail_fast_stops_on_error() {
+        init_test("warmup_fail_fast_stops_on_error");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if n >= 2 {
+                    Err::<u32, _>(Box::new(std::io::Error::other("fail"))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                } else {
+                    Ok(n)
+                }
+            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(10)
+            .warmup_connections(5)
+            .warmup_failure_strategy(WarmupStrategy::FailFast);
+        let pool = GenericPool::new(factory, config);
+
+        let result = futures_lite::future::block_on(pool.warmup());
+        assert!(result.is_err(), "FailFast should return error");
+
+        // Only 2 resources created before the third failed
+        let stats = pool.stats();
+        assert_eq!(stats.idle, 2, "2 created before failure");
+
+        crate::test_complete!("warmup_fail_fast_stops_on_error");
+    }
+
+    #[test]
+    fn warmup_best_effort_continues_on_error() {
+        init_test("warmup_best_effort_continues_on_error");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if n % 2 == 1 {
+                    // Odd-numbered creates fail
+                    Err::<u32, _>(Box::new(std::io::Error::other("fail"))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                } else {
+                    Ok(n)
+                }
+            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(10)
+            .warmup_connections(4)
+            .warmup_failure_strategy(WarmupStrategy::BestEffort);
+        let pool = GenericPool::new(factory, config);
+
+        let created =
+            futures_lite::future::block_on(pool.warmup()).expect("BestEffort never errors");
+        assert_eq!(created, 2, "2 of 4 succeeded (evens)");
+
+        let stats = pool.stats();
+        assert_eq!(stats.idle, 2, "2 idle after partial warmup");
+
+        crate::test_complete!("warmup_best_effort_continues_on_error");
+    }
+
+    #[test]
+    fn warmup_require_minimum_fails_below_min() {
+        init_test("warmup_require_minimum_fails_below_min");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if n >= 1 {
+                    Err::<u32, _>(Box::new(std::io::Error::other("fail"))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                } else {
+                    Ok(n)
+                }
+            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(10)
+            .min_size(3)
+            .warmup_connections(5)
+            .warmup_failure_strategy(WarmupStrategy::RequireMinimum);
+        let pool = GenericPool::new(factory, config);
+
+        let result = futures_lite::future::block_on(pool.warmup());
+        assert!(
+            result.is_err(),
+            "RequireMinimum should fail: only 1 created < min_size 3"
+        );
+
+        crate::test_complete!("warmup_require_minimum_fails_below_min");
+    }
+
+    #[test]
+    fn warmup_require_minimum_passes_above_min() {
+        init_test("warmup_require_minimum_passes_above_min");
+
+        let config = PoolConfig::with_max_size(10)
+            .min_size(2)
+            .warmup_connections(5)
+            .warmup_failure_strategy(WarmupStrategy::RequireMinimum);
+        let pool = GenericPool::new(simple_factory, config);
+
+        let created =
+            futures_lite::future::block_on(pool.warmup()).expect("should pass: 5 >= min 2");
+        assert_eq!(created, 5, "all 5 warmup resources created");
+
+        crate::test_complete!("warmup_require_minimum_passes_above_min");
+    }
+
+    // ========================================================================
+    // PoolConfig health/warmup builder tests (asupersync-cl94)
+    // ========================================================================
+
+    #[test]
+    fn pool_config_health_check_builder() {
+        init_test("pool_config_health_check_builder");
+
+        let config = PoolConfig::with_max_size(5)
+            .health_check_on_acquire(true)
+            .health_check_interval(Some(Duration::from_secs(60)))
+            .evict_unhealthy(false);
+
+        assert!(config.health_check_on_acquire);
+        assert_eq!(config.health_check_interval, Some(Duration::from_secs(60)));
+        assert!(!config.evict_unhealthy);
+
+        crate::test_complete!("pool_config_health_check_builder");
+    }
+
+    #[test]
+    fn pool_config_warmup_builder() {
+        init_test("pool_config_warmup_builder");
+
+        let config = PoolConfig::with_max_size(5)
+            .warmup_connections(3)
+            .warmup_timeout(Duration::from_secs(10))
+            .warmup_failure_strategy(WarmupStrategy::FailFast);
+
+        assert_eq!(config.warmup_connections, 3);
+        assert_eq!(config.warmup_timeout, Duration::from_secs(10));
+        assert_eq!(config.warmup_failure_strategy, WarmupStrategy::FailFast);
+
+        crate::test_complete!("pool_config_warmup_builder");
     }
 }
