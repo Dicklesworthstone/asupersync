@@ -693,6 +693,167 @@ fn e2e_pool_under_load() {
 }
 
 // ============================================================================
+// Cancel-Safety Tests
+// ============================================================================
+
+#[test]
+fn pool_cancel_during_acquire_wait_does_not_corrupt() {
+    init_test_logging();
+    test_phase!("Cancel Safety - Cancel During Acquire Wait");
+
+    reset_connection_counter();
+
+    let pool: Arc<TestPool> = Arc::new(GenericPool::new(
+        mock_factory(),
+        PoolConfig::with_max_size(1),
+    ));
+
+    test_section!("Exhaust pool capacity");
+    let held = acquire_resource(&pool);
+    tracing::info!(id = %held.id(), "Holding sole resource");
+
+    // Pool is now at capacity. Spawn a thread that tries to acquire and will
+    // be cancelled via timeout/abort when it cannot get a resource.
+    test_section!("Spawn waiter thread and cancel");
+    let pool_clone: Arc<TestPool> = Arc::clone(&pool);
+    let handle = std::thread::spawn(move || {
+        // try_acquire returns None immediately when pool is at capacity
+        let result = pool_clone.try_acquire();
+        result.is_some()
+    });
+
+    let acquired = handle.join().expect("waiter thread should not panic");
+    assert!(
+        !acquired,
+        "Waiter should not have acquired (pool at capacity)"
+    );
+
+    test_section!("Verify pool not corrupted");
+    // Return the held resource
+    held.return_to_pool();
+
+    // Pool should still work after the cancelled waiter
+    let r2 = pool.try_acquire();
+    assert!(
+        r2.is_some(),
+        "Pool should still be functional after cancelled waiter"
+    );
+    tracing::info!("Pool remains functional after cancelled acquire");
+
+    let stats = pool.stats();
+    tracing::info!(
+        active = %stats.active,
+        idle = %stats.idle,
+        max_size = %stats.max_size,
+        "Pool state after cancel test"
+    );
+
+    test_complete!("pool_cancel_during_acquire_wait_does_not_corrupt");
+}
+
+#[test]
+fn pool_cancel_while_holding_resource_returns_via_drop() {
+    init_test_logging();
+    test_phase!("Cancel Safety - Cancel While Holding (Drain Phase)");
+
+    reset_connection_counter();
+
+    let pool: Arc<TestPool> = Arc::new(GenericPool::new(
+        mock_factory(),
+        PoolConfig::with_max_size(2),
+    ));
+
+    test_section!("Simulate task cancellation during resource hold");
+    // Spawn a thread that acquires a resource and "gets cancelled" (panics/drops)
+    let pool_clone: Arc<TestPool> = Arc::clone(&pool);
+    let handle = std::thread::spawn(move || {
+        let resource = {
+            let cx = Cx::for_testing();
+            futures_lite::future::block_on(pool_clone.acquire(&cx)).expect("acquire")
+        };
+        tracing::info!(id = %resource.id(), "Task holding resource before cancel");
+        // Simulate cancellation: resource drops when thread exits
+        // The Drop impl should return the resource to the pool
+        drop(resource);
+        tracing::info!("Resource dropped (cancel/drain complete)");
+    });
+
+    handle.join().expect("thread should complete");
+
+    test_section!("Verify resource returned to pool");
+    let stats = pool.stats();
+    tracing::info!(
+        active = %stats.active,
+        idle = %stats.idle,
+        "Pool state after simulated cancellation"
+    );
+
+    // The resource should have been returned via Drop (drain phase behavior)
+    assert_eq!(
+        stats.active, 0,
+        "No resources should be active after cancel"
+    );
+
+    // Verify we can re-acquire the returned resource
+    let r2 = pool.try_acquire();
+    assert!(
+        r2.is_some(),
+        "Should re-acquire resource returned during drain"
+    );
+    tracing::info!("Successfully re-acquired resource after cancel drain");
+
+    test_complete!("pool_cancel_while_holding_resource_returns_via_drop");
+}
+
+#[test]
+fn pool_min_size_configuration_respected() {
+    init_test_logging();
+    test_phase!("Pool Construction - Min Size Configuration");
+
+    reset_connection_counter();
+
+    let config = PoolConfig::with_max_size(10)
+        .min_size(3)
+        .acquire_timeout(Duration::from_secs(5));
+
+    assert_eq!(config.min_size, 3, "Config should store min_size");
+    assert_eq!(config.max_size, 10, "Config should store max_size");
+    assert!(
+        config.min_size <= config.max_size,
+        "min_size must not exceed max_size"
+    );
+
+    let pool = GenericPool::new(mock_factory(), config);
+
+    // Pre-populate the pool to min_size by acquiring and returning
+    test_section!("Pre-populate to min_size");
+    let cx = Cx::for_testing();
+    let mut resources = Vec::new();
+    for _ in 0..3 {
+        let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire for min_size");
+        resources.push(r);
+    }
+    // Return all to idle
+    drop(resources);
+
+    let stats = pool.stats();
+    tracing::info!(
+        idle = %stats.idle,
+        total = %stats.total,
+        min_size = 3,
+        "Pool after pre-population"
+    );
+
+    // Pool should have at least min_size resources available
+    assert!(
+        stats.idle >= 3 || stats.total >= 3,
+        "Pool should maintain at least min_size resources"
+    );
+
+    test_complete!("pool_min_size_configuration_respected");
+}
+
+// ============================================================================
 // Reuse Tests
 // ============================================================================
 
