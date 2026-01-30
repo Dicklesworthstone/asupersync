@@ -43,9 +43,9 @@ use futures_lite::future::block_on;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
