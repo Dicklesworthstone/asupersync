@@ -13,6 +13,9 @@ use std::io;
 /// Maximum allowed header block size (64 KiB).
 const DEFAULT_MAX_HEADERS_SIZE: usize = 64 * 1024;
 
+/// Maximum allowed body size (16 MiB).
+const DEFAULT_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
 /// Maximum number of headers.
 const MAX_HEADERS: usize = 128;
 
@@ -42,6 +45,8 @@ pub enum HttpError {
     RequestLineTooLong,
     /// Incomplete chunked encoding.
     BadChunkedEncoding,
+    /// Body exceeds the configured limit.
+    BodyTooLarge,
 }
 
 impl fmt::Display for HttpError {
@@ -57,6 +62,7 @@ impl fmt::Display for HttpError {
             Self::TooManyHeaders => write!(f, "too many headers"),
             Self::RequestLineTooLong => write!(f, "request line too long"),
             Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
+            Self::BodyTooLarge => write!(f, "body exceeds size limit"),
         }
     }
 }
@@ -106,11 +112,13 @@ enum DecodeState {
 /// # Limits
 ///
 /// - Maximum header block size: 64 KiB (configurable via [`max_headers_size`](Self::max_headers_size))
+/// - Maximum body size: 16 MiB (configurable via [`max_body_size`](Self::max_body_size))
 /// - Maximum number of headers: 128
 /// - Maximum request line: 8 KiB
 pub struct Http1Codec {
     state: DecodeState,
     max_headers_size: usize,
+    max_body_size: usize,
 }
 
 impl Http1Codec {
