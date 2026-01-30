@@ -41,7 +41,7 @@
 //! # API Stability
 //!
 //! Asupersync is currently in the 0.x series. Unless explicitly noted in
-//! [`docs/api_audit.md`], public items should be treated as **unstable** and
+//! `docs/api_audit.md`, public items should be treated as **unstable** and
 //! subject to change. Core types like [`Cx`], [`Outcome`], and [`Budget`] are
 //! intended to stabilize first.
 
