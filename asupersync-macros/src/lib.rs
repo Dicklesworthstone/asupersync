@@ -209,3 +209,187 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 pub fn race(input: TokenStream) -> TokenStream {
     race::race_impl(input)
 }
+
+/// Marks a test with the specification section and requirement it validates.
+///
+/// # Syntax
+///
+/// ```ignore
+/// #[conformance(spec = "3.2.1", requirement = "Region close waits for all children")]
+/// #[test]
+/// fn test_region_close_waits() { /* ... */ }
+/// ```
+///
+/// The macro is validation-only: it checks that `spec` and `requirement` are
+/// present and string literals, then leaves the item unchanged.
+#[proc_macro_attribute]
+pub fn conformance(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match parse_conformance_args(attr) {
+        Ok(_) => item,
+        Err(message) => util::compile_error(&message).into(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConformanceArgs {
+    spec: String,
+    requirement: String,
+}
+
+fn parse_conformance_args(attr: TokenStream) -> Result<ConformanceArgs, String> {
+    let raw = attr.to_string();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("conformance attribute requires arguments".to_string());
+    }
+
+    let mut spec = None;
+    let mut requirement = None;
+
+    for part in split_args(raw) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (key, value) = split_key_value(part)?;
+        let value = parse_string_literal(value)?;
+        match key {
+            "spec" => spec = Some(value),
+            "requirement" => requirement = Some(value),
+            other => {
+                return Err(format!(
+                    "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
+                ))
+            }
+        }
+    }
+
+    let spec = spec.ok_or_else(|| "conformance attribute missing 'spec'".to_string())?;
+    let requirement = requirement
+        .ok_or_else(|| "conformance attribute missing 'requirement'".to_string())?;
+
+    Ok(ConformanceArgs { spec, requirement })
+}
+
+fn split_args(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escape = false;
+
+    for ch in input.chars() {
+        if in_string {
+            current.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                current.push(ch);
+            }
+            ',' => {
+                parts.push(current);
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+
+    parts
+}
+
+fn split_key_value(input: &str) -> Result<(&str, &str), String> {
+    let mut iter = input.splitn(2, '=');
+    let key = iter
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "conformance attribute expects key = \"value\" pairs".to_string())?;
+    let value = iter
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("conformance attribute missing value for '{key}'"))?;
+    Ok((key, value))
+}
+
+fn parse_string_literal(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('"') || !trimmed.ends_with('"') {
+        return Err(format!(
+            "conformance attribute values must be string literals, got: {trimmed}"
+        ));
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let next = chars.next().ok_or_else(|| {
+                "conformance attribute contains dangling escape sequence".to_string()
+            })?;
+            match next {
+                '\\' => out.push('\\'),
+                '"' => out.push('"'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => {
+                    return Err(format!(
+                        "conformance attribute contains unsupported escape: \\{other}"
+                    ))
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_conformance_args;
+    use proc_macro2::TokenStream as TokenStream2;
+    use std::str::FromStr;
+
+    #[test]
+    fn parse_conformance_args_ok() {
+        let tokens = TokenStream2::from_str(
+            r#"spec = "3.2.1", requirement = "Region close waits""#,
+        )
+        .unwrap();
+        let args = parse_conformance_args(tokens.into()).unwrap();
+        assert_eq!(args.spec, "3.2.1");
+        assert_eq!(args.requirement, "Region close waits");
+    }
+
+    #[test]
+    fn parse_conformance_args_missing_spec() {
+        let tokens =
+            TokenStream2::from_str(r#"requirement = "Region close waits""#).unwrap();
+        let err = parse_conformance_args(tokens.into()).unwrap_err();
+        assert!(err.contains("missing 'spec'"));
+    }
+
+    #[test]
+    fn parse_conformance_args_missing_requirement() {
+        let tokens = TokenStream2::from_str(r#"spec = "3.2.1""#).unwrap();
+        let err = parse_conformance_args(tokens.into()).unwrap_err();
+        assert!(err.contains("missing 'requirement'"));
+    }
+}

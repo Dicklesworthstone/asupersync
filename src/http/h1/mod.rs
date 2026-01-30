@@ -3,11 +3,10 @@
 //! This module provides request parsing, response serialization, and
 //! connection handling for HTTP/1.1.
 //!
-//! - [`codec`]: [`Http1Codec`](codec::Http1Codec) for framed request/response I/O
-//! - [`types`]: [`Method`](types::Method), [`Version`](types::Version),
-//!   [`Request`](types::Request), [`Response`](types::Response)
-//! - [`server`]: [`Http1Server`](server::Http1Server) for serving connections
-//! - [`client`]: [`Http1Client`](client::Http1Client) for sending requests
+//! - [`codec`]: [`Http1Codec`] for framed request/response I/O
+//! - [`types`]: [`Method`], [`Version`], [`Request`], [`Response`]
+//! - [`server`]: [`Http1Server`] for serving connections
+//! - [`client`]: [`Http1Client`] for sending requests
 
 pub mod client;
 pub mod codec;
