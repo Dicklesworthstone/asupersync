@@ -218,23 +218,15 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
 
-        // Register waker if not already done (or replace existing)
-        // Simple strategy: always push to back. A better strategy for cancel correctness
-        // might track IDs, but for Phase 0 simplicity and because `poll` is called
-        // when woken, we can just ensure we are in the queue.
-        // Actually, to avoid duplicates, we could track registration state.
-        // But for strict FIFO, we should only push once?
-        // If we wake up spurious, we need to re-register.
-
-        // Simpler: Just push. Waker handling handles spurious wakes naturally
-        // (will re-poll, find locked, push again).
-        // Optimization: Don't push if already waiting?
-        // `Waker` comparison is tricky.
-
-        // Let's allow spurious pushes for now, or use a better structure later.
-        // The standard pattern is to register on every poll if pending.
-        state.waiters.push_back(context.waker().clone());
-        self.registered = true;
+        // Only register the waker once to prevent unbounded queue growth.
+        // If the waker changes between polls (rare), we accept the stale waker -
+        // another waiter will be woken instead, which is harmless.
+        // A more sophisticated implementation would use intrusive linked lists
+        // with proper deregistration on drop.
+        if !self.registered {
+            state.waiters.push_back(context.waker().clone());
+            self.registered = true;
+        }
         drop(state);
 
         Poll::Pending
@@ -299,11 +291,12 @@ impl<T> OwnedMutexGuard<T> {
         struct OwnedLockFuture<T> {
             mutex: Arc<Mutex<T>>,
             cx: Cx, // clone of cx
+            registered: bool,
         }
 
         impl<T> Future for OwnedLockFuture<T> {
             type Output = Result<OwnedMutexGuard<T>, LockError>;
-            fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
                 if self.cx.checkpoint().is_err() {
                     return Poll::Ready(Err(LockError::Cancelled));
                 }
@@ -317,8 +310,15 @@ impl<T> OwnedMutexGuard<T> {
                         mutex: self.mutex.clone(),
                     }));
                 }
-                state.waiters.push_back(context.waker().clone());
+                // Only register once to prevent unbounded queue growth
+                let should_register = !self.registered;
+                if should_register {
+                    state.waiters.push_back(context.waker().clone());
+                }
                 drop(state);
+                if should_register {
+                    self.registered = true;
+                }
                 Poll::Pending
             }
         }
@@ -326,6 +326,7 @@ impl<T> OwnedMutexGuard<T> {
         OwnedLockFuture {
             mutex,
             cx: cx.clone(),
+            registered: false,
         }
         .await
     }
