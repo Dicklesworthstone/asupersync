@@ -10,8 +10,11 @@ pub const DEFAULT_HEADER_TABLE_SIZE: u32 = 4096;
 /// Default enable push (true for servers, false for clients).
 pub const DEFAULT_ENABLE_PUSH: bool = true;
 
-/// Default max concurrent streams (unlimited).
-pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = u32::MAX;
+/// Default max concurrent streams (256).
+///
+/// A reasonable default that balances concurrency with resource protection.
+/// Servers should configure this based on their capacity requirements.
+pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 256;
 
 /// Default initial window size (64 KB - 1).
 pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65535;
@@ -19,8 +22,11 @@ pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 65535;
 /// Default max frame size (16 KB).
 pub const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;
 
-/// Default max header list size (unlimited).
-pub const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = u32::MAX;
+/// Default max header list size (64 KB).
+///
+/// Protects against memory exhaustion attacks via oversized headers.
+/// Most legitimate requests have headers well under this limit.
+pub const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = 65536;
 
 /// Maximum allowed initial window size.
 pub const MAX_INITIAL_WINDOW_SIZE: u32 = 0x7fff_ffff;
@@ -260,10 +266,13 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.header_table_size, 4096);
         assert!(settings.enable_push);
-        assert_eq!(settings.max_concurrent_streams, u32::MAX);
+        assert_eq!(
+            settings.max_concurrent_streams,
+            DEFAULT_MAX_CONCURRENT_STREAMS
+        );
         assert_eq!(settings.initial_window_size, 65535);
         assert_eq!(settings.max_frame_size, 16384);
-        assert_eq!(settings.max_header_list_size, u32::MAX);
+        assert_eq!(settings.max_header_list_size, DEFAULT_MAX_HEADER_LIST_SIZE);
     }
 
     #[test]

@@ -386,27 +386,36 @@ impl SymbolStream for ChannelStream {
         // If the waker changes between polls, we accept the stale waker -
         // another waiter will be woken instead, which is harmless.
         let mut new_waiter = None;
-        match this.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                // We were woken but no message yet - re-register
-                waiter.store(true, Ordering::Release);
-                let mut wakers = this.shared.recv_wakers.lock().unwrap();
-                wakers.push(ChannelWaiter {
-                    waker: cx.waker().clone(),
-                    queued: Arc::clone(waiter),
-                });
+        let mut closed = false;
+        {
+            let mut wakers = this.shared.recv_wakers.lock().unwrap();
+            if this.shared.closed.load(Ordering::SeqCst) {
+                closed = true;
+            } else {
+                match this.waiter.as_ref() {
+                    Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                        // We were woken but no message yet - re-register
+                        waiter.store(true, Ordering::Release);
+                        wakers.push(ChannelWaiter {
+                            waker: cx.waker().clone(),
+                            queued: Arc::clone(waiter),
+                        });
+                    }
+                    Some(_) => {} // Still queued, no need to re-register
+                    None => {
+                        // First time waiting - create new waiter
+                        let waiter = Arc::new(AtomicBool::new(true));
+                        wakers.push(ChannelWaiter {
+                            waker: cx.waker().clone(),
+                            queued: Arc::clone(&waiter),
+                        });
+                        new_waiter = Some(waiter);
+                    }
+                }
             }
-            Some(_) => {} // Still queued, no need to re-register
-            None => {
-                // First time waiting - create new waiter
-                let waiter = Arc::new(AtomicBool::new(true));
-                let mut wakers = this.shared.recv_wakers.lock().unwrap();
-                wakers.push(ChannelWaiter {
-                    waker: cx.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
+        }
+        if closed {
+            return Poll::Ready(None);
         }
         if let Some(waiter) = new_waiter {
             this.waiter = Some(waiter);

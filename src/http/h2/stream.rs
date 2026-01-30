@@ -8,7 +8,11 @@ use crate::bytes::Bytes;
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::PrioritySpec;
-use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
+use super::settings::{DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE};
+
+/// Maximum accumulated header fragment size (4x the default max header list size).
+/// Provides protection against DoS via unbounded CONTINUATION frames.
+const MAX_HEADER_FRAGMENT_SIZE: usize = DEFAULT_MAX_HEADER_LIST_SIZE as usize * 4;
 
 /// Stream state as defined in RFC 7540 Section 5.1.
 ///
@@ -360,6 +364,16 @@ impl Stream {
             ));
         }
 
+        // Check accumulated size to prevent DoS via unbounded CONTINUATION frames
+        let current_size: usize = self.header_fragments.iter().map(Bytes::len).sum();
+        if current_size.saturating_add(header_block.len()) > MAX_HEADER_FRAGMENT_SIZE {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "accumulated header fragments too large",
+            ));
+        }
+
         self.header_fragments.push(header_block);
         self.headers_complete = end_headers;
         Ok(())
@@ -371,8 +385,19 @@ impl Stream {
     }
 
     /// Add header fragment for accumulation.
-    pub fn add_header_fragment(&mut self, fragment: Bytes) {
+    ///
+    /// Returns an error if the accumulated size would exceed the limit.
+    pub fn add_header_fragment(&mut self, fragment: Bytes) -> Result<(), H2Error> {
+        let current_size: usize = self.header_fragments.iter().map(Bytes::len).sum();
+        if current_size.saturating_add(fragment.len()) > MAX_HEADER_FRAGMENT_SIZE {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "accumulated header fragments too large",
+            ));
+        }
         self.header_fragments.push(fragment);
+        Ok(())
     }
 
     /// Transition state on sending data.

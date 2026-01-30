@@ -233,7 +233,11 @@ impl<T> OnceCell<T> {
             }
             Err(INITIALIZING) => {
                 // Another task is initializing. Wait for it.
-                WaitInit { cell: self, waiter: None }.await;
+                WaitInit {
+                    cell: self,
+                    waiter: None,
+                }
+                .await;
                 self.value.get().expect("should be initialized after wait")
             }
             Err(INITIALIZED) => {
@@ -298,7 +302,11 @@ impl<T> OnceCell<T> {
             }
             Err(INITIALIZING) => {
                 // Another task is initializing. Wait for it.
-                WaitInit { cell: self, waiter: None }.await;
+                WaitInit {
+                    cell: self,
+                    waiter: None,
+                }
+                .await;
                 // The other task might have failed, check state.
                 if self.is_initialized() {
                     Ok(self.value.get().expect("should be initialized"))
@@ -372,7 +380,11 @@ impl<T> OnceCell<T> {
     }
 
     /// Registers a waker for async waiting with tracking to prevent unbounded growth.
-    fn register_waker(&self, waker: &Waker, waiter_flag: Option<&Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
+    fn register_waker(
+        &self,
+        waker: &Waker,
+        waiter_flag: Option<&Arc<AtomicBool>>,
+    ) -> Option<Arc<AtomicBool>> {
         let mut guard = match self.waiters.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),

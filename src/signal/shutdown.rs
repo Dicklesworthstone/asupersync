@@ -145,13 +145,17 @@ impl ShutdownReceiver {
     /// This method returns immediately if shutdown has already been initiated.
     /// Otherwise, it waits until the controller's `shutdown()` method is called.
     pub async fn wait(&mut self) {
+        // Create the notification future first to avoid missing a shutdown
+        // that happens between the check and registration.
+        let notified = self.state.notify.notified();
+
         // Check if already shut down.
         if self.is_shutting_down() {
             return;
         }
 
         // Wait for notification.
-        self.state.notify.notified().await;
+        notified.await;
     }
 
     /// Checks if shutdown has been initiated.

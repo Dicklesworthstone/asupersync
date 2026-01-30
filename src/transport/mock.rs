@@ -706,7 +706,8 @@ impl SymbolStream for MockSymbolStream {
                     delay: Delay::new(delay),
                 };
                 this.pending = Some(pending);
-                if this.pending
+                if this
+                    .pending
                     .as_ref()
                     .expect("pending symbol missing")
                     .delay

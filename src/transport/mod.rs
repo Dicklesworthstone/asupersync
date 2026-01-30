@@ -71,20 +71,23 @@ impl SharedChannel {
 
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        // Wake everyone
-        {
+        // Wake everyone (drop locks before waking to avoid deadlocks).
+        let send_wakers = {
             let mut wakers = self.send_wakers.lock().unwrap();
-            for w in wakers.drain(..) {
-                w.queued.store(false, Ordering::Release);
-                w.waker.wake();
-            }
-        }
-        {
+            std::mem::take(&mut *wakers)
+        };
+        let recv_wakers = {
             let mut wakers = self.recv_wakers.lock().unwrap();
-            for w in wakers.drain(..) {
-                w.queued.store(false, Ordering::Release);
-                w.waker.wake();
-            }
+            std::mem::take(&mut *wakers)
+        };
+
+        for w in send_wakers {
+            w.queued.store(false, Ordering::Release);
+            w.waker.wake();
+        }
+        for w in recv_wakers {
+            w.queued.store(false, Ordering::Release);
+            w.waker.wake();
         }
     }
 }

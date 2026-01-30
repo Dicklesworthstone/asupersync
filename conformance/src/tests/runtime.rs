@@ -20,10 +20,8 @@ use crate::{
     checkpoint, ConformanceTest, MpscReceiver, MpscSender, OneshotSender, RuntimeInterface,
     TestCategory, TestMeta, TestResult,
 };
-use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 /// Get all runtime conformance tests.
@@ -608,12 +606,12 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 // Spawn all tasks
                 let start = Instant::now();
 
+                let mut handles = Vec::with_capacity(NUM_TASKS as usize);
                 for _ in 0..NUM_TASKS {
                     let counter = counter.clone();
                     let completed = completed.clone();
 
-                    // Intentionally not awaiting - testing concurrent spawn capacity
-                    drop(rt.spawn(async move {
+                    handles.push(rt.spawn(async move {
                         counter.fetch_add(1, Ordering::SeqCst);
                         completed.fetch_add(1, Ordering::SeqCst);
                     }));
@@ -627,19 +625,10 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     }),
                 );
 
-                let completed_for_wait = completed.clone();
                 let timeout_result = rt
                     .timeout(Duration::from_secs(30), async move {
-                        loop {
-                            let count = completed_for_wait.load(Ordering::SeqCst);
-                            if count >= NUM_TASKS {
-                                break;
-                            }
-                            poll_fn(|cx| {
-                                cx.waker().wake_by_ref();
-                                Poll::<()>::Pending
-                            })
-                            .await;
+                        for handle in handles {
+                            let _ = handle.await;
                         }
                     })
                     .await;

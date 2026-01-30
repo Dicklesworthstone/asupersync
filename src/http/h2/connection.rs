@@ -136,6 +136,12 @@ pub enum PendingOp {
         headers: Vec<Header>,
         end_stream: bool,
     },
+    /// Continuation of header block.
+    Continuation {
+        stream_id: u32,
+        header_block: Bytes,
+        end_headers: bool,
+    },
     /// Data to send.
     Data {
         stream_id: u32,
@@ -468,7 +474,7 @@ impl Connection {
             stream.set_priority(priority);
         }
 
-        stream.add_header_fragment(frame.header_block);
+        stream.add_header_fragment(frame.header_block)?;
 
         if frame.end_headers {
             self.continuation_stream_id = None;
@@ -655,6 +661,7 @@ impl Connection {
     }
 
     /// Get next pending frame to send.
+    #[allow(clippy::too_many_lines)]
     pub fn next_frame(&mut self) -> Option<Frame> {
         let op = self.pending_ops.pop_front()?;
 
@@ -676,26 +683,64 @@ impl Connection {
                 // Encode headers
                 let mut encoded = BytesMut::new();
                 self.hpack_encoder.encode(&headers, &mut encoded);
+                let encoded = encoded.freeze();
 
-                Some(Frame::Headers(HeadersFrame::new(
-                    stream_id,
-                    encoded.freeze(),
-                    end_stream,
-                    true, // end_headers (no continuation for now)
-                )))
+                let max_frame_size = self.remote_settings.max_frame_size as usize;
+
+                if encoded.len() <= max_frame_size {
+                    // Fits in a single HEADERS frame
+                    Some(Frame::Headers(HeadersFrame::new(
+                        stream_id, encoded, end_stream, true, // end_headers
+                    )))
+                } else {
+                    // Need CONTINUATION frames - split the header block
+                    let first_chunk = encoded.slice(..max_frame_size);
+                    let remaining = encoded.slice(max_frame_size..);
+
+                    // Queue CONTINUATION frames for remaining data
+                    let mut offset = 0;
+                    while offset < remaining.len() {
+                        let chunk_end = (offset + max_frame_size).min(remaining.len());
+                        let chunk = remaining.slice(offset..chunk_end);
+                        let is_last = chunk_end == remaining.len();
+                        self.pending_ops.push_front(PendingOp::Continuation {
+                            stream_id,
+                            header_block: chunk,
+                            end_headers: is_last,
+                        });
+                        offset = chunk_end;
+                    }
+
+                    Some(Frame::Headers(HeadersFrame::new(
+                        stream_id,
+                        first_chunk,
+                        end_stream,
+                        false, // end_headers = false, CONTINUATION follows
+                    )))
+                }
             }
+            PendingOp::Continuation {
+                stream_id,
+                header_block,
+                end_headers,
+            } => Some(Frame::Continuation(ContinuationFrame {
+                stream_id,
+                header_block,
+                end_headers,
+            })),
             PendingOp::Data {
                 stream_id,
                 data,
                 end_stream,
             } => {
-                // Determine the maximum sendable bytes from both windows.
+                // Determine the maximum sendable bytes from flow control windows and max_frame_size.
                 let conn_avail = self.send_window.max(0).cast_unsigned();
                 let stream_avail = self
                     .streams
                     .get(stream_id)
                     .map_or(0, |s| s.send_window().max(0).cast_unsigned());
-                let max_send = conn_avail.min(stream_avail) as usize;
+                let frame_size_limit = self.remote_settings.max_frame_size;
+                let max_send = conn_avail.min(stream_avail).min(frame_size_limit) as usize;
 
                 if max_send == 0 && !data.is_empty() {
                     // No send window available; re-queue for later.
@@ -1113,5 +1158,118 @@ mod tests {
             }
             other => panic!("expected DATA frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn send_data_respects_max_frame_size() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        // Set a small max_frame_size for testing
+        conn.remote_settings.max_frame_size = 100;
+
+        let headers = vec![
+            Header::new(":method", "POST"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame().unwrap(); // drain HEADERS
+
+        // Queue 300 bytes of data
+        let data = Bytes::from(vec![0xEE_u8; 300]);
+        conn.send_data(stream_id, data, true).unwrap();
+
+        // First frame should be clamped to max_frame_size (100 bytes)
+        let frame1 = conn.next_frame().expect("expected first DATA frame");
+        match frame1 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 100, "clamped to max_frame_size");
+                assert!(!d.end_stream);
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+
+        // Second frame
+        let frame2 = conn.next_frame().expect("expected second DATA frame");
+        match frame2 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 100);
+                assert!(!d.end_stream);
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+
+        // Third frame (final)
+        let frame3 = conn.next_frame().expect("expected third DATA frame");
+        match frame3 {
+            Frame::Data(d) => {
+                assert_eq!(d.data.len(), 100);
+                assert!(d.end_stream);
+            }
+            other => panic!("expected DATA frame, got {other:?}"),
+        }
+
+        assert!(!conn.has_pending_frames());
+    }
+
+    #[test]
+    fn large_headers_use_continuation_frames() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        // Set a very small max_frame_size to force CONTINUATION
+        conn.remote_settings.max_frame_size = 50;
+
+        // Create headers that will encode to more than 50 bytes
+        let mut headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/some/very/long/path/that/exceeds/frame/size"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        // Add more headers to ensure we exceed the limit
+        for i in 0..10 {
+            headers.push(Header::new(
+                format!("x-custom-header-{i}"),
+                format!("value-{i}"),
+            ));
+        }
+
+        let stream_id = conn.open_stream(headers, true).unwrap();
+
+        // First frame should be HEADERS with end_headers=false
+        let frame1 = conn.next_frame().expect("expected HEADERS frame");
+        match &frame1 {
+            Frame::Headers(h) => {
+                assert_eq!(h.stream_id, stream_id);
+                assert!(h.end_stream);
+                assert!(!h.end_headers, "should have CONTINUATION following");
+                assert_eq!(h.header_block.len(), 50);
+            }
+            other => panic!("expected HEADERS frame, got {other:?}"),
+        }
+
+        // Subsequent frames should be CONTINUATION
+        let mut continuation_count = 0;
+        let mut last_end_headers = false;
+        while let Some(frame) = conn.next_frame() {
+            match frame {
+                Frame::Continuation(c) => {
+                    assert_eq!(c.stream_id, stream_id);
+                    continuation_count += 1;
+                    last_end_headers = c.end_headers;
+                    if c.end_headers {
+                        break;
+                    }
+                }
+                other => panic!("expected CONTINUATION frame, got {other:?}"),
+            }
+        }
+
+        assert!(
+            continuation_count >= 1,
+            "should have at least one CONTINUATION"
+        );
+        assert!(last_end_headers, "last frame should have end_headers=true");
     }
 }

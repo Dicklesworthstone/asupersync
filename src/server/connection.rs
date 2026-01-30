@@ -178,7 +178,11 @@ impl ConnectionManager {
             if self.is_empty() {
                 return;
             }
-            self.all_closed.notified().await;
+            let notified = self.all_closed.notified();
+            if self.is_empty() {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -252,8 +256,26 @@ impl ConnectionManager {
                 }
             }
 
-            // Wait for the next connection close or deadline notification
-            self.all_closed.notified().await;
+            // Register for the next connection close or deadline notification.
+            let notified = self.all_closed.notified();
+
+            // Re-check state after registration to avoid missing close/timeout
+            if self.is_empty() {
+                let drained = initial_count;
+                self.shutdown_signal.mark_stopped();
+                return self.shutdown_signal.collect_stats(drained, 0);
+            }
+
+            if let Some(deadline) = self.shutdown_signal.drain_deadline() {
+                if std::time::Instant::now() >= deadline {
+                    let remaining = self.active_count();
+                    let drained = initial_count.saturating_sub(remaining);
+                    let _ = self.shutdown_signal.begin_force_close();
+                    return self.shutdown_signal.collect_stats(drained, remaining);
+                }
+            }
+
+            notified.await;
         }
     }
 }
