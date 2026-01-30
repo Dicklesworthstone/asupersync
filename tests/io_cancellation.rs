@@ -15,6 +15,7 @@
 //! - IO-CANCEL-006: Split stream cleanup works correctly
 //! - IO-CANCEL-007: Nested task cancellation propagates to I/O
 //! - IO-CANCEL-008: Multiple concurrent I/O operations cancel correctly
+//! - IO-CANCEL-009: IoOp cancel clears obligation and invariants
 //!
 //! # Key Invariants
 //!
@@ -43,6 +44,8 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
@@ -151,8 +154,7 @@ fn io_cancel_001_cancel_during_read() {
 
     assert!(
         result.is_ok(),
-        "cancel during read test should complete: {:?}",
-        result
+        "cancel during read test should complete: {result:?}",
     );
     test_complete!("io_cancel_001_cancel_during_read");
 }
@@ -207,8 +209,7 @@ fn io_cancel_002_cancel_during_write() {
 
     assert!(
         result.is_ok(),
-        "cancel during write test should complete: {:?}",
-        result
+        "cancel during write test should complete: {result:?}",
     );
     test_complete!("io_cancel_002_cancel_during_write");
 }
@@ -251,8 +252,7 @@ fn io_cancel_003_cancel_during_accept() {
 
     assert!(
         result.is_ok(),
-        "cancel during accept test should complete: {:?}",
-        result
+        "cancel during accept test should complete: {result:?}",
     );
     test_complete!("io_cancel_003_cancel_during_accept");
 }
@@ -291,6 +291,7 @@ fn io_cancel_004_cancel_during_connect() {
 // ============================================================================
 
 /// Verifies that dropping a stream normally cleans up its registration.
+#[cfg(unix)]
 #[test]
 fn io_cancel_005_registration_cleanup_on_drop() {
     init_test("io_cancel_005_registration_cleanup_on_drop");
@@ -305,11 +306,11 @@ fn io_cancel_005_registration_cleanup_on_drop() {
         .set_nonblocking(true)
         .expect("set nonblocking on read end");
 
-    let token = Token::new(42);
+    let registration = Token::new(42);
 
     // Register the source — count should increase.
     reactor
-        .register(&pipe_r, token, Interest::READABLE)
+        .register(&pipe_r, registration, Interest::READABLE)
         .expect("register");
     assert_eq!(
         reactor.registration_count(),
@@ -318,7 +319,7 @@ fn io_cancel_005_registration_cleanup_on_drop() {
     );
 
     // Deregister — simulates cleanup on Drop.
-    reactor.deregister(token).expect("deregister");
+    reactor.deregister(registration).expect("deregister");
     assert_eq!(
         reactor.registration_count(),
         0,
@@ -327,7 +328,7 @@ fn io_cancel_005_registration_cleanup_on_drop() {
 
     // Also verify double-deregister returns an error (no leaks or double-free).
     assert!(
-        reactor.deregister(token).is_err(),
+        reactor.deregister(registration).is_err(),
         "double deregister should fail"
     );
 
@@ -602,12 +603,20 @@ fn io_cancel_registration_count_tracking() {
 
     let after_register = reactor.registration_count();
     tracing::info!(after_register, "after registration");
+    assert!(
+        after_register > initial,
+        "registration count should increase after poll"
+    );
 
     // Drop stream
     drop(stream);
 
     let after_drop = reactor.registration_count();
     tracing::info!(after_drop, "after drop");
+    assert_eq!(
+        after_drop, initial,
+        "registration count should return to initial after drop"
+    );
 
     // Cleanup
     drop(_client);
@@ -645,9 +654,18 @@ fn io_cancel_wouldblock_registers_interest() {
     // Verify registration occurred (reactor should have at least one)
     let count = reactor.registration_count();
     tracing::info!(count, "registration count after poll");
+    assert!(
+        count > 0,
+        "registration count should be non-zero after poll"
+    );
 
     // Cleanup
     drop(stream);
+    assert_eq!(
+        reactor.registration_count(),
+        0,
+        "registration count should return to zero after drop"
+    );
     drop(client);
 
     test_complete!("io_cancel_wouldblock_registers_interest");

@@ -248,6 +248,7 @@ impl Cx {
     }
 
     /// Creates a new capability context with optional I/O capability (internal use).
+    #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn new_with_io(
         region: RegionId,
