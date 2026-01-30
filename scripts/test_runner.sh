@@ -18,12 +18,13 @@ SUMMARY_FILE="$OUTPUT_DIR/summary_${TIMESTAMP}.txt"
 run_test_suite() {
     local name="$1"
     local pattern="$2"
+    local features="${3:-test-internals}"
     local log_file="$OUTPUT_DIR/${name}_${TIMESTAMP}.log"
 
     echo ""
     echo "▶ Running ${name} tests..."
 
-    if cargo test "$pattern" --features test-internals -- --nocapture 2>&1 | tee "$log_file"; then
+    if cargo test "$pattern" --features "$features" -- --nocapture 2>&1 | tee "$log_file"; then
         echo "  ✓ ${name}: PASSED" >> "$SUMMARY_FILE"
         return 0
     else
@@ -37,6 +38,7 @@ FAILURES=0
 run_test_suite "unit" "" || ((FAILURES++))
 run_test_suite "conformance" "conformance" || ((FAILURES++))
 PROPTEST_CASES=${PROPTEST_CASES:-1000} run_test_suite "property" "property_test" || ((FAILURES++))
+run_test_suite "tower" "tower_adapter_" "test-internals,tower" || ((FAILURES++))
 run_test_suite "e2e" "e2e_" || ((FAILURES++))
 
 echo ""
