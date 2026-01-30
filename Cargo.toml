@@ -35,9 +35,16 @@ tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring", "dep:rus
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
 tls-webpki-roots = ["tls", "dep:webpki-roots"]
+# Enable CLI tooling (trace inspection).
+cli = ["dep:clap", "dep:time", "trace-compression"]
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "asupersync"
+path = "src/bin/asupersync.rs"
+required-features = ["cli"]
 
 [dependencies]
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
@@ -84,6 +91,8 @@ webpki-roots = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
 # Optional TOML config file support for RuntimeBuilder
 toml = { version = "0.8", optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+time = { version = "0.3", features = ["formatting"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }

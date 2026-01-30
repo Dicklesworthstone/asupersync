@@ -505,6 +505,58 @@ fn test_deadline_monitor_warns_on_no_progress() {
 }
 
 #[test]
+fn test_deadline_monitor_warns_on_approaching_deadline_no_progress() {
+    init_test("test_deadline_monitor_warns_on_approaching_deadline_no_progress");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(8));
+
+    let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_ref = warnings.clone();
+    let config = MonitorConfig {
+        check_interval: Duration::ZERO,
+        warning_threshold_fraction: 0.2,
+        checkpoint_timeout: Duration::ZERO,
+        adaptive: AdaptiveDeadlineConfig::default(),
+        enabled: true,
+    };
+    runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
+        warnings_ref.lock().unwrap().push(warning);
+    });
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let budget = Budget::new().with_deadline(Time::from_secs(100));
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, budget, async {
+            yield_now().await;
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.advance_time_to(Time::from_secs(90));
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recorded = warnings.lock().unwrap();
+    assert_with_log!(
+        recorded.len() == 1,
+        "one warning emitted",
+        1usize,
+        recorded.len()
+    );
+    assert_with_log!(
+        recorded[0].reason == WarningReason::ApproachingDeadlineNoProgress,
+        "approaching deadline + no progress warning",
+        WarningReason::ApproachingDeadlineNoProgress,
+        recorded[0].reason
+    );
+    drop(recorded);
+    test_complete!("test_deadline_monitor_warns_on_approaching_deadline_no_progress");
+}
+
+#[test]
 fn test_deadline_monitor_includes_checkpoint_message() {
     init_test("test_deadline_monitor_includes_checkpoint_message");
     test_section!("setup");
