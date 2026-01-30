@@ -70,14 +70,14 @@ struct TestSource {
 
 #[cfg(unix)]
 impl TestSource {
-    fn new() -> Self {
-        let (stream, peer) = UnixStream::pair().expect("unix stream pair");
-        stream.set_nonblocking(true).expect("set nonblocking");
-        peer.set_nonblocking(true).expect("set nonblocking");
-        Self {
+    fn new() -> io::Result<Self> {
+        let (stream, peer) = UnixStream::pair()?;
+        stream.set_nonblocking(true)?;
+        peer.set_nonblocking(true)?;
+        Ok(Self {
             stream,
             _peer: peer,
-        }
+        })
     }
 }
 
@@ -89,7 +89,7 @@ impl AsRawFd for TestSource {
 }
 
 #[cfg(unix)]
-fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> TaskId {
+fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> Option<TaskId> {
     let (task_id, _handle) = runtime
         .state
         .create_task(region, Budget::INFINITE, async {
@@ -103,26 +103,32 @@ fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> TaskId 
                 asupersync::runtime::yield_now().await;
             }
         })
-        .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-    task_id
+        .ok()?;
+    let Ok(mut scheduler) = runtime.scheduler.lock() else {
+        return None;
+    };
+    scheduler.schedule(task_id, 0);
+    Some(task_id)
 }
 
 #[cfg(unix)]
-fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) {
+fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> bool {
     let tasks = runtime.state.cancel_request(region, reason, None);
-    let mut scheduler = runtime.scheduler.lock().unwrap();
+    let Ok(mut scheduler) = runtime.scheduler.lock() else {
+        return false;
+    };
     for (task, priority) in tasks {
         scheduler.schedule_cancel(task, priority);
     }
+    true
 }
 
 #[cfg(unix)]
-fn record_io_replay_trace(seed: u64) -> ReplayTrace {
+fn record_io_replay_trace(seed: u64) -> Option<ReplayTrace> {
     let config = LabConfig::new(seed).with_default_replay_recording();
     let mut runtime = LabRuntime::new(config);
     let region = runtime.state.create_root_region(Budget::INFINITE);
-    let task_id = spawn_cancellable_task(&mut runtime, region);
+    let task_id = spawn_cancellable_task(&mut runtime, region)?;
 
     let io_op = IoOp::submit(
         &mut runtime.state,
@@ -130,41 +136,47 @@ fn record_io_replay_trace(seed: u64) -> ReplayTrace {
         region,
         Some("e2e io op".to_string()),
     )
-    .expect("submit io op");
+    .ok()?;
 
-    let source = TestSource::new();
+    let source = TestSource::new().ok()?;
     let waker = noop_waker();
-    let registration = runtime
-        .state
-        .io_driver_handle()
-        .expect("io driver handle")
-        .register(&source, Interest::READABLE, waker)
-        .expect("register io");
-    let token = registration.token();
+    let handle = runtime.state.io_driver_handle()?;
+    let registration = handle.register(&source, Interest::READABLE, waker).ok()?;
 
-    runtime
-        .lab_reactor()
-        .inject_event(token, Event::readable(token), Duration::from_millis(1));
+    let registration_id = registration.token();
+    runtime.lab_reactor().inject_event(
+        registration_id,
+        Event::readable(registration_id),
+        Duration::from_millis(1),
+    );
     runtime.advance_time(1_000_000);
     runtime.step_for_test();
 
     let cancel_reason = CancelReason::shutdown();
-    cancel_region(&mut runtime, region, &cancel_reason);
-    io_op.cancel(&mut runtime.state).expect("cancel io op");
+    if !cancel_region(&mut runtime, region, &cancel_reason) {
+        return None;
+    }
+    if io_op.cancel(&mut runtime.state).is_err() {
+        return None;
+    }
     runtime.run_until_quiescent();
 
     let pending = runtime.state.pending_obligation_count();
     let violations = runtime.check_invariants();
-    assert!(
+    assert_with_log!(
         pending == 0,
-        "expected no pending obligations after cancel: {pending}"
+        "no pending obligations after cancel",
+        0usize,
+        pending
     );
-    assert!(
+    assert_with_log!(
         violations.is_empty(),
-        "expected no invariant violations after cancel: {violations:?}"
+        "no invariant violations after cancel",
+        true,
+        violations.is_empty()
     );
 
-    runtime.finish_replay_trace().expect("replay trace")
+    runtime.finish_replay_trace()
 }
 
 // ============================================================================
@@ -280,9 +292,17 @@ fn io_e2e_copy_stream() {
     let mut writer = Vec::new();
     let mut fut = copy(&mut reader, &mut writer);
     let mut fut = Pin::new(&mut fut);
-    let n = poll_ready(&mut fut, 64)
-        .expect("copy future did not resolve")
-        .unwrap();
+    let Some(result) = poll_ready(&mut fut, 64) else {
+        assert_with_log!(false, "copy future resolved", true, false);
+        return;
+    };
+    let n = match result {
+        Ok(n) => n,
+        Err(err) => {
+            assert_with_log!(false, "copy result ok", "Ok", format!("{err:?}"));
+            return;
+        }
+    };
     assert_with_log!(n == 8, "bytes copied", 8, n);
     assert_with_log!(writer == b"hello io", "writer", b"hello io", writer);
     test_complete!("io_e2e_copy_stream");
@@ -298,9 +318,17 @@ fn io_e2e_buffered_read_chain() {
     let mut out = Vec::new();
     let mut fut = reader.read_to_end(&mut out);
     let mut fut = Pin::new(&mut fut);
-    let n = poll_ready(&mut fut, 64)
-        .expect("read_to_end did not resolve")
-        .unwrap();
+    let Some(result) = poll_ready(&mut fut, 64) else {
+        assert_with_log!(false, "read_to_end resolved", true, false);
+        return;
+    };
+    let n = match result {
+        Ok(n) => n,
+        Err(err) => {
+            assert_with_log!(false, "read_to_end ok", "Ok", format!("{err:?}"));
+            return;
+        }
+    };
     assert_with_log!(n == 11, "bytes read", 11, n);
     assert_with_log!(out == b"hello world", "out", b"hello world", out);
     test_complete!("io_e2e_buffered_read_chain");
@@ -348,8 +376,17 @@ fn io_e2e_copy_bidirectional() {
 
     let mut fut = copy_bidirectional(&mut stream_a, &mut stream_b);
     let mut fut = Pin::new(&mut fut);
-    let result = poll_ready(&mut fut, 64).expect("copy_bidirectional did not resolve");
-    let (a_to_b, b_to_a) = result.unwrap();
+    let Some(result) = poll_ready(&mut fut, 64) else {
+        assert_with_log!(false, "copy_bidirectional resolved", true, false);
+        return;
+    };
+    let (a_to_b, b_to_a) = match result {
+        Ok(values) => values,
+        Err(err) => {
+            assert_with_log!(false, "copy_bidirectional ok", "Ok", format!("{err:?}"));
+            return;
+        }
+    };
 
     assert_with_log!(a_to_b == 4, "a->b bytes", 4, a_to_b);
     assert_with_log!(b_to_a == 4, "b->a bytes", 4, b_to_a);
@@ -417,32 +454,52 @@ fn io_e2e_lab_cancel_inflight_io_op() {
     init_test("io_e2e_lab_cancel_inflight_io_op");
     let mut runtime = LabRuntime::new(LabConfig::new(42));
     let region = runtime.state.create_root_region(Budget::INFINITE);
-    let task_id = spawn_cancellable_task(&mut runtime, region);
+    let Some(task_id) = spawn_cancellable_task(&mut runtime, region) else {
+        assert_with_log!(false, "spawn task", "Some", "None");
+        return;
+    };
 
     let io_op = IoOp::submit(
         &mut runtime.state,
         task_id,
         region,
         Some("inflight read".to_string()),
-    )
-    .expect("submit io op");
+    );
+    let io_op = match io_op {
+        Ok(op) => op,
+        Err(err) => {
+            assert_with_log!(false, "submit io op", "Ok", format!("{err:?}"));
+            return;
+        }
+    };
 
     let cancel_reason = CancelReason::parent_cancelled();
-    cancel_region(&mut runtime, region, &cancel_reason);
-    io_op.cancel(&mut runtime.state).expect("cancel io op");
+    let cancelled = cancel_region(&mut runtime, region, &cancel_reason);
+    assert_with_log!(cancelled, "cancel region", true, cancelled);
+    let cancel_ok = io_op.cancel(&mut runtime.state).is_ok();
+    assert_with_log!(cancel_ok, "cancel io op", true, cancel_ok);
     runtime.run_until_quiescent();
 
     let pending = runtime.state.pending_obligation_count();
     let violations = runtime.check_invariants();
-    assert!(
+    assert_with_log!(
         pending == 0,
-        "expected no pending obligations after cancel: {pending}"
+        "no pending obligations after cancel",
+        0usize,
+        pending
     );
-    assert!(
+    assert_with_log!(
         violations.is_empty(),
-        "expected no invariant violations after cancel: {violations:?}"
+        "no invariant violations after cancel",
+        true,
+        violations.is_empty()
     );
-    assert!(runtime.state.is_quiescent(), "runtime should be quiescent");
+    assert_with_log!(
+        runtime.state.is_quiescent(),
+        "runtime quiescent",
+        true,
+        runtime.state.is_quiescent()
+    );
     test_complete!("io_e2e_lab_cancel_inflight_io_op");
 }
 
@@ -452,38 +509,55 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
     init_test("io_e2e_lab_region_close_waits_for_io_op");
     let mut runtime = LabRuntime::new(LabConfig::new(7));
     let region = runtime.state.create_root_region(Budget::INFINITE);
-    let task_id = spawn_cancellable_task(&mut runtime, region);
+    let Some(task_id) = spawn_cancellable_task(&mut runtime, region) else {
+        assert_with_log!(false, "spawn task", "Some", "None");
+        return;
+    };
 
     let io_op = IoOp::submit(
         &mut runtime.state,
         task_id,
         region,
         Some("region close io".to_string()),
-    )
-    .expect("submit io op");
+    );
+    let io_op = match io_op {
+        Ok(op) => op,
+        Err(err) => {
+            assert_with_log!(false, "submit io op", "Ok", format!("{err:?}"));
+            return;
+        }
+    };
 
     let cancel_reason = CancelReason::shutdown();
-    {
-        let region_record = runtime.state.region_mut(region).expect("region");
-        region_record.begin_close(Some(cancel_reason.clone()));
-        region_record.begin_finalize();
-    }
+    let Some(region_record) = runtime.state.region_mut(region) else {
+        assert_with_log!(false, "region record", "Some", "None");
+        return;
+    };
+    region_record.begin_close(Some(cancel_reason.clone()));
+    region_record.begin_finalize();
 
-    if let Some(task) = runtime.state.task_mut(task_id) {
-        task.complete(Outcome::Cancelled(cancel_reason));
-    }
+    let task_completed = runtime.state.task_mut(task_id).is_some_and(|task| {
+        task.complete(Outcome::Cancelled(cancel_reason.clone()));
+        true
+    });
+    assert_with_log!(task_completed, "task completed", true, task_completed);
 
     let can_close_with_pending = runtime.state.can_region_complete_close(region);
-    assert!(
+    assert_with_log!(
         !can_close_with_pending,
-        "region close should wait for io obligations"
+        "region close waits for io obligations",
+        true,
+        !can_close_with_pending
     );
 
-    io_op.cancel(&mut runtime.state).expect("cancel io op");
+    let cancel_ok = io_op.cancel(&mut runtime.state).is_ok();
+    assert_with_log!(cancel_ok, "cancel io op", true, cancel_ok);
     let can_close_after = runtime.state.can_region_complete_close(region);
-    assert!(
+    assert_with_log!(
         can_close_after,
-        "region close should complete after io op cancel"
+        "region close completes after io op cancel",
+        true,
+        can_close_after
     );
 
     test_complete!("io_e2e_lab_region_close_waits_for_io_op");
@@ -493,8 +567,14 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
 #[test]
 fn io_e2e_lab_replay_determinism_for_io_events() {
     init_test("io_e2e_lab_replay_determinism_for_io_events");
-    let trace_a = record_io_replay_trace(123);
-    let trace_b = record_io_replay_trace(123);
+    let Some(trace_a) = record_io_replay_trace(123) else {
+        assert_with_log!(false, "record trace A", "Some", "None");
+        return;
+    };
+    let Some(trace_b) = record_io_replay_trace(123) else {
+        assert_with_log!(false, "record trace B", "Some", "None");
+        return;
+    };
 
     assert_with_log!(
         trace_a.metadata.seed == trace_b.metadata.seed,
