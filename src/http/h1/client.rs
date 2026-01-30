@@ -29,6 +29,12 @@ enum ClientDecodeState {
         headers: Vec<(String, String)>,
         remaining: usize,
     },
+    Chunked {
+        version: Version,
+        status: u16,
+        reason: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 impl Http1ClientCodec {
@@ -82,10 +88,54 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, v)| v.as_str())
 }
 
+fn is_chunked(headers: &[(String, String)]) -> bool {
+    let Some(te) = header_value(headers, "Transfer-Encoding") else {
+        return false;
+    };
+    te.split(',')
+        .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+}
+
+/// Decode a chunked body from `buf`. Returns `Some((body, consumed))` when
+/// complete, or `None` if more data is needed.
+fn decode_chunked(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
+    let mut body = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        let remaining = &buf[pos..];
+        let Some(line_end) = remaining.windows(2).position(|w| w == b"\r\n") else {
+            return Ok(None);
+        };
+
+        let size_str = std::str::from_utf8(&remaining[..line_end])
+            .map_err(|_| HttpError::BadChunkedEncoding)?;
+        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
+            .map_err(|_| HttpError::BadChunkedEncoding)?;
+
+        pos += line_end + 2; // skip size line + CRLF
+
+        if chunk_size == 0 {
+            if buf.len() < pos + 2 {
+                return Ok(None);
+            }
+            pos += 2;
+            return Ok(Some((body, pos)));
+        }
+
+        if buf.len() < pos + chunk_size + 2 {
+            return Ok(None);
+        }
+        body.extend_from_slice(&buf[pos..pos + chunk_size]);
+        pos += chunk_size + 2;
+    }
+}
+
 impl crate::codec::Decoder for Http1ClientCodec {
     type Item = Response;
     type Error = HttpError;
 
+    #[allow(clippy::too_many_lines)]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
         loop {
             match &self.state {
@@ -108,6 +158,16 @@ impl crate::codec::Decoder for Http1ClientCodec {
                             break;
                         }
                         headers.push(parse_header_line(line)?);
+                    }
+
+                    if is_chunked(&headers) {
+                        self.state = ClientDecodeState::Chunked {
+                            version,
+                            status,
+                            reason,
+                            headers,
+                        };
+                        continue;
                     }
 
                     let content_length = header_value(&headers, "Content-Length")
@@ -161,6 +221,32 @@ impl crate::codec::Decoder for Http1ClientCodec {
                         reason,
                         headers,
                         body: body_bytes.to_vec(),
+                    }));
+                }
+
+                ClientDecodeState::Chunked { .. } => {
+                    let Some((body, consumed)) = decode_chunked(src.as_ref())? else {
+                        return Ok(None);
+                    };
+                    let _ = src.split_to(consumed);
+
+                    let old = std::mem::replace(&mut self.state, ClientDecodeState::Head);
+                    let ClientDecodeState::Chunked {
+                        version,
+                        status,
+                        reason,
+                        headers,
+                    } = old
+                    else {
+                        unreachable!()
+                    };
+
+                    return Ok(Some(Response {
+                        version,
+                        status,
+                        reason,
+                        headers,
+                        body,
                     }));
                 }
             }
@@ -292,5 +378,16 @@ mod tests {
         let s = String::from_utf8(buf.to_vec()).unwrap();
         assert!(s.contains("Content-Length: 4\r\n"));
         assert!(s.ends_with("\r\n\r\ndata"));
+    }
+
+    #[test]
+    fn decode_chunked_response() {
+        let mut codec = Http1ClientCodec::new();
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let resp = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"hello world");
     }
 }
