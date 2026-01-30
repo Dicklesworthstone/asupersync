@@ -390,6 +390,45 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ## Using Asupersync as a Dependency
 
+### Cargo.toml
+
+```toml
+[dependencies]
+# Git dependency until crates.io publish
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.1" }
+```
+
+### Feature Flags
+
+Asupersync is feature-light by default; the lab runtime is available without flags.
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `test-internals` | Expose test-only helpers (not for production) | No |
+| `metrics` | OpenTelemetry metrics provider | No |
+| `tracing-integration` | Tracing spans/logging integration | No |
+| `proc-macros` | `scope!`, `spawn!`, `join!`, `race!` proc macros | No |
+| `tower` | Tower `Service` adapter support | No |
+| `trace-compression` | LZ4 compression for trace files | No |
+| `debug-server` | Debug HTTP server for runtime inspection | No |
+| `config-file` | TOML config file loading for `RuntimeBuilder` | No |
+| `io-uring` | Linux io_uring reactor (kernel 5.1+) | No |
+| `tls` | TLS support via rustls | No |
+| `tls-native-roots` | TLS with native root certs | No |
+| `tls-webpki-roots` | TLS with webpki root certs | No |
+| `cli` | CLI tools (trace inspection) | No |
+
+### Minimum Supported Rust Version
+
+Rust **1.75+** (Edition 2021).
+
+### Semver Policy
+
+- **0.x.y**: Breaking changes may ship in **0.(x+1).0**
+- **1.x.y**: Breaking changes only in **(1+1).0.0**
+
+See `docs/api_audit.md` for the current public API audit and stability notes.
+
 ### Core Exports
 
 ```rust
