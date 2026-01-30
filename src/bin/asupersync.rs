@@ -2,7 +2,7 @@
 #![allow(clippy::result_large_err)]
 
 use asupersync::cli::{
-    parse_color_choice, parse_output_format, CliError, ColorChoice, CommonArgs, Output,
+    parse_color_choice, parse_output_format, CliError, ColorChoice, CommonArgs, ExitCode, Output,
     OutputFormat, Outputtable,
 };
 use asupersync::trace::{
@@ -11,8 +11,12 @@ use asupersync::trace::{
 };
 use asupersync::Time;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use conformance::{
+    requirements_from_entries, scan_conformance_attributes, ScanWarning, SpecRequirement,
+    TraceabilityMatrix, TraceabilityScanError,
+};
 use std::fmt::Write as _;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -70,6 +74,8 @@ impl CommonArgsCli {
 enum Command {
     /// Trace file inspection utilities
     Trace(TraceArgs),
+    /// Conformance tooling
+    Conformance(ConformanceArgs),
 }
 
 #[derive(Args, Debug)]
@@ -94,6 +100,41 @@ enum TraceCommand {
 
     /// Export trace events to JSON
     Export(TraceExportArgs),
+}
+
+#[derive(Args, Debug)]
+struct ConformanceArgs {
+    #[command(subcommand)]
+    command: ConformanceCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConformanceCommand {
+    /// Generate spec-to-test traceability matrix
+    Matrix(ConformanceMatrixArgs),
+}
+
+#[derive(Args, Debug)]
+struct ConformanceMatrixArgs {
+    /// Root directory to scan (defaults to current directory)
+    #[arg(long = "root", default_value = ".")]
+    root: PathBuf,
+
+    /// Additional paths to scan (relative to --root if not absolute)
+    #[arg(long = "path")]
+    paths: Vec<PathBuf>,
+
+    /// JSON file with spec requirements (Vec<SpecRequirement>)
+    #[arg(long = "requirements")]
+    requirements: Option<PathBuf>,
+
+    /// Minimum coverage percentage required to pass (0-100)
+    #[arg(long = "min-coverage")]
+    min_coverage: Option<f64>,
+
+    /// Fail if any requirements are missing coverage
+    #[arg(long = "fail-on-missing", action = ArgAction::SetTrue)]
+    fail_on_missing: bool,
 }
 
 #[derive(Args, Debug)]
@@ -232,6 +273,36 @@ impl Outputtable for TraceEventRow {
 }
 
 #[derive(Debug, serde::Serialize)]
+struct ConformanceMatrixReport {
+    root: String,
+    matrix: TraceabilityMatrix,
+    coverage_percentage: f64,
+    missing_sections: Vec<String>,
+    warnings: Vec<ScanWarning>,
+}
+
+impl Outputtable for ConformanceMatrixReport {
+    fn human_format(&self) -> String {
+        let mut matrix = self.matrix.clone();
+        let mut output = matrix.to_markdown();
+
+        if !self.warnings.is_empty() {
+            output.push_str("\n## Warnings\n\n");
+            for warning in &self.warnings {
+                output.push_str(&format!(
+                    "- {}:{}: {}\n",
+                    warning.file.display(),
+                    warning.line,
+                    warning.message
+                ));
+            }
+        }
+
+        output
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
 struct TraceVerifyOutput {
     file: String,
     valid: bool,
@@ -329,6 +400,7 @@ fn main() {
 fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
     match command {
         Command::Trace(trace_args) => run_trace(trace_args, output),
+        Command::Conformance(args) => run_conformance(args, output),
     }
 }
 
@@ -367,6 +439,91 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
             Ok(())
         }
     }
+}
+
+fn run_conformance(args: ConformanceArgs, output: &mut Output) -> Result<(), CliError> {
+    match args.command {
+        ConformanceCommand::Matrix(args) => conformance_matrix(args, output),
+    }
+}
+
+fn conformance_matrix(args: ConformanceMatrixArgs, output: &mut Output) -> Result<(), CliError> {
+    if let Some(min) = args.min_coverage {
+        if !(0.0..=100.0).contains(&min) {
+            return Err(CliError::new(
+                "invalid_argument",
+                "--min-coverage must be between 0 and 100",
+            ));
+        }
+    }
+
+    let mut paths = if args.paths.is_empty() {
+        vec![args.root.join("tests"), args.root.join("src")]
+    } else {
+        args.paths
+            .into_iter()
+            .map(|path| resolve_path(&args.root, path))
+            .collect()
+    };
+
+    paths.retain(|path| path.exists());
+    if paths.is_empty() {
+        return Err(CliError::new(
+            "invalid_argument",
+            "No valid paths found to scan for conformance attributes",
+        ));
+    }
+
+    let scan = scan_conformance_attributes(&paths).map_err(conformance_scan_error)?;
+
+    let requirements = if let Some(path) = args.requirements {
+        let path = resolve_path(&args.root, path);
+        let raw = fs::read_to_string(&path).map_err(|err| io_error(&path, &err))?;
+        serde_json::from_str::<Vec<SpecRequirement>>(&raw).map_err(|err| {
+            CliError::new("invalid_requirements", "Failed to parse requirements JSON")
+                .detail(err.to_string())
+                .context("path", path.display().to_string())
+        })?
+    } else {
+        requirements_from_entries(&scan.entries)
+    };
+
+    let mut matrix = TraceabilityMatrix::from_entries(requirements, scan.entries);
+    let missing = matrix.missing_sections();
+    let coverage = matrix.coverage_percentage();
+
+    let report = ConformanceMatrixReport {
+        root: args.root.display().to_string(),
+        matrix,
+        coverage_percentage: coverage,
+        missing_sections: missing.clone(),
+        warnings: scan.warnings,
+    };
+
+    output.write(&report).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+
+    if args.fail_on_missing && !missing.is_empty() {
+        return Err(
+            CliError::new("missing_requirements", "Missing conformance coverage")
+                .detail(missing.join(", "))
+                .exit_code(ExitCode::TEST_FAILURE),
+        );
+    }
+
+    if let Some(min) = args.min_coverage {
+        if coverage < min {
+            return Err(CliError::new(
+                "coverage_below_threshold",
+                "Conformance coverage below minimum threshold",
+            )
+            .detail(format!("{coverage:.1}% < {min:.1}%"))
+            .exit_code(ExitCode::TEST_FAILURE));
+        }
+    }
+
+    Ok(())
 }
 
 fn trace_info(path: &Path) -> Result<TraceInfo, CliError> {
@@ -787,6 +944,21 @@ fn io_error(path: &Path, err: &io::Error) -> CliError {
     };
     error = error.context("path", path.display().to_string());
     error
+}
+
+fn conformance_scan_error(err: TraceabilityScanError) -> CliError {
+    CliError::new("scan_error", "Failed to scan for conformance attributes")
+        .detail(err.to_string())
+        .context("path", err.path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+fn resolve_path(root: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
 }
 
 fn output_cli_error(err: impl std::error::Error) -> CliError {
