@@ -272,6 +272,55 @@ pub trait Pool: Send + Sync {
     }
 }
 
+/// Trait for async resource creation and destruction.
+///
+/// Provides a structured interface for pool resource lifecycle management.
+/// [`GenericPool`] accepts any factory function matching the expected signature;
+/// implement this trait when you need custom destroy logic or want a named type.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::sync::AsyncResourceFactory;
+///
+/// struct PgFactory { url: String }
+///
+/// impl AsyncResourceFactory for PgFactory {
+///     type Resource = PgConnection;
+///     type Error = PgError;
+///
+///     fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>> {
+///         Box::pin(async { PgConnection::connect(&self.url).await })
+///     }
+///
+///     fn destroy(&self, conn: Self::Resource) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+///         Box::pin(async move { conn.close().await.ok(); })
+///     }
+/// }
+/// ```
+pub trait AsyncResourceFactory: Send + Sync {
+    /// The type of resource this factory creates.
+    type Resource: Send;
+
+    /// The error type for creation failures.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Create a new resource asynchronously.
+    fn create(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>>;
+
+    /// Destroy a resource (optional cleanup before drop).
+    ///
+    /// The default implementation simply drops the resource.
+    fn destroy(
+        &self,
+        _resource: Self::Resource,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+}
+
 /// Pool usage statistics.
 #[derive(Debug, Clone, Default)]
 pub struct PoolStats {
@@ -697,6 +746,11 @@ where
     return_tx: PoolReturnSender<R>,
     /// Channel receiver for returned resources.
     return_rx: std::sync::Mutex<PoolReturnReceiver<R>>,
+    /// Optional synchronous health check function.
+    ///
+    /// When set and `config.health_check_on_acquire` is true, idle resources
+    /// are checked before being returned from `acquire()`.
+    health_check_fn: Option<Box<dyn Fn(&R) -> bool + Send + Sync>>,
     /// Optional metrics handle for observability.
     #[cfg(feature = "metrics")]
     metrics: Option<PoolMetricsHandle>,
@@ -729,6 +783,7 @@ where
             }),
             return_tx,
             return_rx: std::sync::Mutex::new(return_rx),
+            health_check_fn: None,
             #[cfg(feature = "metrics")]
             metrics: None,
         }
@@ -765,6 +820,91 @@ where
     pub fn with_metrics(mut self, handle: PoolMetricsHandle) -> Self {
         self.metrics = Some(handle);
         self
+    }
+
+    /// Sets a synchronous health check function for idle resources.
+    ///
+    /// When set and [`PoolConfig::health_check_on_acquire`] is `true`,
+    /// each idle resource is checked before being returned from [`Pool::acquire`].
+    /// Resources that fail the check are discarded and the next idle resource
+    /// is tried, or a new one is created.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let pool = GenericPool::new(factory, config)
+    ///     .with_health_check(|conn: &TcpStream| conn.peer_addr().is_ok());
+    /// ```
+    #[must_use]
+    pub fn with_health_check(
+        mut self,
+        check: impl Fn(&R) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.health_check_fn = Some(Box::new(check));
+        self
+    }
+
+    /// Pre-create resources according to [`PoolConfig::warmup_connections`].
+    ///
+    /// Call this after constructing the pool to pre-fill the idle queue.
+    /// The behavior on partial failure is controlled by
+    /// [`PoolConfig::warmup_failure_strategy`].
+    ///
+    /// Returns the number of resources successfully created.
+    ///
+    /// # Errors
+    ///
+    /// - [`WarmupStrategy::FailFast`]: Returns on the first creation failure.
+    /// - [`WarmupStrategy::RequireMinimum`]: Returns an error if fewer than
+    ///   [`PoolConfig::min_size`] resources were created.
+    /// - [`WarmupStrategy::BestEffort`]: Never returns an error from warmup.
+    pub async fn warmup(&self) -> Result<usize, PoolError> {
+        let target = self.config.warmup_connections;
+        if target == 0 {
+            return Ok(0);
+        }
+
+        let mut created = 0;
+        let mut last_error = None;
+
+        for _ in 0..target {
+            match self.create_resource().await {
+                Ok(resource) => {
+                    let mut state = self.state.lock().expect("pool state lock poisoned");
+                    state.idle.push_back(IdleResource {
+                        resource,
+                        idle_since: Instant::now(),
+                        created_at: Instant::now(),
+                    });
+                    state.total_created += 1;
+                    created += 1;
+                }
+                Err(e) => match self.config.warmup_failure_strategy {
+                    WarmupStrategy::FailFast => return Err(e),
+                    WarmupStrategy::BestEffort | WarmupStrategy::RequireMinimum => {
+                        last_error = Some(e);
+                    }
+                },
+            }
+        }
+
+        if self.config.warmup_failure_strategy == WarmupStrategy::RequireMinimum
+            && created < self.config.min_size
+        {
+            return Err(last_error.unwrap_or(PoolError::CreateFailed(
+                "warmup did not reach min_size".into(),
+            )));
+        }
+
+        Ok(created)
+    }
+
+    /// Check whether an idle resource passes the configured health check.
+    fn is_healthy(&self, resource: &R) -> bool {
+        match self.health_check_fn {
+            Some(ref check) => check(resource),
+            None => true,
+        }
     }
 
     /// Process returned resources from the return channel.
