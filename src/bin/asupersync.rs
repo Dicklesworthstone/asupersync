@@ -1,3 +1,5 @@
+//! Asupersync CLI tools (feature-gated).
+
 use asupersync::cli::{
     parse_color_choice, parse_output_format, CliError, ColorChoice, CommonArgs, Output,
     OutputFormat, Outputtable,
