@@ -47,6 +47,9 @@ pub enum HttpError {
     BadChunkedEncoding,
     /// Body exceeds the configured limit.
     BodyTooLarge,
+    /// Both Content-Length and Transfer-Encoding present (RFC 7230 3.3.3 violation).
+    /// This is a potential request smuggling vector.
+    AmbiguousBodyLength,
 }
 
 impl fmt::Display for HttpError {
@@ -63,6 +66,9 @@ impl fmt::Display for HttpError {
             Self::RequestLineTooLong => write!(f, "request line too long"),
             Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
             Self::BodyTooLarge => write!(f, "body exceeds size limit"),
+            Self::AmbiguousBodyLength => {
+                write!(f, "both Content-Length and Transfer-Encoding present")
+            }
         }
     }
 }
@@ -128,6 +134,7 @@ impl Http1Codec {
         Self {
             state: DecodeState::Head,
             max_headers_size: DEFAULT_MAX_HEADERS_SIZE,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
         }
     }
 
@@ -135,6 +142,13 @@ impl Http1Codec {
     #[must_use]
     pub fn max_headers_size(mut self, size: usize) -> Self {
         self.max_headers_size = size;
+        self
+    }
+
+    /// Set the maximum body size.
+    #[must_use]
+    pub fn max_body_size(mut self, size: usize) -> Self {
+        self.max_body_size = size;
         self
     }
 }
@@ -185,13 +199,25 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
 }
 
 /// Determine body length from headers.
+///
+/// Per RFC 7230 Section 3.3.3, having both Transfer-Encoding and Content-Length
+/// is an error that could indicate a request smuggling attempt.
 fn body_length(headers: &[(String, String)]) -> Result<BodyKind, HttpError> {
-    if let Some(te) = header_value(headers, "Transfer-Encoding") {
+    let has_te = header_value(headers, "Transfer-Encoding");
+    let has_cl = header_value(headers, "Content-Length");
+
+    // RFC 7230 3.3.3: Reject requests with both Transfer-Encoding and Content-Length
+    // to prevent request smuggling attacks.
+    if has_te.is_some() && has_cl.is_some() {
+        return Err(HttpError::AmbiguousBodyLength);
+    }
+
+    if let Some(te) = has_te {
         if te.eq_ignore_ascii_case("chunked") {
             return Ok(BodyKind::Chunked);
         }
     }
-    if let Some(cl) = header_value(headers, "Content-Length") {
+    if let Some(cl) = has_cl {
         let len: usize = cl.parse().map_err(|_| HttpError::BadContentLength)?;
         return Ok(BodyKind::ContentLength(len));
     }
@@ -205,7 +231,10 @@ enum BodyKind {
 
 /// Decode a chunked body from `buf`. Returns `Some((body, consumed))` when
 /// complete, or `None` if more data is needed.
-fn decode_chunked(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
+///
+/// Returns `Err(HttpError::BodyTooLarge)` if the accumulated body exceeds
+/// `max_body_size`.
+fn decode_chunked(buf: &[u8], max_body_size: usize) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
     let mut body = Vec::new();
     let mut pos = 0;
 
@@ -227,8 +256,17 @@ fn decode_chunked(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
             if buf.len() < pos + 2 {
                 return Ok(None);
             }
+            // Validate trailing CRLF after terminal chunk
+            if buf[pos] != b'\r' || buf[pos + 1] != b'\n' {
+                return Err(HttpError::BadChunkedEncoding);
+            }
             pos += 2;
             return Ok(Some((body, pos)));
+        }
+
+        // Check body size limit before accumulating
+        if body.len().saturating_add(chunk_size) > max_body_size {
+            return Err(HttpError::BodyTooLarge);
         }
 
         // Need chunk_size bytes + CRLF
@@ -236,6 +274,10 @@ fn decode_chunked(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
             return Ok(None);
         }
         body.extend_from_slice(&buf[pos..pos + chunk_size]);
+        // Validate trailing CRLF after chunk data
+        if buf[pos + chunk_size] != b'\r' || buf[pos + chunk_size + 1] != b'\n' {
+            return Err(HttpError::BadChunkedEncoding);
+        }
         pos += chunk_size + 2;
     }
 }
@@ -333,6 +375,10 @@ impl Decoder for Http1Codec {
                             }));
                         }
                         BodyKind::ContentLength(len) => {
+                            // Check body size limit upfront for Content-Length
+                            if len > self.max_body_size {
+                                return Err(HttpError::BodyTooLarge);
+                            }
                             self.state = DecodeState::Body {
                                 method,
                                 uri,
@@ -372,7 +418,8 @@ impl Decoder for Http1Codec {
                 }
 
                 DecodeState::Chunked { .. } => {
-                    let Some((body, consumed)) = decode_chunked(src.as_ref())? else {
+                    let Some((body, consumed)) = decode_chunked(src.as_ref(), self.max_body_size)?
+                    else {
                         return Ok(None);
                     };
                     let _ = src.split_to(consumed);
@@ -610,5 +657,87 @@ mod tests {
 
         let r2 = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(r2.uri, "/b");
+    }
+
+    #[test]
+    fn decode_body_too_large_content_length() {
+        let mut codec = Http1Codec::new().max_body_size(10);
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 100\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BodyTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_too_large_chunked() {
+        let mut codec = Http1Codec::new().max_body_size(10);
+        // Chunked body with 20 bytes total (exceeds 10 byte limit)
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    14\r\n01234567890123456789\r\n0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BodyTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_at_limit_succeeds() {
+        let mut codec = Http1Codec::new().max_body_size(5);
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn decode_chunked_body_at_limit_succeeds() {
+        let mut codec = Http1Codec::new().max_body_size(11);
+        // "hello world" = 11 bytes, exactly at the limit
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello world");
+    }
+
+    // Security: Request smuggling protection (RFC 7230 3.3.3)
+    #[test]
+    fn reject_both_content_length_and_transfer_encoding() {
+        let mut codec = Http1Codec::new();
+        // Having both headers is a request smuggling vector
+        let raw = b"POST /data HTTP/1.1\r\n\
+                    Content-Length: 5\r\n\
+                    Transfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::AmbiguousBodyLength)));
+    }
+
+    #[test]
+    fn reject_transfer_encoding_before_content_length() {
+        let mut codec = Http1Codec::new();
+        // Order shouldn't matter - still reject
+        let raw = b"POST /data HTTP/1.1\r\n\
+                    Transfer-Encoding: chunked\r\n\
+                    Content-Length: 5\r\n\r\n\
+                    5\r\nhello\r\n0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::AmbiguousBodyLength)));
+    }
+
+    // Security: Chunked encoding CRLF validation
+    #[test]
+    fn reject_invalid_crlf_after_chunk() {
+        let mut codec = Http1Codec::new();
+        // Invalid: "XX" instead of "\r\n" after chunk data
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhelloXX0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
+    }
+
+    #[test]
+    fn reject_invalid_crlf_after_terminal_chunk() {
+        let mut codec = Http1Codec::new();
+        // Invalid: "XX" instead of "\r\n" after terminal chunk
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n0\r\nXX";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
     }
 }
