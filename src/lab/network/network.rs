@@ -490,8 +490,8 @@ fn bytes_to_nanos(len: usize, bandwidth: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lab::network::NetworkConfig;
     use crate::lab::network::LatencyModel;
+    use crate::lab::network::NetworkConfig;
 
     #[test]
     fn deterministic_delivery_same_seed() {

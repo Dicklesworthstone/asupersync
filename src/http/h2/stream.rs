@@ -676,4 +676,60 @@ mod tests {
         // Now we can allocate again
         assert!(store.allocate_stream_id().is_ok());
     }
+
+    #[test]
+    fn auto_window_update_not_needed_when_window_above_half() {
+        let mut stream = Stream::new(1, 65535);
+        stream.send_headers(false).unwrap();
+
+        // Consume less than half: no update needed.
+        stream.recv_data(30_000, false).unwrap();
+        assert!(
+            stream.recv_window() >= stream.initial_recv_window / 2,
+            "window should still be above the low watermark"
+        );
+        assert!(stream.auto_window_update_increment().is_none());
+    }
+
+    #[test]
+    fn auto_window_update_triggered_when_window_below_half() {
+        let initial = DEFAULT_INITIAL_WINDOW_SIZE;
+        let initial_i32 = i32::try_from(initial).unwrap();
+        let mut stream = Stream::new(1, initial);
+        stream.send_headers(false).unwrap();
+
+        // Consume just over half to cross the watermark.
+        let consume = u32::try_from(initial_i32 / 2 + 2).unwrap();
+        stream.recv_data(consume, false).unwrap();
+
+        let increment = stream
+            .auto_window_update_increment()
+            .expect("should need WINDOW_UPDATE");
+
+        // Increment should restore the window to its initial value.
+        assert_eq!(
+            i64::from(stream.recv_window()) + i64::from(increment),
+            i64::from(initial_i32)
+        );
+    }
+
+    #[test]
+    fn auto_window_update_returns_none_after_replenish() {
+        let initial = DEFAULT_INITIAL_WINDOW_SIZE;
+        let initial_i32 = i32::try_from(initial).unwrap();
+        let mut stream = Stream::new(1, initial);
+        stream.send_headers(false).unwrap();
+
+        // Drain below the watermark.
+        let consume = u32::try_from(initial_i32 / 2 + 2).unwrap();
+        stream.recv_data(consume, false).unwrap();
+
+        let increment = stream.auto_window_update_increment().unwrap();
+        stream
+            .update_recv_window(i32::try_from(increment).unwrap())
+            .unwrap();
+
+        // After replenishing, should no longer need an update.
+        assert!(stream.auto_window_update_increment().is_none());
+    }
 }

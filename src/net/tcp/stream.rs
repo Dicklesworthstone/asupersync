@@ -25,6 +25,85 @@ pub struct TcpStream {
     registration: Option<IoRegistration>,
 }
 
+/// Builder for configuring TCP stream options before connecting.
+///
+/// This mirrors [`TcpListenerBuilder`] for client connections.
+/// Options are applied after a successful connect.
+#[derive(Debug, Clone)]
+pub struct TcpStreamBuilder<A> {
+    addr: A,
+    connect_timeout: Option<Duration>,
+    nodelay: Option<bool>,
+    keepalive: Option<Duration>,
+}
+
+impl<A> TcpStreamBuilder<A>
+where
+    A: ToSocketAddrs + Send + 'static,
+{
+    /// Create a new builder for the given address.
+    #[must_use]
+    pub fn new(addr: A) -> Self {
+        Self {
+            addr,
+            connect_timeout: None,
+            nodelay: None,
+            keepalive: None,
+        }
+    }
+
+    /// Set a connection timeout.
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
+    /// Enable or disable TCP_NODELAY.
+    #[must_use]
+    pub fn nodelay(mut self, enable: bool) -> Self {
+        self.nodelay = Some(enable);
+        self
+    }
+
+    /// Configure TCP keepalive.
+    ///
+    /// Note: Phase 0 does not support keepalive on all platforms; enabling
+    /// this may return `io::ErrorKind::Unsupported`.
+    #[must_use]
+    pub fn keepalive(mut self, keepalive: Option<Duration>) -> Self {
+        self.keepalive = keepalive;
+        self
+    }
+
+    /// Connect using the configured options.
+    pub async fn connect(self) -> io::Result<TcpStream> {
+        let Self {
+            addr,
+            connect_timeout,
+            nodelay,
+            keepalive,
+        } = self;
+
+        let stream = if let Some(timeout) = connect_timeout {
+            let addr = lookup_one(addr).await?;
+            TcpStream::connect_timeout(addr, timeout).await?
+        } else {
+            TcpStream::connect(addr).await?
+        };
+
+        if let Some(enable) = nodelay {
+            stream.set_nodelay(enable)?;
+        }
+
+        if let Some(keepalive) = keepalive {
+            stream.set_keepalive(Some(keepalive))?;
+        }
+
+        Ok(stream)
+    }
+}
+
 impl TcpStream {
     /// Create a TcpStream from a standard library TcpStream.
     ///
@@ -418,6 +497,7 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
 
     struct NoopWaker;
 
@@ -427,6 +507,26 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[test]
+    fn tcp_stream_builder_defaults() {
+        let builder = TcpStreamBuilder::new("127.0.0.1:0");
+        assert!(builder.connect_timeout.is_none());
+        assert!(builder.nodelay.is_none());
+        assert!(builder.keepalive.is_none());
+    }
+
+    #[test]
+    fn tcp_stream_builder_chain() {
+        let builder = TcpStreamBuilder::new("127.0.0.1:0")
+            .connect_timeout(Duration::from_secs(1))
+            .nodelay(true)
+            .keepalive(Some(Duration::from_secs(30)));
+
+        assert_eq!(builder.connect_timeout, Some(Duration::from_secs(1)));
+        assert_eq!(builder.nodelay, Some(true));
+        assert_eq!(builder.keepalive, Some(Duration::from_secs(30)));
     }
 
     #[test]

@@ -907,4 +907,215 @@ mod tests {
         crate::assert_with_log!(t2 > t1, "t2 > t1", true, t2 > t1);
         crate::test_complete!("token_ordering");
     }
+
+    // ============================================================
+    // Cross-reactor trait compliance tests
+    //
+    // Verify that all Reactor implementations satisfy the same
+    // behavioral contract through the trait interface.
+    // ============================================================
+
+    /// Compile-time assertion that a reactor type is Send + Sync + Reactor.
+    fn assert_reactor_trait_bounds<R: Reactor + Send + Sync>() {}
+
+    #[test]
+    fn reactor_trait_bounds_epoll() {
+        init_test("reactor_trait_bounds_epoll");
+        #[cfg(target_os = "linux")]
+        assert_reactor_trait_bounds::<super::EpollReactor>();
+        crate::test_complete!("reactor_trait_bounds_epoll");
+    }
+
+    #[test]
+    fn reactor_trait_bounds_lab() {
+        init_test("reactor_trait_bounds_lab");
+        assert_reactor_trait_bounds::<super::LabReactor>();
+        crate::test_complete!("reactor_trait_bounds_lab");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reactor_trait_bounds_io_uring() {
+        init_test("reactor_trait_bounds_io_uring");
+        assert_reactor_trait_bounds::<super::IoUringReactor>();
+        crate::test_complete!("reactor_trait_bounds_io_uring");
+    }
+
+    /// Run a common compliance check against any Reactor implementation.
+    /// Verifies: starts empty, registration_count, is_empty, wake succeeds.
+    fn compliance_check_empty_state(reactor: &dyn Reactor, name: &str) {
+        crate::assert_with_log!(
+            reactor.is_empty(),
+            &format!("{name} starts empty"),
+            true,
+            reactor.is_empty()
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            &format!("{name} starts with zero registrations"),
+            0usize,
+            reactor.registration_count()
+        );
+    }
+
+    fn compliance_check_wake(reactor: &dyn Reactor, name: &str) {
+        let result = reactor.wake();
+        crate::assert_with_log!(
+            result.is_ok(),
+            &format!("{name} wake succeeds"),
+            true,
+            result.is_ok()
+        );
+    }
+
+    fn compliance_check_poll_nonblocking(reactor: &dyn Reactor, name: &str) {
+        let mut events = Events::with_capacity(16);
+        let result = reactor.poll(&mut events, Some(std::time::Duration::ZERO));
+        crate::assert_with_log!(
+            result.is_ok(),
+            &format!("{name} non-blocking poll succeeds"),
+            true,
+            result.is_ok()
+        );
+        crate::assert_with_log!(
+            events.is_empty(),
+            &format!("{name} no events on empty reactor"),
+            true,
+            events.is_empty()
+        );
+    }
+
+    fn compliance_check_deregister_unknown(reactor: &dyn Reactor, name: &str) {
+        let result = reactor.deregister(Token::new(99999));
+        crate::assert_with_log!(
+            result.is_err(),
+            &format!("{name} deregister unknown token fails"),
+            true,
+            result.is_err()
+        );
+    }
+
+    fn compliance_check_modify_unknown(reactor: &dyn Reactor, name: &str) {
+        let result = reactor.modify(Token::new(99999), Interest::READABLE);
+        crate::assert_with_log!(
+            result.is_err(),
+            &format!("{name} modify unknown token fails"),
+            true,
+            result.is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cross_reactor_compliance_epoll() {
+        init_test("cross_reactor_compliance_epoll");
+        let reactor = super::EpollReactor::new().expect("failed to create epoll reactor");
+        let name = "EpollReactor";
+
+        compliance_check_empty_state(&reactor, name);
+        compliance_check_wake(&reactor, name);
+        compliance_check_poll_nonblocking(&reactor, name);
+        compliance_check_deregister_unknown(&reactor, name);
+        compliance_check_modify_unknown(&reactor, name);
+
+        crate::test_complete!("cross_reactor_compliance_epoll");
+    }
+
+    #[test]
+    fn cross_reactor_compliance_lab() {
+        init_test("cross_reactor_compliance_lab");
+        let reactor = super::LabReactor::new();
+        let name = "LabReactor";
+
+        compliance_check_empty_state(&reactor, name);
+        compliance_check_wake(&reactor, name);
+        compliance_check_poll_nonblocking(&reactor, name);
+        compliance_check_deregister_unknown(&reactor, name);
+        compliance_check_modify_unknown(&reactor, name);
+
+        crate::test_complete!("cross_reactor_compliance_lab");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cross_reactor_compliance_io_uring() {
+        init_test("cross_reactor_compliance_io_uring");
+        let reactor = match super::IoUringReactor::new() {
+            Ok(r) => r,
+            Err(e) => {
+                // io_uring may not be available on older kernels
+                eprintln!("Skipping io_uring compliance test: {e}");
+                return;
+            }
+        };
+        let name = "IoUringReactor";
+
+        compliance_check_empty_state(&reactor, name);
+        compliance_check_wake(&reactor, name);
+        compliance_check_poll_nonblocking(&reactor, name);
+        compliance_check_deregister_unknown(&reactor, name);
+        compliance_check_modify_unknown(&reactor, name);
+
+        crate::test_complete!("cross_reactor_compliance_io_uring");
+    }
+
+    /// Verify that Reactor trait objects work correctly (dyn dispatch).
+    #[test]
+    fn reactor_as_trait_object() {
+        init_test("reactor_as_trait_object");
+        let lab = super::LabReactor::new();
+        let reactor: &dyn Reactor = &lab;
+
+        crate::assert_with_log!(
+            reactor.is_empty(),
+            "trait object is_empty",
+            true,
+            reactor.is_empty()
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            "trait object registration_count",
+            0usize,
+            reactor.registration_count()
+        );
+        crate::assert_with_log!(
+            reactor.wake().is_ok(),
+            "trait object wake",
+            true,
+            reactor.wake().is_ok()
+        );
+
+        crate::test_complete!("reactor_as_trait_object");
+    }
+
+    /// Verify that Arc<Reactor> works for shared reactor access.
+    #[test]
+    fn reactor_arc_shared_access() {
+        init_test("reactor_arc_shared_access");
+        let reactor = std::sync::Arc::new(super::LabReactor::new());
+        let reactor_clone = std::sync::Arc::clone(&reactor);
+
+        crate::assert_with_log!(
+            reactor.is_empty(),
+            "arc reactor empty",
+            true,
+            reactor.is_empty()
+        );
+        crate::assert_with_log!(
+            reactor_clone.is_empty(),
+            "arc clone reactor empty",
+            true,
+            reactor_clone.is_empty()
+        );
+
+        // Wake from clone
+        crate::assert_with_log!(
+            reactor_clone.wake().is_ok(),
+            "wake from arc clone",
+            true,
+            reactor_clone.wake().is_ok()
+        );
+
+        crate::test_complete!("reactor_arc_shared_access");
+    }
 }
