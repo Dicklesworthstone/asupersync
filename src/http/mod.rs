@@ -5,7 +5,7 @@
 //!
 //! # Body Types
 //!
-//! The [`body`] module provides the [`Body`](body::Body) trait and common
+//! The [`body`] module provides the [`Body`] trait and common
 //! implementations for streaming HTTP message bodies.
 //!
 //! # HTTP/2
@@ -19,6 +19,7 @@
 //! enabling connection reuse for improved performance.
 
 pub mod body;
+pub mod h1;
 pub mod h2;
 pub mod pool;
 
