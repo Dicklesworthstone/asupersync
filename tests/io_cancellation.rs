@@ -17,6 +17,7 @@
 //! - IO-CANCEL-008: Multiple concurrent I/O operations cancel correctly
 //! - IO-CANCEL-009: IoOp cancel clears obligation and invariants
 //! - IO-CANCEL-010: Region close waits for IoOp obligations
+//! - IO-CANCEL-011: Oracle detects leaked IoOp obligations
 //!
 //! # Key Invariants
 //!
@@ -34,6 +35,7 @@ mod common;
 
 use asupersync::cx::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::lab::runtime::InvariantViolation;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::runtime::reactor::{Interest, LabReactor, Token};
@@ -829,4 +831,63 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
     );
 
     test_complete!("io_cancel_010_region_close_waits_for_io_obligations");
+}
+
+// ============================================================================
+// IO-CANCEL-011: Oracle detects leaked IoOp obligations
+// ============================================================================
+
+/// Verifies that the lab invariant checker flags leaked IoOp obligations.
+#[test]
+fn io_cancel_011_oracle_detects_io_obligation_leak() {
+    init_test("io_cancel_011_oracle_detects_io_obligation_leak");
+
+    let mut runtime = LabRuntime::new(LabConfig::new(9));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {
+            loop {
+                let Some(cx) = Cx::current() else {
+                    return;
+                };
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                asupersync::runtime::yield_now().await;
+            }
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    let _io_op = IoOp::submit(
+        &mut runtime.state,
+        task_id,
+        region,
+        Some("io op leak".to_string()),
+    )
+    .expect("submit io op");
+
+    let cancel_reason = CancelReason::shutdown();
+    if let Some(task) = runtime.state.tasks.get_mut(task_id.arena_index()) {
+        task.complete(Outcome::Cancelled(cancel_reason));
+    }
+
+    let violations = runtime.check_invariants();
+    let mut saw_obligation_leak = false;
+    for violation in &violations {
+        if let InvariantViolation::ObligationLeak { leaks } = violation {
+            tracing::info!(?leaks, "obligation leaks detected");
+            saw_obligation_leak = !leaks.is_empty();
+        }
+    }
+
+    assert!(
+        saw_obligation_leak,
+        "expected obligation leak violation: {violations:?}"
+    );
+
+    test_complete!("io_cancel_011_oracle_detects_io_obligation_leak");
 }
