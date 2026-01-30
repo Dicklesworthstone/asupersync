@@ -21,6 +21,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -72,6 +73,15 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
+/// A queued waiter for channel capacity.
+#[derive(Debug)]
+struct SendWaiter {
+    waker: Waker,
+    /// Flag indicating whether this waiter is still queued.
+    /// Set to false when woken, allowing the future to re-register.
+    queued: Arc<AtomicBool>,
+}
+
 /// Internal channel state shared between senders and receivers.
 #[derive(Debug)]
 struct ChannelInner<T> {
@@ -86,7 +96,7 @@ struct ChannelInner<T> {
     /// Number of active senders.
     sender_count: usize,
     /// Wakers for senders waiting for capacity.
-    send_wakers: VecDeque<Waker>,
+    send_wakers: VecDeque<SendWaiter>,
     /// Waker for the receiver waiting for messages.
     recv_waker: Option<Waker>,
 }
@@ -164,7 +174,11 @@ impl<T> Sender<T> {
     /// Reserves a slot in the channel for sending.
     #[must_use]
     pub fn reserve<'a>(&'a self, cx: &'a Cx) -> Reserve<'a, T> {
-        Reserve { sender: self, cx }
+        Reserve {
+            sender: self,
+            cx,
+            waiter: None,
+        }
     }
 
     /// Convenience method: reserve and send in one step.
@@ -246,12 +260,14 @@ impl<T> Sender<T> {
 pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
+    /// Tracks whether we've registered a waiter to prevent unbounded queue growth.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl<'a, T> Future for Reserve<'a, T> {
     type Output = Result<SendPermit<'a, T>, SendError<()>>;
 
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         // Check cancellation
         if self.cx.checkpoint().is_err() {
             self.cx.trace("mpsc::reserve cancelled");
@@ -271,14 +287,45 @@ impl<'a, T> Future for Reserve<'a, T> {
 
         if inner.has_capacity() {
             inner.reserved += 1;
+            // Mark as no longer queued if we had a waiter
+            if let Some(waiter) = self.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
             return Poll::Ready(Ok(SendPermit {
                 sender: self.sender,
                 sent: false,
             }));
         }
 
-        // Register waker
-        inner.send_wakers.push_back(ctx.waker().clone());
+        // Only register the waker once to prevent unbounded queue growth.
+        // If the waker changes between polls (rare), we accept the stale waker -
+        // another waiter will be woken instead, which is harmless.
+        let mut new_waiter = None;
+        match self.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                // We were woken but capacity isn't available yet - re-register
+                waiter.store(true, Ordering::Release);
+                inner.send_wakers.push_back(SendWaiter {
+                    waker: ctx.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(_) => {} // Still queued, don't add again
+            None => {
+                // First time waiting - create new waiter
+                let waiter = Arc::new(AtomicBool::new(true));
+                inner.send_wakers.push_back(SendWaiter {
+                    waker: ctx.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        drop(inner);
+        if let Some(waiter) = new_waiter {
+            self.waiter = Some(waiter);
+        }
+
         Poll::Pending
     }
 }
@@ -386,8 +433,9 @@ impl<T> SendPermit<'_, T> {
         inner.reserved -= 1;
 
         // Wake all waiting senders (simple strategy)
-        for waker in inner.send_wakers.drain(..) {
-            waker.wake();
+        for waiter in inner.send_wakers.drain(..) {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
         }
     }
 }
@@ -403,8 +451,9 @@ impl<T> Drop for SendPermit<'_, T> {
                 .expect("channel lock poisoned");
             inner.reserved -= 1;
 
-            for waker in inner.send_wakers.drain(..) {
-                waker.wake();
+            for waiter in inner.send_wakers.drain(..) {
+                waiter.queued.store(false, Ordering::Release);
+                waiter.waker.wake();
             }
         }
     }
@@ -436,8 +485,9 @@ impl<T> Receiver<T> {
 
         match inner.queue.pop_front() {
             Some(value) => {
-                for waker in inner.send_wakers.drain(..) {
-                    waker.wake();
+                for waiter in inner.send_wakers.drain(..) {
+                    waiter.queued.store(false, Ordering::Release);
+                    waiter.waker.wake();
                 }
                 Ok(value)
             }
@@ -529,8 +579,9 @@ impl<T> Future for Recv<'_, T> {
             .expect("channel lock poisoned");
 
         if let Some(value) = inner.queue.pop_front() {
-            for waker in inner.send_wakers.drain(..) {
-                waker.wake();
+            for waiter in inner.send_wakers.drain(..) {
+                waiter.queued.store(false, Ordering::Release);
+                waiter.waker.wake();
             }
             return Poll::Ready(Ok(value));
         }
@@ -548,8 +599,9 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
         inner.receiver_dropped = true;
-        for waker in inner.send_wakers.drain(..) {
-            waker.wake();
+        for waiter in inner.send_wakers.drain(..) {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
         }
     }
 }
@@ -560,8 +612,6 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
