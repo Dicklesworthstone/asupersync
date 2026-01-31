@@ -249,10 +249,17 @@ impl Wake for WorkStealingWaker {
     }
 }
 
+#[derive(Debug)]
+struct ParkerInner {
+    notified: AtomicBool,
+    mutex: Mutex<()>,
+    cvar: Condvar,
+}
+
 /// A mechanism for parking and unparking a worker.
 #[derive(Debug, Clone)]
 pub struct Parker {
-    inner: Arc<(Mutex<bool>, Condvar)>,
+    inner: Arc<ParkerInner>,
 }
 
 impl Parker {
@@ -260,37 +267,56 @@ impl Parker {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new((Mutex::new(false), Condvar::new())),
+            inner: Arc::new(ParkerInner {
+                notified: AtomicBool::new(false),
+                mutex: Mutex::new(()),
+                cvar: Condvar::new(),
+            }),
         }
     }
 
     /// Parks the current thread until notified.
     pub fn park(&self) {
-        let (lock, cvar) = &*self.inner;
-        let mut notified = lock.lock().unwrap();
-        while !*notified {
-            notified = cvar.wait(notified).unwrap();
+        if self.inner.notified.swap(false, Ordering::Acquire) {
+            return;
         }
-        *notified = false;
+
+        let mut guard = self.inner.mutex.lock().unwrap();
+        while !self.inner.notified.swap(false, Ordering::Acquire) {
+            guard = self.inner.cvar.wait(guard).unwrap();
+        }
     }
 
     /// Parks the current thread with a timeout.
     pub fn park_timeout(&self, duration: Duration) {
-        let (lock, cvar) = &*self.inner;
-        let notified = lock.lock().unwrap();
-        if !*notified {
-            let _ = cvar.wait_timeout(notified, duration).unwrap();
+        if self.inner.notified.swap(false, Ordering::Acquire) {
+            return;
+        }
+
+        let guard = self.inner.mutex.lock().unwrap();
+        if self.inner.notified.swap(false, Ordering::Acquire) {
+            return;
+        }
+
+        let (guard, timeout) = self
+            .inner
+            .cvar
+            .wait_timeout_while(guard, duration, |_| {
+                !self.inner.notified.load(Ordering::Acquire)
+            })
+            .unwrap();
+        drop(guard);
+
+        if !timeout.timed_out() {
+            let _ = self.inner.notified.swap(false, Ordering::Acquire);
         }
     }
 
     /// Unparks a parked thread.
     pub fn unpark(&self) {
-        let (lock, cvar) = &*self.inner;
-        {
-            let mut notified = lock.lock().unwrap();
-            *notified = true;
-        }
-        cvar.notify_one();
+        self.inner.notified.store(true, Ordering::Release);
+        let _guard = self.inner.mutex.lock().unwrap();
+        self.inner.cvar.notify_one();
     }
 }
 
