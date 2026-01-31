@@ -159,14 +159,16 @@ impl RuntimeState {
         }
     }
 
-    /// Creates a runtime state with a real reactor for production use.
+    /// Creates a runtime state with a real reactor and metrics provider.
     ///
     /// The provided reactor will be wrapped in an [`IoDriver`] to handle
-    /// waker dispatch. Use this constructor when you need real I/O support.
+    /// waker dispatch. Use this constructor when you need real I/O support
+    /// and want to preserve the runtime's metrics configuration.
     ///
     /// # Arguments
     ///
     /// * `reactor` - The platform-specific reactor (e.g., `EpollReactor` on Linux)
+    /// * `metrics` - Metrics provider to attach to the runtime state
     ///
     /// # Example
     ///
@@ -175,14 +177,27 @@ impl RuntimeState {
     /// use std::sync::Arc;
     ///
     /// let reactor = Arc::new(EpollReactor::new()?);
-    /// let state = RuntimeState::with_reactor(reactor);
+    /// let state = RuntimeState::with_reactor_and_metrics(reactor, Arc::new(NoOpMetrics));
     /// ```
     #[must_use]
-    pub fn with_reactor(reactor: Arc<dyn Reactor>) -> Self {
-        let mut state = Self::new_with_metrics(Arc::new(NoOpMetrics));
+    pub fn with_reactor_and_metrics(
+        reactor: Arc<dyn Reactor>,
+        metrics: Arc<dyn MetricsProvider>,
+    ) -> Self {
+        let mut state = Self::new_with_metrics(metrics);
         state.io_driver = Some(IoDriverHandle::new(reactor));
         state.timer_driver = Some(TimerDriverHandle::with_wall_clock());
         state
+    }
+
+    /// Creates a runtime state with a real reactor for production use.
+    ///
+    /// This uses a [`NoOpMetrics`] provider by default. Prefer
+    /// [`with_reactor_and_metrics`](Self::with_reactor_and_metrics) if you
+    /// need custom metrics.
+    #[must_use]
+    pub fn with_reactor(reactor: Arc<dyn Reactor>) -> Self {
+        Self::with_reactor_and_metrics(reactor, Arc::new(NoOpMetrics))
     }
 
     /// Creates a runtime state without a reactor (Lab mode).
