@@ -315,8 +315,8 @@ impl ThreeLaneWorker {
 
     /// Tries to get timed work from global or local queues.
     ///
-    /// Only returns tasks whose deadline has passed. Tasks with future
-    /// deadlines are re-injected to be checked later.
+    /// Uses EDF (Earliest Deadline First) ordering. Only returns tasks
+    /// whose deadline has passed.
     pub(crate) fn try_timed_work(&mut self) -> Option<TaskId> {
         // Get current time from timer driver or use Time::ZERO (always ready)
         let now = self
@@ -324,17 +324,12 @@ impl ThreeLaneWorker {
             .as_ref()
             .map_or(Time::ZERO, TimerDriverHandle::now);
 
-        // Global timed - check deadline before executing
-        if let Some(tt) = self.global.pop_timed() {
-            if tt.deadline <= now {
-                return Some(tt.task);
-            }
-            // Deadline not yet due - re-inject the task
-            self.global.inject_timed(tt.task, tt.deadline);
-            return None;
+        // Global timed - EDF ordering, only pop if deadline is due
+        if let Some(tt) = self.global.pop_timed_if_due(now) {
+            return Some(tt.task);
         }
 
-        // Local timed
+        // Local timed (already EDF ordered)
         let mut local = self.local.lock().expect("local scheduler lock poisoned");
         let rng_hint = self.rng.next_u64();
         local.pop_timed_only_with_hint(rng_hint)

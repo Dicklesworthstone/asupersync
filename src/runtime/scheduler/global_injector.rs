@@ -5,7 +5,10 @@
 
 use crate::types::{TaskId, Time};
 use crossbeam_queue::SegQueue;
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -17,12 +20,42 @@ pub struct PriorityTask {
 }
 
 /// A scheduled task with a deadline.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct TimedTask {
     /// The task identifier.
     pub task: TaskId,
     /// Absolute deadline for EDF scheduling.
     pub deadline: Time,
+    /// Insertion order for FIFO tiebreaking among equal deadlines.
+    generation: u64,
+}
+
+impl TimedTask {
+    /// Creates a new timed task with the given deadline and generation.
+    fn new(task: TaskId, deadline: Time, generation: u64) -> Self {
+        Self {
+            task,
+            deadline,
+            generation,
+        }
+    }
+}
+
+impl Ord for TimedTask {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // Reverse ordering for min-heap (earliest deadline first).
+        // For equal deadlines, lower generation (earlier insertion) comes first.
+        other
+            .deadline
+            .cmp(&self.deadline)
+            .then_with(|| other.generation.cmp(&self.generation))
+    }
+}
+
+impl PartialOrd for TimedTask {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Lane-aware global injection queue.
@@ -30,18 +63,38 @@ pub struct TimedTask {
 /// This queue separates tasks by their scheduling lane to maintain strict
 /// priority ordering even for cross-thread wakeups:
 /// - Cancel lane: Highest priority, always processed first
-/// - Timed lane: EDF ordering, processed after cancel
+/// - Timed lane: EDF ordering (earliest deadline first), processed after cancel
 /// - Ready lane: Standard priority ordering, processed last
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GlobalInjector {
     /// Cancel lane: tasks with pending cancellation (highest priority).
     cancel_queue: SegQueue<PriorityTask>,
-    /// Timed lane: tasks with deadlines (EDF ordering).
-    timed_queue: SegQueue<TimedTask>,
+    /// Timed lane: tasks with deadlines (EDF ordering via min-heap).
+    timed_queue: Mutex<TimedQueue>,
     /// Ready lane: general ready tasks.
     ready_queue: SegQueue<PriorityTask>,
     /// Approximate count of pending tasks (for metrics/decisions).
     pending_count: AtomicUsize,
+}
+
+/// Thread-safe EDF queue for timed tasks.
+#[derive(Debug, Default)]
+struct TimedQueue {
+    /// Min-heap ordered by deadline (earliest first).
+    heap: BinaryHeap<TimedTask>,
+    /// Next generation number for FIFO tiebreaking.
+    next_generation: u64,
+}
+
+impl Default for GlobalInjector {
+    fn default() -> Self {
+        Self {
+            cancel_queue: SegQueue::new(),
+            timed_queue: Mutex::new(TimedQueue::default()),
+            ready_queue: SegQueue::new(),
+            pending_count: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl GlobalInjector {
@@ -65,7 +118,11 @@ impl GlobalInjector {
     /// Timed tasks are scheduled by their deadline (earliest deadline first)
     /// and have priority over ready tasks but not cancel tasks.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
-        self.timed_queue.push(TimedTask { task, deadline });
+        let mut queue = self.timed_queue.lock().unwrap();
+        let generation = queue.next_generation;
+        queue.next_generation += 1;
+        queue.heap.push(TimedTask::new(task, deadline, generation));
+        drop(queue);
         self.pending_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -90,17 +147,48 @@ impl GlobalInjector {
         result
     }
 
-    /// Pops a task from the timed lane.
+    /// Pops a task from the timed lane (earliest deadline first).
     ///
     /// Returns `None` if the timed lane is empty.
-    /// Note: The caller should check if the deadline is due before executing.
+    /// The caller should check if the deadline is due before executing.
     #[must_use]
     pub fn pop_timed(&self) -> Option<TimedTask> {
-        let result = self.timed_queue.pop();
+        let mut queue = self.timed_queue.lock().unwrap();
+        let result = queue.heap.pop();
+        drop(queue);
         if result.is_some() {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
         }
         result
+    }
+
+    /// Peeks at the earliest deadline in the timed lane without removing it.
+    ///
+    /// Returns `None` if the timed lane is empty.
+    #[must_use]
+    pub fn peek_earliest_deadline(&self) -> Option<Time> {
+        let queue = self.timed_queue.lock().unwrap();
+        queue.heap.peek().map(|t| t.deadline)
+    }
+
+    /// Pops the earliest timed task only if its deadline is due.
+    ///
+    /// Returns `None` if the timed lane is empty or if the earliest
+    /// deadline is still in the future.
+    #[must_use]
+    pub fn pop_timed_if_due(&self, now: Time) -> Option<TimedTask> {
+        let mut queue = self.timed_queue.lock().unwrap();
+        if let Some(entry) = queue.heap.peek() {
+            if entry.deadline <= now {
+                let result = queue.heap.pop();
+                drop(queue);
+                if result.is_some() {
+                    self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                }
+                return result;
+            }
+        }
+        None
     }
 
     /// Pops a task from the ready lane.
@@ -118,7 +206,9 @@ impl GlobalInjector {
     /// Returns true if all lanes are empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.cancel_queue.is_empty() && self.timed_queue.is_empty() && self.ready_queue.is_empty()
+        self.cancel_queue.is_empty()
+            && self.timed_queue.lock().unwrap().heap.is_empty()
+            && self.ready_queue.is_empty()
     }
 
     /// Returns the approximate number of pending tasks across all lanes.
@@ -136,7 +226,7 @@ impl GlobalInjector {
     /// Returns true if the timed lane has pending work.
     #[must_use]
     pub fn has_timed_work(&self) -> bool {
-        !self.timed_queue.is_empty()
+        !self.timed_queue.lock().unwrap().heap.is_empty()
     }
 
     /// Returns true if the ready lane has pending work.
@@ -182,12 +272,85 @@ mod tests {
 
         assert!(injector.has_timed_work());
 
-        // FIFO order (not sorted - workers handle EDF locally)
+        // EDF order: earliest deadline first
         let first = injector.pop_timed().unwrap();
-        assert_eq!(first.task, task(1));
+        assert_eq!(first.task, task(2)); // deadline 50s comes first
+        assert_eq!(first.deadline, Time::from_secs(50));
 
         let second = injector.pop_timed().unwrap();
-        assert_eq!(second.task, task(2));
+        assert_eq!(second.task, task(1)); // deadline 100s comes second
+        assert_eq!(second.deadline, Time::from_secs(100));
+    }
+
+    #[test]
+    fn edf_ordering_multiple_tasks() {
+        let injector = GlobalInjector::new();
+
+        // Insert in random order
+        injector.inject_timed(task(3), Time::from_secs(75));
+        injector.inject_timed(task(1), Time::from_secs(25));
+        injector.inject_timed(task(4), Time::from_secs(100));
+        injector.inject_timed(task(2), Time::from_secs(50));
+
+        // Should pop in deadline order: 25, 50, 75, 100
+        assert_eq!(injector.pop_timed().unwrap().task, task(1));
+        assert_eq!(injector.pop_timed().unwrap().task, task(2));
+        assert_eq!(injector.pop_timed().unwrap().task, task(3));
+        assert_eq!(injector.pop_timed().unwrap().task, task(4));
+    }
+
+    #[test]
+    fn equal_deadlines_fifo_order() {
+        let injector = GlobalInjector::new();
+
+        // Same deadline, should maintain insertion order
+        injector.inject_timed(task(1), Time::from_secs(50));
+        injector.inject_timed(task(2), Time::from_secs(50));
+        injector.inject_timed(task(3), Time::from_secs(50));
+
+        // FIFO among equal deadlines
+        assert_eq!(injector.pop_timed().unwrap().task, task(1));
+        assert_eq!(injector.pop_timed().unwrap().task, task(2));
+        assert_eq!(injector.pop_timed().unwrap().task, task(3));
+    }
+
+    #[test]
+    fn pop_timed_if_due() {
+        let injector = GlobalInjector::new();
+
+        injector.inject_timed(task(1), Time::from_secs(100));
+        injector.inject_timed(task(2), Time::from_secs(50));
+
+        // At t=25, nothing is due
+        assert!(injector.pop_timed_if_due(Time::from_secs(25)).is_none());
+        assert!(injector.has_timed_work()); // Tasks still in queue
+
+        // At t=50, task 2 is due
+        let due = injector.pop_timed_if_due(Time::from_secs(50)).unwrap();
+        assert_eq!(due.task, task(2));
+
+        // At t=75, task 1 is still not due
+        assert!(injector.pop_timed_if_due(Time::from_secs(75)).is_none());
+
+        // At t=100, task 1 is due
+        let due = injector.pop_timed_if_due(Time::from_secs(100)).unwrap();
+        assert_eq!(due.task, task(1));
+    }
+
+    #[test]
+    fn peek_earliest_deadline() {
+        let injector = GlobalInjector::new();
+
+        assert!(injector.peek_earliest_deadline().is_none());
+
+        injector.inject_timed(task(1), Time::from_secs(100));
+        assert_eq!(injector.peek_earliest_deadline(), Some(Time::from_secs(100)));
+
+        injector.inject_timed(task(2), Time::from_secs(50));
+        assert_eq!(injector.peek_earliest_deadline(), Some(Time::from_secs(50)));
+
+        // Peek doesn't remove
+        assert_eq!(injector.peek_earliest_deadline(), Some(Time::from_secs(50)));
     }
 
     #[test]
