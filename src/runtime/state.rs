@@ -6,8 +6,10 @@
 //! - Obligations (resources to be resolved)
 //! - Current time
 
+use crate::cx::cx::ObservabilityState;
 use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
+use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::record::{
     finalizer::Finalizer, region::RegionState, task::TaskState, AdmissionError,
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionLimits,
@@ -75,6 +77,28 @@ struct CancelRegionNode {
     depth: usize,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeObservability {
+    config: ObservabilityConfig,
+    collector: LogCollector,
+}
+
+impl RuntimeObservability {
+    fn new(config: ObservabilityConfig) -> Self {
+        let collector = config.create_collector();
+        Self { config, collector }
+    }
+
+    fn for_task(&self, region: RegionId, task: TaskId) -> ObservabilityState {
+        ObservabilityState::new_with_config(
+            region,
+            task,
+            &self.config,
+            Some(self.collector.clone()),
+        )
+    }
+}
+
 /// The global runtime state.
 ///
 /// This is the "Σ" from the formal semantics:
@@ -111,6 +135,8 @@ pub struct RuntimeState {
     timer_driver: Option<TimerDriverHandle>,
     /// Entropy source for capability-based randomness.
     entropy_source: Arc<dyn EntropySource>,
+    /// Optional observability configuration for runtime contexts.
+    observability: Option<RuntimeObservability>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -127,6 +153,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
             .field("entropy_source", &"<dyn EntropySource>")
+            .field("observability", &self.observability.is_some())
             .finish()
     }
 }
@@ -156,6 +183,7 @@ impl RuntimeState {
             io_driver: None,
             timer_driver: None,
             entropy_source: Arc::new(OsEntropy),
+            observability: None,
         }
     }
 
@@ -262,6 +290,16 @@ impl RuntimeState {
     /// Sets the entropy source for this runtime.
     pub fn set_entropy_source(&mut self, source: Arc<dyn EntropySource>) {
         self.entropy_source = source;
+    }
+
+    /// Configures runtime observability for new tasks.
+    pub fn set_observability_config(&mut self, config: ObservabilityConfig) {
+        self.observability = Some(RuntimeObservability::new(config));
+    }
+
+    /// Clears runtime observability configuration.
+    pub fn clear_observability_config(&mut self) {
+        self.observability = None;
     }
 
     /// Returns a handle to the trace buffer.
@@ -482,11 +520,15 @@ impl RuntimeState {
 
         // Create the task's capability context
         let entropy = self.entropy_source.fork(task_id);
+        let observability = self
+            .observability
+            .as_ref()
+            .map(|obs| obs.for_task(region, task_id));
         let cx = crate::cx::Cx::new_with_drivers(
             region,
             task_id,
             budget,
-            None,
+            observability,
             self.io_driver_handle(),
             None,
             self.timer_driver_handle(),
@@ -2297,10 +2339,12 @@ pub struct HeldObligationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observability::{LogEntry, ObservabilityConfig};
     use crate::record::task::TaskState;
     use crate::record::{ObligationKind, ObligationRecord, RegionLimits};
     use crate::runtime::reactor::LabReactor;
     use crate::test_utils::init_test_logging;
+    use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
@@ -2415,6 +2459,93 @@ mod tests {
             .any(|event| event.kind == TraceEventKind::UserTrace);
         crate::assert_with_log!(saw_user_trace, "user trace recorded", true, saw_user_trace);
         crate::test_complete!("cx_trace_emits_user_trace_event");
+    }
+
+    #[test]
+    fn cx_log_attaches_collector_and_timestamp() {
+        init_test("cx_log_attaches_collector_and_timestamp");
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        state.set_observability_config(ObservabilityConfig::testing().with_max_log_entries(8));
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async { 1_u8 })
+            .expect("task spawn");
+        let cx = state
+            .tasks
+            .get(task_id.arena_index())
+            .and_then(|record| record.cx.clone())
+            .expect("cx missing");
+
+        cx.log(LogEntry::info("hello"));
+
+        let collector = cx.log_collector().expect("collector missing");
+        let entries = collector.peek();
+        crate::assert_with_log!(entries.len() == 1, "log entry count", 1, entries.len());
+        let entry = &entries[0];
+        crate::assert_with_log!(
+            entry.message() == "hello",
+            "log entry message",
+            "hello",
+            entry.message()
+        );
+        crate::assert_with_log!(
+            entry.timestamp() == Time::from_millis(5),
+            "log entry timestamp",
+            Time::from_millis(5),
+            entry.timestamp()
+        );
+        let task_str = task_id.to_string();
+        let region_str = root.to_string();
+        crate::assert_with_log!(
+            entry.get_field("task_id") == Some(task_str.as_str()),
+            "log entry task id",
+            task_str.as_str(),
+            entry.get_field("task_id")
+        );
+        crate::assert_with_log!(
+            entry.get_field("region_id") == Some(region_str.as_str()),
+            "log entry region id",
+            region_str.as_str(),
+            entry.get_field("region_id")
+        );
+        crate::test_complete!("cx_log_attaches_collector_and_timestamp");
+    }
+
+    #[test]
+    fn cx_log_respects_timestamp_toggle() {
+        init_test("cx_log_respects_timestamp_toggle");
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(9)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let config = ObservabilityConfig::testing().with_include_timestamps(false);
+        state.set_observability_config(config);
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async { 1_u8 })
+            .expect("task spawn");
+        let cx = state
+            .tasks
+            .get(task_id.arena_index())
+            .and_then(|record| record.cx.clone())
+            .expect("cx missing");
+
+        cx.log(LogEntry::info("no timestamps"));
+
+        let collector = cx.log_collector().expect("collector missing");
+        let entries = collector.peek();
+        crate::assert_with_log!(entries.len() == 1, "log entry count", 1, entries.len());
+        let entry = &entries[0];
+        crate::assert_with_log!(
+            entry.timestamp() == Time::ZERO,
+            "timestamps disabled",
+            Time::ZERO,
+            entry.timestamp()
+        );
+        crate::test_complete!("cx_log_respects_timestamp_toggle");
     }
 
     #[test]

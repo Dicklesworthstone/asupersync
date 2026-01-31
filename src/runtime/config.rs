@@ -15,8 +15,10 @@
 //! | `steal_batch_size` | 16 |
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
+//! | `observability` | `None` |
 
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
+use crate::observability::ObservabilityConfig;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use std::sync::Arc;
 
@@ -67,6 +69,8 @@ pub struct RuntimeConfig {
     pub deadline_warning_handler: Option<Arc<dyn Fn(DeadlineWarning) + Send + Sync>>,
     /// Metrics provider for runtime instrumentation.
     pub metrics_provider: Arc<dyn MetricsProvider>,
+    /// Optional runtime observability configuration.
+    pub observability: Option<ObservabilityConfig>,
 }
 
 impl RuntimeConfig {
@@ -113,6 +117,7 @@ impl Default for RuntimeConfig {
             deadline_monitor: None,
             deadline_warning_handler: None,
             metrics_provider: Arc::new(NoOpMetrics),
+            observability: None,
         }
     }
 }

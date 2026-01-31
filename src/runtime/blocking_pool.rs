@@ -1,5 +1,8 @@
 //! Blocking pool for executing synchronous operations.
 //!
+// Allow clippy lints that are allowed at the crate level but not picked up in this module
+#![allow(clippy::must_use_candidate)]
+//!
 //! This module provides a thread pool for running blocking operations without
 //! blocking the async runtime. It supports:
 //!
@@ -442,10 +445,12 @@ impl BlockingPool {
         }
 
         // All threads have exited, now join the handles to clean up
-        let mut handles = self.inner.thread_handles.lock().unwrap();
-        for handle in handles.drain(..) {
-            // Threads have already exited, so join returns immediately
-            let _ = handle.join();
+        {
+            let mut handles = self.inner.thread_handles.lock().unwrap();
+            for handle in handles.drain(..) {
+                // Threads have already exited, so join returns immediately
+                let _ = handle.join();
+            }
         }
 
         true

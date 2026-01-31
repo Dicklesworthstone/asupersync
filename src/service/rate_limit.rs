@@ -316,13 +316,25 @@ where
         let now = (self.time_getter)();
         self.refill(now);
 
-        if self.try_acquire() {
-            // Also check inner service readiness
-            self.inner.poll_ready(cx).map_err(RateLimitError::Inner)
-        } else {
-            // No tokens available
+        let has_tokens = self.state.lock().expect("rate limit lock poisoned").tokens > 0;
+        if !has_tokens {
+            // No tokens available.
             cx.waker().wake_by_ref();
-            Poll::Pending
+            return Poll::Pending;
+        }
+
+        match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {
+                let acquired = self.try_acquire();
+                if acquired {
+                    Poll::Ready(Ok(()))
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
         }
     }
 
@@ -372,7 +384,7 @@ impl<F: std::fmt::Debug> std::fmt::Debug for RateLimitFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -405,6 +417,37 @@ mod tests {
 
         fn call(&mut self, req: i32) -> Self::Future {
             ready(Ok(req))
+        }
+    }
+
+    struct ToggleReadyService {
+        ready: Arc<AtomicBool>,
+        error: bool,
+    }
+
+    impl ToggleReadyService {
+        fn new(ready: Arc<AtomicBool>, error: bool) -> Self {
+            Self { ready, error }
+        }
+    }
+
+    impl Service<()> for ToggleReadyService {
+        type Response = ();
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<(), &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.error {
+                Poll::Ready(Err("inner error"))
+            } else if self.ready.load(Ordering::SeqCst) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            ready(Ok(()))
         }
     }
 
@@ -480,6 +523,52 @@ mod tests {
         let pending = result.is_pending();
         crate::assert_with_log!(pending, "pending", true, pending);
         crate::test_complete!("pending_when_no_tokens");
+    }
+
+    #[test]
+    fn inner_pending_does_not_consume_token() {
+        init_test("inner_pending_does_not_consume_token");
+        let ready = Arc::new(AtomicBool::new(false));
+        let mut svc = RateLimit::new(
+            ToggleReadyService::new(ready.clone(), false),
+            1,
+            Duration::from_secs(1),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(first.is_pending(), "pending", true, first.is_pending());
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+
+        ready.store(true, Ordering::SeqCst);
+        let second = svc.poll_ready(&mut cx);
+        let ok = matches!(second, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 0, "available", 0, available);
+        crate::test_complete!("inner_pending_does_not_consume_token");
+    }
+
+    #[test]
+    fn inner_error_does_not_consume_token() {
+        init_test("inner_error_does_not_consume_token");
+        let ready = Arc::new(AtomicBool::new(true));
+        let mut svc = RateLimit::new(
+            ToggleReadyService::new(ready, true),
+            1,
+            Duration::from_secs(1),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = svc.poll_ready(&mut cx);
+        let err = matches!(result, Poll::Ready(Err(RateLimitError::Inner(_))));
+        crate::assert_with_log!(err, "inner err", true, err);
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+        crate::test_complete!("inner_error_does_not_consume_token");
     }
 
     #[test]

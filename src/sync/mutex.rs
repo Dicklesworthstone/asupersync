@@ -182,13 +182,25 @@ impl<T> Mutex<T> {
     }
 
     fn unlock(&self) {
-        let mut state = self.state.lock().expect("mutex state lock poisoned");
-        state.locked = false;
-        while let Some(waiter) = state.waiters.pop_front() {
-            if waiter.queued.swap(false, Ordering::AcqRel) {
-                waiter.waker.wake();
-                break;
+        // Extract the waker to wake outside the lock to prevent deadlocks.
+        // Waking while holding the lock can cause priority inversion or deadlock
+        // if the woken task tries to acquire another mutex.
+        let waker_to_wake = {
+            let mut state = self.state.lock().expect("mutex state lock poisoned");
+            state.locked = false;
+            loop {
+                match state.waiters.pop_front() {
+                    Some(waiter) if waiter.queued.swap(false, Ordering::AcqRel) => {
+                        break Some(waiter.waker);
+                    }
+                    Some(_) => {}
+                    None => break None,
+                }
             }
+        };
+        // Wake outside the lock
+        if let Some(waker) = waker_to_wake {
+            waker.wake();
         }
     }
 }

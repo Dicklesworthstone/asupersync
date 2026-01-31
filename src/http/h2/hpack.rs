@@ -340,11 +340,17 @@ impl Default for Encoder {
     }
 }
 
+/// Maximum allowed HPACK table size to prevent DoS (1MB).
+const MAX_ALLOWED_TABLE_SIZE: usize = 1024 * 1024;
+
 /// HPACK decoder for decoding headers.
 #[derive(Debug)]
 pub struct Decoder {
     dynamic_table: DynamicTable,
     max_header_list_size: usize,
+    /// Maximum table size allowed by SETTINGS (from peer).
+    /// Dynamic table size updates must not exceed this.
+    allowed_table_size: usize,
 }
 
 impl Decoder {
@@ -354,21 +360,30 @@ impl Decoder {
         Self {
             dynamic_table: DynamicTable::new(),
             max_header_list_size: 16384,
+            allowed_table_size: 4096, // HTTP/2 default
         }
     }
 
     /// Create a decoder with specified max table size.
     #[must_use]
     pub fn with_max_size(max_size: usize) -> Self {
+        let capped_size = max_size.min(MAX_ALLOWED_TABLE_SIZE);
         Self {
-            dynamic_table: DynamicTable::with_max_size(max_size),
+            dynamic_table: DynamicTable::with_max_size(capped_size),
             max_header_list_size: 16384,
+            allowed_table_size: capped_size,
         }
     }
 
     /// Set the maximum header list size.
     pub fn set_max_header_list_size(&mut self, size: usize) {
         self.max_header_list_size = size;
+    }
+
+    /// Set the allowed table size (from SETTINGS frame).
+    /// This limits what the peer can request via dynamic table size updates.
+    pub fn set_allowed_table_size(&mut self, size: usize) {
+        self.allowed_table_size = size.min(MAX_ALLOWED_TABLE_SIZE);
     }
 
     /// Decode headers from a buffer.
@@ -389,41 +404,67 @@ impl Decoder {
     }
 
     /// Decode a single header.
+    ///
+    /// Uses iterative approach instead of recursion to prevent stack overflow
+    /// from malicious sequences of dynamic table size updates.
     fn decode_header(&mut self, src: &mut Bytes) -> Result<Header, H2Error> {
-        if src.is_empty() {
-            return Err(H2Error::compression("unexpected end of header block"));
-        }
+        // Maximum consecutive size updates allowed to prevent DoS
+        const MAX_SIZE_UPDATES: usize = 16;
+        let mut size_update_count = 0;
 
-        let first = src[0];
-
-        if first & 0x80 != 0 {
-            // Indexed header field
-            let index = decode_integer(src, 7)?;
-            self.get_indexed(index)
-        } else if first & 0x40 != 0 {
-            // Literal with incremental indexing
-            let (name, value) = self.decode_literal(src, 6)?;
-            let header = Header::new(name, value);
-            self.dynamic_table.insert(header.clone());
-            Ok(header)
-        } else if first & 0x20 != 0 {
-            // Dynamic table size update
-            let new_size = decode_integer(src, 5)?;
-            self.dynamic_table.set_max_size(new_size);
-            // Recursively decode next header
+        loop {
             if src.is_empty() {
-                Err(H2Error::compression("size update without header"))
-            } else {
-                self.decode_header(src)
+                return Err(H2Error::compression("unexpected end of header block"));
             }
-        } else if first & 0x10 != 0 {
-            // Literal never indexed
-            let (name, value) = self.decode_literal(src, 4)?;
-            Ok(Header::new(name, value))
-        } else {
+
+            let first = src[0];
+
+            if first & 0x80 != 0 {
+                // Indexed header field
+                let index = decode_integer(src, 7)?;
+                return self.get_indexed(index);
+            }
+
+            if first & 0x40 != 0 {
+                // Literal with incremental indexing
+                let (name, value) = self.decode_literal(src, 6)?;
+                let header = Header::new(name, value);
+                self.dynamic_table.insert(header.clone());
+                return Ok(header);
+            }
+
+            if first & 0x20 != 0 {
+                // Dynamic table size update
+                size_update_count += 1;
+                if size_update_count > MAX_SIZE_UPDATES {
+                    return Err(H2Error::compression(
+                        "too many consecutive dynamic table size updates",
+                    ));
+                }
+                let new_size = decode_integer(src, 5)?;
+                // Validate against allowed maximum to prevent DoS
+                if new_size > self.allowed_table_size {
+                    return Err(H2Error::compression(
+                        "dynamic table size update exceeds allowed maximum",
+                    ));
+                }
+                self.dynamic_table.set_max_size(new_size);
+                // Continue loop to decode next header (iterative instead of recursive)
+                if src.is_empty() {
+                    return Err(H2Error::compression("size update without header"));
+                }
+                continue;
+            }
+
+            if first & 0x10 != 0 {
+                // Literal never indexed
+                let (name, value) = self.decode_literal(src, 4)?;
+                return Ok(Header::new(name, value));
+            }
+
             // Literal without indexing
             let (name, value) = self.decode_literal(src, 4)?;
-            Ok(Header::new(name, value))
+            return Ok(Header::new(name, value));
         }
     }
 
@@ -513,12 +554,19 @@ fn decode_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
         let byte = src[0];
         let _ = src.split_to(1);
 
-        value += ((byte & 0x7f) as usize) << shift;
-        shift += 7;
-
+        // Check shift limit BEFORE doing the addition to prevent overflow
         if shift > 28 {
             return Err(H2Error::compression("integer too large"));
         }
+
+        // Use checked arithmetic to prevent overflow
+        let increment = ((byte & 0x7f) as usize)
+            .checked_shl(shift)
+            .ok_or_else(|| H2Error::compression("integer overflow in shift"))?;
+        value = value
+            .checked_add(increment)
+            .ok_or_else(|| H2Error::compression("integer overflow in addition"))?;
+        shift += 7;
 
         if byte & 0x80 == 0 {
             break;
@@ -908,11 +956,13 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
         }
     }
 
-    // Check remaining bits are valid padding (all 1s)
-    if bits > 0 {
+    // Check remaining bits are valid padding (all 1s) per RFC 7541 Section 5.2
+    if bits > 0 && bits < 8 {
         let mask = (1u64 << bits) - 1;
-        if accumulator != mask && bits < 8 {
-            // Padding should be all 1s
+        if accumulator != mask {
+            return Err(H2Error::compression(
+                "invalid Huffman padding (must be all 1s)",
+            ));
         }
     }
 
