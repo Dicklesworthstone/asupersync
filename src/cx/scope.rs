@@ -337,6 +337,7 @@ impl<P: Policy> Scope<'_, P> {
             io_driver,
             Some(child_entropy),
         );
+        child_cx.set_trace_buffer(state.trace_handle());
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -602,6 +603,7 @@ impl<P: Policy> Scope<'_, P> {
             io_driver,
             Some(child_entropy),
         );
+        child_cx.set_trace_buffer(state.trace_handle());
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -810,6 +812,8 @@ impl<P: Policy> Scope<'_, P> {
             state.tasks.remove(idx);
             return Err(SpawnError::RegionNotFound(self.region));
         }
+
+        state.record_task_spawn(task_id, self.region);
 
         Ok(task_id)
     }

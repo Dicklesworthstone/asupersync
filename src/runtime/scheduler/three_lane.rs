@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timed_work_reinjection() {
+    fn test_timed_work_not_due_stays_in_queue() {
         use crate::time::{TimerDriverHandle, VirtualClock};
 
         // Create state with virtual clock timer driver
@@ -860,17 +860,122 @@ mod tests {
         let mut workers = scheduler.take_workers().into_iter();
         let mut worker = workers.next().unwrap();
 
-        // At t=0, task is not ready - should be re-injected
+        // At t=0, task is not ready - stays in queue (not popped)
         let result = worker.try_timed_work();
         assert!(result.is_none());
 
-        // The task should still be in the global queue (re-injected)
+        // The task should still be in the global queue (was never removed)
         let peeked = worker.global.pop_timed();
-        assert!(
-            peeked.is_some(),
-            "task should be re-injected to global queue"
-        );
+        assert!(peeked.is_some(), "task should remain in global queue");
         assert_eq!(peeked.unwrap().task, task_id);
+    }
+
+    #[test]
+    fn test_edf_ordering_from_global_queue() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create state with virtual clock timer driver at t=1000
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Inject timed tasks with different deadlines (all due, since t=1000)
+        let task1 = TaskId::new_for_test(1, 1);
+        let task2 = TaskId::new_for_test(1, 2);
+        let task3 = TaskId::new_for_test(1, 3);
+
+        // Insert in non-deadline order
+        scheduler.inject_timed(task2, Time::from_nanos(500)); // deadline 500
+        scheduler.inject_timed(task3, Time::from_nanos(750)); // deadline 750
+        scheduler.inject_timed(task1, Time::from_nanos(250)); // deadline 250
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // All deadlines are due (t=1000), so should be returned in EDF order
+        let first = worker.try_timed_work();
+        assert_eq!(
+            first,
+            Some(task1),
+            "earliest deadline (250) should be first"
+        );
+
+        let second = worker.try_timed_work();
+        assert_eq!(
+            second,
+            Some(task2),
+            "second earliest deadline (500) should be second"
+        );
+
+        let third = worker.try_timed_work();
+        assert_eq!(
+            third,
+            Some(task3),
+            "third earliest deadline (750) should be third"
+        );
+    }
+
+    #[test]
+    fn test_starvation_avoidance_ready_with_timed() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create state with virtual clock at t=0
+        let clock = Arc::new(VirtualClock::new());
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Inject a ready task
+        let ready_task = TaskId::new_for_test(1, 1);
+        scheduler.inject_ready(ready_task, 100);
+
+        // Inject a timed task with future deadline
+        let timed_task = TaskId::new_for_test(1, 2);
+        scheduler.inject_timed(timed_task, Time::from_nanos(1000));
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // Timed task has future deadline, so should not be returned
+        assert!(worker.try_timed_work().is_none());
+
+        // Ready task should be available
+        assert_eq!(worker.try_ready_work(), Some(ready_task));
+    }
+
+    #[test]
+    fn test_cancel_priority_over_timed() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create state with virtual clock at t=1000 (both tasks due)
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Inject a timed task
+        let timed_task = TaskId::new_for_test(1, 1);
+        scheduler.inject_timed(timed_task, Time::from_nanos(500));
+
+        // Inject a cancel task (lower priority number, but cancel lane has priority)
+        let cancel_task = TaskId::new_for_test(1, 2);
+        scheduler.inject_cancel(cancel_task, 50);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // Cancel work should come before timed work
+        assert_eq!(worker.try_cancel_work(), Some(cancel_task));
+
+        // Then timed work
+        assert_eq!(worker.try_timed_work(), Some(timed_task));
     }
 
     #[test]

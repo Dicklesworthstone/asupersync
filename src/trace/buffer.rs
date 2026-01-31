@@ -4,6 +4,8 @@
 //! allowing efficient capture without unbounded memory growth.
 
 use super::event::TraceEvent;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A ring buffer for storing trace events.
 ///
@@ -98,6 +100,78 @@ impl TraceBuffer {
 impl Default for TraceBuffer {
     fn default() -> Self {
         Self::new(1024)
+    }
+}
+
+/// Thread-safe handle for sharing a trace buffer across tasks.
+///
+/// This wraps a [`TraceBuffer`] in a mutex and adds a monotonically increasing
+/// sequence counter for event ordering.
+#[derive(Debug, Clone)]
+pub struct TraceBufferHandle {
+    inner: Arc<TraceBufferInner>,
+}
+
+#[derive(Debug)]
+struct TraceBufferInner {
+    buffer: Mutex<TraceBuffer>,
+    next_seq: AtomicU64,
+}
+
+impl TraceBufferHandle {
+    /// Creates a new trace buffer handle with the given capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(TraceBufferInner {
+                buffer: Mutex::new(TraceBuffer::new(capacity)),
+                next_seq: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Allocates and returns the next trace sequence number.
+    #[must_use]
+    pub fn next_seq(&self) -> u64 {
+        self.inner.next_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Pushes a trace event into the buffer.
+    pub fn push_event(&self, event: TraceEvent) {
+        let mut buffer = self
+            .inner
+            .buffer
+            .lock()
+            .expect("trace buffer lock poisoned");
+        buffer.push(event);
+    }
+
+    /// Returns a snapshot of buffered events in order (oldest to newest).
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<TraceEvent> {
+        let buffer = self
+            .inner
+            .buffer
+            .lock()
+            .expect("trace buffer lock poisoned");
+        buffer.iter().cloned().collect()
+    }
+
+    /// Returns the current number of buffered events.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        let buffer = self
+            .inner
+            .buffer
+            .lock()
+            .expect("trace buffer lock poisoned");
+        buffer.len()
+    }
+
+    /// Returns true if the buffer is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

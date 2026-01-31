@@ -30,7 +30,7 @@ config-file = ["dep:toml"]
 # Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls
-tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring", "dep:rustls-pemfile"]
+tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring", "dep:rustls-pemfile", "dep:base64", "dep:x509-parser"]
 # Enable native root certificates for TLS
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
@@ -91,6 +91,10 @@ rustls-native-certs = { version = "0.8", optional = true }
 webpki-roots = { version = "0.26", optional = true }
 # PEM file parsing for TLS certificates
 rustls-pemfile = { version = "2.2", optional = true }
+# Base64 encoding for certificate pins
+base64 = { version = "0.22", optional = true }
+# X.509 certificate parsing for SPKI extraction
+x509-parser = { version = "0.17", optional = true }
 # Optional TOML config file support for RuntimeBuilder
 toml = { version = "0.8", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }

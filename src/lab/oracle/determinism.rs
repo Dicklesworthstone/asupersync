@@ -282,8 +282,9 @@ impl DeterminismOracle {
         program(&mut runtime1);
         let trace1: Vec<_> = runtime1
             .trace()
-            .iter()
-            .map(TraceEventSummary::from_event)
+            .snapshot()
+            .into_iter()
+            .map(|e| TraceEventSummary::from_event(&e))
             .collect();
 
         // Second run with identical config
@@ -291,8 +292,9 @@ impl DeterminismOracle {
         program(&mut runtime2);
         let trace2: Vec<_> = runtime2
             .trace()
-            .iter()
-            .map(TraceEventSummary::from_event)
+            .snapshot()
+            .into_iter()
+            .map(|e| TraceEventSummary::from_event(&e))
             .collect();
 
         // Compare traces
@@ -382,8 +384,9 @@ where
     program(&mut reference);
     let reference_trace: Vec<_> = reference
         .trace()
-        .iter()
-        .map(TraceEventSummary::from_event)
+        .snapshot()
+        .into_iter()
+        .map(|e| TraceEventSummary::from_event(&e))
         .collect();
 
     let oracle = DeterminismOracle::new();
@@ -394,8 +397,9 @@ where
         program(&mut runtime);
         let trace: Vec<_> = runtime
             .trace()
-            .iter()
-            .map(TraceEventSummary::from_event)
+            .snapshot()
+            .into_iter()
+            .map(|e| TraceEventSummary::from_event(&e))
             .collect();
 
         if let Err(violation) = oracle.compare_traces(&reference_trace, &trace) {
@@ -499,13 +503,15 @@ mod tests {
         // Traces should be identical
         let trace1: Vec<_> = r1
             .trace()
-            .iter()
-            .map(TraceEventSummary::from_event)
+            .snapshot()
+            .into_iter()
+            .map(|e| TraceEventSummary::from_event(&e))
             .collect();
         let trace2: Vec<_> = r2
             .trace()
-            .iter()
-            .map(TraceEventSummary::from_event)
+            .snapshot()
+            .into_iter()
+            .map(|e| TraceEventSummary::from_event(&e))
             .collect();
 
         let oracle = DeterminismOracle::new();

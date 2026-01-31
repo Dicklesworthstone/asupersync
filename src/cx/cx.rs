@@ -58,6 +58,7 @@ use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
 use crate::time::{timeout, TimeSource, TimerDriverHandle, WallClock};
+use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, info, trace};
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
 use crate::util::{EntropySource, OsEntropy};
@@ -157,6 +158,7 @@ pub struct Cx {
 pub struct ObservabilityState {
     collector: Option<LogCollector>,
     context: DiagnosticContext,
+    trace: Option<TraceBufferHandle>,
 }
 
 impl ObservabilityState {
@@ -168,6 +170,7 @@ impl ObservabilityState {
         Self {
             collector: None,
             context,
+            trace: None,
         }
     }
 
@@ -177,6 +180,7 @@ impl ObservabilityState {
         Self {
             collector: self.collector.clone(),
             context,
+            trace: self.trace.clone(),
         }
     }
 }
@@ -1046,6 +1050,15 @@ impl Cx {
     /// to the trace buffer maintained by the runtime.
     pub fn trace(&self, message: &str) {
         self.log(LogEntry::trace(message));
+        let Some(trace) = self.trace_buffer() else {
+            return;
+        };
+        let now = self
+            .timer_driver
+            .as_ref()
+            .map_or_else(wall_clock_now, TimerDriverHandle::now);
+        let seq = trace.next_seq();
+        trace.push_event(TraceEvent::user_trace(seq, now, message));
     }
 
     /// Logs a structured entry to the attached collector, if present.
@@ -1088,6 +1101,22 @@ impl Cx {
             .read()
             .expect("lock poisoned")
             .collector
+            .clone()
+    }
+
+    /// Attaches a trace buffer to this context.
+    pub fn set_trace_buffer(&self, trace: TraceBufferHandle) {
+        let mut obs = self.observability.write().expect("lock poisoned");
+        obs.trace = Some(trace);
+    }
+
+    /// Returns the current trace buffer handle, if attached.
+    #[must_use]
+    pub fn trace_buffer(&self) -> Option<TraceBufferHandle> {
+        self.observability
+            .read()
+            .expect("lock poisoned")
+            .trace
             .clone()
     }
 

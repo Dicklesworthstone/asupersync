@@ -100,7 +100,8 @@ mod tests {
 
         let reserve_event = state
             .trace
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::ObligationReserve)
             .expect("reserve event");
         match &reserve_event.data {
@@ -151,7 +152,8 @@ mod tests {
 
         let commit_event = state
             .trace
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::ObligationCommit)
             .expect("commit event");
         match &commit_event.data {
@@ -185,10 +187,10 @@ mod tests {
                     *ob_state
                 );
                 crate::assert_with_log!(
-                    duration_ns == &Some(15),
+                    *duration_ns == Some(15),
                     "duration",
-                    &Some(15),
-                    duration_ns
+                    Some(15),
+                    *duration_ns
                 );
                 crate::assert_with_log!(
                     abort_reason.is_none(),
@@ -219,7 +221,8 @@ mod tests {
 
         let abort_event = state
             .trace
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::ObligationAbort)
             .expect("abort event");
         match &abort_event.data {
@@ -253,16 +256,16 @@ mod tests {
                     *ob_state
                 );
                 crate::assert_with_log!(
-                    duration_ns == &Some(30),
+                    *duration_ns == Some(30),
                     "duration",
-                    &Some(30),
-                    duration_ns
+                    Some(30),
+                    *duration_ns
                 );
                 crate::assert_with_log!(
-                    abort_reason == &Some(ObligationAbortReason::Cancel),
+                    *abort_reason == Some(ObligationAbortReason::Cancel),
                     "abort_reason",
-                    &Some(ObligationAbortReason::Cancel),
-                    abort_reason
+                    Some(ObligationAbortReason::Cancel),
+                    *abort_reason
                 );
             }
             other => panic!("unexpected abort data: {other:?}"),

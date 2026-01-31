@@ -11,8 +11,31 @@ pub enum TlsError {
     InvalidDnsName(String),
     /// TLS handshake failure.
     Handshake(String),
-    /// Certificate error.
+    /// Certificate error (generic).
     Certificate(String),
+    /// Certificate has expired.
+    CertificateExpired {
+        /// The time the certificate expired (Unix timestamp in seconds).
+        expired_at: i64,
+        /// Description of the certificate.
+        description: String,
+    },
+    /// Certificate is not yet valid.
+    CertificateNotYetValid {
+        /// The time the certificate becomes valid (Unix timestamp in seconds).
+        valid_from: i64,
+        /// Description of the certificate.
+        description: String,
+    },
+    /// Certificate chain validation failed.
+    ChainValidation(String),
+    /// Certificate pin mismatch.
+    PinMismatch {
+        /// Expected pin(s).
+        expected: Vec<String>,
+        /// Actual pin found.
+        actual: String,
+    },
     /// Configuration error.
     Configuration(String),
     /// I/O error during TLS operations.
@@ -30,6 +53,19 @@ impl fmt::Display for TlsError {
             Self::InvalidDnsName(name) => write!(f, "invalid DNS name: {name}"),
             Self::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
             Self::Certificate(msg) => write!(f, "certificate error: {msg}"),
+            Self::CertificateExpired {
+                expired_at,
+                description,
+            } => write!(f, "certificate expired at {expired_at}: {description}"),
+            Self::CertificateNotYetValid {
+                valid_from,
+                description,
+            } => write!(f, "certificate not valid until {valid_from}: {description}"),
+            Self::ChainValidation(msg) => write!(f, "certificate chain validation failed: {msg}"),
+            Self::PinMismatch { expected, actual } => write!(
+                f,
+                "certificate pin mismatch: expected one of {expected:?}, got {actual}"
+            ),
             Self::Configuration(msg) => write!(f, "TLS configuration error: {msg}"),
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Timeout(duration) => write!(f, "TLS operation timed out after {duration:?}"),

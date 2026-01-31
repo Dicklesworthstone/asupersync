@@ -344,7 +344,10 @@ mod tests {
         assert!(injector.peek_earliest_deadline().is_none());
 
         injector.inject_timed(task(1), Time::from_secs(100));
-        assert_eq!(injector.peek_earliest_deadline(), Some(Time::from_secs(100)));
+        assert_eq!(
+            injector.peek_earliest_deadline(),
+            Some(Time::from_secs(100))
+        );
 
         injector.inject_timed(task(2), Time::from_secs(50));
         assert_eq!(injector.peek_earliest_deadline(), Some(Time::from_secs(50)));

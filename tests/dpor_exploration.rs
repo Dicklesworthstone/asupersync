@@ -95,7 +95,7 @@ fn canonicalization_same_trace_same_fingerprint() {
             .expect("t1");
         runtime.scheduler.lock().unwrap().schedule(t1, 0);
         runtime.run_until_quiescent();
-        let events: Vec<TraceEvent> = runtime.trace().iter().cloned().collect();
+        let events: Vec<TraceEvent> = runtime.trace().snapshot();
         trace_fingerprint(&events)
     };
 
@@ -108,7 +108,7 @@ fn canonicalization_same_trace_same_fingerprint() {
             .expect("t1");
         runtime.scheduler.lock().unwrap().schedule(t1, 0);
         runtime.run_until_quiescent();
-        let events: Vec<TraceEvent> = runtime.trace().iter().cloned().collect();
+        let events: Vec<TraceEvent> = runtime.trace().snapshot();
         trace_fingerprint(&events)
     };
 

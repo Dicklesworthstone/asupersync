@@ -42,7 +42,7 @@ pub mod replayer;
 pub mod streaming;
 pub mod tla_export;
 
-pub use buffer::TraceBuffer;
+pub use buffer::{TraceBuffer, TraceBufferHandle};
 pub use canonicalize::{canonicalize, trace_fingerprint, FoataTrace};
 pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,

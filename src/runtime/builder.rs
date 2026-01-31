@@ -669,6 +669,37 @@ impl Runtime {
     pub fn config(&self) -> &RuntimeConfig {
         &self.inner.config
     }
+
+    /// Spawns a blocking task on the blocking pool.
+    ///
+    /// Returns `None` if the blocking pool is not configured (max_threads = 0).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let runtime = RuntimeBuilder::new()
+    ///     .blocking_threads(1, 4)
+    ///     .build()?;
+    ///
+    /// let handle = runtime.spawn_blocking(|| {
+    ///     std::fs::read_to_string("/etc/hosts")
+    /// });
+    /// ```
+    pub fn spawn_blocking<F>(
+        &self,
+        f: F,
+    ) -> Option<crate::runtime::blocking_pool::BlockingTaskHandle>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
+    }
+
+    /// Returns a handle to the blocking pool, if configured.
+    #[must_use]
+    pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
+        self.inner.blocking_handle()
+    }
 }
 
 /// Handle for spawning tasks onto a runtime from outside async context.
@@ -696,6 +727,25 @@ impl RuntimeHandle {
         F::Output: Send + 'static,
     {
         self.inner.spawn(future)
+    }
+
+    /// Spawns a blocking task on the blocking pool.
+    ///
+    /// Returns `None` if the blocking pool is not configured.
+    pub fn spawn_blocking<F>(
+        &self,
+        f: F,
+    ) -> Option<crate::runtime::blocking_pool::BlockingTaskHandle>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
+    }
+
+    /// Returns a handle to the blocking pool, if configured.
+    #[must_use]
+    pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
+        self.inner.blocking_handle()
     }
 }
 
@@ -739,11 +789,15 @@ struct RuntimeInner {
     scheduler: ThreeLaneScheduler,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     root_region: crate::types::RegionId,
+    /// Blocking pool for synchronous operations.
+    blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
 }
 
 impl RuntimeInner {
     fn new(config: RuntimeConfig) -> Self {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(Mutex::new(RuntimeState::new_with_metrics(
+            config.metrics_provider.clone(),
+        )));
         let root_region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -780,6 +834,23 @@ impl RuntimeInner {
             }
         }
 
+        // Create blocking pool if configured
+        let blocking_pool = if config.blocking.max_threads > 0 {
+            let options = crate::runtime::blocking_pool::BlockingPoolOptions {
+                idle_timeout: Duration::from_secs(10),
+                thread_name_prefix: format!("{}-blocking", config.thread_name_prefix),
+                on_thread_start: config.on_thread_start.clone(),
+                on_thread_stop: config.on_thread_stop.clone(),
+            };
+            Some(crate::runtime::blocking_pool::BlockingPool::with_config(
+                config.blocking.min_threads,
+                config.blocking.max_threads,
+                options,
+            ))
+        } else {
+            None
+        };
+
         Self {
             config,
             next_worker_id: AtomicUsize::new(0),
@@ -787,6 +858,7 @@ impl RuntimeInner {
             scheduler,
             worker_threads: Mutex::new(worker_threads),
             root_region,
+            blocking_pool,
         }
     }
 
@@ -821,11 +893,22 @@ impl RuntimeInner {
 
         JoinHandle::new(join_state)
     }
+
+    /// Returns a handle to the blocking pool, if configured.
+    fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
+        self.blocking_pool
+            .as_ref()
+            .map(crate::runtime::blocking_pool::BlockingPool::handle)
+    }
 }
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
         self.scheduler.shutdown();
+        // Shutdown blocking pool first (it may have tasks that need to drain)
+        if let Some(pool) = self.blocking_pool.take() {
+            pool.shutdown();
+        }
         let mut handles = lock_state(&self.worker_threads);
         for handle in handles.drain(..) {
             let _ = handle.join();
@@ -943,7 +1026,10 @@ fn noop_waker() -> Waker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lab::{LabConfig, LabRuntime};
     use crate::test_utils::init_test_logging;
+    use crate::trace::{TraceData, TraceEvent, TraceEventKind};
+    use crate::types::Budget;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
@@ -965,6 +1051,130 @@ mod tests {
         let result = runtime.block_on(handle);
         assert_eq!(result, 42);
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn runtime_spawn_blocking_executes_on_pool() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(1, 2)
+            .build()
+            .expect("runtime build");
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+
+        // Spawn blocking task via runtime
+        let handle = runtime
+            .spawn_blocking(move || {
+                flag_clone.store(true, Ordering::SeqCst);
+            })
+            .expect("blocking pool configured");
+
+        // Wait for completion
+        handle.wait();
+        assert!(flag.load(Ordering::SeqCst), "blocking task should have run");
+    }
+
+    #[test]
+    fn runtime_without_blocking_pool_returns_none() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(0, 0)
+            .build()
+            .expect("runtime build");
+
+        let handle = runtime.spawn_blocking(|| {});
+        assert!(
+            handle.is_none(),
+            "spawn_blocking should return None when pool is not configured"
+        );
+        assert!(
+            runtime.blocking_handle().is_none(),
+            "blocking_handle should return None"
+        );
+    }
+
+    fn parity_summary(events: Vec<TraceEvent>) -> Vec<(TraceEventKind, String)> {
+        events
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                TraceEventKind::RegionCreated
+                | TraceEventKind::Spawn
+                | TraceEventKind::Complete => {
+                    let summary = match event.data {
+                        TraceData::Task { task, region } => {
+                            format!("task={task:?} region={region:?}")
+                        }
+                        TraceData::Region { region, parent } => {
+                            format!("region={region:?} parent={parent:?}")
+                        }
+                        _ => String::new(),
+                    };
+                    Some((event.kind, summary))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wait_for_runtime_quiescent(runtime: &Runtime) {
+        for _ in 0..1000 {
+            let live_tasks = runtime
+                .inner
+                .state
+                .lock()
+                .expect("runtime state lock poisoned")
+                .live_task_count();
+            if live_tasks == 0 {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("runtime failed to reach quiescence after waiting");
+    }
+
+    #[test]
+    fn lab_runtime_matches_prod_trace_for_basic_spawn() {
+        init_test_logging();
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
+        let lab_region = lab.state.create_root_region(Budget::INFINITE);
+        for _ in 0..2 {
+            let (task_id, _handle) = lab
+                .state
+                .create_task(lab_region, Budget::INFINITE, async { 1_u8 })
+                .expect("lab task spawn");
+            lab.scheduler
+                .lock()
+                .expect("lab scheduler lock poisoned")
+                .schedule(task_id, Budget::INFINITE.priority);
+            lab.run_until_quiescent();
+        }
+
+        let lab_summary = parity_summary(lab.trace().snapshot());
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        for _ in 0..2 {
+            let handle = runtime.handle().spawn(async { 1_u8 });
+            let _ = runtime.block_on(handle);
+        }
+        wait_for_runtime_quiescent(&runtime);
+
+        let runtime_summary = {
+            let guard = runtime
+                .inner
+                .state
+                .lock()
+                .expect("runtime state lock poisoned");
+            parity_summary(guard.trace.snapshot())
+        };
+
+        assert_eq!(lab_summary, runtime_summary);
     }
 
     fn with_clean_env<F, R>(f: F) -> R

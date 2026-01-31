@@ -117,6 +117,7 @@
 //! - `metrics(...)`: default = NoOp. Custom providers add instrumentation overhead.
 //! - `deadline_monitoring(...)`: disabled by default; enables warning callbacks.
 
+pub mod blocking_pool;
 pub mod builder;
 pub mod config;
 pub mod deadline_monitor;
@@ -135,6 +136,9 @@ pub mod waker;
 pub mod yield_now;
 
 pub use crate::record::RegionLimits;
+pub use blocking_pool::{
+    BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingTaskHandle,
+};
 pub use builder::{DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder, RuntimeHandle};
 pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{

@@ -7,6 +7,7 @@
 //! - Current time
 
 use crate::error::{Error, ErrorKind};
+use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
 use crate::record::{
     finalizer::Finalizer, region::RegionState, task::TaskState, AdmissionError,
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionLimits,
@@ -17,7 +18,7 @@ use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
 use crate::time::TimerDriverHandle;
 use crate::trace::event::{TraceData, TraceEventKind};
-use crate::trace::{TraceBuffer, TraceEvent};
+use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
 use crate::types::policy::PolicyAction;
 use crate::types::{
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Errors that can occur when spawning a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +79,6 @@ struct CancelRegionNode {
 ///
 /// This is the "Σ" from the formal semantics:
 /// `Σ = ⟨R, T, O, τ_now⟩`
-#[derive(Debug)]
 pub struct RuntimeState {
     /// All region records.
     pub regions: Arena<RegionRecord>,
@@ -90,9 +91,9 @@ pub struct RuntimeState {
     /// The root region.
     pub root_region: Option<RegionId>,
     /// Trace buffer for events.
-    pub trace: TraceBuffer,
-    /// Next trace sequence number.
-    pub trace_seq: u64,
+    pub trace: TraceBufferHandle,
+    /// Metrics provider for runtime instrumentation.
+    pub metrics: Arc<dyn MetricsProvider>,
     /// Stored futures for polling.
     ///
     /// Maps task IDs to their pollable futures. When a task is created via
@@ -112,6 +113,24 @@ pub struct RuntimeState {
     entropy_source: Arc<dyn EntropySource>,
 }
 
+impl std::fmt::Debug for RuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeState")
+            .field("regions", &self.regions)
+            .field("tasks", &self.tasks)
+            .field("obligations", &self.obligations)
+            .field("now", &self.now)
+            .field("root_region", &self.root_region)
+            .field("trace", &self.trace)
+            .field("metrics", &"<dyn MetricsProvider>")
+            .field("stored_futures", &self.stored_futures)
+            .field("io_driver", &self.io_driver)
+            .field("timer_driver", &self.timer_driver)
+            .field("entropy_source", &"<dyn EntropySource>")
+            .finish()
+    }
+}
+
 impl RuntimeState {
     /// Creates a new empty runtime state without a reactor.
     ///
@@ -119,14 +138,20 @@ impl RuntimeState {
     /// a runtime suitable for Lab mode or pure computation without I/O.
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_metrics(Arc::new(NoOpMetrics))
+    }
+
+    /// Creates a new runtime state with an explicit metrics provider.
+    #[must_use]
+    pub fn new_with_metrics(metrics: Arc<dyn MetricsProvider>) -> Self {
         Self {
             regions: Arena::new(),
             tasks: Arena::new(),
             obligations: Arena::new(),
             now: Time::ZERO,
             root_region: None,
-            trace: TraceBuffer::new(4096),
-            trace_seq: 0,
+            trace: TraceBufferHandle::new(4096),
+            metrics,
             stored_futures: HashMap::new(),
             io_driver: None,
             timer_driver: None,
@@ -154,19 +179,10 @@ impl RuntimeState {
     /// ```
     #[must_use]
     pub fn with_reactor(reactor: Arc<dyn Reactor>) -> Self {
-        Self {
-            regions: Arena::new(),
-            tasks: Arena::new(),
-            obligations: Arena::new(),
-            now: Time::ZERO,
-            root_region: None,
-            trace: TraceBuffer::new(4096),
-            trace_seq: 0,
-            stored_futures: HashMap::new(),
-            io_driver: Some(IoDriverHandle::new(reactor)),
-            timer_driver: Some(TimerDriverHandle::with_wall_clock()),
-            entropy_source: Arc::new(OsEntropy),
-        }
+        let mut state = Self::new_with_metrics(Arc::new(NoOpMetrics));
+        state.io_driver = Some(IoDriverHandle::new(reactor));
+        state.timer_driver = Some(TimerDriverHandle::with_wall_clock());
+        state
     }
 
     /// Creates a runtime state without a reactor (Lab mode).
@@ -231,6 +247,23 @@ impl RuntimeState {
     /// Sets the entropy source for this runtime.
     pub fn set_entropy_source(&mut self, source: Arc<dyn EntropySource>) {
         self.entropy_source = source;
+    }
+
+    /// Returns a handle to the trace buffer.
+    #[must_use]
+    pub fn trace_handle(&self) -> TraceBufferHandle {
+        self.trace.clone()
+    }
+
+    /// Returns the metrics provider for this runtime.
+    #[must_use]
+    pub fn metrics_provider(&self) -> Arc<dyn MetricsProvider> {
+        self.metrics.clone()
+    }
+
+    /// Sets the metrics provider for this runtime.
+    pub fn set_metrics_provider(&mut self, provider: Arc<dyn MetricsProvider>) {
+        self.metrics = provider;
     }
 
     /// Returns a shared reference to a task record by ID.
@@ -298,8 +331,12 @@ impl RuntimeState {
             })
             .collect();
 
-        let recent_events: Vec<EventSnapshot> =
-            self.trace.iter().map(EventSnapshot::from_event).collect();
+        let recent_events: Vec<EventSnapshot> = self
+            .trace
+            .snapshot()
+            .iter()
+            .map(EventSnapshot::from_event)
+            .collect();
 
         RuntimeSnapshot {
             timestamp: self.now.as_nanos(),
@@ -326,6 +363,10 @@ impl RuntimeState {
         }
 
         self.root_region = Some(id);
+        let seq = self.next_trace_seq();
+        self.trace
+            .push_event(TraceEvent::region_created(seq, self.now, id, None));
+        self.metrics.region_created(id, None);
         id
     }
 
@@ -422,16 +463,21 @@ impl RuntimeState {
             return Err(SpawnError::RegionNotFound(region));
         }
 
+        self.record_task_spawn(task_id, region);
+
         // Create the task's capability context
         let entropy = self.entropy_source.fork(task_id);
-        let cx = crate::cx::Cx::new_with_observability(
+        let cx = crate::cx::Cx::new_with_drivers(
             region,
             task_id,
             budget,
             None,
             self.io_driver_handle(),
+            None,
+            self.timer_driver_handle(),
             Some(entropy),
         );
+        cx.set_trace_buffer(self.trace_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
         // Link the shared state to the TaskRecord
@@ -464,6 +510,26 @@ impl RuntimeState {
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
         Ok((task_id, handle))
+    }
+
+    pub(crate) fn record_task_spawn(&self, task_id: TaskId, region: RegionId) {
+        let seq = self.next_trace_seq();
+        self.trace
+            .push_event(TraceEvent::spawn(seq, self.now, task_id, region));
+        self.metrics.task_spawned(region, task_id);
+    }
+
+    fn record_task_complete(&self, task: &TaskRecord) {
+        let seq = self.next_trace_seq();
+        self.trace
+            .push_event(TraceEvent::complete(seq, self.now, task.id, task.owner));
+
+        let duration = Duration::from_nanos(self.now.duration_since(task.created_at()));
+        let outcome_kind = match &task.state {
+            TaskState::Completed(outcome) => OutcomeKind::from(outcome),
+            _ => OutcomeKind::Err,
+        };
+        self.metrics.task_completed(task.id, outcome_kind, duration);
     }
 
     /// Creates and registers an obligation for the given task and region.
@@ -536,7 +602,7 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        self.trace.push(TraceEvent::obligation_reserve(
+        self.trace.push_event(TraceEvent::obligation_reserve(
             seq,
             self.now,
             obligation_id,
@@ -544,6 +610,7 @@ impl RuntimeState {
             region,
             kind,
         ));
+        self.metrics.obligation_created(region);
 
         Ok(obligation_id)
     }
@@ -596,9 +663,10 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        self.trace.push(TraceEvent::obligation_commit(
+        self.trace.push_event(TraceEvent::obligation_commit(
             seq, self.now, id, holder, region, kind, duration,
         ));
+        self.metrics.obligation_discharged(region);
 
         if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
@@ -661,9 +729,10 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        self.trace.push(TraceEvent::obligation_abort(
+        self.trace.push_event(TraceEvent::obligation_abort(
             seq, self.now, id, holder, region, kind, duration, reason,
         ));
+        self.metrics.obligation_discharged(region);
 
         if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
@@ -712,9 +781,10 @@ impl RuntimeState {
         let _span_guard = span.enter();
 
         let seq = self.next_trace_seq();
-        self.trace.push(TraceEvent::obligation_leak(
+        self.trace.push_event(TraceEvent::obligation_leak(
             seq, self.now, id, holder, region, kind, duration,
         ));
+        self.metrics.obligation_leaked(region);
         crate::tracing_compat::error!(
             obligation_id = ?id,
             kind = ?kind,
@@ -765,10 +835,9 @@ impl RuntimeState {
     }
 
     /// Returns the next trace sequence number and increments it.
-    pub fn next_trace_seq(&mut self) -> u64 {
-        let seq = self.trace_seq;
-        self.trace_seq += 1;
-        seq
+    #[must_use]
+    pub fn next_trace_seq(&self) -> u64 {
+        self.trace.next_seq()
     }
 
     /// Counts live tasks.
@@ -850,14 +919,27 @@ impl RuntimeState {
             if task_id == child {
                 continue;
             }
-            let Some(task_record) = self.tasks.get_mut(task_id.arena_index()) else {
-                continue;
-            };
-
             let budget = reason.cleanup_budget();
-            if task_record.request_cancel_with_budget(reason.clone(), budget)
-                || task_record.state.is_cancelling()
-            {
+            let (newly_cancelled, is_cancelling) = {
+                let Some(task_record) = self.tasks.get_mut(task_id.arena_index()) else {
+                    continue;
+                };
+                let newly_cancelled =
+                    task_record.request_cancel_with_budget(reason.clone(), budget);
+                let is_cancelling = task_record.state.is_cancelling();
+                (newly_cancelled, is_cancelling)
+            };
+            if newly_cancelled {
+                let seq = self.trace.next_seq();
+                self.trace.push_event(TraceEvent::cancel_request(
+                    seq,
+                    self.now,
+                    task_id,
+                    region,
+                    reason.clone(),
+                ));
+            }
+            if newly_cancelled || is_cancelling {
                 tasks_to_cancel.push((task_id, budget.priority));
             }
         }
@@ -961,6 +1043,15 @@ impl RuntimeState {
             // Store this region's reason for child chain building
             region_reasons.insert(rid, region_reason.clone());
 
+            let seq = self.next_trace_seq();
+            self.trace.push_event(TraceEvent::region_cancelled(
+                seq,
+                self.now,
+                rid,
+                region_reason.clone(),
+            ));
+            self.metrics.cancellation_requested(rid, region_reason.kind);
+
             if let Some(_parent) = node.parent {
                 let span = trace_span!(
                     "cancel_propagate_region",
@@ -994,7 +1085,18 @@ impl RuntimeState {
                 // Use the properly chained reason.
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
-                if !region.begin_close(Some(region_reason.clone())) {
+                if region.begin_close(Some(region_reason.clone())) {
+                    let seq = self.next_trace_seq();
+                    self.trace.push_event(TraceEvent::new(
+                        seq,
+                        self.now,
+                        TraceEventKind::RegionCloseBegin,
+                        TraceData::Region {
+                            region: rid,
+                            parent: node.parent,
+                        },
+                    ));
+                } else {
                     region.strengthen_cancel_reason(region_reason);
                 }
             }
@@ -1022,6 +1124,16 @@ impl RuntimeState {
                     let newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
                     let already_cancelling = task.state.is_cancelling();
+                    if newly_cancelled {
+                        let seq = self.next_trace_seq();
+                        self.trace.push_event(TraceEvent::cancel_request(
+                            seq,
+                            self.now,
+                            task_id,
+                            rid,
+                            task_reason.clone(),
+                        ));
+                    }
                     let span = trace_span!(
                         "cancel_propagate_task",
                         from_region = ?rid,
@@ -1132,6 +1244,8 @@ impl RuntimeState {
                 guard.cancel_waker = None;
             }
         }
+
+        self.record_task_complete(&task);
 
         // Get the owning region and the waiters before we mutate
         let owner = task.owner;
@@ -2175,9 +2289,61 @@ mod tests {
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Wake, Waker};
+
+    #[derive(Default)]
+    struct TestMetrics {
+        cancellations: AtomicUsize,
+        completions: Mutex<Vec<OutcomeKind>>,
+        spawns: AtomicUsize,
+    }
+
+    impl MetricsProvider for TestMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {
+            self.spawns.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn task_completed(&self, _: TaskId, outcome: OutcomeKind, _: Duration) {
+            self.completions
+                .lock()
+                .expect("lock poisoned")
+                .push(outcome);
+        }
+
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+
+        fn region_closed(&self, _: RegionId, _: Duration) {}
+
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {
+            self.cancellations.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+
+        fn deadline_exceeded(&self, _: RegionId) {}
+
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+
+        fn deadline_remaining(&self, _: &str, _: Duration) {}
+
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+
+        fn task_stuck_detected(&self, _: &str) {}
+
+        fn obligation_created(&self, _: RegionId) {}
+
+        fn obligation_discharged(&self, _: RegionId) {}
+
+        fn obligation_leaked(&self, _: RegionId) {}
+
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
 
     struct TestWaker(AtomicBool);
 
@@ -2207,6 +2373,92 @@ mod tests {
             .add_task(id);
         crate::assert_with_log!(added.is_ok(), "task added to region", true, added.is_ok());
         id
+    }
+
+    #[test]
+    fn cx_trace_emits_user_trace_event() {
+        init_test("cx_trace_emits_user_trace_event");
+        let metrics = Arc::new(TestMetrics::default());
+        let mut state = RuntimeState::new_with_metrics(metrics);
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async { 1_u8 })
+            .expect("task spawn");
+        let cx = state
+            .tasks
+            .get(task_id.arena_index())
+            .and_then(|record| record.cx.clone())
+            .expect("cx missing");
+
+        cx.trace("user trace");
+
+        let saw_user_trace = state
+            .trace
+            .snapshot()
+            .iter()
+            .any(|event| event.kind == TraceEventKind::UserTrace);
+        crate::assert_with_log!(saw_user_trace, "user trace recorded", true, saw_user_trace);
+        crate::test_complete!("cx_trace_emits_user_trace_event");
+    }
+
+    #[test]
+    fn cancel_request_emits_trace_and_metrics() {
+        init_test("cancel_request_emits_trace_and_metrics");
+        let metrics = Arc::new(TestMetrics::default());
+        let mut state = RuntimeState::new_with_metrics(metrics.clone());
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let _ = state
+            .create_task(root, Budget::INFINITE, async { 1_u8 })
+            .expect("task spawn");
+        let reason = CancelReason::timeout();
+        let _ = state.cancel_request(root, &reason, None);
+
+        let events = state.trace.snapshot();
+        let saw_cancel = events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::CancelRequest);
+        crate::assert_with_log!(saw_cancel, "cancel trace recorded", true, saw_cancel);
+
+        let cancellations = metrics.cancellations.load(Ordering::Relaxed);
+        crate::assert_with_log!(
+            cancellations == 1,
+            "cancellation metrics",
+            1usize,
+            cancellations
+        );
+        crate::test_complete!("cancel_request_emits_trace_and_metrics");
+    }
+
+    #[test]
+    fn cancellation_outcome_metric_emitted() {
+        init_test("cancellation_outcome_metric_emitted");
+        let metrics = Arc::new(TestMetrics::default());
+        let mut state = RuntimeState::new_with_metrics(metrics.clone());
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async { 1_u8 })
+            .expect("task spawn");
+
+        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+            record.complete(Outcome::Cancelled(CancelReason::timeout()));
+        }
+        let _ = state.task_completed(task_id);
+
+        let saw_cancelled = metrics
+            .completions
+            .lock()
+            .expect("lock poisoned")
+            .contains(&OutcomeKind::Cancelled);
+        crate::assert_with_log!(
+            saw_cancelled,
+            "cancelled outcome metric",
+            true,
+            saw_cancelled
+        );
+        crate::test_complete!("cancellation_outcome_metric_emitted");
     }
 
     #[test]
@@ -2268,9 +2520,9 @@ mod tests {
     #[test]
     fn snapshot_preserves_event_version() {
         init_test("snapshot_preserves_event_version");
-        let mut state = RuntimeState::new();
+        let state = RuntimeState::new();
         let event = TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
-        state.trace.push(event);
+        state.trace.push_event(event);
 
         let snapshot = state.snapshot();
         let event_snapshot = snapshot

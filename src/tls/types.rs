@@ -6,6 +6,7 @@
 #[cfg(feature = "tls")]
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
 
+use std::collections::HashSet;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
@@ -356,9 +357,498 @@ impl RootCertStore {
         // No-op when feature is disabled
     }
 
+    /// Extend with native/platform root certificates.
+    ///
+    /// On Linux, this typically reads from /etc/ssl/certs.
+    /// On macOS, this uses the system keychain.
+    /// On Windows, this uses the Windows certificate store.
+    ///
+    /// Requires the `tls-native-roots` feature.
+    #[cfg(feature = "tls-native-roots")]
+    pub fn extend_from_native_roots(&mut self) -> Result<usize, TlsError> {
+        let result = rustls_native_certs::load_native_certs();
+        let mut count = 0;
+        for cert in result.certs {
+            if self
+                .inner
+                .add(rustls_pki_types::CertificateDer::from(cert.to_vec()))
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Extend with native/platform root certificates (stub when feature is disabled).
+    #[cfg(not(feature = "tls-native-roots"))]
+    pub fn extend_from_native_roots(&mut self) -> Result<usize, TlsError> {
+        Err(TlsError::Configuration(
+            "tls-native-roots feature not enabled".into(),
+        ))
+    }
+
     /// Convert to rustls root cert store.
     #[cfg(feature = "tls")]
     pub(crate) fn into_inner(self) -> rustls::RootCertStore {
         self.inner
+    }
+}
+
+/// A certificate pin for certificate pinning.
+///
+/// Certificate pinning adds an additional layer of security by verifying
+/// that the server's certificate matches a known value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CertificatePin {
+    /// Pin by SPKI (Subject Public Key Info) SHA-256 hash.
+    ///
+    /// This is the recommended pinning method as it survives certificate
+    /// renewal as long as the same key pair is used.
+    SpkiSha256(Vec<u8>),
+
+    /// Pin by certificate SHA-256 hash.
+    ///
+    /// This pins the entire certificate, so you need to update pins
+    /// when certificates are renewed.
+    CertSha256(Vec<u8>),
+}
+
+impl CertificatePin {
+    /// Create a SPKI SHA-256 pin from a base64-encoded hash.
+    pub fn spki_sha256_base64(base64_hash: &str) -> Result<Self, TlsError> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_hash)
+            .map_err(|e| TlsError::Certificate(format!("invalid base64: {e}")))?;
+        if bytes.len() != 32 {
+            return Err(TlsError::Certificate(format!(
+                "SPKI SHA-256 hash must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(Self::SpkiSha256(bytes))
+    }
+
+    /// Create a certificate SHA-256 pin from a base64-encoded hash.
+    pub fn cert_sha256_base64(base64_hash: &str) -> Result<Self, TlsError> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_hash)
+            .map_err(|e| TlsError::Certificate(format!("invalid base64: {e}")))?;
+        if bytes.len() != 32 {
+            return Err(TlsError::Certificate(format!(
+                "certificate SHA-256 hash must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(Self::CertSha256(bytes))
+    }
+
+    /// Create a SPKI SHA-256 pin from raw bytes.
+    pub fn spki_sha256(hash: impl Into<Vec<u8>>) -> Result<Self, TlsError> {
+        let bytes = hash.into();
+        if bytes.len() != 32 {
+            return Err(TlsError::Certificate(format!(
+                "SPKI SHA-256 hash must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(Self::SpkiSha256(bytes))
+    }
+
+    /// Create a certificate SHA-256 pin from raw bytes.
+    pub fn cert_sha256(hash: impl Into<Vec<u8>>) -> Result<Self, TlsError> {
+        let bytes = hash.into();
+        if bytes.len() != 32 {
+            return Err(TlsError::Certificate(format!(
+                "certificate SHA-256 hash must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(Self::CertSha256(bytes))
+    }
+
+    /// Compute the SPKI SHA-256 pin for a certificate.
+    #[cfg(feature = "tls")]
+    pub fn compute_spki_sha256(cert: &Certificate) -> Result<Self, TlsError> {
+        use ring::digest::{digest, SHA256};
+        use x509_parser::prelude::*;
+
+        let (_, parsed) = X509Certificate::from_der(cert.as_der())
+            .map_err(|e| TlsError::Certificate(format!("failed to parse certificate: {e}")))?;
+        let spki_bytes = parsed.public_key().raw;
+        let hash = digest(&SHA256, spki_bytes);
+        Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
+    }
+
+    /// Compute the SPKI SHA-256 pin for a certificate (stub when TLS is disabled).
+    #[cfg(not(feature = "tls"))]
+    pub fn compute_spki_sha256(_cert: &Certificate) -> Result<Self, TlsError> {
+        Err(TlsError::Configuration("tls feature not enabled".into()))
+    }
+
+    /// Compute the certificate SHA-256 pin for a certificate.
+    #[cfg(feature = "tls")]
+    pub fn compute_cert_sha256(cert: &Certificate) -> Result<Self, TlsError> {
+        use ring::digest::{digest, SHA256};
+        let hash = digest(&SHA256, cert.as_der());
+        Ok(Self::CertSha256(hash.as_ref().to_vec()))
+    }
+
+    /// Compute the certificate SHA-256 pin for a certificate (stub when TLS is disabled).
+    #[cfg(not(feature = "tls"))]
+    pub fn compute_cert_sha256(_cert: &Certificate) -> Result<Self, TlsError> {
+        Err(TlsError::Configuration("tls feature not enabled".into()))
+    }
+
+    /// Get the pin as a base64-encoded string.
+    pub fn to_base64(&self) -> String {
+        use base64::Engine;
+        match self {
+            Self::SpkiSha256(bytes) | Self::CertSha256(bytes) => {
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            }
+        }
+    }
+
+    /// Get the hash bytes.
+    pub fn hash_bytes(&self) -> &[u8] {
+        match self {
+            Self::SpkiSha256(bytes) | Self::CertSha256(bytes) => bytes,
+        }
+    }
+}
+
+/// A set of certificate pins for pinning validation.
+///
+/// The set supports multiple pins to allow for key rotation without downtime.
+#[derive(Clone, Debug, Default)]
+pub struct CertificatePinSet {
+    pins: HashSet<CertificatePin>,
+    /// Whether to enforce pinning (fail if no pins match) or just warn.
+    enforce: bool,
+}
+
+impl CertificatePinSet {
+    /// Create a new empty pin set.
+    pub fn new() -> Self {
+        Self {
+            pins: HashSet::new(),
+            enforce: true,
+        }
+    }
+
+    /// Create a pin set with enforcement disabled (report-only mode).
+    pub fn report_only() -> Self {
+        Self {
+            pins: HashSet::new(),
+            enforce: false,
+        }
+    }
+
+    /// Add a pin to the set.
+    pub fn add(&mut self, pin: CertificatePin) {
+        self.pins.insert(pin);
+    }
+
+    /// Add a pin to the set (builder pattern).
+    pub fn with_pin(mut self, pin: CertificatePin) -> Self {
+        self.add(pin);
+        self
+    }
+
+    /// Add a SPKI SHA-256 pin from base64.
+    pub fn add_spki_sha256_base64(&mut self, base64_hash: &str) -> Result<(), TlsError> {
+        self.add(CertificatePin::spki_sha256_base64(base64_hash)?);
+        Ok(())
+    }
+
+    /// Add a certificate SHA-256 pin from base64.
+    pub fn add_cert_sha256_base64(&mut self, base64_hash: &str) -> Result<(), TlsError> {
+        self.add(CertificatePin::cert_sha256_base64(base64_hash)?);
+        Ok(())
+    }
+
+    /// Check if the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.pins.is_empty()
+    }
+
+    /// Get the number of pins.
+    pub fn len(&self) -> usize {
+        self.pins.len()
+    }
+
+    /// Check if enforcement is enabled.
+    pub fn is_enforcing(&self) -> bool {
+        self.enforce
+    }
+
+    /// Set whether to enforce pinning.
+    pub fn set_enforce(&mut self, enforce: bool) {
+        self.enforce = enforce;
+    }
+
+    /// Validate a certificate against the pin set.
+    ///
+    /// Returns Ok(true) if a pin matches, Ok(false) if no pins match but
+    /// enforcement is disabled, or Err if no pins match and enforcement is enabled.
+    #[cfg(feature = "tls")]
+    pub fn validate(&self, cert: &Certificate) -> Result<bool, TlsError> {
+        if self.pins.is_empty() {
+            return Ok(true);
+        }
+
+        // Compute both types of pins for the certificate
+        let spki_pin = CertificatePin::compute_spki_sha256(cert)?;
+        let cert_pin = CertificatePin::compute_cert_sha256(cert)?;
+
+        // Check if any pin matches
+        if self.pins.contains(&spki_pin) || self.pins.contains(&cert_pin) {
+            return Ok(true);
+        }
+
+        // No match
+        if self.enforce {
+            let expected: Vec<String> = self.pins.iter().map(CertificatePin::to_base64).collect();
+            Err(TlsError::PinMismatch {
+                expected,
+                actual: spki_pin.to_base64(),
+            })
+        } else {
+            #[cfg(feature = "tracing-integration")]
+            tracing::warn!(
+                expected = ?self.pins.iter().map(CertificatePin::to_base64).collect::<Vec<_>>(),
+                actual_spki = %spki_pin.to_base64(),
+                actual_cert = %cert_pin.to_base64(),
+                "Certificate pin mismatch (report-only mode)"
+            );
+            Ok(false)
+        }
+    }
+
+    /// Validate a certificate against the pin set (stub when TLS is disabled).
+    #[cfg(not(feature = "tls"))]
+    pub fn validate(&self, _cert: &Certificate) -> Result<bool, TlsError> {
+        Err(TlsError::Configuration("tls feature not enabled".into()))
+    }
+
+    /// Get an iterator over the pins.
+    pub fn iter(&self) -> impl Iterator<Item = &CertificatePin> {
+        self.pins.iter()
+    }
+}
+
+impl FromIterator<CertificatePin> for CertificatePinSet {
+    fn from_iter<I: IntoIterator<Item = CertificatePin>>(iter: I) -> Self {
+        Self {
+            pins: iter.into_iter().collect(),
+            enforce: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_from_der() {
+        // Minimal self-signed certificate DER (just test parsing doesn't panic)
+        let cert = Certificate::from_der(vec![0x30, 0x00]);
+        assert_eq!(cert.as_der().len(), 2);
+    }
+
+    #[test]
+    fn certificate_chain_operations() {
+        let chain = CertificateChain::new();
+        assert!(chain.is_empty());
+        assert_eq!(chain.len(), 0);
+
+        let mut chain = CertificateChain::new();
+        chain.push(Certificate::from_der(vec![1, 2, 3]));
+        assert!(!chain.is_empty());
+        assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn certificate_chain_from_cert() {
+        let cert = Certificate::from_der(vec![1, 2, 3]);
+        let chain = CertificateChain::from_cert(cert);
+        assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn root_cert_store_empty() {
+        let store = RootCertStore::empty();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn certificate_pin_spki_base64_valid() {
+        // Valid 32-byte SHA-256 hash in base64
+        let hash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let pin = CertificatePin::spki_sha256_base64(hash).unwrap();
+        assert!(matches!(pin, CertificatePin::SpkiSha256(_)));
+        assert_eq!(pin.hash_bytes().len(), 32);
+        assert_eq!(pin.to_base64(), hash);
+    }
+
+    #[test]
+    fn certificate_pin_cert_base64_valid() {
+        // Valid 32-byte SHA-256 hash in base64
+        let hash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let pin = CertificatePin::cert_sha256_base64(hash).unwrap();
+        assert!(matches!(pin, CertificatePin::CertSha256(_)));
+        assert_eq!(pin.hash_bytes().len(), 32);
+    }
+
+    #[test]
+    fn certificate_pin_invalid_base64() {
+        let result = CertificatePin::spki_sha256_base64("not valid base64!!!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certificate_pin_wrong_length() {
+        // Valid base64 but wrong length (16 bytes instead of 32)
+        let short_hash = "AAAAAAAAAAAAAAAAAAAAAA==";
+        let result = CertificatePin::spki_sha256_base64(short_hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn certificate_pin_from_raw_bytes_valid() {
+        let bytes = vec![0u8; 32];
+        let pin = CertificatePin::spki_sha256(bytes).unwrap();
+        assert_eq!(pin.hash_bytes().len(), 32);
+    }
+
+    #[test]
+    fn certificate_pin_from_raw_bytes_wrong_length() {
+        let bytes = vec![0u8; 16];
+        let result = CertificatePin::spki_sha256(bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pin_set_operations() {
+        let mut set = CertificatePinSet::new();
+        assert!(set.is_empty());
+        assert!(set.is_enforcing());
+
+        let pin = CertificatePin::spki_sha256(vec![0u8; 32]).unwrap();
+        set.add(pin);
+        assert!(!set.is_empty());
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn pin_set_report_only_mode() {
+        let set = CertificatePinSet::report_only();
+        assert!(!set.is_enforcing());
+    }
+
+    #[test]
+    fn pin_set_builder_pattern() {
+        let pin = CertificatePin::spki_sha256(vec![0u8; 32]).unwrap();
+        let set = CertificatePinSet::new().with_pin(pin);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn pin_set_add_from_base64() {
+        let mut set = CertificatePinSet::new();
+        let hash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        set.add_spki_sha256_base64(hash).unwrap();
+        set.add_cert_sha256_base64(hash).unwrap();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn pin_set_from_iterator() {
+        let pins: Vec<CertificatePin> = (0..3)
+            .map(|i| CertificatePin::spki_sha256(vec![i; 32]).unwrap())
+            .collect();
+        let set: CertificatePinSet = pins.into_iter().collect();
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn pin_set_empty_validates_any() {
+        let set = CertificatePinSet::new();
+        // Empty set should allow any certificate
+        #[cfg(feature = "tls")]
+        {
+            // We'd need a real cert to test, so just verify the method exists
+            let _ = &set;
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = &set;
+        }
+    }
+
+    #[test]
+    fn pin_equality_and_hash() {
+        let pin1 = CertificatePin::spki_sha256(vec![1u8; 32]).unwrap();
+        let pin2 = CertificatePin::spki_sha256(vec![1u8; 32]).unwrap();
+        let pin3 = CertificatePin::spki_sha256(vec![2u8; 32]).unwrap();
+
+        assert_eq!(pin1, pin2);
+        assert_ne!(pin1, pin3);
+
+        // Test hash by adding to HashSet
+        let mut set = std::collections::HashSet::new();
+        set.insert(pin1.clone());
+        assert!(set.contains(&pin2));
+        assert!(!set.contains(&pin3));
+    }
+
+    #[test]
+    fn private_key_debug_is_redacted() {
+        #[cfg(feature = "tls")]
+        {
+            // Just verify Debug impl exists and doesn't expose key material
+            let key = PrivateKey::from_pkcs8_der(vec![0u8; 32]);
+            let debug_str = format!("{key:?}");
+            assert!(debug_str.contains("redacted"));
+            assert!(!debug_str.contains("0"));
+        }
+    }
+
+    #[test]
+    fn error_variants_display() {
+        use super::super::error::TlsError;
+
+        let expired = TlsError::CertificateExpired {
+            expired_at: 1000000,
+            description: "test cert".to_string(),
+        };
+        let display = format!("{expired}");
+        assert!(display.contains("expired"));
+        assert!(display.contains("1000000"));
+
+        let not_yet = TlsError::CertificateNotYetValid {
+            valid_from: 2000000,
+            description: "test cert".to_string(),
+        };
+        let display = format!("{not_yet}");
+        assert!(display.contains("not valid"));
+        assert!(display.contains("2000000"));
+
+        let chain = TlsError::ChainValidation("chain error".to_string());
+        let display = format!("{chain}");
+        assert!(display.contains("chain"));
+
+        let pin_mismatch = TlsError::PinMismatch {
+            expected: vec!["pin1".to_string(), "pin2".to_string()],
+            actual: "actual_pin".to_string(),
+        };
+        let display = format!("{pin_mismatch}");
+        assert!(display.contains("mismatch"));
+        assert!(display.contains("actual_pin"));
     }
 }

@@ -36,12 +36,12 @@ fn t(nanos: u64) -> Time {
     Time::from_nanos(nanos)
 }
 
-fn push_trace(runtime: &mut LabRuntime, kind: TraceEventKind, data: TraceData, time: Time) {
+fn push_trace(runtime: &LabRuntime, kind: TraceEventKind, data: TraceData, time: Time) {
     let seq = runtime.state.next_trace_seq();
     runtime
         .state
         .trace
-        .push(TraceEvent::new(seq, time, kind, data));
+        .push_event(TraceEvent::new(seq, time, kind, data));
 }
 
 fn init_test(test_name: &str) {

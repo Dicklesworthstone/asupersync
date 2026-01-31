@@ -35,7 +35,7 @@
 //! handshake completes, read/write operations follow the cancel-safety
 //! properties of the underlying I/O traits.
 
-use crate::time::WallClock;
+use crate::time::{TimeSource, WallClock};
 use crate::types::Time;
 use std::sync::OnceLock;
 
@@ -54,4 +54,6 @@ pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
 pub use connector::{TlsConnector, TlsConnectorBuilder};
 pub use error::TlsError;
 pub use stream::TlsStream;
-pub use types::{Certificate, CertificateChain, PrivateKey, RootCertStore};
+pub use types::{
+    Certificate, CertificateChain, CertificatePin, CertificatePinSet, PrivateKey, RootCertStore,
+};

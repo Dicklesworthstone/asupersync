@@ -14,10 +14,11 @@ use crate::runtime::deadline_monitor::{
 };
 use crate::runtime::reactor::LabReactor;
 use crate::runtime::RuntimeState;
+use crate::time::VirtualClock;
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
 use crate::trace::replay::{ReplayTrace, TraceMetadata};
-use crate::trace::TraceBuffer;
+use crate::trace::TraceBufferHandle;
 use crate::trace::{TraceData, TraceEvent};
 use crate::types::{ObligationId, TaskId};
 use crate::types::{Severity, Time};
@@ -50,6 +51,8 @@ pub struct LabRuntime {
     rng: DetRng,
     /// Current virtual time.
     virtual_time: Time,
+    /// Virtual clock backing the timer driver.
+    virtual_clock: Arc<VirtualClock>,
     /// Number of steps executed.
     steps: u64,
     /// Chaos RNG for deterministic fault injection.
@@ -73,8 +76,12 @@ impl LabRuntime {
             |chaos| Arc::new(LabReactor::with_chaos(chaos.clone())),
         );
         let mut state = RuntimeState::with_reactor(lab_reactor.clone());
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(
+            virtual_clock.clone(),
+        ));
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
-        state.trace = TraceBuffer::new(config.trace_capacity);
+        state.trace = TraceBufferHandle::new(config.trace_capacity);
 
         // Initialize replay recorder if configured
         let mut replay_recorder = if let Some(ref rec_config) = config.replay_recording {
@@ -94,6 +101,7 @@ impl LabRuntime {
             config,
             rng,
             virtual_time: Time::ZERO,
+            virtual_clock,
             steps: 0,
             chaos_rng,
             chaos_stats: ChaosStats::new(),
@@ -132,9 +140,9 @@ impl LabRuntime {
         &self.lab_reactor
     }
 
-    /// Returns a reference to the trace buffer.
+    /// Returns a reference to the trace buffer handle.
     #[must_use]
-    pub fn trace(&self) -> &TraceBuffer {
+    pub fn trace(&self) -> &TraceBufferHandle {
         &self.state.trace
     }
 
@@ -189,6 +197,7 @@ impl LabRuntime {
         let from = self.virtual_time;
         self.virtual_time = self.virtual_time.saturating_add_nanos(nanos);
         self.state.now = self.virtual_time;
+        self.virtual_clock.advance(nanos);
         self.lab_reactor.advance_time(Duration::from_nanos(nanos));
         // Record time advancement
         self.replay_recorder
@@ -201,6 +210,7 @@ impl LabRuntime {
             let from = self.virtual_time;
             self.virtual_time = time;
             self.state.now = self.virtual_time;
+            self.virtual_clock.advance_to(time);
             self.lab_reactor.advance_time_to(time);
             // Record time advancement
             self.replay_recorder
@@ -421,7 +431,7 @@ impl LabRuntime {
             let interest = interest.unwrap_or(event.ready);
             if seen.insert(token) {
                 let seq = state.next_trace_seq();
-                state.trace.push(TraceEvent::io_requested(
+                state.trace.push_event(TraceEvent::io_requested(
                     seq,
                     now,
                     token as u64,
@@ -429,7 +439,7 @@ impl LabRuntime {
                 ));
             }
             let seq = state.next_trace_seq();
-            state.trace.push(TraceEvent::io_ready(
+            state.trace.push_event(TraceEvent::io_ready(
                 seq,
                 now,
                 token as u64,
@@ -536,7 +546,7 @@ impl LabRuntime {
 
         // Emit trace event
         let seq = self.state.next_trace_seq();
-        self.state.trace.push(TraceEvent::new(
+        self.state.trace.push_event(TraceEvent::new(
             seq,
             self.virtual_time,
             TraceEventKind::ChaosInjection,
@@ -566,7 +576,7 @@ impl LabRuntime {
 
         // Emit trace event
         let seq = self.state.next_trace_seq();
-        self.state.trace.push(TraceEvent::new(
+        self.state.trace.push_event(TraceEvent::new(
             seq,
             self.virtual_time,
             TraceEventKind::ChaosInjection,
@@ -593,7 +603,7 @@ impl LabRuntime {
 
         // Emit trace event
         let seq = self.state.next_trace_seq();
-        self.state.trace.push(TraceEvent::new(
+        self.state.trace.push_event(TraceEvent::new(
             seq,
             self.virtual_time,
             TraceEventKind::ChaosInjection,
@@ -746,7 +756,7 @@ impl LabRuntime {
         violations
     }
 
-    fn check_futurelocks(&mut self) {
+    fn check_futurelocks(&self) {
         let violations = self.futurelock_violations();
         if violations.is_empty() {
             return;
@@ -774,7 +784,7 @@ impl LabRuntime {
             }
 
             let seq = self.state.next_trace_seq();
-            self.state.trace.push(TraceEvent::new(
+            self.state.trace.push_event(TraceEvent::new(
                 seq,
                 self.virtual_time,
                 TraceEventKind::FuturelockDetected,
@@ -1108,7 +1118,7 @@ mod tests {
 
         let mut saw_requested = false;
         let mut saw_ready = false;
-        for event in runtime.state.trace.iter() {
+        for event in runtime.state.trace.snapshot() {
             if event.kind == TraceEventKind::IoRequested {
                 saw_requested = true;
             }
@@ -1321,7 +1331,8 @@ mod tests {
 
         let futurelock = runtime
             .trace()
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::FuturelockDetected)
             .expect("expected futurelock trace event");
 
@@ -1525,7 +1536,8 @@ mod tests {
 
         let commit_event = runtime
             .trace()
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::ObligationCommit)
             .expect("commit event");
         match &commit_event.data {
@@ -1571,7 +1583,8 @@ mod tests {
 
         let abort_event = runtime
             .trace()
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::ObligationAbort)
             .expect("abort event");
         match &abort_event.data {
@@ -1653,7 +1666,8 @@ mod tests {
 
         let leak_event = runtime
             .trace()
-            .iter()
+            .snapshot()
+            .into_iter()
             .find(|e| e.kind == TraceEventKind::ObligationLeak)
             .expect("leak event");
         match &leak_event.data {

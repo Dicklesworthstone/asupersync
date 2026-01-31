@@ -258,7 +258,7 @@ impl ScheduleExplorer {
         let steps = runtime.steps();
 
         // Compute trace fingerprint.
-        let trace_events: Vec<TraceEvent> = runtime.trace().iter().cloned().collect();
+        let trace_events: Vec<TraceEvent> = runtime.trace().snapshot();
         let fingerprint = if trace_events.is_empty() {
             // Use seed as fingerprint if no trace events (recording disabled).
             seed
