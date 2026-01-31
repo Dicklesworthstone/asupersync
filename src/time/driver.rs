@@ -389,6 +389,11 @@ impl TimerDriverHandle {
         Self { inner: driver }
     }
 
+    /// Returns true if two handles refer to the same underlying driver.
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Creates a handle with a wall clock timer driver for production use.
     #[must_use]
     pub fn with_wall_clock() -> Self {

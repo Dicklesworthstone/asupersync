@@ -29,6 +29,8 @@ struct SleepState {
     spawned: bool,
     /// Handle to the registered timer in the timer driver.
     timer_handle: Option<TimerHandle>,
+    /// Timer driver used to register the current handle.
+    timer_driver: Option<TimerDriverHandle>,
 }
 
 /// A future that completes after a specified deadline.
@@ -104,6 +106,7 @@ impl Sleep {
                 waker: None,
                 spawned: false,
                 timer_handle: None,
+                timer_driver: None,
             })),
         }
     }
@@ -150,6 +153,7 @@ impl Sleep {
                 waker: None,
                 spawned: false,
                 timer_handle: None,
+                timer_driver: None,
             })),
         }
     }
@@ -194,23 +198,21 @@ impl Sleep {
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled.set(false);
-        let mut state = self.state.lock().expect("sleep state lock poisoned");
-        state.spawned = false;
-        let handle = state.timer_handle.take();
-        drop(state);
+        let (handle, driver) = {
+            let mut state = self.state.lock().expect("sleep state lock poisoned");
+            state.spawned = false;
+            (state.timer_handle.take(), state.timer_driver.take())
+        };
 
         // Cancel any existing timer - will be re-registered on next poll
-        if let Some(current) = Cx::current() {
-            let trace = current.trace_buffer();
-            let timer = current.timer_driver();
-            if let (Some(handle), Some(timer)) = (handle, timer.as_ref()) {
-                if let Some(trace) = trace.as_ref() {
-                    let now = timer.now();
-                    let seq = trace.next_seq();
-                    trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
-                }
-                let _ = timer.cancel(&handle);
+        if let (Some(handle), Some(driver)) = (handle, driver) {
+            let trace = Cx::current().and_then(|current| current.trace_buffer());
+            if let Some(trace) = trace.as_ref() {
+                let now = driver.now();
+                let seq = trace.next_seq();
+                trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
             }
+            let _ = driver.cancel(&handle);
         }
     }
 
@@ -220,23 +222,21 @@ impl Sleep {
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
         self.polled.set(false);
-        let mut state = self.state.lock().expect("sleep state lock poisoned");
-        state.spawned = false;
-        let handle = state.timer_handle.take();
-        drop(state);
+        let (handle, driver) = {
+            let mut state = self.state.lock().expect("sleep state lock poisoned");
+            state.spawned = false;
+            (state.timer_handle.take(), state.timer_driver.take())
+        };
 
         // Cancel any existing timer - will be re-registered on next poll
-        if let Some(current) = Cx::current() {
-            let trace = current.trace_buffer();
-            let timer = current.timer_driver();
-            if let (Some(handle), Some(timer)) = (handle, timer.as_ref()) {
-                if let Some(trace) = trace.as_ref() {
-                    let now = timer.now();
-                    let seq = trace.next_seq();
-                    trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
-                }
-                let _ = timer.cancel(&handle);
+        if let (Some(handle), Some(driver)) = (handle, driver) {
+            let trace = Cx::current().and_then(|current| current.trace_buffer());
+            if let Some(trace) = trace.as_ref() {
+                let now = driver.now();
+                let seq = trace.next_seq();
+                trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
             }
+            let _ = driver.cancel(&handle);
         }
     }
 
@@ -283,6 +283,7 @@ impl Sleep {
 impl Future for Sleep {
     type Output = ();
 
+    #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Try to get time from timer driver first (most efficient path)
         let (timer_driver, trace) = Cx::current().map_or_else(
@@ -296,17 +297,17 @@ impl Future for Sleep {
         match self.poll_with_time(now) {
             Poll::Ready(()) => {
                 // Cancel any registered timer on completion
-                let handle = {
+                let (handle, driver) = {
                     let mut state = self.state.lock().expect("sleep state lock poisoned");
-                    state.timer_handle.take()
+                    (state.timer_handle.take(), state.timer_driver.clone())
                 };
                 if let Some(handle) = handle {
                     if let Some(trace) = trace.as_ref() {
                         let seq = trace.next_seq();
                         trace.push_event(TraceEvent::timer_fired(seq, now, handle.id()));
                     }
-                    if let Some(timer) = timer_driver.as_ref() {
-                        let _ = timer.cancel(&handle);
+                    if let Some(driver) = driver.or_else(|| timer_driver.clone()) {
+                        let _ = driver.cancel(&handle);
                     }
                 }
                 Poll::Ready(())
@@ -323,11 +324,39 @@ impl Future for Sleep {
 
                 // Prefer timer driver over background thread
                 if let Some(timer) = timer_driver.as_ref() {
+                    // Clear fallback state when using the timer driver.
+                    state.spawned = false;
+
+                    // If we switched drivers, cancel the old timer handle first.
+                    // Check if we need to cancel before taking any references.
+                    let needs_cancel = state
+                        .timer_driver
+                        .as_ref()
+                        .is_some_and(|prev| !timer.ptr_eq(prev));
+                    if needs_cancel {
+                        // Take both the old driver and handle to avoid borrow conflicts
+                        let old_driver = state.timer_driver.take();
+                        let old_handle = state.timer_handle.take();
+                        if let (Some(prev_driver), Some(handle)) = (old_driver, old_handle) {
+                            if let Some(trace) = trace.as_ref() {
+                                let seq = trace.next_seq();
+                                trace.push_event(TraceEvent::timer_cancelled(
+                                    seq,
+                                    prev_driver.now(),
+                                    handle.id(),
+                                ));
+                            }
+                            let _ = prev_driver.cancel(&handle);
+                        }
+                    }
+
+                    state.timer_driver = Some(timer.clone());
+
                     // Register or update timer in the driver's wheel
-                    if let Some(handle) = state.timer_handle.as_ref() {
+                    if let Some(handle) = state.timer_handle.take() {
                         // Update existing timer with new waker
                         let old_id = handle.id();
-                        let new_handle = timer.update(handle, self.deadline, cx.waker().clone());
+                        let new_handle = timer.update(&handle, self.deadline, cx.waker().clone());
                         if let Some(trace) = trace.as_ref() {
                             let seq = trace.next_seq();
                             trace.push_event(TraceEvent::timer_cancelled(seq, now, old_id));
@@ -354,28 +383,64 @@ impl Future for Sleep {
                         }
                         state.timer_handle = Some(handle);
                     }
-                } else if !state.spawned {
-                    // Fallback: spawn background thread for timing
-                    state.spawned = true;
-                    let duration = self.remaining(now);
-                    let state_clone = Arc::clone(&self.state);
-                    drop(state);
-
-                    // ubs:ignore — intentional fire-and-forget: short-lived timer thread
-                    // self-terminates after sleeping; JoinHandle detach is correct here
-                    std::thread::spawn(move || {
-                        std::thread::sleep(duration);
-                        let mut state = state_clone.lock().expect("sleep state lock poisoned");
-                        if let Some(waker) = state.waker.take() {
-                            waker.wake();
+                } else {
+                    // No timer driver; cancel any existing registration.
+                    if let Some(prev_driver) = state.timer_driver.take() {
+                        if let Some(old_handle) = state.timer_handle.take() {
+                            if let Some(trace) = trace.as_ref() {
+                                let seq = trace.next_seq();
+                                trace.push_event(TraceEvent::timer_cancelled(
+                                    seq,
+                                    prev_driver.now(),
+                                    old_handle.id(),
+                                ));
+                            }
+                            let _ = prev_driver.cancel(&old_handle);
                         }
-                        // Reset spawned flag so if we are still pending (rare), we spawn again
-                        state.spawned = false;
-                    });
+                    }
+
+                    if !state.spawned {
+                        // Fallback: spawn background thread for timing
+                        state.spawned = true;
+                        let duration = self.remaining(now);
+                        let state_clone = Arc::clone(&self.state);
+                        drop(state);
+
+                        // ubs:ignore — intentional fire-and-forget: short-lived timer thread
+                        // self-terminates after sleeping; JoinHandle detach is correct here
+                        std::thread::spawn(move || {
+                            std::thread::sleep(duration);
+                            let mut state = state_clone.lock().expect("sleep state lock poisoned");
+                            if let Some(waker) = state.waker.take() {
+                                waker.wake();
+                            }
+                            // Reset spawned flag so if we are still pending (rare), we spawn again
+                            state.spawned = false;
+                        });
+                    }
                 }
 
                 Poll::Pending
             }
+        }
+    }
+}
+
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        let (handle, driver) = {
+            let mut state = self.state.lock().expect("sleep state lock poisoned");
+            (state.timer_handle.take(), state.timer_driver.take())
+        };
+
+        if let (Some(handle), Some(driver)) = (handle, driver) {
+            let trace = Cx::current().and_then(|current| current.trace_buffer());
+            if let Some(trace) = trace.as_ref() {
+                let now = driver.now();
+                let seq = trace.next_seq();
+                trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
+            }
+            let _ = driver.cancel(&handle);
         }
     }
 }
@@ -390,6 +455,7 @@ impl Clone for Sleep {
                 waker: None,
                 spawned: false,
                 timer_handle: None, // Fresh clone has no timer registration
+                timer_driver: None,
             })),
         }
     }
@@ -444,8 +510,14 @@ pub fn sleep_until(deadline: Time) -> Sleep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::test_utils::init_test_logging;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
 
     // =========================================================================
     // Construction Tests
@@ -709,6 +781,61 @@ mod tests {
             sleep.deadline()
         );
         crate::test_complete!("reset_after_changes_deadline");
+    }
+
+    // =========================================================================
+    // Timer Driver Integration Tests
+    // =========================================================================
+
+    fn noop_waker() -> Waker {
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[test]
+    fn drop_cancels_timer_registration() {
+        init_test("drop_cancels_timer_registration");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut sleep = Sleep::after(timer.now(), Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let poll = Pin::new(&mut sleep).poll(&mut cx);
+        crate::assert_with_log!(poll.is_pending(), "pending", true, poll.is_pending());
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "timer registered",
+            1,
+            timer.pending_count()
+        );
+
+        drop(sleep);
+
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "timer cancelled on drop",
+            0,
+            timer.pending_count()
+        );
+        crate::test_complete!("drop_cancels_timer_registration");
     }
 
     // =========================================================================

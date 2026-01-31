@@ -172,24 +172,29 @@ where
     type Future = ConcurrencyLimitFuture<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // If we already have a permit, we're ready
-        if self.permit.is_some() {
-            return self
-                .inner
-                .poll_ready(cx)
-                .map_err(ConcurrencyLimitError::Inner);
+        match self
+            .inner
+            .poll_ready(cx)
+            .map_err(ConcurrencyLimitError::Inner)
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
         }
 
-        // Try to acquire a permit
+        // If we already have a permit, we're ready.
+        if self.permit.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Try to acquire a permit after inner readiness succeeds.
         if let Ok(permit) = OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1) {
             self.permit = Some(permit);
-            self.inner
-                .poll_ready(cx)
-                .map_err(ConcurrencyLimitError::Inner)
+            Poll::Ready(Ok(()))
         } else {
-            // No permits available - register waker and return pending
+            // No permits available - register waker and return pending.
             // Note: The semaphore doesn't have built-in waker support,
-            // so we rely on the caller to retry poll_ready
+            // so we rely on the caller to retry poll_ready.
             cx.waker().wake_by_ref();
             Poll::Pending
         }
@@ -256,7 +261,7 @@ impl<F: std::fmt::Debug> std::fmt::Debug for ConcurrencyLimitFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -331,6 +336,37 @@ mod tests {
 
         fn call(&mut self, req: i32) -> Self::Future {
             ready(Ok(req))
+        }
+    }
+
+    struct ToggleReadyService {
+        ready: Arc<AtomicBool>,
+        error: bool,
+    }
+
+    impl ToggleReadyService {
+        fn new(ready: Arc<AtomicBool>, error: bool) -> Self {
+            Self { ready, error }
+        }
+    }
+
+    impl Service<()> for ToggleReadyService {
+        type Response = ();
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<(), &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.error {
+                Poll::Ready(Err("inner error"))
+            } else if self.ready.load(Ordering::SeqCst) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            ready(Ok(()))
         }
     }
 
@@ -445,6 +481,46 @@ mod tests {
         let pending = ready2.is_pending();
         crate::assert_with_log!(pending, "ready2 pending", true, pending);
         crate::test_complete!("limit_enforced");
+    }
+
+    #[test]
+    fn inner_pending_does_not_consume_permit() {
+        init_test("inner_pending_does_not_consume_permit");
+        let ready = Arc::new(AtomicBool::new(false));
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(ToggleReadyService::new(ready.clone(), false));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(first.is_pending(), "pending", true, first.is_pending());
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+
+        ready.store(true, Ordering::SeqCst);
+        let second = svc.poll_ready(&mut cx);
+        let ok = matches!(second, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        let available = svc.available();
+        crate::assert_with_log!(available == 0, "available", 0, available);
+        crate::test_complete!("inner_pending_does_not_consume_permit");
+    }
+
+    #[test]
+    fn inner_error_does_not_consume_permit() {
+        init_test("inner_error_does_not_consume_permit");
+        let ready = Arc::new(AtomicBool::new(true));
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(ToggleReadyService::new(ready, true));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = svc.poll_ready(&mut cx);
+        let err = matches!(result, Poll::Ready(Err(ConcurrencyLimitError::Inner(_))));
+        crate::assert_with_log!(err, "inner err", true, err);
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+        crate::test_complete!("inner_error_does_not_consume_permit");
     }
 
     #[test]

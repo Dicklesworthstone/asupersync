@@ -106,6 +106,7 @@
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//! | [`observability`](RuntimeBuilder::observability) | None | Attach structured logging collectors |
 //!
 //! # Error Handling
 //!
@@ -129,6 +130,7 @@
 
 use crate::error::Error;
 use crate::observability::metrics::MetricsProvider;
+use crate::observability::ObservabilityConfig;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{
     default_warning_handler, AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig,
@@ -283,6 +285,16 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn metrics<M: MetricsProvider>(mut self, provider: M) -> Self {
         self.config.metrics_provider = Arc::new(provider);
+        self
+    }
+
+    /// Configure runtime observability (logging and diagnostic context).
+    ///
+    /// When provided, the runtime attaches a shared log collector to task
+    /// contexts and configures diagnostic context defaults.
+    #[must_use]
+    pub fn observability(mut self, config: ObservabilityConfig) -> Self {
+        self.config.observability = Some(config);
         self
     }
 
@@ -831,6 +843,9 @@ impl RuntimeInner {
         }));
         let root_region = {
             let mut guard = state.lock().expect("runtime state lock poisoned");
+            if let Some(observability) = config.observability.clone() {
+                guard.set_observability_config(observability);
+            }
             if guard.timer_driver().is_none() {
                 guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
             }

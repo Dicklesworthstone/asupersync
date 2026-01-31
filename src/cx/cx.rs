@@ -52,7 +52,9 @@
 //! - All capabilities flow through the wrapped Cx
 
 use crate::combinator::select::SelectAll;
-use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
+use crate::observability::{
+    DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
+};
 use crate::remote::RemoteCap;
 use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
@@ -159,6 +161,7 @@ pub struct ObservabilityState {
     collector: Option<LogCollector>,
     context: DiagnosticContext,
     trace: Option<TraceBufferHandle>,
+    include_timestamps: bool,
 }
 
 impl ObservabilityState {
@@ -171,6 +174,26 @@ impl ObservabilityState {
             collector: None,
             context,
             trace: None,
+            include_timestamps: true,
+        }
+    }
+
+    pub(crate) fn new_with_config(
+        region: RegionId,
+        task: TaskId,
+        config: &ObservabilityConfig,
+        collector: Option<LogCollector>,
+    ) -> Self {
+        let context = config
+            .create_diagnostic_context()
+            .with_task_id(task)
+            .with_region_id(region)
+            .with_span_id(SpanId::new());
+        Self {
+            collector,
+            context,
+            trace: None,
+            include_timestamps: config.include_timestamps(),
         }
     }
 
@@ -181,6 +204,7 @@ impl ObservabilityState {
             collector: self.collector.clone(),
             context,
             trace: self.trace.clone(),
+            include_timestamps: self.include_timestamps,
         }
     }
 }
@@ -1067,8 +1091,17 @@ impl Cx {
         let Some(collector) = obs.collector.clone() else {
             return;
         };
+        let include_timestamps = obs.include_timestamps;
+        let context = obs.context.clone();
         drop(obs);
-        let entry = entry.with_context(&self.diagnostic_context());
+        let mut entry = entry.with_context(&context);
+        if include_timestamps && entry.timestamp() == Time::ZERO {
+            let now = self
+                .timer_driver
+                .as_ref()
+                .map_or_else(wall_clock_now, TimerDriverHandle::now);
+            entry = entry.with_timestamp(now);
+        }
         collector.log(entry);
     }
 
