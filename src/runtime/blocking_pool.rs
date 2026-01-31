@@ -72,12 +72,16 @@ impl fmt::Debug for BlockingPoolHandle {
 /// The blocking pool for executing synchronous operations.
 pub struct BlockingPool {
     inner: Arc<BlockingPoolInner>,
-    thread_handles: Mutex<Vec<ThreadJoinHandle<()>>>,
 }
 
 impl fmt::Debug for BlockingPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let handles_len = self.thread_handles.lock().map(|h| h.len()).unwrap_or(0);
+        let handles_len = self
+            .inner
+            .thread_handles
+            .lock()
+            .map(|h| h.len())
+            .unwrap_or(0);
         f.debug_struct("BlockingPool")
             .field("min_threads", &self.inner.min_threads)
             .field("max_threads", &self.inner.max_threads)
@@ -123,6 +127,8 @@ struct BlockingPoolInner {
     on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Callback when a thread stops.
     on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Thread join handles for cleanup.
+    thread_handles: Mutex<Vec<ThreadJoinHandle<()>>>,
 }
 
 /// A task submitted to the blocking pool.
@@ -305,12 +311,10 @@ impl BlockingPool {
             thread_name_prefix: options.thread_name_prefix,
             on_thread_start: options.on_thread_start,
             on_thread_stop: options.on_thread_stop,
+            thread_handles: Mutex::new(Vec::with_capacity(max_threads)),
         });
 
-        let pool = Self {
-            inner,
-            thread_handles: Mutex::new(Vec::with_capacity(max_threads)),
-        };
+        let pool = Self { inner };
 
         // Spawn minimum threads eagerly
         for _ in 0..min_threads {
@@ -421,68 +425,38 @@ impl BlockingPool {
         self.shutdown();
 
         let deadline = std::time::Instant::now() + timeout;
-        let mut handles = self.thread_handles.lock().unwrap();
 
-        while let Some(handle) = handles.pop() {
+        // Wait for all threads to exit by monitoring active_threads counter.
+        // Threads decrement this counter when they exit the worker loop.
+        while self.inner.active_threads.load(Ordering::Acquire) > 0 {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                // Put the handle back and return false
-                handles.push(handle);
                 return false;
             }
 
-            // We can't join with timeout directly, so we'll use a polling approach
-            // with the condvar to check for completion
-            drop(handles);
+            // Wake any waiting threads so they notice the shutdown flag
+            self.notify_all();
 
-            // Wait a bit for the thread
+            // Wait a bit before checking again
             thread::sleep(Duration::from_millis(10).min(remaining));
-
-            handles = self.thread_handles.lock().unwrap();
-            // The thread may have exited - we'll check on the next iteration
         }
 
-        drop(handles);
+        // All threads have exited, now join the handles to clean up
+        let mut handles = self.inner.thread_handles.lock().unwrap();
+        for handle in handles.drain(..) {
+            // Threads have already exited, so join returns immediately
+            let _ = handle.join();
+        }
+
         true
     }
 
     fn spawn_thread(&self) {
-        let inner = Arc::clone(&self.inner);
-        let thread_id = self.inner.active_threads.fetch_add(1, Ordering::Relaxed);
-        let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
-
-        let handle = thread::Builder::new()
-            .name(name)
-            .spawn(move || {
-                if let Some(ref callback) = inner.on_thread_start {
-                    callback();
-                }
-
-                blocking_worker_loop(&inner);
-
-                if let Some(ref callback) = inner.on_thread_stop {
-                    callback();
-                }
-
-                inner.active_threads.fetch_sub(1, Ordering::Relaxed);
-            })
-            .expect("failed to spawn blocking thread");
-
-        self.thread_handles.lock().unwrap().push(handle);
+        spawn_thread_on_inner(&self.inner);
     }
 
     fn maybe_spawn_thread(&self) {
-        let active = self.inner.active_threads.load(Ordering::Relaxed);
-        let busy = self.inner.busy_threads.load(Ordering::Relaxed);
-        let pending = self.inner.pending_count.load(Ordering::Relaxed);
-
-        // Spawn a new thread if:
-        // 1. We're below max_threads
-        // 2. All threads are busy
-        // 3. There's pending work
-        if active < self.inner.max_threads && busy >= active && pending > 0 {
-            self.spawn_thread();
-        }
+        maybe_spawn_thread_on_inner(&self.inner);
     }
 
     fn notify_one(&self) {
@@ -533,7 +507,8 @@ impl BlockingPoolHandle {
         self.inner.queue.push(task);
         self.inner.pending_count.fetch_add(1, Ordering::Relaxed);
 
-        // Wake a waiting thread
+        // Wake a waiting thread or spawn a new one if needed
+        maybe_spawn_thread_on_inner(&self.inner);
         {
             let _guard = self.inner.mutex.lock().unwrap();
             self.inner.condvar.notify_one();
@@ -597,6 +572,47 @@ impl fmt::Debug for BlockingPoolOptions {
             .field("on_thread_start", &self.on_thread_start.is_some())
             .field("on_thread_stop", &self.on_thread_stop.is_some())
             .finish()
+    }
+}
+
+/// Spawn a new worker thread on the given pool inner.
+fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
+    let inner_clone = Arc::clone(inner);
+    let thread_id = inner.active_threads.fetch_add(1, Ordering::Relaxed);
+    let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
+
+    let handle = thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            if let Some(ref callback) = inner_clone.on_thread_start {
+                callback();
+            }
+
+            blocking_worker_loop(&inner_clone);
+
+            if let Some(ref callback) = inner_clone.on_thread_stop {
+                callback();
+            }
+
+            inner_clone.active_threads.fetch_sub(1, Ordering::Relaxed);
+        })
+        .expect("failed to spawn blocking thread");
+
+    inner.thread_handles.lock().unwrap().push(handle);
+}
+
+/// Check if we should spawn a new thread and do so if needed.
+fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
+    let active = inner.active_threads.load(Ordering::Relaxed);
+    let busy = inner.busy_threads.load(Ordering::Relaxed);
+    let pending = inner.pending_count.load(Ordering::Relaxed);
+
+    // Spawn a new thread if:
+    // 1. We're below max_threads
+    // 2. All threads are busy
+    // 3. There's pending work
+    if active < inner.max_threads && busy >= active && pending > 0 {
+        spawn_thread_on_inner(inner);
     }
 }
 
