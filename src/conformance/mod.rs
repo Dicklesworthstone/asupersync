@@ -301,38 +301,78 @@ pub struct ConformanceTestFn {
     pub test_fn: fn(&TestConfig),
 }
 
-/// Run a slice of conformance tests with the given configuration.
+/// Conformance test execution events.
+#[derive(Clone, Debug)]
+pub enum ConformanceEvent {
+    /// A test started.
+    TestStart {
+        /// Test name.
+        name: &'static str,
+    },
+    /// A test completed successfully.
+    TestPassed {
+        /// Test name.
+        name: &'static str,
+    },
+    /// A test failed (panic or error).
+    TestFailed {
+        /// Test name.
+        name: &'static str,
+        /// Optional failure message extracted from the panic payload.
+        message: Option<String>,
+    },
+}
+
+/// Run a slice of conformance tests with the given configuration,
+/// reporting progress via a callback.
 ///
 /// Returns the number of tests that passed and failed.
 #[must_use]
-pub fn run_conformance_tests(tests: &[ConformanceTestFn], config: &TestConfig) -> (usize, usize) {
+pub fn run_conformance_tests_with_reporter<F>(
+    tests: &[ConformanceTestFn],
+    config: &TestConfig,
+    mut report: F,
+) -> (usize, usize)
+where
+    F: FnMut(ConformanceEvent),
+{
     let mut passed = 0;
     let mut failed = 0;
 
     for test in tests {
-        println!("Running conformance test: {}", test.name);
+        report(ConformanceEvent::TestStart { name: test.name });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (test.test_fn)(config);
         }));
 
         match result {
             Ok(()) => {
-                println!("  PASSED: {}", test.name);
+                report(ConformanceEvent::TestPassed { name: test.name });
                 passed += 1;
             }
             Err(e) => {
-                println!("  FAILED: {}", test.name);
-                if let Some(msg) = e.downcast_ref::<&str>() {
-                    println!("    Error: {msg}");
-                } else if let Some(msg) = e.downcast_ref::<String>() {
-                    println!("    Error: {msg}");
-                }
+                let message = e.downcast_ref::<&str>().map_or_else(
+                    || e.downcast_ref::<String>().cloned(),
+                    |msg| Some((*msg).to_string()),
+                );
+                report(ConformanceEvent::TestFailed {
+                    name: test.name,
+                    message,
+                });
                 failed += 1;
             }
         }
     }
 
     (passed, failed)
+}
+
+/// Run a slice of conformance tests with the given configuration.
+///
+/// Returns the number of tests that passed and failed.
+#[must_use]
+pub fn run_conformance_tests(tests: &[ConformanceTestFn], config: &TestConfig) -> (usize, usize) {
+    run_conformance_tests_with_reporter(tests, config, |_| {})
 }
 
 /// Macro for defining conformance tests.

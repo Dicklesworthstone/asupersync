@@ -413,6 +413,7 @@ impl SymbolStream for ChannelStream {
                     }
                 }
             }
+            drop(wakers);
         }
         if closed {
             return Poll::Ready(None);

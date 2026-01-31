@@ -427,10 +427,10 @@ pub fn pipeline2_outcomes<T, E>(
             stage_outcome_to_result(outcome, 1, TOTAL_STAGES)
                 .expect("non-Ok should return Some result")
         }
-        None => {
-            // Second stage was never executed (shouldn't happen in normal use)
-            panic!("o2 must be provided when o1 succeeds")
-        }
+        None => PipelineResult::panicked(
+            PanicPayload::new("o2 must be provided when o1 succeeds"),
+            FailedStage::new(1, TOTAL_STAGES),
+        ),
     }
 }
 
@@ -482,7 +482,12 @@ pub fn pipeline3_outcomes<T, E>(
                 return result;
             }
         }
-        None => panic!("o2 must be provided when o1 succeeds"),
+        None => {
+            return PipelineResult::panicked(
+                PanicPayload::new("o2 must be provided when o1 succeeds"),
+                FailedStage::new(1, TOTAL_STAGES),
+            );
+        }
     }
 
     // Check third stage
@@ -493,7 +498,10 @@ pub fn pipeline3_outcomes<T, E>(
             stage_outcome_to_result(outcome, 2, TOTAL_STAGES)
                 .expect("non-Ok should return Some result")
         }
-        None => panic!("o3 must be provided when o1 and o2 succeed"),
+        None => PipelineResult::panicked(
+            PanicPayload::new("o3 must be provided when o1 and o2 succeed"),
+            FailedStage::new(2, TOTAL_STAGES),
+        ),
     }
 }
 
@@ -937,9 +945,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "o2 must be provided")]
-    fn pipeline2_panics_when_o2_missing() {
-        let _ = pipeline2_outcomes::<i32, &str>(Outcome::Ok(1), None);
+    fn pipeline2_panicked_when_o2_missing() {
+        let result = pipeline2_outcomes::<i32, &str>(Outcome::Ok(1), None);
+        assert!(result.is_panicked());
+        if let PipelineResult::Panicked {
+            payload,
+            panicked_at,
+        } = result
+        {
+            assert_eq!(payload.message(), "o2 must be provided when o1 succeeds");
+            assert_eq!(panicked_at.index, 1);
+        } else {
+            panic!("Expected Panicked");
+        }
     }
 
     // =========================================================================
@@ -1004,15 +1022,38 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "o2 must be provided")]
-    fn pipeline3_panics_when_o2_missing() {
-        let _ = pipeline3_outcomes::<i32, &str>(Outcome::Ok(1), None, None);
+    fn pipeline3_panicked_when_o2_missing() {
+        let result = pipeline3_outcomes::<i32, &str>(Outcome::Ok(1), None, None);
+        assert!(result.is_panicked());
+        if let PipelineResult::Panicked {
+            payload,
+            panicked_at,
+        } = result
+        {
+            assert_eq!(payload.message(), "o2 must be provided when o1 succeeds");
+            assert_eq!(panicked_at.index, 1);
+        } else {
+            panic!("Expected Panicked");
+        }
     }
 
     #[test]
-    #[should_panic(expected = "o3 must be provided")]
-    fn pipeline3_panics_when_o3_missing() {
-        let _ = pipeline3_outcomes::<i32, &str>(Outcome::Ok(1), Some(Outcome::Ok(2)), None);
+    fn pipeline3_panicked_when_o3_missing() {
+        let result = pipeline3_outcomes::<i32, &str>(Outcome::Ok(1), Some(Outcome::Ok(2)), None);
+        assert!(result.is_panicked());
+        if let PipelineResult::Panicked {
+            payload,
+            panicked_at,
+        } = result
+        {
+            assert_eq!(
+                payload.message(),
+                "o3 must be provided when o1 and o2 succeed"
+            );
+            assert_eq!(panicked_at.index, 2);
+        } else {
+            panic!("Expected Panicked");
+        }
     }
 
     // =========================================================================

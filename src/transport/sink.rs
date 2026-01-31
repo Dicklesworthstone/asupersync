@@ -358,6 +358,7 @@ impl SymbolSink for ChannelSink {
                         }
                     }
                 }
+                drop(wakers);
             }
             if closed {
                 return Poll::Ready(Err(SinkError::Closed));

@@ -501,10 +501,10 @@ impl Drop for SymbolicObligation {
             );
 
             #[cfg(not(debug_assertions))]
-            eprintln!(
-                "WARNING: SymbolicObligation leaked: {:?} for object {}",
-                self.kind(),
-                self.object_id()
+            crate::tracing_compat::error!(
+                kind = ?self.kind(),
+                object_id = %self.object_id(),
+                "symbolic obligation leaked"
             );
         }
     }
