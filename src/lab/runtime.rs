@@ -265,6 +265,9 @@ impl LabRuntime {
         let rng_value = self.rng.next_u64();
         self.replay_recorder.record_rng_value(rng_value);
         self.check_futurelocks();
+        if let Some(timer) = self.state.timer_driver_handle() {
+            let _ = timer.process_timers();
+        }
         self.poll_io();
 
         // 1. Choose a worker and pop a task (deterministic multi-worker model)

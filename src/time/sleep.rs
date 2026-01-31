@@ -11,6 +11,7 @@
 
 use crate::cx::Cx;
 use crate::time::{TimerDriverHandle, TimerHandle};
+use crate::trace::TraceEvent;
 use crate::types::Time;
 use std::cell::Cell;
 use std::future::Future;
@@ -199,10 +200,17 @@ impl Sleep {
         drop(state);
 
         // Cancel any existing timer - will be re-registered on next poll
-        if let (Some(handle), Some(timer)) =
-            (handle, Cx::current().and_then(|cx| cx.timer_driver()))
-        {
-            let _ = timer.cancel(&handle);
+        if let Some(current) = Cx::current() {
+            let trace = current.trace_buffer();
+            let timer = current.timer_driver();
+            if let (Some(handle), Some(timer)) = (handle, timer.as_ref()) {
+                if let Some(trace) = trace.as_ref() {
+                    let now = timer.now();
+                    let seq = trace.next_seq();
+                    trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
+                }
+                let _ = timer.cancel(&handle);
+            }
         }
     }
 
@@ -218,10 +226,17 @@ impl Sleep {
         drop(state);
 
         // Cancel any existing timer - will be re-registered on next poll
-        if let (Some(handle), Some(timer)) =
-            (handle, Cx::current().and_then(|cx| cx.timer_driver()))
-        {
-            let _ = timer.cancel(&handle);
+        if let Some(current) = Cx::current() {
+            let trace = current.trace_buffer();
+            let timer = current.timer_driver();
+            if let (Some(handle), Some(timer)) = (handle, timer.as_ref()) {
+                if let Some(trace) = trace.as_ref() {
+                    let now = timer.now();
+                    let seq = trace.next_seq();
+                    trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
+                }
+                let _ = timer.cancel(&handle);
+            }
         }
     }
 
@@ -270,7 +285,10 @@ impl Future for Sleep {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Try to get time from timer driver first (most efficient path)
-        let timer_driver = Cx::current().and_then(|current_cx| current_cx.timer_driver());
+        let (timer_driver, trace) = Cx::current().map_or_else(
+            || (None, None),
+            |current| (current.timer_driver(), current.trace_buffer()),
+        );
         let now = timer_driver
             .as_ref()
             .map_or_else(|| self.current_time(), TimerDriverHandle::now);
@@ -282,8 +300,14 @@ impl Future for Sleep {
                     let mut state = self.state.lock().expect("sleep state lock poisoned");
                     state.timer_handle.take()
                 };
-                if let (Some(handle), Some(timer)) = (handle, timer_driver.as_ref()) {
-                    let _ = timer.cancel(&handle);
+                if let Some(handle) = handle {
+                    if let Some(trace) = trace.as_ref() {
+                        let seq = trace.next_seq();
+                        trace.push_event(TraceEvent::timer_fired(seq, now, handle.id()));
+                    }
+                    if let Some(timer) = timer_driver.as_ref() {
+                        let _ = timer.cancel(&handle);
+                    }
                 }
                 Poll::Ready(())
             }
@@ -302,11 +326,32 @@ impl Future for Sleep {
                     // Register or update timer in the driver's wheel
                     if let Some(handle) = state.timer_handle.as_ref() {
                         // Update existing timer with new waker
+                        let old_id = handle.id();
                         let new_handle = timer.update(handle, self.deadline, cx.waker().clone());
+                        if let Some(trace) = trace.as_ref() {
+                            let seq = trace.next_seq();
+                            trace.push_event(TraceEvent::timer_cancelled(seq, now, old_id));
+                            let seq = trace.next_seq();
+                            trace.push_event(TraceEvent::timer_scheduled(
+                                seq,
+                                now,
+                                new_handle.id(),
+                                self.deadline,
+                            ));
+                        }
                         state.timer_handle = Some(new_handle);
                     } else {
                         // Register new timer
                         let handle = timer.register(self.deadline, cx.waker().clone());
+                        if let Some(trace) = trace.as_ref() {
+                            let seq = trace.next_seq();
+                            trace.push_event(TraceEvent::timer_scheduled(
+                                seq,
+                                now,
+                                handle.id(),
+                                self.deadline,
+                            ));
+                        }
                         state.timer_handle = Some(handle);
                     }
                 } else if !state.spawned {

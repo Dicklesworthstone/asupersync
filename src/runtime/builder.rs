@@ -133,8 +133,10 @@ use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{
     default_warning_handler, AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig,
 };
+use crate::runtime::reactor::Reactor;
 use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::runtime::RuntimeState;
+use crate::time::TimerDriverHandle;
 use crate::types::Budget;
 use std::future::Future;
 use std::pin::Pin;
@@ -168,6 +170,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
+    reactor: Option<Arc<dyn Reactor>>,
 }
 
 impl RuntimeBuilder {
@@ -176,6 +179,7 @@ impl RuntimeBuilder {
     pub fn new() -> Self {
         Self {
             config: RuntimeConfig::default(),
+            reactor: None,
         }
     }
 
@@ -377,7 +381,10 @@ impl RuntimeBuilder {
             })?;
         let mut config = RuntimeConfig::default();
         crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            reactor: None,
+        })
     }
 
     /// Load configuration from a TOML string.
@@ -404,13 +411,25 @@ impl RuntimeBuilder {
         })?;
         let mut config = RuntimeConfig::default();
         crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            reactor: None,
+        })
     }
 
     /// Build a runtime from this configuration.
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<Runtime, Error> {
-        Runtime::with_config(self.config)
+        Runtime::with_config_and_reactor(self.config, self.reactor)
+    }
+
+    /// Provide a reactor for runtime I/O integration.
+    ///
+    /// When set, the runtime will attach an `IoDriver` backed by this reactor.
+    #[must_use]
+    pub fn with_reactor(mut self, reactor: Arc<dyn Reactor>) -> Self {
+        self.reactor = Some(reactor);
+        self
     }
 
     /// Preset: single-threaded runtime.
@@ -637,10 +656,19 @@ pub struct Runtime {
 impl Runtime {
     /// Construct a runtime from the given configuration.
     #[allow(clippy::result_large_err)]
-    pub fn with_config(mut config: RuntimeConfig) -> Result<Self, Error> {
+    pub fn with_config(config: RuntimeConfig) -> Result<Self, Error> {
+        Self::with_config_and_reactor(config, None)
+    }
+
+    /// Construct a runtime from the given configuration and reactor.
+    #[allow(clippy::result_large_err)]
+    pub fn with_config_and_reactor(
+        mut config: RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+    ) -> Result<Self, Error> {
         config.normalize();
         Ok(Self {
-            inner: Arc::new(RuntimeInner::new(config)),
+            inner: Arc::new(RuntimeInner::new(config, reactor)),
         })
     }
 
@@ -794,14 +822,20 @@ struct RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn new(config: RuntimeConfig) -> Self {
-        let state = Arc::new(Mutex::new(RuntimeState::new_with_metrics(
-            config.metrics_provider.clone(),
-        )));
-        let root_region = state
-            .lock()
-            .expect("runtime state lock poisoned")
-            .create_root_region(Budget::INFINITE);
+    fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> Self {
+        let state = Arc::new(Mutex::new(match reactor {
+            Some(reactor) => {
+                RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
+            }
+            None => RuntimeState::new_with_metrics(config.metrics_provider.clone()),
+        }));
+        let root_region = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            if guard.timer_driver().is_none() {
+                guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
+            }
+            guard.create_root_region(Budget::INFINITE)
+        };
 
         let mut scheduler = ThreeLaneScheduler::new(config.worker_threads, &state);
 
@@ -1026,11 +1060,16 @@ fn noop_waker() -> Waker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
+    use crate::runtime::reactor::{Event, Interest, LabReactor, Reactor};
     use crate::test_utils::init_test_logging;
-    use crate::trace::{TraceData, TraceEvent, TraceEventKind};
-    use crate::types::Budget;
+    use crate::time::sleep;
+    use crate::trace::{TraceEvent, TraceEventKind};
+    use crate::types::{Budget, CancelReason, Time};
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn runtime_handle_spawn_completes_via_scheduler() {
@@ -1097,27 +1136,48 @@ mod tests {
         );
     }
 
-    fn parity_summary(events: Vec<TraceEvent>) -> Vec<(TraceEventKind, String)> {
-        events
-            .into_iter()
-            .filter_map(|event| match event.kind {
-                TraceEventKind::RegionCreated
-                | TraceEventKind::Spawn
-                | TraceEventKind::Complete => {
-                    let summary = match event.data {
-                        TraceData::Task { task, region } => {
-                            format!("task={task:?} region={region:?}")
-                        }
-                        TraceData::Region { region, parent } => {
-                            format!("region={region:?} parent={parent:?}")
-                        }
-                        _ => String::new(),
-                    };
-                    Some((event.kind, summary))
-                }
-                _ => None,
-            })
-            .collect()
+    #[derive(Debug, PartialEq, Eq)]
+    struct TraceCounts {
+        region_created: usize,
+        spawn: usize,
+        complete: usize,
+        timer_scheduled: usize,
+        timer_fired: usize,
+        timer_cancelled: usize,
+        io_requested: usize,
+        io_ready: usize,
+        cancel_request: usize,
+    }
+
+    fn parity_counts(events: Vec<TraceEvent>) -> TraceCounts {
+        let mut counts = TraceCounts {
+            region_created: 0,
+            spawn: 0,
+            complete: 0,
+            timer_scheduled: 0,
+            timer_fired: 0,
+            timer_cancelled: 0,
+            io_requested: 0,
+            io_ready: 0,
+            cancel_request: 0,
+        };
+
+        for event in events {
+            match event.kind {
+                TraceEventKind::RegionCreated => counts.region_created += 1,
+                TraceEventKind::Spawn => counts.spawn += 1,
+                TraceEventKind::Complete => counts.complete += 1,
+                TraceEventKind::TimerScheduled => counts.timer_scheduled += 1,
+                TraceEventKind::TimerFired => counts.timer_fired += 1,
+                TraceEventKind::TimerCancelled => counts.timer_cancelled += 1,
+                TraceEventKind::IoRequested => counts.io_requested += 1,
+                TraceEventKind::IoReady => counts.io_ready += 1,
+                TraceEventKind::CancelRequest => counts.cancel_request += 1,
+                _ => {}
+            }
+        }
+
+        counts
     }
 
     fn wait_for_runtime_quiescent(runtime: &Runtime) {
@@ -1134,6 +1194,16 @@ mod tests {
             std::thread::yield_now();
         }
         panic!("runtime failed to reach quiescence after waiting");
+    }
+
+    #[cfg(unix)]
+    struct MockSource;
+
+    #[cfg(unix)]
+    impl std::os::fd::AsRawFd for MockSource {
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            0
+        }
     }
 
     #[test]
@@ -1154,7 +1224,11 @@ mod tests {
             lab.run_until_quiescent();
         }
 
-        let lab_summary = parity_summary(lab.trace().snapshot());
+        let lab_counts = parity_counts(lab.trace().snapshot());
+        assert_eq!(
+            lab_counts.spawn, lab_counts.complete,
+            "lab trace should complete every spawned task"
+        );
 
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -1165,16 +1239,198 @@ mod tests {
         }
         wait_for_runtime_quiescent(&runtime);
 
-        let runtime_summary = {
+        let runtime_counts = {
             let guard = runtime
                 .inner
                 .state
                 .lock()
                 .expect("runtime state lock poisoned");
-            parity_summary(guard.trace.snapshot())
+            parity_counts(guard.trace.snapshot())
         };
+        assert_eq!(
+            runtime_counts.spawn, runtime_counts.complete,
+            "runtime trace should complete every spawned task"
+        );
 
-        assert_eq!(lab_summary, runtime_summary);
+        assert_eq!(lab_counts, runtime_counts);
+    }
+
+    async fn sleep_once() {
+        let now = Cx::current()
+            .and_then(|cx| cx.timer_driver())
+            .map_or(Time::ZERO, |driver| driver.now());
+        sleep(now, Duration::from_millis(1)).await;
+    }
+
+    #[test]
+    fn lab_runtime_matches_prod_trace_for_timer_sleep() {
+        init_test_logging();
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
+        let lab_region = lab.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = lab
+            .state
+            .create_task(lab_region, Budget::INFINITE, sleep_once())
+            .expect("lab sleep task spawn");
+        lab.scheduler
+            .lock()
+            .expect("lab scheduler lock poisoned")
+            .schedule(task_id, Budget::INFINITE.priority);
+
+        lab.step_for_test(); // register timer
+        lab.advance_time(1_000_000);
+        lab.run_until_quiescent();
+
+        let lab_counts = parity_counts(lab.trace().snapshot());
+        assert!(
+            lab_counts.timer_scheduled > 0,
+            "lab trace should record timer scheduling"
+        );
+        assert_eq!(
+            lab_counts.timer_scheduled, lab_counts.timer_fired,
+            "lab trace should fire every scheduled timer"
+        );
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let handle = runtime.handle().spawn(sleep_once());
+        runtime.block_on(handle);
+        wait_for_runtime_quiescent(&runtime);
+
+        let runtime_counts = {
+            let guard = runtime
+                .inner
+                .state
+                .lock()
+                .expect("runtime state lock poisoned");
+            parity_counts(guard.trace.snapshot())
+        };
+        assert!(
+            runtime_counts.timer_scheduled > 0,
+            "runtime trace should record timer scheduling"
+        );
+        assert_eq!(
+            runtime_counts.timer_scheduled, runtime_counts.timer_fired,
+            "runtime trace should fire every scheduled timer"
+        );
+
+        assert_eq!(lab_counts, runtime_counts);
+    }
+
+    #[test]
+    fn lab_runtime_matches_prod_trace_for_cancel_request() {
+        init_test_logging();
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
+        let lab_region = lab.state.create_root_region(Budget::INFINITE);
+        let _ = lab
+            .state
+            .create_task(lab_region, Budget::INFINITE, async {
+                std::future::pending::<()>().await;
+            })
+            .expect("lab task spawn");
+        let _ = lab
+            .state
+            .cancel_request(lab_region, &CancelReason::user("stop"), None);
+        let lab_counts = parity_counts(lab.trace().snapshot());
+        assert!(
+            lab_counts.cancel_request > 0,
+            "lab trace should record cancel request"
+        );
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        {
+            let mut guard = runtime
+                .inner
+                .state
+                .lock()
+                .expect("runtime state lock poisoned");
+            let region = runtime.inner.root_region;
+            let _ = guard
+                .create_task(region, Budget::INFINITE, async {
+                    std::future::pending::<()>().await;
+                })
+                .expect("runtime task spawn");
+            let _ = guard.cancel_request(region, &CancelReason::user("stop"), None);
+        }
+        let runtime_counts = {
+            let guard = runtime
+                .inner
+                .state
+                .lock()
+                .expect("runtime state lock poisoned");
+            parity_counts(guard.trace.snapshot())
+        };
+        assert!(
+            runtime_counts.cancel_request > 0,
+            "runtime trace should record cancel request"
+        );
+
+        assert_eq!(lab_counts, runtime_counts);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lab_runtime_matches_prod_trace_for_io_ready() {
+        init_test_logging();
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
+        let handle = lab.state.io_driver_handle().expect("lab io driver");
+        let registration = handle
+            .register(&MockSource, Interest::READABLE, noop_waker())
+            .expect("lab register source");
+        let token = registration.token();
+        lab.lab_reactor()
+            .inject_event(token, Event::readable(token), Duration::ZERO);
+        lab.step_for_test();
+        let lab_counts = parity_counts(lab.trace().snapshot());
+        assert!(
+            lab_counts.io_requested > 0,
+            "lab trace should record io requested"
+        );
+        assert_eq!(
+            lab_counts.io_requested, lab_counts.io_ready,
+            "lab trace should record ready after request"
+        );
+
+        let reactor = Arc::new(LabReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let state = RuntimeState::with_reactor(reactor_handle);
+        let driver = state.io_driver_handle().expect("runtime state io driver");
+        let registration = driver
+            .register(&MockSource, Interest::READABLE, noop_waker())
+            .expect("runtime state register source");
+        let token = registration.token();
+        reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        let trace = state.trace_handle();
+        let now = Time::ZERO;
+        let mut seen = HashSet::new();
+        let _ = driver.turn_with(Some(Duration::ZERO), |event, interest| {
+            let token = event.token.0 as u64;
+            let interest_bits = interest.unwrap_or(event.ready).bits();
+            if seen.insert(token) {
+                let seq = trace.next_seq();
+                trace.push_event(TraceEvent::io_requested(seq, now, token, interest_bits));
+            }
+            let seq = trace.next_seq();
+            trace.push_event(TraceEvent::io_ready(seq, now, token, event.ready.bits()));
+        });
+
+        let runtime_counts = parity_counts(state.trace.snapshot());
+        assert!(
+            runtime_counts.io_requested > 0,
+            "runtime trace should record io requested"
+        );
+        assert_eq!(
+            runtime_counts.io_requested, runtime_counts.io_ready,
+            "runtime trace should record ready after request"
+        );
+
+        assert_eq!(lab_counts.io_requested, runtime_counts.io_requested);
+        assert_eq!(lab_counts.io_ready, runtime_counts.io_ready);
     }
 
     fn with_clean_env<F, R>(f: F) -> R

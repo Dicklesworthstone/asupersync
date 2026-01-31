@@ -5,10 +5,12 @@ use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
 use crate::runtime::RuntimeState;
+use crate::time::TimerDriverHandle;
+use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::trace;
-use crate::types::Outcome;
-use crate::types::TaskId;
+use crate::types::{Outcome, TaskId, Time};
 use crate::util::DetRng;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -38,6 +40,12 @@ pub struct Worker {
     pub shutdown: Arc<AtomicBool>,
     /// I/O driver handle (optional).
     pub io_driver: Option<IoDriverHandle>,
+    /// Trace buffer for I/O events.
+    pub trace: TraceBufferHandle,
+    /// Timer driver for timestamps (optional).
+    pub timer_driver: Option<TimerDriverHandle>,
+    /// Tokens seen for I/O trace emission.
+    seen_io_tokens: HashSet<u64>,
 }
 
 impl Worker {
@@ -49,10 +57,14 @@ impl Worker {
         state: Arc<Mutex<RuntimeState>>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
-        let io_driver = state
-            .lock()
-            .expect("runtime state lock poisoned")
-            .io_driver_handle();
+        let (io_driver, trace, timer_driver) = {
+            let guard = state.lock().expect("runtime state lock poisoned");
+            (
+                guard.io_driver_handle(),
+                guard.trace_handle(),
+                guard.timer_driver_handle(),
+            )
+        };
 
         Self {
             id,
@@ -64,6 +76,9 @@ impl Worker {
             rng: DetRng::new(id as u64 + 1), // Simple seed
             shutdown,
             io_driver,
+            trace,
+            timer_driver,
+            seen_io_tokens: HashSet::new(),
         }
     }
 
@@ -102,7 +117,27 @@ impl Worker {
                     // Note: Ideally we would block indefinitely and be woken by `spawn`,
                     // but that requires integrating the Parker with the Reactor.
                     // For now, a short timeout (1ms) serves as a "busy-wait with sleep".
-                    let _ = driver.turn(Some(Duration::from_millis(1)));
+                    let now = self
+                        .timer_driver
+                        .as_ref()
+                        .map_or(Time::ZERO, TimerDriverHandle::now);
+                    let trace = &self.trace;
+                    let seen = &mut self.seen_io_tokens;
+                    let _ = driver.turn_with(Some(Duration::from_millis(1)), |event, interest| {
+                        let token = event.token.0 as u64;
+                        let interest_bits = interest.unwrap_or(event.ready).bits();
+                        if seen.insert(token) {
+                            let seq = trace.next_seq();
+                            trace.push_event(TraceEvent::io_requested(
+                                seq,
+                                now,
+                                token,
+                                interest_bits,
+                            ));
+                        }
+                        let seq = trace.next_seq();
+                        trace.push_event(TraceEvent::io_ready(seq, now, token, event.ready.bits()));
+                    });
 
                     // Loop back to check queues (tasks might have been woken by I/O)
                     continue;
