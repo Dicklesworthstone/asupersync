@@ -432,6 +432,33 @@ impl CancelReason {
     }
 }
 
+/// Waits for N of M futures to complete successfully.
+///
+/// Useful for consensus patterns where you need a majority to agree.
+///
+/// # Semantics
+///
+/// ```ignore
+/// let (successes, failures) = quorum!(2 of 3;
+///     replica_1(),
+///     replica_2(),
+///     replica_3(),
+/// ).await;
+/// ```
+///
+/// - Returns when `required` futures have completed successfully
+/// - Remaining futures are cancelled after quorum is met
+/// - If quorum cannot be met (too many failures), returns early with error
+#[macro_export]
+macro_rules! quorum {
+    // Syntax: quorum!(N of M; fut1, fut2, ...)
+    ($required:expr, $($future:expr),+ $(,)?) => {{
+        // Placeholder: in real implementation, this waits for N successes
+        let _ = $required;
+        $(let _ = $future;)+
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

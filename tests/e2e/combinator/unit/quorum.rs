@@ -144,7 +144,11 @@ fn test_quorum_mixed_outcomes() {
         .take(required)
         .collect();
 
-    assert_eq!(successes.len(), required, "Should collect required successes");
+    assert_eq!(
+        successes.len(),
+        required,
+        "Should collect required successes"
+    );
 }
 
 /// Test quorum timing (who contributes).
@@ -232,7 +236,10 @@ fn test_quorum_error_handling() {
     assert!(check_quorum(3, 2).is_ok());
     assert_eq!(
         check_quorum(1, 3),
-        Err(QuorumError::NotEnoughSuccesses { got: 1, required: 3 })
+        Err(QuorumError::NotEnoughSuccesses {
+            got: 1,
+            required: 3
+        })
     );
 }
 
@@ -271,11 +278,7 @@ fn test_quorum_weighted() {
         weight: u32,
     }
 
-    let votes = vec![
-        Vote { weight: 1 },
-        Vote { weight: 2 },
-        Vote { weight: 1 },
-    ];
+    let votes = vec![Vote { weight: 1 }, Vote { weight: 2 }, Vote { weight: 1 }];
 
     let total_weight: u32 = votes.iter().map(|v| v.weight).sum();
     let required_weight = 3;
