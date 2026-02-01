@@ -122,6 +122,128 @@ impl std::fmt::Debug for StoredTask {
     }
 }
 
+/// A local (non-Send) type-erased future stored in the runtime.
+///
+/// This is identical to `StoredTask` but allows `!Send` futures, pinned to
+/// a specific worker thread.
+pub struct LocalStoredTask {
+    /// The pinned, boxed future to poll.
+    future: Pin<Box<dyn Future<Output = Outcome<(), ()>> + 'static>>,
+    /// The task ID (for tracing).
+    task_id: Option<TaskId>,
+    /// Poll counter (for tracing).
+    poll_count: u64,
+    /// Budget polls remaining (set by executor before each poll, for tracing).
+    polls_remaining: Option<u32>,
+}
+
+impl LocalStoredTask {
+    /// Creates a new local stored task from a future.
+    pub fn new<F>(future: F) -> Self
+    where
+        F: Future<Output = Outcome<(), ()>> + 'static,
+    {
+        Self {
+            future: Box::pin(future),
+            task_id: None,
+            poll_count: 0,
+            polls_remaining: None,
+        }
+    }
+
+    /// Creates a new local stored task with a task ID.
+    pub fn new_with_id<F>(future: F, task_id: TaskId) -> Self
+    where
+        F: Future<Output = Outcome<(), ()>> + 'static,
+    {
+        Self {
+            future: Box::pin(future),
+            task_id: Some(task_id),
+            poll_count: 0,
+            polls_remaining: None,
+        }
+    }
+
+    /// Sets the task ID for tracing.
+    pub fn set_task_id(&mut self, task_id: TaskId) {
+        self.task_id = Some(task_id);
+    }
+
+    /// Sets the budget polls remaining.
+    pub fn set_polls_remaining(&mut self, remaining: u32) {
+        self.polls_remaining = Some(remaining);
+    }
+
+    /// Polls the stored task.
+    #[allow(clippy::used_underscore_binding)]
+    pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
+        self.poll_count += 1;
+        let poll_number = self.poll_count;
+
+        if let Some(task_id) = self.task_id {
+            let _budget_remaining = self.polls_remaining.unwrap_or(0);
+            trace!(
+                task_id = ?task_id,
+                poll_number = poll_number,
+                budget_remaining = _budget_remaining,
+                "local task poll started"
+            );
+            let _ = (task_id, poll_number, _budget_remaining);
+        }
+
+        let result = self.future.as_mut().poll(cx);
+
+        if let Some(task_id) = self.task_id {
+            let poll_result = match &result {
+                Poll::Ready(_) => "Ready",
+                Poll::Pending => "Pending",
+            };
+            trace!(
+                task_id = ?task_id,
+                poll_number = poll_number,
+                poll_result = poll_result,
+                "local task poll completed"
+            );
+            let _ = (task_id, poll_number, poll_result);
+        }
+
+        result
+    }
+}
+
+impl std::fmt::Debug for LocalStoredTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalStoredTask").finish_non_exhaustive()
+    }
+}
+
+/// Enum wrapping either a global or local stored task.
+#[derive(Debug)]
+pub enum AnyStoredTask {
+    /// A `Send` task stored in the global state.
+    Global(StoredTask),
+    /// A `!Send` task stored in thread-local storage.
+    Local(LocalStoredTask),
+}
+
+impl AnyStoredTask {
+    /// Polls the inner task.
+    pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
+        match self {
+            Self::Global(t) => t.poll(cx),
+            Self::Local(t) => t.poll(cx),
+        }
+    }
+
+    /// Sets budget info on the inner task.
+    pub fn set_polls_remaining(&mut self, remaining: u32) {
+        match self {
+            Self::Global(t) => t.set_polls_remaining(remaining),
+            Self::Local(t) => t.set_polls_remaining(remaining),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
