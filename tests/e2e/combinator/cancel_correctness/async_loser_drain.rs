@@ -260,9 +260,9 @@ fn test_loser_drain_oracle_detects_violation() {
 
     let mut oracle = LoserDrainOracle::new();
 
-    let region = RegionId::new(1, 0);
-    let winner = TaskId::new(1, 0);
-    let loser = TaskId::new(2, 0);
+    let region = RegionId::new_for_test(1, 0);
+    let winner = TaskId::new_for_test(1, 0);
+    let loser = TaskId::new_for_test(2, 0);
 
     let race_id = oracle.on_race_start(region, vec![winner, loser], Time::ZERO);
 
@@ -287,17 +287,17 @@ fn test_loser_drain_oracle_multiple_races() {
     use asupersync::types::{RegionId, TaskId};
 
     let mut oracle = LoserDrainOracle::new();
-    let region = RegionId::new(1, 0);
+    let region = RegionId::new_for_test(1, 0);
 
     // Race 1: 2 participants
-    let r1_t1 = TaskId::new(1, 0);
-    let r1_t2 = TaskId::new(2, 0);
+    let r1_t1 = TaskId::new_for_test(1, 0);
+    let r1_t2 = TaskId::new_for_test(2, 0);
     let race1 = oracle.on_race_start(region, vec![r1_t1, r1_t2], Time::ZERO);
 
     // Race 2: 3 participants
-    let r2_t1 = TaskId::new(3, 0);
-    let r2_t2 = TaskId::new(4, 0);
-    let r2_t3 = TaskId::new(5, 0);
+    let r2_t1 = TaskId::new_for_test(3, 0);
+    let r2_t2 = TaskId::new_for_test(4, 0);
+    let r2_t3 = TaskId::new_for_test(5, 0);
     let race2 = oracle.on_race_start(region, vec![r2_t1, r2_t2, r2_t3], Time::from_nanos(5));
 
     // Complete race 1 properly
