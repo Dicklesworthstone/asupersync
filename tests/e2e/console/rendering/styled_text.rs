@@ -19,7 +19,7 @@ fn e2e_styled_text_bold() {
         output.contains("\x1b[1m") || output.contains(";1m") || output.contains("[1;"),
         "bold code",
         true,
-        output.contains("1")
+        output.contains('1')
     );
 
     crate::test_complete!("e2e_styled_text_bold");

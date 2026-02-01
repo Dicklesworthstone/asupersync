@@ -7,6 +7,53 @@ use crate::e2e::combinator::util::{Counter, DrainFlag, DrainTracker, NeverComple
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
+struct CleanupOnDrop {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for CleanupOnDrop {
+    fn drop(&mut self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+}
+
+struct SequenceTracker {
+    sequence: Arc<AtomicU32>,
+    expected_order: u32,
+}
+
+impl Drop for SequenceTracker {
+    fn drop(&mut self) {
+        // Record when drain happens
+        let current = self.sequence.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            current < self.expected_order,
+            "Drain happened after winner return (sequence {current} >= {expected})",
+            expected = self.expected_order
+        );
+    }
+}
+
+struct BudgetTracker {
+    counter: Arc<Counter>,
+    max_polls: u32,
+}
+
+impl Drop for BudgetTracker {
+    fn drop(&mut self) {
+        // Simulate drain polling
+        for _ in 0..10 {
+            self.counter.increment();
+        }
+        assert!(
+            self.counter.get() <= self.max_polls,
+            "Exceeded drain poll budget: {} > {}",
+            self.counter.get(),
+            self.max_polls
+        );
+    }
+}
+
 /// Test that race loser's Drop is called after cancellation.
 #[test]
 fn test_race_loser_drop_called() {
@@ -51,16 +98,6 @@ fn test_race_loser_cleanup_executes() {
     let cleanup_executed = Arc::new(AtomicBool::new(false));
     let cleanup_executed_clone = Arc::clone(&cleanup_executed);
 
-    struct CleanupOnDrop {
-        flag: Arc<AtomicBool>,
-    }
-
-    impl Drop for CleanupOnDrop {
-        fn drop(&mut self) {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-    }
-
     {
         let _cleanup_guard = CleanupOnDrop {
             flag: cleanup_executed_clone,
@@ -83,24 +120,6 @@ fn test_race_loser_drain_timing() {
     let drain_clone = Arc::clone(&drain_sequence);
     let winner_clone = Arc::clone(&winner_return_sequence);
 
-    struct SequenceTracker {
-        sequence: Arc<AtomicU32>,
-        expected_order: u32,
-    }
-
-    impl Drop for SequenceTracker {
-        fn drop(&mut self) {
-            // Record when drain happens
-            let current = self.sequence.fetch_add(1, Ordering::SeqCst);
-            assert!(
-                current < self.expected_order,
-                "Drain happened after winner return (sequence {} >= {})",
-                current,
-                self.expected_order
-            );
-        }
-    }
-
     {
         let _loser = SequenceTracker {
             sequence: drain_clone,
@@ -116,9 +135,7 @@ fn test_race_loser_drain_timing() {
 
     assert!(
         drain_time <= winner_time,
-        "Loser drain (seq={}) happened after winner return (seq={})",
-        drain_time,
-        winner_time
+        "Loser drain (seq={drain_time}) happened after winner return (seq={winner_time})"
     );
 }
 
@@ -166,26 +183,6 @@ fn test_race_loser_panic_in_cleanup() {
 fn test_race_loser_drain_respects_budget() {
     let polls_during_drain = Counter::new();
     let max_drain_polls: u32 = 100;
-
-    struct BudgetTracker {
-        counter: Arc<Counter>,
-        max_polls: u32,
-    }
-
-    impl Drop for BudgetTracker {
-        fn drop(&mut self) {
-            // Simulate drain polling
-            for _ in 0..10 {
-                self.counter.increment();
-            }
-            assert!(
-                self.counter.get() <= self.max_polls,
-                "Exceeded drain poll budget: {} > {}",
-                self.counter.get(),
-                self.max_polls
-            );
-        }
-    }
 
     {
         let _loser = BudgetTracker {

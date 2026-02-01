@@ -11,6 +11,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+struct Resource {
+    released: Arc<AtomicBool>,
+}
+
+impl Drop for Resource {
+    fn drop(&mut self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Test that operation completes before timeout.
 #[test]
 fn test_timeout_completes_before_deadline() {
@@ -98,16 +108,6 @@ fn test_timeout_long_duration() {
 #[test]
 fn test_timeout_cleanup_releases_resources() {
     let resource_released = Arc::new(AtomicBool::new(false));
-
-    struct Resource {
-        released: Arc<AtomicBool>,
-    }
-
-    impl Drop for Resource {
-        fn drop(&mut self) {
-            self.released.store(true, Ordering::SeqCst);
-        }
-    }
 
     {
         let _resource = Resource {

@@ -15,7 +15,7 @@ use std::sync::Arc;
 fn test_race_first_wins() {
     // Simulate race where branch1 completes first
     let winner_value = 42;
-    let _loser_value = 100;
+    let _ = 100;
 
     // First to complete wins
     let result = winner_value;
@@ -33,7 +33,7 @@ fn test_race_error_wins() {
 
     // If error completes first, it wins
     let error_result: Result<i32, TestError> = Err(TestError::FastError);
-    let _success_result: Result<i32, TestError> = Ok(42);
+    let _ = Ok::<i32, TestError>(42);
 
     // Error completed first
     let winner = error_result;
@@ -95,8 +95,7 @@ fn test_race_polling_fairness() {
     for (i, count) in poll_counts.iter().enumerate() {
         assert!(
             count.load(Ordering::SeqCst) >= 1,
-            "Branch {} should be polled at least once for fairness",
-            i
+            "Branch {i} should be polled at least once for fairness"
         );
     }
 }
@@ -146,9 +145,6 @@ fn test_race_nested_cancellation() {
 /// Test race with same-tick completion.
 #[test]
 fn test_race_same_tick_completion() {
-    // When multiple branches complete in same tick, first polled wins
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-
     struct OrderTracker {
         order: Arc<std::sync::Mutex<Vec<u32>>>,
         id: u32,
@@ -159,6 +155,9 @@ fn test_race_same_tick_completion() {
             self.order.lock().unwrap().push(self.id);
         }
     }
+
+    // When multiple branches complete in same tick, first polled wins
+    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let tracker1 = OrderTracker {
         order: Arc::clone(&completion_order),
@@ -173,7 +172,7 @@ fn test_race_same_tick_completion() {
     tracker1.complete();
     tracker2.complete();
 
-    let order = completion_order.lock().unwrap();
+    let order = completion_order.lock().unwrap().clone();
     assert_eq!(order.len(), 2);
     assert_eq!(order[0], 1, "First polled should be recorded first");
 }
@@ -181,9 +180,6 @@ fn test_race_same_tick_completion() {
 /// Test race resource cleanup timing.
 #[test]
 fn test_race_cleanup_before_return() {
-    let cleanup_done = Arc::new(AtomicBool::new(false));
-    let result_returned = Arc::new(AtomicBool::new(false));
-
     struct CleanupTracker {
         cleanup_flag: Arc<AtomicBool>,
         result_flag: Arc<AtomicBool>,
@@ -199,6 +195,9 @@ fn test_race_cleanup_before_return() {
             self.cleanup_flag.store(true, Ordering::SeqCst);
         }
     }
+
+    let cleanup_done = Arc::new(AtomicBool::new(false));
+    let result_returned = Arc::new(AtomicBool::new(false));
 
     {
         let _tracker = CleanupTracker {

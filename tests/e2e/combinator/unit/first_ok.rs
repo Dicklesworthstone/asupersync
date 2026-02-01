@@ -10,6 +10,33 @@ use crate::e2e::combinator::util::{DrainFlag, DrainTracker, NeverComplete};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
+struct OrderTracker {
+    order: Arc<std::sync::Mutex<Vec<u32>>>,
+    id: u32,
+    succeeds: bool,
+}
+
+impl OrderTracker {
+    fn evaluate(&self) -> Result<i32, ()> {
+        self.order.lock().unwrap().push(self.id);
+        if self.succeeds {
+            Ok(i32::try_from(self.id).expect("id fits i32"))
+        } else {
+            Err(())
+        }
+    }
+}
+
+struct CleanupOnError {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for CleanupOnError {
+    fn drop(&mut self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Test that first success wins.
 #[test]
 fn test_first_ok_success_wins() {
@@ -22,7 +49,7 @@ fn test_first_ok_success_wins() {
         vec![Err(TestError::Failed), Ok(42), Err(TestError::Failed)];
 
     // First Ok should win
-    let winner = results.into_iter().find(|r| r.is_ok());
+    let winner = results.into_iter().find(Result::is_ok);
 
     assert_eq!(winner, Some(Ok(42)));
 }
@@ -41,12 +68,12 @@ fn test_first_ok_fallback() {
         Err(TestError::FirstFailed)
     }
 
-    fn fallback() -> Result<i32, TestError> {
-        Ok(42)
+    fn fallback() -> i32 {
+        42
     }
 
     // Primary fails, fallback succeeds
-    let result = primary().or_else(|_| fallback());
+    let result: Result<i32, TestError> = primary().or_else(|_| Ok(fallback()));
 
     assert_eq!(result, Ok(42));
 }
@@ -82,11 +109,11 @@ fn test_first_ok_immediate_success() {
         Unused,
     }
 
-    fn immediate_ok() -> Result<i32, TestError> {
-        Ok(1)
+    fn immediate_ok() -> i32 {
+        1
     }
 
-    fn never_called() -> Result<i32, TestError> {
+    fn never_called() -> i32 {
         panic!("Should not be called");
     }
 
@@ -94,7 +121,7 @@ fn test_first_ok_immediate_success() {
     let result = immediate_ok();
     let _ = never_called; // Just to use it
 
-    assert_eq!(result, Ok(1));
+    assert_eq!(result, 1);
 }
 
 /// Test cancellation of remaining branches on success.
@@ -104,7 +131,7 @@ fn test_first_ok_cancels_remaining() {
 
     {
         // First succeeds
-        let _success = 42;
+        let _ = 42;
         // Remaining branches cancelled
         let _remaining = DrainTracker::new(NeverComplete, Arc::clone(&remaining_cancelled));
     }
@@ -132,23 +159,6 @@ fn test_first_ok_collects_errors() {
 #[test]
 fn test_first_ok_priority_order() {
     let evaluation_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    struct OrderTracker {
-        order: Arc<std::sync::Mutex<Vec<u32>>>,
-        id: u32,
-        succeeds: bool,
-    }
-
-    impl OrderTracker {
-        fn evaluate(&self) -> Result<i32, ()> {
-            self.order.lock().unwrap().push(self.id);
-            if self.succeeds {
-                Ok(self.id as i32)
-            } else {
-                Err(())
-            }
-        }
-    }
 
     let trackers = vec![
         OrderTracker {
@@ -179,24 +189,14 @@ fn test_first_ok_priority_order() {
 
     assert_eq!(result, Some(2));
 
-    let order = evaluation_order.lock().unwrap();
-    assert_eq!(*order, vec![1, 2], "Should stop at first success");
+    let order = evaluation_order.lock().unwrap().clone();
+    assert_eq!(order, vec![1, 2], "Should stop at first success");
 }
 
 /// Test resource cleanup on error path.
 #[test]
 fn test_first_ok_cleanup_on_error() {
     let cleaned_up = Arc::new(AtomicBool::new(false));
-
-    struct CleanupOnError {
-        flag: Arc<AtomicBool>,
-    }
-
-    impl Drop for CleanupOnError {
-        fn drop(&mut self) {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-    }
 
     {
         let _guard = CleanupOnError {
@@ -230,16 +230,15 @@ fn test_first_ok_heterogeneous_errors() {
         Err(CombinedError::Timeout)
     }
 
-    fn try_default() -> Result<i32, CombinedError> {
-        Ok(0)
+    fn try_default() -> i32 {
+        0
     }
 
     let result = try_network()
         .or_else(|_| try_cache())
-        .or_else(|_| try_default());
+        .unwrap_or_else(|_| try_default());
 
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), 0);
+    assert_eq!(result, 0);
 }
 
 /// Test concurrent first_ok evaluation.

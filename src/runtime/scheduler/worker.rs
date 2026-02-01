@@ -374,8 +374,7 @@ mod tests {
         // Should be nearly instant (< 50ms)
         assert!(
             elapsed < Duration::from_millis(50),
-            "park after unpark should be immediate, took {:?}",
-            elapsed
+            "park after unpark should be immediate, took {elapsed:?}"
         );
     }
 
@@ -427,13 +426,11 @@ mod tests {
         // Should return after ~50ms (allow some slack)
         assert!(
             elapsed >= Duration::from_millis(40),
-            "timeout should wait at least 40ms, waited {:?}",
-            elapsed
+            "timeout should wait at least 40ms, waited {elapsed:?}"
         );
         assert!(
             elapsed < Duration::from_millis(200),
-            "timeout should not wait too long, waited {:?}",
-            elapsed
+            "timeout should not wait too long, waited {elapsed:?}"
         );
     }
 
@@ -458,8 +455,7 @@ mod tests {
         // Should return much earlier than 10s
         assert!(
             elapsed < Duration::from_millis(500),
-            "unpark should interrupt timeout, waited {:?}",
-            elapsed
+            "unpark should interrupt timeout, waited {elapsed:?}"
         );
     }
 
@@ -477,8 +473,7 @@ mod tests {
 
             assert!(
                 elapsed < Duration::from_millis(50),
-                "iteration {i}: reused parker should wake immediately, took {:?}",
-                elapsed
+                "iteration {i}: reused parker should wake immediately, took {elapsed:?}"
             );
         }
     }
@@ -531,11 +526,13 @@ mod tests {
             .collect();
 
         // One thread parking
-        let p = parker.clone();
-        let b = barrier.clone();
-        let parker_handle = thread::spawn(move || {
-            b.wait();
-            p.park();
+        let parker_handle = thread::spawn({
+            let p = parker;
+            let b = barrier;
+            move || {
+                b.wait();
+                p.park();
+            }
         });
 
         for h in handles {

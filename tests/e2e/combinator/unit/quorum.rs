@@ -24,12 +24,7 @@ fn test_quorum_2_of_3() {
     completions.fetch_add(1, Ordering::SeqCst);
 
     let count = completions.load(Ordering::SeqCst);
-    assert!(
-        count >= required,
-        "Quorum reached: {} >= {}",
-        count,
-        required
-    );
+    assert!(count >= required, "Quorum reached: {count} >= {required}");
     assert!(count <= total);
 }
 
@@ -97,8 +92,8 @@ fn test_quorum_cancels_remaining() {
 
     {
         // Quorum branches (completed)
-        let _success1 = 1;
-        let _success2 = 2;
+        let _ = 1;
+        let _ = 2;
         // Remaining branches (cancelled)
         let _r1 = DrainTracker::new(NeverComplete, Arc::clone(&remaining1));
         let _r2 = DrainTracker::new(NeverComplete, Arc::clone(&remaining2));
@@ -115,9 +110,9 @@ fn test_quorum_collects_results() {
     let required = 2;
 
     // Collect first N results that complete
-    let quorum_results: Vec<i32> = results.into_iter().take(required).collect();
+    let quorum_count = results.iter().take(required).count();
 
-    assert_eq!(quorum_results.len(), required);
+    assert_eq!(quorum_count, required);
 }
 
 /// Test quorum with mixed success/failure.
@@ -129,7 +124,7 @@ fn test_quorum_mixed_outcomes() {
         Failure,
     }
 
-    let outcomes = vec![
+    let outcomes = [
         Outcome::Success(1),
         Outcome::Failure,
         Outcome::Success(2),
@@ -138,24 +133,18 @@ fn test_quorum_mixed_outcomes() {
     ];
 
     let required = 2;
-    let successes: Vec<_> = outcomes
+    let success_count = outcomes
         .iter()
         .filter(|o| matches!(o, Outcome::Success(_)))
         .take(required)
-        .collect();
+        .count();
 
-    assert_eq!(
-        successes.len(),
-        required,
-        "Should collect required successes"
-    );
+    assert_eq!(success_count, required, "Should collect required successes");
 }
 
 /// Test quorum timing (who contributes).
 #[test]
 fn test_quorum_timing() {
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-
     struct TimedCompletion {
         order: Arc<std::sync::Mutex<Vec<u32>>>,
         id: u32,
@@ -167,7 +156,9 @@ fn test_quorum_timing() {
         }
     }
 
-    let completions = vec![
+    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let completions = [
         TimedCompletion {
             order: Arc::clone(&completion_order),
             id: 3,
@@ -187,7 +178,7 @@ fn test_quorum_timing() {
     completions[1].complete();
     // Third not needed for quorum of 2
 
-    let order = completion_order.lock().unwrap();
+    let order = completion_order.lock().unwrap().clone();
     assert_eq!(order.len(), 2, "Only quorum contributors recorded");
 }
 
@@ -204,7 +195,7 @@ fn test_quorum_1_of_n() {
 #[test]
 fn test_quorum_n_of_n() {
     // Quorum of N out of N is essentially join
-    let all_completed = vec![1, 2, 3, 4, 5];
+    let all_completed = [1, 2, 3, 4, 5];
     let required = 5;
 
     assert_eq!(
@@ -246,8 +237,6 @@ fn test_quorum_error_handling() {
 /// Test quorum cleanup preserves quorum results.
 #[test]
 fn test_quorum_preserves_results() {
-    let result_preserved = Arc::new(AtomicBool::new(false));
-
     struct ResultGuard {
         preserved: Arc<AtomicBool>,
     }
@@ -261,6 +250,8 @@ fn test_quorum_preserves_results() {
             );
         }
     }
+
+    let result_preserved = Arc::new(AtomicBool::new(false));
 
     result_preserved.store(true, Ordering::SeqCst);
 
@@ -278,7 +269,7 @@ fn test_quorum_weighted() {
         weight: u32,
     }
 
-    let votes = vec![Vote { weight: 1 }, Vote { weight: 2 }, Vote { weight: 1 }];
+    let votes = [Vote { weight: 1 }, Vote { weight: 2 }, Vote { weight: 1 }];
 
     let total_weight: u32 = votes.iter().map(|v| v.weight).sum();
     let required_weight = 3;

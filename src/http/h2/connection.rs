@@ -10,7 +10,8 @@ use crate::codec::{Decoder, Encoder};
 use super::error::{ErrorCode, H2Error};
 use super::frame::{
     parse_frame, ContinuationFrame, DataFrame, Frame, FrameHeader, GoAwayFrame, HeadersFrame,
-    PingFrame, RstStreamFrame, Setting, SettingsFrame, WindowUpdateFrame, FRAME_HEADER_SIZE,
+    PingFrame, PushPromiseFrame, RstStreamFrame, Setting, SettingsFrame, WindowUpdateFrame,
+    FRAME_HEADER_SIZE,
 };
 use super::hpack::{self, Header};
 use super::settings::Settings;
@@ -161,6 +162,12 @@ pub enum PendingOp {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PushPromiseAccumulator {
+    associated_stream_id: u32,
+    promised_stream_id: u32,
+}
+
 /// HTTP/2 connection.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -195,6 +202,8 @@ pub struct Connection {
     pending_ops: VecDeque<PendingOp>,
     /// Stream ID being continued (for CONTINUATION frames).
     continuation_stream_id: Option<u32>,
+    /// Pending PUSH_PROMISE header block, if any.
+    pending_push_promise: Option<PushPromiseAccumulator>,
 }
 
 impl Connection {
@@ -221,6 +230,7 @@ impl Connection {
             goaway_sent: false,
             pending_ops: VecDeque::new(),
             continuation_stream_id: None,
+            pending_push_promise: None,
         }
     }
 
@@ -247,6 +257,7 @@ impl Connection {
             goaway_sent: false,
             pending_ops: VecDeque::new(),
             continuation_stream_id: None,
+            pending_push_promise: None,
         }
     }
 
@@ -496,6 +507,28 @@ impl Connection {
         &mut self,
         frame: ContinuationFrame,
     ) -> Result<Option<ReceivedFrame>, H2Error> {
+        if let Some(pending) = self.pending_push_promise {
+            if pending.associated_stream_id == frame.stream_id {
+                let promised_stream_id = pending.promised_stream_id;
+                let promised = self.streams.get_mut(promised_stream_id).ok_or_else(|| {
+                    H2Error::stream(
+                        promised_stream_id,
+                        ErrorCode::StreamClosed,
+                        "promised stream not found",
+                    )
+                })?;
+                promised.add_header_fragment(frame.header_block)?;
+
+                if frame.end_headers {
+                    self.pending_push_promise = None;
+                    self.continuation_stream_id = None;
+                    return self.decode_push_promise(frame.stream_id, promised_stream_id);
+                }
+
+                return Ok(None);
+            }
+        }
+
         let stream = self
             .streams
             .get_mut(frame.stream_id)
@@ -549,6 +582,46 @@ impl Connection {
             stream_id,
             headers,
             end_stream,
+        }))
+    }
+
+    /// Decode accumulated PUSH_PROMISE headers for a promised stream.
+    fn decode_push_promise(
+        &mut self,
+        associated_stream_id: u32,
+        promised_stream_id: u32,
+    ) -> Result<Option<ReceivedFrame>, H2Error> {
+        let promised = self.streams.get_mut(promised_stream_id).ok_or_else(|| {
+            H2Error::stream(
+                promised_stream_id,
+                ErrorCode::StreamClosed,
+                "promised stream not found",
+            )
+        })?;
+        let fragments = promised.take_header_fragments();
+
+        let total_len: usize = fragments.iter().map(Bytes::len).sum();
+        let max_fragment_size =
+            Stream::max_header_fragment_size_for(self.local_settings.max_header_list_size);
+        if total_len > max_fragment_size {
+            return Err(H2Error::stream(
+                promised_stream_id,
+                ErrorCode::EnhanceYourCalm,
+                "accumulated header fragments too large",
+            ));
+        }
+        let mut combined = BytesMut::with_capacity(total_len);
+        for fragment in fragments {
+            combined.extend_from_slice(&fragment);
+        }
+
+        let mut src = combined.freeze();
+        let headers = self.hpack_decoder.decode(&mut src)?;
+
+        Ok(Some(ReceivedFrame::PushPromise {
+            stream_id: associated_stream_id,
+            promised_stream_id,
+            headers,
         }))
     }
 
@@ -607,16 +680,61 @@ impl Connection {
 
     /// Process PUSH_PROMISE frame.
     fn process_push_promise(
-        &self,
-        frame: &super::frame::PushPromiseFrame,
+        &mut self,
+        frame: &PushPromiseFrame,
     ) -> Result<Option<ReceivedFrame>, H2Error> {
-        if self.is_client && !self.local_settings.enable_push {
+        if !self.is_client {
+            return Err(H2Error::protocol("server received PUSH_PROMISE"));
+        }
+        if !self.local_settings.enable_push {
             return Err(H2Error::protocol("push not enabled"));
         }
+        if frame.stream_id.is_multiple_of(2) {
+            return Err(H2Error::protocol("PUSH_PROMISE on server-initiated stream"));
+        }
 
-        // TODO: Handle push promise properly
-        let _ = frame;
-        Ok(None)
+        let assoc_state = match self.streams.get(frame.stream_id) {
+            Some(stream) => stream.state(),
+            None => {
+                return Err(H2Error::stream(
+                    frame.stream_id,
+                    ErrorCode::ProtocolError,
+                    "PUSH_PROMISE on unknown stream",
+                ));
+            }
+        };
+        if assoc_state.is_closed() {
+            return Err(H2Error::stream(
+                frame.stream_id,
+                ErrorCode::StreamClosed,
+                "PUSH_PROMISE on closed stream",
+            ));
+        }
+
+        let max_concurrent = self.local_settings.max_concurrent_streams;
+        if self.streams.active_count() as u32 >= max_concurrent {
+            return Err(H2Error::stream(
+                frame.stream_id,
+                ErrorCode::RefusedStream,
+                "max concurrent streams exceeded",
+            ));
+        }
+
+        let promised_stream_id = frame.promised_stream_id;
+        let promised_stream = self.streams.reserve_remote_stream(promised_stream_id)?;
+        promised_stream.add_header_fragment(frame.header_block.clone())?;
+
+        if frame.end_headers {
+            self.continuation_stream_id = None;
+            self.decode_push_promise(frame.stream_id, promised_stream_id)
+        } else {
+            self.pending_push_promise = Some(PushPromiseAccumulator {
+                associated_stream_id: frame.stream_id,
+                promised_stream_id,
+            });
+            self.continuation_stream_id = Some(frame.stream_id);
+            Ok(None)
+        }
     }
 
     /// Process PING frame.
@@ -885,6 +1003,12 @@ pub enum ReceivedFrame {
         stream_id: u32,
         headers: Vec<Header>,
         end_stream: bool,
+    },
+    /// Received PUSH_PROMISE.
+    PushPromise {
+        stream_id: u32,
+        promised_stream_id: u32,
+        headers: Vec<Header>,
     },
     /// Received data.
     Data {
@@ -1302,5 +1426,188 @@ mod tests {
             "should have at least one CONTINUATION"
         );
         assert!(last_end_headers, "last frame should have end_headers=true");
+    }
+
+    #[test]
+    fn push_promise_rejected_when_disabled() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn push_promise_creates_reserved_stream() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let received = conn.process_frame(frame).unwrap().unwrap();
+        match received {
+            ReceivedFrame::PushPromise {
+                promised_stream_id, ..
+            } => assert_eq!(promised_stream_id, 2),
+            other => panic!("expected PushPromise frame, got {other:?}"),
+        }
+
+        let promised = conn.stream(2).expect("promised stream exists");
+        assert_eq!(promised.state(), StreamState::ReservedRemote);
+    }
+
+    #[test]
+    fn push_promise_continuation_accumulates() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+
+        let mut promise_headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/pushed"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+
+        let mut encoded = BytesMut::new();
+        conn.hpack_encoder.encode(&promise_headers, &mut encoded);
+        if encoded.len() < 2 {
+            promise_headers.push(Header::new("x-extra", "1"));
+            encoded.clear();
+            conn.hpack_encoder.encode(&promise_headers, &mut encoded);
+        }
+        assert!(encoded.len() >= 2);
+
+        let encoded = encoded.freeze();
+        let split = encoded.len() / 2;
+        let first = encoded.slice(..split);
+        let second = encoded.slice(split..);
+
+        let push = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: first,
+            end_headers: false,
+        });
+        assert!(conn.process_frame(push).unwrap().is_none());
+
+        let continuation = Frame::Continuation(ContinuationFrame {
+            stream_id,
+            header_block: second,
+            end_headers: true,
+        });
+
+        let received = conn.process_frame(continuation).unwrap().unwrap();
+        match received {
+            ReceivedFrame::PushPromise {
+                promised_stream_id,
+                headers: decoded,
+                ..
+            } => {
+                assert_eq!(promised_stream_id, 2);
+                assert_eq!(decoded, promise_headers);
+            }
+            other => panic!("expected PushPromise frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_promise_rejected_on_server_connection() {
+        let mut conn = Connection::server(Settings::server());
+        conn.state = ConnectionState::Open;
+
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id: 1,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn push_promise_rejected_for_invalid_promised_id() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 3,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn push_promise_rejected_for_unknown_associated_stream() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id: 1,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, Some(1));
     }
 }

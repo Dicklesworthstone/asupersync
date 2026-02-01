@@ -72,9 +72,10 @@ fn test_ready_not_starved_by_cancel_flood() {
 /// Test that timed work completes despite a flood of cancel work.
 #[test]
 fn test_timed_not_starved_by_cancel_flood() {
-    let clock = Arc::new(VirtualClock::new());
     let mut runtime_state = RuntimeState::new();
-    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+        VirtualClock::new(),
+    )));
     let state = Arc::new(Mutex::new(runtime_state));
 
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
@@ -126,9 +127,10 @@ fn test_timed_not_starved_by_cancel_flood() {
 /// Test that all lanes make progress in a mixed workload.
 #[test]
 fn test_all_lanes_make_progress() {
-    let clock = Arc::new(VirtualClock::new());
     let mut runtime_state = RuntimeState::new();
-    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+        VirtualClock::new(),
+    )));
     let state = Arc::new(Mutex::new(runtime_state));
 
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
