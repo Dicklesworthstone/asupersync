@@ -458,43 +458,31 @@ impl RuntimeState {
             .map(RegionRecord::limits)
     }
 
-    /// Creates a task and stores its future for polling.
+    /// Creates the infrastructure for a task (record, context, channel) without storing the future.
     ///
-    /// This is the core spawn primitive. It:
-    /// 1. Creates a TaskRecord in the specified region
-    /// 2. Wraps the future to send its result through a oneshot channel
-    /// 3. Stores the wrapped future for the executor to poll
-    /// 4. Returns a TaskHandle for awaiting the result
-    ///
-    /// # Arguments
-    /// * `region` - The region that will own this task
-    /// * `budget` - The budget for this task
-    /// * `future` - The future to execute
-    ///
-    /// # Returns
-    /// A Result containing `(TaskId, TaskHandle)` on success, or `SpawnError` on failure.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let (task_id, handle) = state.create_task(region, budget, async { 42 })?;
-    /// // Later: scheduler.schedule(task_id);
-    /// // Even later: let result = handle.join(cx)?;
-    /// ```
-    pub fn create_task<F, T>(
+    /// This helper allows `create_task` and `spawn_local` to share the same setup logic
+    /// while storing the future in different places (global vs thread-local).
+    pub(crate) fn create_task_infrastructure<T>(
         &mut self,
         region: RegionId,
         budget: Budget,
-        future: F,
-    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>), SpawnError>
+    ) -> Result<
+        (
+            TaskId,
+            crate::runtime::TaskHandle<T>,
+            crate::cx::Cx,
+            crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+        ),
+        SpawnError,
+    >
     where
-        F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         use crate::channel::oneshot;
-        use crate::runtime::task_handle::JoinError;
 
         // Create oneshot channel for the result
-        let (result_tx, result_rx) = oneshot::channel::<Result<T, JoinError>>();
+        let (result_tx, result_rx) =
+            oneshot::channel::<Result<T, crate::runtime::task_handle::JoinError>>();
 
         // Create the TaskRecord
         let idx = self.tasks.insert(TaskRecord::new_with_time(
@@ -560,6 +548,57 @@ impl RuntimeState {
             record.set_cx(cx.clone());
         }
 
+        // Trace task creation
+        debug!(
+            task_id = ?task_id,
+            region_id = ?region,
+            initial_state = "Created",
+            poll_quota = budget.poll_quota,
+            "task created via RuntimeState"
+        );
+
+        // Create the TaskHandle
+        let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
+
+        Ok((task_id, handle, cx, result_tx))
+    }
+
+    /// Creates a task and stores its future for polling.
+    ///
+    /// This is the core spawn primitive. It:
+    /// 1. Creates a TaskRecord in the specified region
+    /// 2. Wraps the future to send its result through a oneshot channel
+    /// 3. Stores the wrapped future for the executor to poll
+    /// 4. Returns a TaskHandle for awaiting the result
+    ///
+    /// # Arguments
+    /// * `region` - The region that will own this task
+    /// * `budget` - The budget for this task
+    /// * `future` - The future to execute
+    ///
+    /// # Returns
+    /// A Result containing `(TaskId, TaskHandle)` on success, or `SpawnError` on failure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let (task_id, handle) = state.create_task(region, budget, async { 42 })?;
+    /// // Later: scheduler.schedule(task_id);
+    /// // Even later: let result = handle.join(cx)?;
+    /// ```
+    pub fn create_task<F, T>(
+        &mut self,
+        region: RegionId,
+        budget: Budget,
+        future: F,
+    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>), SpawnError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use crate::runtime::task_handle::JoinError;
+
+        let (task_id, handle, cx, result_tx) = self.create_task_infrastructure(region, budget)?;
+
         // Wrap the future to send the result through the channel
         let wrapped_future = async move {
             let result = future.await;
@@ -571,18 +610,6 @@ impl RuntimeState {
         // Store the wrapped future with task_id for poll tracing
         self.stored_futures
             .insert(task_id, StoredTask::new_with_id(wrapped_future, task_id));
-
-        // Trace task creation
-        debug!(
-            task_id = ?task_id,
-            region_id = ?region,
-            initial_state = "Created",
-            poll_quota = budget.poll_quota,
-            "task created via RuntimeState::create_task"
-        );
-
-        // Create the TaskHandle
-        let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
         Ok((task_id, handle))
     }

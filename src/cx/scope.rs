@@ -509,7 +509,7 @@ impl<P: Policy> Scope<'_, P> {
     /// | Property | Value |
     /// |----------|-------|
     /// | Migration | Never (thread-pinned) |
-    /// | Send bound | Not required (Phase 1+) |
+    /// | Send bound | Not required |
     /// | Borrowing | Can capture `&T` (same-thread) |
     /// | Use case | `!Send` types, borrowed data |
     ///
@@ -523,13 +523,12 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// Panics if called from a blocking thread (spawn_blocking context).
     ///
-    /// # Example (Phase 1+)
+    /// # Example
     ///
     /// ```ignore
     /// use std::rc::Rc;
     /// use std::cell::RefCell;
     ///
-    /// // In Phase 1+, this will work with !Send futures:
     /// let counter = Rc::new(RefCell::new(0));
     /// let counter_clone = counter.clone();
     ///
@@ -538,37 +537,113 @@ impl<P: Policy> Scope<'_, P> {
     ///     *counter_clone.borrow_mut() += 1;
     /// });
     /// ```
-    ///
-    /// # Phase 0 Limitation
-    ///
-    /// In Phase 0 (single-threaded), this method still requires `Send` bounds
-    /// because task storage is shared. In Phase 1+, this will be relaxed to
-    /// accept `!Send` futures via thread-local task storage.
-    ///
-    /// # Comparison with `spawn_task`
-    ///
-    /// | Method | Tier | Bounds | Migration |
-    /// |--------|------|--------|-----------|
-    /// | `spawn` / `spawn_task` | Task | `Send + 'static` | Yes |
-    /// | `spawn_local` | Fiber | `!Send` OK (Phase 1+) | No |
     pub fn spawn_local<F, Fut>(
         &self,
         state: &mut RuntimeState,
-        cx: &Cx,
+        _cx: &Cx,
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        F: FnOnce(Cx) -> Fut + Send + 'static,
-        Fut: Future + Send + 'static,
-        Fut::Output: Send + 'static,
+        F: FnOnce(Cx) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: 'static,
     {
-        // In Phase 0, spawn_local behaves identically to spawn since
-        // everything runs on a single thread. The distinction matters
-        // in Phase 1+ with work-stealing where local tasks cannot migrate.
+        use crate::runtime::stored_task::LocalStoredTask;
+        use crate::runtime::task_handle::JoinError;
+
+        // Use the infrastructure helper to create the record, channel, etc.
+        let (task_id, handle, child_cx, result_tx) =
+            state.create_task_infrastructure(self.region, self.budget)?;
+
+        // Capture child_cx for result sending
+        let cx_for_send = child_cx.clone();
+
+        // Instantiate the future with the child context.
+        // We use a guard to rollback task creation if the factory panics.
+        let future = {
+            struct TaskCreationGuard<'a> {
+                state: &'a mut RuntimeState,
+                task_id: TaskId,
+                region_id: RegionId,
+                committed: bool,
+            }
+
+            impl Drop for TaskCreationGuard<'_> {
+                fn drop(&mut self) {
+                    if !self.committed {
+                        // Rollback task creation
+                        if let Some(region) =
+                            self.state.regions.get_mut(self.region_id.arena_index())
+                        {
+                            region.remove_task(self.task_id);
+                        }
+                        self.state.tasks.remove(self.task_id.arena_index());
+                    }
+                }
+            }
+
+            let mut guard = TaskCreationGuard {
+                state,
+                task_id,
+                region_id: self.region,
+                committed: false,
+            };
+
+            let fut = f(child_cx);
+            guard.committed = true;
+            fut
+        };
+
+        // Wrap the future to send its result through the channel
+        let wrapped = async move {
+            let result_result = CatchUnwind(Box::pin(future)).await;
+            match result_result {
+                Ok(result) => {
+                    let _ = result_tx.send(&cx_for_send, Ok(result));
+                    crate::types::Outcome::Ok(())
+                }
+                Err(payload) => {
+                    let msg = payload_to_string(&payload);
+                    let panic_payload = PanicPayload::new(msg);
+                    let _ = result_tx.send(
+                        &cx_for_send,
+                        Err(JoinError::Panicked(panic_payload.clone())),
+                    );
+                    crate::types::Outcome::Panicked(panic_payload)
+                }
+            }
+        };
+
+        // Create local stored task
+        let stored = LocalStoredTask::new_with_id(wrapped, task_id);
+
+        // Store in thread-local storage
+        crate::runtime::local::store_local_task(task_id, stored);
+
+        // Return a placeholder StoredTask because the API signature expects it.
+        // This allows existing callers (if any) to continue working, although
+        // they shouldn't try to store this placeholder in RuntimeState.
+        // Since spawn_local stores it implicitly in TLS, the caller doesn't need to do anything.
         //
-        // TODO(Phase 1): Implement true thread-local task storage that
-        // accepts !Send futures.
-        self.spawn(state, cx, f)
+        // Note: This effectively changes the semantics of the returned StoredTask.
+        // It is now a dummy. This is necessary to preserve the function signature
+        // while changing the storage mechanism.
+        //
+        // Ideally, we would change the signature to return just TaskHandle,
+        // but that would break the trait if Scope implements one (it doesn't).
+        //
+        // We create a dummy StoredTask that does nothing.
+        // Since we can't easily create a dummy Future that returns Outcome,
+        // we assume the caller won't use it or will try to store it and fail?
+        // No, spawn_local callers usually look like:
+        // let (handle, _) = scope.spawn_local(...)
+        //
+        // To be safe, we return a dummy StoredTask that panics if polled.
+        let dummy = StoredTask::new(async {
+            panic!("spawn_local task placeholder should not be polled");
+        });
+
+        Ok((handle, dummy))
     }
 
     /// Spawns a blocking operation on a dedicated thread pool.

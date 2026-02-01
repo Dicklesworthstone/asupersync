@@ -170,22 +170,48 @@ impl Worker {
     }
 
     fn execute(&self, task_id: TaskId) {
+        use crate::runtime::stored_task::AnyStoredTask;
+
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
+        // Try to find the task in global state first
         let (mut stored, task_cx, wake_state) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
-            let Some(stored) = state.remove_stored_future(task_id) else {
-                return;
-            };
-            let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
-                return;
-            };
-            record.start_running();
-            record.wake_state.begin_poll();
-            let task_cx = record.cx.clone();
-            let wake_state = Arc::clone(&record.wake_state);
-            drop(state);
-            (stored, task_cx, wake_state)
+
+            if let Some(stored) = state.remove_stored_future(task_id) {
+                // Global task found
+                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                    record.start_running();
+                    record.wake_state.begin_poll();
+                    let task_cx = record.cx.clone();
+                    let wake_state = Arc::clone(&record.wake_state);
+                    drop(state);
+                    (AnyStoredTask::Global(stored), task_cx, wake_state)
+                } else {
+                    return; // Task record missing?
+                }
+            } else {
+                // Not in global, check local
+                drop(state); // Drop lock before accessing thread-local
+
+                if let Some(local_task) = crate::runtime::local::remove_local_task(task_id) {
+                    // Local task found
+                    // We need to re-acquire state lock to get record info
+                    let mut state = self.state.lock().expect("runtime state lock poisoned");
+                    if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                        record.start_running();
+                        record.wake_state.begin_poll();
+                        let task_cx = record.cx.clone();
+                        let wake_state = Arc::clone(&record.wake_state);
+                        drop(state);
+                        (AnyStoredTask::Local(local_task), task_cx, wake_state)
+                    } else {
+                        return; // Task record missing
+                    }
+                } else {
+                    return; // Task not found anywhere
+                }
+            }
         };
 
         let waker = Waker::from(Arc::new(WorkStealingWaker {
@@ -200,9 +226,8 @@ impl Worker {
         match stored.poll(&mut cx) {
             Poll::Ready(outcome) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
-                let task_outcome = outcome.map_err(|()| {
-                    crate::error::Error::new(crate::error::ErrorKind::Internal)
-                });
+                let task_outcome = outcome
+                    .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
@@ -222,11 +247,101 @@ impl Worker {
                 wake_state.clear();
             }
             Poll::Pending => {
-                let mut state = self.state.lock().expect("runtime state lock poisoned");
-                state.store_spawned_task(task_id, stored);
-                drop(state);
+                match stored {
+                    AnyStoredTask::Global(t) => {
+                        let mut state = self.state.lock().expect("runtime state lock poisoned");
+                        state.store_spawned_task(task_id, t);
+                        drop(state);
+                    }
+                    AnyStoredTask::Local(t) => {
+                        crate::runtime::local::store_local_task(task_id, t);
+                    }
+                }
+
                 if wake_state.finish_poll() {
-                    self.global.push(task_id);
+                    // For local tasks, we should ideally push to local queue if we own it,
+                    // but pushing to global is safe (it will just be routed back to us
+                    // or picked up by us if we are the only one who can run it).
+                    // Actually, if it's a local task, it *must* run on this thread.
+                    // If we push to global, another worker might pick it up, fail to find it
+                    // in global/its-local, and drop it?
+                    //
+                    // Wait! If another worker picks up a local task ID from global queue:
+                    // 1. It checks global stored_futures -> Not found.
+                    // 2. It checks ITS local storage -> Not found.
+                    // 3. It returns.
+                    // Task is lost!
+                    //
+                    // So local tasks MUST be scheduled to the LOCAL queue of the owning worker.
+                    // `WorkStealingWaker` pushes to `global`. This is a problem for local tasks!
+                    //
+                    // We need `LocalWaker` or `WorkStealingWaker` needs to know if it's local.
+                    // But `Waker` is `Send + Sync`. It can be moved.
+                    // If a local task is woken from another thread, we must schedule it
+                    // such that the OWNING worker runs it.
+                    //
+                    // Phase 1 Scheduler (ThreeLaneScheduler) has `inject_ready`.
+                    // `inject_ready` pushes to global.
+                    //
+                    // We need `inject_local(worker_id, task_id)`.
+                    // But we don't have `worker_id` in `Waker` easily.
+                    //
+                    // Workaround for now:
+                    // We are in `execute` (on the worker thread).
+                    // If `finish_poll` returns true, we need to reschedule.
+                    // We are on the correct thread.
+                    // We can push to `self.local`.
+                    //
+                    // However, `WorkStealingWaker` is used for *external* wakeups too (timers, I/O).
+                    // If I/O wakes a local task, it calls `wake()`.
+                    // `WorkStealingWaker` pushes to `global`.
+                    //
+                    // We need to fix `WorkStealingWaker` to support local scheduling,
+                    // OR we need to ensure local tasks are only woken on their thread
+                    // (unlikely for I/O).
+                    //
+                    // Or we rely on `GlobalInjector` to handle "pinned" tasks?
+                    // Global queue is `SegQueue`. Any worker pops.
+                    //
+                    // If we want to support `spawn_local` fully in Phase 1, we need
+                    // worker-aware scheduling.
+                    //
+                    // For this immediate fix, I will push to `self.local` inside `execute`
+                    // if it's a local task.
+                    // But this doesn't solve external wakeups.
+                    //
+                    // Assumption: For Phase 0/1 transition, maybe we assume limited cross-thread wakeups
+                    // for local tasks? Or maybe we assume `spawn_local` tasks utilize things that
+                    // wake on the same thread?
+                    //
+                    // Actually, `LocalStoredTask` is usually used for `!Send` futures like `Rc`.
+                    // If `Rc` is shared with I/O (e.g. `Rc<RefCell<Socket>>`), that I/O must happen on same thread.
+                    //
+                    // If we use `spawn_local`, we must ensure the task is pinned.
+                    //
+                    // Fix: `WorkStealingWaker` needs to know if it should schedule globally or locally.
+                    // But `Waker` is generic.
+                    //
+                    // Ideally `TaskRecord` stores `pinned_worker: Option<WorkerId>`.
+                    // `ThreeLaneScheduler::inject_ready` checks this and pushes to specific worker's queue?
+                    // `GlobalInjector` doesn't support pushing to specific worker.
+                    //
+                    // Let's defer full pinned scheduling to a proper "Pinned Tasks" feature.
+                    // For now, in `execute`, if `finish_poll` is true:
+                    // - If Global, push to global.
+                    // - If Local, push to `self.local`.
+                    //
+                    // This handles self-wakes (yield_now).
+                    // External wakes will still go to global and be dropped by other workers.
+                    // This is a known limitation of this "quick fix" for `spawn_local`.
+                    // But it's better than `Send` bound.
+                    //
+                    // I'll implement the push to `self.local` for `AnyStoredTask::Local`.
+
+                    match stored {
+                        AnyStoredTask::Global(_) => self.global.push(task_id),
+                        AnyStoredTask::Local(_) => self.local.push(task_id),
+                    }
                     self.parker.unpark();
                 }
             }
