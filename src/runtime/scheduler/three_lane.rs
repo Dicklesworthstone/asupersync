@@ -116,37 +116,25 @@ impl ThreeLaneScheduler {
     /// or multiple times in the Cancel lane. This is safe because `execute()`
     /// handles double-execution via `state.remove_stored_future()`.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        let exists = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            if let Some(record) = state.tasks.get(task.arena_index()) {
-                // Try to notify. Even if already notified, we continue to inject
-                // to ensure priority promotion.
-                record.wake_state.notify();
-                true
-            } else {
-                false
-            }
-        };
-        
         // Always inject if the task exists (or if we want to support test behavior
         // where tasks might not exist in state but are injected).
         // The original code allowed injection if task didn't exist (is_none_or).
-        // We preserve that behavior implicitly if we just check exists or if we 
+        // We preserve that behavior implicitly if we just check exists or if we
         // follow the original logic's intent.
         // Actually, looking at original: `is_none_or` meant "if None OR (Some and notify)".
         // If None, it returned true.
         // So we should inject if None OR Some.
         // For Some, we don't care about notify result.
-        
+
         let should_inject = {
-             let state = self.state.lock().expect("runtime state lock poisoned");
-             let record = state.tasks.get(task.arena_index());
-             if let Some(r) = record {
-                 r.wake_state.notify(); // Attempt notify, ignore result
-                 true
-             } else {
-                 true // Allow injection for missing tasks (tests)
-             }
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            let record = state.tasks.get(task.arena_index());
+            if let Some(r) = record {
+                r.wake_state.notify(); // Attempt notify, ignore result
+                true
+            } else {
+                true // Allow injection for missing tasks (tests)
+            }
         };
 
         if should_inject {
@@ -606,9 +594,8 @@ impl ThreeLaneWorker {
         match stored.poll(&mut cx) {
             Poll::Ready(outcome) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
-                let task_outcome = outcome.map_err(|()| {
-                    crate::error::Error::new(crate::error::ErrorKind::Internal)
-                });
+                let task_outcome = outcome
+                    .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
@@ -722,7 +709,7 @@ impl CancelLaneWaker {
 
         // Always notify (attempt state transition)
         self.wake_state.notify();
-        
+
         // Always inject to ensure priority promotion, even if already scheduled.
         // See `inject_cancel` for details.
         self.global.inject_cancel(self.task_id, priority);
@@ -1262,7 +1249,7 @@ mod tests {
         assert!(first.is_some());
         let second = scheduler.global.pop_cancel();
         assert!(second.is_some(), "cancel inject always injects");
-        
+
         // Third check should be empty
         let third = scheduler.global.pop_cancel();
         assert!(third.is_none());
