@@ -236,7 +236,9 @@ fn extract_json_i64(json: &str, key: &str) -> Option<i64> {
     let pattern = format!("\"{key}\":");
     let start = json.find(&pattern)? + pattern.len();
     let rest = json[start..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -378,7 +380,10 @@ impl NatsClient {
     /// Connect with explicit configuration.
     pub async fn connect_with_config(cx: &Cx, config: NatsConfig) -> Result<Self, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
-        cx.trace(&format!("nats: connecting to {}:{}", config.host, config.port));
+        cx.trace(&format!(
+            "nats: connecting to {}:{}",
+            config.host, config.port
+        ));
 
         let addr = format!("{}:{}", config.host, config.port);
         let stream = TcpStream::connect(addr).await?;
@@ -434,7 +439,11 @@ impl NatsClient {
         connect.push_str("\"verbose\":");
         connect.push_str(if self.config.verbose { "true" } else { "false" });
         connect.push_str(",\"pedantic\":");
-        connect.push_str(if self.config.pedantic { "true" } else { "false" });
+        connect.push_str(if self.config.pedantic {
+            "true"
+        } else {
+            "false"
+        });
         connect.push_str(",\"lang\":\"rust\"");
         connect.push_str(",\"version\":\"0.1.0\"");
         connect.push_str(",\"protocol\":1");
@@ -613,16 +622,16 @@ impl NatsClient {
         let (reply_to, payload_len) = if parts.len() == 5 {
             (
                 Some(parts[3].to_string()),
-                parts[4]
-                    .parse::<usize>()
-                    .map_err(|_| NatsError::Protocol(format!("invalid payload length: {}", parts[4])))?,
+                parts[4].parse::<usize>().map_err(|_| {
+                    NatsError::Protocol(format!("invalid payload length: {}", parts[4]))
+                })?,
             )
         } else {
             (
                 None,
-                parts[3]
-                    .parse::<usize>()
-                    .map_err(|_| NatsError::Protocol(format!("invalid payload length: {}", parts[3])))?,
+                parts[3].parse::<usize>().map_err(|_| {
+                    NatsError::Protocol(format!("invalid payload length: {}", parts[3]))
+                })?,
             )
         };
 
@@ -668,7 +677,12 @@ impl NatsClient {
     }
 
     /// Publish a message to a subject.
-    pub async fn publish(&mut self, cx: &Cx, subject: &str, payload: &[u8]) -> Result<(), NatsError> {
+    pub async fn publish(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        payload: &[u8],
+    ) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         if !self.connected {
@@ -743,7 +757,11 @@ impl NatsClient {
         }
 
         // Generate unique inbox subject
-        let inbox = format!("_INBOX.{}.{}", self.next_sid.load(Ordering::Relaxed), random_suffix());
+        let inbox = format!(
+            "_INBOX.{}.{}",
+            self.next_sid.load(Ordering::Relaxed),
+            random_suffix()
+        );
 
         // Subscribe to inbox
         let mut sub = self.subscribe(cx, &inbox).await?;
@@ -804,11 +822,7 @@ impl NatsClient {
     /// Subscribe to a subject.
     ///
     /// Returns a `Subscription` that can be used to receive messages.
-    pub async fn subscribe(
-        &mut self,
-        cx: &Cx,
-        subject: &str,
-    ) -> Result<Subscription, NatsError> {
+    pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         if !self.connected {
@@ -1163,14 +1177,8 @@ mod tests {
             format!("{}", NatsError::Cancelled),
             "NATS operation cancelled"
         );
-        assert_eq!(
-            format!("{}", NatsError::Closed),
-            "NATS connection closed"
-        );
-        assert_eq!(
-            format!("{}", NatsError::NotConnected),
-            "NATS not connected"
-        );
+        assert_eq!(format!("{}", NatsError::Closed), "NATS connection closed");
+        assert_eq!(format!("{}", NatsError::NotConnected), "NATS not connected");
         assert_eq!(
             format!("{}", NatsError::SubscriptionNotFound(42)),
             "NATS subscription not found: 42"
@@ -1197,6 +1205,8 @@ mod tests {
         // Just verify format is correct (16 hex chars)
         assert_eq!(s1.len(), 16);
         assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(s2.len(), 16);
+        assert!(s2.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

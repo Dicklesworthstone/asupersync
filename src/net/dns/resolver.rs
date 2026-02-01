@@ -305,8 +305,8 @@ impl Resolver {
         // Run connection on blocking pool for true async behavior
         // TODO: Use proper async TCP connect with timeout when available
         let result = spawn_blocking(move || {
-            let stream = StdTcpStream::connect(addr)
-                .map_err(|e| DnsError::Connection(e.to_string()))?;
+            let stream =
+                StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
 
             stream
                 .set_nonblocking(true)
@@ -449,5 +449,83 @@ mod tests {
         let empty = cloudflare.nameservers.is_empty();
         crate::assert_with_log!(!empty, "cloudflare nameservers", false, empty);
         crate::test_complete!("resolver_config_presets");
+    }
+
+    #[test]
+    fn error_display_formats() {
+        init_test("error_display_formats");
+
+        // Test error display messages for failure mapping
+        let no_records = DnsError::NoRecords("test.example".to_string());
+        let msg = format!("{no_records}");
+        crate::assert_with_log!(
+            msg.contains("no DNS records"),
+            "no records msg",
+            true,
+            msg.contains("no DNS records")
+        );
+
+        let timeout = DnsError::Timeout;
+        let msg = format!("{timeout}");
+        crate::assert_with_log!(
+            msg.contains("timed out"),
+            "timeout msg",
+            true,
+            msg.contains("timed out")
+        );
+
+        let io_err = DnsError::Io("connection refused".to_string());
+        let msg = format!("{io_err}");
+        crate::assert_with_log!(
+            msg.contains("I/O error"),
+            "io error msg",
+            true,
+            msg.contains("I/O error")
+        );
+
+        let invalid = DnsError::InvalidHost("".to_string());
+        let msg = format!("{invalid}");
+        crate::assert_with_log!(
+            msg.contains("invalid hostname"),
+            "invalid msg",
+            true,
+            msg.contains("invalid hostname")
+        );
+
+        let not_impl = DnsError::NotImplemented("SRV");
+        let msg = format!("{not_impl}");
+        crate::assert_with_log!(
+            msg.contains("not implemented"),
+            "not impl msg",
+            true,
+            msg.contains("not implemented")
+        );
+
+        crate::test_complete!("error_display_formats");
+    }
+
+    #[test]
+    fn error_from_io() {
+        init_test("error_from_io");
+
+        // Test io::Error conversion
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let dns_err: DnsError = io_err.into();
+        let is_io = matches!(dns_err, DnsError::Io(_));
+        crate::assert_with_log!(is_io, "is io error", true, is_io);
+
+        crate::test_complete!("error_from_io");
+    }
+
+    #[test]
+    fn resolver_nonexistent_domain() {
+        init_test("resolver_nonexistent_domain");
+
+        // Try to resolve a domain that definitely doesn't exist
+        let result = Resolver::query_ip_sync("this-domain-definitely-does-not-exist.invalid");
+        // Should fail with either NoRecords or Io error depending on DNS resolver behavior
+        crate::assert_with_log!(result.is_err(), "nonexistent fails", true, result.is_err());
+
+        crate::test_complete!("resolver_nonexistent_domain");
     }
 }
