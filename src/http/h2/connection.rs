@@ -1818,4 +1818,237 @@ mod tests {
         assert_eq!(err.code, ErrorCode::ProtocolError);
         assert!(err.message.contains("CONTINUATION timeout"));
     }
+
+    // =========================================================================
+    // Additional PUSH_PROMISE Security Tests (bd-1ckh)
+    // =========================================================================
+
+    #[test]
+    fn push_promise_rejected_on_closed_stream() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        // Open and then close a stream
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, true).unwrap(); // end_stream=true
+        let _ = conn.next_frame(); // drain HEADERS
+
+        // Simulate receiving response headers with END_STREAM to fully close
+        let response = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), true, true));
+        conn.process_frame(response).unwrap();
+
+        // Stream should now be closed
+        assert_eq!(conn.stream(stream_id).unwrap().state(), StreamState::Closed);
+
+        // PUSH_PROMISE on closed stream should fail
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::StreamClosed);
+    }
+
+    #[test]
+    fn push_promise_enforces_max_concurrent_streams() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        settings.max_concurrent_streams = 3; // Very low limit for testing
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        // Open client stream
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame();
+
+        // First push should succeed (now 2 active: stream 1 + pushed 2)
+        let push1 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        assert!(conn.process_frame(push1).is_ok());
+
+        // Second push should succeed (now 3 active: stream 1 + pushed 2 + pushed 4)
+        let push2 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 4,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        assert!(conn.process_frame(push2).is_ok());
+
+        // Third push should fail - max concurrent streams exceeded
+        let push3 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 6,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        let err = conn.process_frame(push3).unwrap_err();
+        assert_eq!(err.code, ErrorCode::RefusedStream);
+    }
+
+    #[test]
+    fn push_promise_rejected_for_duplicate_stream_id() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame();
+
+        // First push with stream ID 2
+        let push1 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        assert!(conn.process_frame(push1).is_ok());
+
+        // Trying to push with same stream ID 2 again should fail
+        let push2 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        let err = conn.process_frame(push2).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn push_promise_monotonic_stream_id() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame();
+
+        // Push with stream ID 4 first
+        let push1 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 4,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        assert!(conn.process_frame(push1).is_ok());
+
+        // Push with stream ID 2 (lower) should fail - IDs must be monotonically increasing
+        let push2 = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        let err = conn.process_frame(push2).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn push_promise_attack_flood_bounded() {
+        // Simulates a malicious server sending many PUSH_PROMISE frames.
+        // The implementation must bound resource usage via max_concurrent_streams.
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        settings.max_concurrent_streams = 10;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame();
+
+        let mut accepted = 0;
+        let mut rejected = 0;
+
+        // Try to push 100 streams
+        for i in 0..100 {
+            let promised_id = (i + 1) * 2; // Even IDs: 2, 4, 6, ...
+            let push = Frame::PushPromise(PushPromiseFrame {
+                stream_id,
+                promised_stream_id: promised_id,
+                header_block: Bytes::new(),
+                end_headers: true,
+            });
+
+            match conn.process_frame(push) {
+                Ok(_) => accepted += 1,
+                Err(e) if e.code == ErrorCode::RefusedStream => rejected += 1,
+                Err(e) => panic!("unexpected error: {:?}", e),
+            }
+        }
+
+        // Should accept up to max_concurrent_streams - 1 (minus the original request stream)
+        assert_eq!(accepted, 9, "should accept max_concurrent_streams - 1 pushes");
+        assert_eq!(rejected, 91, "should reject the rest");
+    }
+
+    #[test]
+    fn push_promise_on_server_initiated_stream_rejected() {
+        // PUSH_PROMISE must be sent on client-initiated (odd) stream
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        // Open a client stream first
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let _ = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame();
+
+        // Try to send PUSH_PROMISE on an even (server-initiated) stream ID
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id: 2, // Even = server-initiated = invalid for PUSH_PROMISE
+            promised_stream_id: 4,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
 }
