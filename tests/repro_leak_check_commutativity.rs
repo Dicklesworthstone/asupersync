@@ -18,16 +18,22 @@ fn test_var_state_join_commutativity() {
     println!("B join A: {:?}", join_ba);
 
     assert_eq!(join_ab, join_ba, "Join should be commutative");
-    
+
     // Check that we got the ambiguous state
-    assert!(matches!(join_ab, VarState::MayHoldAmbiguous), "Should be ambiguous");
+    assert!(
+        matches!(join_ab, VarState::MayHoldAmbiguous),
+        "Should be ambiguous"
+    );
 }
 
 #[test]
 fn test_var_state_ambiguous_propagation() {
     let state_a = VarState::MayHoldAmbiguous;
     let state_b = VarState::Held(ObligationKind::SendPermit);
-    
+
     let join = state_a.join(state_b);
-    assert!(matches!(join, VarState::MayHoldAmbiguous), "Ambiguity should propagate");
+    assert!(
+        matches!(join, VarState::MayHoldAmbiguous),
+        "Ambiguity should propagate"
+    );
 }
