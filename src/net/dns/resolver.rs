@@ -11,8 +11,6 @@
 //! synchronous resolution. The async API is maintained for forward compatibility
 //! with future async DNS implementations.
 
-#![allow(clippy::unused_async)]
-
 use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +19,7 @@ use super::cache::{CacheConfig, CacheStats, DnsCache};
 use super::error::DnsError;
 use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::net::TcpStream;
+use crate::runtime::spawn_blocking;
 
 /// DNS resolver configuration.
 #[derive(Debug, Clone)]
@@ -137,6 +136,11 @@ impl Resolver {
     }
 
     /// Performs the actual IP lookup with retries.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This function is cancel-safe. If the future is dropped, the underlying
+    /// DNS query continues on the blocking pool but the result is discarded.
     async fn do_lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
         // If it's already an IP address, return it directly
         if let Ok(ip) = host.parse::<IpAddr>() {
@@ -148,23 +152,25 @@ impl Resolver {
             return Err(DnsError::InvalidHost(host.to_string()));
         }
 
-        let mut last_error = None;
+        let retries = self.config.retries;
+        let host = host.to_string();
 
-        for attempt in 0..=self.config.retries {
-            if attempt > 0 {
-                // Brief yield between retries
-                crate::runtime::yield_now().await;
-            }
+        // Run DNS resolution on blocking pool for true async behavior
+        spawn_blocking(move || {
+            let mut last_error = None;
 
-            match Self::query_ip_sync(host) {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    last_error = Some(e);
+            for _attempt in 0..=retries {
+                match Self::query_ip_sync(&host) {
+                    Ok(result) => return Ok(result),
+                    Err(e) => {
+                        last_error = Some(e);
+                    }
                 }
             }
-        }
 
-        Err(last_error.unwrap_or(DnsError::Timeout))
+            Err(last_error.unwrap_or(DnsError::Timeout))
+        })
+        .await
     }
 
     /// Performs synchronous DNS lookup using std::net.
@@ -286,22 +292,32 @@ impl Resolver {
     }
 
     /// Attempts to connect with a timeout.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This function is cancel-safe. If the future is dropped, the underlying
+    /// connection attempt continues on the blocking pool but the result is discarded.
     async fn try_connect_timeout(
         &self,
         addr: SocketAddr,
         _timeout: Duration,
     ) -> Result<TcpStream, DnsError> {
-        // Phase 0: Synchronous connect
-        // TODO: Implement proper async connect with timeout in Phase 1
-        let stream =
-            StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
+        // Run connection on blocking pool for true async behavior
+        // TODO: Use proper async TCP connect with timeout when available
+        let result = spawn_blocking(move || {
+            let stream = StdTcpStream::connect(addr)
+                .map_err(|e| DnsError::Connection(e.to_string()))?;
 
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| DnsError::Io(e.to_string()))?;
+            stream
+                .set_nonblocking(true)
+                .map_err(|e| DnsError::Io(e.to_string()))?;
+
+            Ok::<_, DnsError>(stream)
+        })
+        .await?;
 
         // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
-        Ok(TcpStream::from_std(stream))
+        Ok(TcpStream::from_std(result))
     }
 
     /// Looks up MX records for a domain.

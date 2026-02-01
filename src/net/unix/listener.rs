@@ -329,20 +329,10 @@ impl Stream for Incoming<'_> {
     type Item = io::Result<UnixStream>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.listener.inner.accept() {
-            Ok((stream, _addr)) => {
-                if let Err(e) = stream.set_nonblocking(true) {
-                    return Poll::Ready(Some(Err(e)));
-                }
-                Poll::Ready(Some(Ok(UnixStream::from_std(stream))))
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Schedule wakeup and return pending
-                // TODO: Use proper reactor registration instead of immediate wake
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Some(Err(e))),
+        match self.listener.poll_accept(cx) {
+            Poll::Ready(Ok((stream, _addr))) => Poll::Ready(Some(Ok(stream))),
+            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -350,13 +340,29 @@ impl Stream for Incoming<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::io::AsyncReadExt;
+    use crate::runtime::{IoDriverHandle, LabReactor};
+    use crate::types::{Budget, RegionId, TaskId};
     use std::io::Write;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
     use tempfile::tempdir;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
     }
 
     #[test]
@@ -410,6 +416,43 @@ mod tests {
             handle.join().expect("thread failed");
         });
         crate::test_complete!("test_accept");
+    }
+
+    #[test]
+    fn incoming_registers_on_wouldblock() {
+        init_test("incoming_registers_on_wouldblock");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("incoming_register.sock");
+
+        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+        std_listener
+            .set_nonblocking(true)
+            .expect("nonblocking failed");
+
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+        let mut incoming = listener.incoming();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut incoming).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+
+        let registration = listener.registration.lock().expect("lock poisoned");
+        assert!(registration.is_some(), "incoming should register interest");
+        crate::test_complete!("incoming_registers_on_wouldblock");
     }
 
     #[test]

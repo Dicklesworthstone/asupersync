@@ -10,11 +10,13 @@ use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf}
 use crate::net::tcp::traits::TcpStreamApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+use crate::time::{timeout, TimeSource, WallClock};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -154,10 +156,16 @@ impl TcpStream {
     }
 
     /// Connect with timeout.
-    pub async fn connect_timeout(addr: SocketAddr, timeout: Duration) -> io::Result<Self> {
-        let stream = net::TcpStream::connect_timeout(&addr, timeout)?;
-        stream.set_nonblocking(true)?;
-        Ok(Self::from_std(stream))
+    pub async fn connect_timeout(addr: SocketAddr, timeout_duration: Duration) -> io::Result<Self> {
+        let connect_future = Box::pin(TcpStream::connect(addr));
+        match timeout(wall_clock_now(), timeout_duration, connect_future).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "tcp connect timeout",
+            )),
+        }
     }
 
     /// Get peer address.
@@ -250,6 +258,11 @@ impl TcpStream {
             Err(err) => Err(err),
         }
     }
+}
+
+fn wall_clock_now() -> crate::types::Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    CLOCK.get_or_init(WallClock::new).now()
 }
 
 fn connect_in_progress(err: &io::Error) -> bool {
