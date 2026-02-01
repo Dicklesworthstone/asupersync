@@ -288,10 +288,9 @@ mod tests {
             let dir = tempdir().unwrap();
             let path = dir.path().join("test_truncate.txt");
 
-            // Create and write
-            let file = File::create(&path).await.unwrap();
-            let mut writer = &*file.inner;
-            std::io::Write::write_all(&mut writer, b"hello world").unwrap();
+            // Create and write using async API
+            let mut file = File::create(&path).await.unwrap();
+            file.write_all(b"hello world").await.unwrap();
             file.sync_all().await.unwrap();
 
             // Truncate
