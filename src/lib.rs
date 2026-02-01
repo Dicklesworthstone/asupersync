@@ -72,6 +72,7 @@ pub mod codec;
 pub mod combinator;
 pub mod config;
 pub mod conformance;
+pub mod console;
 pub mod cx;
 pub mod decoding;
 pub mod distributed;
