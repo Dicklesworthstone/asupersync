@@ -214,21 +214,21 @@ impl WebSocketConfig {
 /// handling and clean close on cancellation.
 pub struct WebSocket<IO> {
     /// Underlying I/O stream.
-    io: IO,
+    pub(super) io: IO,
     /// Frame codec for encoding/decoding.
-    codec: FrameCodec,
+    pub(super) codec: FrameCodec,
     /// Read buffer.
-    read_buf: BytesMut,
+    pub(super) read_buf: BytesMut,
     /// Write buffer.
-    write_buf: BytesMut,
+    pub(super) write_buf: BytesMut,
     /// Close handshake state.
-    close_handshake: CloseHandshake,
+    pub(super) close_handshake: CloseHandshake,
     /// Configuration.
-    config: WebSocketConfig,
+    pub(super) config: WebSocketConfig,
     /// Negotiated subprotocol (if any).
-    protocol: Option<String>,
+    pub(super) protocol: Option<String>,
     /// Pending pong payloads to send.
-    pending_pongs: Vec<Bytes>,
+    pub(super) pending_pongs: Vec<Bytes>,
 }
 
 impl<IO> WebSocket<IO>
