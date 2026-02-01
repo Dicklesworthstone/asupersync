@@ -8,7 +8,7 @@ use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::runtime::RuntimeState;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, Time};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,6 +67,68 @@ fn test_ready_not_starved_by_cancel_flood() {
     // Ready task should have completed (removed from tasks map)
     let ready_completed = state.lock().unwrap().task(ready_id).is_none();
     assert!(ready_completed, "Ready task was starved by cancel flood");
+}
+
+/// Test that ready work runs within the fairness window when cancel tasks flood.
+#[test]
+fn test_ready_runs_within_fairness_window() {
+    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
+
+    let seq = Arc::new(AtomicUsize::new(0));
+    let ready_position = Arc::new(AtomicUsize::new(usize::MAX));
+
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+    // Flood cancel lane well beyond the fairness limit.
+    let num_cancel = MAX_CONSECUTIVE_CANCEL * 2;
+    for _ in 0..num_cancel {
+        let seq = Arc::clone(&seq);
+        let cancel_id = {
+            let mut guard = state.lock().unwrap();
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async move {
+                    seq.fetch_add(1, Ordering::SeqCst);
+                })
+                .unwrap();
+            id
+        };
+        scheduler.inject_cancel(cancel_id, 100);
+    }
+
+    // One ready task that records when it ran.
+    let seq_ready = Arc::clone(&seq);
+    let ready_position_ref = Arc::clone(&ready_position);
+    let ready_id = {
+        let mut guard = state.lock().unwrap();
+        let (id, _) = guard
+            .create_task(region, Budget::INFINITE, async move {
+                let pos = seq_ready.fetch_add(1, Ordering::SeqCst) + 1;
+                ready_position_ref.store(pos, Ordering::SeqCst);
+            })
+            .unwrap();
+        id
+    };
+    scheduler.inject_ready(ready_id, 100);
+
+    let workers = scheduler.take_workers();
+    let mut worker = workers.into_iter().next().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        worker.run_loop();
+    });
+
+    std::thread::sleep(Duration::from_millis(200));
+    scheduler.shutdown();
+    handle.join().unwrap();
+
+    let pos = ready_position.load(Ordering::SeqCst);
+    assert!(pos != usize::MAX, "Ready task never executed");
+    assert!(
+        pos <= MAX_CONSECUTIVE_CANCEL + 1,
+        "Ready task executed too late: {pos} (limit {})",
+        MAX_CONSECUTIVE_CANCEL + 1
+    );
 }
 
 /// Test that timed work completes despite a flood of cancel work.

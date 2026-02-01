@@ -12,10 +12,10 @@ fn test_var_state_join_commutativity() {
     let join_ab = state_a.join(state_b);
     let join_ba = state_b.join(state_a);
 
-    println!("A: {:?}", state_a);
-    println!("B: {:?}", state_b);
-    println!("A join B: {:?}", join_ab);
-    println!("B join A: {:?}", join_ba);
+    println!("A: {state_a:?}");
+    println!("B: {state_b:?}");
+    println!("A join B: {join_ab:?}");
+    println!("B join A: {join_ba:?}");
 
     assert_eq!(join_ab, join_ba, "Join should be commutative");
 

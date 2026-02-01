@@ -26,7 +26,7 @@ use common::init_test_logging;
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::deadline_monitor::{AdaptiveDeadlineConfig, MonitorConfig};
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::{RegionLimits, RuntimeBuilder, SpawnError};
 use asupersync::types::Time;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,6 +184,30 @@ fn builder_verify_006_normalization() {
     assert!(config.poll_budget >= 1, "normalized poll budget");
 
     test_complete!("builder_verify_006_normalization");
+}
+
+/// BUILDER-VERIFY-006B: Root region admission limits
+///
+/// RuntimeBuilder applies root region limits and spawn returns an error when
+/// admission is denied.
+#[test]
+fn builder_verify_006b_root_region_limits() {
+    init_test("builder_verify_006b_root_region_limits");
+
+    let limits = RegionLimits {
+        max_tasks: Some(0),
+        ..RegionLimits::unlimited()
+    };
+
+    let runtime = RuntimeBuilder::new()
+        .root_region_limits(limits)
+        .build()
+        .expect("build with root limits should succeed");
+
+    let result = runtime.handle().try_spawn(async { 1_u8 });
+    assert!(matches!(result, Err(SpawnError::RegionAtCapacity { .. })));
+
+    test_complete!("builder_verify_006b_root_region_limits");
 }
 
 // =============================================================================
