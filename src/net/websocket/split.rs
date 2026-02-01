@@ -84,12 +84,20 @@ pub struct WebSocketWrite<IO> {
 }
 
 /// Error returned when attempting to reunite mismatched halves.
-#[derive(Debug)]
 pub struct ReuniteError<IO> {
     /// The read half that couldn't be reunited.
     pub read: WebSocketRead<IO>,
     /// The write half that couldn't be reunited.
     pub write: WebSocketWrite<IO>,
+}
+
+impl<IO> std::fmt::Debug for ReuniteError<IO> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReuniteError")
+            .field("read", &"WebSocketRead { .. }")
+            .field("write", &"WebSocketWrite { .. }")
+            .finish()
+    }
 }
 
 impl<IO> std::fmt::Display for ReuniteError<IO> {
@@ -98,7 +106,7 @@ impl<IO> std::fmt::Display for ReuniteError<IO> {
     }
 }
 
-impl<IO: std::fmt::Debug> std::error::Error for ReuniteError<IO> {}
+impl<IO> std::error::Error for ReuniteError<IO> {}
 
 impl<IO> WebSocket<IO>
 where
@@ -164,11 +172,13 @@ where
 
             // Send any pending pongs (under lock)
             {
-                let mut shared = self.shared.lock();
+                let mut guard = self.shared.lock();
+                let shared = &mut *guard;
                 while let Some(payload) = shared.pending_pongs.pop() {
                     let pong = Frame::pong(payload);
-                    shared.write_buf.clear();
-                    shared.codec.encode(pong, &mut shared.write_buf)?;
+                    let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
+                    write_buf.clear();
+                    codec.encode(pong, write_buf)?;
                 }
             }
 
@@ -177,8 +187,10 @@ where
 
             // Try to decode a frame from the buffer
             let frame = {
-                let mut shared = self.shared.lock();
-                shared.codec.decode(&mut shared.read_buf)?
+                let mut guard = self.shared.lock();
+                let shared = &mut *guard;
+                let (codec, read_buf) = (&mut shared.codec, &mut shared.read_buf);
+                codec.decode(read_buf)?
             };
 
             match frame {
@@ -300,10 +312,12 @@ where
     /// Internal: send a single frame (for control messages like pong/close).
     async fn send_frame_internal(&mut self, frame: Frame) -> Result<(), WsError> {
         let data = {
-            let mut shared = self.shared.lock();
-            shared.write_buf.clear();
-            shared.codec.encode(frame, &mut shared.write_buf)?;
-            shared.write_buf.to_vec()
+            let mut guard = self.shared.lock();
+            let shared = &mut *guard;
+            let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
+            write_buf.clear();
+            codec.encode(frame, write_buf)?;
+            write_buf.to_vec()
         };
 
         self.write_all(&data).await
@@ -470,10 +484,12 @@ where
         use std::future::poll_fn;
 
         let data = {
-            let mut shared = self.shared.lock();
-            shared.write_buf.clear();
-            shared.codec.encode(frame, &mut shared.write_buf)?;
-            shared.write_buf.to_vec()
+            let mut guard = self.shared.lock();
+            let shared = &mut *guard;
+            let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
+            write_buf.clear();
+            codec.encode(frame, write_buf)?;
+            write_buf.to_vec()
         };
 
         let mut written = 0;
