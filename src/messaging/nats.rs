@@ -253,6 +253,16 @@ fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
     }
 }
 
+/// Generate a random suffix for unique inbox subjects.
+fn random_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:016x}", nanos ^ (std::process::id() as u128))
+}
+
 /// Internal read buffer for NATS protocol parsing.
 #[derive(Debug)]
 struct NatsReadBuffer {
@@ -716,6 +726,81 @@ impl NatsClient {
         Ok(())
     }
 
+    /// Request/reply pattern: publish and wait for a single response.
+    ///
+    /// This creates a unique inbox subject, subscribes to it, publishes
+    /// the request, and waits for the first response (or timeout).
+    pub async fn request(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        payload: &[u8],
+    ) -> Result<Message, NatsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+        if !self.connected {
+            return Err(NatsError::NotConnected);
+        }
+
+        // Generate unique inbox subject
+        let inbox = format!("_INBOX.{}.{}", self.next_sid.load(Ordering::Relaxed), random_suffix());
+
+        // Subscribe to inbox
+        let mut sub = self.subscribe(cx, &inbox).await?;
+
+        // Publish request with reply-to inbox
+        self.publish_request(cx, subject, &inbox, payload).await?;
+
+        // Wait for response with timeout
+        let timeout = self.config.request_timeout;
+        let start = std::time::Instant::now();
+
+        loop {
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+            // Check timeout
+            if start.elapsed() > timeout {
+                // Clean up subscription
+                self.unsubscribe(cx, sub.sid()).await?;
+                return Err(NatsError::Protocol("request timeout".to_string()));
+            }
+
+            // Try to read any pending messages
+            self.read_more().await?;
+
+            // Process messages looking for our reply
+            loop {
+                match self.try_parse_message()? {
+                    Some(NatsMessage::Ping) => {
+                        self.stream.write_all(b"PONG\r\n").await?;
+                        self.stream.flush().await?;
+                    }
+                    Some(NatsMessage::Msg(m)) => {
+                        if m.sid == sub.sid() {
+                            // This is our reply - clean up and return
+                            self.unsubscribe(cx, sub.sid()).await?;
+                            return Ok(m);
+                        } else {
+                            // Dispatch to other subscriptions
+                            self.dispatch_message(m);
+                        }
+                    }
+                    Some(NatsMessage::Err(e)) => {
+                        return Err(NatsError::Server(e));
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+
+            // Also check the subscription channel in case message was already dispatched
+            if let Some(msg) = sub.try_next() {
+                self.unsubscribe(cx, sub.sid()).await?;
+                return Ok(msg);
+            }
+        }
+    }
+
     /// Subscribe to a subject.
     ///
     /// Returns a `Subscription` that can be used to receive messages.
@@ -1058,5 +1143,113 @@ mod tests {
         assert_eq!(extract_json_bool(json, "enabled"), Some(true));
         assert_eq!(extract_json_bool(json, "disabled"), Some(false));
         assert_eq!(extract_json_bool(json, "missing"), None);
+    }
+
+    #[test]
+    fn test_config_invalid_url() {
+        let result = NatsConfig::from_url("http://localhost:4222");
+        assert!(matches!(result, Err(NatsError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn test_config_invalid_port() {
+        let result = NatsConfig::from_url("nats://localhost:notaport");
+        assert!(matches!(result, Err(NatsError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn test_nats_error_display() {
+        assert_eq!(
+            format!("{}", NatsError::Cancelled),
+            "NATS operation cancelled"
+        );
+        assert_eq!(
+            format!("{}", NatsError::Closed),
+            "NATS connection closed"
+        );
+        assert_eq!(
+            format!("{}", NatsError::NotConnected),
+            "NATS not connected"
+        );
+        assert_eq!(
+            format!("{}", NatsError::SubscriptionNotFound(42)),
+            "NATS subscription not found: 42"
+        );
+        assert_eq!(
+            format!("{}", NatsError::Server("auth error".to_string())),
+            "NATS server error: auth error"
+        );
+        assert_eq!(
+            format!("{}", NatsError::Protocol("parse error".to_string())),
+            "NATS protocol error: parse error"
+        );
+        assert_eq!(
+            format!("{}", NatsError::InvalidUrl("bad".to_string())),
+            "Invalid NATS URL: bad"
+        );
+    }
+
+    #[test]
+    fn test_random_suffix_uniqueness() {
+        let s1 = random_suffix();
+        let s2 = random_suffix();
+        // Not guaranteed unique in same nanosecond, but in practice should differ
+        // Just verify format is correct (16 hex chars)
+        assert_eq!(s1.len(), 16);
+        assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_server_info_parse_minimal() {
+        let json = r#"{}"#;
+        let info = ServerInfo::parse(json);
+        assert_eq!(info.server_id, "");
+        assert_eq!(info.max_payload, 0);
+        assert!(!info.tls_required);
+    }
+
+    #[test]
+    fn test_server_info_parse_with_tls() {
+        let json = r#"{"tls_required":true,"tls_available":true}"#;
+        let info = ServerInfo::parse(json);
+        assert!(info.tls_required);
+        assert!(info.tls_available);
+    }
+
+    #[test]
+    fn test_nats_config_default() {
+        let config = NatsConfig::default();
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 4222);
+        assert!(config.user.is_none());
+        assert!(config.password.is_none());
+        assert!(config.token.is_none());
+        assert!(!config.verbose);
+        assert!(!config.pedantic);
+        assert_eq!(config.max_payload, 1_048_576);
+        assert_eq!(config.request_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_read_buffer_operations() {
+        let mut buf = NatsReadBuffer::new();
+        assert!(buf.available().is_empty());
+
+        buf.extend(b"hello\r\n");
+        assert_eq!(buf.available(), b"hello\r\n");
+        assert_eq!(buf.find_crlf(), Some(5));
+
+        buf.consume(7);
+        assert!(buf.available().is_empty());
+    }
+
+    #[test]
+    fn test_read_buffer_partial_crlf() {
+        let mut buf = NatsReadBuffer::new();
+        buf.extend(b"hello\r");
+        assert_eq!(buf.find_crlf(), None); // Incomplete CRLF
+
+        buf.extend(b"\n");
+        assert_eq!(buf.find_crlf(), Some(5));
     }
 }

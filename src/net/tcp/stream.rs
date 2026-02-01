@@ -158,7 +158,7 @@ impl TcpStream {
     /// Connect with timeout.
     pub async fn connect_timeout(addr: SocketAddr, timeout_duration: Duration) -> io::Result<Self> {
         let connect_future = Box::pin(TcpStream::connect(addr));
-        match timeout(wall_clock_now(), timeout_duration, connect_future).await {
+        match timeout(timeout_now(), timeout_duration, connect_future).await {
             Ok(Ok(stream)) => Ok(stream),
             Ok(Err(err)) => Err(err),
             Err(_) => Err(io::Error::new(
@@ -260,7 +260,12 @@ impl TcpStream {
     }
 }
 
-fn wall_clock_now() -> crate::types::Time {
+fn timeout_now() -> crate::types::Time {
+    if let Some(current) = Cx::current() {
+        if let Some(driver) = current.timer_driver() {
+            return driver.now();
+        }
+    }
     static CLOCK: OnceLock<WallClock> = OnceLock::new();
     CLOCK.get_or_init(WallClock::new).now()
 }

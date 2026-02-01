@@ -91,10 +91,7 @@ pub struct IncomingBody {
 impl IncomingBody {
     /// Creates a bounded incoming body channel.
     #[must_use]
-    pub fn channel(
-        cx: Cx,
-        kind: BodyKind,
-    ) -> (IncomingBodyWriter, IncomingBody) {
+    pub fn channel(cx: Cx, kind: BodyKind) -> (IncomingBodyWriter, IncomingBody) {
         Self::channel_with_capacity(cx, kind, DEFAULT_BODY_CHANNEL_CAPACITY)
     }
 
@@ -346,11 +343,7 @@ impl IncomingBodyWriter {
         }
 
         let remaining = usize::try_from(self.remaining).unwrap_or(usize::MAX);
-        let to_yield = self
-            .buffer
-            .len()
-            .min(remaining)
-            .min(self.max_chunk_size);
+        let to_yield = self.buffer.len().min(remaining).min(self.max_chunk_size);
 
         let chunk = self.buffer.split_to(to_yield);
         self.remaining = self.remaining.saturating_sub(to_yield as u64);
@@ -371,17 +364,14 @@ impl IncomingBodyWriter {
         loop {
             match self.chunked_state {
                 ChunkedReadState::SizeLine => {
-                    let line_end = self
-                        .buffer
-                        .as_ref()
-                        .windows(2)
-                        .position(|w| w == b"\r\n");
+                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
                     let Some(line_end) = line_end else {
                         return Ok(None);
                     };
 
                     let line = &self.buffer.as_ref()[..line_end];
-                    let line_str = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
+                    let line_str =
+                        std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
                     let size_part = line_str.split(';').next().unwrap_or("").trim();
                     if size_part.is_empty() {
                         return Err(HttpError::BadChunkedEncoding);
@@ -408,11 +398,7 @@ impl IncomingBodyWriter {
                         return Ok(None);
                     }
 
-                    let to_yield = self
-                        .buffer
-                        .len()
-                        .min(remaining)
-                        .min(self.max_chunk_size);
+                    let to_yield = self.buffer.len().min(remaining).min(self.max_chunk_size);
 
                     let chunk = self.buffer.split_to(to_yield);
                     let remaining = remaining.saturating_sub(to_yield);
@@ -446,11 +432,7 @@ impl IncomingBodyWriter {
                         return Err(HttpError::HeadersTooLarge);
                     }
 
-                    let line_end = self
-                        .buffer
-                        .as_ref()
-                        .windows(2)
-                        .position(|w| w == b"\r\n");
+                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
                     let Some(line_end) = line_end else {
                         return Ok(None);
                     };
@@ -472,7 +454,8 @@ impl IncomingBodyWriter {
                         return Err(HttpError::HeadersTooLarge);
                     }
 
-                    let line_str = std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
+                    let line_str =
+                        std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
                     let Some(colon) = line_str.find(':') else {
                         return Err(HttpError::BadHeader);
                     };
@@ -599,10 +582,7 @@ pub struct OutgoingBody {
 impl OutgoingBody {
     /// Creates a bounded outgoing body channel.
     #[must_use]
-    pub fn channel(
-        cx: Cx,
-        kind: BodyKind,
-    ) -> (OutgoingBodySender, OutgoingBody) {
+    pub fn channel(cx: Cx, kind: BodyKind) -> (OutgoingBodySender, OutgoingBody) {
         Self::channel_with_capacity(cx, kind, DEFAULT_BODY_CHANNEL_CAPACITY)
     }
 
@@ -745,7 +725,8 @@ impl OutgoingBodySender {
             self.remaining -= len;
         }
         self.total_bytes = self.total_bytes.saturating_add(len);
-        self.send_frame(cx, Frame::Data(BytesCursor::new(data))).await
+        self.send_frame(cx, Frame::Data(BytesCursor::new(data)))
+            .await
     }
 
     /// Sends a slice (copies into Bytes).
@@ -757,11 +738,7 @@ impl OutgoingBodySender {
     }
 
     /// Sends trailing headers (only valid for chunked bodies).
-    pub async fn send_trailers(
-        &mut self,
-        cx: &Cx,
-        trailers: HeaderMap,
-    ) -> Result<(), HttpError> {
+    pub async fn send_trailers(&mut self, cx: &Cx, trailers: HeaderMap) -> Result<(), HttpError> {
         if !matches!(self.kind, BodyKind::Chunked) {
             return Err(HttpError::TrailersNotAllowed);
         }
@@ -955,8 +932,7 @@ impl StreamingResponse {
         status: u16,
         reason: impl Into<String>,
     ) -> (StreamingResponse, OutgoingBodySender) {
-        let head = ResponseHead::new(status, reason)
-            .with_header("Transfer-Encoding", "chunked");
+        let head = ResponseHead::new(status, reason).with_header("Transfer-Encoding", "chunked");
         let (sender, body) = OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, capacity);
         (StreamingResponse { head, body }, sender)
     }
@@ -970,8 +946,8 @@ impl StreamingResponse {
         reason: impl Into<String>,
         length: u64,
     ) -> (StreamingResponse, OutgoingBodySender) {
-        let head = ResponseHead::new(status, reason)
-            .with_header("Content-Length", length.to_string());
+        let head =
+            ResponseHead::new(status, reason).with_header("Content-Length", length.to_string());
         let (sender, body) =
             OutgoingBody::channel_with_capacity(cx, BodyKind::ContentLength(length), capacity);
         (StreamingResponse { head, body }, sender)
@@ -980,8 +956,7 @@ impl StreamingResponse {
     /// Creates an empty response (no body).
     #[must_use]
     pub fn empty(cx: Cx, status: u16, reason: impl Into<String>) -> StreamingResponse {
-        let head = ResponseHead::new(status, reason)
-            .with_header("Content-Length", "0");
+        let head = ResponseHead::new(status, reason).with_header("Content-Length", "0");
         StreamingResponse {
             head,
             body: OutgoingBody::empty(cx),
@@ -992,7 +967,6 @@ impl StreamingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::Buf as _;
     use crate::types::CancelKind;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -1008,7 +982,7 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
-    fn block_on<F: std::future::Future>(mut f: F) -> F::Output {
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = std::pin::pin!(f);
@@ -1026,7 +1000,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         loop {
-            match Pin::new(body).poll_frame(&mut cx) {
+            match Pin::new(&mut *body).poll_frame(&mut cx) {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
@@ -1052,8 +1026,7 @@ mod tests {
     #[test]
     fn incoming_body_content_length() {
         let cx = Cx::for_testing();
-        let (mut writer, mut body) =
-            IncomingBody::channel(cx.clone(), BodyKind::ContentLength(5));
+        let (mut writer, mut body) = IncomingBody::channel(cx.clone(), BodyKind::ContentLength(5));
 
         block_on(writer.push_bytes(&cx, b"hello")).expect("push bytes");
 
@@ -1068,11 +1041,8 @@ mod tests {
         let cx = Cx::for_testing();
         let (mut writer, mut body) = IncomingBody::channel(cx.clone(), BodyKind::Chunked);
 
-        block_on(writer.push_bytes(
-            &cx,
-            b"5\r\nhello\r\n0\r\nX-Trailer: test\r\n\r\n",
-        ))
-        .expect("push bytes");
+        block_on(writer.push_bytes(&cx, b"5\r\nhello\r\n0\r\nX-Trailer: test\r\n\r\n"))
+            .expect("push bytes");
 
         let frame = poll_body(&mut body).unwrap().unwrap();
         assert_eq!(frame.into_data().unwrap().chunk(), b"hello");
@@ -1129,8 +1099,7 @@ mod tests {
     #[test]
     fn outgoing_body_content_length_roundtrip() {
         let cx = Cx::for_testing();
-        let (mut sender, mut body) =
-            OutgoingBody::channel(cx.clone(), BodyKind::ContentLength(11));
+        let (mut sender, mut body) = OutgoingBody::channel(cx.clone(), BodyKind::ContentLength(11));
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello"))).unwrap();
         block_on(sender.send_bytes(&cx, Bytes::from_static(b" world"))).unwrap();
@@ -1240,20 +1209,23 @@ mod tests {
     fn streaming_response_chunked() {
         let cx = Cx::for_testing();
         let (resp, _sender) = StreamingResponse::chunked(cx, 4, 200, "OK");
-        assert!(resp.head.headers.iter().any(|(n, v)| {
-            n.eq_ignore_ascii_case("transfer-encoding") && v == "chunked"
-        }));
+        assert!(resp
+            .head
+            .headers
+            .iter()
+            .any(|(n, v)| { n.eq_ignore_ascii_case("transfer-encoding") && v == "chunked" }));
         assert!(resp.body.kind().is_chunked());
     }
 
     #[test]
     fn streaming_response_content_length() {
         let cx = Cx::for_testing();
-        let (resp, _sender) =
-            StreamingResponse::with_content_length(cx, 4, 200, "OK", 100);
-        assert!(resp.head.headers.iter().any(|(n, v)| {
-            n.eq_ignore_ascii_case("content-length") && v == "100"
-        }));
+        let (resp, _sender) = StreamingResponse::with_content_length(cx, 4, 200, "OK", 100);
+        assert!(resp
+            .head
+            .headers
+            .iter()
+            .any(|(n, v)| { n.eq_ignore_ascii_case("content-length") && v == "100" }));
         assert_eq!(resp.body.kind(), BodyKind::ContentLength(100));
     }
 }
