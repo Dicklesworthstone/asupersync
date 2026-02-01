@@ -181,7 +181,7 @@ impl Worker {
                 return;
             };
             record.start_running();
-            record.wake_state.clear();
+            record.wake_state.begin_poll();
             let task_cx = record.cx.clone();
             let wake_state = Arc::clone(&record.wake_state);
             drop(state);
@@ -190,7 +190,7 @@ impl Worker {
 
         let waker = Waker::from(Arc::new(WorkStealingWaker {
             task_id,
-            wake_state,
+            wake_state: Arc::clone(&wake_state),
             global: Arc::clone(&self.global),
             parker: self.parker.clone(),
         }));
@@ -214,10 +214,17 @@ impl Worker {
                         .is_none_or(|record| record.wake_state.notify())
                         .then(|| self.global.push(waiter));
                 }
+                drop(state);
+                wake_state.clear();
             }
             Poll::Pending => {
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 state.store_spawned_task(task_id, stored);
+                drop(state);
+                if wake_state.finish_poll() {
+                    self.global.push(task_id);
+                    self.parker.unpark();
+                }
             }
         }
     }
@@ -285,6 +292,7 @@ impl Parker {
         while !self.inner.notified.swap(false, Ordering::Acquire) {
             guard = self.inner.cvar.wait(guard).unwrap();
         }
+        drop(guard);
     }
 
     /// Parks the current thread with a timeout.
@@ -293,23 +301,14 @@ impl Parker {
             return;
         }
 
-        let guard = self.inner.mutex.lock().unwrap();
-        if self.inner.notified.swap(false, Ordering::Acquire) {
-            return;
-        }
-
-        let (guard, timeout) = self
+        let (guard, _timeout) = self
             .inner
             .cvar
-            .wait_timeout_while(guard, duration, |_| {
-                !self.inner.notified.load(Ordering::Acquire)
+            .wait_timeout_while(self.inner.mutex.lock().unwrap(), duration, |()| {
+                !self.inner.notified.swap(false, Ordering::Acquire)
             })
             .unwrap();
         drop(guard);
-
-        if !timeout.timed_out() {
-            let _ = self.inner.notified.swap(false, Ordering::Acquire);
-        }
     }
 
     /// Unparks a parked thread.

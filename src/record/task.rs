@@ -6,7 +6,7 @@
 use crate::cx::Cx;
 use crate::tracing_compat::{debug, trace};
 use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId, Time};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -100,7 +100,15 @@ impl TaskPhaseCell {
 /// Cross-thread wake dedup state for a task.
 #[derive(Debug, Default)]
 pub struct TaskWakeState {
-    notified: AtomicBool,
+    state: AtomicU8,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WakeState {
+    Idle = 0,
+    Polling = 1,
+    Notified = 2,
 }
 
 impl TaskWakeState {
@@ -110,20 +118,40 @@ impl TaskWakeState {
         Self::default()
     }
 
-    /// Marks a pending wake and returns true if this is the first notification.
+    /// Marks a pending wake and returns true if scheduling should occur.
     pub fn notify(&self) -> bool {
-        !self.notified.swap(true, Ordering::AcqRel)
+        let prev = self.state.swap(WakeState::Notified as u8, Ordering::AcqRel);
+        prev == WakeState::Idle as u8
     }
 
-    /// Clears the pending wake flag.
+    /// Marks the task as being polled.
+    pub fn begin_poll(&self) {
+        self.state
+            .store(WakeState::Polling as u8, Ordering::Release);
+    }
+
+    /// Finishes polling and returns true if a wake occurred during poll.
+    pub fn finish_poll(&self) -> bool {
+        match self.state.compare_exchange(
+            WakeState::Polling as u8,
+            WakeState::Idle as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => false,
+            Err(current) => current == WakeState::Notified as u8,
+        }
+    }
+
+    /// Clears any pending wake and marks the task idle.
     pub fn clear(&self) {
-        self.notified.store(false, Ordering::Release);
+        self.state.store(WakeState::Idle as u8, Ordering::Release);
     }
 
     /// Returns true if a wake is pending.
     #[must_use]
     pub fn is_notified(&self) -> bool {
-        self.notified.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) == WakeState::Notified as u8
     }
 }
 
@@ -772,6 +800,33 @@ mod tests {
         let cleared = state.is_notified();
         crate::assert_with_log!(!cleared, "notified cleared", false, cleared);
         crate::test_complete!("wake_state_dedups_across_threads");
+    }
+
+    #[test]
+    fn wake_state_tracks_wake_during_poll() {
+        init_test("wake_state_tracks_wake_during_poll");
+        let state = TaskWakeState::new();
+
+        state.begin_poll();
+        let woken = state.finish_poll();
+        crate::assert_with_log!(!woken, "no wake during poll", false, woken);
+
+        state.begin_poll();
+        let scheduled = state.notify();
+        crate::assert_with_log!(
+            !scheduled,
+            "wake during poll does not schedule",
+            false,
+            scheduled
+        );
+        let woken = state.finish_poll();
+        crate::assert_with_log!(woken, "wake observed after poll", true, woken);
+        let pending = state.is_notified();
+        crate::assert_with_log!(pending, "pending wake recorded", true, pending);
+        state.clear();
+        let cleared = state.is_notified();
+        crate::assert_with_log!(!cleared, "wake cleared", false, cleared);
+        crate::test_complete!("wake_state_tracks_wake_during_poll");
     }
 
     #[test]

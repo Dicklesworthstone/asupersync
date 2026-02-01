@@ -416,7 +416,7 @@ impl ThreeLaneWorker {
                 return;
             };
             record.start_running();
-            record.wake_state.clear();
+            record.wake_state.begin_poll();
             let priority = record
                 .cx_inner
                 .as_ref()
@@ -475,10 +475,33 @@ impl ThreeLaneWorker {
                         }
                     }
                 }
+                drop(state);
+                wake_state.clear();
             }
             Poll::Pending => {
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 state.store_spawned_task(task_id, stored);
+                drop(state);
+                if wake_state.finish_poll() {
+                    let mut cancel_priority = priority;
+                    let mut schedule_cancel = false;
+                    if let Some(inner) = cx_inner.as_ref() {
+                        if let Ok(guard) = inner.read() {
+                            if guard.cancel_requested {
+                                schedule_cancel = true;
+                                if let Some(reason) = guard.cancel_reason.as_ref() {
+                                    cancel_priority = reason.cleanup_budget().priority;
+                                }
+                            }
+                        }
+                    }
+                    if schedule_cancel {
+                        self.global.inject_cancel(task_id, cancel_priority);
+                    } else {
+                        self.global.inject_ready(task_id, priority);
+                    }
+                    self.parker.unpark();
+                }
             }
         }
     }

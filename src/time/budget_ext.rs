@@ -118,8 +118,10 @@ mod tests {
     #[test]
     fn test_budget_sleep() {
         init_test("test_budget_sleep");
-        let now = Time::from_secs(100);
-        let deadline = now.saturating_add_nanos(100_000_000); // 100ms
+        // `Sleep`'s fallback time source starts at `Time::ZERO` on first poll.
+        // Use a small deadline in the same time basis so this test remains fast.
+        let now = Time::ZERO;
+        let deadline = now.saturating_add_nanos(5_000_000); // 5ms
         let budget = Budget::new().with_deadline(deadline);
         let cx = test_cx(budget);
 
