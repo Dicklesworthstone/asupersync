@@ -104,6 +104,8 @@ pub struct RegionLimits {
     pub max_tasks: Option<usize>,
     /// Maximum number of pending obligations in the region.
     pub max_obligations: Option<usize>,
+    /// Maximum live bytes allocated in the region heap.
+    pub max_heap_bytes: Option<usize>,
     /// Optional min-plus curve budget for hard admission bounds.
     pub curve_budget: Option<CurveBudget>,
 }
@@ -114,6 +116,7 @@ impl RegionLimits {
         max_children: None,
         max_tasks: None,
         max_obligations: None,
+        max_heap_bytes: None,
         curve_budget: None,
     };
 
@@ -153,6 +156,8 @@ pub enum AdmissionKind {
     Task,
     /// Admission for obligations.
     Obligation,
+    /// Admission for region heap memory.
+    HeapBytes,
 }
 
 /// Admission control failure reasons.
@@ -530,12 +535,28 @@ impl RegionRecord {
     /// The allocation remains valid until the region closes to quiescence.
     /// This ensures that tasks spawned in the region can safely access the data.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the heap exceeds its maximum capacity.
-    pub fn heap_alloc<T: Send + Sync + 'static>(&self, value: T) -> HeapIndex {
+    /// Returns an admission error if the heap memory limit is exceeded.
+    pub fn heap_alloc<T: Send + Sync + 'static>(
+        &self,
+        value: T,
+    ) -> Result<HeapIndex, AdmissionError> {
+        let size_hint = std::mem::size_of::<T>();
         let mut inner = self.inner.write().expect("lock poisoned");
-        inner.heap.alloc(value)
+        if let Some(limit) = inner.limits.max_heap_bytes {
+            let live_bytes = inner.heap.stats().bytes_live;
+            let requested = live_bytes.saturating_add(size_hint as u64);
+            if requested > limit as u64 {
+                let live = usize::try_from(live_bytes).unwrap_or(usize::MAX);
+                return Err(AdmissionError::LimitReached {
+                    kind: AdmissionKind::HeapBytes,
+                    limit,
+                    live,
+                });
+            }
+        }
+        Ok(inner.heap.alloc(value))
     }
 
     /// Returns a reference to a heap-allocated value.
@@ -888,6 +909,27 @@ mod tests {
     }
 
     #[test]
+    fn region_heap_bytes_limit_enforced() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let limit = std::mem::size_of::<u32>();
+        region.set_limits(RegionLimits {
+            max_heap_bytes: Some(limit),
+            ..RegionLimits::unlimited()
+        });
+
+        let _idx = region.heap_alloc(7u32).expect("heap alloc");
+        let err = region.heap_alloc(1u8).expect_err("heap limit enforced");
+        assert!(matches!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::HeapBytes,
+                limit: _,
+                live: _
+            }
+        ));
+    }
+
+    #[test]
     fn begin_close_with_reason() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         let reason = CancelReason::user("test shutdown");
@@ -900,7 +942,7 @@ mod tests {
     fn region_heap_reclaimed_on_close() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
 
-        let _idx = region.heap_alloc(42u32);
+        let _idx = region.heap_alloc(42u32).expect("heap alloc");
         assert_eq!(region.heap_len(), 1);
 
         assert!(region.begin_close(None));
@@ -915,7 +957,7 @@ mod tests {
         let region_id = test_region_id();
         let region = RegionRecord::new(region_id, None, Budget::default());
 
-        let index = region.heap_alloc(123u32);
+        let index = region.heap_alloc(123u32).expect("heap alloc");
         let rref = RRef::<u32>::new(region_id, index);
 
         assert!(region.begin_close(None));

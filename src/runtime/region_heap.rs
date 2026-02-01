@@ -47,6 +47,8 @@ pub struct HeapStats {
     pub live: u64,
     /// Total bytes allocated (approximate, type-erased overhead not counted).
     pub bytes_allocated: u64,
+    /// Current live bytes (approximate, type-erased overhead not counted).
+    pub bytes_live: u64,
 }
 
 /// Global allocation counter for testing memory reclamation.
@@ -204,6 +206,7 @@ impl RegionHeap {
         self.stats.allocations += 1;
         self.stats.live += 1;
         self.stats.bytes_allocated += size_hint as u64;
+        self.stats.bytes_live += size_hint as u64;
         GLOBAL_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
 
         let entry = HeapEntry {
@@ -311,6 +314,7 @@ impl RegionHeap {
 
         match slot {
             HeapSlot::Occupied(entry) if entry.generation == index.generation => {
+                let size_hint = entry.size_hint;
                 let new_gen = entry.generation.wrapping_add(1);
 
                 *slot = HeapSlot::Vacant {
@@ -323,6 +327,8 @@ impl RegionHeap {
                 // Update statistics
                 self.stats.reclaimed += 1;
                 self.stats.live -= 1;
+                self.stats.bytes_live =
+                    self.stats.bytes_live.saturating_sub(size_hint as u64);
                 GLOBAL_ALLOC_COUNT.fetch_sub(1, Ordering::Relaxed);
 
                 true
@@ -341,6 +347,7 @@ impl RegionHeap {
 
         self.stats.reclaimed += reclaimed_count;
         self.stats.live = 0;
+        self.stats.bytes_live = 0;
 
         self.slots.clear();
         self.free_head = None;

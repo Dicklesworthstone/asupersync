@@ -20,7 +20,7 @@
 //!
 //! ```ignore
 //! // In region context
-//! let data = region.heap_alloc(vec![1, 2, 3]);
+//! let data = region.heap_alloc(vec![1, 2, 3]).expect("heap alloc");
 //! let rref = RRef::<Vec<i32>>::new(region_id, data);
 //!
 //! // Pass to spawned task
@@ -152,7 +152,7 @@ impl<T: Send + Sync + 'static> RRef<T> {
     /// # Example
     ///
     /// ```ignore
-    /// let index = region.heap_alloc(42u32);
+    /// let index = region.heap_alloc(42u32).expect("heap alloc");
     /// let rref = RRef::new(region_id, index);
     /// ```
     #[must_use]
@@ -229,7 +229,7 @@ mod tests {
     fn rref_is_copy_and_clone() {
         let region_id = test_region_id();
         let record = RegionRecord::new(region_id, None, Budget::INFINITE);
-        let index = record.heap_alloc(42u32);
+        let index = record.heap_alloc(42u32).expect("heap alloc");
         let rref = RRef::<u32>::new(region_id, index);
 
         // Test Copy
@@ -245,8 +245,8 @@ mod tests {
         let region_id = test_region_id();
         let record = RegionRecord::new(region_id, None, Budget::INFINITE);
 
-        let index1 = record.heap_alloc(1u32);
-        let index2 = record.heap_alloc(2u32);
+        let index1 = record.heap_alloc(1u32).expect("heap alloc");
+        let index2 = record.heap_alloc(2u32).expect("heap alloc");
 
         let rref1a = RRef::<u32>::new(region_id, index1);
         let rref1_clone = RRef::<u32>::new(region_id, index1);
@@ -260,7 +260,7 @@ mod tests {
     fn rref_accessors() {
         let region_id = test_region_id();
         let record = RegionRecord::new(region_id, None, Budget::INFINITE);
-        let index = record.heap_alloc("hello".to_string());
+        let index = record.heap_alloc("hello".to_string()).expect("heap alloc");
         let rref = RRef::<String>::new(region_id, index);
 
         assert_eq!(rref.region_id(), region_id);
@@ -271,7 +271,7 @@ mod tests {
     fn rref_debug_format() {
         let region_id = test_region_id();
         let record = RegionRecord::new(region_id, None, Budget::INFINITE);
-        let index = record.heap_alloc(42u32);
+        let index = record.heap_alloc(42u32).expect("heap alloc");
         let rref = RRef::<u32>::new(region_id, index);
 
         let debug_str = format!("{rref:?}");
@@ -284,7 +284,7 @@ mod tests {
     fn rref_access_through_region_record() {
         let region_id = test_region_id();
         let record = RegionRecord::new(region_id, None, Budget::INFINITE);
-        let index = record.heap_alloc("hello".to_string());
+        let index = record.heap_alloc("hello".to_string()).expect("heap alloc");
         let rref = RRef::<String>::new(region_id, index);
 
         let value = record.rref_get(&rref).expect("rref_get");
@@ -301,7 +301,7 @@ mod tests {
         let record_a = RegionRecord::new(region_a, None, Budget::INFINITE);
         let record_b = RegionRecord::new(region_b, None, Budget::INFINITE);
 
-        let index = record_a.heap_alloc(7u32);
+        let index = record_a.heap_alloc(7u32).expect("heap alloc");
         let rref = RRef::<u32>::new(region_a, index);
 
         let err = record_b.rref_get(&rref).expect_err("region mismatch");

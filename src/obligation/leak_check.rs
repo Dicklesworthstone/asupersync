@@ -83,7 +83,10 @@ impl VarState {
     /// Returns true if this state indicates a potential leak.
     #[must_use]
     pub fn is_leak(&self) -> bool {
-        matches!(self, Self::Held(_) | Self::MayHold(_) | Self::MayHoldAmbiguous)
+        matches!(
+            self,
+            Self::Held(_) | Self::MayHold(_) | Self::MayHoldAmbiguous
+        )
     }
 
     /// Returns the obligation kind, if any.
