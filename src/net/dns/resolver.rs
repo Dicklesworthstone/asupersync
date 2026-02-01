@@ -156,10 +156,13 @@ impl Resolver {
         }
 
         let retries = self.config.retries;
+        if self.config.timeout.is_zero() {
+            return Err(DnsError::Timeout);
+        }
         let host = host.to_string();
 
-        // Run DNS resolution on blocking pool for true async behavior
-        spawn_blocking(move || {
+        // Run DNS resolution on blocking pool for true async behavior.
+        let lookup = Box::pin(spawn_blocking(move || {
             let mut last_error = None;
 
             for _attempt in 0..=retries {
@@ -172,8 +175,12 @@ impl Resolver {
             }
 
             Err(last_error.unwrap_or(DnsError::Timeout))
-        })
-        .await
+        }));
+
+        match timeout(timeout_now(), self.config.timeout, lookup).await {
+            Ok(result) => result,
+            Err(_) => Err(DnsError::Timeout),
+        }
     }
 
     /// Performs synchronous DNS lookup using std::net.
@@ -262,16 +269,11 @@ impl Resolver {
 
         let delay = self.config.happy_eyeballs_delay;
         let mut last_error = None;
-        let start = Instant::now();
 
         for (i, addr) in addrs.iter().enumerate() {
-            // Calculate when this attempt should start
-            let attempt_start = delay * i as u32;
-            let elapsed = start.elapsed();
-
-            if elapsed < attempt_start {
-                // Yield briefly to simulate staggered start
-                crate::runtime::yield_now().await;
+            if i > 0 && !delay.is_zero() {
+                // Stagger attempts with deterministic sleep (lab time aware).
+                sleep(timeout_now(), delay).await;
             }
 
             // Try to connect with timeout
@@ -303,20 +305,28 @@ impl Resolver {
     async fn try_connect_timeout(
         &self,
         addr: SocketAddr,
-        timeout: Duration,
+        timeout_duration: Duration,
     ) -> Result<TcpStream, DnsError> {
-        // Run connection on blocking pool for true async behavior
-        let result = spawn_blocking(move || {
-            let stream = StdTcpStream::connect_timeout(&addr, timeout)
-                .map_err(|e| DnsError::Connection(e.to_string()))?;
+        if timeout_duration.is_zero() {
+            return Err(DnsError::Timeout);
+        }
+
+        // Run connection on blocking pool for true async behavior.
+        let connect = Box::pin(spawn_blocking(move || {
+            let stream =
+                StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
 
             stream
                 .set_nonblocking(true)
                 .map_err(|e| DnsError::Io(e.to_string()))?;
 
             Ok::<_, DnsError>(stream)
-        })
-        .await?;
+        }));
+
+        let result = match timeout(timeout_now(), timeout_duration, connect).await {
+            Ok(result) => result?,
+            Err(_) => return Err(DnsError::Timeout),
+        };
 
         // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
         Ok(TcpStream::from_std(result))
@@ -372,9 +382,20 @@ impl Clone for Resolver {
     }
 }
 
+fn timeout_now() -> Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    if let Some(current) = Cx::current() {
+        if let Some(driver) = current.timer_driver() {
+            return driver.now();
+        }
+    }
+    CLOCK.get_or_init(WallClock::new).now()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -451,6 +472,22 @@ mod tests {
         let empty = cloudflare.nameservers.is_empty();
         crate::assert_with_log!(!empty, "cloudflare nameservers", false, empty);
         crate::test_complete!("resolver_config_presets");
+    }
+
+    #[test]
+    fn resolver_timeout_zero() {
+        init_test("resolver_timeout_zero");
+
+        let mut config = ResolverConfig::default();
+        config.timeout = Duration::ZERO;
+        config.cache_enabled = false;
+        let resolver = Resolver::with_config(config);
+
+        let result = future::block_on(async { resolver.lookup_ip("example.invalid").await });
+        let timed_out = matches!(result, Err(DnsError::Timeout));
+        crate::assert_with_log!(timed_out, "timed out", true, timed_out);
+
+        crate::test_complete!("resolver_timeout_zero");
     }
 
     #[test]
