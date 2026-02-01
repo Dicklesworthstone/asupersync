@@ -477,9 +477,11 @@ mod tests {
     fn resolver_timeout_zero() {
         init_test("resolver_timeout_zero");
 
-        let mut config = ResolverConfig::default();
-        config.timeout = Duration::ZERO;
-        config.cache_enabled = false;
+        let config = ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        };
         let resolver = Resolver::with_config(config);
 
         let result = future::block_on(async { resolver.lookup_ip("example.invalid").await });
