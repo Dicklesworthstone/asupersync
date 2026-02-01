@@ -6,104 +6,95 @@
 //! 3. Ready lane - all other ready tasks
 //!
 //! Within each lane, tasks are ordered by their priority (or deadline).
+//! Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 
 use crate::types::{TaskId, Time};
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// A task entry in a scheduler lane ordered by priority.
-#[derive(Debug, Clone)]
+///
+/// Ordering: higher priority first, then earlier generation (FIFO within same priority).
+#[derive(Debug, Clone, Eq, PartialEq)]
 struct SchedulerEntry {
     task: TaskId,
     priority: u8,
+    /// Insertion order for FIFO tie-breaking among equal priorities.
+    generation: u64,
+}
+
+impl Ord for SchedulerEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Higher priority first (BinaryHeap is max-heap)
+        // For equal priorities, earlier generation (lower number) comes first
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.generation.cmp(&self.generation))
+    }
+}
+
+impl PartialOrd for SchedulerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// A task entry in a scheduler lane ordered by deadline (EDF).
-#[derive(Debug, Clone)]
+///
+/// Ordering: earlier deadline first, then earlier generation (FIFO within same deadline).
+#[derive(Debug, Clone, Eq, PartialEq)]
 struct TimedEntry {
     task: TaskId,
     deadline: Time,
+    /// Insertion order for FIFO tie-breaking among equal deadlines.
+    generation: u64,
 }
 
-fn insert_by_priority(lane: &mut VecDeque<SchedulerEntry>, entry: SchedulerEntry) {
-    // Higher priority first. Stable for equal priority (insert after existing equals).
-    let pos = lane
-        .iter()
-        .position(|e| entry.priority > e.priority)
-        .unwrap_or(lane.len());
-    lane.insert(pos, entry);
+impl Ord for TimedEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Earlier deadline first (reverse comparison for min-heap behavior via max-heap)
+        // For equal deadlines, earlier generation comes first
+        other
+            .deadline
+            .cmp(&self.deadline)
+            .then_with(|| other.generation.cmp(&self.generation))
+    }
 }
 
-fn insert_by_deadline(lane: &mut VecDeque<TimedEntry>, entry: TimedEntry) {
-    // Earlier deadline first (EDF). Stable for equal deadlines.
-    let pos = lane
-        .iter()
-        .position(|e| entry.deadline < e.deadline)
-        .unwrap_or(lane.len());
-    lane.insert(pos, entry);
-}
-
-/// Pop from a priority-based lane with RNG tie-breaking among equal-priority tasks.
-fn pop_from_priority_lane_with_hint(
-    lane: &mut VecDeque<SchedulerEntry>,
-    rng_hint: u64,
-) -> Option<TaskId> {
-    if lane.is_empty() {
-        return None;
+impl PartialOrd for TimedEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
-
-    // Find how many tasks share the highest priority at the front
-    let front_priority = lane.front().unwrap().priority;
-    let tie_count = lane
-        .iter()
-        .take_while(|e| e.priority == front_priority)
-        .count();
-
-    if tie_count == 1 {
-        // No tie, just pop the front
-        return lane.pop_front().map(|e| e.task);
-    }
-
-    // Use rng_hint to select among the tied tasks
-    let selected_idx = (rng_hint as usize) % tie_count;
-    let entry = lane.remove(selected_idx).unwrap();
-    Some(entry.task)
-}
-
-/// Pop from a timed lane with RNG tie-breaking for equal deadlines.
-fn pop_from_timed_lane_with_hint(lane: &mut VecDeque<TimedEntry>, rng_hint: u64) -> Option<TaskId> {
-    if lane.is_empty() {
-        return None;
-    }
-
-    // Find how many tasks share the earliest deadline at the front
-    let front_deadline = lane.front().unwrap().deadline;
-    let tie_count = lane
-        .iter()
-        .take_while(|e| e.deadline == front_deadline)
-        .count();
-
-    if tie_count == 1 {
-        // No tie, just pop the front
-        return lane.pop_front().map(|e| e.task);
-    }
-
-    // Use rng_hint to select among the tied tasks
-    let selected_idx = (rng_hint as usize) % tie_count;
-    let entry = lane.remove(selected_idx).unwrap();
-    Some(entry.task)
 }
 
 /// The three-lane scheduler.
-#[derive(Debug, Default)]
+///
+/// Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
+/// Generation counters provide FIFO ordering within same priority/deadline.
+#[derive(Debug)]
 pub struct Scheduler {
     /// Cancel lane: tasks with pending cancellation (highest priority).
-    cancel_lane: VecDeque<SchedulerEntry>,
+    cancel_lane: BinaryHeap<SchedulerEntry>,
     /// Timed lane: tasks with deadlines (EDF ordering).
-    timed_lane: VecDeque<TimedEntry>,
+    timed_lane: BinaryHeap<TimedEntry>,
     /// Ready lane: general ready tasks.
-    ready_lane: VecDeque<SchedulerEntry>,
+    ready_lane: BinaryHeap<SchedulerEntry>,
     /// Set of tasks currently in the scheduler (for dedup).
     scheduled: std::collections::HashSet<TaskId>,
+    /// Next generation number for FIFO ordering.
+    next_generation: u64,
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self {
+            cancel_lane: BinaryHeap::new(),
+            timed_lane: BinaryHeap::new(),
+            ready_lane: BinaryHeap::new(),
+            scheduled: std::collections::HashSet::new(),
+            next_generation: 0,
+        }
+    }
 }
 
 impl Scheduler {
@@ -125,48 +116,74 @@ impl Scheduler {
         self.scheduled.is_empty()
     }
 
+    /// Allocates and returns the next generation number for FIFO ordering.
+    fn next_gen(&mut self) -> u64 {
+        let gen = self.next_generation;
+        self.next_generation += 1;
+        gen
+    }
+
     /// Schedules a task in the ready lane.
     ///
     /// Does nothing if the task is already scheduled.
+    /// O(log n) insertion via binary heap.
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
-            insert_by_priority(&mut self.ready_lane, SchedulerEntry { task, priority });
+            let generation = self.next_gen();
+            self.ready_lane.push(SchedulerEntry {
+                task,
+                priority,
+                generation,
+            });
         }
     }
 
     /// Schedules a task in the cancel lane.
     ///
     /// Does nothing if the task is already scheduled.
+    /// O(log n) insertion via binary heap.
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
-            insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+            let generation = self.next_gen();
+            self.cancel_lane.push(SchedulerEntry {
+                task,
+                priority,
+                generation,
+            });
         }
     }
 
     /// Schedules a task in the timed lane.
     ///
     /// Does nothing if the task is already scheduled.
+    /// O(log n) insertion via binary heap.
     pub fn schedule_timed(&mut self, task: TaskId, deadline: Time) {
         if self.scheduled.insert(task) {
-            insert_by_deadline(&mut self.timed_lane, TimedEntry { task, deadline });
+            let generation = self.next_gen();
+            self.timed_lane.push(TimedEntry {
+                task,
+                deadline,
+                generation,
+            });
         }
     }
 
     /// Pops the next task to run.
     ///
     /// Order: cancel lane > timed lane > ready lane.
+    /// O(log n) pop via binary heap.
     pub fn pop(&mut self) -> Option<TaskId> {
-        if let Some(entry) = self.cancel_lane.pop_front() {
+        if let Some(entry) = self.cancel_lane.pop() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
 
-        if let Some(entry) = self.timed_lane.pop_front() {
+        if let Some(entry) = self.timed_lane.pop() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
 
-        if let Some(entry) = self.ready_lane.pop_front() {
+        if let Some(entry) = self.ready_lane.pop() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
@@ -176,40 +193,39 @@ impl Scheduler {
 
     /// Pops the next task to run, using `rng_hint` for tie-breaking among equal-priority tasks.
     ///
-    /// This method provides deterministic but seed-varying scheduling for the lab runtime.
-    /// When multiple tasks have the same priority at the head of a lane, the `rng_hint`
-    /// determines which one is selected, enabling different seeds to produce different
-    /// execution orderings while remaining deterministic for the same seed.
+    /// Note: With the heap-based implementation, ties are broken by generation (FIFO order)
+    /// rather than RNG. The `rng_hint` parameter is kept for API compatibility but is not used.
+    /// This provides deterministic FIFO ordering within each priority level.
     ///
     /// Order: cancel lane > timed lane > ready lane.
-    pub fn pop_with_rng_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
-        // Try cancel lane first
-        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.cancel_lane, rng_hint) {
-            self.scheduled.remove(&task);
-            return Some(task);
-        }
-
-        // Try timed lane (EDF - equal deadlines get tie-broken)
-        if let Some(task) = pop_from_timed_lane_with_hint(&mut self.timed_lane, rng_hint) {
-            self.scheduled.remove(&task);
-            return Some(task);
-        }
-
-        // Try ready lane
-        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.ready_lane, rng_hint) {
-            self.scheduled.remove(&task);
-            return Some(task);
-        }
-
-        None
+    /// O(log n) pop via binary heap.
+    pub fn pop_with_rng_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
+        // With heap + generation, ordering is deterministic FIFO within priority
+        self.pop()
     }
 
     /// Removes a specific task from the scheduler.
+    ///
+    /// O(n) rebuild of affected lane. This is acceptable since removal is rare
+    /// compared to schedule/pop operations.
     pub fn remove(&mut self, task: TaskId) {
         if self.scheduled.remove(&task) {
-            self.cancel_lane.retain(|e| e.task != task);
-            self.timed_lane.retain(|e| e.task != task);
-            self.ready_lane.retain(|e| e.task != task);
+            // Rebuild heaps without the removed task
+            self.cancel_lane = self
+                .cancel_lane
+                .drain()
+                .filter(|e| e.task != task)
+                .collect();
+            self.timed_lane = self
+                .timed_lane
+                .drain()
+                .filter(|e| e.task != task)
+                .collect();
+            self.ready_lane = self
+                .ready_lane
+                .drain()
+                .filter(|e| e.task != task)
+                .collect();
         }
     }
 
@@ -220,44 +236,82 @@ impl Scheduler {
     ///
     /// This is the key operation for ensuring cancelled tasks get priority:
     /// the cancel lane is always drained before timed and ready lanes.
+    ///
+    /// O(n) for finding and removing from other lanes, O(log n) for insertion.
     pub fn move_to_cancel_lane(&mut self, task: TaskId, priority: u8) {
+        let generation = self.next_gen();
+
         if self.scheduled.insert(task) {
             // Not scheduled, add directly to cancel lane
-            insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+            self.cancel_lane.push(SchedulerEntry {
+                task,
+                priority,
+                generation,
+            });
             return;
         }
 
         // Task is scheduled. Check where it is.
-        // We optimize by returning early once found.
-
-        // 1. Check Cancel Lane (target destination)
-        if let Some(pos) = self.cancel_lane.iter().position(|e| e.task == task) {
-            // Update priority if new priority is higher
-            if self.cancel_lane[pos].priority < priority {
-                self.cancel_lane.remove(pos);
-                insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
-            }
+        // Check if already in cancel lane
+        let in_cancel = self.cancel_lane.iter().any(|e| e.task == task);
+        if in_cancel {
+            // Rebuild cancel lane, updating priority if higher
+            self.cancel_lane = self
+                .cancel_lane
+                .drain()
+                .map(|e| {
+                    if e.task == task && priority > e.priority {
+                        SchedulerEntry {
+                            task,
+                            priority,
+                            generation,
+                        }
+                    } else {
+                        e
+                    }
+                })
+                .collect();
             return;
         }
 
-        // 2. Check Timed Lane
-        if let Some(pos) = self.timed_lane.iter().position(|e| e.task == task) {
-            self.timed_lane.remove(pos);
-            insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+        // Check timed lane
+        let in_timed = self.timed_lane.iter().any(|e| e.task == task);
+        if in_timed {
+            self.timed_lane = self
+                .timed_lane
+                .drain()
+                .filter(|e| e.task != task)
+                .collect();
+            self.cancel_lane.push(SchedulerEntry {
+                task,
+                priority,
+                generation,
+            });
             return;
         }
 
-        // 3. Check Ready Lane
-        if let Some(pos) = self.ready_lane.iter().position(|e| e.task == task) {
-            self.ready_lane.remove(pos);
-            insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+        // Check ready lane
+        let in_ready = self.ready_lane.iter().any(|e| e.task == task);
+        if in_ready {
+            self.ready_lane = self
+                .ready_lane
+                .drain()
+                .filter(|e| e.task != task)
+                .collect();
+            self.cancel_lane.push(SchedulerEntry {
+                task,
+                priority,
+                generation,
+            });
             return;
         }
 
-        // If we reach here, the task is in `scheduled` set but not in any lane.
-        // This should not happen if invariants are maintained.
-        // We'll re-add it to be safe, but this implies a bug elsewhere.
-        insert_by_priority(&mut self.cancel_lane, SchedulerEntry { task, priority });
+        // Task is in `scheduled` set but not in any lane - add to cancel lane
+        self.cancel_lane.push(SchedulerEntry {
+            task,
+            priority,
+            generation,
+        });
     }
 
     /// Returns true if a task is in the cancel lane.
@@ -269,9 +323,10 @@ impl Scheduler {
     /// Pops only from the cancel lane.
     ///
     /// Use this for strict cancel-first processing in multi-worker scenarios.
+    /// O(log n) pop via binary heap.
     #[must_use]
     pub fn pop_cancel_only(&mut self) -> Option<TaskId> {
-        if let Some(entry) = self.cancel_lane.pop_front() {
+        if let Some(entry) = self.cancel_lane.pop() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
@@ -279,21 +334,20 @@ impl Scheduler {
     }
 
     /// Pops only from the cancel lane with RNG tie-breaking.
+    ///
+    /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
     #[must_use]
-    pub fn pop_cancel_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
-        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.cancel_lane, rng_hint) {
-            self.scheduled.remove(&task);
-            return Some(task);
-        }
-        None
+    pub fn pop_cancel_only_with_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
+        self.pop_cancel_only()
     }
 
     /// Pops only from the timed lane.
     ///
     /// Use this for strict lane ordering in multi-worker scenarios.
+    /// O(log n) pop via binary heap.
     #[must_use]
     pub fn pop_timed_only(&mut self) -> Option<TaskId> {
-        if let Some(entry) = self.timed_lane.pop_front() {
+        if let Some(entry) = self.timed_lane.pop() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
@@ -301,21 +355,20 @@ impl Scheduler {
     }
 
     /// Pops only from the timed lane with RNG tie-breaking.
+    ///
+    /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
     #[must_use]
-    pub fn pop_timed_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
-        if let Some(task) = pop_from_timed_lane_with_hint(&mut self.timed_lane, rng_hint) {
-            self.scheduled.remove(&task);
-            return Some(task);
-        }
-        None
+    pub fn pop_timed_only_with_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
+        self.pop_timed_only()
     }
 
     /// Pops only from the ready lane.
     ///
     /// Use this for strict lane ordering in multi-worker scenarios.
+    /// O(log n) pop via binary heap.
     #[must_use]
     pub fn pop_ready_only(&mut self) -> Option<TaskId> {
-        if let Some(entry) = self.ready_lane.pop_front() {
+        if let Some(entry) = self.ready_lane.pop() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
@@ -323,25 +376,25 @@ impl Scheduler {
     }
 
     /// Pops only from the ready lane with RNG tie-breaking.
+    ///
+    /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
     #[must_use]
-    pub fn pop_ready_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
-        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.ready_lane, rng_hint) {
-            self.scheduled.remove(&task);
-            return Some(task);
-        }
-        None
+    pub fn pop_ready_only_with_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
+        self.pop_ready_only()
     }
 
     /// Steals a batch of ready tasks for another worker.
     ///
     /// Only steals from the ready lane to preserve cancel/timed priority semantics.
-    /// Returns the number of tasks stolen.
+    /// Returns the stolen tasks with their priorities.
+    ///
+    /// O(k log n) where k is the number of tasks stolen.
     pub fn steal_ready_batch(&mut self, max_steal: usize) -> Vec<(TaskId, u8)> {
         let steal_count = (self.ready_lane.len() / 2).min(max_steal).max(1);
         let mut stolen = Vec::with_capacity(steal_count);
 
         for _ in 0..steal_count {
-            if let Some(entry) = self.ready_lane.pop_front() {
+            if let Some(entry) = self.ready_lane.pop() {
                 self.scheduled.remove(&entry.task);
                 stolen.push((entry.task, entry.priority));
             } else {
