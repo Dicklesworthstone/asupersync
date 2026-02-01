@@ -137,6 +137,35 @@ pub mod waker;
 /// Yield points for cooperative multitasking.
 pub mod yield_now;
 
+/// Thread-local storage for non-Send local tasks.
+///
+/// Local tasks are pinned to the worker thread that created them. They are
+/// stored in TLS so only that worker can poll them.
+pub mod local {
+    use crate::runtime::stored_task::LocalStoredTask;
+    use crate::types::TaskId;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static LOCAL_TASKS: RefCell<HashMap<TaskId, LocalStoredTask>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Store a local task in thread-local storage.
+    pub fn store_local_task(task_id: TaskId, task: LocalStoredTask) {
+        LOCAL_TASKS.with(|tasks| {
+            tasks.borrow_mut().insert(task_id, task);
+        });
+    }
+
+    /// Remove a local task from thread-local storage.
+    #[must_use]
+    pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
+        LOCAL_TASKS.with(|tasks| tasks.borrow_mut().remove(&task_id))
+    }
+}
+
 pub use crate::record::RegionLimits;
 pub use blocking_pool::{
     BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingTaskHandle,

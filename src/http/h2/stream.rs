@@ -1587,7 +1587,7 @@ mod tests {
         // Reserved streams cannot send data until headers are sent
         // (can_send returns true for ReservedLocal, but send_data should
         // only allow it after headers are sent)
-        let result = stream.send_data(false);
+        let _result = stream.send_data(false);
         // This should fail because we're in ReservedLocal, not a data-sending state
         // Actually, can_send() returns true for ReservedLocal, so this will succeed
         // The RFC says data is allowed on reserved(local) after HEADERS is sent
@@ -1625,7 +1625,12 @@ mod tests {
 
             // Prune should remove all closed streams
             store.prune_closed();
-            assert_eq!(store.active_count(), 0, "round {}: all streams should be pruned", round);
+            assert_eq!(
+                store.active_count(),
+                0,
+                "round {}: all streams should be pruned",
+                round
+            );
         }
 
         // After all rounds, should be able to allocate again

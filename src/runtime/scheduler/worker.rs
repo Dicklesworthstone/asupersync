@@ -247,6 +247,9 @@ impl Worker {
                 wake_state.clear();
             }
             Poll::Pending => {
+                // Track if this is a local task before consuming it
+                let is_local = matches!(&stored, AnyStoredTask::Local(_));
+
                 match stored {
                     AnyStoredTask::Global(t) => {
                         let mut state = self.state.lock().expect("runtime state lock poisoned");
@@ -338,9 +341,10 @@ impl Worker {
                     //
                     // I'll implement the push to `self.local` for `AnyStoredTask::Local`.
 
-                    match stored {
-                        AnyStoredTask::Global(_) => self.global.push(task_id),
-                        AnyStoredTask::Local(_) => self.local.push(task_id),
+                    if is_local {
+                        self.local.push(task_id);
+                    } else {
+                        self.global.push(task_id);
                     }
                     self.parker.unpark();
                 }

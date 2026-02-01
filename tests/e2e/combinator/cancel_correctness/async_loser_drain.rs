@@ -11,8 +11,8 @@
 //!
 //! Formally: `∀race: ∀loser ∈ race.losers: loser.state = Completed`
 
-use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::lab::oracle::LoserDrainOracle;
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, Time};
 use std::future::Future;
 use std::pin::Pin;
@@ -60,12 +60,14 @@ impl Drop for YieldingFuture {
 }
 
 /// A future that tracks when it is polled and dropped.
+#[allow(dead_code)]
 struct TrackedFuture {
     poll_count: Arc<AtomicU32>,
     drop_flag: Arc<AtomicBool>,
     completes_after: Option<u32>,
 }
 
+#[allow(dead_code)]
 impl TrackedFuture {
     fn never_completes(poll_count: Arc<AtomicU32>, drop_flag: Arc<AtomicBool>) -> Self {
         Self {
@@ -75,11 +77,7 @@ impl TrackedFuture {
         }
     }
 
-    fn completes_after(
-        n: u32,
-        poll_count: Arc<AtomicU32>,
-        drop_flag: Arc<AtomicBool>,
-    ) -> Self {
+    fn completes_after(n: u32, poll_count: Arc<AtomicU32>, drop_flag: Arc<AtomicBool>) -> Self {
         Self {
             poll_count,
             drop_flag,
@@ -132,7 +130,9 @@ fn test_labruntime_task_cleanup_on_scope_exit() {
                 }
             }
 
-            let _guard = CleanupGuard { flag: cleanup_clone };
+            let _guard = CleanupGuard {
+                flag: cleanup_clone,
+            };
             // Yield once then complete
             YieldingFuture::new(1, 0, Arc::new(AtomicBool::new(false))).await;
         })
