@@ -34,5 +34,6 @@ pub use unix::{
 pub use websocket::{
     apply_mask, ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Message,
     Opcode, Role as WsRole, ServerHandshake, ServerWebSocket, WebSocket, WebSocketAcceptor,
-    WebSocketConfig, WsAcceptError, WsConnectError, WsError, WsUrl,
+    WebSocketConfig, WebSocketRead, WebSocketWrite, WsAcceptError, WsConnectError, WsError,
+    WsReuniteError, WsUrl,
 };

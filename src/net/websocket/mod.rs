@@ -50,6 +50,7 @@ mod close;
 mod frame;
 mod handshake;
 mod server;
+mod split;
 
 pub use client::{Message, WebSocket, WebSocketConfig, WsConnectError};
 pub use close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
@@ -59,3 +60,4 @@ pub use handshake::{
     HttpResponse, ServerHandshake, WsUrl,
 };
 pub use server::{ServerWebSocket, WebSocketAcceptor, WsAcceptError};
+pub use split::{ReuniteError as WsReuniteError, WebSocketRead, WebSocketWrite};
