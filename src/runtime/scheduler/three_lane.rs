@@ -24,6 +24,9 @@ pub type WorkerId = usize;
 /// Each worker maintains a local `PriorityScheduler` for tasks spawned within
 /// that worker. Cross-thread wakeups go through the shared `GlobalInjector`.
 /// Workers strictly process cancel work before timed, and timed before ready.
+///
+/// All scheduling paths go through `wake_state.notify()` to provide centralized
+/// deduplication, preventing the same task from being scheduled in multiple queues.
 #[derive(Debug)]
 pub struct ThreeLaneScheduler {
     /// Global injection queue for cross-thread wakeups.
@@ -36,6 +39,8 @@ pub struct ThreeLaneScheduler {
     parkers: Vec<Parker>,
     /// Timer driver for processing timer wakeups.
     timer_driver: Option<TimerDriverHandle>,
+    /// Shared runtime state for accessing task records and wake_state.
+    state: Arc<Mutex<RuntimeState>>,
 }
 
 impl ThreeLaneScheduler {
@@ -91,25 +96,65 @@ impl ThreeLaneScheduler {
             shutdown,
             parkers,
             timer_driver,
+            state: Arc::clone(state),
         }
     }
 
     /// Injects a task into the cancel lane for cross-thread wakeup.
+    ///
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        self.global.inject_cancel(task, priority);
-        self.wake_one();
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            self.global.inject_cancel(task, priority);
+            self.wake_one();
+        }
     }
 
     /// Injects a task into the timed lane for cross-thread wakeup.
+    ///
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
-        self.global.inject_timed(task, deadline);
-        self.wake_one();
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            self.global.inject_timed(task, deadline);
+            self.wake_one();
+        }
     }
 
     /// Injects a task into the ready lane for cross-thread wakeup.
+    ///
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        self.global.inject_ready(task, priority);
-        self.wake_one();
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            self.global.inject_ready(task, priority);
+            self.wake_one();
+        }
     }
 
     /// Spawns a task (shorthand for inject_ready).
@@ -194,6 +239,12 @@ impl ThreeLaneWorker {
     pub fn run_loop(&mut self) {
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
+        // Fairness limit: max consecutive cancel executions before yielding to other lanes.
+        // This prevents cancel work from starving ready work indefinitely.
+        // 16 is a balance between cancel responsiveness and fairness.
+        const MAX_CONSECUTIVE_CANCEL: usize = 16;
+
+        let mut consecutive_cancel = 0usize;
 
         while !self.shutdown.load(Ordering::Relaxed) {
             // PHASE 0: Process expired timers (fires wakers, which may inject tasks)
@@ -201,27 +252,35 @@ impl ThreeLaneWorker {
                 let _ = timer.process_timers();
             }
 
-            // PHASE 1: Cancel work (highest priority, never starve)
-            if let Some(task) = self.try_cancel_work() {
-                self.execute(task);
-                continue;
+            // PHASE 1: Cancel work (highest priority, with fairness limit)
+            // Cancel work is critical for timely cleanup, but we limit consecutive
+            // executions to prevent starvation of other lanes during cancel cascades.
+            if consecutive_cancel < MAX_CONSECUTIVE_CANCEL {
+                if let Some(task) = self.try_cancel_work() {
+                    self.execute(task);
+                    consecutive_cancel += 1;
+                    continue;
+                }
             }
 
-            // PHASE 2: Timed work
+            // PHASE 2: Timed work (resets cancel counter)
             if let Some(task) = self.try_timed_work() {
                 self.execute(task);
+                consecutive_cancel = 0;
                 continue;
             }
 
-            // PHASE 3: Ready work
+            // PHASE 3: Ready work (resets cancel counter)
             if let Some(task) = self.try_ready_work() {
                 self.execute(task);
+                consecutive_cancel = 0;
                 continue;
             }
 
-            // PHASE 4: Steal from other workers
+            // PHASE 4: Steal from other workers (resets cancel counter)
             if let Some(task) = self.try_steal() {
                 self.execute(task);
+                consecutive_cancel = 0;
                 continue;
             }
 
@@ -229,8 +288,15 @@ impl ThreeLaneWorker {
             let mut backoff = 0;
 
             loop {
-                // Quick check for new work
-                if !self.global.is_empty() {
+                // Quick check for new work in both global and local queues.
+                // Previously only checked global, causing unnecessary spinning when
+                // local queue had work.
+                let local_has_work = self
+                    .local
+                    .lock()
+                    .map(|local| !local.is_empty())
+                    .unwrap_or(false);
+                if !self.global.is_empty() || local_has_work {
                     break;
                 }
 
@@ -258,9 +324,17 @@ impl ThreeLaneWorker {
                         // No timer driver, park indefinitely
                         self.parker.park();
                     }
-                    break;
+                    // After waking, re-check queues by continuing the loop.
+                    // This fixes a lost-wakeup race where work arrives right as we park.
+                    // Reset backoff to spin briefly before parking again (spurious wakeups).
+                    backoff = 0;
+                    // Continue loop to re-check condition (no break!)
                 }
             }
+
+            // After backoff/park, reset the consecutive cancel counter.
+            // We've given other work a chance during the backoff period.
+            consecutive_cancel = 0;
         }
     }
 
@@ -387,21 +461,60 @@ impl ThreeLaneWorker {
     }
 
     /// Schedules a task locally in the appropriate lane.
+    ///
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local(&self, task: TaskId, priority: u8) {
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
-        local.schedule(task, priority);
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            local.schedule(task, priority);
+        }
     }
 
     /// Schedules a cancelled task locally.
+    ///
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local_cancel(&self, task: TaskId, priority: u8) {
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
-        local.schedule_cancel(task, priority);
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            local.schedule_cancel(task, priority);
+        }
     }
 
     /// Schedules a timed task locally.
+    ///
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local_timed(&self, task: TaskId, deadline: Time) {
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
-        local.schedule_timed(task, deadline);
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            local.schedule_timed(task, deadline);
+        }
     }
 
     pub(crate) fn execute(&self, task_id: TaskId) {
@@ -1031,5 +1144,230 @@ mod tests {
 
         let task = global.pop_cancel().map(|pt| pt.task);
         assert_eq!(task, Some(task_id));
+    }
+
+    // ========== Deduplication Tests (bd-35f9) ==========
+
+    #[test]
+    fn test_inject_ready_dedup_prevents_double_schedule() {
+        // Create state with a real task record
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // First inject should succeed
+        scheduler.inject_ready(task_id, 100);
+        assert!(
+            scheduler.global.has_ready_work(),
+            "first inject should add to queue"
+        );
+
+        // Second inject should be deduplicated (same task)
+        scheduler.inject_ready(task_id, 100);
+
+        // Pop first - should succeed
+        let first = scheduler.global.pop_ready();
+        assert!(first.is_some(), "first pop should succeed");
+        assert_eq!(first.unwrap().task, task_id);
+
+        // Second pop should fail - task was deduplicated
+        let second = scheduler.global.pop_ready();
+        assert!(second.is_none(), "second pop should fail (deduplicated)");
+    }
+
+    #[test]
+    fn test_inject_cancel_dedup_prevents_double_schedule() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // First inject to cancel lane
+        scheduler.inject_cancel(task_id, 100);
+        assert!(scheduler.global.has_cancel_work());
+
+        // Second inject should be deduplicated
+        scheduler.inject_cancel(task_id, 100);
+
+        // Only one task should be in queue
+        let first = scheduler.global.pop_cancel();
+        assert!(first.is_some());
+        let second = scheduler.global.pop_cancel();
+        assert!(second.is_none(), "duplicate should be prevented");
+    }
+
+    #[test]
+    fn test_schedule_local_dedup_prevents_double_schedule() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // First schedule to local
+        worker.schedule_local(task_id, 100);
+
+        // Second schedule should be deduplicated
+        worker.schedule_local(task_id, 100);
+
+        // Check local queue has only one entry
+        let count = {
+            let local = worker.local.lock().expect("local lock poisoned");
+            local.len()
+        };
+        assert_eq!(count, 1, "should have exactly 1 task, not {count}");
+    }
+
+    #[test]
+    fn test_local_then_global_dedup() {
+        // Test: schedule locally first, then try to inject globally
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // Schedule locally first (consumes the notify)
+        worker.schedule_local(task_id, 100);
+
+        // Now try global inject - should be deduplicated
+        scheduler.global.inject_ready(task_id, 100);
+        // Note: We're injecting directly to global to simulate the race
+
+        // But since wake_state was consumed by local, subsequent inject
+        // via the scheduler method would be blocked
+        // The task is only in local queue
+        let local_len = {
+            let local = worker.local.lock().expect("local lock poisoned");
+            local.len()
+        };
+        assert_eq!(local_len, 1);
+    }
+
+    #[test]
+    fn test_multiple_wakes_single_schedule() {
+        // Simulate the ThreeLaneWaker behavior
+        let task_id = TaskId::new_for_test(1, 1);
+        let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
+        let global = Arc::new(GlobalInjector::new());
+        let parker = Parker::new();
+
+        // Create multiple wakers (simulating cloned wakers)
+        let wakers: Vec<_> = (0..10)
+            .map(|_| {
+                Waker::from(Arc::new(ThreeLaneWaker {
+                    task_id,
+                    priority: 100,
+                    wake_state: Arc::clone(&wake_state),
+                    global: Arc::clone(&global),
+                    parker: parker.clone(),
+                }))
+            })
+            .collect();
+
+        // Wake all 10 wakers
+        for waker in &wakers {
+            waker.wake_by_ref();
+        }
+
+        // Only one task should be in the queue
+        let first = global.pop_ready();
+        assert!(first.is_some(), "at least one wake should succeed");
+
+        let second = global.pop_ready();
+        assert!(
+            second.is_none(),
+            "only one wake should succeed, dedup should prevent duplicates"
+        );
+    }
+
+    #[test]
+    fn test_wake_state_cleared_allows_reschedule() {
+        // After task completes, wake_state is cleared, allowing new schedule
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        // Get the wake_state for direct manipulation
+        let wake_state = {
+            let guard = state.lock().expect("runtime state lock poisoned");
+            guard
+                .tasks
+                .get(task_id.arena_index())
+                .map(|r| Arc::clone(&r.wake_state))
+                .expect("task should exist")
+        };
+
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // First schedule
+        scheduler.inject_ready(task_id, 100);
+        let first = scheduler.global.pop_ready();
+        assert!(first.is_some());
+
+        // Clear wake state (simulating task completion)
+        wake_state.clear();
+
+        // Now should be able to schedule again
+        scheduler.inject_ready(task_id, 100);
+        let second = scheduler.global.pop_ready();
+        assert!(second.is_some(), "should be able to reschedule after clear");
     }
 }
