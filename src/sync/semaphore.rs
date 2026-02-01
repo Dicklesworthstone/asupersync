@@ -257,18 +257,12 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
-        if state.permits >= self.count {
-            // Optimistic acquire if no waiters or we are next
-            // Note: simple FIFO logic here - if we are not woken explicitly, we might steal?
-            // To be strict FIFO, we should only acquire if waiters is empty OR we are the woken one?
-            // But waker doesn't carry ID.
-            // Simplified: if we are polled, we try to acquire.
-            // If waiters exist and we are new, we should queue.
-            // But here we rely on the waker system.
+        // FIFO fairness: only acquire if queue is empty or we are at the front.
+        // This prevents queue jumping where a new arrival grabs permits before
+        // earlier-waiting tasks get their turn.
+        let is_next_in_line = state.waiters.front().is_none_or(|w| w.id == waiter_id);
 
-            // Just acquire if available. Fairness is best-effort with this simple waker queue.
-            // Actually, if we just acquired, we jumped the queue if we weren't at front.
-            // But for now, correctness (async) > strict fairness perfection.
+        if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
             state.waiters.retain(|waiter| waiter.id != waiter_id);
             return Poll::Ready(Ok(SemaphorePermit {
@@ -433,7 +427,10 @@ impl Future for OwnedAcquireFuture {
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
-        if state.permits >= self.count {
+        // FIFO fairness: only acquire if queue is empty or we are at the front.
+        let is_next_in_line = state.waiters.front().is_none_or(|w| w.id == waiter_id);
+
+        if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
             state.waiters.retain(|waiter| waiter.id != waiter_id);
             return Poll::Ready(Ok(OwnedSemaphorePermit {
@@ -566,5 +563,120 @@ mod tests {
         let waiter_len = sem.state.lock().unwrap().waiters.len();
         crate::assert_with_log!(waiter_len == 0, "waiter removed", 0usize, waiter_len);
         crate::test_complete!("drop_removes_waiter");
+    }
+
+    #[test]
+    fn test_semaphore_fifo_basic() {
+        init_test("test_semaphore_fifo_basic");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(1);
+
+        // First waiter arrives when permit is held
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let pending1 = poll_once(&mut fut1).is_none();
+        crate::assert_with_log!(pending1, "first waiter pending", true, pending1);
+
+        // Second waiter arrives
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let pending2 = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(pending2, "second waiter pending", true, pending2);
+
+        // Release the held permit
+        drop(held);
+
+        // First waiter should acquire (FIFO)
+        let result1 = poll_once(&mut fut1);
+        let _permit1 = result1.expect("first should acquire").expect("no error");
+        crate::assert_with_log!(true, "first waiter acquires", true, true);
+
+        // Second waiter should still be pending (permit1 still held)
+        let still_pending = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(still_pending, "second still pending", true, still_pending);
+
+        drop(_permit1); // explicitly drop to document lifetime
+        crate::test_complete!("test_semaphore_fifo_basic");
+    }
+
+    #[test]
+    fn test_semaphore_no_queue_jump() {
+        init_test("test_semaphore_no_queue_jump");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(2);
+
+        // First waiter needs 2 permits, only 1 available after this
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        // First waiter requests 2 (only 1 available, must wait)
+        let mut fut1 = sem.acquire(&cx1, 2);
+        let pending1 = poll_once(&mut fut1).is_none();
+        crate::assert_with_log!(pending1, "first waiter pending", true, pending1);
+
+        // Release permit - now 2 available
+        drop(held);
+
+        // Second waiter arrives requesting just 1
+        let mut fut2 = sem.acquire(&cx2, 1);
+
+        // Poll second waiter - should NOT jump queue even though 1 is available
+        let pending2 = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(pending2, "second cannot jump queue", true, pending2);
+
+        // First waiter should now be able to acquire (it's at front, 2 permits available)
+        let result1 = poll_once(&mut fut1);
+        let first_acquired = result1.is_some() && result1.unwrap().is_ok();
+        crate::assert_with_log!(
+            first_acquired,
+            "first waiter acquires",
+            true,
+            first_acquired
+        );
+
+        crate::test_complete!("test_semaphore_no_queue_jump");
+    }
+
+    #[test]
+    fn test_semaphore_cancel_preserves_order() {
+        init_test("test_semaphore_cancel_preserves_order");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let cx3 = test_cx();
+        let sem = Semaphore::new(1);
+
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        // Three waiters queue up
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let _ = poll_once(&mut fut1);
+
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let _ = poll_once(&mut fut2);
+
+        let mut fut3 = sem.acquire(&cx3, 1);
+        let _ = poll_once(&mut fut3);
+
+        // Middle waiter cancels
+        cx2.set_cancel_requested(true);
+        let result2 = poll_once(&mut fut2);
+        let cancelled = matches!(result2, Some(Err(AcquireError::Cancelled)));
+        crate::assert_with_log!(cancelled, "second waiter cancelled", true, cancelled);
+
+        // Release permit
+        drop(held);
+
+        // First waiter should acquire (not third, even though second cancelled)
+        let result1 = poll_once(&mut fut1);
+        let _permit1 = result1.expect("first should acquire").expect("no error");
+        crate::assert_with_log!(true, "first waiter acquires", true, true);
+
+        // Third should still be pending (permit1 still held)
+        let third_pending = poll_once(&mut fut3).is_none();
+        crate::assert_with_log!(third_pending, "third still pending", true, third_pending);
+
+        drop(_permit1); // explicitly drop to document lifetime
+        crate::test_complete!("test_semaphore_cancel_preserves_order");
     }
 }
