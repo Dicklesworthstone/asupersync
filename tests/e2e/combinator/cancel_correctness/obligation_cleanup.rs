@@ -103,6 +103,7 @@ fn test_winner_permit_committed() {
 #[derive(Debug)]
 pub struct MockLease {
     released: Arc<AtomicBool>,
+    #[allow(dead_code)]
     resource_id: u32,
 }
 

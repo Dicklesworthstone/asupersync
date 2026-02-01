@@ -6,7 +6,6 @@
 use crate::e2e::combinator::util::{Counter, DrainFlag, DrainTracker, NeverComplete};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Test that race loser's Drop is called after cancellation.
 #[test]
