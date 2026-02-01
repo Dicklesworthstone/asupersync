@@ -69,7 +69,8 @@ pub use quorum::{
 };
 pub use race::{
     make_race_all_result, race2_outcomes, race2_to_result, race_all_outcomes, race_all_to_result,
-    Race, Race2Result, RaceAll, RaceAllError, RaceAllResult, RaceError, RaceResult, RaceWinner,
+    Cancel, PollingOrder, Race, Race2, Race2Result, Race3, Race4, RaceAll, RaceAllError,
+    RaceAllResult, RaceError, RaceResult, RaceWinner,
 };
 pub use rate_limit::{
     RateLimitAlgorithm, RateLimitError, RateLimitMetrics, RateLimitPolicy, RateLimitPolicyBuilder,

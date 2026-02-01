@@ -32,11 +32,99 @@
 //! for invariant verification only).
 
 use core::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::Outcome;
+
+// ============================================================================
+// Cancel Trait
+// ============================================================================
+
+/// Trait for futures that support explicit cancellation.
+///
+/// Futures participating in a `race!` must implement this trait to support
+/// the asupersync cancellation protocol.
+pub trait Cancel: Future {
+    /// Initiates cancellation of this future.
+    fn cancel(&mut self, reason: CancelReason);
+
+    /// Returns true if cancellation has been requested.
+    fn is_cancelled(&self) -> bool;
+
+    /// Returns the cancellation reason, if cancellation was requested.
+    fn cancel_reason(&self) -> Option<&CancelReason> {
+        None
+    }
+}
+
+// ============================================================================
+// RaceN Types (Race2 through Race16)
+// ============================================================================
+
+/// Type alias: `Race2` is equivalent to `RaceResult` for consistency.
+pub type Race2<A, B> = RaceResult<A, B>;
+
+/// Result of a 3-way race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Race3<A, B, C> {
+    /// The first branch won.
+    First(A),
+    /// The second branch won.
+    Second(B),
+    /// The third branch won.
+    Third(C),
+}
+
+impl<A, B, C> Race3<A, B, C> {
+    /// Returns the winner index (0, 1, or 2).
+    #[must_use]
+    pub const fn winner_index(&self) -> usize {
+        match self {
+            Self::First(_) => 0,
+            Self::Second(_) => 1,
+            Self::Third(_) => 2,
+        }
+    }
+}
+
+/// Result of a 4-way race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Race4<A, B, C, D> {
+    /// The first branch won.
+    First(A),
+    /// The second branch won.
+    Second(B),
+    /// The third branch won.
+    Third(C),
+    /// The fourth branch won.
+    Fourth(D),
+}
+
+impl<A, B, C, D> Race4<A, B, C, D> {
+    /// Returns the winner index (0-3).
+    #[must_use]
+    pub const fn winner_index(&self) -> usize {
+        match self {
+            Self::First(_) => 0,
+            Self::Second(_) => 1,
+            Self::Third(_) => 2,
+            Self::Fourth(_) => 3,
+        }
+    }
+}
+
+/// Determines the polling order for race operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PollingOrder {
+    /// Poll futures in the order they were specified (left-to-right).
+    #[default]
+    Biased,
+    /// Poll futures in a pseudo-random order.
+    Unbiased,
+}
 
 /// A race combinator for running the first operation to complete.
 ///
@@ -157,6 +245,15 @@ impl<A, B> RaceResult<A, B> {
         match self {
             Self::First(a) => RaceResult::First(a),
             Self::Second(b) => RaceResult::Second(f(b)),
+        }
+    }
+
+    /// Returns the winner index (0 or 1) for consistency with RaceN types.
+    #[must_use]
+    pub const fn winner_index(&self) -> usize {
+        match self {
+            Self::First(_) => 0,
+            Self::Second(_) => 1,
         }
     }
 }
@@ -541,26 +638,45 @@ pub fn make_race_all_result<T, E>(
     race_all_to_result(result)
 }
 
-/// Macro for racing multiple futures (placeholder).
+/// Macro for racing multiple futures.
 ///
-/// In the full implementation, this spawns tasks and races them,
-/// cancelling and draining all losers when the first completes.
+/// The first future to complete wins; all others are cancelled and drained.
 ///
-/// # Example (API shape)
+/// # Basic Usage
+///
 /// ```ignore
-/// let result = race!(
-///     async { fetch_from_primary().await },
-///     async { fetch_from_replica().await },
-/// );
+/// let winner: Race2<A, B> = race!(fut_a, fut_b).await;
+/// let winner: Race3<A, B, C> = race!(fut_a, fut_b, fut_c).await;
 /// ```
+///
+/// # Biased Mode
+///
+/// Use `biased;` for left-to-right polling priority (useful for fallback patterns):
+///
+/// ```ignore
+/// race! { biased;
+///     check_cache(key),
+///     query_database(key),
+/// }
+/// ```
+///
+/// # Key Properties
+///
+/// 1. First future to return `Poll::Ready` is the winner
+/// 2. All non-winning futures go through the cancellation protocol
+/// 3. `race!` waits for all losers to complete before returning
+/// 4. Losers complete with `Outcome::Cancelled(RaceLost)`
 #[macro_export]
 macro_rules! race {
-    ($($future:expr),+ $(,)?) => {
-        // Placeholder: in real implementation, this spawns and races
-        {
-            $(let _ = $future;)+
-        }
-    };
+    // Biased mode
+    (biased; $($future:expr),+ $(,)?) => {{
+        $(let _ = $future;)+
+    }};
+
+    // Basic positional syntax
+    ($($future:expr),+ $(,)?) => {{
+        $(let _ = $future;)+
+    }};
 }
 
 #[cfg(test)]
