@@ -35,9 +35,9 @@
 //!     .with_field("symbol_count", "10");
 //! ```
 
-pub mod budget_monitor;
 pub mod collector;
 pub mod context;
+pub mod diagnostics;
 pub mod entry;
 pub mod level;
 pub mod metrics;
@@ -46,13 +46,12 @@ pub mod obligation_tracker;
 pub mod otel;
 pub mod task_inspector;
 
-pub use budget_monitor::{
-    AlertSeverity, BreakdownView, BudgetAlert, BudgetBreakdown, BudgetDashboard, BudgetHistory,
-    BudgetHistoryPoint, BudgetMonitor, BudgetMonitorConfig, BudgetSnapshot, ConsumptionRate,
-    RegionBudgetStatus,
-};
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
+pub use diagnostics::{
+    BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, Diagnostics,
+    ObligationLeak, Reason, RegionOpenExplanation, TaskBlockedExplanation,
+};
 pub use entry::LogEntry;
 pub use level::LogLevel;
 pub use metrics::{
