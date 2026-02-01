@@ -17,12 +17,7 @@ fn e2e_diagnostics_explain_task_not_found() {
     let explanation = diagnostics.explain_task_blocked(fake_id);
 
     let is_not_found = matches!(explanation.block_reason, BlockReason::TaskNotFound);
-    crate::assert_with_log!(
-        is_not_found,
-        "task not found",
-        true,
-        is_not_found
-    );
+    crate::assert_with_log!(is_not_found, "task not found", true, is_not_found);
 
     crate::test_complete!("e2e_diagnostics_explain_task_not_found");
 }

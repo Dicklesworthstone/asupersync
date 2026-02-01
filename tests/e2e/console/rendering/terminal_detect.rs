@@ -129,8 +129,18 @@ fn e2e_terminal_detect_unicode_flag() {
         unicode: false,
     };
 
-    crate::assert_with_log!(unicode_caps.unicode, "unicode true", true, unicode_caps.unicode);
-    crate::assert_with_log!(!ascii_caps.unicode, "unicode false", false, ascii_caps.unicode);
+    crate::assert_with_log!(
+        unicode_caps.unicode,
+        "unicode true",
+        true,
+        unicode_caps.unicode
+    );
+    crate::assert_with_log!(
+        !ascii_caps.unicode,
+        "unicode false",
+        false,
+        ascii_caps.unicode
+    );
 
     crate::test_complete!("e2e_terminal_detect_unicode_flag");
 }

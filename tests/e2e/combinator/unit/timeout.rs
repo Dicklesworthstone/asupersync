@@ -85,7 +85,10 @@ fn test_timeout_long_duration() {
     // Should not timeout if operation completes quickly
     let operation_completed = true;
 
-    assert!(operation_completed, "Operation should complete within long timeout");
+    assert!(
+        operation_completed,
+        "Operation should complete within long timeout"
+    );
     assert!(timeout_duration.as_secs() >= 3600);
 }
 

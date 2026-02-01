@@ -38,7 +38,11 @@ fn test_race_error_wins() {
     // Error completed first
     let winner = error_result;
 
-    assert_eq!(winner, Err(TestError::FastError), "Error should win if it completes first");
+    assert_eq!(
+        winner,
+        Err(TestError::FastError),
+        "Error should win if it completes first"
+    );
 }
 
 /// Test that race losers are dropped.
@@ -205,7 +209,10 @@ fn test_race_cleanup_before_return() {
 
     result_returned.store(true, Ordering::SeqCst);
 
-    assert!(cleanup_done.load(Ordering::SeqCst), "Cleanup should be done");
+    assert!(
+        cleanup_done.load(Ordering::SeqCst),
+        "Cleanup should be done"
+    );
 }
 
 // Note: Full integration tests with the actual race! macro would require

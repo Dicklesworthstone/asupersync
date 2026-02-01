@@ -27,12 +27,7 @@ fn e2e_diagnostics_explain_region_not_found() {
         .reasons
         .iter()
         .any(|r| matches!(r, Reason::RegionNotFound));
-    crate::assert_with_log!(
-        has_not_found,
-        "reason is not found",
-        true,
-        has_not_found
-    );
+    crate::assert_with_log!(has_not_found, "reason is not found", true, has_not_found);
 
     crate::test_complete!("e2e_diagnostics_explain_region_not_found");
 }

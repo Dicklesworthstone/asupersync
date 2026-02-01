@@ -95,9 +95,19 @@ fn e2e_styled_text_combined_styles() {
     let output = writer.output();
 
     // Should have bold (1), underline (4), and red (31)
-    crate::assert_with_log!(output.contains("1"), "has bold", true, output.contains("1"));
-    crate::assert_with_log!(output.contains("4"), "has underline", true, output.contains("4"));
-    crate::assert_with_log!(output.contains("31"), "has red", true, output.contains("31"));
+    crate::assert_with_log!(output.contains('1'), "has bold", true, output.contains('1'));
+    crate::assert_with_log!(
+        output.contains('4'),
+        "has underline",
+        true,
+        output.contains('4')
+    );
+    crate::assert_with_log!(
+        output.contains("31"),
+        "has red",
+        true,
+        output.contains("31")
+    );
 
     crate::test_complete!("e2e_styled_text_combined_styles");
 }
@@ -188,10 +198,8 @@ fn e2e_styled_text_hex_color() {
         color
     );
 
-    let (console, writer) = test_console(
-        crate::console_e2e::util::full_color_caps(),
-        ColorMode::Auto,
-    );
+    let (console, writer) =
+        test_console(crate::console_e2e::util::full_color_caps(), ColorMode::Auto);
     let text = Text::new("magenta").fg(color);
     console.println(&text).expect("print");
     let output = writer.output();
@@ -216,8 +224,18 @@ fn e2e_styled_text_fg_and_bg() {
     let output = writer.output();
 
     // White fg is 37, Blue bg is 44
-    crate::assert_with_log!(output.contains("37"), "white fg", true, output.contains("37"));
-    crate::assert_with_log!(output.contains("44"), "blue bg", true, output.contains("44"));
+    crate::assert_with_log!(
+        output.contains("37"),
+        "white fg",
+        true,
+        output.contains("37")
+    );
+    crate::assert_with_log!(
+        output.contains("44"),
+        "blue bg",
+        true,
+        output.contains("44")
+    );
 
     crate::test_complete!("e2e_styled_text_fg_and_bg");
 }
