@@ -312,29 +312,30 @@ impl RegionHeap {
             return false;
         };
 
-        match slot {
-            HeapSlot::Occupied(entry) if entry.generation == index.generation => {
-                let size_hint = entry.size_hint;
-                let new_gen = entry.generation.wrapping_add(1);
-
-                *slot = HeapSlot::Vacant {
-                    next_free: self.free_head,
-                    generation: new_gen,
-                };
-                self.free_head = Some(index.index);
-                self.len -= 1;
-
-                // Update statistics
-                self.stats.reclaimed += 1;
-                self.stats.live -= 1;
-                self.stats.bytes_live =
-                    self.stats.bytes_live.saturating_sub(size_hint as u64);
-                GLOBAL_ALLOC_COUNT.fetch_sub(1, Ordering::Relaxed);
-
-                true
+        let (size_hint, new_gen) = {
+            let HeapSlot::Occupied(entry) = slot else {
+                return false;
+            };
+            if entry.generation != index.generation {
+                return false;
             }
-            _ => false,
-        }
+            (entry.size_hint, entry.generation.wrapping_add(1))
+        };
+
+        *slot = HeapSlot::Vacant {
+            next_free: self.free_head,
+            generation: new_gen,
+        };
+        self.free_head = Some(index.index);
+        self.len -= 1;
+
+        // Update statistics
+        self.stats.reclaimed += 1;
+        self.stats.live -= 1;
+        self.stats.bytes_live = self.stats.bytes_live.saturating_sub(size_hint as u64);
+        GLOBAL_ALLOC_COUNT.fetch_sub(1, Ordering::Relaxed);
+
+        true
     }
 
     /// Reclaims all allocations in the heap.
