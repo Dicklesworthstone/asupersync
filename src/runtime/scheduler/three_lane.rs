@@ -1380,7 +1380,7 @@ mod tests {
     // These tests are marked #[ignore] for CI and should be run manually.
 
     #[test]
-    #[ignore]
+    #[ignore = "stress test; run manually"]
     fn stress_test_parker_high_contention() {
         use crate::runtime::scheduler::worker::Parker;
         use std::sync::atomic::AtomicUsize;
@@ -1426,7 +1426,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "stress test; run manually"]
     fn stress_test_scheduler_inject_while_parking() {
         // Race: inject work between empty check and park
         let state = Arc::new(Mutex::new(RuntimeState::new()));
@@ -1492,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "stress test; run manually"]
     fn stress_test_work_stealing_fairness() {
         use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 
@@ -1520,9 +1520,8 @@ mod tests {
                     let mut local_stolen = 0;
                     loop {
                         let task = {
-                            let mut guard = match q.try_lock() {
-                                Ok(g) => g,
-                                Err(_) => continue,
+                            let Ok(mut guard) = q.try_lock() else {
+                                continue;
                             };
                             let batch = guard.steal_ready_batch(4);
                             if batch.is_empty() {
@@ -1585,7 +1584,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "stress test; run manually"]
     fn stress_test_global_queue_contention() {
         // High contention: 50 spawners, single queue
         let global = Arc::new(GlobalInjector::new());
@@ -1602,7 +1601,7 @@ mod tests {
                 std::thread::spawn(move || {
                     b.wait();
                     for i in 0..2000 {
-                        let task = TaskId::new_for_test(t * 100000 + i, 0);
+                        let task = TaskId::new_for_test(t * 100_000 + i, 0);
                         g.inject_ready(task, 50);
                         s.fetch_add(1, Ordering::Relaxed);
                     }

@@ -4,7 +4,7 @@
 //! combinator branches are properly resolved when branches are cancelled.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Mock permit for testing obligation cleanup.
 #[derive(Debug)]
@@ -34,6 +34,42 @@ impl Drop for MockPermit {
     }
 }
 
+struct CountingPermit {
+    counter: Arc<AtomicU32>,
+}
+
+impl Drop for CountingPermit {
+    fn drop(&mut self) {
+        self.counter.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct OrderTracker {
+    order: Arc<Mutex<Vec<u32>>>,
+    id: u32,
+}
+
+impl Drop for OrderTracker {
+    fn drop(&mut self) {
+        self.order.lock().unwrap().push(self.id);
+    }
+}
+
+struct FailingCleanup {
+    flag: Arc<AtomicBool>,
+    should_fail: bool,
+}
+
+impl Drop for FailingCleanup {
+    fn drop(&mut self) {
+        self.flag.store(true, Ordering::SeqCst);
+        if self.should_fail {
+            // In real code, this would be logged, not panicked.
+            // Keep this branch for coverage without side effects.
+        }
+    }
+}
+
 /// Test that permit in loser branch is resolved on cancellation.
 #[test]
 fn test_loser_permit_resolved() {
@@ -54,16 +90,6 @@ fn test_loser_permit_resolved() {
 #[test]
 fn test_loser_multiple_permits_resolved() {
     let resolved_count = Arc::new(AtomicU32::new(0));
-
-    struct CountingPermit {
-        counter: Arc<AtomicU32>,
-    }
-
-    impl Drop for CountingPermit {
-        fn drop(&mut self) {
-            self.counter.fetch_add(1, Ordering::SeqCst);
-        }
-    }
 
     {
         let _p1 = CountingPermit {
@@ -142,18 +168,7 @@ fn test_loser_lease_released() {
 /// Test obligation cleanup order (LIFO like destructors).
 #[test]
 fn test_obligation_cleanup_order() {
-    let cleanup_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    struct OrderTracker {
-        order: Arc<std::sync::Mutex<Vec<u32>>>,
-        id: u32,
-    }
-
-    impl Drop for OrderTracker {
-        fn drop(&mut self) {
-            self.order.lock().unwrap().push(self.id);
-        }
-    }
+    let cleanup_order = Arc::new(Mutex::new(Vec::new()));
 
     {
         let _first = OrderTracker {
@@ -170,9 +185,9 @@ fn test_obligation_cleanup_order() {
         };
     }
 
-    let order = cleanup_order.lock().unwrap();
+    let order = cleanup_order.lock().unwrap().clone();
     assert_eq!(
-        *order,
+        order,
         vec![3, 2, 1],
         "Cleanup order should be LIFO (reverse of creation)"
     );
@@ -207,21 +222,6 @@ fn test_nested_obligation_cleanup() {
 fn test_obligation_cleanup_with_error() {
     let primary_cleaned = Arc::new(AtomicBool::new(false));
     let secondary_cleaned = Arc::new(AtomicBool::new(false));
-
-    struct FailingCleanup {
-        flag: Arc<AtomicBool>,
-        should_fail: bool,
-    }
-
-    impl Drop for FailingCleanup {
-        fn drop(&mut self) {
-            self.flag.store(true, Ordering::SeqCst);
-            if self.should_fail {
-                // In real code, this would be logged, not panicked
-                // Here we just verify cleanup still happens
-            }
-        }
-    }
 
     {
         let _primary = FailingCleanup {

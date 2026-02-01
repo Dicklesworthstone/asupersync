@@ -88,6 +88,22 @@ fn push_i64_decimal(buf: &mut Vec<u8>, n: i64) {
     push_u64_decimal(buf, n);
 }
 
+fn u64_decimal_bytes(mut n: u64, tmp: &mut [u8; 20]) -> &[u8] {
+    let mut i = tmp.len();
+    if n == 0 {
+        i -= 1;
+        tmp[i] = b'0';
+    } else {
+        while n > 0 {
+            let digit = (n % 10) as u8;
+            n /= 10;
+            i -= 1;
+            tmp[i] = b'0' + digit;
+        }
+    }
+    &tmp[i..]
+}
+
 fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
         return Err(RedisError::Protocol(
@@ -107,7 +123,13 @@ fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
         }
     }
 
-    let mut acc: i64 = 0;
+    let limit: i128 = if neg {
+        i128::from(i64::MAX) + 1
+    } else {
+        i128::from(i64::MAX)
+    };
+
+    let mut acc: i128 = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if !b.is_ascii_digit() {
@@ -115,15 +137,16 @@ fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
                 "invalid integer byte: 0x{b:02x}"
             )));
         }
-        let digit = i64::from(b - b'0');
-        acc = acc
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(digit))
-            .ok_or_else(|| RedisError::Protocol("integer overflow".to_string()))?;
+        let digit = i128::from(b - b'0');
+        acc = acc * 10 + digit;
+        if acc > limit {
+            return Err(RedisError::Protocol("integer overflow".to_string()));
+        }
         i += 1;
     }
 
-    Ok(if neg { -acc } else { acc })
+    let signed = if neg { -acc } else { acc };
+    i64::try_from(signed).map_err(|_| RedisError::Protocol("integer overflow".to_string()))
 }
 
 fn find_crlf(buf: &[u8], start: usize) -> Option<usize> {
@@ -517,20 +540,7 @@ impl RedisConnection {
 
         if self.config.database != 0 {
             let mut tmp = [0u8; 20];
-            let mut i = tmp.len();
-            let mut n = u64::from(self.config.database);
-            if n == 0 {
-                i -= 1;
-                tmp[i] = b'0';
-            } else {
-                while n > 0 {
-                    let digit = (n % 10) as u8;
-                    n /= 10;
-                    i -= 1;
-                    tmp[i] = b'0' + digit;
-                }
-            }
-            let db_bytes = &tmp[i..];
+            let db_bytes = u64_decimal_bytes(u64::from(self.config.database), &mut tmp);
             let resp = self.exec_no_init(cx, &[b"SELECT", db_bytes]).await?;
             if !resp.is_ok() {
                 return Err(RedisError::Protocol(format!(
@@ -635,7 +645,8 @@ impl fmt::Debug for RedisClient {
 
 impl RedisClient {
     /// Connect to Redis.
-    pub fn connect(cx: &Cx, url: &str) -> Result<Self, RedisError> {
+    #[allow(clippy::unused_async)]
+    pub async fn connect(cx: &Cx, url: &str) -> Result<Self, RedisError> {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
         let config = RedisConfig::from_url(url)?;
         let config_for_factory = config.clone();
@@ -681,6 +692,7 @@ impl RedisClient {
         let mut conn = self.acquire(cx).await?;
         match conn.exec(cx, args).await {
             Ok(resp) => Ok(resp),
+            Err(e @ RedisError::Redis(_)) => Err(e),
             Err(e) => {
                 conn.discard();
                 Err(e)
@@ -704,20 +716,7 @@ impl RedisClient {
     ) -> Result<(), RedisError> {
         if let Some(ttl) = ttl {
             let mut tmp = [0u8; 20];
-            let mut i = tmp.len();
-            let mut n = ttl.as_secs();
-            if n == 0 {
-                i -= 1;
-                tmp[i] = b'0';
-            } else {
-                while n > 0 {
-                    let digit = (n % 10) as u8;
-                    n /= 10;
-                    i -= 1;
-                    tmp[i] = b'0' + digit;
-                }
-            }
-            let secs = &tmp[i..];
+            let secs = u64_decimal_bytes(ttl.as_secs(), &mut tmp);
             let resp = self
                 .cmd_bytes(cx, &[b"SET", key.as_bytes(), value, b"EX", secs])
                 .await?;
@@ -743,6 +742,105 @@ impl RedisClient {
         response
             .as_integer()
             .ok_or_else(|| RedisError::Protocol("INCR did not return integer".to_string()))
+    }
+
+    /// DEL key [key ...]
+    ///
+    /// Returns the number of keys removed.
+    pub async fn del(&self, cx: &Cx, keys: &[&str]) -> Result<i64, RedisError> {
+        if keys.is_empty() {
+            return Err(RedisError::Protocol(
+                "DEL requires at least one key".to_string(),
+            ));
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        args.push(b"DEL");
+        for key in keys {
+            args.push(key.as_bytes());
+        }
+
+        let resp = self.cmd_bytes(cx, &args).await?;
+        resp.as_integer()
+            .ok_or_else(|| RedisError::Protocol("DEL did not return integer".to_string()))
+    }
+
+    /// EXPIRE key seconds
+    ///
+    /// Returns true if the timeout was set, false if the key does not exist.
+    pub async fn expire(&self, cx: &Cx, key: &str, ttl: Duration) -> Result<bool, RedisError> {
+        let mut tmp = [0u8; 20];
+        let secs = u64_decimal_bytes(ttl.as_secs(), &mut tmp);
+        let resp = self
+            .cmd_bytes(cx, &[b"EXPIRE", key.as_bytes(), secs])
+            .await?;
+
+        let n = resp
+            .as_integer()
+            .ok_or_else(|| RedisError::Protocol("EXPIRE did not return integer".to_string()))?;
+        Ok(n != 0)
+    }
+
+    /// HGET key field
+    pub async fn hget(
+        &self,
+        cx: &Cx,
+        key: &str,
+        field: &str,
+    ) -> Result<Option<Vec<u8>>, RedisError> {
+        let resp = self
+            .cmd_bytes(cx, &[b"HGET", key.as_bytes(), field.as_bytes()])
+            .await?;
+
+        match resp {
+            RespValue::BulkString(Some(bytes)) => Ok(Some(bytes)),
+            RespValue::BulkString(None) => Ok(None),
+            other => Err(RedisError::Protocol(format!(
+                "HGET expected bulk string, got {other:?}"
+            ))),
+        }
+    }
+
+    /// HSET key field value
+    ///
+    /// Returns true if the field was newly inserted, false if it was updated.
+    pub async fn hset(
+        &self,
+        cx: &Cx,
+        key: &str,
+        field: &str,
+        value: &[u8],
+    ) -> Result<bool, RedisError> {
+        let resp = self
+            .cmd_bytes(cx, &[b"HSET", key.as_bytes(), field.as_bytes(), value])
+            .await?;
+
+        let n = resp
+            .as_integer()
+            .ok_or_else(|| RedisError::Protocol("HSET did not return integer".to_string()))?;
+        Ok(n != 0)
+    }
+
+    /// HDEL key field [field ...]
+    ///
+    /// Returns the number of fields removed.
+    pub async fn hdel(&self, cx: &Cx, key: &str, fields: &[&str]) -> Result<i64, RedisError> {
+        if fields.is_empty() {
+            return Err(RedisError::Protocol(
+                "HDEL requires at least one field".to_string(),
+            ));
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(fields.len() + 2);
+        args.push(b"HDEL");
+        args.push(key.as_bytes());
+        for field in fields {
+            args.push(field.as_bytes());
+        }
+
+        let resp = self.cmd_bytes(cx, &args).await?;
+        resp.as_integer()
+            .ok_or_else(|| RedisError::Protocol("HDEL did not return integer".to_string()))
     }
 
     /// Start a pipeline (multiple commands on a single pooled connection).

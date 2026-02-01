@@ -6,8 +6,39 @@
 //! - Panic handling in branches
 //! - Proper resource cleanup
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+struct CompletionTracker {
+    order: Arc<Mutex<Vec<u32>>>,
+    id: u32,
+}
+
+impl Drop for CompletionTracker {
+    fn drop(&mut self) {
+        self.order.lock().unwrap().push(self.id);
+    }
+}
+
+struct CleanupGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+}
+
+struct Resource {
+    freed: Arc<AtomicBool>,
+}
+
+impl Drop for Resource {
+    fn drop(&mut self) {
+        self.freed.store(true, Ordering::SeqCst);
+    }
+}
 
 /// Test that join waits for all branches to complete.
 #[test]
@@ -47,18 +78,7 @@ fn test_join_collects_results() {
 /// Test join with different completion times.
 #[test]
 fn test_join_different_completion_times() {
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    struct CompletionTracker {
-        order: Arc<std::sync::Mutex<Vec<u32>>>,
-        id: u32,
-    }
-
-    impl Drop for CompletionTracker {
-        fn drop(&mut self) {
-            self.order.lock().unwrap().push(self.id);
-        }
-    }
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     {
         // Simulate different completion orders
@@ -76,7 +96,7 @@ fn test_join_different_completion_times() {
         };
     }
 
-    let order = completion_order.lock().unwrap();
+    let order = completion_order.lock().unwrap().clone();
     assert_eq!(order.len(), 3, "All should complete");
 }
 
@@ -88,43 +108,31 @@ fn test_join_with_error() {
         Branch2Failed,
     }
 
-    fn branch1() -> Result<i32, TestError> {
-        Ok(1)
+    fn branch1() -> i32 {
+        1
     }
 
     fn branch2() -> Result<i32, TestError> {
         Err(TestError::Branch2Failed)
     }
 
-    fn branch3() -> Result<i32, TestError> {
-        Ok(3)
+    fn branch3() -> i32 {
+        3
     }
 
     // Simulate join collecting results
-    let results = vec![branch1(), branch2(), branch3()];
+    let results = [Ok(branch1()), branch2(), Ok(branch3())];
 
     // At least one error means overall failure
-    let has_error = results.iter().any(|r| r.is_err());
+    let has_error = results.iter().any(Result::is_err);
     assert!(has_error, "Join should detect error in branches");
 }
 
 /// Test join cleanup on early exit.
 #[test]
 fn test_join_cleanup_on_early_exit() {
-    use std::sync::atomic::AtomicBool;
-
     let cleaned1 = Arc::new(AtomicBool::new(false));
     let cleaned2 = Arc::new(AtomicBool::new(false));
-
-    struct CleanupGuard {
-        flag: Arc<AtomicBool>,
-    }
-
-    impl Drop for CleanupGuard {
-        fn drop(&mut self) {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-    }
 
     {
         let _guard1 = CleanupGuard {
@@ -173,19 +181,7 @@ fn test_join_preserves_values() {
 /// Test that join doesn't leak resources on success.
 #[test]
 fn test_join_no_resource_leak() {
-    use std::sync::atomic::AtomicBool;
-
     let resource_freed = Arc::new(AtomicBool::new(false));
-
-    struct Resource {
-        freed: Arc<AtomicBool>,
-    }
-
-    impl Drop for Resource {
-        fn drop(&mut self) {
-            self.freed.store(true, Ordering::SeqCst);
-        }
-    }
 
     {
         let _resource = Resource {

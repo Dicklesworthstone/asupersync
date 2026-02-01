@@ -261,7 +261,7 @@ mod tests {
         queue.push(task(1));
         assert!(!queue.is_empty());
 
-        queue.pop();
+        let _ = queue.pop();
         assert!(queue.is_empty());
     }
 
@@ -293,7 +293,7 @@ mod tests {
             src.push(task(i));
         }
 
-        src.stealer().steal_batch(&dest);
+        let _ = src.stealer().steal_batch(&dest);
 
         // Should steal ~half (5)
         let mut src_count = 0;
@@ -308,7 +308,7 @@ mod tests {
 
         assert_eq!(src_count + dest_count, 10, "no tasks should be lost");
         assert!(
-            dest_count >= 4 && dest_count <= 6,
+            (4..=6).contains(&dest_count),
             "should steal roughly half, got {dest_count}"
         );
     }
@@ -320,7 +320,7 @@ mod tests {
         let dest = LocalQueue::new();
 
         src.push(task(42));
-        src.stealer().steal_batch(&dest);
+        let _ = src.stealer().steal_batch(&dest);
 
         // Source should be empty
         assert!(src.is_empty());

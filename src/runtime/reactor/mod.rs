@@ -133,6 +133,15 @@ pub use epoll::EpollReactor;
 #[cfg(target_os = "windows")]
 pub use windows::IocpReactor;
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub use kqueue::KqueueReactor;
+
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;

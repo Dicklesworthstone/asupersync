@@ -129,14 +129,14 @@ mod tests {
         let stolen_count = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(5));
 
-        let handles: Vec<_> = (0..5)
+        let handles: Vec<_> = (0_u64..5)
             .map(|i| {
                 let s = stealer.clone();
                 let count = stolen_count.clone();
                 let b = barrier.clone();
                 thread::spawn(move || {
                     let stealers = vec![s];
-                    let mut rng = DetRng::new(i as u64);
+                    let mut rng = DetRng::new(i);
                     b.wait();
 
                     let mut local_count = 0;

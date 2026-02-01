@@ -1145,11 +1145,14 @@ mod tests {
 
     #[test]
     fn recv_data_exceeding_window_returns_flow_control_error() {
-        let mut stream = Stream::new(1, 1000, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
 
-        // Try to receive more data than window allows
-        let result = stream.recv_data(2000, false);
+        // Consume most of the receive window (recv_window uses DEFAULT_INITIAL_WINDOW_SIZE)
+        stream.recv_data(65530, false).unwrap();
+
+        // Now try to receive more data than remaining window (only 5 bytes left)
+        let result = stream.recv_data(100, false);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code, ErrorCode::FlowControlError);
