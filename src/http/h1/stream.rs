@@ -20,7 +20,7 @@ use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
 use crate::channel::mpsc;
 use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::Cx;
-use crate::http::body::{Body, Frame, HeaderMap, SizeHint};
+use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::HttpError;
 
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
@@ -91,17 +91,17 @@ pub struct IncomingBody {
 impl IncomingBody {
     /// Creates a bounded incoming body channel.
     #[must_use]
-    pub fn channel(cx: Cx, kind: BodyKind) -> (IncomingBodyWriter, IncomingBody) {
+    pub fn channel(cx: &Cx, kind: BodyKind) -> (IncomingBodyWriter, Self) {
         Self::channel_with_capacity(cx, kind, DEFAULT_BODY_CHANNEL_CAPACITY)
     }
 
     /// Creates a bounded incoming body channel with custom capacity.
     #[must_use]
     pub fn channel_with_capacity(
-        cx: Cx,
+        cx: &Cx,
         kind: BodyKind,
         capacity: usize,
-    ) -> (IncomingBodyWriter, IncomingBody) {
+    ) -> (IncomingBodyWriter, Self) {
         let (tx, rx) = mpsc::channel(capacity);
         let size_hint = match kind {
             BodyKind::Empty => SizeHint::with_exact(0),
@@ -109,7 +109,7 @@ impl IncomingBody {
             BodyKind::Chunked => SizeHint::default(),
         };
         let done = kind.is_empty();
-        let body = IncomingBody {
+        let body = Self {
             receiver: rx,
             cx: cx.clone(),
             done,
@@ -144,6 +144,7 @@ impl Body for IncomingBody {
         match pinned.as_mut().poll(poll_cx) {
             Poll::Ready(Ok(frame)) => Poll::Ready(Some(frame)),
             Poll::Ready(Err(RecvError::Cancelled)) => {
+                self.done = true;
                 Poll::Ready(Some(Err(HttpError::BodyCancelled)))
             }
             Poll::Ready(Err(RecvError::Disconnected)) => {
@@ -201,7 +202,7 @@ impl IncomingBodyWriter {
             trailers: HeaderMap::new(),
             trailers_bytes: 0,
             done,
-            max_chunk_size: IncomingBodyWriter::DEFAULT_MAX_CHUNK_SIZE,
+            max_chunk_size: Self::DEFAULT_MAX_CHUNK_SIZE,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
             max_trailers_size: DEFAULT_MAX_TRAILERS_SIZE,
             max_buffered_bytes: DEFAULT_MAX_BUFFERED_BYTES,
@@ -267,7 +268,7 @@ impl IncomingBodyWriter {
     }
 
     /// Signals EOF with no additional bytes.
-    pub async fn finish(&mut self, _cx: &Cx) -> Result<(), HttpError> {
+    pub fn finish(&mut self, _cx: &Cx) -> Result<(), HttpError> {
         if self.done {
             return Ok(());
         }
@@ -282,11 +283,7 @@ impl IncomingBodyWriter {
     }
 
     async fn drain_frames(&mut self, cx: &Cx) -> Result<(), HttpError> {
-        loop {
-            let frame = match self.try_decode_frame()? {
-                Some(frame) => frame,
-                None => break,
-            };
+        while let Some(frame) = self.try_decode_frame()? {
             self.send_frame(cx, frame).await?;
             if self.done {
                 self.close_sender();
@@ -305,15 +302,16 @@ impl IncomingBodyWriter {
         self.sender.take();
     }
 
-    async fn send_frame(&mut self, cx: &Cx, frame: Frame<BytesCursor>) -> Result<(), HttpError> {
+    async fn send_frame(&self, cx: &Cx, frame: Frame<BytesCursor>) -> Result<(), HttpError> {
         let Some(sender) = self.sender.as_ref() else {
             return Err(HttpError::BodyChannelClosed);
         };
         match sender.send(cx, Ok(frame)).await {
             Ok(()) => Ok(()),
-            Err(SendError::Disconnected(_)) => Err(HttpError::BodyChannelClosed),
+            Err(SendError::Disconnected(_) | SendError::Full(_)) => {
+                Err(HttpError::BodyChannelClosed)
+            }
             Err(SendError::Cancelled(_)) => Err(HttpError::BodyCancelled),
-            Err(SendError::Full(_)) => Err(HttpError::BodyChannelClosed),
         }
     }
 
@@ -462,7 +460,6 @@ impl IncomingBodyWriter {
 
                     let name = line_str[..colon].trim();
                     let value = line_str[colon + 1..].trim();
-                    use crate::http::body::{HeaderName, HeaderValue};
                     self.trailers.append(
                         HeaderName::from_string(name),
                         HeaderValue::from_bytes(value.as_bytes()),
@@ -489,13 +486,14 @@ impl ChunkedEncoder {
     }
 
     /// Encodes a data chunk into the chunked format.
-    pub fn encode_chunk(&self, data: &[u8]) -> BytesMut {
+    #[must_use]
+    pub fn encode_chunk(data: &[u8]) -> BytesMut {
         let mut buf = BytesMut::with_capacity(data.len() + 32);
-        self.encode_chunk_into(data, &mut buf);
+        Self::encode_chunk_into(data, &mut buf);
         buf
     }
 
-    fn encode_chunk_into(&self, data: &[u8], dst: &mut BytesMut) {
+    fn encode_chunk_into(data: &[u8], dst: &mut BytesMut) {
         let size_line = format!("{:X}\r\n", data.len());
         dst.extend_from_slice(size_line.as_bytes());
         dst.extend_from_slice(data);
@@ -503,19 +501,16 @@ impl ChunkedEncoder {
     }
 
     /// Encodes the final chunk (zero-length) with optional trailers.
+    #[must_use]
     pub fn encode_final(&mut self, trailers: Option<&HeaderMap>) -> BytesMut {
         let mut buf = BytesMut::with_capacity(256);
-        let _ = self.encode_final_into(trailers, &mut buf);
+        self.encode_final_into(trailers, &mut buf);
         buf
     }
 
-    fn encode_final_into(
-        &mut self,
-        trailers: Option<&HeaderMap>,
-        dst: &mut BytesMut,
-    ) -> Result<(), HttpError> {
+    fn encode_final_into(&mut self, trailers: Option<&HeaderMap>, dst: &mut BytesMut) {
         if self.finished {
-            return Ok(());
+            return;
         }
         self.finished = true;
         dst.extend_from_slice(b"0\r\n");
@@ -528,15 +523,10 @@ impl ChunkedEncoder {
             }
         }
         dst.extend_from_slice(b"\r\n");
-        Ok(())
     }
 
     /// Encodes a body frame into chunked format.
-    pub fn encode_frame<B: Buf>(
-        &mut self,
-        frame: Frame<B>,
-        dst: &mut BytesMut,
-    ) -> Result<(), HttpError> {
+    pub fn encode_frame<B: Buf>(&mut self, frame: Frame<B>, dst: &mut BytesMut) {
         match frame {
             Frame::Data(mut data) => {
                 while data.remaining() > 0 {
@@ -544,22 +534,17 @@ impl ChunkedEncoder {
                     if chunk.is_empty() {
                         break;
                     }
-                    self.encode_chunk_into(chunk, dst);
+                    Self::encode_chunk_into(chunk, dst);
                     data.advance(chunk.len());
                 }
-                Ok(())
             }
             Frame::Trailers(trailers) => self.encode_final_into(Some(&trailers), dst),
         }
     }
 
     /// Writes the final chunk if not already finished.
-    pub fn finalize(
-        &mut self,
-        trailers: Option<&HeaderMap>,
-        dst: &mut BytesMut,
-    ) -> Result<(), HttpError> {
-        self.encode_final_into(trailers, dst)
+    pub fn finalize(&mut self, trailers: Option<&HeaderMap>, dst: &mut BytesMut) {
+        self.encode_final_into(trailers, dst);
     }
 
     /// Returns true if the final chunk has been encoded.
@@ -582,24 +567,24 @@ pub struct OutgoingBody {
 impl OutgoingBody {
     /// Creates a bounded outgoing body channel.
     #[must_use]
-    pub fn channel(cx: Cx, kind: BodyKind) -> (OutgoingBodySender, OutgoingBody) {
+    pub fn channel(cx: &Cx, kind: BodyKind) -> (OutgoingBodySender, Self) {
         Self::channel_with_capacity(cx, kind, DEFAULT_BODY_CHANNEL_CAPACITY)
     }
 
     /// Creates a bounded outgoing body channel with custom capacity.
     #[must_use]
     pub fn channel_with_capacity(
-        cx: Cx,
+        cx: &Cx,
         kind: BodyKind,
         capacity: usize,
-    ) -> (OutgoingBodySender, OutgoingBody) {
+    ) -> (OutgoingBodySender, Self) {
         let (tx, rx) = mpsc::channel(capacity);
         let size_hint = match kind {
             BodyKind::Empty => SizeHint::with_exact(0),
             BodyKind::ContentLength(n) => SizeHint::with_exact(n),
             BodyKind::Chunked => SizeHint::default(),
         };
-        let body = OutgoingBody {
+        let body = Self {
             receiver: rx,
             cx: cx.clone(),
             done: kind.is_empty(),
@@ -612,7 +597,7 @@ impl OutgoingBody {
 
     /// Creates an empty outgoing body.
     #[must_use]
-    pub fn empty(cx: Cx) -> Self {
+    pub fn empty(cx: &Cx) -> Self {
         let (_sender, body) = Self::channel_with_capacity(cx, BodyKind::Empty, 1);
         body
     }
@@ -641,6 +626,7 @@ impl Body for OutgoingBody {
         match pinned.as_mut().poll(poll_cx) {
             Poll::Ready(Ok(frame)) => Poll::Ready(Some(frame)),
             Poll::Ready(Err(RecvError::Cancelled)) => {
+                self.done = true;
                 Poll::Ready(Some(Err(HttpError::BodyCancelled)))
             }
             Poll::Ready(Err(RecvError::Disconnected)) => {
@@ -752,7 +738,7 @@ impl OutgoingBodySender {
     }
 
     /// Finishes the body (no trailers).
-    pub async fn finish(&mut self, _cx: &Cx) -> Result<(), HttpError> {
+    pub fn finish(&mut self, _cx: &Cx) -> Result<(), HttpError> {
         if self.finished {
             return Ok(());
         }
@@ -768,15 +754,16 @@ impl OutgoingBodySender {
         self.sender.take();
     }
 
-    async fn send_frame(&mut self, cx: &Cx, frame: Frame<BytesCursor>) -> Result<(), HttpError> {
+    async fn send_frame(&self, cx: &Cx, frame: Frame<BytesCursor>) -> Result<(), HttpError> {
         let Some(sender) = self.sender.as_ref() else {
             return Err(HttpError::BodyChannelClosed);
         };
         match sender.send(cx, Ok(frame)).await {
             Ok(()) => Ok(()),
-            Err(SendError::Disconnected(_)) => Err(HttpError::BodyChannelClosed),
+            Err(SendError::Disconnected(_) | SendError::Full(_)) => {
+                Err(HttpError::BodyChannelClosed)
+            }
             Err(SendError::Cancelled(_)) => Err(HttpError::BodyCancelled),
-            Err(SendError::Full(_)) => Err(HttpError::BodyChannelClosed),
         }
     }
 }
@@ -863,6 +850,7 @@ impl ResponseHead {
     }
 
     /// Serializes the response head to bytes.
+    #[must_use]
     pub fn serialize(&self) -> BytesMut {
         let reason = if self.reason.is_empty() {
             super::types::default_reason(self.status)
@@ -904,13 +892,9 @@ impl StreamingRequest {
 
     /// Creates a streaming request with a channel-backed body.
     #[must_use]
-    pub fn channel(
-        head: RequestHead,
-        cx: Cx,
-        capacity: usize,
-    ) -> (IncomingBodyWriter, StreamingRequest) {
+    pub fn channel(head: RequestHead, cx: &Cx, capacity: usize) -> (IncomingBodyWriter, Self) {
         let (writer, body) = IncomingBody::channel_with_capacity(cx, head.body_kind(), capacity);
-        (writer, StreamingRequest { head, body })
+        (writer, Self { head, body })
     }
 }
 
@@ -927,37 +911,37 @@ impl StreamingResponse {
     /// Creates a new streaming response with chunked encoding.
     #[must_use]
     pub fn chunked(
-        cx: Cx,
+        cx: &Cx,
         capacity: usize,
         status: u16,
         reason: impl Into<String>,
-    ) -> (StreamingResponse, OutgoingBodySender) {
+    ) -> (Self, OutgoingBodySender) {
         let head = ResponseHead::new(status, reason).with_header("Transfer-Encoding", "chunked");
         let (sender, body) = OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, capacity);
-        (StreamingResponse { head, body }, sender)
+        (Self { head, body }, sender)
     }
 
     /// Creates a new streaming response with known Content-Length.
     #[must_use]
     pub fn with_content_length(
-        cx: Cx,
+        cx: &Cx,
         capacity: usize,
         status: u16,
         reason: impl Into<String>,
         length: u64,
-    ) -> (StreamingResponse, OutgoingBodySender) {
+    ) -> (Self, OutgoingBodySender) {
         let head =
             ResponseHead::new(status, reason).with_header("Content-Length", length.to_string());
         let (sender, body) =
             OutgoingBody::channel_with_capacity(cx, BodyKind::ContentLength(length), capacity);
-        (StreamingResponse { head, body }, sender)
+        (Self { head, body }, sender)
     }
 
     /// Creates an empty response (no body).
     #[must_use]
-    pub fn empty(cx: Cx, status: u16, reason: impl Into<String>) -> StreamingResponse {
+    pub fn empty(cx: &Cx, status: u16, reason: impl Into<String>) -> Self {
         let head = ResponseHead::new(status, reason).with_header("Content-Length", "0");
-        StreamingResponse {
+        Self {
             head,
             body: OutgoingBody::empty(cx),
         }
@@ -1024,7 +1008,7 @@ mod tests {
     #[test]
     fn incoming_body_content_length() {
         let cx = Cx::for_testing();
-        let (mut writer, mut body) = IncomingBody::channel(cx.clone(), BodyKind::ContentLength(5));
+        let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(5));
 
         block_on(writer.push_bytes(&cx, b"hello")).expect("push bytes");
 
@@ -1037,7 +1021,7 @@ mod tests {
     #[test]
     fn incoming_body_chunked_with_trailers() {
         let cx = Cx::for_testing();
-        let (mut writer, mut body) = IncomingBody::channel(cx.clone(), BodyKind::Chunked);
+        let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::Chunked);
 
         block_on(writer.push_bytes(&cx, b"5\r\nhello\r\n0\r\nX-Trailer: test\r\n\r\n"))
             .expect("push bytes");
@@ -1054,9 +1038,8 @@ mod tests {
 
     #[test]
     fn chunked_encoder_simple() {
-        let encoder = ChunkedEncoder::new();
-        let encoded = encoder.encode_chunk(b"hello");
-        assert_eq!(encoded.as_ref(), b"5\r\nhello\r\n");
+        let encoded_chunk = ChunkedEncoder::encode_chunk(b"hello");
+        assert_eq!(encoded_chunk.as_ref(), b"5\r\nhello\r\n");
     }
 
     #[test]
@@ -1076,20 +1059,20 @@ mod tests {
     #[test]
     fn outgoing_body_chunked_roundtrip() {
         let cx = Cx::for_testing();
-        let (mut sender, mut body) = OutgoingBody::channel(cx.clone(), BodyKind::Chunked);
+        let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello"))).unwrap();
         block_on(sender.send_bytes(&cx, Bytes::from_static(b" world"))).unwrap();
-        block_on(sender.finish(&cx)).unwrap();
+        sender.finish(&cx).unwrap();
 
         let mut encoder = ChunkedEncoder::new();
         let mut out = BytesMut::new();
 
         while let Some(frame) = poll_body(&mut body) {
             let frame = frame.unwrap();
-            encoder.encode_frame(frame, &mut out).unwrap();
+            encoder.encode_frame(frame, &mut out);
         }
-        encoder.finalize(None, &mut out).unwrap();
+        encoder.finalize(None, &mut out);
 
         assert_eq!(out.as_ref(), b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
     }
@@ -1097,11 +1080,11 @@ mod tests {
     #[test]
     fn outgoing_body_content_length_roundtrip() {
         let cx = Cx::for_testing();
-        let (mut sender, mut body) = OutgoingBody::channel(cx.clone(), BodyKind::ContentLength(11));
+        let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::ContentLength(11));
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello"))).unwrap();
         block_on(sender.send_bytes(&cx, Bytes::from_static(b" world"))).unwrap();
-        block_on(sender.finish(&cx)).unwrap();
+        sender.finish(&cx).unwrap();
 
         let mut collected = Vec::new();
         while let Some(frame) = poll_body(&mut body) {
@@ -1116,8 +1099,7 @@ mod tests {
     #[test]
     fn outgoing_body_backpressure_blocks_until_recv() {
         let cx = Cx::for_testing();
-        let (mut sender, mut body) =
-            OutgoingBody::channel_with_capacity(cx.clone(), BodyKind::Chunked, 1);
+        let (mut sender, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"one"))).unwrap();
 
@@ -1127,7 +1109,7 @@ mod tests {
 
         let handle = std::thread::spawn(move || {
             block_on(sender.send_bytes(&cx_worker, Bytes::from_static(b"two"))).unwrap();
-            block_on(sender.finish(&cx_worker)).unwrap();
+            sender.finish(&cx_worker).unwrap();
             finished_clone.store(true, Ordering::SeqCst);
         });
 
@@ -1153,7 +1135,7 @@ mod tests {
     #[test]
     fn outgoing_body_send_cancelled() {
         let cx = Cx::for_testing();
-        let (mut sender, _body) = OutgoingBody::channel(cx.clone(), BodyKind::Chunked);
+        let (mut sender, _body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
         cx.cancel_fast(CancelKind::User);
 
         let err = block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello")))
@@ -1206,7 +1188,7 @@ mod tests {
     #[test]
     fn streaming_response_chunked() {
         let cx = Cx::for_testing();
-        let (resp, _sender) = StreamingResponse::chunked(cx, 4, 200, "OK");
+        let (resp, _sender) = StreamingResponse::chunked(&cx, 4, 200, "OK");
         assert!(resp
             .head
             .headers
@@ -1218,7 +1200,7 @@ mod tests {
     #[test]
     fn streaming_response_content_length() {
         let cx = Cx::for_testing();
-        let (resp, _sender) = StreamingResponse::with_content_length(cx, 4, 200, "OK", 100);
+        let (resp, _sender) = StreamingResponse::with_content_length(&cx, 4, 200, "OK", 100);
         assert!(resp
             .head
             .headers

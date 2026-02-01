@@ -2,6 +2,7 @@
 //!
 //! Manages HTTP/2 settings as defined in RFC 7540 Section 6.5.
 
+use super::error::{ErrorCode, H2Error};
 use super::frame::Setting;
 
 /// Default header table size (4 KB).
@@ -108,8 +109,10 @@ impl Settings {
 
     /// Apply a setting value.
     ///
-    /// Returns an error description if the value is invalid.
-    pub fn apply(&mut self, setting: Setting) -> Result<(), &'static str> {
+    /// Returns an error if the value is invalid per RFC 7540 Section 6.5.2:
+    /// - `SETTINGS_INITIAL_WINDOW_SIZE` above 2^31-1: FLOW_CONTROL_ERROR
+    /// - `SETTINGS_MAX_FRAME_SIZE` outside 16384..16777215: PROTOCOL_ERROR
+    pub fn apply(&mut self, setting: Setting) -> Result<(), H2Error> {
         match setting {
             Setting::HeaderTableSize(v) => {
                 self.header_table_size = v;
@@ -125,7 +128,12 @@ impl Settings {
             }
             Setting::InitialWindowSize(v) => {
                 if v > MAX_INITIAL_WINDOW_SIZE {
-                    Err("initial window size too large")
+                    // RFC 7540 Section 6.5.2: Values above 2^31-1 MUST be treated
+                    // as a connection error of type FLOW_CONTROL_ERROR
+                    Err(H2Error::connection(
+                        ErrorCode::FlowControlError,
+                        "initial window size exceeds maximum (2^31-1)",
+                    ))
                 } else {
                     self.initial_window_size = v;
                     Ok(())
@@ -136,7 +144,9 @@ impl Settings {
                     self.max_frame_size = v;
                     Ok(())
                 } else {
-                    Err("max frame size out of range")
+                    // RFC 7540 Section 6.5.2: Values outside 16384..16777215
+                    // MUST be treated as a connection error of type PROTOCOL_ERROR
+                    Err(H2Error::protocol("max frame size out of valid range"))
                 }
             }
             Setting::MaxHeaderListSize(v) => {

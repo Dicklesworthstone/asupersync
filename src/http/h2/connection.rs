@@ -361,8 +361,7 @@ impl Connection {
                 self.pending_push_promise = None;
 
                 return Err(H2Error::protocol(format!(
-                    "CONTINUATION timeout: no END_HEADERS within {}ms for stream {:?}",
-                    timeout_ms, stream_id
+                    "CONTINUATION timeout: no END_HEADERS within {timeout_ms}ms for stream {stream_id:?}",
                 )));
             }
         }
@@ -1686,8 +1685,10 @@ mod tests {
 
     #[test]
     fn continuation_timeout_not_triggered_when_within_limit() {
-        let mut settings = Settings::default();
-        settings.continuation_timeout_ms = 5000; // 5 seconds
+        let settings = Settings {
+            continuation_timeout_ms: 5000, // 5 seconds
+            ..Default::default()
+        };
         let mut conn = Connection::server(settings);
         conn.state = ConnectionState::Open;
 
@@ -1730,8 +1731,10 @@ mod tests {
     fn continuation_timeout_triggers_after_expiry() {
         use std::time::Duration;
 
-        let mut settings = Settings::default();
-        settings.continuation_timeout_ms = 50; // 50ms for fast test
+        let settings = Settings {
+            continuation_timeout_ms: 50, // 50ms for fast test
+            ..Default::default()
+        };
         let mut conn = Connection::server(settings);
         conn.state = ConnectionState::Open;
 
@@ -1741,7 +1744,11 @@ mod tests {
         assert!(conn.is_awaiting_continuation());
 
         // Simulate a timeout without sleeping.
-        conn.continuation_started_at = Some(Instant::now() - Duration::from_millis(60));
+        conn.continuation_started_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(60))
+                .unwrap_or_else(Instant::now),
+        );
 
         // Timeout should trigger
         let err = conn.check_continuation_timeout().unwrap_err();
@@ -1757,8 +1764,10 @@ mod tests {
     fn continuation_timeout_on_next_frame() {
         use std::time::Duration;
 
-        let mut settings = Settings::default();
-        settings.continuation_timeout_ms = 50; // 50ms for fast test
+        let settings = Settings {
+            continuation_timeout_ms: 50, // 50ms for fast test
+            ..Default::default()
+        };
         let mut conn = Connection::server(settings);
         conn.state = ConnectionState::Open;
 
@@ -1767,7 +1776,11 @@ mod tests {
         conn.process_frame(headers).unwrap();
 
         // Simulate a timeout without sleeping.
-        conn.continuation_started_at = Some(Instant::now() - Duration::from_millis(60));
+        conn.continuation_started_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(60))
+                .unwrap_or_else(Instant::now),
+        );
 
         // Try to process another CONTINUATION - should fail with timeout
         let continuation = Frame::Continuation(ContinuationFrame {
@@ -1811,7 +1824,11 @@ mod tests {
         assert!(conn.is_awaiting_continuation());
 
         // Simulate a timeout without sleeping.
-        conn.continuation_started_at = Some(Instant::now() - Duration::from_millis(60));
+        conn.continuation_started_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_millis(60))
+                .unwrap_or_else(Instant::now),
+        );
 
         // Timeout should trigger
         let err = conn.check_continuation_timeout().unwrap_err();
@@ -2013,7 +2030,7 @@ mod tests {
             match conn.process_frame(push) {
                 Ok(_) => accepted += 1,
                 Err(e) if e.code == ErrorCode::RefusedStream => rejected += 1,
-                Err(e) => panic!("unexpected error: {:?}", e),
+                Err(e) => panic!("unexpected error: {e:?}"),
             }
         }
 
@@ -2077,8 +2094,8 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
 
-        // Initial values
-        assert_eq!(conn.remote_settings().max_concurrent_streams, u32::MAX);
+        // Initial values (DEFAULT_MAX_CONCURRENT_STREAMS = 256)
+        assert_eq!(conn.remote_settings().max_concurrent_streams, 256);
         assert_eq!(
             conn.remote_settings().initial_window_size,
             settings::DEFAULT_INITIAL_WINDOW_SIZE
@@ -2103,7 +2120,9 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
 
-        // Initial window size > 2^31 - 1 is a flow control error
+        // Initial window size > 2^31 - 1 is invalid per RFC 7540 Section 6.5.2:
+        // "Values above the maximum flow-control window size of 2^31-1 MUST be
+        // treated as a connection error of type FLOW_CONTROL_ERROR"
         let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(0x8000_0000)]);
         let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
 

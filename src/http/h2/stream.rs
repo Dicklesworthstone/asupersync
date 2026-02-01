@@ -1614,8 +1614,7 @@ mod tests {
             let result = store.allocate_stream_id();
             assert!(
                 result.is_err(),
-                "round {}: should hit max_concurrent_streams limit",
-                round
+                "round {round}: should hit max_concurrent_streams limit"
             );
 
             // Close all
@@ -1628,8 +1627,7 @@ mod tests {
             assert_eq!(
                 store.active_count(),
                 0,
-                "round {}: all streams should be pruned",
-                round
+                "round {round}: all streams should be pruned"
             );
         }
 
