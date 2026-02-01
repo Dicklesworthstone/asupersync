@@ -23,9 +23,11 @@
 use crate::console::Console;
 use crate::record::task::{TaskPhase, TaskState};
 use crate::runtime::state::RuntimeState;
+use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, Time};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -264,8 +266,7 @@ impl TaskInspector {
     fn current_time(&self) -> Time {
         self.state
             .timer_driver()
-            .map(|d| d.now())
-            .unwrap_or(Time::ZERO)
+            .map_or(Time::ZERO, TimerDriverHandle::now)
     }
 
     /// Get detailed information about a specific task.
@@ -378,6 +379,8 @@ impl TaskInspector {
                 "potential stuck tasks detected"
             );
             for task in &stuck {
+                // When tracing is compiled out, ensure `task` is still considered "used".
+                let _ = task;
                 info!(
                     task_id = ?task.id,
                     region_id = ?task.region_id,
@@ -455,31 +458,32 @@ impl TaskInspector {
 
     /// Render task summary to console (if available).
     pub fn render_summary(&self) -> std::io::Result<()> {
-        let console = match &self.console {
-            Some(c) => c,
-            None => return Ok(()),
+        let Some(console) = &self.console else {
+            return Ok(());
         };
 
         let summary = self.summary();
         let stuck = self.find_stuck_tasks_default();
 
         let mut output = String::new();
-        output.push_str("Task Inspector\n");
-        output.push_str(&format!(
-            "Total: {}  |  Running: {}  |  Cancelling: {}  |  Completed: {}  |  Stuck: {}\n",
+        writeln!(&mut output, "Task Inspector").unwrap();
+        writeln!(
+            &mut output,
+            "Total: {}  |  Running: {}  |  Cancelling: {}  |  Completed: {}  |  Stuck: {}",
             summary.total_tasks,
             summary.running,
             summary.cancelling,
             summary.completed,
             summary.stuck_count
-        ));
+        )
+        .unwrap();
         output.push_str(&"-".repeat(70));
         output.push('\n');
 
         // Region breakdown
         output.push_str("By Region:\n");
         for (region_id, count) in &summary.by_region {
-            output.push_str(&format!("  {:?}: {} tasks\n", region_id, count));
+            writeln!(&mut output, "  {region_id:?}: {count} tasks").unwrap();
         }
 
         // Stuck tasks section
@@ -488,14 +492,16 @@ impl TaskInspector {
             output.push('\n');
             output.push_str("POTENTIAL STUCK TASKS:\n");
             for stuck_task in &stuck {
-                output.push_str(&format!(
-                    "  {:?} in {:?} - {} for {:.1}s, {} polls\n",
-                    stuck_task.id,
-                    stuck_task.region_id,
-                    stuck_task.state.name(),
-                    stuck_task.age.as_secs_f64(),
-                    stuck_task.poll_count
-                ));
+                let id = stuck_task.id;
+                let region_id = stuck_task.region_id;
+                let state = stuck_task.state.name();
+                let age_secs = stuck_task.age.as_secs_f64();
+                let poll_count = stuck_task.poll_count;
+                writeln!(
+                    &mut output,
+                    "  {id:?} in {region_id:?} - {state} for {age_secs:.1}s, {poll_count} polls"
+                )
+                .unwrap();
             }
         }
 
@@ -504,38 +510,34 @@ impl TaskInspector {
 
     /// Render detailed task information to console.
     pub fn render_task_details(&self, task_id: TaskId) -> std::io::Result<()> {
-        let console = match &self.console {
-            Some(c) => c,
-            None => return Ok(()),
+        let Some(console) = &self.console else {
+            return Ok(());
         };
 
-        let task = match self.inspect_task(task_id) {
-            Some(t) => t,
-            None => {
-                let mut output = String::new();
-                output.push_str(&format!("Task {:?} not found\n", task_id));
-                return console.print(&RawText(&output));
-            }
+        let Some(task) = self.inspect_task(task_id) else {
+            let mut output = String::new();
+            writeln!(&mut output, "Task {task_id:?} not found").unwrap();
+            return console.print(&RawText(&output));
         };
 
         let mut output = String::new();
-        output.push_str(&format!("Task Inspector: {:?}\n", task_id));
+        writeln!(&mut output, "Task Inspector: {task_id:?}").unwrap();
         output.push_str(&"-".repeat(50));
         output.push('\n');
-        output.push_str(&format!("State:         {}\n", task.state.name()));
-        output.push_str(&format!("Phase:         {:?}\n", task.phase));
-        output.push_str(&format!("Region:        {:?}\n", task.region_id));
-        output.push_str(&format!("Age:           {:.3}s\n", task.age.as_secs_f64()));
-        output.push_str(&format!("Poll count:    {}\n", task.poll_count));
-        output.push_str(&format!("Polls left:    {}\n", task.polls_remaining));
-        output.push_str(&format!("Wake pending:  {}\n", task.wake_pending));
+        writeln!(&mut output, "State:         {}", task.state.name()).unwrap();
+        writeln!(&mut output, "Phase:         {:?}", task.phase).unwrap();
+        writeln!(&mut output, "Region:        {:?}", task.region_id).unwrap();
+        writeln!(&mut output, "Age:           {:.3}s", task.age.as_secs_f64()).unwrap();
+        writeln!(&mut output, "Poll count:    {}", task.poll_count).unwrap();
+        writeln!(&mut output, "Polls left:    {}", task.polls_remaining).unwrap();
+        writeln!(&mut output, "Wake pending:  {}", task.wake_pending).unwrap();
 
         if !task.obligations.is_empty() {
             output.push_str(&"-".repeat(50));
             output.push('\n');
             output.push_str("Obligations:\n");
             for ob_id in &task.obligations {
-                output.push_str(&format!("  {:?}\n", ob_id));
+                writeln!(&mut output, "  {ob_id:?}").unwrap();
             }
         }
 
@@ -544,7 +546,7 @@ impl TaskInspector {
             output.push('\n');
             output.push_str("Waiters:\n");
             for waiter_id in &task.waiters {
-                output.push_str(&format!("  {:?}\n", waiter_id));
+                writeln!(&mut output, "  {waiter_id:?}").unwrap();
             }
         }
 

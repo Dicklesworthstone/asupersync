@@ -71,7 +71,7 @@ impl PartialOrd for TimedEntry {
 ///
 /// Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 /// Generation counters provide FIFO ordering within same priority/deadline.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Scheduler {
     /// Cancel lane: tasks with pending cancellation (highest priority).
     cancel_lane: BinaryHeap<SchedulerEntry>,
@@ -83,18 +83,6 @@ pub struct Scheduler {
     scheduled: std::collections::HashSet<TaskId>,
     /// Next generation number for FIFO ordering.
     next_generation: u64,
-}
-
-impl Default for Scheduler {
-    fn default() -> Self {
-        Self {
-            cancel_lane: BinaryHeap::new(),
-            timed_lane: BinaryHeap::new(),
-            ready_lane: BinaryHeap::new(),
-            scheduled: std::collections::HashSet::new(),
-            next_generation: 0,
-        }
-    }
 }
 
 impl Scheduler {
@@ -216,16 +204,8 @@ impl Scheduler {
                 .drain()
                 .filter(|e| e.task != task)
                 .collect();
-            self.timed_lane = self
-                .timed_lane
-                .drain()
-                .filter(|e| e.task != task)
-                .collect();
-            self.ready_lane = self
-                .ready_lane
-                .drain()
-                .filter(|e| e.task != task)
-                .collect();
+            self.timed_lane = self.timed_lane.drain().filter(|e| e.task != task).collect();
+            self.ready_lane = self.ready_lane.drain().filter(|e| e.task != task).collect();
         }
     }
 
@@ -277,11 +257,7 @@ impl Scheduler {
         // Check timed lane
         let in_timed = self.timed_lane.iter().any(|e| e.task == task);
         if in_timed {
-            self.timed_lane = self
-                .timed_lane
-                .drain()
-                .filter(|e| e.task != task)
-                .collect();
+            self.timed_lane = self.timed_lane.drain().filter(|e| e.task != task).collect();
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,
@@ -293,11 +269,7 @@ impl Scheduler {
         // Check ready lane
         let in_ready = self.ready_lane.iter().any(|e| e.task == task);
         if in_ready {
-            self.ready_lane = self
-                .ready_lane
-                .drain()
-                .filter(|e| e.task != task)
-                .collect();
+            self.ready_lane = self.ready_lane.drain().filter(|e| e.task != task).collect();
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,

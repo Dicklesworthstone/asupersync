@@ -82,6 +82,7 @@ impl Opcode {
 
 /// WebSocket frame.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // RFC 6455 exposes these as independent header bits.
 pub struct Frame {
     /// Final fragment flag (FIN bit).
     pub fin: bool,
@@ -368,6 +369,7 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = WsError;
 
+    #[allow(clippy::too_many_lines)] // Single, explicit RFC 6455 decode state machine.
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         loop {
             match &self.state {
@@ -393,6 +395,15 @@ impl Decoder for FrameCodec {
                     }
 
                     let opcode = Opcode::from_u8(opcode_raw)?;
+
+                    // Masking rules (RFC 6455):
+                    // - Client->Server frames MUST be masked
+                    // - Server->Client frames MUST NOT be masked
+                    match self.role {
+                        Role::Server if !masked => return Err(WsError::UnmaskedClientFrame),
+                        Role::Client if masked => return Err(WsError::MaskedServerFrame),
+                        _ => {}
+                    }
 
                     // Control frame validation
                     if opcode.is_control() {
@@ -698,7 +709,7 @@ pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
 fn generate_mask_key() -> [u8; 4] {
     // Use a simple counter-based approach for determinism in tests
     // In production, use thread_rng or similar
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x12345678);
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x1234_5678);
     let val = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     val.to_ne_bytes()
 }
@@ -748,7 +759,7 @@ impl CloseCode {
 
 impl From<CloseCode> for u16 {
     fn from(code: CloseCode) -> Self {
-        code as u16
+        code as Self
     }
 }
 
@@ -798,7 +809,7 @@ mod tests {
         let frame = Frame::text("Hello, WebSocket!");
 
         let mut buf = BytesMut::new();
-        codec.encode(frame.clone(), &mut buf).unwrap();
+        codec.encode(frame, &mut buf).unwrap();
 
         // Decode the frame
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
@@ -827,9 +838,9 @@ mod tests {
         let mut codec = FrameCodec::server();
 
         // Ping
-        let ping = Frame::ping("ping-data");
+        let ping_request = Frame::ping("ping-data");
         let mut buf = BytesMut::new();
-        codec.encode(ping, &mut buf).unwrap();
+        codec.encode(ping_request, &mut buf).unwrap();
 
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
@@ -837,9 +848,9 @@ mod tests {
         assert_eq!(decoded.payload.as_ref(), b"ping-data");
 
         // Pong
-        let pong = Frame::pong("pong-data");
+        let pong_response = Frame::pong("pong-data");
         let mut buf = BytesMut::new();
-        codec.encode(pong, &mut buf).unwrap();
+        codec.encode(pong_response, &mut buf).unwrap();
 
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
@@ -871,8 +882,7 @@ mod tests {
     #[test]
     fn test_payload_length_126() {
         let mut codec = FrameCodec::server();
-        let payload = Bytes::from(vec![0u8; 200]); // > 125, uses 2-byte length
-        let frame = Frame::binary(payload.clone());
+        let frame = Frame::binary(Bytes::from(vec![0u8; 200])); // > 125, uses 2-byte length
 
         let mut buf = BytesMut::new();
         codec.encode(frame, &mut buf).unwrap();
@@ -884,8 +894,7 @@ mod tests {
     #[test]
     fn test_payload_length_127() {
         let mut codec = FrameCodec::server();
-        let payload = Bytes::from(vec![0u8; 70_000]); // > 65535, uses 8-byte length
-        let frame = Frame::binary(payload.clone());
+        let frame = Frame::binary(Bytes::from(vec![0u8; 70_000])); // > 65535, uses 8-byte length
 
         let mut buf = BytesMut::new();
         codec.encode(frame, &mut buf).unwrap();

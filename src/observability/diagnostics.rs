@@ -24,6 +24,7 @@ use crate::record::region::RegionState;
 use crate::record::task::TaskState;
 use crate::record::ObligationState;
 use crate::runtime::state::RuntimeState;
+use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, trace, warn};
 use crate::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
 use std::fmt;
@@ -58,7 +59,9 @@ impl Diagnostics {
 
     /// Get the current logical time from the timer driver, or ZERO if unavailable.
     fn now(&self) -> Time {
-        self.state.timer_driver().map(|d| d.now()).unwrap_or(Time::ZERO)
+        self.state
+            .timer_driver()
+            .map_or(Time::ZERO, TimerDriverHandle::now)
     }
 
     /// Explain why a region cannot close.
@@ -90,7 +93,7 @@ impl Diagnostics {
         let mut reasons = Vec::new();
 
         // Children first (structural).
-        let mut child_ids = region.child_ids().to_vec();
+        let mut child_ids = region.child_ids();
         child_ids.sort();
         for child_id in child_ids {
             if let Some(child) = self.state.region(child_id) {
@@ -105,7 +108,7 @@ impl Diagnostics {
         }
 
         // Live tasks.
-        let mut task_ids = region.task_ids().to_vec();
+        let mut task_ids = region.task_ids();
         task_ids.sort();
         for task_id in task_ids {
             if let Some(task) = self.state.task(task_id) {
@@ -136,14 +139,25 @@ impl Diagnostics {
         }
 
         let mut recommendations = Vec::new();
-        if reasons.iter().any(|r| matches!(r, Reason::ChildRegionOpen { .. })) {
+        if reasons
+            .iter()
+            .any(|r| matches!(r, Reason::ChildRegionOpen { .. }))
+        {
             recommendations.push("Wait for child regions to close, or cancel them.".to_string());
         }
-        if reasons.iter().any(|r| matches!(r, Reason::TaskRunning { .. })) {
-            recommendations.push("Wait for live tasks to complete, or cancel the region.".to_string());
+        if reasons
+            .iter()
+            .any(|r| matches!(r, Reason::TaskRunning { .. }))
+        {
+            recommendations
+                .push("Wait for live tasks to complete, or cancel the region.".to_string());
         }
-        if reasons.iter().any(|r| matches!(r, Reason::ObligationHeld { .. })) {
-            recommendations.push("Ensure obligations are committed/aborted before closing.".to_string());
+        if reasons
+            .iter()
+            .any(|r| matches!(r, Reason::ObligationHeld { .. }))
+        {
+            recommendations
+                .push("Ensure obligations are committed/aborted before closing.".to_string());
         }
 
         debug!(
@@ -186,10 +200,12 @@ impl Diagnostics {
             TaskState::Running => {
                 // We cannot introspect await points yet, but we can surface wake state.
                 if task.wake_state.is_notified() {
-                    recommendations.push("Task has a pending wake; it should be scheduled soon.".to_string());
+                    recommendations
+                        .push("Task has a pending wake; it should be scheduled soon.".to_string());
                     BlockReason::AwaitingSchedule
                 } else {
-                    recommendations.push("Task appears to be awaiting an async operation.".to_string());
+                    recommendations
+                        .push("Task appears to be awaiting an async operation.".to_string());
                     BlockReason::AwaitingFuture {
                         description: "unknown await point".to_string(),
                     }
@@ -202,7 +218,7 @@ impl Diagnostics {
                 }
                 recommendations.push("Task is cancelling; wait for drain/finalizers.".to_string());
                 BlockReason::CancelRequested {
-                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message.as_deref()),
+                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message),
                 }
             }
             TaskState::Cancelling {
@@ -210,9 +226,12 @@ impl Diagnostics {
                 cleanup_budget,
             } => {
                 details.push(format!("cancel kind: {}", reason.kind));
-                details.push(format!("cleanup polls remaining: {}", cleanup_budget.poll_quota));
+                details.push(format!(
+                    "cleanup polls remaining: {}",
+                    cleanup_budget.poll_quota
+                ));
                 BlockReason::RunningCleanup {
-                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message.as_deref()),
+                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message),
                     polls_remaining: cleanup_budget.poll_quota,
                 }
             }
@@ -221,9 +240,12 @@ impl Diagnostics {
                 cleanup_budget,
             } => {
                 details.push(format!("cancel kind: {}", reason.kind));
-                details.push(format!("cleanup polls remaining: {}", cleanup_budget.poll_quota));
+                details.push(format!(
+                    "cleanup polls remaining: {}",
+                    cleanup_budget.poll_quota
+                ));
                 BlockReason::Finalizing {
-                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message.as_deref()),
+                    reason: CancelReasonInfo::from_reason(reason.kind, reason.message),
                     polls_remaining: cleanup_budget.poll_quota,
                 }
             }
@@ -271,7 +293,10 @@ impl Diagnostics {
         leaks.sort_by_key(|l| (l.region_id, l.obligation_id));
 
         if !leaks.is_empty() {
-            warn!(count = leaks.len(), "diagnostics: potential obligation leaks detected");
+            warn!(
+                count = leaks.len(),
+                "diagnostics: potential obligation leaks detected"
+            );
         }
 
         leaks
@@ -346,15 +371,14 @@ impl fmt::Display for Reason {
             Self::ChildRegionOpen {
                 child_id,
                 child_state,
-            } => write!(f, "child region {:?} still open ({child_state:?})", child_id),
+            } => write!(f, "child region {child_id:?} still open ({child_state:?})"),
             Self::TaskRunning {
                 task_id,
                 task_state,
                 poll_count,
             } => write!(
                 f,
-                "task {:?} still running (state={task_state}, polls={poll_count})",
-                task_id
+                "task {task_id:?} still running (state={task_state}, polls={poll_count})"
             ),
             Self::ObligationHeld {
                 obligation_id,
@@ -362,8 +386,7 @@ impl fmt::Display for Reason {
                 holder_task,
             } => write!(
                 f,
-                "obligation {:?} held by task {:?} (type={obligation_type})",
-                obligation_id, holder_task
+                "obligation {obligation_id:?} held by task {holder_task:?} (type={obligation_type})"
             ),
         }
     }
@@ -405,17 +428,27 @@ pub enum BlockReason {
     /// Task is runnable but waiting to be scheduled.
     AwaitingSchedule,
     /// Task is awaiting an async operation.
-    AwaitingFuture { description: String },
+    AwaitingFuture {
+        /// Short, human-readable description of what the task is awaiting.
+        description: String,
+    },
     /// Cancellation requested.
-    CancelRequested { reason: CancelReasonInfo },
+    CancelRequested {
+        /// Cancellation reason as observed on the task.
+        reason: CancelReasonInfo,
+    },
     /// Task is running cancellation cleanup.
     RunningCleanup {
+        /// Cancellation reason driving cleanup.
         reason: CancelReasonInfo,
+        /// Remaining poll budget at the time of inspection.
         polls_remaining: u32,
     },
     /// Task is finalizing.
     Finalizing {
+        /// Cancellation reason driving finalization.
         reason: CancelReasonInfo,
+        /// Remaining poll budget at the time of inspection.
         polls_remaining: u32,
     },
     /// Task is completed.
@@ -433,11 +466,17 @@ impl fmt::Display for BlockReason {
             Self::RunningCleanup {
                 reason,
                 polls_remaining,
-            } => write!(f, "running cleanup ({reason}, polls_remaining={polls_remaining})"),
+            } => write!(
+                f,
+                "running cleanup ({reason}, polls_remaining={polls_remaining})"
+            ),
             Self::Finalizing {
                 reason,
                 polls_remaining,
-            } => write!(f, "finalizing ({reason}, polls_remaining={polls_remaining})"),
+            } => write!(
+                f,
+                "finalizing ({reason}, polls_remaining={polls_remaining})"
+            ),
             Self::Completed => f.write_str("completed"),
         }
     }

@@ -1217,7 +1217,8 @@ mod tests {
             0x86, // :scheme: http (indexed 6)
             0x84, // :path: / (indexed 4)
             0x41, 0x0f, // :authority: with literal value, 15 bytes
-            b'w', b'w', b'w', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm',
+            b'w', b'w', b'w', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o',
+            b'm',
         ];
 
         let mut decoder = Decoder::new();
@@ -1238,8 +1239,8 @@ mod tests {
     #[test]
     fn test_rfc7541_c4_request_with_huffman() {
         // Encode headers with Huffman, then decode and verify
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(true);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(true);
 
         let headers = vec![
             Header::new(":method", "GET"),
@@ -1248,22 +1249,22 @@ mod tests {
             Header::new(":authority", "www.example.com"),
         ];
 
-        let mut encoded = BytesMut::new();
-        encoder.encode(&headers, &mut encoded);
+        let mut buf = BytesMut::new();
+        enc.encode(&headers, &mut buf);
 
-        let mut decoder = Decoder::new();
-        let mut src = encoded.freeze();
-        let decoded = decoder.decode(&mut src).unwrap();
+        let mut dec = Decoder::new();
+        let mut src = buf.freeze();
+        let headers_out = dec.decode(&mut src).unwrap();
 
-        assert_eq!(decoded.len(), 4);
-        assert_eq!(decoded[3].value, "www.example.com");
+        assert_eq!(headers_out.len(), 4);
+        assert_eq!(headers_out[3].value, "www.example.com");
     }
 
     #[test]
     fn test_rfc7541_c5_response_without_huffman() {
         // Test response headers encoding/decoding
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(false);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
 
         let headers = vec![
             Header::new(":status", "302"),
@@ -1272,18 +1273,18 @@ mod tests {
             Header::new("location", "https://www.example.com"),
         ];
 
-        let mut encoded = BytesMut::new();
-        encoder.encode(&headers, &mut encoded);
+        let mut buf = BytesMut::new();
+        enc.encode(&headers, &mut buf);
 
-        let mut decoder = Decoder::new();
-        let mut src = encoded.freeze();
-        let decoded = decoder.decode(&mut src).unwrap();
+        let mut dec = Decoder::new();
+        let mut src = buf.freeze();
+        let headers_out = dec.decode(&mut src).unwrap();
 
-        assert_eq!(decoded.len(), 4);
-        assert_eq!(decoded[0].name, ":status");
-        assert_eq!(decoded[0].value, "302");
-        assert_eq!(decoded[3].name, "location");
-        assert_eq!(decoded[3].value, "https://www.example.com");
+        assert_eq!(headers_out.len(), 4);
+        assert_eq!(headers_out[0].name, ":status");
+        assert_eq!(headers_out[0].value, "302");
+        assert_eq!(headers_out[3].name, "location");
+        assert_eq!(headers_out[3].value, "https://www.example.com");
     }
 
     #[test]
@@ -1441,24 +1442,24 @@ mod tests {
 
     #[test]
     fn test_decoder_shared_state_across_blocks() {
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(false);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
 
-        let mut decoder = Decoder::new();
+        let mut dec = Decoder::new();
 
         // First block adds to dynamic table
         let headers1 = vec![Header::new("x-custom", "initial")];
         let mut buf1 = BytesMut::new();
-        encoder.encode(&headers1, &mut buf1);
-        decoder.decode(&mut buf1.freeze()).unwrap();
+        enc.encode(&headers1, &mut buf1);
+        dec.decode(&mut buf1.freeze()).unwrap();
 
         // Second block can reference dynamic table entries
         let headers2 = vec![Header::new("x-custom", "updated")];
         let mut buf2 = BytesMut::new();
-        encoder.encode(&headers2, &mut buf2);
-        let decoded = decoder.decode(&mut buf2.freeze()).unwrap();
+        enc.encode(&headers2, &mut buf2);
+        let headers_out = dec.decode(&mut buf2.freeze()).unwrap();
 
-        assert_eq!(decoded[0].value, "updated");
+        assert_eq!(headers_out[0].value, "updated");
     }
 
     // =========================================================================
@@ -1527,9 +1528,8 @@ mod tests {
     fn test_decode_integer_overflow_protection() {
         // Attempt to decode an integer that would overflow
         // First byte 0x7f means "use continuation bytes" for 7-bit prefix
-        let mut src = Bytes::from_static(&[
-            0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
-        ]);
+        let mut src =
+            Bytes::from_static(&[0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]);
         // Should either error or return a reasonable value, not panic
         let result = decode_integer(&mut src, 7);
         // We're testing that it handles this gracefully (should error on overflow)
@@ -1539,35 +1539,35 @@ mod tests {
     #[test]
     fn test_decode_literal_with_empty_name() {
         // Literal header with empty name (valid per spec)
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(false);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
 
         let headers = vec![Header::new("", "value")];
         let mut buf = BytesMut::new();
-        encoder.encode(&headers, &mut buf);
+        enc.encode(&headers, &mut buf);
 
-        let mut decoder = Decoder::new();
-        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+        let mut dec = Decoder::new();
+        let headers_out = dec.decode(&mut buf.freeze()).unwrap();
 
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].name, "");
-        assert_eq!(decoded[0].value, "value");
+        assert_eq!(headers_out.len(), 1);
+        assert_eq!(headers_out[0].name, "");
+        assert_eq!(headers_out[0].value, "value");
     }
 
     #[test]
     fn test_decode_literal_with_empty_value() {
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(false);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
 
         let headers = vec![Header::new("x-empty", "")];
         let mut buf = BytesMut::new();
-        encoder.encode(&headers, &mut buf);
+        enc.encode(&headers, &mut buf);
 
-        let mut decoder = Decoder::new();
-        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+        let mut dec = Decoder::new();
+        let headers_out = dec.decode(&mut buf.freeze()).unwrap();
 
-        assert_eq!(decoded[0].name, "x-empty");
-        assert_eq!(decoded[0].value, "");
+        assert_eq!(headers_out[0].name, "x-empty");
+        assert_eq!(headers_out[0].value, "");
     }
 
     #[test]
@@ -1626,8 +1626,8 @@ mod tests {
     #[test]
     fn test_sensitive_header_encoding() {
         // Test headers that should never be indexed (sensitive data)
-        let mut encoder = Encoder::new();
-        let mut decoder = Decoder::new();
+        let mut enc = Encoder::new();
+        let mut dec = Decoder::new();
 
         // Encode with never-index flag for sensitive headers
         let headers = vec![
@@ -1636,36 +1636,36 @@ mod tests {
         ];
 
         let mut buf = BytesMut::new();
-        encoder.encode(&headers, &mut buf);
+        enc.encode(&headers, &mut buf);
 
-        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[1].name, "authorization");
-        assert_eq!(decoded[1].value, "Bearer secret123");
+        let headers_out = dec.decode(&mut buf.freeze()).unwrap();
+        assert_eq!(headers_out.len(), 2);
+        assert_eq!(headers_out[1].name, "authorization");
+        assert_eq!(headers_out[1].value, "Bearer secret123");
     }
 
     #[test]
     fn test_large_header_value() {
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(false);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(false);
 
         // Create a large header value (but within reasonable limits)
         let large_value: String = "x".repeat(4096);
         let headers = vec![Header::new("x-large", &large_value)];
 
         let mut buf = BytesMut::new();
-        encoder.encode(&headers, &mut buf);
+        enc.encode(&headers, &mut buf);
 
-        let mut decoder = Decoder::new();
-        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+        let mut dec = Decoder::new();
+        let headers_out = dec.decode(&mut buf.freeze()).unwrap();
 
-        assert_eq!(decoded[0].value, large_value);
+        assert_eq!(headers_out[0].value, large_value);
     }
 
     #[test]
     fn test_many_headers() {
-        let mut encoder = Encoder::new();
-        encoder.set_use_huffman(true);
+        let mut enc = Encoder::new();
+        enc.set_use_huffman(true);
 
         // Encode many headers
         let headers: Vec<Header> = (0..100)
@@ -1673,13 +1673,13 @@ mod tests {
             .collect();
 
         let mut buf = BytesMut::new();
-        encoder.encode(&headers, &mut buf);
+        enc.encode(&headers, &mut buf);
 
-        let mut decoder = Decoder::new();
-        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+        let mut dec = Decoder::new();
+        let headers_out = dec.decode(&mut buf.freeze()).unwrap();
 
-        assert_eq!(decoded.len(), 100);
-        for (i, header) in decoded.iter().enumerate() {
+        assert_eq!(headers_out.len(), 100);
+        for (i, header) in headers_out.iter().enumerate() {
             assert_eq!(header.name, format!("x-header-{i}"));
             assert_eq!(header.value, format!("value-{i}"));
         }

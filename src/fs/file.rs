@@ -113,7 +113,7 @@ impl File {
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         // Phase 0: Direct blocking. Requires reactor integration for true async.
         Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file handle is shared"))?
+            .ok_or_else(|| io::Error::other("file handle is shared"))?
             .seek(pos)
     }
 
@@ -121,7 +121,7 @@ impl File {
     pub async fn stream_position(&mut self) -> io::Result<u64> {
         // Phase 0: Direct blocking. Requires reactor integration for true async.
         Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file handle is shared"))?
+            .ok_or_else(|| io::Error::other("file handle is shared"))?
             .stream_position()
     }
 
@@ -129,7 +129,7 @@ impl File {
     pub async fn rewind(&mut self) -> io::Result<()> {
         // Phase 0: Direct blocking. Requires reactor integration for true async.
         Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file handle is shared"))?
+            .ok_or_else(|| io::Error::other("file handle is shared"))?
             .rewind()
     }
 }
@@ -143,9 +143,8 @@ impl AsyncRead for File {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_read")
-        })?;
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::other("file handle is shared during poll_read"))?;
         let n = inner.read(buf.unfilled())?;
         buf.advance(n);
         Poll::Ready(Ok(()))
@@ -158,17 +157,15 @@ impl AsyncWrite for File {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_write")
-        })?;
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::other("file handle is shared during poll_write"))?;
         let n = inner.write(buf)?;
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_flush")
-        })?;
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::other("file handle is shared during poll_flush"))?;
         inner.flush()?;
         Poll::Ready(Ok(()))
     }
@@ -184,9 +181,8 @@ impl AsyncSeek for File {
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_seek")
-        })?;
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::other("file handle is shared during poll_seek"))?;
         let n = inner.seek(pos)?;
         Poll::Ready(Ok(n))
     }

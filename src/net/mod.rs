@@ -32,8 +32,8 @@ pub use unix::{
     ReuniteError as UnixReuniteError, UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
 };
 pub use websocket::{
-    apply_mask, ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Message,
-    Opcode, Role as WsRole, ServerHandshake, ServerWebSocket, WebSocket, WebSocketAcceptor,
+    apply_mask, ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Message, Opcode,
+    Role as WsRole, ServerHandshake, ServerWebSocket, WebSocket, WebSocketAcceptor,
     WebSocketConfig, WebSocketRead, WebSocketWrite, WsAcceptError, WsConnectError, WsError,
     WsReuniteError, WsUrl,
 };

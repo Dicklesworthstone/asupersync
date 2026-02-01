@@ -98,14 +98,13 @@ impl From<Frame> for Message {
                 let text = String::from_utf8_lossy(&frame.payload).into_owned();
                 Self::Text(text)
             }
-            Opcode::Binary => Self::Binary(frame.payload),
+            Opcode::Binary | Opcode::Continuation => Self::Binary(frame.payload), // Simplified
             Opcode::Ping => Self::Ping(frame.payload),
             Opcode::Pong => Self::Pong(frame.payload),
             Opcode::Close => {
                 let reason = CloseReason::parse(&frame.payload).ok();
                 Self::Close(reason)
             }
-            Opcode::Continuation => Self::Binary(frame.payload), // Simplified
         }
     }
 }
@@ -113,10 +112,10 @@ impl From<Frame> for Message {
 impl From<Message> for Frame {
     fn from(msg: Message) -> Self {
         match msg {
-            Message::Text(text) => Frame::text(text),
-            Message::Binary(data) => Frame::binary(data),
-            Message::Ping(data) => Frame::ping(data),
-            Message::Pong(data) => Frame::pong(data),
+            Message::Text(text) => Self::text(text),
+            Message::Binary(data) => Self::binary(data),
+            Message::Ping(data) => Self::ping(data),
+            Message::Pong(data) => Self::pong(data),
             Message::Close(reason) => {
                 let reason = reason.unwrap_or_else(CloseReason::normal);
                 reason.to_frame()
@@ -147,7 +146,7 @@ pub struct WebSocketConfig {
 impl Default for WebSocketConfig {
     fn default() -> Self {
         Self {
-            max_frame_size: 16 * 1024 * 1024,  // 16 MB
+            max_frame_size: 16 * 1024 * 1024,   // 16 MB
             max_message_size: 64 * 1024 * 1024, // 64 MB
             ping_interval: Some(Duration::from_secs(30)),
             close_config: CloseConfig::default(),
@@ -283,9 +282,9 @@ where
     ///
     /// If cancelled, the message may be partially sent. The connection should
     /// be closed if cancellation occurs mid-send.
-    pub async fn send(&mut self, _cx: &Cx, msg: Message) -> Result<(), WsError> {
+    pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
-        if _cx.is_cancel_requested() {
+        if cx.is_cancel_requested() {
             self.initiate_close(CloseReason::going_away()).await?;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -312,10 +311,10 @@ where
     /// # Cancel-Safety
     ///
     /// This method is cancel-safe. If cancelled, no data is lost.
-    pub async fn recv(&mut self, _cx: &Cx) -> Result<Option<Message>, WsError> {
+    pub async fn recv(&mut self, cx: &Cx) -> Result<Option<Message>, WsError> {
         loop {
             // Check cancellation
-            if _cx.is_cancel_requested() {
+            if cx.is_cancel_requested() {
                 self.initiate_close(CloseReason::going_away()).await?;
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
@@ -329,48 +328,38 @@ where
                 self.send_frame(pong).await?;
             }
 
-            // Try to decode a frame from the buffer
-            match self.codec.decode(&mut self.read_buf)? {
-                Some(frame) => {
-                    // Handle control frames
-                    match frame.opcode {
-                        Opcode::Ping => {
-                            // Queue pong for next send
-                            self.pending_pongs.push(frame.payload.clone());
-                            continue;
-                        }
-                        Opcode::Pong => {
-                            // Pong received - keepalive confirmed
-                            continue;
-                        }
-                        Opcode::Close => {
-                            // Handle close handshake
-                            if let Some(response) =
-                                self.close_handshake.receive_close(&frame)?
-                            {
-                                self.send_frame(response).await?;
-                            }
-                            let reason = CloseReason::parse(&frame.payload).ok();
-                            return Ok(Some(Message::Close(reason)));
-                        }
-                        _ => {
-                            return Ok(Some(Message::from(frame)));
-                        }
+            if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
+                // Handle control frames
+                match frame.opcode {
+                    Opcode::Ping => {
+                        // Queue pong for next send
+                        self.pending_pongs.push(frame.payload);
                     }
+                    Opcode::Pong => {
+                        // Pong received - keepalive confirmed
+                    }
+                    Opcode::Close => {
+                        // Handle close handshake
+                        if let Some(response) = self.close_handshake.receive_close(&frame)? {
+                            self.send_frame(response).await?;
+                        }
+                        let reason = CloseReason::parse(&frame.payload).ok();
+                        return Ok(Some(Message::Close(reason)));
+                    }
+                    _ => return Ok(Some(Message::from(frame))),
                 }
-                None => {
-                    // Need more data - read from socket
-                    if self.close_handshake.is_closed() {
-                        return Ok(None);
-                    }
+            } else {
+                // Need more data - read from socket
+                if self.close_handshake.is_closed() {
+                    return Ok(None);
+                }
 
-                    let n = self.read_more().await?;
-                    if n == 0 {
-                        // EOF - connection closed
-                        self.close_handshake
-                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
-                        return Ok(None);
-                    }
+                let n = self.read_more().await?;
+                if n == 0 {
+                    // EOF - connection closed
+                    self.close_handshake
+                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Ok(None);
                 }
             }
         }
@@ -477,7 +466,10 @@ async fn write_all_io<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> Result
 }
 
 /// Read some bytes from an I/O stream.
-async fn read_some_io<IO: AsyncRead + Unpin>(io: &mut IO, buf: &mut [u8]) -> Result<usize, WsError> {
+async fn read_some_io<IO: AsyncRead + Unpin>(
+    io: &mut IO,
+    buf: &mut [u8],
+) -> Result<usize, WsError> {
     use std::future::poll_fn;
 
     poll_fn(|cx| {
@@ -540,10 +532,8 @@ impl WebSocket<TcpStream> {
         config: &WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
         // Build handshake request
-        let mut handshake = ClientHandshake::new(&format!(
-            "ws://{}:{}{}",
-            url.host, url.port, url.path
-        ))?;
+        let mut handshake =
+            ClientHandshake::new(&format!("ws://{}:{}{}", url.host, url.port, url.path))?;
 
         for protocol in &config.protocols {
             handshake = handshake.protocol(protocol);
@@ -566,7 +556,7 @@ impl WebSocket<TcpStream> {
         handshake.validate_response(&response)?;
 
         // Create WebSocket
-        let mut ws = WebSocket::from_upgraded(tcp, config.clone());
+        let mut ws = Self::from_upgraded(tcp, config.clone());
         ws.protocol = response.header("sec-websocket-protocol").map(String::from);
 
         Ok(ws)
@@ -581,10 +571,7 @@ async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Resul
     while written < buf.len() {
         let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, &buf[written..])).await?;
         if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "write returned 0",
-            ));
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
         }
         written += n;
     }

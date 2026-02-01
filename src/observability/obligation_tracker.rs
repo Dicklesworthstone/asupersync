@@ -28,10 +28,12 @@
 use crate::console::Console;
 use crate::record::{ObligationKind, ObligationState};
 use crate::runtime::state::RuntimeState;
-use crate::types::Time;
+use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
+use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -196,8 +198,7 @@ impl ObligationTracker {
     fn current_time(&self) -> Time {
         self.state
             .timer_driver()
-            .map(|d| d.now())
-            .unwrap_or(Time::ZERO)
+            .map_or(Time::ZERO, TimerDriverHandle::now)
     }
 
     /// List all active obligations.
@@ -253,6 +254,8 @@ impl ObligationTracker {
                 "potential obligation leaks detected"
             );
             for leak in &leaks {
+                // When tracing is compiled out, ensure `leak` is still considered "used".
+                let _ = leak;
                 info!(
                     obligation_id = ?leak.id,
                     type_name = %leak.type_name,
@@ -356,9 +359,8 @@ impl ObligationTracker {
 
     /// Render obligation summary to console (if available).
     pub fn render_summary(&self) -> std::io::Result<()> {
-        let console = match &self.console {
-            Some(c) => c,
-            None => return Ok(()),
+        let Some(console) = &self.console else {
+            return Ok(());
         };
 
         let summary = self.summary();
@@ -366,11 +368,13 @@ impl ObligationTracker {
 
         // Build output string
         let mut output = String::new();
-        output.push_str("Obligation Tracker\n");
-        output.push_str(&format!(
-            "Active: {}  |  Potential Leaks: {}  |  Age Warnings: {}\n",
+        writeln!(&mut output, "Obligation Tracker").unwrap();
+        writeln!(
+            &mut output,
+            "Active: {}  |  Potential Leaks: {}  |  Age Warnings: {}",
             summary.total_active, summary.potential_leaks, summary.age_warnings
-        ));
+        )
+        .unwrap();
         output.push_str(&"-".repeat(60));
         output.push('\n');
 
@@ -381,13 +385,13 @@ impl ObligationTracker {
 
         for (type_name, type_summary) in &summary.by_type {
             let holder = type_summary.primary_holder.as_deref().unwrap_or("-");
-            output.push_str(&format!(
-                "{:<18} {:>5}  {:>8.1}s  {}\n",
-                type_name,
+            writeln!(
+                &mut output,
+                "{type_name:<18} {:>5}  {:>8.1}s  {holder}",
                 type_summary.count,
-                type_summary.oldest_age.as_secs_f64(),
-                holder
-            ));
+                type_summary.oldest_age.as_secs_f64()
+            )
+            .unwrap();
         }
 
         // Potential leaks section
@@ -396,14 +400,16 @@ impl ObligationTracker {
             output.push('\n');
             output.push_str("POTENTIAL LEAKS:\n");
             for leak in &leaks {
-                output.push_str(&format!(
-                    "  {} held by {:?} for {:.1}s\n",
-                    leak.type_name,
-                    leak.holder_task,
-                    leak.age.as_secs_f64()
-                ));
+                let type_name = &leak.type_name;
+                let holder_task = leak.holder_task;
+                let age_secs = leak.age.as_secs_f64();
+                writeln!(
+                    &mut output,
+                    "  {type_name} held by {holder_task:?} for {age_secs:.1}s"
+                )
+                .unwrap();
                 if let Some(desc) = &leak.description {
-                    output.push_str(&format!("    -> {}\n", desc));
+                    writeln!(&mut output, "    -> {desc}").unwrap();
                 }
             }
         }
@@ -425,7 +431,7 @@ fn obligation_kind_name(kind: ObligationKind) -> String {
 /// Simple wrapper for rendering raw text.
 struct RawText<'a>(&'a str);
 
-impl<'a> crate::console::Render for RawText<'a> {
+impl crate::console::Render for RawText<'_> {
     fn render(
         &self,
         out: &mut String,
@@ -439,15 +445,6 @@ impl<'a> crate::console::Render for RawText<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::ObligationRecord;
-    use crate::types::Time;
-    use crate::util::ArenaIndex;
-
-    fn make_test_state() -> Arc<RuntimeState> {
-        // This would require constructing a minimal RuntimeState
-        // For now, we'll skip this as it requires significant setup
-        unimplemented!("test state setup required")
-    }
 
     #[test]
     fn test_obligation_state_is_active() {
