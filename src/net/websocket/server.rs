@@ -25,15 +25,14 @@
 //! }
 //! ```
 
-use super::client::{Message, WebSocket, WebSocketConfig};
-use super::close::{CloseConfig, CloseHandshake, CloseReason};
-use super::frame::{Frame, FrameCodec, Opcode, Role, WsError};
+use super::client::{Message, WebSocketConfig};
+use super::close::{CloseHandshake, CloseReason};
+use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-use crate::net::TcpStream;
 use std::io;
 use std::pin::Pin;
 use std::task::Poll;
@@ -200,18 +199,14 @@ impl WebSocketAcceptor {
     /// * `stream` - TCP stream to send rejection on
     /// * `status` - HTTP status code (e.g., 400, 403, 404)
     /// * `reason` - Status reason phrase
-    pub async fn reject<IO>(
-        stream: &mut IO,
-        status: u16,
-        reason: &str,
-    ) -> Result<(), io::Error>
+    pub async fn reject<IO>(stream: &mut IO, status: u16, reason: &str) -> Result<(), io::Error>
     where
         IO: AsyncWrite + Unpin,
     {
         let response = ServerHandshake::reject(status, reason);
         write_all_io(stream, &response).await.map_err(|e| match e {
             WsError::Io(e) => e,
-            _ => io::Error::new(io::ErrorKind::Other, "unexpected error"),
+            _ => io::Error::other("unexpected error"),
         })
     }
 }
@@ -339,48 +334,38 @@ where
                 self.send_frame(pong).await?;
             }
 
-            // Try to decode a frame from the buffer
-            match self.codec.decode(&mut self.read_buf)? {
-                Some(frame) => {
-                    // Handle control frames
-                    match frame.opcode {
-                        Opcode::Ping => {
-                            // Queue pong for next send
-                            self.pending_pongs.push(frame.payload.clone());
-                            continue;
-                        }
-                        Opcode::Pong => {
-                            // Pong received - keepalive confirmed
-                            continue;
-                        }
-                        Opcode::Close => {
-                            // Handle close handshake
-                            if let Some(response) =
-                                self.close_handshake.receive_close(&frame)?
-                            {
-                                self.send_frame(response).await?;
-                            }
-                            let reason = CloseReason::parse(&frame.payload).ok();
-                            return Ok(Some(Message::Close(reason)));
-                        }
-                        _ => {
-                            return Ok(Some(Message::from(frame)));
-                        }
+            if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
+                // Handle control frames
+                match frame.opcode {
+                    Opcode::Ping => {
+                        // Queue pong for next send
+                        self.pending_pongs.push(frame.payload);
                     }
+                    Opcode::Pong => {
+                        // Pong received - keepalive confirmed
+                    }
+                    Opcode::Close => {
+                        // Handle close handshake
+                        if let Some(response) = self.close_handshake.receive_close(&frame)? {
+                            self.send_frame(response).await?;
+                        }
+                        let reason = CloseReason::parse(&frame.payload).ok();
+                        return Ok(Some(Message::Close(reason)));
+                    }
+                    _ => return Ok(Some(Message::from(frame))),
                 }
-                None => {
-                    // Need more data - read from socket
-                    if self.close_handshake.is_closed() {
-                        return Ok(None);
-                    }
+            } else {
+                // Need more data - read from socket
+                if self.close_handshake.is_closed() {
+                    return Ok(None);
+                }
 
-                    let n = self.read_more().await?;
-                    if n == 0 {
-                        // EOF - connection closed
-                        self.close_handshake
-                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
-                        return Ok(None);
-                    }
+                let n = self.read_more().await?;
+                if n == 0 {
+                    // EOF - connection closed
+                    self.close_handshake
+                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Ok(None);
                 }
             }
         }
@@ -485,7 +470,10 @@ async fn write_all_io<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> Result
 }
 
 /// Read some bytes from an I/O stream.
-async fn read_some_io<IO: AsyncRead + Unpin>(io: &mut IO, buf: &mut [u8]) -> Result<usize, WsError> {
+async fn read_some_io<IO: AsyncRead + Unpin>(
+    io: &mut IO,
+    buf: &mut [u8],
+) -> Result<usize, WsError> {
     use std::future::poll_fn;
 
     poll_fn(|cx| {

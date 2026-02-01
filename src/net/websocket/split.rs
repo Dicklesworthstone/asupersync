@@ -172,12 +172,11 @@ where
 
             // Send any pending pongs (under lock)
             {
-                let mut guard = self.shared.lock();
-                let shared = &mut *guard;
+                let shared = &mut *self.shared.lock();
                 while let Some(payload) = shared.pending_pongs.pop() {
                     let pong = Frame::pong(payload);
+                    shared.write_buf.clear();
                     let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-                    write_buf.clear();
                     codec.encode(pong, write_buf)?;
                 }
             }
@@ -186,65 +185,51 @@ where
             self.flush_write_buf().await?;
 
             // Try to decode a frame from the buffer
-            let frame = {
-                let mut guard = self.shared.lock();
-                let shared = &mut *guard;
+            let maybe_frame = {
+                let shared = &mut *self.shared.lock();
                 let (codec, read_buf) = (&mut shared.codec, &mut shared.read_buf);
                 codec.decode(read_buf)?
             };
 
-            match frame {
-                Some(frame) => {
-                    // Handle control frames
-                    match frame.opcode {
-                        Opcode::Ping => {
-                            // Queue pong for next operation
-                            let mut shared = self.shared.lock();
-                            shared.pending_pongs.push(frame.payload.clone());
-                            continue;
-                        }
-                        Opcode::Pong => {
-                            // Pong received - keepalive confirmed
-                            continue;
-                        }
-                        Opcode::Close => {
-                            // Handle close handshake
-                            let response = {
-                                let mut shared = self.shared.lock();
-                                shared.close_handshake.receive_close(&frame)?
-                            };
-
-                            if let Some(response_frame) = response {
-                                self.send_frame_internal(response_frame).await?;
-                            }
-
-                            let reason = CloseReason::parse(&frame.payload).ok();
-                            return Ok(Some(Message::Close(reason)));
-                        }
-                        _ => {
-                            return Ok(Some(Message::from(frame)));
-                        }
+            if let Some(frame) = maybe_frame {
+                // Handle control frames
+                match frame.opcode {
+                    Opcode::Ping => {
+                        // Queue pong for next operation
+                        self.shared.lock().pending_pongs.push(frame.payload);
                     }
+                    Opcode::Pong => {
+                        // Pong received - keepalive confirmed
+                    }
+                    Opcode::Close => {
+                        // Handle close handshake
+                        let response =
+                            { self.shared.lock().close_handshake.receive_close(&frame)? };
+
+                        if let Some(response_frame) = response {
+                            self.send_frame_internal(response_frame).await?;
+                        }
+
+                        let reason = CloseReason::parse(&frame.payload).ok();
+                        return Ok(Some(Message::Close(reason)));
+                    }
+                    _ => return Ok(Some(Message::from(frame))),
                 }
-                None => {
-                    // Check if closed
-                    {
-                        let shared = self.shared.lock();
-                        if shared.close_handshake.is_closed() {
-                            return Ok(None);
-                        }
-                    }
+            } else {
+                // Check if closed
+                if self.shared.lock().close_handshake.is_closed() {
+                    return Ok(None);
+                }
 
-                    // Need more data - read from socket
-                    let n = self.read_more().await?;
-                    if n == 0 {
-                        // EOF - connection closed
-                        let mut shared = self.shared.lock();
-                        shared
-                            .close_handshake
-                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
-                        return Ok(None);
-                    }
+                // Need more data - read from socket
+                let n = self.read_more().await?;
+                if n == 0 {
+                    // EOF - connection closed
+                    self.shared
+                        .lock()
+                        .close_handshake
+                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Ok(None);
                 }
             }
         }
@@ -297,7 +282,7 @@ where
     }
 
     /// Internal: initiate close without waiting.
-    async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+    async fn initiate_close(&self, reason: CloseReason) -> Result<(), WsError> {
         let frame = {
             let mut shared = self.shared.lock();
             shared.close_handshake.initiate(reason)
@@ -310,21 +295,20 @@ where
     }
 
     /// Internal: send a single frame (for control messages like pong/close).
-    async fn send_frame_internal(&mut self, frame: Frame) -> Result<(), WsError> {
+    async fn send_frame_internal(&self, frame: Frame) -> Result<(), WsError> {
         let data = {
-            let mut guard = self.shared.lock();
-            let shared = &mut *guard;
+            let shared = &mut *self.shared.lock();
+            shared.write_buf.clear();
             let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-            write_buf.clear();
             codec.encode(frame, write_buf)?;
-            write_buf.to_vec()
+            shared.write_buf.to_vec()
         };
 
         self.write_all(&data).await
     }
 
     /// Internal: flush the write buffer.
-    async fn flush_write_buf(&mut self) -> Result<(), WsError> {
+    async fn flush_write_buf(&self) -> Result<(), WsError> {
         let data = {
             let shared = self.shared.lock();
             if shared.write_buf.is_empty() {
@@ -344,7 +328,7 @@ where
     }
 
     /// Internal: write all bytes.
-    async fn write_all(&mut self, buf: &[u8]) -> Result<(), WsError> {
+    async fn write_all(&self, buf: &[u8]) -> Result<(), WsError> {
         use std::future::poll_fn;
 
         let mut written = 0;
@@ -367,7 +351,7 @@ where
     }
 
     /// Internal: read more data into buffer.
-    async fn read_more(&mut self) -> Result<usize, WsError> {
+    async fn read_more(&self) -> Result<usize, WsError> {
         use std::future::poll_fn;
 
         // Ensure we have space
@@ -467,7 +451,7 @@ where
     }
 
     /// Internal: initiate close without waiting.
-    async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+    async fn initiate_close(&self, reason: CloseReason) -> Result<(), WsError> {
         let frame = {
             let mut shared = self.shared.lock();
             shared.close_handshake.initiate(reason)
@@ -480,16 +464,15 @@ where
     }
 
     /// Internal: send a single frame.
-    async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
+    async fn send_frame(&self, frame: Frame) -> Result<(), WsError> {
         use std::future::poll_fn;
 
         let data = {
-            let mut guard = self.shared.lock();
-            let shared = &mut *guard;
+            let shared = &mut *self.shared.lock();
+            shared.write_buf.clear();
             let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-            write_buf.clear();
             codec.encode(frame, write_buf)?;
-            write_buf.to_vec()
+            shared.write_buf.to_vec()
         };
 
         let mut written = 0;

@@ -60,9 +60,7 @@ where
             let _ = tx.send(result);
         });
 
-    if thread_result.is_err() {
-        panic!("failed to spawn blocking thread");
-    }
+    let _ = thread_result.expect("failed to spawn blocking thread");
 
     // Poll the channel, yielding between attempts.
     loop {
@@ -115,7 +113,9 @@ mod tests {
     fn spawn_blocking_io_returns_result() {
         init_test("spawn_blocking_io_returns_result");
         future::block_on(async {
-            let result = spawn_blocking_io(|| Ok::<_, std::io::Error>(42)).await.unwrap();
+            let result = spawn_blocking_io(|| Ok::<_, std::io::Error>(42))
+                .await
+                .unwrap();
             crate::assert_with_log!(result == 42, "result", 42, result);
         });
         crate::test_complete!("spawn_blocking_io_returns_result");
@@ -126,7 +126,10 @@ mod tests {
         init_test("spawn_blocking_io_propagates_error");
         future::block_on(async {
             let result: std::io::Result<()> = spawn_blocking_io(|| {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "test error"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test error",
+                ))
             })
             .await;
             crate::assert_with_log!(result.is_err(), "is error", true, result.is_err());
@@ -192,4 +195,3 @@ mod tests {
         });
     }
 }
-

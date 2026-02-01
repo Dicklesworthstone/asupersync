@@ -1594,8 +1594,10 @@ mod tests {
         assert_eq!(DEFAULT_MAX_FRAME_SIZE, 16_384);
         assert_eq!(MAX_FRAME_SIZE, 16_777_215);
         assert_eq!(MIN_MAX_FRAME_SIZE, 16_384);
-        assert!(DEFAULT_MAX_FRAME_SIZE >= MIN_MAX_FRAME_SIZE);
-        assert!(DEFAULT_MAX_FRAME_SIZE <= MAX_FRAME_SIZE);
+        const {
+            assert!(DEFAULT_MAX_FRAME_SIZE >= MIN_MAX_FRAME_SIZE);
+            assert!(DEFAULT_MAX_FRAME_SIZE <= MAX_FRAME_SIZE);
+        }
     }
 
     #[test]

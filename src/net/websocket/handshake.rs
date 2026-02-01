@@ -99,10 +99,9 @@ impl WsUrl {
         let default_port = if tls { 443 } else { 80 };
 
         // Split host:port from path
-        let (host_port, path) = match rest.find('/') {
-            Some(idx) => (&rest[..idx], &rest[idx..]),
-            None => (rest, "/"),
-        };
+        let (host_port, path) = rest
+            .find('/')
+            .map_or((rest, "/"), |idx| (&rest[..idx], &rest[idx..]));
 
         // Parse host and port
         let (host, port) = if let Some(bracket_end) = host_port.find(']') {
@@ -210,8 +209,7 @@ impl fmt::Display for HandshakeError {
             Self::ProtocolMismatch { requested, offered } => {
                 write!(
                     f,
-                    "protocol mismatch: requested {:?}, offered {:?}",
-                    requested, offered
+                    "protocol mismatch: requested {requested:?}, offered {offered:?}"
                 )
             }
             Self::Rejected { status, reason } => {

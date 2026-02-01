@@ -153,10 +153,12 @@ impl CloseReason {
     pub fn is_error(&self) -> bool {
         matches!(
             self.code,
-            Some(CloseCode::ProtocolError)
-                | Some(CloseCode::InvalidPayload)
-                | Some(CloseCode::PolicyViolation)
-                | Some(CloseCode::InternalError)
+            Some(
+                CloseCode::ProtocolError
+                    | CloseCode::InvalidPayload
+                    | CloseCode::PolicyViolation
+                    | CloseCode::InternalError
+            )
         )
     }
 }
@@ -188,10 +190,7 @@ impl CloseCode {
             1010 => Some(Self::MandatoryExtension),
             1011 => Some(Self::InternalError),
             1015 => Some(Self::TlsHandshake),
-            // Valid custom code ranges (accept but map to closest known)
-            1012..=1014 | 1016..=2999 => None, // Reserved range
-            3000..=4999 => None,               // Custom codes - valid but unknown
-            _ => None,                         // Invalid range
+            _ => None,
         }
     }
 
@@ -208,9 +207,10 @@ impl CloseCode {
 }
 
 /// State of the close handshake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloseState {
     /// Connection is open (normal operation).
+    #[default]
     Open,
     /// We sent a close frame, waiting for peer's close frame.
     CloseSent,
@@ -237,12 +237,6 @@ impl CloseState {
     #[must_use]
     pub const fn is_closing(self) -> bool {
         matches!(self, Self::CloseSent | Self::CloseReceived)
-    }
-}
-
-impl Default for CloseState {
-    fn default() -> Self {
-        Self::Open
     }
 }
 
@@ -379,14 +373,16 @@ impl CloseHandshake {
         match self.state {
             CloseState::Open => {
                 self.state = CloseState::CloseSent;
-                self.our_reason = Some(reason.clone());
-                Some(reason.to_frame())
+                let frame = reason.to_frame();
+                self.our_reason = Some(reason);
+                Some(frame)
             }
             CloseState::CloseReceived => {
                 // We're responding to their close
                 self.state = CloseState::Closed;
-                self.our_reason = Some(reason.clone());
-                Some(reason.to_frame())
+                let frame = reason.to_frame();
+                self.our_reason = Some(reason);
+                Some(frame)
             }
             CloseState::CloseSent | CloseState::Closed => None,
         }
@@ -554,7 +550,7 @@ mod tests {
         assert!(!CloseCode::is_valid_code(1004)); // Reserved
         assert!(!CloseCode::is_valid_code(1005)); // NoStatusReceived
         assert!(!CloseCode::is_valid_code(1006)); // Abnormal
-        assert!(!CloseCode::is_valid_code(999));  // Below valid range
+        assert!(!CloseCode::is_valid_code(999)); // Below valid range
         assert!(!CloseCode::is_valid_code(5000)); // Above valid range
     }
 
