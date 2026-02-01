@@ -450,8 +450,14 @@ mod tests {
         let poll = Pin::new(&mut incoming).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Pending));
 
-        let registration = listener.registration.lock().expect("lock poisoned");
-        assert!(registration.is_some(), "incoming should register interest");
+        assert!(
+            listener
+                .registration
+                .lock()
+                .expect("lock poisoned")
+                .is_some(),
+            "incoming should register interest"
+        );
         crate::test_complete!("incoming_registers_on_wouldblock");
     }
 

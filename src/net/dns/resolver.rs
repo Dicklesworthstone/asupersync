@@ -12,14 +12,17 @@
 //! with future async DNS implementations.
 
 use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use super::cache::{CacheConfig, CacheStats, DnsCache};
 use super::error::DnsError;
 use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
+use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
+use crate::time::{sleep, timeout, WallClock};
+use crate::types::Time;
 
 /// DNS resolver configuration.
 #[derive(Debug, Clone)]
@@ -300,13 +303,12 @@ impl Resolver {
     async fn try_connect_timeout(
         &self,
         addr: SocketAddr,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<TcpStream, DnsError> {
         // Run connection on blocking pool for true async behavior
-        // TODO: Use proper async TCP connect with timeout when available
         let result = spawn_blocking(move || {
-            let stream =
-                StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
+            let stream = StdTcpStream::connect_timeout(&addr, timeout)
+                .map_err(|e| DnsError::Connection(e.to_string()))?;
 
             stream
                 .set_nonblocking(true)
@@ -483,7 +485,7 @@ mod tests {
             msg.contains("I/O error")
         );
 
-        let invalid = DnsError::InvalidHost("".to_string());
+        let invalid = DnsError::InvalidHost(String::new());
         let msg = format!("{invalid}");
         crate::assert_with_log!(
             msg.contains("invalid hostname"),

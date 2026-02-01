@@ -157,15 +157,24 @@ impl TcpStream {
 
     /// Connect with timeout.
     pub async fn connect_timeout(addr: SocketAddr, timeout_duration: Duration) -> io::Result<Self> {
-        let connect_future = Box::pin(TcpStream::connect(addr));
-        match timeout(timeout_now(), timeout_duration, connect_future).await {
-            Ok(Ok(stream)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "tcp connect timeout",
-            )),
+        if let Some(current) = Cx::current() {
+            if current.timer_driver().is_some() {
+                let connect_future = Box::pin(Self::connect(addr));
+                return match timeout(timeout_now(), timeout_duration, connect_future).await {
+                    Ok(Ok(stream)) => Ok(stream),
+                    Ok(Err(err)) => Err(err),
+                    Err(_) => Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "tcp connect timeout",
+                    )),
+                };
+            }
         }
+
+        // Fallback for contexts without a timer driver: use blocking connect timeout.
+        let stream = net::TcpStream::connect_timeout(&addr, timeout_duration)?;
+        stream.set_nonblocking(true)?;
+        Ok(Self::from_std(stream))
     }
 
     /// Get peer address.
@@ -261,12 +270,12 @@ impl TcpStream {
 }
 
 fn timeout_now() -> crate::types::Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
     if let Some(current) = Cx::current() {
         if let Some(driver) = current.timer_driver() {
             return driver.now();
         }
     }
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
     CLOCK.get_or_init(WallClock::new).now()
 }
 
