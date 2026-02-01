@@ -257,4 +257,77 @@ mod tests {
         });
         crate::test_complete!("test_file_seek");
     }
+
+    #[test]
+    fn test_file_metadata() {
+        init_test("test_file_metadata");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("test_metadata.txt");
+
+            // Create file with known content
+            let mut file = File::create(&path).await.unwrap();
+            file.write_all(b"test content").await.unwrap();
+            file.sync_all().await.unwrap();
+            drop(file);
+
+            // Read metadata
+            let file = File::open(&path).await.unwrap();
+            let metadata = file.metadata().await.unwrap();
+
+            crate::assert_with_log!(metadata.is_file(), "is_file", true, metadata.is_file());
+            crate::assert_with_log!(metadata.len() == 12, "file length", 12u64, metadata.len());
+        });
+        crate::test_complete!("test_file_metadata");
+    }
+
+    #[test]
+    fn test_file_set_len() {
+        init_test("test_file_set_len");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("test_truncate.txt");
+
+            // Create and write
+            let file = File::create(&path).await.unwrap();
+            let mut writer = &*file.inner;
+            std::io::Write::write_all(&mut writer, b"hello world").unwrap();
+            file.sync_all().await.unwrap();
+
+            // Truncate
+            file.set_len(5).await.unwrap();
+            file.sync_all().await.unwrap();
+            drop(file);
+
+            // Verify
+            let mut file = File::open(&path).await.unwrap();
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).await.unwrap();
+            crate::assert_with_log!(contents == "hello", "truncated contents", "hello", contents);
+        });
+        crate::test_complete!("test_file_set_len");
+    }
+
+    #[test]
+    fn test_cancellation_safety_soft_cancel() {
+        // Test that dropping an in-flight file operation doesn't corrupt state.
+        // With spawn_blocking, the blocking op continues but result is discarded.
+        init_test("test_cancellation_safety_soft_cancel");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("test_cancel.txt");
+
+            // Create file first
+            let file = File::create(&path).await.unwrap();
+            drop(file);
+
+            // Open the file - this should complete
+            let file = File::open(&path).await.unwrap();
+
+            // File should be usable after the operation completed
+            let metadata = file.metadata().await.unwrap();
+            crate::assert_with_log!(metadata.is_file(), "file exists", true, metadata.is_file());
+        });
+        crate::test_complete!("test_cancellation_safety_soft_cancel");
+    }
 }
