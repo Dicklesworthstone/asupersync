@@ -462,6 +462,7 @@ impl RuntimeState {
     ///
     /// This helper allows `create_task` and `spawn_local` to share the same setup logic
     /// while storing the future in different places (global vs thread-local).
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_task_infrastructure<T>(
         &mut self,
         region: RegionId,
@@ -656,7 +657,7 @@ impl RuntimeState {
                     Error::new(ErrorKind::RegionClosed).with_message("region closed")
                 }
                 AdmissionError::LimitReached { limit, live, .. } => {
-                    Error::new(ErrorKind::RegionClosed).with_message(format!(
+                    Error::new(ErrorKind::AdmissionDenied).with_message(format!(
                         "region {region:?} obligation limit {limit} reached (live {live})"
                     ))
                 }
@@ -3673,13 +3674,55 @@ mod tests {
         let set = state.set_region_limits(region, limits);
         crate::assert_with_log!(set, "limits set", true, set);
 
-        let _ = state
+        let (task_id, _handle) = state
             .create_task(region, Budget::INFINITE, async { 1_u8 })
             .expect("first task");
         let result = state.create_task(region, Budget::INFINITE, async { 2_u8 });
         let rejected = matches!(result, Err(SpawnError::RegionAtCapacity { .. }));
         crate::assert_with_log!(rejected, "spawn rejected", true, rejected);
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        let tasks = region_record.task_ids();
+        crate::assert_with_log!(tasks.len() == 1, "one task live", 1, tasks.len());
+        crate::assert_with_log!(
+            tasks.contains(&task_id),
+            "task id preserved",
+            true,
+            tasks.contains(&task_id)
+        );
+        crate::assert_with_log!(
+            state.tasks.len() == 1,
+            "arena len stable",
+            1,
+            state.tasks.len()
+        );
         crate::test_complete!("spawn_rejected_when_task_limit_reached");
+    }
+
+    #[test]
+    fn obligation_rejected_when_limit_reached() {
+        init_test("obligation_rejected_when_limit_reached");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let limits = RegionLimits {
+            max_obligations: Some(0),
+            ..RegionLimits::unlimited()
+        };
+        let set = state.set_region_limits(region, limits);
+        crate::assert_with_log!(set, "limits set", true, set);
+
+        let holder = insert_task(&mut state, region);
+        let err = state
+            .create_obligation(ObligationKind::IoOp, holder, region, None)
+            .expect_err("obligation limit enforced");
+        crate::assert_with_log!(
+            err.kind() == ErrorKind::AdmissionDenied,
+            "admission denied",
+            ErrorKind::AdmissionDenied,
+            err.kind()
+        );
+        let pending = state.pending_obligation_count();
+        crate::assert_with_log!(pending == 0, "no obligations recorded", 0, pending);
+        crate::test_complete!("obligation_rejected_when_limit_reached");
     }
 
     #[test]

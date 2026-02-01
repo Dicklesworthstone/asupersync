@@ -15,10 +15,12 @@
 //! | `steal_batch_size` | 16 |
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
+//! | `root_region_limits` | `None` |
 //! | `observability` | `None` |
 
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::observability::ObservabilityConfig;
+use crate::record::RegionLimits;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use std::sync::Arc;
 
@@ -59,6 +61,8 @@ pub struct RuntimeConfig {
     pub enable_parking: bool,
     /// Time slice for cooperative yielding (polls).
     pub poll_budget: u32,
+    /// Admission limits applied to the root region (if set).
+    pub root_region_limits: Option<RegionLimits>,
     /// Callback executed when a worker thread starts.
     pub on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Callback executed when a worker thread stops.
@@ -112,6 +116,7 @@ impl Default for RuntimeConfig {
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
+            root_region_limits: None,
             on_thread_start: None,
             on_thread_stop: None,
             deadline_monitor: None,

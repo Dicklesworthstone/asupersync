@@ -113,6 +113,7 @@
 //! - `blocking_threads(min, max)`: default = 0..0. Max is clamped to be >= min.
 //! - `enable_parking`: default = true. Disabling reduces wake latency at CPU cost.
 //! - `poll_budget`: default = 128. Lower for fairness, higher for throughput.
+//! - `root_region_limits`: default = None. Admission limits applied to root region.
 //! - `on_thread_start/stop`: lifecycle hooks; keep work minimal to avoid jitter.
 //! - `metrics(...)`: default = NoOp. Custom providers add instrumentation overhead.
 //! - `deadline_monitoring(...)`: disabled by default; enables warning callbacks.

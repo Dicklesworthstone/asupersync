@@ -106,6 +106,7 @@
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//! | [`root_region_limits`](RuntimeBuilder::root_region_limits) | None | Admission limits for the root region |
 //! | [`observability`](RuntimeBuilder::observability) | None | Attach structured logging collectors |
 //!
 //! # Error Handling
@@ -131,6 +132,7 @@
 use crate::error::Error;
 use crate::observability::metrics::MetricsProvider;
 use crate::observability::ObservabilityConfig;
+use crate::record::RegionLimits;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{
     default_warning_handler, AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig,
@@ -138,6 +140,7 @@ use crate::runtime::deadline_monitor::{
 use crate::runtime::reactor::Reactor;
 use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::runtime::RuntimeState;
+use crate::runtime::SpawnError;
 use crate::time::TimerDriverHandle;
 use crate::types::Budget;
 use std::future::Future;
@@ -239,6 +242,20 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn poll_budget(mut self, budget: u32) -> Self {
         self.config.poll_budget = budget;
+        self
+    }
+
+    /// Set admission limits for the root region.
+    #[must_use]
+    pub fn root_region_limits(mut self, limits: RegionLimits) -> Self {
+        self.config.root_region_limits = Some(limits);
+        self
+    }
+
+    /// Clear root region admission limits (unlimited).
+    #[must_use]
+    pub fn clear_root_region_limits(mut self) -> Self {
+        self.config.root_region_limits = None;
         self
     }
 
@@ -761,7 +778,20 @@ pub struct RuntimeHandle {
 
 impl RuntimeHandle {
     /// Spawn a task from outside async context.
+    ///
+    /// Panics if the root region rejects admission. Use [`RuntimeHandle::try_spawn`]
+    /// to handle admission errors explicitly.
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.try_spawn(future)
+            .expect("failed to create runtime task")
+    }
+
+    /// Spawn a task from outside async context, returning admission errors.
+    pub fn try_spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
@@ -849,7 +879,11 @@ impl RuntimeInner {
             if guard.timer_driver().is_none() {
                 guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
             }
-            guard.create_root_region(Budget::INFINITE)
+            let root = guard.create_root_region(Budget::INFINITE);
+            if let Some(limits) = config.root_region_limits.clone() {
+                let _ = guard.set_region_limits(root, limits);
+            }
+            root
         };
 
         let mut scheduler = ThreeLaneScheduler::new(config.worker_threads, &state);
@@ -921,7 +955,7 @@ impl RuntimeInner {
         format!("{}-{id}", self.config.thread_name_prefix)
     }
 
-    fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    fn spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
@@ -936,16 +970,15 @@ impl RuntimeInner {
 
         let task_id = {
             let mut guard = self.state.lock().expect("runtime state lock poisoned");
-            let (task_id, _handle) = guard
-                .create_task(self.root_region, Budget::INFINITE, wrapped)
-                .expect("failed to create runtime task");
+            let (task_id, _handle) =
+                guard.create_task(self.root_region, Budget::INFINITE, wrapped)?;
             task_id
         };
 
         self.scheduler
             .inject_ready(task_id, Budget::INFINITE.priority);
 
-        JoinHandle::new(join_state)
+        Ok(JoinHandle::new(join_state))
     }
 
     /// Returns a handle to the blocking pool, if configured.
