@@ -56,6 +56,7 @@ use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
 };
 use crate::remote::RemoteCap;
+use crate::runtime::blocking_pool::BlockingPoolHandle;
 use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
@@ -151,6 +152,7 @@ pub struct Cx {
     io_driver: Option<IoDriverHandle>,
     io_cap: Option<Arc<dyn crate::io::IoCap>>,
     timer_driver: Option<TimerDriverHandle>,
+    blocking_pool: Option<BlockingPoolHandle>,
     entropy: Arc<dyn EntropySource>,
     remote_cap: Option<Arc<RemoteCap>>,
 }
@@ -262,6 +264,7 @@ impl Cx {
             io_driver: None,
             io_cap: None,
             timer_driver: None,
+            blocking_pool: None,
             entropy: Arc::new(OsEntropy),
             remote_cap: None,
         }
@@ -350,6 +353,7 @@ impl Cx {
             io_driver,
             io_cap,
             timer_driver,
+            blocking_pool: None,
             entropy,
             remote_cap: None,
         }
@@ -499,6 +503,19 @@ impl Cx {
     #[must_use]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.io_driver.clone()
+    }
+
+    /// Returns a cloned handle to the blocking pool, if present.
+    #[must_use]
+    pub(crate) fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
+        self.blocking_pool.clone()
+    }
+
+    /// Attaches a blocking pool handle to this context.
+    #[must_use]
+    pub(crate) fn with_blocking_pool_handle(mut self, handle: Option<BlockingPoolHandle>) -> Self {
+        self.blocking_pool = handle;
+        self
     }
 
     /// Returns a cloned handle to the timer driver, if present.

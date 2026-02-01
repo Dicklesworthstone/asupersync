@@ -461,6 +461,22 @@ mod tests {
         }
     }
 
+    fn poll_until_ready<T>(future: &mut impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        loop {
+            match unsafe { Pin::new_unchecked(&mut *future) }.poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn lock_blocking<'a, T>(mutex: &'a Mutex<T>, cx: &Cx) -> MutexGuard<'a, T> {
+        let mut fut = mutex.lock(cx);
+        poll_until_ready(&mut fut).expect("lock failed")
+    }
+
     #[test]
     fn new_mutex_is_unlocked() {
         init_test("new_mutex_is_unlocked");
@@ -605,5 +621,40 @@ mod tests {
         let can_lock = mutex.try_lock().is_ok();
         crate::assert_with_log!(can_lock, "should be unlocked", true, can_lock);
         crate::test_complete!("test_mutex_drop_releases_lock");
+    }
+
+    #[test]
+    #[ignore]
+    fn stress_test_mutex_high_contention() {
+        init_test("stress_test_mutex_high_contention");
+        let threads = 8usize;
+        let iters = 2_000usize;
+        let mutex = Arc::new(Mutex::new(0usize));
+
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let mutex = Arc::clone(&mutex);
+            handles.push(std::thread::spawn(move || {
+                let cx = test_cx();
+                for _ in 0..iters {
+                    let mut guard = lock_blocking(&mutex, &cx);
+                    *guard += 1;
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("thread join failed");
+        }
+
+        let final_value = *mutex.try_lock().expect("final lock failed");
+        let expected = threads * iters;
+        crate::assert_with_log!(
+            final_value == expected,
+            "final count matches",
+            expected,
+            final_value
+        );
+        crate::test_complete!("stress_test_mutex_high_contention");
     }
 }

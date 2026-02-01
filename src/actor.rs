@@ -48,7 +48,7 @@ use crate::channel::mpsc;
 use crate::channel::mpsc::SendError;
 use crate::cx::Cx;
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::{CxInner, RegionId, TaskId, Time};
+use crate::types::{CxInner, Outcome, RegionId, TaskId, Time};
 
 /// Unique identifier for an actor.
 ///
@@ -481,7 +481,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             Some(child_observability),
             io_driver,
             Some(child_entropy),
-        );
+        )
+        .with_blocking_pool_handle(cx.blocking_pool_handle());
 
         // Link Cx to TaskRecord
         if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
@@ -517,6 +518,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 }
             }
             state_for_task.store(ActorState::Stopped);
+            Outcome::Ok(())
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
@@ -627,6 +629,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             .await;
             let _ = result_tx.send(&cx_for_send, result);
             state_for_task.store(ActorState::Stopped);
+            Outcome::Ok(())
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);

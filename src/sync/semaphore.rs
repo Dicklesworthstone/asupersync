@@ -485,6 +485,26 @@ mod tests {
         }
     }
 
+    fn poll_until_ready<T>(future: &mut impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        loop {
+            match unsafe { Pin::new_unchecked(&mut *future) }.poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn acquire_blocking<'a>(
+        semaphore: &'a Semaphore,
+        cx: &Cx,
+        count: usize,
+    ) -> SemaphorePermit<'a> {
+        let mut fut = semaphore.acquire(cx, count);
+        poll_until_ready(&mut fut).expect("acquire failed")
+    }
+
     #[test]
     fn new_semaphore_has_correct_permits() {
         init_test("new_semaphore_has_correct_permits");
@@ -678,5 +698,41 @@ mod tests {
 
         drop(permit1); // explicitly drop to document lifetime
         crate::test_complete!("test_semaphore_cancel_preserves_order");
+    }
+
+    #[test]
+    #[ignore]
+    fn stress_test_semaphore_fairness() {
+        init_test("stress_test_semaphore_fairness");
+        let threads = 8usize;
+        let iters = 2_000usize;
+        let semaphore = Arc::new(Semaphore::new(1));
+
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let semaphore = Arc::clone(&semaphore);
+            handles.push(std::thread::spawn(move || {
+                let cx = test_cx();
+                let mut acquired = 0usize;
+                for _ in 0..iters {
+                    let permit = acquire_blocking(&semaphore, &cx, 1);
+                    acquired += 1;
+                    drop(permit);
+                }
+                acquired
+            }));
+        }
+
+        let mut counts = Vec::with_capacity(threads);
+        for handle in handles {
+            counts.push(handle.join().expect("thread join failed"));
+        }
+
+        let total: usize = counts.iter().sum();
+        let expected = threads * iters;
+        let min = counts.iter().copied().min().unwrap_or(0);
+        crate::assert_with_log!(total == expected, "total acquisitions", expected, total);
+        crate::assert_with_log!(min > 0, "no starvation", true, min > 0);
+        crate::test_complete!("stress_test_semaphore_fairness");
     }
 }

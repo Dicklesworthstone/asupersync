@@ -336,7 +336,8 @@ impl<P: Policy> Scope<'_, P> {
             Some(child_observability),
             io_driver,
             Some(child_entropy),
-        );
+        )
+        .with_blocking_pool_handle(cx.blocking_pool_handle());
         child_cx.set_trace_buffer(state.trace_handle());
 
         // Create the TaskHandle
