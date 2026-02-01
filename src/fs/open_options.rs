@@ -4,6 +4,7 @@
 //! open behavior. The API mirrors `std::fs::OpenOptions`.
 
 use super::File;
+use crate::runtime::spawn_blocking_io;
 use std::io;
 use std::path::Path;
 
@@ -127,13 +128,11 @@ impl OpenOptions {
     }
 
     /// Opens a file at `path` with the options specified by `self`.
-    #[allow(clippy::unused_async)]
     pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         let path = path.as_ref().to_owned();
         let opts = self.clone();
 
-        // Phase 0: Synchronous open (will use spawn_blocking in Phase 1+)
-        let std_file = opts.to_std_options().open(&path)?;
+        let std_file = spawn_blocking_io(move || opts.to_std_options().open(&path)).await?;
         Ok(File::from_std(std_file))
     }
 

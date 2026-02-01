@@ -1,19 +1,33 @@
 //! Async file implementation.
+//!
+//! This module provides async filesystem I/O by running blocking operations
+//! on a background thread via `spawn_blocking_io`. The file handle is wrapped
+//! in `Arc` to allow sharing across the async boundary.
+//!
+//! # Phase 0 Limitations
+//!
+//! The poll-based traits (`AsyncRead`, `AsyncWrite`, `AsyncSeek`) still use
+//! direct blocking I/O. Full async poll support requires reactor integration.
 
 #![allow(clippy::unused_async)]
 
 use crate::fs::OpenOptions;
 use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+use crate::runtime::spawn_blocking_io;
 use std::fs::{Metadata, Permissions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// An open file on the filesystem.
+///
+/// The file handle is wrapped in `Arc` to allow sharing across
+/// `spawn_blocking_io` boundaries for async operations.
 #[derive(Debug)]
 pub struct File {
-    pub(crate) inner: std::fs::File,
+    pub(crate) inner: Arc<std::fs::File>,
 }
 
 impl File {
@@ -22,8 +36,10 @@ impl File {
     /// See [`OpenOptions::open`] for more options.
     pub async fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
-        let file = std::fs::File::open(path)?;
-        Ok(Self { inner: file })
+        let file = spawn_blocking_io(move || std::fs::File::open(&path)).await?;
+        Ok(Self {
+            inner: Arc::new(file),
+        })
     }
 
     /// Opens a file in write-only mode.
@@ -31,8 +47,10 @@ impl File {
     /// This function will create a file if it does not exist, and will truncate it if it does.
     pub async fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
-        let file = std::fs::File::create(path)?;
-        Ok(Self { inner: file })
+        let file = spawn_blocking_io(move || std::fs::File::create(&path)).await?;
+        Ok(Self {
+            inner: Arc::new(file),
+        })
     }
 
     /// Returns a new `OpenOptions` object.
@@ -42,58 +60,82 @@ impl File {
     }
 
     pub(crate) fn from_std(file: std::fs::File) -> Self {
-        Self { inner: file }
+        Self {
+            inner: Arc::new(file),
+        }
     }
 
     /// Attempts to sync all OS-internal metadata to disk.
     pub async fn sync_all(&self) -> io::Result<()> {
-        self.inner.sync_all()
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.sync_all()).await
     }
 
     /// This function is similar to `sync_all`, except that it will not sync file metadata.
     pub async fn sync_data(&self) -> io::Result<()> {
-        self.inner.sync_data()
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.sync_data()).await
     }
 
     /// Truncates or extends the underlying file.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
-        self.inner.set_len(size)
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.set_len(size)).await
     }
 
     /// Queries metadata about the underlying file.
     pub async fn metadata(&self) -> io::Result<Metadata> {
-        self.inner.metadata()
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.metadata()).await
     }
 
     /// Creates a new `File` instance that shares the same underlying file handle.
     pub async fn try_clone(&self) -> io::Result<Self> {
-        let file = self.inner.try_clone()?;
-        Ok(Self { inner: file })
+        let inner = Arc::clone(&self.inner);
+        let file = spawn_blocking_io(move || inner.try_clone()).await?;
+        Ok(Self {
+            inner: Arc::new(file),
+        })
     }
 
     /// Changes the permissions on the underlying file.
     pub async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        self.inner.set_permissions(perm)
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.set_permissions(perm)).await
     }
 
     // Helper methods that match std::fs::File but async
+    // Note: These require &mut self due to seek position state.
+    // Phase 0: Still blocking since we can't safely share mutable state.
 
     /// Reads a number of bytes starting from a given offset.
     /// Note: using seek + read
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.inner.seek(pos)
+        // Phase 0: Direct blocking. Requires reactor integration for true async.
+        Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file handle is shared"))?
+            .seek(pos)
     }
 
     /// Gets the current stream position.
     pub async fn stream_position(&mut self) -> io::Result<u64> {
-        self.inner.stream_position()
+        // Phase 0: Direct blocking. Requires reactor integration for true async.
+        Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file handle is shared"))?
+            .stream_position()
     }
 
     /// Rewinds the stream to the beginning.
     pub async fn rewind(&mut self) -> io::Result<()> {
-        self.inner.rewind()
+        // Phase 0: Direct blocking. Requires reactor integration for true async.
+        Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file handle is shared"))?
+            .rewind()
     }
 }
+
+// Phase 0: Poll-based traits use direct blocking I/O.
+// True async support requires reactor integration to wake on readiness.
 
 impl AsyncRead for File {
     fn poll_read(
@@ -101,7 +143,10 @@ impl AsyncRead for File {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let n = self.inner.read(buf.unfilled())?;
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_read")
+        })?;
+        let n = inner.read(buf.unfilled())?;
         buf.advance(n);
         Poll::Ready(Ok(()))
     }
@@ -113,12 +158,18 @@ impl AsyncWrite for File {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let n = self.inner.write(buf)?;
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_write")
+        })?;
+        let n = inner.write(buf)?;
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.inner.flush()?;
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_flush")
+        })?;
+        inner.flush()?;
         Poll::Ready(Ok(()))
     }
 
@@ -133,7 +184,10 @@ impl AsyncSeek for File {
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        let n = self.inner.seek(pos)?;
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "file handle is shared during poll_seek")
+        })?;
+        let n = inner.seek(pos)?;
         Poll::Ready(Ok(n))
     }
 }
