@@ -17,6 +17,4 @@
 
 pub mod sqlite;
 
-pub use sqlite::{
-    SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, SqliteValue,
-};
+pub use sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, SqliteValue};

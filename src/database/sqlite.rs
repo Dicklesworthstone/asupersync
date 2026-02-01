@@ -322,7 +322,10 @@ pub struct SqliteConnection {
 impl fmt::Debug for SqliteConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteConnection")
-            .field("open", &self.inner.lock().map(|g| g.conn.is_some()).unwrap_or(false))
+            .field(
+                "open",
+                &self.inner.lock().map(|g| g.conn.is_some()).unwrap_or(false),
+            )
             .finish()
     }
 }
@@ -337,7 +340,10 @@ impl SqliteConnection {
     pub async fn open(cx: &Cx, path: impl AsRef<Path>) -> Outcome<Self, SqliteError> {
         // Check for cancellation
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")));
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
         }
 
         let path = path.as_ref().to_path_buf();
@@ -348,8 +354,8 @@ impl SqliteConnection {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let handle = pool.spawn(move || {
-            let result = rusqlite::Connection::open(&path)
-                .map_err(|e| SqliteError::Sqlite(e.to_string()));
+            let result =
+                rusqlite::Connection::open(&path).map_err(|e| SqliteError::Sqlite(e.to_string()));
             let _ = tx.send(result);
         });
 
@@ -374,7 +380,10 @@ impl SqliteConnection {
     pub async fn open_in_memory(cx: &Cx) -> Outcome<Self, SqliteError> {
         // Check for cancellation
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")));
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
         }
 
         let pool = get_sqlite_pool();
@@ -415,7 +424,10 @@ impl SqliteConnection {
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")));
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
         }
 
         let inner = Arc::clone(&self.inner);
@@ -429,10 +441,8 @@ impl SqliteConnection {
                 let guard = inner.lock().map_err(|_| SqliteError::LockPoisoned)?;
                 let conn = guard.get()?;
 
-                let params_refs: Vec<&dyn rusqlite::ToSql> = params
-                    .iter()
-                    .map(|v| v as &dyn rusqlite::ToSql)
-                    .collect();
+                let params_refs: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
                 conn.execute(&sql, params_refs.as_slice())
                     .map(|n| n as u64)
@@ -457,7 +467,10 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn execute_batch(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")));
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
         }
 
         let inner = Arc::clone(&self.inner);
@@ -496,7 +509,10 @@ impl SqliteConnection {
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteError> {
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")));
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
         }
 
         let inner = Arc::clone(&self.inner);
@@ -510,21 +526,16 @@ impl SqliteConnection {
                 let guard = inner.lock().map_err(|_| SqliteError::LockPoisoned)?;
                 let conn = guard.get()?;
 
-                let params_refs: Vec<&dyn rusqlite::ToSql> = params
-                    .iter()
-                    .map(|v| v as &dyn rusqlite::ToSql)
-                    .collect();
+                let params_refs: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
                 let mut stmt = conn
                     .prepare(&sql)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
                 // Build column map
-                let column_names: Vec<String> = stmt
-                    .column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let column_names: Vec<String> =
+                    stmt.column_names().iter().map(|s| s.to_string()).collect();
                 let columns: HashMap<String, usize> = column_names
                     .iter()
                     .enumerate()
@@ -653,10 +664,7 @@ impl SqliteConnection {
     /// Returns true if the connection is open.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        self.inner
-            .lock()
-            .map(|g| g.conn.is_some())
-            .unwrap_or(false)
+        self.inner.lock().map(|g| g.conn.is_some()).unwrap_or(false)
     }
 }
 
@@ -775,12 +783,8 @@ impl rusqlite::ToSql for SqliteValue {
             SqliteValue::Null => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Null)),
             SqliteValue::Integer(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Integer(*v))),
             SqliteValue::Real(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Real(*v))),
-            SqliteValue::Text(v) => {
-                Ok(ToSqlOutput::Owned(rusqlite::types::Value::Text(v.clone())))
-            }
-            SqliteValue::Blob(v) => {
-                Ok(ToSqlOutput::Owned(rusqlite::types::Value::Blob(v.clone())))
-            }
+            SqliteValue::Text(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Text(v.clone()))),
+            SqliteValue::Blob(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Blob(v.clone()))),
         }
     }
 }
@@ -828,7 +832,10 @@ mod tests {
         );
         assert_eq!(SqliteValue::Integer(42).as_text(), None);
 
-        assert_eq!(SqliteValue::Blob(vec![1, 2, 3]).as_blob(), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            SqliteValue::Blob(vec![1, 2, 3]).as_blob(),
+            Some(&[1, 2, 3][..])
+        );
     }
 
     #[test]
@@ -838,7 +845,10 @@ mod tests {
         columns.insert("name".to_string(), 1);
         let columns = Arc::new(columns);
 
-        let values = vec![SqliteValue::Integer(1), SqliteValue::Text("Alice".to_string())];
+        let values = vec![
+            SqliteValue::Integer(1),
+            SqliteValue::Text("Alice".to_string()),
+        ];
         let row = SqliteRow::new(columns, values);
 
         assert_eq!(row.len(), 2);
