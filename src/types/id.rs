@@ -85,7 +85,7 @@ impl fmt::Display for RegionId {
 /// A unique identifier for a task in the runtime.
 ///
 /// Tasks are units of concurrent execution owned by regions.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub(crate) ArenaIndex);
 
 impl TaskId {
