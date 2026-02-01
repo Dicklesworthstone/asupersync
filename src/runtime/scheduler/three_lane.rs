@@ -126,21 +126,18 @@ impl ThreeLaneScheduler {
         // So we should inject if None OR Some.
         // For Some, we don't care about notify result.
 
-        let should_inject = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            let record = state.tasks.get(task.arena_index());
-            if let Some(r) = record {
-                r.wake_state.notify(); // Attempt notify, ignore result
-                true
-            } else {
-                true // Allow injection for missing tasks (tests)
-            }
-        };
-
-        if should_inject {
-            self.global.inject_cancel(task, priority);
-            self.wake_one();
+        if let Some(record) = self
+            .state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .tasks
+            .get(task.arena_index())
+        {
+            record.wake_state.notify(); // Attempt notify, ignore result
         }
+
+        self.global.inject_cancel(task, priority);
+        self.wake_one();
     }
 
     /// Injects a task into the timed lane for cross-thread wakeup.
