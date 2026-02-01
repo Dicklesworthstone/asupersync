@@ -828,11 +828,20 @@ where
                 result
             }
             CancellationMode::TimeoutFallback => {
-                // If we have a fallback timeout, use it
-                // Note: Full timeout implementation would require async runtime support
-                // For now, just await the future directly (timeout is a no-op placeholder)
-                let _ = self.config.fallback_timeout;
-                future.await.map_err(TowerAdapterError::Service)
+                if let Some(timeout_duration) = self.config.fallback_timeout {
+                    if let Some(timer) = cx.timer_driver() {
+                        let now = timer.now();
+                        match crate::time::timeout(now, timeout_duration, future).await {
+                            Ok(output) => Ok(output),
+                            Err(_) => Err(TowerAdapterError::Timeout),
+                        }
+                    } else {
+                        // No timer driver available; fall back to best-effort.
+                        future.await.map_err(TowerAdapterError::Service)
+                    }
+                } else {
+                    future.await.map_err(TowerAdapterError::Service)
+                }
             }
         }
     }
@@ -1199,6 +1208,91 @@ mod tests {
             let no_cx1: ProviderAdapterError<i32> = ProviderAdapterError::NoCx(NoCxAvailable);
             let no_cx2: ProviderAdapterError<i32> = ProviderAdapterError::NoCx(NoCxAvailable);
             assert_eq!(no_cx1, no_cx2);
+        }
+    }
+
+    #[cfg(feature = "tower")]
+    mod tower_adapter_timeout_tests {
+        use super::super::{
+            AdapterConfig, AsupersyncAdapter, AsupersyncService, CancellationMode,
+            TowerAdapterError,
+        };
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use crate::Cx;
+        use std::future::pending;
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Wake, Waker};
+        use std::time::Duration;
+
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        fn noop_waker() -> Waker {
+            Arc::new(NoopWaker).into()
+        }
+
+        #[derive(Clone)]
+        struct PendingService;
+
+        impl tower::Service<()> for PendingService {
+            type Response = ();
+            type Error = ();
+            type Future = std::future::Pending<Result<(), ()>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _req: ()) -> Self::Future {
+                pending()
+            }
+        }
+
+        #[test]
+        fn timeout_fallback_triggers_timeout_error() {
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("timeout_fallback_triggers_timeout_error");
+
+            let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+            let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(1, 0),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(cx.clone()));
+
+            let config = AdapterConfig::new()
+                .cancellation_mode(CancellationMode::TimeoutFallback)
+                .fallback_timeout(Duration::from_millis(5));
+            let adapter = AsupersyncAdapter::with_config(PendingService, config);
+
+            let mut fut = adapter.call(&cx, ());
+            let waker = noop_waker();
+            let mut context = Context::from_waker(&waker);
+
+            let first = Pin::new(&mut fut).poll(&mut context);
+            assert!(first.is_pending());
+
+            clock.advance(Time::from_millis(6).as_nanos());
+            timer.process_timers();
+
+            let result = Pin::new(&mut fut).poll(&mut context);
+            let timed_out = matches!(result, Poll::Ready(Err(TowerAdapterError::Timeout)));
+            crate::assert_with_log!(timed_out, "timeout error", true, timed_out);
+            crate::test_complete!("timeout_fallback_triggers_timeout_error");
         }
     }
 }
