@@ -19,11 +19,10 @@
 //! Body streaming respects Cx budget constraints. When the poll quota
 //! is exhausted, the body yields to allow other work to proceed.
 
-use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
+use crate::bytes::{Bytes, BytesCursor, BytesMut};
 use crate::http::body::{Body, Frame, HeaderMap, SizeHint};
 use crate::http::h1::codec::HttpError;
 
@@ -823,6 +822,7 @@ impl StreamingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes::Buf;
 
     #[test]
     fn body_kind_properties() {
