@@ -11,9 +11,10 @@ use asupersync::net;
 use asupersync::runtime::RuntimeBuilder;
 use common::*;
 use conformance::{
-    AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
-    OneshotSender, RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket,
-    WatchReceiver, WatchRecvError, WatchSender,
+    render_console_summary, run_conformance_suite, AsyncFile, BroadcastReceiver,
+    BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender, OneshotSender, RunConfig,
+    RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket, WatchReceiver,
+    WatchRecvError, WatchSender,
 };
 use futures_lite::future;
 use std::future::Future;
@@ -492,20 +493,15 @@ impl RuntimeInterface for AsupersyncRuntime {
 fn run_conformance_tests() {
     init_test_logging();
     test_phase!("run_conformance_tests");
-    let tests = conformance::tests::all_tests::<AsupersyncRuntime>();
+    let runtime = AsupersyncRuntime::new();
+    let summary = run_conformance_suite(&runtime, "asupersync", RunConfig::new());
+    write_conformance_artifacts("channel_conformance", &summary);
 
-    for test in tests {
-        let runtime = AsupersyncRuntime::new();
-        test_section!("conformance_case");
-        tracing::info!(case = %test.meta.name, "running conformance test");
-        let result = test.run(&runtime);
-        let message = result.message.clone().unwrap_or_default();
-        tracing::debug!(
-            passed = result.passed,
-            message = %message,
-            "conformance test result"
-        );
-        assert!(result.passed, "Test {} failed: {}", test.meta.name, message);
-    }
+    let report = render_console_summary(&summary);
+    tracing::info!(summary = %report, "conformance summary");
+    assert!(
+        summary.failed == 0,
+        "Conformance failures detected:\n{report}"
+    );
     test_complete!("run_channel_conformance_tests");
 }

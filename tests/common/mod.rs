@@ -23,6 +23,7 @@ use asupersync::types::Time;
 use proptest::prelude::ProptestConfig;
 use proptest::test_runner::RngSeed;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -36,6 +37,7 @@ pub const DEFAULT_PROPTEST_SEED: u64 = 0x5EED_5EED;
 
 const PROPTEST_SEED_ENV: &str = "ASUPERSYNC_PROPTEST_SEED";
 const PROPTEST_MAX_SHRINK_ITERS_ENV: &str = "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS";
+const CONFORMANCE_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_CONFORMANCE_ARTIFACTS_DIR";
 
 /// Configuration for property tests with optional deterministic seed support.
 #[derive(Debug, Clone)]
@@ -166,6 +168,57 @@ where
         .build()
         .expect("failed to build test runtime");
     runtime.block_on(f(cx));
+}
+
+fn conformance_artifacts_dir() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var(CONFORMANCE_ARTIFACTS_DIR_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    if std::env::var("CI").is_ok() {
+        return Some(PathBuf::from("target/conformance"));
+    }
+
+    None
+}
+
+pub fn write_conformance_artifacts(suite_name: &str, summary: &conformance::runner::SuiteResult) {
+    let Some(dir) = conformance_artifacts_dir() else {
+        return;
+    };
+
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %err, path = %dir.display(), "failed to create conformance artifact dir");
+        return;
+    }
+
+    let json_path = dir.join(format!("{suite_name}.json"));
+    if let Err(err) = conformance::write_json_report(summary, &json_path) {
+        tracing::warn!(
+            error = %err,
+            path = %json_path.display(),
+            "failed to write conformance json report"
+        );
+    }
+
+    let txt_path = dir.join(format!("{suite_name}.txt"));
+    let summary_text = conformance::render_console_summary(summary);
+    if let Err(err) = std::fs::write(&txt_path, summary_text) {
+        tracing::warn!(
+            error = %err,
+            path = %txt_path.display(),
+            "failed to write conformance text report"
+        );
+    }
+
+    tracing::info!(
+        path = %dir.display(),
+        suite = %suite_name,
+        "conformance artifacts written"
+    );
 }
 
 /// Assert that an async operation completes within a timeout.

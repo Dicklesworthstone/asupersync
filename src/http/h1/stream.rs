@@ -191,7 +191,7 @@ impl IncomingBody {
     }
 
     /// Appends a Bytes chunk to the internal buffer.
-    pub fn append_bytes(&mut self, data: Bytes) {
+    pub fn append_bytes(&mut self, data: &Bytes) {
         self.buffer.extend_from_slice(data.as_ref());
     }
 
@@ -259,20 +259,15 @@ impl IncomingBody {
             match &mut self.chunked_state {
                 ChunkedReadState::SizeLine => {
                     // Look for CRLF to complete size line
-                    let line_end = self
-                        .buffer
-                        .as_ref()
-                        .windows(2)
-                        .position(|w| w == b"\r\n")?;
+                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n")?;
 
                     // Parse chunk size (may have extensions after ';')
                     let line = &self.buffer.as_ref()[..line_end];
                     let size_str = std::str::from_utf8(line).ok()?;
                     let size_part = size_str.split(';').next().unwrap_or("").trim();
 
-                    let chunk_size = match usize::from_str_radix(size_part, 16) {
-                        Ok(s) => s,
-                        Err(_) => return Some(Err(HttpError::BadChunkedEncoding)),
+                    let Ok(chunk_size) = usize::from_str_radix(size_part, 16) else {
+                        return Some(Err(HttpError::BadChunkedEncoding));
                     };
 
                     // Consume the size line
@@ -295,11 +290,7 @@ impl IncomingBody {
                     }
 
                     // Yield up to remaining bytes, capped by max_chunk_size
-                    let to_yield = self
-                        .buffer
-                        .len()
-                        .min(*remaining)
-                        .min(self.max_chunk_size);
+                    let to_yield = self.buffer.len().min(*remaining).min(self.max_chunk_size);
 
                     let chunk = self.buffer.split_to(to_yield);
                     *remaining -= to_yield;
@@ -326,11 +317,7 @@ impl IncomingBody {
 
                 ChunkedReadState::Trailers => {
                     // Look for CRLF
-                    let line_end = self
-                        .buffer
-                        .as_ref()
-                        .windows(2)
-                        .position(|w| w == b"\r\n")?;
+                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n")?;
 
                     let line = self.buffer.split_to(line_end);
                     let _ = self.buffer.split_to(2); // CRLF
@@ -350,9 +337,8 @@ impl IncomingBody {
                     }
 
                     // Parse trailer header
-                    let line_str = match std::str::from_utf8(line.as_ref()) {
-                        Ok(s) => s,
-                        Err(_) => return Some(Err(HttpError::BadHeader)),
+                    let Ok(line_str) = std::str::from_utf8(line.as_ref()) else {
+                        return Some(Err(HttpError::BadHeader));
                     };
 
                     if let Some(colon) = line_str.find(':') {
@@ -434,6 +420,7 @@ impl ChunkedEncoder {
     /// Encodes a data chunk into the chunked format.
     ///
     /// Returns the encoded bytes including size line and CRLF.
+    #[must_use]
     pub fn encode_chunk(&self, data: &[u8]) -> BytesMut {
         let mut buf = BytesMut::with_capacity(data.len() + 32);
 
@@ -568,9 +555,9 @@ impl OutgoingBody {
         self.total_bytes += data.len() as u64;
 
         match &self.encoder {
-            Some(encoder) => {
-                let encoded = encoder.encode_chunk(data);
-                self.chunks.push(encoded.freeze());
+            Some(enc) => {
+                let chunk_buf = enc.encode_chunk(data);
+                self.chunks.push(chunk_buf.freeze());
             }
             None => {
                 self.chunks.push(Bytes::copy_from_slice(data));
@@ -587,9 +574,9 @@ impl OutgoingBody {
         self.total_bytes += data.len() as u64;
 
         match &self.encoder {
-            Some(encoder) => {
-                let encoded = encoder.encode_chunk(data.as_ref());
-                self.chunks.push(encoded.freeze());
+            Some(enc) => {
+                let chunk_buf = enc.encode_chunk(data.as_ref());
+                self.chunks.push(chunk_buf.freeze());
             }
             None => {
                 self.chunks.push(data);
@@ -667,12 +654,10 @@ impl RequestHead {
     /// Returns true if Transfer-Encoding: chunked is set.
     #[must_use]
     pub fn is_chunked(&self) -> bool {
-        self.headers
-            .iter()
-            .any(|(name, value)| {
-                name.eq_ignore_ascii_case("transfer-encoding")
-                    && value.to_lowercase().contains("chunked")
-            })
+        self.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value.to_lowercase().contains("chunked")
+        })
     }
 
     /// Determines the body kind from headers.
@@ -728,6 +713,7 @@ impl ResponseHead {
     }
 
     /// Serializes the response head to bytes.
+    #[must_use]
     pub fn serialize(&self) -> BytesMut {
         let reason = if self.reason.is_empty() {
             super::types::default_reason(self.status)
@@ -788,8 +774,7 @@ impl StreamingResponse {
     /// Creates a new streaming response with chunked encoding.
     #[must_use]
     pub fn chunked(status: u16, reason: impl Into<String>) -> Self {
-        let head = ResponseHead::new(status, reason)
-            .with_header("Transfer-Encoding", "chunked");
+        let head = ResponseHead::new(status, reason).with_header("Transfer-Encoding", "chunked");
         Self {
             head,
             body: OutgoingBody::chunked(),
@@ -799,8 +784,8 @@ impl StreamingResponse {
     /// Creates a new streaming response with known Content-Length.
     #[must_use]
     pub fn with_content_length(status: u16, reason: impl Into<String>, length: u64) -> Self {
-        let head = ResponseHead::new(status, reason)
-            .with_header("Content-Length", length.to_string());
+        let head =
+            ResponseHead::new(status, reason).with_header("Content-Length", length.to_string());
         Self {
             head,
             body: OutgoingBody::with_content_length(length),
@@ -810,8 +795,7 @@ impl StreamingResponse {
     /// Creates an empty response (no body).
     #[must_use]
     pub fn empty(status: u16, reason: impl Into<String>) -> Self {
-        let head = ResponseHead::new(status, reason)
-            .with_header("Content-Length", "0");
+        let head = ResponseHead::new(status, reason).with_header("Content-Length", "0");
         Self {
             head,
             body: OutgoingBody::empty(),
@@ -905,9 +889,9 @@ mod tests {
 
     #[test]
     fn chunked_encoder_simple() {
-        let encoder = ChunkedEncoder::new();
-        let encoded = encoder.encode_chunk(b"hello");
-        assert_eq!(encoded.as_ref(), b"5\r\nhello\r\n");
+        let enc = ChunkedEncoder::new();
+        let result = enc.encode_chunk(b"hello");
+        assert_eq!(result.as_ref(), b"5\r\nhello\r\n");
     }
 
     #[test]
@@ -1017,18 +1001,22 @@ mod tests {
     #[test]
     fn streaming_response_chunked() {
         let resp = StreamingResponse::chunked(200, "OK");
-        assert!(resp.head.headers.iter().any(|(n, v)| {
-            n.eq_ignore_ascii_case("transfer-encoding") && v == "chunked"
-        }));
+        assert!(resp
+            .head
+            .headers
+            .iter()
+            .any(|(n, v)| { n.eq_ignore_ascii_case("transfer-encoding") && v == "chunked" }));
         assert!(resp.body.kind().is_chunked());
     }
 
     #[test]
     fn streaming_response_content_length() {
         let resp = StreamingResponse::with_content_length(200, "OK", 100);
-        assert!(resp.head.headers.iter().any(|(n, v)| {
-            n.eq_ignore_ascii_case("content-length") && v == "100"
-        }));
+        assert!(resp
+            .head
+            .headers
+            .iter()
+            .any(|(n, v)| { n.eq_ignore_ascii_case("content-length") && v == "100" }));
         assert_eq!(resp.body.kind(), BodyKind::ContentLength(100));
     }
 }
