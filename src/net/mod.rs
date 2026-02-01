@@ -33,6 +33,6 @@ pub use unix::{
 };
 pub use websocket::{
     apply_mask, ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Message,
-    Opcode, Role as WsRole, ServerHandshake, WebSocket, WebSocketConfig, WsConnectError,
-    WsError, WsUrl,
+    Opcode, Role as WsRole, ServerHandshake, ServerWebSocket, WebSocket, WebSocketAcceptor,
+    WebSocketConfig, WsAcceptError, WsConnectError, WsError, WsUrl,
 };
