@@ -179,7 +179,7 @@ impl Resolver {
 
         timeout(timeout_now(), self.config.timeout, lookup)
             .await
-            .unwrap_or(Err(DnsError::Timeout))
+            .map_or(Err(DnsError::Timeout), |result| result)
     }
 
     /// Performs synchronous DNS lookup using std::net.
@@ -322,10 +322,9 @@ impl Resolver {
             Ok::<_, DnsError>(stream)
         }));
 
-        let result = match timeout(timeout_now(), timeout_duration, connect).await {
-            Ok(result) => result?,
-            Err(_) => return Err(DnsError::Timeout),
-        };
+        let result = timeout(timeout_now(), timeout_duration, connect)
+            .await
+            .map_or(Err(DnsError::Timeout), |result| result)?;
 
         // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
         Ok(TcpStream::from_std(result))
