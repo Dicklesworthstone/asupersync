@@ -256,7 +256,7 @@ impl Diagnostics {
 
         for (_, ob) in self.state.obligations.iter() {
             if ob.state == ObligationState::Reserved {
-                let age = Duration::from_nanos(now.duration_since(ob.created_at));
+                let age = Duration::from_nanos(now.duration_since(ob.reserved_at));
                 leaks.push(ObligationLeak {
                     obligation_id: ob.id,
                     obligation_type: format!("{:?}", ob.kind),
@@ -505,4 +505,3 @@ pub struct ObligationLeak {
     /// Age since creation.
     pub age: Duration,
 }
-
