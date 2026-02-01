@@ -435,10 +435,7 @@ impl ConsumerConfig {
             "\"deliver_policy\":\"{}\"",
             self.deliver_policy.as_str()
         ));
-        parts.push(format!(
-            "\"ack_policy\":\"{}\"",
-            self.ack_policy.as_str()
-        ));
+        parts.push(format!("\"ack_policy\":\"{}\"", self.ack_policy.as_str()));
         parts.push(format!("\"ack_wait\":{}", self.ack_wait.as_nanos()));
         parts.push(format!("\"max_deliver\":{}", self.max_deliver));
         parts.push(format!("\"max_ack_pending\":{}", self.max_ack_pending));
