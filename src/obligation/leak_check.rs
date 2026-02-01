@@ -57,7 +57,7 @@ impl VarState {
     /// Used when control flow paths merge (e.g., after an if/else).
     #[must_use]
     pub fn join(self, other: Self) -> Self {
-        use VarState::*;
+        use VarState::{Empty, Held, MayHold, MayHoldAmbiguous, Resolved};
         match (self, other) {
             // Identity cases.
             (Empty, Empty) => Empty,
