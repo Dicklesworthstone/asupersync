@@ -74,6 +74,31 @@ User Future
 - `encoding/`, `decoding/`, `raptorq/`: RaptorQ pipelines
 - `security/`, `observability/`: auth and structured tracing
 
+### Protocol stack overview
+
+- HTTP/1.1: `src/http/h1/` (codec + client/server helpers)
+  - Tests: `tests/http_verification.rs`, fuzz targets `fuzz_http1_request` / `fuzz_http1_response`
+- HTTP/2: `src/http/h2/` (frames, HPACK, streams, connection)
+  - Tests: `tests/http_verification.rs`, fuzz targets `fuzz_http2_frame` / `fuzz_hpack_decode`
+- gRPC: `src/grpc/` (framing, client/server, interceptors)
+  - Tests: `tests/grpc_verification.rs`
+- WebSocket: `src/net/websocket/` (handshake, frames, client/server)
+  - Tests: `tests/e2e_websocket.rs`
+
+### Testing reference
+
+See `TESTING.md` for test categories, logging conventions, conformance suite usage,
+and fuzzing instructions.
+
+### Examples
+
+Examples live in `examples/` and cover:
+
+- Structured concurrency macros: `examples/macros_*.rs`
+- Cancellation injection: `examples/cancellation_injection.rs`
+- Chaos testing: `examples/chaos_testing.rs`
+- Metrics dashboards: `examples/prometheus_metrics.rs`, `examples/grafana_dashboard.json`
+
 ### Module dependency sketch (high level)
 
 ```

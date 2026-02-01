@@ -686,8 +686,10 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials |
 | [`docs/macro-dsl.md`](./docs/macro-dsl.md) | **Macro DSL**: scope!/spawn!/join!/race! usage, patterns, examples |
+| [`docs/cancellation-testing.md`](./docs/cancellation-testing.md) | **Cancellation Testing**: deterministic injection + oracles |
 | [`docs/replay-debugging.md`](./docs/replay-debugging.md) | **Replay Debugging**: Record/replay for debugging async bugs |
 | [`docs/security_threat_model.md`](./docs/security_threat_model.md) | **Security Review**: Threat model and security invariants |
+| [`TESTING.md`](./TESTING.md) | **Testing Guide**: unit, conformance, E2E, fuzzing, CI |
 | [`AGENTS.md`](./AGENTS.md) | **AI Guidelines**: Rules for AI coding agents |
 
 ---
