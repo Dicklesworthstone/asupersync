@@ -4,6 +4,57 @@
 //! fairness. Acquisition is cancel-safe:
 //! - Cancellation while waiting returns an error without acquiring the lock.
 //! - Once acquired, guards always release on drop.
+//!
+//! # Writer-Preference Fairness
+//!
+//! This RwLock uses a **writer-preference** policy: when a writer is waiting,
+//! new read requests are blocked until the writer acquires and releases the lock.
+//! This prevents writer starvation under heavy read load, but can cause reader
+//! starvation under heavy write load.
+//!
+//! ## Fairness Characteristics
+//!
+//! | Scenario                  | Behavior                                      |
+//! |---------------------------|-----------------------------------------------|
+//! | No writers waiting        | Readers acquire immediately                   |
+//! | Writer waiting            | New readers blocked until writer completes    |
+//! | Existing readers + writer | Writer waits for all readers to release       |
+//! | Multiple writers          | Writers queue in arrival order (FIFO)         |
+//!
+//! ## Starvation Analysis
+//!
+//! - **Writer starvation**: Prevented. Writers block new readers while waiting.
+//! - **Reader starvation**: Possible under continuous write pressure. If writes
+//!   are frequent, readers may wait indefinitely as each writer blocks new reads.
+//!
+//! ## When to Use RwLock vs Mutex
+//!
+//! Prefer **RwLock** when:
+//! - Read operations significantly outnumber writes
+//! - Read operations are expensive (benefit from parallelism)
+//! - Writers are infrequent
+//!
+//! Prefer **Mutex** when:
+//! - Read and write frequency are similar
+//! - Critical sections are short
+//! - Simplicity is preferred over potential read parallelism
+//!
+//! # Example
+//!
+//! ```ignore
+//! use asupersync::sync::RwLock;
+//!
+//! let lock = RwLock::new(vec![1, 2, 3]);
+//!
+//! // Multiple readers can access concurrently
+//! let read1 = lock.read(&cx)?;
+//! let read2 = lock.read(&cx)?;  // OK: no writers waiting
+//!
+//! // Writers get exclusive access
+//! drop((read1, read2));
+//! let mut write = lock.write(&cx)?;
+//! write.push(4);
+//! ```
 
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,7 +130,31 @@ struct State {
     writer_waiters: usize,
 }
 
-/// A cancel-aware read-write lock.
+/// A cancel-aware read-write lock with writer-preference fairness.
+///
+/// This lock allows multiple readers to access the data concurrently, or a single
+/// writer to have exclusive access. When a writer is waiting, new read attempts
+/// are blocked to prevent writer starvation.
+///
+/// # Fairness Policy
+///
+/// - **Writer-preference**: When `writer_waiters > 0`, new readers block.
+/// - **Reader parallelism**: Multiple readers can hold the lock simultaneously
+///   when no writer is waiting or active.
+/// - **Writer exclusivity**: Only one writer can hold the lock, and no readers
+///   can hold it while a writer does.
+///
+/// # Cancel Safety
+///
+/// Both `read()` and `write()` are cancel-safe. If cancelled while waiting:
+/// - The waiter is removed from the queue
+/// - No lock is acquired
+/// - An error is returned
+///
+/// # Poisoning
+///
+/// If a panic occurs while holding a guard, the lock is poisoned. Subsequent
+/// acquisition attempts will return `RwLockError::Poisoned`.
 #[derive(Debug)]
 pub struct RwLock<T> {
     state: StdMutex<State>,
