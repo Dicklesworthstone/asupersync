@@ -45,6 +45,8 @@ pub enum VarState {
     Held(ObligationKind),
     /// May hold an obligation (depends on control flow).
     MayHold(ObligationKind),
+    /// May hold an obligation, but the kind is ambiguous (different paths had different kinds).
+    MayHoldAmbiguous,
     /// Obligation has been resolved (committed or aborted).
     Resolved,
 }
@@ -55,27 +57,33 @@ impl VarState {
     /// Used when control flow paths merge (e.g., after an if/else).
     #[must_use]
     pub fn join(self, other: Self) -> Self {
+        use VarState::*;
         match (self, other) {
             // Identity cases.
-            (Self::Empty, Self::Empty) => Self::Empty,
-            (Self::Resolved | Self::Empty, Self::Resolved) | (Self::Resolved, Self::Empty) => {
-                Self::Resolved
-            }
-            (Self::Held(k1), Self::Held(k2)) if k1 == k2 => Self::Held(k1),
-            (Self::MayHold(k1), Self::MayHold(k2)) if k1 == k2 => Self::MayHold(k1),
+            (Empty, Empty) => Empty,
+            (Resolved | Empty, Resolved) | (Resolved, Empty) => Resolved,
+
+            // Same kinds.
+            (Held(k1), Held(k2)) if k1 == k2 => Held(k1),
+            (MayHold(k1), MayHold(k2)) if k1 == k2 => MayHold(k1),
+            (Held(k1), MayHold(k2)) | (MayHold(k2), Held(k1)) if k1 == k2 => MayHold(k1),
 
             // Held in one path, not in another => MayHold.
-            (Self::Held(k), Self::Resolved | Self::Empty | Self::Held(_))
-            | (Self::Resolved | Self::Empty, Self::Held(k))
-            | (Self::MayHold(k), _)
-            | (_, Self::MayHold(k)) => Self::MayHold(k),
+            (Held(k) | MayHold(k), Resolved | Empty) | (Resolved | Empty, Held(k) | MayHold(k)) => {
+                MayHold(k)
+            }
+
+            // Ambiguous cases (mismatched kinds or existing ambiguity).
+            (MayHoldAmbiguous, _)
+            | (_, MayHoldAmbiguous)
+            | (Held(_) | MayHold(_), Held(_) | MayHold(_)) => MayHoldAmbiguous,
         }
     }
 
     /// Returns true if this state indicates a potential leak.
     #[must_use]
     pub fn is_leak(&self) -> bool {
-        matches!(self, Self::Held(_) | Self::MayHold(_))
+        matches!(self, Self::Held(_) | Self::MayHold(_) | Self::MayHoldAmbiguous)
     }
 
     /// Returns the obligation kind, if any.
@@ -83,7 +91,7 @@ impl VarState {
     pub fn kind(&self) -> Option<ObligationKind> {
         match self {
             Self::Held(k) | Self::MayHold(k) => Some(*k),
-            Self::Empty | Self::Resolved => None,
+            Self::Empty | Self::Resolved | Self::MayHoldAmbiguous => None,
         }
     }
 }
@@ -94,6 +102,7 @@ impl fmt::Display for VarState {
             Self::Empty => f.write_str("empty"),
             Self::Held(k) => write!(f, "held({k})"),
             Self::MayHold(k) => write!(f, "may-hold({k})"),
+            Self::MayHoldAmbiguous => f.write_str("may-hold(ambiguous)"),
             Self::Resolved => f.write_str("resolved"),
         }
     }
@@ -356,7 +365,7 @@ impl LeakChecker {
                     "abort"
                 };
                 match self.state.get(var) {
-                    Some(VarState::Held(_) | VarState::MayHold(_)) => {
+                    Some(VarState::Held(_) | VarState::MayHold(_) | VarState::MayHoldAmbiguous) => {
                         self.state.insert(*var, VarState::Resolved);
                     }
                     Some(VarState::Resolved) => {
@@ -458,6 +467,17 @@ impl LeakChecker {
                         message: format!(
                             "{var} may hold {} obligation at scope exit (depends on control flow)",
                             kind.as_str(),
+                        ),
+                    });
+                }
+                VarState::MayHoldAmbiguous => {
+                    self.diagnostics.push(Diagnostic {
+                        kind: DiagnosticKind::PotentialLeak,
+                        var,
+                        obligation_kind: None,
+                        scope: self.scope_name.clone(),
+                        message: format!(
+                            "{var} may hold an ambiguous obligation at scope exit (different kinds on different paths)",
                         ),
                     });
                 }
