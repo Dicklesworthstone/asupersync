@@ -1141,4 +1141,567 @@ mod tests {
             assert_eq!(orig.value, dec.value, "value mismatch for {:?}", orig.name);
         }
     }
+
+    // =========================================================================
+    // RFC 7541 Standard Test Vectors (bd-et96)
+    // =========================================================================
+
+    #[test]
+    fn test_rfc7541_c1_integer_representation() {
+        // RFC 7541 C.1.1: Encoding 10 using a 5-bit prefix
+        // Expected: 0x0a (10 fits in 5 bits)
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, 10, 5);
+        assert_eq!(&buf[..], &[0x0a]);
+
+        // RFC 7541 C.1.2: Encoding 1337 using a 5-bit prefix
+        // 1337 = 31 + 1306, 1306 = 0x51a = 10 + 128*10 + 128*128*0
+        // Expected: 0x1f 0x9a 0x0a
+        buf.clear();
+        encode_integer(&mut buf, 1337, 5);
+        assert_eq!(&buf[..], &[0x1f, 0x9a, 0x0a]);
+
+        // RFC 7541 C.1.3: Encoding 42 at an octet boundary (8-bit prefix)
+        buf.clear();
+        encode_integer(&mut buf, 42, 8);
+        assert_eq!(&buf[..], &[0x2a]);
+    }
+
+    #[test]
+    fn test_rfc7541_integer_decode_roundtrip() {
+        // Test various integer values
+        for &(value, prefix_bits) in &[
+            (0u32, 5),
+            (1, 5),
+            (30, 5),
+            (31, 5),
+            (32, 5),
+            (127, 7),
+            (128, 7),
+            (255, 8),
+            (256, 8),
+            (1337, 5),
+            (65535, 8),
+        ] {
+            let mut buf = BytesMut::new();
+            encode_integer(&mut buf, value, prefix_bits);
+
+            let mut src = buf.freeze();
+            let first = src[0];
+            src.advance(1);
+            let decoded = decode_integer(&mut src, first, prefix_bits).unwrap();
+            assert_eq!(decoded, value, "roundtrip failed for {value} with {prefix_bits}-bit prefix");
+        }
+    }
+
+    #[test]
+    fn test_rfc7541_c2_header_field_indexed() {
+        // RFC 7541 C.2.4: Indexed Header Field
+        // Index 2 in static table = :method: GET
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::from_static(&[0x82]);
+        let headers = decoder.decode(&mut src).unwrap();
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, ":method");
+        assert_eq!(headers[0].value, "GET");
+    }
+
+    #[test]
+    fn test_rfc7541_c3_request_without_huffman() {
+        // RFC 7541 C.3.1: First Request (without Huffman)
+        // :method: GET, :scheme: http, :path: /, :authority: www.example.com
+        let wire: &[u8] = &[
+            0x82, // :method: GET (indexed 2)
+            0x86, // :scheme: http (indexed 6)
+            0x84, // :path: / (indexed 4)
+            0x41, 0x0f, // :authority: with literal value, 15 bytes
+            b'w', b'w', b'w', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm',
+        ];
+
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::copy_from_slice(wire);
+        let headers = decoder.decode(&mut src).unwrap();
+
+        assert_eq!(headers.len(), 4);
+        assert_eq!(headers[0].name, ":method");
+        assert_eq!(headers[0].value, "GET");
+        assert_eq!(headers[1].name, ":scheme");
+        assert_eq!(headers[1].value, "http");
+        assert_eq!(headers[2].name, ":path");
+        assert_eq!(headers[2].value, "/");
+        assert_eq!(headers[3].name, ":authority");
+        assert_eq!(headers[3].value, "www.example.com");
+    }
+
+    #[test]
+    fn test_rfc7541_c4_request_with_huffman() {
+        // Encode headers with Huffman, then decode and verify
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(true);
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "http"),
+            Header::new(":path", "/"),
+            Header::new(":authority", "www.example.com"),
+        ];
+
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+
+        let mut decoder = Decoder::new();
+        let mut src = encoded.freeze();
+        let decoded = decoder.decode(&mut src).unwrap();
+
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded[3].value, "www.example.com");
+    }
+
+    #[test]
+    fn test_rfc7541_c5_response_without_huffman() {
+        // Test response headers encoding/decoding
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        let headers = vec![
+            Header::new(":status", "302"),
+            Header::new("cache-control", "private"),
+            Header::new("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+            Header::new("location", "https://www.example.com"),
+        ];
+
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+
+        let mut decoder = Decoder::new();
+        let mut src = encoded.freeze();
+        let decoded = decoder.decode(&mut src).unwrap();
+
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded[0].name, ":status");
+        assert_eq!(decoded[0].value, "302");
+        assert_eq!(decoded[3].name, "location");
+        assert_eq!(decoded[3].value, "https://www.example.com");
+    }
+
+    #[test]
+    fn test_rfc7541_huffman_decode_www_example_com() {
+        // RFC 7541 C.4.1 encoded "www.example.com" with Huffman
+        // This is a known encoding from the spec
+        let huffman_encoded: &[u8] = &[
+            0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff,
+        ];
+        let decoded = decode_huffman(&Bytes::copy_from_slice(huffman_encoded)).unwrap();
+        assert_eq!(decoded, "www.example.com");
+    }
+
+    // =========================================================================
+    // Dynamic Table Edge Cases (bd-et96)
+    // =========================================================================
+
+    #[test]
+    fn test_dynamic_table_empty() {
+        let table = DynamicTable::new();
+        assert_eq!(table.size(), 0);
+        assert!(table.get(1).is_none());
+        assert!(table.get(0).is_none());
+        assert!(table.get(100).is_none());
+    }
+
+    #[test]
+    fn test_dynamic_table_single_entry() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("x-custom", "value"));
+
+        // Index 1 should return the entry
+        let entry = table.get(1).unwrap();
+        assert_eq!(entry.name, "x-custom");
+        assert_eq!(entry.value, "value");
+
+        // Index 2 should be None (only 1 entry)
+        assert!(table.get(2).is_none());
+    }
+
+    #[test]
+    fn test_dynamic_table_fifo_order() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("first", "1"));
+        table.insert(Header::new("second", "2"));
+        table.insert(Header::new("third", "3"));
+
+        // Most recent entry is at index 1
+        assert_eq!(table.get(1).unwrap().name, "third");
+        assert_eq!(table.get(2).unwrap().name, "second");
+        assert_eq!(table.get(3).unwrap().name, "first");
+    }
+
+    #[test]
+    fn test_dynamic_table_size_calculation() {
+        let mut table = DynamicTable::new();
+
+        // Entry size = name.len() + value.len() + 32 (RFC 7541 Section 4.1)
+        let header = Header::new("custom", "value"); // 6 + 5 + 32 = 43
+        table.insert(header);
+        assert_eq!(table.size(), 43);
+
+        table.insert(Header::new("a", "b")); // 1 + 1 + 32 = 34
+        assert_eq!(table.size(), 43 + 34);
+    }
+
+    #[test]
+    fn test_dynamic_table_max_size_zero() {
+        let mut table = DynamicTable::with_max_size(0);
+        table.insert(Header::new("header", "value"));
+
+        // With max_size 0, table should always be empty
+        assert_eq!(table.size(), 0);
+        assert!(table.get(1).is_none());
+    }
+
+    #[test]
+    fn test_dynamic_table_exact_fit() {
+        // Entry is exactly 43 bytes: 6 + 5 + 32
+        let mut table = DynamicTable::with_max_size(43);
+        table.insert(Header::new("custom", "value"));
+
+        assert_eq!(table.size(), 43);
+        assert!(table.get(1).is_some());
+
+        // Insert another entry, first should be evicted
+        table.insert(Header::new("newkey", "newva")); // 6 + 5 + 32 = 43
+        assert_eq!(table.size(), 43);
+        assert_eq!(table.get(1).unwrap().name, "newkey");
+        assert!(table.get(2).is_none()); // First entry evicted
+    }
+
+    #[test]
+    fn test_dynamic_table_cascade_eviction() {
+        let mut table = DynamicTable::with_max_size(100);
+
+        // Insert 3 small entries (each 34 bytes = 1+1+32)
+        table.insert(Header::new("a", "1"));
+        table.insert(Header::new("b", "2"));
+        table.insert(Header::new("c", "3"));
+        assert_eq!(table.size(), 102); // Exceeds 100, oldest evicted
+
+        // After eviction, only 2 entries should remain
+        assert!(table.size() <= 100);
+    }
+
+    #[test]
+    fn test_dynamic_table_set_max_size() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("header1", "value1")); // 39 + 32 = 46
+        table.insert(Header::new("header2", "value2")); // 46
+
+        let initial_size = table.size();
+        assert_eq!(initial_size, 92);
+
+        // Reduce max size to force eviction
+        table.set_max_size(50);
+        assert!(table.size() <= 50);
+    }
+
+    #[test]
+    fn test_dynamic_table_resize_to_zero() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("key", "val"));
+        assert!(table.size() > 0);
+
+        table.set_max_size(0);
+        assert_eq!(table.size(), 0);
+        assert!(table.get(1).is_none());
+    }
+
+    #[test]
+    fn test_encoder_dynamic_table_reuse() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        // First encode
+        let headers1 = vec![Header::new("x-custom", "value1")];
+        let mut buf1 = BytesMut::new();
+        encoder.encode(&headers1, &mut buf1);
+
+        // Second encode with same header name
+        let headers2 = vec![Header::new("x-custom", "value2")];
+        let mut buf2 = BytesMut::new();
+        encoder.encode(&headers2, &mut buf2);
+
+        // Both should decode correctly
+        let mut decoder = Decoder::new();
+        let decoded1 = decoder.decode(&mut buf1.freeze()).unwrap();
+        let decoded2 = decoder.decode(&mut buf2.freeze()).unwrap();
+
+        assert_eq!(decoded1[0].name, "x-custom");
+        assert_eq!(decoded2[0].name, "x-custom");
+    }
+
+    #[test]
+    fn test_decoder_shared_state_across_blocks() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        let mut decoder = Decoder::new();
+
+        // First block adds to dynamic table
+        let headers1 = vec![Header::new("x-custom", "initial")];
+        let mut buf1 = BytesMut::new();
+        encoder.encode(&headers1, &mut buf1);
+        decoder.decode(&mut buf1.freeze()).unwrap();
+
+        // Second block can reference dynamic table entries
+        let headers2 = vec![Header::new("x-custom", "updated")];
+        let mut buf2 = BytesMut::new();
+        encoder.encode(&headers2, &mut buf2);
+        let decoded = decoder.decode(&mut buf2.freeze()).unwrap();
+
+        assert_eq!(decoded[0].value, "updated");
+    }
+
+    // =========================================================================
+    // Invalid Input Handling (bd-et96)
+    // =========================================================================
+
+    #[test]
+    fn test_decode_empty_input() {
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::new();
+        let headers = decoder.decode(&mut src).unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_decode_invalid_indexed_zero() {
+        // Index 0 is invalid per RFC 7541 Section 6.1
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::from_static(&[0x80]); // Indexed with index 0
+        let result = decoder.decode(&mut src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_invalid_index_too_large() {
+        // Index beyond static + dynamic table
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::from_static(&[0xff, 0xff, 0xff, 0x7f]); // Very large index
+        let result = decoder.decode(&mut src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_truncated_integer() {
+        // Multi-byte integer without continuation
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::from_static(&[0x1f]); // Needs continuation but none provided
+        let result = decoder.decode(&mut src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_truncated_string() {
+        // String length says 10 bytes but only 3 provided
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::from_static(&[
+            0x40, // Literal header with incremental indexing
+            0x0a, // Name length = 10
+            b'a', b'b', b'c', // Only 3 bytes
+        ]);
+        let result = decoder.decode(&mut src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_huffman_invalid_eos() {
+        // Invalid Huffman sequence (not properly padded with EOS)
+        let invalid_huffman: &[u8] = &[0x00]; // Invalid sequence
+        let result = decode_huffman(&Bytes::copy_from_slice(invalid_huffman));
+        // This may succeed or fail depending on implementation
+        // The key is it shouldn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_decode_integer_overflow_protection() {
+        // Attempt to decode an integer that would overflow
+        let mut src = Bytes::from_static(&[
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ]);
+        let first = src[0];
+        src.advance(1);
+        // Should either error or return a reasonable value, not panic
+        let result = decode_integer(&mut src, first, 7);
+        // We're testing that it handles this gracefully
+        let _ = result;
+    }
+
+    #[test]
+    fn test_decode_literal_with_empty_name() {
+        // Literal header with empty name (valid per spec)
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        let headers = vec![Header::new("", "value")];
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        let mut decoder = Decoder::new();
+        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].name, "");
+        assert_eq!(decoded[0].value, "value");
+    }
+
+    #[test]
+    fn test_decode_literal_with_empty_value() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        let headers = vec![Header::new("x-empty", "")];
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        let mut decoder = Decoder::new();
+        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+
+        assert_eq!(decoded[0].name, "x-empty");
+        assert_eq!(decoded[0].value, "");
+    }
+
+    #[test]
+    fn test_static_table_all_entries_accessible() {
+        // Verify all 61 static table entries are accessible
+        for idx in 1..=61u32 {
+            let entry = static_table_get(idx);
+            assert!(entry.is_some(), "static table entry {idx} should exist");
+        }
+        assert!(static_table_get(62).is_none());
+        assert!(static_table_get(0).is_none());
+    }
+
+    #[test]
+    fn test_static_table_known_entries() {
+        // Verify specific well-known entries
+        let method_get = static_table_get(2).unwrap();
+        assert_eq!(method_get.0, ":method");
+        assert_eq!(method_get.1, "GET");
+
+        let method_post = static_table_get(3).unwrap();
+        assert_eq!(method_post.0, ":method");
+        assert_eq!(method_post.1, "POST");
+
+        let status_200 = static_table_get(8).unwrap();
+        assert_eq!(status_200.0, ":status");
+        assert_eq!(status_200.1, "200");
+
+        let status_404 = static_table_get(13).unwrap();
+        assert_eq!(status_404.0, ":status");
+        assert_eq!(status_404.1, "404");
+    }
+
+    #[test]
+    fn test_huffman_all_ascii_printable() {
+        // Ensure all printable ASCII characters roundtrip correctly
+        let mut input = String::new();
+        for c in 32u8..=126 {
+            input.push(c as char);
+        }
+
+        let encoded = encode_huffman(input.as_bytes());
+        let decoded = decode_huffman(&Bytes::from(encoded)).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn test_huffman_empty_string() {
+        let encoded = encode_huffman(b"");
+        assert!(encoded.is_empty());
+
+        let decoded = decode_huffman(&Bytes::new()).unwrap();
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_never_indexed_header() {
+        // Test headers that should never be indexed (sensitive data)
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+
+        // Encode with never-index flag for sensitive headers
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::sensitive("authorization", "Bearer secret123"),
+        ];
+
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[1].name, "authorization");
+        assert_eq!(decoded[1].value, "Bearer secret123");
+    }
+
+    #[test]
+    fn test_large_header_value() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        // Create a large header value (but within reasonable limits)
+        let large_value: String = "x".repeat(4096);
+        let headers = vec![Header::new("x-large", &large_value)];
+
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        let mut decoder = Decoder::new();
+        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+
+        assert_eq!(decoded[0].value, large_value);
+    }
+
+    #[test]
+    fn test_many_headers() {
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(true);
+
+        // Encode many headers
+        let headers: Vec<Header> = (0..100)
+            .map(|i| Header::new(format!("x-header-{i}"), format!("value-{i}")))
+            .collect();
+
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        let mut decoder = Decoder::new();
+        let decoded = decoder.decode(&mut buf.freeze()).unwrap();
+
+        assert_eq!(decoded.len(), 100);
+        for (i, header) in decoded.iter().enumerate() {
+            assert_eq!(header.name, format!("x-header-{i}"));
+            assert_eq!(header.value, format!("value-{i}"));
+        }
+    }
+
+    #[test]
+    fn test_deterministic_encoding() {
+        // Same input should always produce same output (deterministic for testing)
+        let mut encoder1 = Encoder::new();
+        let mut encoder2 = Encoder::new();
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/api/test"),
+            Header::new("content-type", "application/json"),
+        ];
+
+        let mut buf1 = BytesMut::new();
+        let mut buf2 = BytesMut::new();
+        encoder1.encode(&headers, &mut buf1);
+        encoder2.encode(&headers, &mut buf2);
+
+        assert_eq!(buf1, buf2, "encoding should be deterministic");
+    }
 }
