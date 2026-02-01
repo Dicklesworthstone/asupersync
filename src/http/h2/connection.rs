@@ -1673,4 +1673,149 @@ mod tests {
         assert_eq!(err.code, ErrorCode::ProtocolError);
         assert_eq!(err.stream_id, Some(1));
     }
+
+    #[test]
+    fn continuation_timeout_not_triggered_when_no_continuation() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // No continuation in progress - timeout check should succeed
+        assert!(conn.check_continuation_timeout().is_ok());
+        assert!(!conn.is_awaiting_continuation());
+    }
+
+    #[test]
+    fn continuation_timeout_not_triggered_when_within_limit() {
+        let mut settings = Settings::default();
+        settings.continuation_timeout_ms = 5000; // 5 seconds
+        let mut conn = Connection::server(settings);
+        conn.state = ConnectionState::Open;
+
+        // Receive HEADERS without END_HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        let result = conn.process_frame(headers);
+        assert!(result.is_ok());
+        assert!(conn.is_awaiting_continuation());
+
+        // Immediately check timeout - should not trigger
+        assert!(conn.check_continuation_timeout().is_ok());
+        assert!(conn.is_awaiting_continuation());
+    }
+
+    #[test]
+    fn continuation_clears_timeout_on_completion() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Receive HEADERS without END_HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        conn.process_frame(headers).unwrap();
+        assert!(conn.is_awaiting_continuation());
+        assert!(conn.continuation_started_at.is_some());
+
+        // Receive CONTINUATION with END_HEADERS
+        let continuation = Frame::Continuation(ContinuationFrame {
+            stream_id: 1,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        conn.process_frame(continuation).unwrap();
+
+        // Continuation state should be cleared
+        assert!(!conn.is_awaiting_continuation());
+        assert!(conn.continuation_started_at.is_none());
+    }
+
+    #[test]
+    fn continuation_timeout_triggers_after_expiry() {
+        use std::time::Duration;
+
+        let mut settings = Settings::default();
+        settings.continuation_timeout_ms = 50; // 50ms for fast test
+        let mut conn = Connection::server(settings);
+        conn.state = ConnectionState::Open;
+
+        // Receive HEADERS without END_HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        conn.process_frame(headers).unwrap();
+        assert!(conn.is_awaiting_continuation());
+
+        // Simulate a timeout without sleeping.
+        conn.continuation_started_at = Some(Instant::now() - Duration::from_millis(60));
+
+        // Timeout should trigger
+        let err = conn.check_continuation_timeout().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.message.contains("CONTINUATION timeout"));
+
+        // Continuation state should be cleared
+        assert!(!conn.is_awaiting_continuation());
+        assert!(conn.continuation_started_at.is_none());
+    }
+
+    #[test]
+    fn continuation_timeout_on_next_frame() {
+        use std::time::Duration;
+
+        let mut settings = Settings::default();
+        settings.continuation_timeout_ms = 50; // 50ms for fast test
+        let mut conn = Connection::server(settings);
+        conn.state = ConnectionState::Open;
+
+        // Receive HEADERS without END_HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        conn.process_frame(headers).unwrap();
+
+        // Simulate a timeout without sleeping.
+        conn.continuation_started_at = Some(Instant::now() - Duration::from_millis(60));
+
+        // Try to process another CONTINUATION - should fail with timeout
+        let continuation = Frame::Continuation(ContinuationFrame {
+            stream_id: 1,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+        let err = conn.process_frame(continuation).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.message.contains("CONTINUATION timeout"));
+    }
+
+    #[test]
+    fn push_promise_continuation_timeout() {
+        use std::time::Duration;
+
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        settings.continuation_timeout_ms = 50;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        // First open a stream
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame(); // drain HEADERS
+
+        // Receive PUSH_PROMISE without END_HEADERS
+        let push = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: false,
+        });
+        conn.process_frame(push).unwrap();
+        assert!(conn.is_awaiting_continuation());
+
+        // Simulate a timeout without sleeping.
+        conn.continuation_started_at = Some(Instant::now() - Duration::from_millis(60));
+
+        // Timeout should trigger
+        let err = conn.check_continuation_timeout().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.message.contains("CONTINUATION timeout"));
+    }
 }
