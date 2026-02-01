@@ -29,6 +29,7 @@ fn test_timeout_completes_before_deadline() {
 #[test]
 fn test_timeout_result_ok_on_completion() {
     #[derive(Debug, PartialEq)]
+    #[allow(dead_code)]
     enum TimeoutResult<T> {
         Completed(T),
         TimedOut,
@@ -44,6 +45,7 @@ fn test_timeout_result_ok_on_completion() {
 #[test]
 fn test_timeout_result_on_timeout() {
     #[derive(Debug, PartialEq)]
+    #[allow(dead_code)]
     enum TimeoutResult<T> {
         Completed(T),
         TimedOut,
@@ -159,6 +161,7 @@ fn test_timeout_error_propagation() {
     }
 
     #[derive(Debug, PartialEq)]
+    #[allow(dead_code)]
     enum TimeoutError<E> {
         Operation(E),
         TimedOut,
