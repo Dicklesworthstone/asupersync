@@ -21,7 +21,7 @@ use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
-use crate::time::{sleep, timeout, WallClock};
+use crate::time::{sleep, timeout, TimeSource, WallClock};
 use crate::types::Time;
 
 /// DNS resolver configuration.
@@ -177,10 +177,9 @@ impl Resolver {
             Err(last_error.unwrap_or(DnsError::Timeout))
         }));
 
-        match timeout(timeout_now(), self.config.timeout, lookup).await {
-            Ok(result) => result,
-            Err(_) => Err(DnsError::Timeout),
-        }
+        timeout(timeout_now(), self.config.timeout, lookup)
+            .await
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     /// Performs synchronous DNS lookup using std::net.

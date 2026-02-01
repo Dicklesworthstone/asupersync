@@ -423,44 +423,30 @@ impl ConsumerConfig {
     /// Encode to JSON for API request.
     fn to_json(&self) -> String {
         let mut json = String::from("{");
-        let mut needs_comma = false;
+        let mut parts = Vec::new();
 
         if let Some(ref name) = self.name {
-            write!(&mut json, "\"name\":\"{name}\"").expect("write to String");
-            needs_comma = true;
+            parts.push(format!("\"name\":\"{name}\""));
         }
         if let Some(ref durable) = self.durable_name {
-            if needs_comma {
-                json.push(',');
-            }
-            write!(&mut json, "\"durable_name\":\"{durable}\"").expect("write to String");
-            needs_comma = true;
+            parts.push(format!("\"durable_name\":\"{durable}\""));
         }
-
-        if needs_comma {
-            json.push(',');
-        }
-        write!(
-            &mut json,
+        parts.push(format!(
             "\"deliver_policy\":\"{}\"",
             self.deliver_policy.as_str()
-        )
-        .expect("write to String");
-        write!(
-            &mut json,
-            ",\"ack_policy\":\"{}\"",
+        ));
+        parts.push(format!(
+            "\"ack_policy\":\"{}\"",
             self.ack_policy.as_str()
-        )
-        .expect("write to String");
-        write!(&mut json, ",\"ack_wait\":{}", self.ack_wait.as_nanos()).expect("write to String");
-        write!(&mut json, ",\"max_deliver\":{}", self.max_deliver).expect("write to String");
-        write!(&mut json, ",\"max_ack_pending\":{}", self.max_ack_pending)
-            .expect("write to String");
-
+        ));
+        parts.push(format!("\"ack_wait\":{}", self.ack_wait.as_nanos()));
+        parts.push(format!("\"max_deliver\":{}", self.max_deliver));
+        parts.push(format!("\"max_ack_pending\":{}", self.max_ack_pending));
         if let Some(ref filter) = self.filter_subject {
-            write!(&mut json, ",\"filter_subject\":\"{filter}\"").expect("write to String");
+            parts.push(format!("\"filter_subject\":\"{filter}\""));
         }
 
+        json.push_str(&parts.join(","));
         json.push('}');
         json
     }
