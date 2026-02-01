@@ -1,7 +1,11 @@
-//! WebSocket split read/write halves for concurrent I/O.
+//! WebSocket split implementation for independent read/write halves.
 //!
-//! Enables splitting a WebSocket into independent read and write halves,
-//! allowing concurrent send/receive operations from different tasks.
+//! This module provides the ability to split a WebSocket into separate read and
+//! write halves that can be used concurrently. This is essential for patterns like:
+//!
+//! - Reading messages while simultaneously sending keepalive pings
+//! - Processing received messages while sending responses in parallel
+//! - Integrating with select/join patterns for concurrent I/O
 //!
 //! # Example
 //!
@@ -11,98 +15,75 @@
 //! let ws = WebSocket::connect(&cx, "ws://example.com/chat").await?;
 //! let (mut read, mut write) = ws.split();
 //!
-//! // Spawn receive task
-//! region.spawn(async move |cx| {
+//! // Spawn tasks for concurrent read/write
+//! let reader = async move {
 //!     while let Some(msg) = read.recv(&cx).await? {
 //!         println!("Received: {:?}", msg);
 //!     }
-//!     Ok(())
-//! });
+//!     Ok::<_, WsError>(())
+//! };
 //!
-//! // Send from main task
-//! write.send(&cx, Message::text("Hello!")).await?;
+//! let writer = async move {
+//!     write.send(&cx, Message::text("Hello!")).await?;
+//!     Ok::<_, WsError>(())
+//! };
+//!
+//! // Run concurrently
+//! futures::try_join!(reader, writer)?;
 //! ```
 
+use super::client::{Message, WebSocket, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason, CloseState};
-use super::client::{Message, WebSocketConfig};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
-use super::CloseCode;
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use parking_lot::Mutex;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::Poll;
 
 /// Shared state between read and write halves.
 struct WebSocketShared<IO> {
     /// Underlying I/O stream.
-    io: Mutex<IO>,
+    io: IO,
     /// Frame codec for encoding/decoding.
     codec: FrameCodec,
+    /// Read buffer.
+    read_buf: BytesMut,
+    /// Write buffer.
+    write_buf: BytesMut,
     /// Close handshake state.
-    close_handshake: Mutex<CloseHandshake>,
+    close_handshake: CloseHandshake,
     /// Configuration.
     config: WebSocketConfig,
-    /// Negotiated subprotocol.
+    /// Negotiated subprotocol (if any).
     protocol: Option<String>,
-    /// Flags for tracking half ownership.
-    /// Bit 0: read half exists
-    /// Bit 1: write half exists
-    halves_alive: AtomicU8,
-    /// Whether close has been initiated.
-    close_initiated: AtomicBool,
-}
-
-impl<IO> WebSocketShared<IO> {
-    /// Check if both halves are dropped.
-    fn both_dropped(&self) -> bool {
-        self.halves_alive.load(Ordering::Acquire) == 0
-    }
-
-    /// Mark read half as dropped.
-    fn drop_read(&self) {
-        self.halves_alive.fetch_and(!0x01, Ordering::Release);
-    }
-
-    /// Mark write half as dropped.
-    fn drop_write(&self) {
-        self.halves_alive.fetch_and(!0x02, Ordering::Release);
-    }
-}
-
-/// Read half of a split WebSocket.
-///
-/// Provides receive functionality independent of the write half.
-/// Dropping this half does NOT close the connection unless the write
-/// half is also dropped.
-pub struct WebSocketRead<IO> {
-    /// Shared state with write half.
-    shared: Arc<WebSocketShared<IO>>,
-    /// Read buffer (owned by read half).
-    read_buf: BytesMut,
-    /// Pending pongs to forward to write half.
+    /// Pending pong payloads to send.
     pending_pongs: Vec<Bytes>,
+    /// Unique ID for reunite verification.
+    id: u64,
 }
 
-/// Write half of a split WebSocket.
+/// The read half of a split WebSocket.
 ///
-/// Provides send functionality independent of the read half.
-/// Dropping this half does NOT close the connection unless the read
-/// half is also dropped.
-pub struct WebSocketWrite<IO> {
-    /// Shared state with read half.
-    shared: Arc<WebSocketShared<IO>>,
-    /// Write buffer (owned by write half).
-    write_buf: BytesMut,
-    /// Pongs received from read half to send.
-    outgoing_pongs: Vec<Bytes>,
+/// This half can receive messages but cannot send. Use `reunite()` to
+/// recombine with the write half.
+pub struct WebSocketRead<IO> {
+    shared: Arc<Mutex<WebSocketShared<IO>>>,
 }
 
-/// Error when attempting to reunite mismatched halves.
+/// The write half of a split WebSocket.
+///
+/// This half can send messages but cannot receive. Use the read half's
+/// `reunite()` to recombine.
+pub struct WebSocketWrite<IO> {
+    shared: Arc<Mutex<WebSocketShared<IO>>>,
+}
+
+/// Error returned when attempting to reunite mismatched halves.
 #[derive(Debug)]
 pub struct ReuniteError<IO> {
     /// The read half that couldn't be reunited.
@@ -113,11 +94,51 @@ pub struct ReuniteError<IO> {
 
 impl<IO> std::fmt::Display for ReuniteError<IO> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "tried to reunite halves from different WebSocket connections")
+        write!(f, "attempted to reunite mismatched WebSocket halves")
     }
 }
 
 impl<IO: std::fmt::Debug> std::error::Error for ReuniteError<IO> {}
+
+impl<IO> WebSocket<IO>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Split the WebSocket into independent read and write halves.
+    ///
+    /// The halves share the underlying connection and can be used concurrently.
+    /// Use `WebSocketRead::reunite()` to recombine them.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// If one half is dropped while the other is still in use, the connection
+    /// remains valid. The remaining half can continue operating until both
+    /// halves are dropped or `reunite()` is called.
+    pub fn split(self) -> (WebSocketRead<IO>, WebSocketWrite<IO>) {
+        // Generate a unique ID for reunite verification
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let shared = Arc::new(Mutex::new(WebSocketShared {
+            io: self.io,
+            codec: self.codec,
+            read_buf: self.read_buf,
+            write_buf: self.write_buf,
+            close_handshake: self.close_handshake,
+            config: self.config,
+            protocol: self.protocol,
+            pending_pongs: self.pending_pongs,
+            id,
+        }));
+
+        let read = WebSocketRead {
+            shared: Arc::clone(&shared),
+        };
+        let write = WebSocketWrite { shared };
+
+        (read, write)
+    }
+}
 
 impl<IO> WebSocketRead<IO>
 where
@@ -141,14 +162,33 @@ where
                 )));
             }
 
+            // Send any pending pongs (under lock)
+            {
+                let mut shared = self.shared.lock();
+                while let Some(payload) = shared.pending_pongs.pop() {
+                    let pong = Frame::pong(payload);
+                    shared.write_buf.clear();
+                    shared.codec.encode(pong, &mut shared.write_buf)?;
+                }
+            }
+
+            // Flush pending pongs if any were queued
+            self.flush_write_buf().await?;
+
             // Try to decode a frame from the buffer
-            match self.shared.codec.decode(&mut self.read_buf)? {
+            let frame = {
+                let mut shared = self.shared.lock();
+                shared.codec.decode(&mut shared.read_buf)?
+            };
+
+            match frame {
                 Some(frame) => {
                     // Handle control frames
                     match frame.opcode {
                         Opcode::Ping => {
-                            // Queue pong for write half
-                            self.pending_pongs.push(frame.payload.clone());
+                            // Queue pong for next operation
+                            let mut shared = self.shared.lock();
+                            shared.pending_pongs.push(frame.payload.clone());
                             continue;
                         }
                         Opcode::Pong => {
@@ -158,12 +198,14 @@ where
                         Opcode::Close => {
                             // Handle close handshake
                             let response = {
-                                let mut handshake = self.shared.close_handshake.lock().unwrap();
-                                handshake.receive_close(&frame)?
+                                let mut shared = self.shared.lock();
+                                shared.close_handshake.receive_close(&frame)?
                             };
-                            if let Some(resp) = response {
-                                self.send_frame(resp).await?;
+
+                            if let Some(response_frame) = response {
+                                self.send_frame_internal(response_frame).await?;
                             }
+
                             let reason = CloseReason::parse(&frame.payload).ok();
                             return Ok(Some(Message::Close(reason)));
                         }
@@ -175,8 +217,8 @@ where
                 None => {
                     // Check if closed
                     {
-                        let handshake = self.shared.close_handshake.lock().unwrap();
-                        if handshake.is_closed() {
+                        let shared = self.shared.lock();
+                        if shared.close_handshake.is_closed() {
                             return Ok(None);
                         }
                     }
@@ -185,8 +227,10 @@ where
                     let n = self.read_more().await?;
                     if n == 0 {
                         // EOF - connection closed
-                        let mut handshake = self.shared.close_handshake.lock().unwrap();
-                        handshake.force_close(CloseReason::new(CloseCode::Abnormal, None));
+                        let mut shared = self.shared.lock();
+                        shared
+                            .close_handshake
+                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
                         return Ok(None);
                     }
                 }
@@ -194,131 +238,151 @@ where
         }
     }
 
-    /// Get pending pongs that need to be sent by the write half.
-    ///
-    /// Call this periodically and pass the result to `WebSocketWrite::queue_pongs`.
-    #[must_use]
-    pub fn take_pending_pongs(&mut self) -> Vec<Bytes> {
-        std::mem::take(&mut self.pending_pongs)
-    }
-
     /// Check if the connection is open.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        let handshake = self.shared.close_handshake.lock().unwrap();
-        handshake.is_open()
+        self.shared.lock().close_handshake.is_open()
     }
 
     /// Check if the close handshake is complete.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        let handshake = self.shared.close_handshake.lock().unwrap();
-        handshake.is_closed()
+        self.shared.lock().close_handshake.is_closed()
     }
 
-    /// Get the close state.
-    #[must_use]
-    pub fn close_state(&self) -> CloseState {
-        let handshake = self.shared.close_handshake.lock().unwrap();
-        handshake.state()
-    }
-
-    /// Get the negotiated subprotocol (if any).
-    #[must_use]
-    pub fn protocol(&self) -> Option<&str> {
-        self.shared.protocol.as_deref()
-    }
-
-    /// Attempt to reunite with the write half.
+    /// Reunite with the write half to reform the original WebSocket.
     ///
     /// # Errors
     ///
-    /// Returns `ReuniteError` if the halves don't originate from the same
-    /// WebSocket connection.
-    pub fn reunite(self, write: WebSocketWrite<IO>) -> Result<super::WebSocket<IO>, ReuniteError<IO>> {
-        if Arc::ptr_eq(&self.shared, &write.shared) {
-            // Destructure write half completely
-            let WebSocketWrite {
-                shared: write_shared,
-                write_buf,
-                outgoing_pongs: _,
-            } = write;
+    /// Returns an error if the halves don't originate from the same WebSocket.
+    pub fn reunite(self, write: WebSocketWrite<IO>) -> Result<WebSocket<IO>, ReuniteError<IO>> {
+        // Check that both halves have the same ID
+        let self_id = self.shared.lock().id;
+        let write_id = write.shared.lock().id;
 
-            // Drop write's Arc to reduce refcount to 1
-            drop(write_shared);
-
-            // Now try_unwrap should succeed
-            let shared = Arc::try_unwrap(self.shared)
-                .expect("reunite: Arc refcount should be 1 after dropping write half");
-
-            let io = shared.io.into_inner().unwrap();
-            let close_handshake = shared.close_handshake.into_inner().unwrap();
-
-            Ok(super::WebSocket {
-                io,
-                codec: shared.codec,
-                read_buf: self.read_buf,
-                write_buf,
-                close_handshake,
-                config: shared.config,
-                protocol: shared.protocol,
-                pending_pongs: self.pending_pongs,
-            })
-        } else {
-            Err(ReuniteError { read: self, write })
+        if self_id != write_id {
+            return Err(ReuniteError { read: self, write });
         }
+
+        // Take the shared state - we know both Arcs point to the same allocation
+        // so we can safely unwrap after dropping one reference
+        drop(write);
+        let shared = Arc::try_unwrap(self.shared)
+            .ok()
+            .expect("reunite should succeed after ID check")
+            .into_inner();
+
+        Ok(WebSocket {
+            io: shared.io,
+            codec: shared.codec,
+            read_buf: shared.read_buf,
+            write_buf: shared.write_buf,
+            close_handshake: shared.close_handshake,
+            config: shared.config,
+            protocol: shared.protocol,
+            pending_pongs: shared.pending_pongs,
+        })
     }
 
-    /// Internal: initiate close.
+    /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
         let frame = {
-            let mut handshake = self.shared.close_handshake.lock().unwrap();
-            handshake.initiate(reason)
+            let mut shared = self.shared.lock();
+            shared.close_handshake.initiate(reason)
         };
+
         if let Some(f) = frame {
-            self.shared.close_initiated.store(true, Ordering::Release);
-            self.send_frame(f).await?;
+            self.send_frame_internal(f).await?;
         }
         Ok(())
     }
 
-    /// Internal: send a single frame (for close/pong responses).
-    async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        let mut write_buf = BytesMut::with_capacity(256);
-        self.shared.codec.encode(frame, &mut write_buf)?;
+    /// Internal: send a single frame (for control messages like pong/close).
+    async fn send_frame_internal(&mut self, frame: Frame) -> Result<(), WsError> {
+        let data = {
+            let mut shared = self.shared.lock();
+            shared.write_buf.clear();
+            shared.codec.encode(frame, &mut shared.write_buf)?;
+            shared.write_buf.to_vec()
+        };
 
-        let data = write_buf.to_vec();
-        let mut io = self.shared.io.lock().unwrap();
-        write_all_io(&mut *io, &data).await
+        self.write_all(&data).await
+    }
+
+    /// Internal: flush the write buffer.
+    async fn flush_write_buf(&mut self) -> Result<(), WsError> {
+        let data = {
+            let shared = self.shared.lock();
+            if shared.write_buf.is_empty() {
+                return Ok(());
+            }
+            shared.write_buf.to_vec()
+        };
+
+        self.write_all(&data).await?;
+
+        {
+            let mut shared = self.shared.lock();
+            shared.write_buf.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Internal: write all bytes.
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), WsError> {
+        use std::future::poll_fn;
+
+        let mut written = 0;
+        while written < buf.len() {
+            let n = poll_fn(|poll_cx| {
+                let mut shared = self.shared.lock();
+                Pin::new(&mut shared.io).poll_write(poll_cx, &buf[written..])
+            })
+            .await?;
+
+            if n == 0 {
+                return Err(WsError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned 0",
+                )));
+            }
+            written += n;
+        }
+        Ok(())
     }
 
     /// Internal: read more data into buffer.
     async fn read_more(&mut self) -> Result<usize, WsError> {
+        use std::future::poll_fn;
+
         // Ensure we have space
-        if self.read_buf.capacity() - self.read_buf.len() < 4096 {
-            self.read_buf.reserve(8192);
+        {
+            let mut shared = self.shared.lock();
+            if shared.read_buf.capacity() - shared.read_buf.len() < 4096 {
+                shared.read_buf.reserve(8192);
+            }
         }
 
-        // Read into temp buffer
+        // Read into temporary buffer to avoid holding lock during poll
         let mut temp = [0u8; 4096];
-        let n = {
-            let mut io = self.shared.io.lock().unwrap();
-            read_some_io(&mut *io, &mut temp).await?
-        };
+        let n = poll_fn(|poll_cx| {
+            let mut shared = self.shared.lock();
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut shared.io).poll_read(poll_cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(WsError::Io(e))),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
 
         if n > 0 {
-            self.read_buf.extend_from_slice(&temp[..n]);
+            let mut shared = self.shared.lock();
+            shared.read_buf.extend_from_slice(&temp[..n]);
         }
 
         Ok(n)
-    }
-}
-
-impl<IO> Drop for WebSocketRead<IO> {
-    fn drop(&mut self) {
-        self.shared.drop_read();
-        // If both halves dropped and not already closing, we should initiate close
-        // But we can't do async in drop, so just mark the state
     }
 }
 
@@ -342,13 +406,10 @@ where
             )));
         }
 
-        // Send any queued pongs first
-        self.flush_pongs().await?;
-
         // Don't send data messages if we're closing
-        if !msg.is_control() {
-            let handshake = self.shared.close_handshake.lock().unwrap();
-            if !handshake.is_open() {
+        {
+            let shared = self.shared.lock();
+            if !msg.is_control() && !shared.close_handshake.is_open() {
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::NotConnected,
                     "connection is closing",
@@ -358,22 +419,6 @@ where
 
         let frame = Frame::from(msg);
         self.send_frame(frame).await
-    }
-
-    /// Queue pongs received from the read half.
-    ///
-    /// These will be sent on the next `send()` call or `flush_pongs()`.
-    pub fn queue_pongs(&mut self, pongs: Vec<Bytes>) {
-        self.outgoing_pongs.extend(pongs);
-    }
-
-    /// Flush any pending pong frames.
-    pub async fn flush_pongs(&mut self) -> Result<(), WsError> {
-        while let Some(payload) = self.outgoing_pongs.pop() {
-            let pong = Frame::pong(payload);
-            self.send_frame(pong).await?;
-        }
-        Ok(())
     }
 
     /// Initiate a close handshake.
@@ -392,38 +437,29 @@ where
     /// Check if the connection is open.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        let handshake = self.shared.close_handshake.lock().unwrap();
-        handshake.is_open()
+        self.shared.lock().close_handshake.is_open()
     }
 
     /// Check if the close handshake is complete.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        let handshake = self.shared.close_handshake.lock().unwrap();
-        handshake.is_closed()
+        self.shared.lock().close_handshake.is_closed()
     }
 
     /// Get the close state.
     #[must_use]
     pub fn close_state(&self) -> CloseState {
-        let handshake = self.shared.close_handshake.lock().unwrap();
-        handshake.state()
+        self.shared.lock().close_handshake.state()
     }
 
-    /// Get the negotiated subprotocol (if any).
-    #[must_use]
-    pub fn protocol(&self) -> Option<&str> {
-        self.shared.protocol.as_deref()
-    }
-
-    /// Internal: initiate close.
+    /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
         let frame = {
-            let mut handshake = self.shared.close_handshake.lock().unwrap();
-            handshake.initiate(reason)
+            let mut shared = self.shared.lock();
+            shared.close_handshake.initiate(reason)
         };
+
         if let Some(f) = frame {
-            self.shared.close_initiated.store(true, Ordering::Release);
             self.send_frame(f).await?;
         }
         Ok(())
@@ -431,98 +467,34 @@ where
 
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        self.write_buf.clear();
-        self.shared.codec.encode(frame, &mut self.write_buf)?;
+        use std::future::poll_fn;
 
-        let data = self.write_buf.to_vec();
-        let mut io = self.shared.io.lock().unwrap();
-        write_all_io(&mut *io, &data).await
-    }
-}
-
-impl<IO> Drop for WebSocketWrite<IO> {
-    fn drop(&mut self) {
-        self.shared.drop_write();
-    }
-}
-
-// Extension to WebSocket to add split functionality
-impl<IO> super::WebSocket<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    /// Split into independent read and write halves.
-    ///
-    /// Both halves share the same underlying connection. Dropping either half
-    /// does NOT close the connection. Dropping BOTH halves triggers close.
-    ///
-    /// # Concurrency
-    ///
-    /// The read and write halves can be used concurrently from different tasks.
-    /// This is the primary use case for splitting a WebSocket.
-    ///
-    /// # Reuniting
-    ///
-    /// Use `WebSocketRead::reunite()` to restore the original WebSocket.
-    #[must_use]
-    pub fn split(self) -> (WebSocketRead<IO>, WebSocketWrite<IO>) {
-        let shared = Arc::new(WebSocketShared {
-            io: Mutex::new(self.io),
-            codec: self.codec,
-            close_handshake: Mutex::new(self.close_handshake),
-            config: self.config,
-            protocol: self.protocol,
-            halves_alive: AtomicU8::new(0x03), // Both halves alive
-            close_initiated: AtomicBool::new(false),
-        });
-
-        let read = WebSocketRead {
-            shared: Arc::clone(&shared),
-            read_buf: self.read_buf,
-            pending_pongs: self.pending_pongs,
+        let data = {
+            let mut shared = self.shared.lock();
+            shared.write_buf.clear();
+            shared.codec.encode(frame, &mut shared.write_buf)?;
+            shared.write_buf.to_vec()
         };
 
-        let write = WebSocketWrite {
-            shared,
-            write_buf: self.write_buf,
-            outgoing_pongs: Vec::new(),
-        };
+        let mut written = 0;
+        while written < data.len() {
+            let n = poll_fn(|poll_cx| {
+                let mut shared = self.shared.lock();
+                Pin::new(&mut shared.io).poll_write(poll_cx, &data[written..])
+            })
+            .await?;
 
-        (read, write)
-    }
-}
-
-/// Write all bytes to an I/O stream.
-async fn write_all_io<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> Result<(), WsError> {
-    use std::future::poll_fn;
-
-    let mut written = 0;
-    while written < buf.len() {
-        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, &buf[written..])).await?;
-        if n == 0 {
-            return Err(WsError::Io(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "write returned 0",
-            )));
+            if n == 0 {
+                return Err(WsError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned 0",
+                )));
+            }
+            written += n;
         }
-        written += n;
+
+        Ok(())
     }
-    Ok(())
-}
-
-/// Read some bytes from an I/O stream.
-async fn read_some_io<IO: AsyncRead + Unpin>(io: &mut IO, buf: &mut [u8]) -> Result<usize, WsError> {
-    use std::future::poll_fn;
-
-    poll_fn(|cx| {
-        let mut read_buf = ReadBuf::new(buf);
-        match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(WsError::Io(e))),
-            Poll::Pending => Poll::Pending,
-        }
-    })
-    .await
 }
 
 #[cfg(test)]
@@ -587,25 +559,9 @@ mod tests {
 
     #[test]
     fn test_reunite_error_display() {
-        let err_msg = "tried to reunite halves from different WebSocket connections";
+        let err_msg = "attempted to reunite mismatched WebSocket halves";
         // Just verify the message format is correct
         assert!(err_msg.contains("reunite"));
-        assert!(err_msg.contains("different"));
-    }
-
-    #[test]
-    fn test_shared_halves_tracking() {
-        let halves = AtomicU8::new(0x03);
-
-        // Both alive
-        assert_eq!(halves.load(Ordering::Acquire), 0x03);
-
-        // Drop read
-        halves.fetch_and(!0x01, Ordering::Release);
-        assert_eq!(halves.load(Ordering::Acquire), 0x02);
-
-        // Drop write
-        halves.fetch_and(!0x02, Ordering::Release);
-        assert_eq!(halves.load(Ordering::Acquire), 0x00);
+        assert!(err_msg.contains("mismatched"));
     }
 }
