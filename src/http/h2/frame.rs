@@ -1140,4 +1140,637 @@ mod tests {
         assert_eq!(parsed.stream_id, 1);
         assert_eq!(parsed.increment, 65535);
     }
+
+    // ========================================================================
+    // Frame roundtrip tests for all frame types (bd-7lg3)
+    // ========================================================================
+
+    #[test]
+    fn test_headers_frame_roundtrip() {
+        let original = HeadersFrame::new(3, Bytes::from_static(b"header-block"), false, true);
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = HeadersFrame::parse(&header, payload).unwrap();
+
+        assert_eq!(parsed.stream_id, original.stream_id);
+        assert_eq!(parsed.header_block, original.header_block);
+        assert_eq!(parsed.end_stream, original.end_stream);
+        assert_eq!(parsed.end_headers, original.end_headers);
+    }
+
+    #[test]
+    fn test_headers_frame_with_priority_roundtrip() {
+        let mut original = HeadersFrame::new(5, Bytes::from_static(b"hdr"), true, true);
+        original.priority = Some(PrioritySpec {
+            exclusive: true,
+            dependency: 1,
+            weight: 128,
+        });
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = HeadersFrame::parse(&header, payload).unwrap();
+
+        assert_eq!(parsed.stream_id, 5);
+        assert!(parsed.end_stream);
+        assert!(parsed.priority.is_some());
+        let p = parsed.priority.unwrap();
+        assert!(p.exclusive);
+        assert_eq!(p.dependency, 1);
+        assert_eq!(p.weight, 128);
+    }
+
+    #[test]
+    fn test_priority_frame_roundtrip() {
+        let original = PriorityFrame {
+            stream_id: 7,
+            priority: PrioritySpec {
+                exclusive: false,
+                dependency: 3,
+                weight: 64,
+            },
+        };
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = PriorityFrame::parse(&header, &payload).unwrap();
+
+        assert_eq!(parsed.stream_id, original.stream_id);
+        assert_eq!(parsed.priority.exclusive, original.priority.exclusive);
+        assert_eq!(parsed.priority.dependency, original.priority.dependency);
+        assert_eq!(parsed.priority.weight, original.priority.weight);
+    }
+
+    #[test]
+    fn test_rst_stream_roundtrip() {
+        let original = RstStreamFrame::new(11, ErrorCode::Cancel);
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = RstStreamFrame::parse(&header, &payload).unwrap();
+
+        assert_eq!(parsed.stream_id, original.stream_id);
+        assert_eq!(parsed.error_code, original.error_code);
+    }
+
+    #[test]
+    fn test_push_promise_roundtrip() {
+        let original = PushPromiseFrame {
+            stream_id: 1,
+            promised_stream_id: 2,
+            header_block: Bytes::from_static(b"pushed-headers"),
+            end_headers: true,
+        };
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = PushPromiseFrame::parse(&header, payload).unwrap();
+
+        assert_eq!(parsed.stream_id, original.stream_id);
+        assert_eq!(parsed.promised_stream_id, original.promised_stream_id);
+        assert_eq!(parsed.header_block, original.header_block);
+        assert_eq!(parsed.end_headers, original.end_headers);
+    }
+
+    #[test]
+    fn test_continuation_roundtrip() {
+        let original = ContinuationFrame {
+            stream_id: 9,
+            header_block: Bytes::from_static(b"continued-headers"),
+            end_headers: false,
+        };
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = ContinuationFrame::parse(&header, payload).unwrap();
+
+        assert_eq!(parsed.stream_id, original.stream_id);
+        assert_eq!(parsed.header_block, original.header_block);
+        assert_eq!(parsed.end_headers, original.end_headers);
+    }
+
+    // ========================================================================
+    // Invalid input tests (bd-7lg3)
+    // ========================================================================
+
+    #[test]
+    fn test_data_frame_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::Data as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(b"hello");
+
+        let err = DataFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_data_frame_invalid_padding() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::Data as u8,
+            flags: data_flags::PADDED,
+            stream_id: 1,
+        };
+        // Pad length (10) exceeds remaining data (4 bytes)
+        let payload = Bytes::from_static(&[10, b'a', b'b', b'c', b'd']);
+
+        let err = DataFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_headers_frame_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::Headers as u8,
+            flags: headers_flags::END_HEADERS,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(b"hdr");
+
+        let err = HeadersFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_headers_frame_priority_too_short() {
+        let header = FrameHeader {
+            length: 3,
+            frame_type: FrameType::Headers as u8,
+            flags: headers_flags::PRIORITY | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        // Too short for priority (needs 5 bytes)
+        let payload = Bytes::from_static(&[0, 0, 0]);
+
+        let err = HeadersFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_priority_frame_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::Priority as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 1, 16]);
+
+        let err = PriorityFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_priority_frame_wrong_size() {
+        let header = FrameHeader {
+            length: 4,
+            frame_type: FrameType::Priority as u8,
+            flags: 0,
+            stream_id: 1,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 1]);
+
+        let err = PriorityFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_rst_stream_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 4,
+            frame_type: FrameType::RstStream as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0]);
+
+        let err = RstStreamFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_rst_stream_wrong_size() {
+        let header = FrameHeader {
+            length: 3,
+            frame_type: FrameType::RstStream as u8,
+            flags: 0,
+            stream_id: 1,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0]);
+
+        let err = RstStreamFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_settings_frame_non_zero_stream_id_rejected() {
+        let header = FrameHeader {
+            length: 0,
+            frame_type: FrameType::Settings as u8,
+            flags: 0,
+            stream_id: 1,
+        };
+        let payload = Bytes::new();
+
+        let err = SettingsFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_settings_ack_with_payload_rejected() {
+        let header = FrameHeader {
+            length: 6,
+            frame_type: FrameType::Settings as u8,
+            flags: settings_flags::ACK,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 1, 0, 0, 0, 1]);
+
+        let err = SettingsFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_settings_wrong_length() {
+        let header = FrameHeader {
+            length: 5, // Not multiple of 6
+            frame_type: FrameType::Settings as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 1, 0, 0, 0]);
+
+        let err = SettingsFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_push_promise_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::PushPromise as u8,
+            flags: headers_flags::END_HEADERS,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 2, 0]);
+
+        let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_push_promise_too_short() {
+        let header = FrameHeader {
+            length: 3,
+            frame_type: FrameType::PushPromise as u8,
+            flags: headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        let payload = Bytes::from_static(&[0, 0, 2]);
+
+        let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_ping_non_zero_stream_id_rejected() {
+        let header = FrameHeader {
+            length: 8,
+            frame_type: FrameType::Ping as u8,
+            flags: 0,
+            stream_id: 1,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let err = PingFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_ping_wrong_size() {
+        let header = FrameHeader {
+            length: 7,
+            frame_type: FrameType::Ping as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0]);
+
+        let err = PingFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_goaway_non_zero_stream_id_rejected() {
+        let header = FrameHeader {
+            length: 8,
+            frame_type: FrameType::GoAway as u8,
+            flags: 0,
+            stream_id: 1,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let err = GoAwayFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_goaway_too_short() {
+        let header = FrameHeader {
+            length: 7,
+            frame_type: FrameType::GoAway as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0]);
+
+        let err = GoAwayFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_goaway_with_debug_data() {
+        let mut original = GoAwayFrame::new(100, ErrorCode::EnhanceYourCalm);
+        original.debug_data = Bytes::from_static(b"too many requests");
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = GoAwayFrame::parse(&header, &payload).unwrap();
+
+        assert_eq!(parsed.last_stream_id, 100);
+        assert_eq!(parsed.error_code, ErrorCode::EnhanceYourCalm);
+        assert_eq!(&parsed.debug_data[..], b"too many requests");
+    }
+
+    #[test]
+    fn test_window_update_wrong_size() {
+        let header = FrameHeader {
+            length: 3,
+            frame_type: FrameType::WindowUpdate as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0]);
+
+        let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+    }
+
+    #[test]
+    fn test_window_update_zero_increment_rejected() {
+        let header = FrameHeader {
+            length: 4,
+            frame_type: FrameType::WindowUpdate as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0]);
+
+        let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_continuation_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::Continuation as u8,
+            flags: continuation_flags::END_HEADERS,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(b"hdr");
+
+        let err = ContinuationFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_unknown_frame_type_rejected() {
+        let header = FrameHeader {
+            length: 0,
+            frame_type: 0xFF,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::new();
+
+        let err = parse_frame(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    // ========================================================================
+    // Size limit tests (bd-7lg3)
+    // ========================================================================
+
+    #[test]
+    fn test_max_frame_size_constants() {
+        assert_eq!(DEFAULT_MAX_FRAME_SIZE, 16_384);
+        assert_eq!(MAX_FRAME_SIZE, 16_777_215);
+        assert_eq!(MIN_MAX_FRAME_SIZE, 16_384);
+        assert!(DEFAULT_MAX_FRAME_SIZE >= MIN_MAX_FRAME_SIZE);
+        assert!(DEFAULT_MAX_FRAME_SIZE <= MAX_FRAME_SIZE);
+    }
+
+    #[test]
+    fn test_frame_header_length_max() {
+        // Test that maximum length (24-bit) is properly encoded/decoded
+        let header = FrameHeader {
+            length: MAX_FRAME_SIZE,
+            frame_type: FrameType::Data as u8,
+            flags: 0,
+            stream_id: 1,
+        };
+
+        let mut buf = BytesMut::new();
+        header.write(&mut buf);
+
+        let parsed = FrameHeader::parse(&mut buf).unwrap();
+        assert_eq!(parsed.length, MAX_FRAME_SIZE);
+    }
+
+    #[test]
+    fn test_stream_id_31_bits() {
+        // Stream ID is 31 bits, high bit is reserved
+        let header = FrameHeader {
+            length: 0,
+            frame_type: FrameType::Data as u8,
+            flags: 0,
+            stream_id: 0x7FFF_FFFF, // Max valid stream ID
+        };
+
+        let mut buf = BytesMut::new();
+        header.write(&mut buf);
+
+        let parsed = FrameHeader::parse(&mut buf).unwrap();
+        assert_eq!(parsed.stream_id, 0x7FFF_FFFF);
+    }
+
+    #[test]
+    fn test_stream_id_reserved_bit_masked() {
+        // High bit should be masked off
+        let header = FrameHeader {
+            length: 0,
+            frame_type: FrameType::Data as u8,
+            flags: 0,
+            stream_id: 0xFFFF_FFFF,
+        };
+
+        let mut buf = BytesMut::new();
+        header.write(&mut buf);
+
+        let parsed = FrameHeader::parse(&mut buf).unwrap();
+        // Reserved bit is masked, so only 31 bits are preserved
+        assert_eq!(parsed.stream_id, 0x7FFF_FFFF);
+    }
+
+    #[test]
+    fn test_frame_type_all_variants() {
+        // Ensure all frame types can be parsed from their u8 values
+        assert_eq!(FrameType::from_u8(0x0), Some(FrameType::Data));
+        assert_eq!(FrameType::from_u8(0x1), Some(FrameType::Headers));
+        assert_eq!(FrameType::from_u8(0x2), Some(FrameType::Priority));
+        assert_eq!(FrameType::from_u8(0x3), Some(FrameType::RstStream));
+        assert_eq!(FrameType::from_u8(0x4), Some(FrameType::Settings));
+        assert_eq!(FrameType::from_u8(0x5), Some(FrameType::PushPromise));
+        assert_eq!(FrameType::from_u8(0x6), Some(FrameType::Ping));
+        assert_eq!(FrameType::from_u8(0x7), Some(FrameType::GoAway));
+        assert_eq!(FrameType::from_u8(0x8), Some(FrameType::WindowUpdate));
+        assert_eq!(FrameType::from_u8(0x9), Some(FrameType::Continuation));
+        assert_eq!(FrameType::from_u8(0xA), None);
+        assert_eq!(FrameType::from_u8(0xFF), None);
+    }
+
+    #[test]
+    fn test_setting_all_variants() {
+        // Test all setting types
+        assert_eq!(
+            Setting::from_id_value(0x1, 4096),
+            Some(Setting::HeaderTableSize(4096))
+        );
+        assert_eq!(
+            Setting::from_id_value(0x2, 1),
+            Some(Setting::EnablePush(true))
+        );
+        assert_eq!(
+            Setting::from_id_value(0x2, 0),
+            Some(Setting::EnablePush(false))
+        );
+        assert_eq!(
+            Setting::from_id_value(0x3, 100),
+            Some(Setting::MaxConcurrentStreams(100))
+        );
+        assert_eq!(
+            Setting::from_id_value(0x4, 65535),
+            Some(Setting::InitialWindowSize(65535))
+        );
+        assert_eq!(
+            Setting::from_id_value(0x5, 16384),
+            Some(Setting::MaxFrameSize(16384))
+        );
+        assert_eq!(
+            Setting::from_id_value(0x6, 8192),
+            Some(Setting::MaxHeaderListSize(8192))
+        );
+        // Unknown settings are ignored per RFC 7540
+        assert_eq!(Setting::from_id_value(0x7, 123), None);
+        assert_eq!(Setting::from_id_value(0xFF, 456), None);
+    }
+
+    #[test]
+    fn test_setting_id_and_value() {
+        let settings = vec![
+            Setting::HeaderTableSize(4096),
+            Setting::EnablePush(true),
+            Setting::MaxConcurrentStreams(100),
+            Setting::InitialWindowSize(65535),
+            Setting::MaxFrameSize(16384),
+            Setting::MaxHeaderListSize(8192),
+        ];
+
+        for setting in settings {
+            assert_eq!(
+                Setting::from_id_value(setting.id(), setting.value()),
+                Some(setting)
+            );
+        }
+    }
+
+    #[test]
+    fn test_window_update_max_increment() {
+        // Maximum valid increment is 2^31 - 1
+        let original = WindowUpdateFrame::new(0, 0x7FFF_FFFF);
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+
+        let header = FrameHeader::parse(&mut buf).unwrap();
+        let payload = buf.split_to(header.length as usize).freeze();
+        let parsed = WindowUpdateFrame::parse(&header, &payload).unwrap();
+
+        assert_eq!(parsed.increment, 0x7FFF_FFFF);
+    }
+
+    #[test]
+    fn test_error_code_all_variants() {
+        // Test all error codes can be parsed and converted
+        let codes = [
+            (0x0, ErrorCode::NoError),
+            (0x1, ErrorCode::ProtocolError),
+            (0x3, ErrorCode::FlowControlError),
+            (0x4, ErrorCode::SettingsTimeout),
+            (0x5, ErrorCode::StreamClosed),
+            (0x6, ErrorCode::FrameSizeError),
+            (0x7, ErrorCode::RefusedStream),
+            (0x8, ErrorCode::Cancel),
+            (0x9, ErrorCode::CompressionError),
+            (0xa, ErrorCode::ConnectError),
+            (0xb, ErrorCode::EnhanceYourCalm),
+            (0xc, ErrorCode::InadequateSecurity),
+            (0xd, ErrorCode::Http11Required),
+        ];
+
+        for (value, expected) in codes {
+            let code = ErrorCode::from_u32(value);
+            assert_eq!(code, expected);
+            assert_eq!(u32::from(code), value);
+        }
+
+        // Unknown codes map to InternalError
+        assert_eq!(ErrorCode::from_u32(0xFFFF), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn test_partial_header_parse_insufficient_bytes() {
+        let mut buf = BytesMut::from(&[0, 0, 5, 0, 0, 0, 0][..]); // Only 7 bytes, need 9
+
+        let result = FrameHeader::parse(&mut buf);
+        assert!(result.is_err());
+    }
 }
