@@ -35,14 +35,22 @@
 //!     .with_field("symbol_count", "10");
 //! ```
 
+pub mod budget_monitor;
 pub mod collector;
 pub mod context;
 pub mod entry;
 pub mod level;
 pub mod metrics;
+pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
+pub mod task_inspector;
 
+pub use budget_monitor::{
+    AlertSeverity, BreakdownView, BudgetAlert, BudgetBreakdown, BudgetDashboard, BudgetHistory,
+    BudgetHistoryPoint, BudgetMonitor, BudgetMonitorConfig, BudgetSnapshot, ConsumptionRate,
+    RegionBudgetStatus,
+};
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
 pub use entry::LogEntry;
@@ -50,10 +58,17 @@ pub use level::LogLevel;
 pub use metrics::{
     Counter, Gauge, Histogram, MetricValue, Metrics, MetricsProvider, NoOpMetrics, OutcomeKind,
 };
+pub use obligation_tracker::{
+    ObligationInfo, ObligationStateInfo, ObligationSummary, ObligationTracker,
+    ObligationTrackerConfig, TypeSummary,
+};
 #[cfg(feature = "metrics")]
 pub use otel::{
     CardinalityOverflow, ExportError, InMemoryExporter, MetricsConfig, MetricsExporter,
     MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
+};
+pub use task_inspector::{
+    TaskDetails, TaskInspector, TaskInspectorConfig, TaskStateInfo, TaskSummary,
 };
 
 /// Configuration for observability and logging.
