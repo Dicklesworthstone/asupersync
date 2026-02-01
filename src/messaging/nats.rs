@@ -18,6 +18,7 @@ use crate::channel::mpsc;
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
+use crate::tracing_compat::warn;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -212,7 +213,7 @@ impl ServerInfo {
             info.proto = v as i32;
         }
         if let Some(v) = extract_json_i64(json, "max_payload") {
-            info.max_payload = v as usize;
+            info.max_payload = usize::try_from(v).unwrap_or(0);
         }
         if let Some(v) = extract_json_bool(json, "tls_required") {
             info.tls_required = v;
@@ -262,7 +263,7 @@ fn random_suffix() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:016x}", nanos ^ (std::process::id() as u128))
+    format!("{:016x}", nanos ^ u128::from(std::process::id()))
 }
 
 /// Internal read buffer for NATS protocol parsing.
@@ -299,12 +300,7 @@ impl NatsReadBuffer {
 
     fn find_crlf(&self) -> Option<usize> {
         let buf = self.available();
-        for i in 0..buf.len().saturating_sub(1) {
-            if buf[i] == b'\r' && buf[i + 1] == b'\n' {
-                return Some(i);
-            }
-        }
-        None
+        (0..buf.len().saturating_sub(1)).find(|&i| buf[i] == b'\r' && buf[i + 1] == b'\n')
     }
 }
 
@@ -798,10 +794,9 @@ impl NatsClient {
                             // This is our reply - clean up and return
                             self.unsubscribe(cx, sub.sid()).await?;
                             return Ok(m);
-                        } else {
-                            // Dispatch to other subscriptions
-                            self.dispatch_message(m);
                         }
+                        // Dispatch to other subscriptions
+                        self.dispatch_message(m);
                     }
                     Some(NatsMessage::Err(e)) => {
                         return Err(NatsError::Server(e));
@@ -973,8 +968,13 @@ impl NatsClient {
     fn dispatch_message(&self, msg: Message) {
         let subs = self.state.subscriptions.lock().unwrap();
         if let Some(sub) = subs.get(&msg.sid) {
-            // Try to send; if receiver is dropped, ignore
-            let _ = sub.sender.try_send(msg);
+            // Try to send; warn if channel is full (backpressure)
+            if sub.sender.try_send(msg).is_err() {
+                warn!(
+                    subject = %sub.subject,
+                    "NATS message dropped due to backpressure - consumer too slow"
+                );
+            }
         }
     }
 
@@ -1008,6 +1008,7 @@ impl NatsClient {
     }
 
     /// Close the connection.
+    #[allow(clippy::unused_async)]
     pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
@@ -1048,11 +1049,13 @@ impl fmt::Debug for Subscription {
 
 impl Subscription {
     /// Get the subscription ID.
+    #[must_use]
     pub fn sid(&self) -> u64 {
         self.sid
     }
 
     /// Get the subject this subscription is for.
+    #[must_use]
     pub fn subject(&self) -> &str {
         &self.subject
     }
@@ -1067,9 +1070,8 @@ impl Subscription {
 
         match self.rx.recv(cx).await {
             Ok(msg) => Ok(Some(msg)),
-            Err(mpsc::RecvError::Disconnected) => Ok(None),
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => Ok(None),
             Err(mpsc::RecvError::Cancelled) => Err(NatsError::Cancelled),
-            Err(mpsc::RecvError::Empty) => Ok(None),
         }
     }
 
@@ -1132,7 +1134,7 @@ mod tests {
         assert_eq!(info.server_name, "test");
         assert_eq!(info.version, "2.9.0");
         assert_eq!(info.proto, 1);
-        assert_eq!(info.max_payload, 1048576);
+        assert_eq!(info.max_payload, 1_048_576);
         assert!(!info.tls_required);
     }
 
@@ -1211,7 +1213,7 @@ mod tests {
 
     #[test]
     fn test_server_info_parse_minimal() {
-        let json = r#"{}"#;
+        let json = "{}";
         let info = ServerInfo::parse(json);
         assert_eq!(info.server_id, "");
         assert_eq!(info.max_payload, 0);
