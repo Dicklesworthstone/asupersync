@@ -57,6 +57,10 @@ pub enum HttpError {
     BadChunkedEncoding,
     /// Body exceeds the configured limit.
     BodyTooLarge,
+    /// Body stream was cancelled.
+    BodyCancelled,
+    /// Body channel closed unexpectedly.
+    BodyChannelClosed,
     /// Both Content-Length and Transfer-Encoding present (RFC 7230 3.3.3 violation).
     /// This is a potential request smuggling vector.
     AmbiguousBodyLength,
@@ -83,6 +87,8 @@ impl fmt::Display for HttpError {
             Self::RequestLineTooLong => write!(f, "request line too long"),
             Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
             Self::BodyTooLarge => write!(f, "body exceeds size limit"),
+            Self::BodyCancelled => write!(f, "body stream cancelled"),
+            Self::BodyChannelClosed => write!(f, "body stream closed"),
             Self::AmbiguousBodyLength => {
                 write!(f, "both Content-Length and Transfer-Encoding present")
             }
