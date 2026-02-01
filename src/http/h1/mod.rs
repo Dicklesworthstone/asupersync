@@ -19,7 +19,7 @@ pub use client::{Http1Client, Http1ClientCodec};
 pub use codec::{Http1Codec, HttpError};
 pub use server::{Http1Config, Http1Server};
 pub use stream::{
-    BodyKind, ChunkedEncoder, IncomingBody, OutgoingBody, RequestHead, ResponseHead,
-    StreamingRequest, StreamingResponse,
+    BodyKind, ChunkedEncoder, IncomingBody, IncomingBodyWriter, OutgoingBody, OutgoingBodySender,
+    RequestHead, ResponseHead, StreamingRequest, StreamingResponse,
 };
 pub use types::{Method, Request, Response, Version};

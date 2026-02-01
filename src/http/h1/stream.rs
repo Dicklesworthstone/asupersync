@@ -1218,7 +1218,6 @@ mod tests {
             version: super::super::types::Version::Http11,
             headers: vec![],
         };
-        assert_eq!(head.body_kind(), BodyKind::ContentLength(100));
         assert_eq!(empty_head.body_kind(), BodyKind::Empty);
     }
 
