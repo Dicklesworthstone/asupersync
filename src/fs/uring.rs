@@ -114,11 +114,7 @@ impl IoUringFile {
     ///
     /// This will create the file if it doesn't exist and truncate it if it does.
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::open_with_flags(
-            path,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-            0o644,
-        )
+        Self::open_with_flags(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644)
     }
 
     /// Opens a file with custom flags and mode.
@@ -339,11 +335,9 @@ impl IoUringFile {
         if datasync {
             builder = builder.flags(types::FsyncFlags::DATASYNC);
         }
-        let entry = builder.build().user_data(if datasync {
-            OP_FDATASYNC
-        } else {
-            OP_FSYNC
-        });
+        let entry = builder
+            .build()
+            .user_data(if datasync { OP_FDATASYNC } else { OP_FSYNC });
 
         let result = self.submit_and_wait(entry)?;
         if result < 0 {
@@ -441,9 +435,7 @@ impl AsyncRead for IoUringFile {
         let offset = self.inner.position.load(Ordering::Relaxed);
         let n = self.blocking_read_at(buf.unfilled(), offset)?;
         buf.advance(n);
-        self.inner
-            .position
-            .fetch_add(n as u64, Ordering::Relaxed);
+        self.inner.position.fetch_add(n as u64, Ordering::Relaxed);
         Poll::Ready(Ok(()))
     }
 }
@@ -456,9 +448,7 @@ impl AsyncWrite for IoUringFile {
     ) -> Poll<io::Result<usize>> {
         let offset = self.inner.position.load(Ordering::Relaxed);
         let n = self.blocking_write_at(buf, offset)?;
-        self.inner
-            .position
-            .fetch_add(n as u64, Ordering::Relaxed);
+        self.inner.position.fetch_add(n as u64, Ordering::Relaxed);
         Poll::Ready(Ok(n))
     }
 
@@ -576,12 +566,22 @@ mod tests {
             .unwrap();
 
             // Initial position should be 0
-            crate::assert_with_log!(file.position() == 0, "initial position", 0u64, file.position());
+            crate::assert_with_log!(
+                file.position() == 0,
+                "initial position",
+                0u64,
+                file.position()
+            );
 
             // Write updates position
             let n = file.write(b"hello").await.unwrap();
             crate::assert_with_log!(n == 5, "write", 5usize, n);
-            crate::assert_with_log!(file.position() == 5, "position after write", 5u64, file.position());
+            crate::assert_with_log!(
+                file.position() == 5,
+                "position after write",
+                5u64,
+                file.position()
+            );
 
             // write_at does NOT update position
             let n = file.write_at(b"world", 10).await.unwrap();
@@ -596,7 +596,12 @@ mod tests {
             // Seek updates position
             let pos = file.seek(SeekFrom::Start(0)).unwrap();
             crate::assert_with_log!(pos == 0, "seek result", 0u64, pos);
-            crate::assert_with_log!(file.position() == 0, "position after seek", 0u64, file.position());
+            crate::assert_with_log!(
+                file.position() == 0,
+                "position after seek",
+                0u64,
+                file.position()
+            );
         });
         crate::test_complete!("test_uring_file_position_tracking");
     }
