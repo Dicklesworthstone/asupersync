@@ -15,6 +15,8 @@ mod udp;
 /// Unix domain socket networking primitives (includes `UnixListener`, `UnixStream`).
 #[cfg(unix)]
 pub mod unix;
+/// WebSocket protocol implementation (RFC 6455).
+pub mod websocket;
 
 pub use resolve::{lookup_all, lookup_one};
 pub use tcp::listener::{Incoming, TcpListener};
@@ -29,3 +31,4 @@ pub use unix::{
     OwnedWriteHalf as UnixOwnedWriteHalf, ReadHalf as UnixReadHalf,
     ReuniteError as UnixReuniteError, UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
 };
+pub use websocket::{apply_mask, CloseCode, Frame, FrameCodec, Opcode, Role as WsRole, WsError};
