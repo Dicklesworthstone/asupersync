@@ -134,6 +134,7 @@ pub use epoll::EpollReactor;
 pub use windows::IocpReactor;
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 pub use uring::IoUringReactor;
@@ -539,6 +540,62 @@ pub trait Reactor: Send + Sync {
     }
 }
 
+/// Create the best available reactor for the current platform.
+///
+/// This is a convenience factory that selects the most capable backend
+/// supported by the build and host environment.
+///
+/// # Selection Order
+/// - **Linux**: io_uring (if enabled and available), otherwise epoll
+/// - **macOS/BSD**: kqueue
+/// - **Windows**: IOCP
+///
+/// # Errors
+/// Returns an error if no supported reactor backend can be created.
+#[cfg(target_os = "linux")]
+pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    #[cfg(feature = "io-uring")]
+    {
+        if let Ok(reactor) = IoUringReactor::new() {
+            return Ok(Arc::new(reactor));
+        }
+    }
+
+    Ok(Arc::new(EpollReactor::new()?))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    Ok(Arc::new(KqueueReactor::new()?))
+}
+
+#[cfg(target_os = "windows")]
+pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    Ok(Arc::new(IocpReactor::new()?))
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    target_os = "windows"
+)))]
+pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no supported reactor backend for this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +604,34 @@ mod tests {
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "windows"
+    ))]
+    fn create_reactor_factory() {
+        init_test("create_reactor_factory");
+        let reactor = create_reactor().expect("failed to create reactor");
+        crate::assert_with_log!(
+            reactor.is_empty(),
+            "reactor empty",
+            true,
+            reactor.is_empty()
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            "registration count",
+            0usize,
+            reactor.registration_count()
+        );
+        crate::test_complete!("create_reactor_factory");
     }
 
     // Event tests
