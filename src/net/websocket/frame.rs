@@ -805,14 +805,15 @@ mod tests {
 
     #[test]
     fn test_encode_decode_text_frame() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let frame = Frame::text("Hello, WebSocket!");
 
         let mut buf = BytesMut::new();
-        codec.encode(frame, &mut buf).unwrap();
+        encoder.encode(frame, &mut buf).unwrap();
 
-        // Decode the frame
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        // Decode the frame (server decodes client-masked frames)
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
         assert_eq!(decoded.opcode, Opcode::Text);
         assert_eq!(decoded.payload.as_ref(), b"Hello, WebSocket!");
@@ -820,14 +821,15 @@ mod tests {
 
     #[test]
     fn test_encode_decode_binary_frame() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let payload: Bytes = vec![0x00, 0x01, 0x02, 0xFF].into();
         let frame = Frame::binary(payload.clone());
 
         let mut buf = BytesMut::new();
-        codec.encode(frame, &mut buf).unwrap();
+        encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
         assert_eq!(decoded.opcode, Opcode::Binary);
         assert_eq!(decoded.payload, payload);
@@ -835,14 +837,15 @@ mod tests {
 
     #[test]
     fn test_encode_decode_ping_pong() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
 
         // Ping
         let ping_request = Frame::ping("ping-data");
         let mut buf = BytesMut::new();
-        codec.encode(ping_request, &mut buf).unwrap();
+        encoder.encode(ping_request, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
         assert_eq!(decoded.opcode, Opcode::Ping);
         assert_eq!(decoded.payload.as_ref(), b"ping-data");
@@ -850,9 +853,9 @@ mod tests {
         // Pong
         let pong_response = Frame::pong("pong-data");
         let mut buf = BytesMut::new();
-        codec.encode(pong_response, &mut buf).unwrap();
+        encoder.encode(pong_response, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
         assert_eq!(decoded.opcode, Opcode::Pong);
         assert_eq!(decoded.payload.as_ref(), b"pong-data");
@@ -860,13 +863,14 @@ mod tests {
 
     #[test]
     fn test_encode_decode_close_frame() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let close = Frame::close(Some(1000), Some("goodbye"));
 
         let mut buf = BytesMut::new();
-        codec.encode(close, &mut buf).unwrap();
+        encoder.encode(close, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.fin);
         assert_eq!(decoded.opcode, Opcode::Close);
 
@@ -881,25 +885,27 @@ mod tests {
 
     #[test]
     fn test_payload_length_126() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let frame = Frame::binary(Bytes::from(vec![0u8; 200])); // > 125, uses 2-byte length
 
         let mut buf = BytesMut::new();
-        codec.encode(frame, &mut buf).unwrap();
+        encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.payload.len(), 200);
     }
 
     #[test]
     fn test_payload_length_127() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let frame = Frame::binary(Bytes::from(vec![0u8; 70_000])); // > 65535, uses 8-byte length
 
         let mut buf = BytesMut::new();
-        codec.encode(frame, &mut buf).unwrap();
+        encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert_eq!(decoded.payload.len(), 70_000);
     }
 
@@ -947,29 +953,31 @@ mod tests {
 
     #[test]
     fn test_partial_frame_returns_none() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let frame = Frame::text("Hello");
 
         let mut buf = BytesMut::new();
-        codec.encode(frame, &mut buf).unwrap();
+        encoder.encode(frame, &mut buf).unwrap();
 
         // Only provide partial data
         let partial = buf.split_to(3);
         let mut partial = BytesMut::from(partial.as_ref());
 
         // Should return None (need more data)
-        assert!(codec.decode(&mut partial).unwrap().is_none());
+        assert!(decoder.decode(&mut partial).unwrap().is_none());
     }
 
     #[test]
     fn test_empty_payload() {
-        let mut codec = FrameCodec::server();
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
         let frame = Frame::binary(Bytes::new());
 
         let mut buf = BytesMut::new();
-        codec.encode(frame, &mut buf).unwrap();
+        encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
         assert!(decoded.payload.is_empty());
     }
 
