@@ -236,7 +236,9 @@ mod hpack_security {
         // Decode
         let mut decoder = HpackDecoder::new();
         let mut encoded_copy = encoded.clone();
-        let decoded = decoder.decode(&mut encoded_copy).expect("decode should succeed");
+        let decoded = decoder
+            .decode(&mut encoded_copy)
+            .expect("decode should succeed");
 
         // Verify count matches
         assert_eq!(
@@ -299,10 +301,10 @@ fn stress_hpack_malformed_input() {
 
     // Test with various malformed inputs
     let malformed_inputs: Vec<Vec<u8>> = vec![
-        vec![0xFF; 100],                    // All 0xFF bytes
-        vec![0x00; 1000],                   // All zeros
+        vec![0xFF; 100],                      // All 0xFF bytes
+        vec![0x00; 1000],                     // All zeros
         (0..255).cycle().take(500).collect(), // Cycling bytes
-        vec![0x80; 50],                     // Incomplete integer encoding
+        vec![0x80; 50],                       // Incomplete integer encoding
     ];
 
     for input in malformed_inputs {

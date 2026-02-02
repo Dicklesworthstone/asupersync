@@ -1135,6 +1135,20 @@ mod tests {
     }
 
     #[test]
+    fn test_decoder_caps_allowed_table_size() {
+        let decoder = Decoder::with_max_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        assert_eq!(decoder.allowed_table_size, MAX_ALLOWED_TABLE_SIZE);
+        assert_eq!(decoder.dynamic_table.max_size(), MAX_ALLOWED_TABLE_SIZE);
+    }
+
+    #[test]
+    fn test_set_allowed_table_size_caps() {
+        let mut decoder = Decoder::new();
+        decoder.set_allowed_table_size(MAX_ALLOWED_TABLE_SIZE + 1);
+        assert_eq!(decoder.allowed_table_size, MAX_ALLOWED_TABLE_SIZE);
+    }
+
+    #[test]
     fn test_dynamic_table_insert() {
         let mut table = DynamicTable::new();
         table.insert(Header::new("custom-header", "custom-value"));
