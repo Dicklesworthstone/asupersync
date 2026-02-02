@@ -1817,4 +1817,174 @@ mod tests {
         assert_eq!(packet[3], 0); // sequence
         assert_eq!(packet[4], command::COM_QUERY);
     }
+
+    #[test]
+    fn test_lenenc_int_3byte() {
+        // 3-byte encoding (0xFD prefix)
+        let data = [0xFD, 0x01, 0x02, 0x03]; // 0x030201 = 197121
+        let mut reader = PacketReader::new(&data);
+        assert_eq!(reader.read_lenenc_int().unwrap(), 197121);
+    }
+
+    #[test]
+    fn test_lenenc_int_8byte() {
+        // 8-byte encoding (0xFE prefix)
+        let data = [0xFE, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut reader = PacketReader::new(&data);
+        assert_eq!(reader.read_lenenc_int().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_lenenc_string() {
+        // Length-encoded string: length=5, then "hello"
+        let data = [0x05, b'h', b'e', b'l', b'l', b'o'];
+        let mut reader = PacketReader::new(&data);
+        let bytes = reader.read_lenenc_bytes().unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn test_null_terminated_string() {
+        let data = [
+            b'h', b'e', b'l', b'l', b'o', 0x00, b'e', b'x', b't', b'r', b'a',
+        ];
+        let mut reader = PacketReader::new(&data);
+        let s = reader.read_null_terminated().unwrap();
+        assert_eq!(s, "hello");
+        assert_eq!(reader.pos, 6);
+    }
+
+    #[test]
+    fn test_fixed_length_string() {
+        let data = b"hello world";
+        let mut reader = PacketReader::new(data);
+        let bytes = reader.read_bytes(5).unwrap();
+        assert_eq!(bytes, b"hello");
+        assert_eq!(reader.pos, 5);
+    }
+
+    #[test]
+    fn test_mysql_value_display() {
+        assert_eq!(format!("{}", MySqlValue::Null), "NULL");
+        assert_eq!(format!("{}", MySqlValue::Long(42)), "42");
+        assert_eq!(format!("{}", MySqlValue::Text("test".to_string())), "test");
+        assert_eq!(
+            format!("{}", MySqlValue::Bytes(vec![1, 2, 3])),
+            "<bytes 3 len>"
+        );
+    }
+
+    #[test]
+    fn test_mysql_value_type_conversions() {
+        // Test Short to i32 conversion
+        assert_eq!(MySqlValue::Short(100).as_i32(), Some(100));
+        // Test Tiny to i32 conversion
+        assert_eq!(MySqlValue::Tiny(42).as_i32(), Some(42));
+        // Test LongLong to i64
+        assert_eq!(
+            MySqlValue::LongLong(123456789012345).as_i64(),
+            Some(123456789012345)
+        );
+        // Test Float to f64
+        assert!(MySqlValue::Float(3.14).as_f64().is_some());
+        // Test Double to f64
+        assert_eq!(MySqlValue::Double(2.718).as_f64(), Some(2.718));
+        // Test invalid conversions return None
+        assert_eq!(MySqlValue::Text("not a number".to_string()).as_i32(), None);
+        assert_eq!(MySqlValue::Null.as_i64(), None);
+    }
+
+    #[test]
+    fn test_mysql_value_bool_conversion() {
+        assert_eq!(MySqlValue::Bool(true).as_bool(), Some(true));
+        assert_eq!(MySqlValue::Bool(false).as_bool(), Some(false));
+        assert_eq!(MySqlValue::Tiny(0).as_bool(), Some(false));
+        assert_eq!(MySqlValue::Tiny(1).as_bool(), Some(true));
+        assert_eq!(MySqlValue::Tiny(42).as_bool(), Some(true)); // Non-zero is true
+    }
+
+    #[test]
+    fn test_mysql_value_bytes() {
+        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let val = MySqlValue::Bytes(bytes.clone());
+        assert_eq!(val.as_bytes(), Some(bytes.as_slice()));
+        assert_eq!(MySqlValue::Null.as_bytes(), None);
+    }
+
+    #[test]
+    fn test_connect_options_with_port() {
+        let opts = MySqlConnectOptions::parse("mysql://user@localhost:3307/db").unwrap();
+        assert_eq!(opts.port, 3307);
+    }
+
+    #[test]
+    fn test_connect_options_password_with_special() {
+        // Password with special chars (non-encoded)
+        let opts = MySqlConnectOptions::parse("mysql://user:pass123@localhost/db").unwrap();
+        assert_eq!(opts.password, Some("pass123".to_string()));
+    }
+
+    #[test]
+    fn test_connect_options_invalid_scheme() {
+        let result = MySqlConnectOptions::parse("postgres://localhost/db");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mysql_error_display() {
+        let err = MySqlError::Protocol("test error".to_string());
+        assert!(format!("{err}").contains("test error"));
+
+        let err = MySqlError::ColumnNotFound("missing_col".to_string());
+        assert!(format!("{err}").contains("missing_col"));
+    }
+
+    #[test]
+    fn test_packet_buffer_sequence() {
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(5);
+        buf.write_byte(0x00);
+        let packet = buf.build_packet();
+        assert_eq!(packet[3], 5); // sequence byte
+    }
+
+    #[test]
+    fn test_packet_buffer_large_payload() {
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        // Write 256 bytes
+        for _ in 0..256 {
+            buf.write_byte(0x41);
+        }
+        let packet = buf.build_packet();
+        // Length should be 256 = 0x100
+        assert_eq!(packet[0], 0x00); // low byte
+        assert_eq!(packet[1], 0x01); // mid byte (256)
+        assert_eq!(packet[2], 0x00); // high byte
+    }
+
+    #[test]
+    fn test_mysql_column_fields() {
+        let col = MySqlColumn {
+            catalog: "def".to_string(),
+            schema: "test_db".to_string(),
+            table: "users".to_string(),
+            org_table: "users".to_string(),
+            name: "id".to_string(),
+            org_name: "id".to_string(),
+            charset: 33, // utf8
+            length: 11,
+            column_type: column_type::MYSQL_TYPE_LONG,
+            flags: 0,
+            decimals: 0,
+        };
+        assert_eq!(col.name, "id");
+        assert_eq!(col.column_type, column_type::MYSQL_TYPE_LONG);
+        assert_eq!(col.schema, "test_db");
+    }
+
+    #[test]
+    fn test_ssl_mode_default() {
+        assert_eq!(SslMode::default(), SslMode::Disabled);
+    }
 }
