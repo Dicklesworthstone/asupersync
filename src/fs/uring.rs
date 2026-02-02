@@ -788,7 +788,10 @@ mod tests {
             let mut written = 0usize;
             while written < data.len() {
                 let end = std::cmp::min(written + 4096, data.len());
-                let n = file.write_at(&data[written..end], written as u64).await.unwrap();
+                let n = file
+                    .write_at(&data[written..end], written as u64)
+                    .await
+                    .unwrap();
                 written += n;
             }
             file.sync_all().await.unwrap();
