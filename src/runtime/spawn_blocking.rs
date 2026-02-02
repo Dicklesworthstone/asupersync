@@ -25,8 +25,16 @@
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
 use crate::runtime::yield_now;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
+
+/// Maximum number of concurrent fallback blocking threads (when no pool exists).
+/// Prevents unbounded thread creation under load.
+const MAX_FALLBACK_THREADS: usize = 256;
+
+/// Current number of active fallback blocking threads.
+static FALLBACK_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct CancelOnDrop {
     handle: BlockingTaskHandle,
@@ -134,6 +142,22 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    // Wait until we are under the fallback thread limit to prevent unbounded
+    // thread creation when no blocking pool is available.
+    loop {
+        let current = FALLBACK_THREAD_COUNT.load(Ordering::Relaxed);
+        if current < MAX_FALLBACK_THREADS {
+            if FALLBACK_THREAD_COUNT
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        } else {
+            yield_now().await;
+        }
+    }
+
     let (tx, rx) = mpsc::channel();
 
     let thread_result = thread::Builder::new()
@@ -141,6 +165,7 @@ where
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             let _ = tx.send(result);
+            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
         });
 
     let _ = thread_result.expect("failed to spawn blocking thread");
