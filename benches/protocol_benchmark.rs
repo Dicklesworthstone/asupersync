@@ -406,17 +406,17 @@ fn bench_protocol_throughput(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter(|| {
-                    let mut encoder = HpackEncoder::new();
-                    let mut decoder = HpackDecoder::new();
+                    let mut hpack_encoder = HpackEncoder::new();
+                    let mut hpack_decoder = HpackDecoder::new();
                     let mut buf = BytesMut::with_capacity(256);
 
                     for _ in 0..count {
                         buf.clear();
-                        encoder.encode(&headers, &mut buf);
+                        hpack_encoder.encode(&headers, &mut buf);
                         // Convert BytesMut to Bytes for decoding
-                        let mut encoded = Bytes::from(buf.as_ref().to_vec());
-                        let decoded = decoder.decode(&mut encoded);
-                        let _ = black_box(decoded);
+                        let mut encoded_bytes = Bytes::from(buf.as_ref().to_vec());
+                        let decoded_headers = hpack_decoder.decode(&mut encoded_bytes);
+                        let _ = black_box(decoded_headers);
                     }
                 })
             },

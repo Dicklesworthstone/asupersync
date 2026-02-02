@@ -35,7 +35,7 @@ fn actor_fifo_message_ordering() {
     let trace = events.lock().unwrap().clone();
 
     // Verify FIFO ordering
-    let expected = vec!["msg:0", "msg:1", "msg:2", "msg:3", "msg:4"];
+    let expected = ["msg:0", "msg:1", "msg:2", "msg:3", "msg:4"];
     for (i, (actual, expected)) in trace.iter().zip(expected.iter()).enumerate() {
         assert_with_log!(
             actual == *expected,

@@ -196,12 +196,12 @@ pub fn test_lab_runtime(seed: u64) -> LabRuntime {
 }
 
 /// Run a lab test and return the collected events.
-pub fn run_lab_test<F>(seed: u64, events: Arc<Mutex<Vec<String>>>, setup: F) -> Vec<String>
+pub fn run_lab_test<F>(seed: u64, events: &Arc<Mutex<Vec<String>>>, setup: F) -> Vec<String>
 where
     F: FnOnce(&mut LabRuntime, Arc<Mutex<Vec<String>>>),
 {
     let mut runtime = test_lab_runtime(seed);
-    setup(&mut runtime, events.clone());
+    setup(&mut runtime, Arc::clone(events));
     runtime.run_until_quiescent();
     events.lock().unwrap().clone()
 }

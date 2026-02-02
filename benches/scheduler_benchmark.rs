@@ -377,7 +377,7 @@ fn bench_work_stealing(c: &mut Criterion) {
     });
 
     // Batch steal
-    for &victim_size in &[16, 64, 256] {
+    for &victim_size in &[16u32, 64, 256] {
         group.bench_with_input(
             BenchmarkId::new("steal_batch", victim_size),
             &victim_size,
@@ -385,7 +385,7 @@ fn bench_work_stealing(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let victim = LocalQueue::new();
-                        for i in 0..victim_size as u32 {
+                        for i in 0..victim_size {
                             victim.push(task(i));
                         }
                         let stealer = victim.stealer();
@@ -407,8 +407,7 @@ fn bench_work_stealing(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let victim = LocalQueue::new();
-                let stealer = victim.stealer();
-                stealer
+                victim.stealer()
             },
             |stealer| {
                 let result = stealer.steal();
@@ -464,7 +463,7 @@ fn bench_scheduler_throughput(c: &mut Criterion) {
                         match i % 3 {
                             0 => scheduler.schedule(task(i), 0),
                             1 => scheduler
-                                .schedule_timed(task(i), Time::from_nanos((i as u64) * 1000)),
+                                .schedule_timed(task(i), Time::from_nanos(u64::from(i) * 1000)),
                             _ => scheduler.schedule_cancel(task(i), 0),
                         }
                     }

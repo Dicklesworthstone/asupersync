@@ -53,7 +53,7 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
     let events_b = Arc::clone(&events);
 
     // Actor A: sends messages to B
-    let (task_a_id, _) = runtime
+    let (task_sender_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
             events_a.lock().unwrap().push("A:start".into());
@@ -65,7 +65,7 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
         .expect("create task A");
 
     // Actor B: receives messages from A
-    let (task_b_id, _) = runtime
+    let (task_receiver_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
             events_b.lock().unwrap().push("B:start".into());
@@ -79,8 +79,8 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
     // Schedule both tasks
     {
         let mut sched = runtime.scheduler.lock().unwrap();
-        sched.schedule(task_a_id, 0);
-        sched.schedule(task_b_id, 1);
+        sched.schedule(task_sender_id, 0);
+        sched.schedule(task_receiver_id, 1);
     }
 
     runtime.run_until_quiescent();

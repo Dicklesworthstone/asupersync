@@ -109,8 +109,7 @@ mod websocket_security {
             let result = Opcode::from_u8(opcode);
             assert!(
                 result.is_err(),
-                "Reserved opcode {:#x} should be rejected",
-                opcode
+                "Reserved opcode {opcode:#x} should be rejected"
             );
         }
     }
@@ -130,11 +129,7 @@ mod websocket_security {
 
         for (byte, expected) in valid_opcodes {
             let result = Opcode::from_u8(byte);
-            assert!(
-                result.is_ok(),
-                "Valid opcode {:#x} should be accepted",
-                byte
-            );
+            assert!(result.is_ok(), "Valid opcode {byte:#x} should be accepted");
             assert_eq!(result.unwrap(), expected);
         }
     }
@@ -231,14 +226,11 @@ mod hpack_security {
         let mut encoder = HpackEncoder::new();
         let mut buf = BytesMut::with_capacity(256);
         encoder.encode(&original_headers, &mut buf);
-        let encoded = buf.freeze();
+        let mut encoded = buf.freeze();
 
         // Decode
         let mut decoder = HpackDecoder::new();
-        let mut encoded_copy = encoded.clone();
-        let decoded = decoder
-            .decode(&mut encoded_copy)
-            .expect("decode should succeed");
+        let decoded = decoder.decode(&mut encoded).expect("decode should succeed");
 
         // Verify count matches
         assert_eq!(
@@ -293,7 +285,7 @@ mod flow_control_security {
 /// Stress test for HPACK decoder with malformed input.
 /// Marked as ignored for normal test runs.
 #[test]
-#[ignore]
+#[ignore = "stress test: malformed inputs can be slow in CI"]
 fn stress_hpack_malformed_input() {
     use asupersync::bytes::Bytes;
 
@@ -308,19 +300,16 @@ fn stress_hpack_malformed_input() {
     ];
 
     for input in malformed_inputs {
-        let mut bytes = Bytes::from(input.clone());
+        let mut bytes = Bytes::from(input);
         let result = decoder.decode(&mut bytes);
         // Should either succeed or return an error, never panic
-        match result {
-            Ok(_) => { /* Valid decode */ }
-            Err(_) => { /* Expected for malformed input */ }
-        }
+        let _ = result;
     }
 }
 
 /// Stress test for WebSocket frame construction.
 #[test]
-#[ignore]
+#[ignore = "stress test: large frames are slow in CI"]
 fn stress_websocket_frame_sizes() {
     use asupersync::bytes::Bytes;
 
@@ -348,7 +337,7 @@ fn stress_websocket_frame_sizes() {
 
 /// Stress test for settings builder with edge cases.
 #[test]
-#[ignore]
+#[ignore = "stress test: builder edge cases are slow in CI"]
 fn stress_settings_edge_cases() {
     // Test with maximum values
     let settings = SettingsBuilder::new()
