@@ -162,22 +162,29 @@ mod tests {
 
     #[test]
     fn test_steal_deterministic_with_same_seed() {
-        let q1 = LocalQueue::new();
-        let q2 = LocalQueue::new();
-        let q3 = LocalQueue::new();
+        // Use two separate queue sets so the first steal doesn't mutate
+        // the queues used by the second steal.
+        let q1a = LocalQueue::new();
+        let q2a = LocalQueue::new();
+        let q3a = LocalQueue::new();
+        q1a.push(task(1));
+        q2a.push(task(2));
+        q3a.push(task(3));
+        let stealers_a = vec![q1a.stealer(), q2a.stealer(), q3a.stealer()];
 
-        q1.push(task(1));
-        q2.push(task(2));
-        q3.push(task(3));
+        let q1b = LocalQueue::new();
+        let q2b = LocalQueue::new();
+        let q3b = LocalQueue::new();
+        q1b.push(task(1));
+        q2b.push(task(2));
+        q3b.push(task(3));
+        let stealers_b = vec![q1b.stealer(), q2b.stealer(), q3b.stealer()];
 
-        let stealers = vec![q1.stealer(), q2.stealer(), q3.stealer()];
-
-        // Same seed should give same result
         let mut rng1 = DetRng::new(12345);
         let mut rng2 = DetRng::new(12345);
 
-        let result1 = steal_task(&stealers, &mut rng1);
-        let result2 = steal_task(&stealers, &mut rng2);
+        let result1 = steal_task(&stealers_a, &mut rng1);
+        let result2 = steal_task(&stealers_b, &mut rng2);
 
         assert_eq!(result1, result2, "same seed should give same steal target");
     }

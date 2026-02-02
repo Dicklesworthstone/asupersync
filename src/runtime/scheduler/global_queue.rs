@@ -217,7 +217,10 @@ mod tests {
             h.join().expect("thread should complete without deadlock");
         }
 
-        // Queue should still be functional
+        // Drain any leftover items from the concurrent phase
+        while queue.pop().is_some() {}
+
+        // Queue should still be functional after contention
         queue.push(task(999_999));
         assert_eq!(queue.pop(), Some(task(999_999)));
     }
