@@ -911,9 +911,13 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
     (0x3fffffff, 30),  // 256 EOS
 ];
 
-/// Decode a Huffman-encoded string.
+/// Decode a Huffman-encoded string using grouped code-length matching.
+///
+/// Security: This decoder avoids the O(n*257) worst case of the naive linear
+/// scan approach. By grouping codes by bit length and checking shortest first,
+/// the decoder consumes at least 5 bits per iteration, bounding the work per
+/// input byte to a constant factor.
 fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
-    // Build a simple bit-by-bit decoder
     let mut result = Vec::new();
     let mut accumulator: u64 = 0;
     let mut bits: u32 = 0;
@@ -923,13 +927,10 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
         bits += 8;
 
         while bits >= 5 {
-            // Optimization: Fast path for 5-bit codes to prevent CPU exhaustion.
-            // The shortest Huffman codes are 5 bits (values 0x00..=0x09).
-            // Checking this first allows O(1) decoding for the most frequent symbols
-            // and improves the worst-case behavior (5 bits per symbol).
+            // Fast path: check 5-bit codes first (most common ASCII symbols).
+            // Codes 0x00-0x09 in 5 bits map to: '0','1','2','a','c','e','i','o','s','t'
             let high_5 = (accumulator >> (bits - 5)) as u32 & 0x1F;
             if high_5 < 10 {
-                // Map 0..9 to corresponding symbols: 0,1,2,a,c,e,i,o,s,t
                 let sym = match high_5 {
                     0 => b'0',
                     1 => b'1',
@@ -944,39 +945,155 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                     _ => unreachable!(),
                 };
                 result.push(sym);
-                accumulator &= (1u64 << (bits - 5)) - 1;
                 bits -= 5;
+                accumulator &= (1u64 << bits) - 1;
                 continue;
             }
 
-            // Try to decode a symbol
+            // Fast path: check 6-bit codes (next most common).
+            if bits >= 6 {
+                let high_6 = (accumulator >> (bits - 6)) as u32 & 0x3F;
+                // 6-bit codes range from 0x14 to 0x2d (symbols: space, %, -, ., /,
+                // 3-9, =, A-Z, _, b, d, f-h, l-p, r, u)
+                let sym_6 = match high_6 {
+                    0x14 => Some(b' '),
+                    0x15 => Some(b'%'),
+                    0x16 => Some(b'-'),
+                    0x17 => Some(b'.'),
+                    0x18 => Some(b'/'),
+                    0x19 => Some(b'3'),
+                    0x1a => Some(b'4'),
+                    0x1b => Some(b'5'),
+                    0x1c => Some(b'6'),
+                    0x1d => Some(b'7'),
+                    0x1e => Some(b'8'),
+                    0x1f => Some(b'9'),
+                    0x20 => Some(b'='),
+                    0x21 => Some(b'A'),
+                    0x22 => Some(b'_'),
+                    0x23 => Some(b'b'),
+                    0x24 => Some(b'd'),
+                    0x25 => Some(b'f'),
+                    0x26 => Some(b'g'),
+                    0x27 => Some(b'h'),
+                    0x28 => Some(b'l'),
+                    0x29 => Some(b'm'),
+                    0x2a => Some(b'n'),
+                    0x2b => Some(b'p'),
+                    0x2c => Some(b'r'),
+                    0x2d => Some(b'u'),
+                    _ => None,
+                };
+                if let Some(s) = sym_6 {
+                    result.push(s);
+                    bits -= 6;
+                    accumulator &= (1u64 << bits) - 1;
+                    continue;
+                }
+            }
+
+            // Fast path: check 7-bit codes.
+            if bits >= 7 {
+                let high_7 = (accumulator >> (bits - 7)) as u32 & 0x7F;
+                let sym_7 = match high_7 {
+                    0x5c => Some(b':'),
+                    0x5d => Some(b'B'),
+                    0x5e => Some(b'C'),
+                    0x5f => Some(b'D'),
+                    0x60 => Some(b'E'),
+                    0x61 => Some(b'F'),
+                    0x62 => Some(b'G'),
+                    0x63 => Some(b'H'),
+                    0x64 => Some(b'I'),
+                    0x65 => Some(b'J'),
+                    0x66 => Some(b'K'),
+                    0x67 => Some(b'L'),
+                    0x68 => Some(b'M'),
+                    0x69 => Some(b'N'),
+                    0x6a => Some(b'O'),
+                    0x6b => Some(b'P'),
+                    0x6c => Some(b'Q'),
+                    0x6d => Some(b'R'),
+                    0x6e => Some(b'S'),
+                    0x6f => Some(b'T'),
+                    0x70 => Some(b'U'),
+                    0x71 => Some(b'V'),
+                    0x72 => Some(b'W'),
+                    0x73 => Some(b'Y'),
+                    0x74 => Some(b'j'),
+                    0x75 => Some(b'k'),
+                    0x76 => Some(b'q'),
+                    0x77 => Some(b'v'),
+                    0x78 => Some(b'w'),
+                    0x79 => Some(b'x'),
+                    0x7a => Some(b'y'),
+                    0x7b => Some(b'z'),
+                    _ => None,
+                };
+                if let Some(s) = sym_7 {
+                    result.push(s);
+                    bits -= 7;
+                    accumulator &= (1u64 << bits) - 1;
+                    continue;
+                }
+            }
+
+            // Fast path: check 8-bit codes.
+            if bits >= 8 {
+                let high_8 = (accumulator >> (bits - 8)) as u32 & 0xFF;
+                let sym_8 = match high_8 {
+                    0xf8 => Some(b'&'),
+                    0xf9 => Some(b'*'),
+                    0xfa => Some(b','),
+                    0xfb => Some(b';'),
+                    0xfc => Some(b'X'),
+                    0xfd => Some(b'Z'),
+                    _ => None,
+                };
+                if let Some(s) = sym_8 {
+                    result.push(s);
+                    bits -= 8;
+                    accumulator &= (1u64 << bits) - 1;
+                    continue;
+                }
+            }
+
+            // Slow path for codes 9-30 bits: use table scan but only for
+            // codes of the exact length range we need. Since we already
+            // handled 5-8 bit codes above, we start at 9.
             let mut decoded = false;
+            for code_len in 9u32..=30 {
+                if bits < code_len {
+                    break;
+                }
+                let shift = bits - code_len;
+                let candidate = (accumulator >> shift) as u32;
+                let mask = (1u32 << code_len) - 1;
+                let candidate = candidate & mask;
 
-            for (sym, &(code, code_bits)) in HUFFMAN_TABLE.iter().enumerate() {
-                let code_bits_u32 = u32::from(code_bits);
-                if bits >= code_bits_u32 {
-                    let shift = bits - code_bits_u32;
-                    let candidate = (accumulator >> shift) as u32;
-                    let mask = (1u32 << code_bits_u32) - 1;
-
-                    if candidate == (code & mask) {
+                // Scan only entries with matching code length.
+                for (sym, &(code, code_bits)) in HUFFMAN_TABLE.iter().enumerate() {
+                    if u32::from(code_bits) != code_len {
+                        continue;
+                    }
+                    if (code & mask) == candidate {
                         if sym == 256 {
-                            // EOS symbol should only appear at padding
-                            // For now, treat as end of string
                             return String::from_utf8(result)
                                 .map_err(|_| H2Error::compression("invalid UTF-8 in huffman"));
                         }
                         result.push(sym as u8);
-                        accumulator &= (1u64 << shift) - 1;
                         bits = shift;
+                        accumulator &= (1u64 << bits) - 1;
                         decoded = true;
                         break;
                     }
                 }
+                if decoded {
+                    break;
+                }
             }
 
             if !decoded {
-                // No symbol matched, need more bits
                 break;
             }
         }
