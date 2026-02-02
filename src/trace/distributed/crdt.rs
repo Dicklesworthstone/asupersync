@@ -162,9 +162,7 @@ impl<V: Ord + Clone> LWWRegister<V> {
     /// The update is only applied if `timestamp` is strictly greater than
     /// the current timestamp (or equal with a greater node id for tie-breaking).
     pub fn set(&mut self, value: V, timestamp: u64, node: NodeId) {
-        if timestamp > self.timestamp
-            || (timestamp == self.timestamp && node > self.node)
-        {
+        if timestamp > self.timestamp || (timestamp == self.timestamp && node > self.node) {
             self.value = value;
             self.timestamp = timestamp;
             self.node = node;
@@ -386,8 +384,7 @@ fn dominates(a: &BTreeMap<NodeId, u64>, b: &BTreeMap<NodeId, u64>) -> bool {
 impl<V: Ord + Clone> Merge for MVRegister<V> {
     fn merge(&mut self, other: &Self) {
         // Collect all entries from both sides, then remove dominated ones.
-        let mut combined: Vec<(V, BTreeMap<NodeId, u64>)> =
-            self.entries.iter().cloned().collect();
+        let mut combined: Vec<(V, BTreeMap<NodeId, u64>)> = self.entries.iter().cloned().collect();
         for entry in &other.entries {
             combined.push(entry.clone());
         }
@@ -395,9 +392,10 @@ impl<V: Ord + Clone> Merge for MVRegister<V> {
         // Remove entries dominated by any other entry.
         let mut kept = BTreeSet::new();
         for (i, (v_i, ver_i)) in combined.iter().enumerate() {
-            let is_dominated = combined.iter().enumerate().any(|(j, (_, ver_j))| {
-                i != j && dominates(ver_j, ver_i)
-            });
+            let is_dominated = combined
+                .iter()
+                .enumerate()
+                .any(|(j, (_, ver_j))| i != j && dominates(ver_j, ver_i));
             if !is_dominated {
                 kept.insert((v_i.clone(), ver_i.clone()));
             }
@@ -592,7 +590,7 @@ mod tests {
         let r1 = LWWRegister::new("v1".to_string(), 3, node("a"));
         let r2 = LWWRegister::new("v2".to_string(), 5, node("b"));
 
-        let mut merged = r1.clone();
+        let mut merged = r1;
         merged.merge(&r2);
         assert_eq!(merged.value(), "v2");
     }
@@ -710,8 +708,8 @@ mod tests {
         r1.merge(&r2);
         // Both concurrent values preserved.
         assert_eq!(r1.len(), 2);
-        let mut vals: Vec<_> = r1.values().cloned().collect();
-        vals.sort();
+        let mut vals: Vec<_> = r1.values().copied().collect();
+        vals.sort_unstable();
         assert_eq!(vals, vec!["from_a", "from_b"]);
     }
 
