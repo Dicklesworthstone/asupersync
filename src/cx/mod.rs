@@ -40,5 +40,5 @@
 pub mod cx;
 pub mod scope;
 
-pub use cx::Cx;
+pub use cx::{Cx, SpanGuard};
 pub use scope::Scope;

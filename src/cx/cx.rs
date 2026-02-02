@@ -1102,6 +1102,80 @@ impl Cx {
         trace.push_event(TraceEvent::user_trace(seq, now, message));
     }
 
+    /// Logs a trace-level message with structured key-value fields.
+    ///
+    /// Each field is attached to the resulting `LogEntry`, making it
+    /// queryable in the log collector.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// cx.trace_with_fields("request handled", &[
+    ///     ("method", "GET"),
+    ///     ("path", "/api/users"),
+    ///     ("status", "200"),
+    /// ]);
+    /// ```
+    pub fn trace_with_fields(&self, message: &str, fields: &[(&str, &str)]) {
+        let mut entry = LogEntry::trace(message);
+        for &(k, v) in fields {
+            entry = entry.with_field(k, v);
+        }
+        self.log(entry);
+        let Some(trace) = self.trace_buffer() else {
+            return;
+        };
+        let now = self
+            .timer_driver
+            .as_ref()
+            .map_or_else(wall_clock_now, TimerDriverHandle::now);
+        let seq = trace.next_seq();
+        trace.push_event(TraceEvent::user_trace(seq, now, message));
+    }
+
+    /// Enters a named span, returning a guard that ends the span on drop.
+    ///
+    /// The span forks the current `DiagnosticContext`, assigning a new
+    /// `SpanId` with the previous span as parent. When the guard is
+    /// dropped the original context is restored.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// {
+    ///     let _guard = cx.enter_span("parse_request");
+    ///     // ... work inside the span ...
+    /// } // span ends here
+    /// ```
+    #[must_use]
+    pub fn enter_span(&self, name: &str) -> SpanGuard {
+        let prev = self.diagnostic_context();
+        let child = prev.fork().with_custom("span.name", name);
+        self.set_diagnostic_context(child);
+        self.log(LogEntry::debug(format!("span enter: {name}")).with_target("tracing"));
+        SpanGuard {
+            cx: self.clone(),
+            prev,
+        }
+    }
+
+    /// Sets a request correlation ID on the diagnostic context.
+    ///
+    /// The ID propagates to all log entries and child spans created
+    /// from this context, enabling end-to-end request tracing.
+    pub fn set_request_id(&self, id: impl Into<String>) {
+        let mut obs = self.observability.write().expect("lock poisoned");
+        obs.context = obs.context.clone().with_custom("request_id", id);
+    }
+
+    /// Returns the current request correlation ID, if set.
+    #[must_use]
+    pub fn request_id(&self) -> Option<String> {
+        self.diagnostic_context()
+            .custom("request_id")
+            .map(String::from)
+    }
+
     /// Logs a structured entry to the attached collector, if present.
     pub fn log(&self, entry: LogEntry) {
         let obs = self.observability.read().expect("lock poisoned");
@@ -1747,6 +1821,29 @@ impl Cx {
             "scope budget set"
         );
         crate::cx::Scope::new(self.region_id(), budget)
+    }
+}
+
+/// RAII guard returned by [`Cx::enter_span`].
+///
+/// On drop, restores the previous `DiagnosticContext` and emits a
+/// span-exit log entry.
+pub struct SpanGuard {
+    cx: Cx,
+    prev: DiagnosticContext,
+}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        let name = self
+            .cx
+            .diagnostic_context()
+            .custom("span.name")
+            .unwrap_or("unknown")
+            .to_owned();
+        self.cx
+            .log(LogEntry::debug(format!("span exit: {name}")).with_target("tracing"));
+        self.cx.set_diagnostic_context(self.prev.clone());
     }
 }
 
