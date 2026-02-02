@@ -221,7 +221,10 @@ mod tests {
 
         // First stream is empty, so after one poll it should be dropped
         let _ = Pin::new(&mut stream).poll_next(&mut cx);
-        assert!(stream.first_ref().is_none(), "first should be None after exhaustion");
+        assert!(
+            stream.first_ref().is_none(),
+            "first should be None after exhaustion"
+        );
         crate::test_complete!("chain_first_consumed_after_exhaustion");
     }
 
@@ -245,10 +248,10 @@ mod tests {
         let _ = Pin::new(&mut stream).poll_next(&mut cx); // yields 1
         let _ = Pin::new(&mut stream).poll_next(&mut cx); // first exhausted, yields 2
 
-        // Size hint should now reflect only second stream's remaining items
+        // Size hint should now reflect only second stream's remaining items (one left: 3)
         let hint = stream.size_hint();
-        let ok = hint == (0, Some(0));
-        crate::assert_with_log!(ok, "hint after exhaust", (0, Some(0)), hint);
+        let ok = hint == (1, Some(1));
+        crate::assert_with_log!(ok, "hint after exhaust", (1, Some(1)), hint);
         crate::test_complete!("chain_size_hint_after_first_exhausted");
     }
 

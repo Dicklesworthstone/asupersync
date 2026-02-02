@@ -317,9 +317,16 @@ mod tests {
     #[test]
     fn filter_map_alternating() {
         init_test("filter_map_alternating");
-        let mut stream = FilterMap::new(iter(1..=6), |x: i32| {
-            if x % 2 == 0 { Some(x * 10) } else { None }
-        });
+        let mut stream = FilterMap::new(
+            iter(1..=6),
+            |x: i32| {
+                if x % 2 == 0 {
+                    Some(x * 10)
+                } else {
+                    None
+                }
+            },
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -370,7 +377,11 @@ mod tests {
         let mut sum = 0i32;
         let mut stream = FilterMap::new(iter(vec![1, 2, 3, 4, 5]), move |x: i32| {
             sum += x;
-            if sum > 6 { Some(sum) } else { None }
+            if sum > 6 {
+                Some(sum)
+            } else {
+                None
+            }
         });
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
