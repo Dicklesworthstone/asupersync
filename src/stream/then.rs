@@ -64,3 +64,72 @@ where
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::iter;
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
+
+    struct NoopWaker;
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn collect_then<S, Fut, F>(stream: &mut Then<S, Fut, F>) -> Vec<Fut::Output>
+    where
+        S: Stream + Unpin,
+        F: FnMut(S::Item) -> Fut + Unpin,
+        Fut: Future,
+    {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut *stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => break,
+            }
+        }
+        items
+    }
+
+    #[test]
+    fn test_then_async_transform() {
+        let mut s = Then::new(iter(vec![1, 2, 3]), |x: i32| async move { x * 2 });
+        let items = collect_then(&mut s);
+        assert_eq!(items, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_then_empty_stream() {
+        let mut s = Then::new(iter(Vec::<i32>::new()), |x: i32| async move { x });
+        let items = collect_then(&mut s);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_then_type_change() {
+        let mut s = Then::new(iter(vec![1, 2]), |x: i32| async move { format!("{x}") });
+        let items = collect_then(&mut s);
+        assert_eq!(items, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn test_then_size_hint() {
+        let s = Then::new(iter(vec![1, 2, 3]), |x: i32| async move { x });
+        assert_eq!(s.size_hint(), (3, Some(3)));
+    }
+
+    #[test]
+    fn test_then_single_item() {
+        let mut s = Then::new(iter(vec![42]), |x: i32| async move { x + 1 });
+        let items = collect_then(&mut s);
+        assert_eq!(items, vec![43]);
+    }
+}
