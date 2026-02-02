@@ -39,6 +39,10 @@ tls-webpki-roots = ["tls", "dep:webpki-roots"]
 cli = ["dep:clap", "dep:time", "trace-compression", "dep:conformance"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite"]
+# Enable PostgreSQL async client with wire protocol.
+postgres = ["dep:sha2"]
+# Enable QUIC protocol support via quinn.
+quic = ["dep:quinn", "tls"]
 
 [lib]
 path = "src/lib.rs"
@@ -105,6 +109,10 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 time = { version = "0.3", features = ["formatting"], optional = true }
 # SQLite async wrapper - bundled by default for portability
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
+# SHA-256 for PostgreSQL SCRAM authentication
+sha2 = { version = "0.10", optional = true }
+# QUIC protocol implementation via quinn
+quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }

@@ -5,16 +5,28 @@
 //!
 //! # Available Clients
 //!
-//! - [`sqlite`]: SQLite async wrapper using blocking pool
+//! - [`sqlite`]: SQLite async wrapper using blocking pool (requires `sqlite` feature)
+//! - [`postgres`]: PostgreSQL async client with wire protocol (requires `postgres` feature)
 //!
 //! # Design Philosophy
 //!
-//! Database clients use the blocking pool to execute synchronous operations
-//! without blocking the async runtime. All operations integrate with [`Cx`]
-//! for checkpointing and cancellation.
+//! Database clients integrate with [`Cx`] for checkpointing and cancellation.
+//! SQLite uses the blocking pool for synchronous operations, while PostgreSQL
+//! implements the wire protocol over async TCP.
 //!
 //! [`Cx`]: crate::cx::Cx
 
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
+#[cfg(feature = "sqlite")]
 pub use sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, SqliteValue};
+
+#[cfg(feature = "postgres")]
+pub use postgres::{
+    oid as pg_oid, PgColumn, PgConnectOptions, PgConnection, PgError, PgRow, PgTransaction,
+    PgValue, SslMode,
+};
