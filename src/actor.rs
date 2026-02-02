@@ -1012,7 +1012,7 @@ where
                 cx.trace("supervised_actor::failure");
 
                 let outcome = Outcome::err(());
-                let now = 0u64; // Virtual time placeholder for determinism
+                let now = cx.timer_driver().map_or(0, |td| td.now().as_nanos());
                 let decision = supervisor.on_failure(task_id, region_id, None, outcome, now);
 
                 match decision {

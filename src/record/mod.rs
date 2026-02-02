@@ -18,6 +18,7 @@ pub use distributed_region::{
     ReplicaInfo, ReplicaStatus, StateTransition, TransitionReason,
 };
 pub use finalizer::{Finalizer, FinalizerEscalation, FinalizerStack};
+pub use obligation::SourceLocation;
 pub use obligation::{ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState};
 pub use region::{AdmissionError, AdmissionKind, RegionLimits, RegionRecord};
 pub use symbol_obligation_tracker::{

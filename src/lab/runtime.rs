@@ -10,6 +10,7 @@ use super::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
 use super::oracle::OracleSuite;
 use crate::record::ObligationKind;
+use crate::runtime::config::ObligationLeakResponse;
 use crate::runtime::deadline_monitor::{
     default_warning_handler, DeadlineMonitor, DeadlineWarning, MonitorConfig,
 };
@@ -79,6 +80,11 @@ impl LabRuntime {
             |chaos| Arc::new(LabReactor::with_chaos(chaos.clone())),
         );
         let mut state = RuntimeState::with_reactor(lab_reactor.clone());
+        state.set_obligation_leak_response(if config.panic_on_obligation_leak {
+            ObligationLeakResponse::Panic
+        } else {
+            ObligationLeakResponse::Log
+        });
         let virtual_clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
         state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(
             virtual_clock.clone(),

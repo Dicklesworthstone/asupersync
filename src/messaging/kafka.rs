@@ -30,6 +30,24 @@ use std::fmt;
 use std::io;
 use std::time::Duration;
 
+#[cfg(feature = "kafka")]
+use rdkafka::{
+    client::ClientContext,
+    config::ClientConfig,
+    error::{KafkaError as RdKafkaError, RDKafkaErrorCode},
+    message::{BorrowedMessage, DeliveryResult, Header, Message, OwnedHeaders},
+    producer::{BaseRecord, Producer, ProducerContext, ThreadedProducer},
+    util::Timeout,
+};
+#[cfg(feature = "kafka")]
+use std::future::Future;
+#[cfg(feature = "kafka")]
+use std::pin::Pin;
+#[cfg(feature = "kafka")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "kafka")]
+use std::task::{Context, Poll, Waker};
+
 /// Error type for Kafka operations.
 #[derive(Debug)]
 pub enum KafkaError {
@@ -88,6 +106,270 @@ impl std::error::Error for KafkaError {
 impl From<io::Error> for KafkaError {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+#[cfg(feature = "kafka")]
+#[derive(Debug)]
+struct KafkaContext;
+
+#[cfg(feature = "kafka")]
+impl ClientContext for KafkaContext {}
+
+#[cfg(feature = "kafka")]
+impl ProducerContext for KafkaContext {
+    type DeliveryOpaque = Box<DeliverySender>;
+
+    fn delivery(
+        &self,
+        delivery_result: &DeliveryResult<'_>,
+        delivery_opaque: Self::DeliveryOpaque,
+    ) {
+        let mapped = map_delivery_result(delivery_result);
+        delivery_opaque.complete(mapped);
+    }
+}
+
+#[cfg(feature = "kafka")]
+#[derive(Debug)]
+struct DeliveryState {
+    value: Option<Result<RecordMetadata, KafkaError>>,
+    waker: Option<Waker>,
+    closed: bool,
+}
+
+#[cfg(feature = "kafka")]
+impl DeliveryState {
+    fn new() -> Self {
+        Self {
+            value: None,
+            waker: None,
+            closed: false,
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+#[derive(Debug)]
+struct DeliverySender {
+    inner: Arc<Mutex<DeliveryState>>,
+}
+
+#[cfg(feature = "kafka")]
+impl DeliverySender {
+    fn complete(self, value: Result<RecordMetadata, KafkaError>) {
+        let mut state = self.inner.lock().expect("delivery lock poisoned");
+        if state.closed || state.value.is_some() {
+            return;
+        }
+        state.value = Some(value);
+        if let Some(waker) = state.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+#[derive(Debug)]
+struct DeliveryReceiver {
+    inner: Arc<Mutex<DeliveryState>>,
+    cx: Cx,
+}
+
+#[cfg(feature = "kafka")]
+impl Drop for DeliveryReceiver {
+    fn drop(&mut self) {
+        let mut state = self.inner.lock().expect("delivery lock poisoned");
+        state.closed = true;
+        state.waker = None;
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl Future for DeliveryReceiver {
+    type Output = Result<RecordMetadata, KafkaError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.cx.checkpoint().is_err() {
+            let mut state = self.inner.lock().expect("delivery lock poisoned");
+            state.closed = true;
+            state.waker = None;
+            return Poll::Ready(Err(KafkaError::Cancelled));
+        }
+
+        let mut state = self.inner.lock().expect("delivery lock poisoned");
+        if let Some(value) = state.value.take() {
+            Poll::Ready(value)
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn delivery_channel(cx: &Cx) -> (DeliverySender, DeliveryReceiver) {
+    let inner = Arc::new(Mutex::new(DeliveryState::new()));
+    (
+        DeliverySender {
+            inner: Arc::clone(&inner),
+        },
+        DeliveryReceiver {
+            inner,
+            cx: cx.clone(),
+        },
+    )
+}
+
+#[cfg(feature = "kafka")]
+fn map_delivery_result(delivery_result: &DeliveryResult<'_>) -> Result<RecordMetadata, KafkaError> {
+    match delivery_result {
+        Ok(message) => Ok(record_metadata_from_message(message)),
+        Err((err, message)) => Err(map_rdkafka_error(err, Some(message))),
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn record_metadata_from_message(message: &BorrowedMessage<'_>) -> RecordMetadata {
+    RecordMetadata {
+        topic: message.topic().to_string(),
+        partition: message.partition(),
+        offset: message.offset(),
+        timestamp: message.timestamp().to_millis(),
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) -> KafkaError {
+    match err {
+        RdKafkaError::ClientConfig(_, _, _, msg) => KafkaError::Config(msg.clone()),
+        RdKafkaError::MessageProduction(code) => {
+            map_error_code(*code, message.map(|msg| msg.topic()))
+        }
+        RdKafkaError::Canceled => KafkaError::Cancelled,
+        _ => KafkaError::Broker(err.to_string()),
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn map_error_code(code: RDKafkaErrorCode, topic: Option<&str>) -> KafkaError {
+    match code {
+        RDKafkaErrorCode::QueueFull => KafkaError::QueueFull,
+        RDKafkaErrorCode::InvalidTopic | RDKafkaErrorCode::UnknownTopic => {
+            KafkaError::InvalidTopic(topic.unwrap_or("unknown").to_string())
+        }
+        _ => KafkaError::Broker(format!("{code:?}")),
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn compression_to_str(compression: Compression) -> &'static str {
+    match compression {
+        Compression::None => "none",
+        Compression::Gzip => "gzip",
+        Compression::Snappy => "snappy",
+        Compression::Lz4 => "lz4",
+        Compression::Zstd => "zstd",
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn acks_to_str(acks: Acks) -> &'static str {
+    match acks {
+        Acks::None => "0",
+        Acks::Leader => "1",
+        Acks::All => "all",
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn build_client_config(
+    config: &ProducerConfig,
+    transactional: Option<&TransactionalConfig>,
+) -> Result<ClientConfig, KafkaError> {
+    let mut client = ClientConfig::new();
+    client.set("bootstrap.servers", config.bootstrap_servers.join(","));
+    if let Some(client_id) = &config.client_id {
+        client.set("client.id", client_id);
+    }
+    client.set("batch.size", config.batch_size.to_string());
+    client.set("linger.ms", config.linger_ms.to_string());
+    client.set("compression.type", compression_to_str(config.compression));
+    client.set("enable.idempotence", config.enable_idempotence.to_string());
+    client.set("acks", acks_to_str(config.acks));
+    client.set("retries", config.retries.to_string());
+    client.set(
+        "request.timeout.ms",
+        config.request_timeout.as_millis().to_string(),
+    );
+    client.set("message.max.bytes", config.max_message_size.to_string());
+
+    if let Some(tx) = transactional {
+        client.set("transactional.id", tx.transaction_id.as_str());
+        client.set(
+            "transaction.timeout.ms",
+            tx.transaction_timeout.as_millis().to_string(),
+        );
+        client.set("enable.idempotence", "true");
+    }
+
+    Ok(client)
+}
+
+#[cfg(feature = "kafka")]
+fn build_producer(
+    config: &ProducerConfig,
+    transactional: Option<&TransactionalConfig>,
+) -> Result<ThreadedProducer<KafkaContext>, KafkaError> {
+    let client = build_client_config(config, transactional)?;
+    client
+        .create_with_context(KafkaContext)
+        .map_err(|err| map_rdkafka_error(&err, None))
+}
+
+#[cfg(feature = "kafka")]
+async fn send_with_producer(
+    producer: &ThreadedProducer<KafkaContext>,
+    cx: &Cx,
+    config: &ProducerConfig,
+    topic: &str,
+    key: Option<&[u8]>,
+    payload: &[u8],
+    partition: Option<i32>,
+    headers: Option<&[(&str, &[u8])]>,
+) -> Result<RecordMetadata, KafkaError> {
+    cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+
+    if payload.len() > config.max_message_size {
+        return Err(KafkaError::MessageTooLarge {
+            size: payload.len(),
+            max_size: config.max_message_size,
+        });
+    }
+
+    let (sender, receiver) = delivery_channel(cx);
+
+    let mut record = BaseRecord::with_opaque_to(topic, Box::new(sender)).payload(payload);
+    if let Some(key) = key {
+        record = record.key(key);
+    }
+    if let Some(partition) = partition {
+        record = record.partition(partition);
+    }
+    if let Some(headers) = headers {
+        let mut owned_headers = OwnedHeaders::new();
+        for (key, value) in headers {
+            owned_headers = owned_headers.insert(Header {
+                key,
+                value: Some(*value),
+            });
+        }
+        record = record.headers(owned_headers);
+    }
+
+    match producer.send(record) {
+        Ok(()) => receiver.await,
+        Err((err, _)) => Err(map_rdkafka_error(&err, None)),
     }
 }
 

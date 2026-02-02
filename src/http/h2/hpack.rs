@@ -1976,9 +1976,7 @@ mod tests {
         for shift in 0..=40u8 {
             // Continuation bytes that would cause large shifts
             let mut data = vec![0x7f_u8]; // 7-bit prefix full
-            for _ in 0..shift {
-                data.push(0xff); // continuation byte
-            }
+            data.extend(std::iter::repeat_n(0xff, shift as usize));
             data.push(0x00); // terminator
             let mut src = Bytes::from(data);
             let _ = decode_integer(&mut src, 7);

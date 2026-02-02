@@ -228,19 +228,19 @@ impl SymbolCancelToken {
     pub fn child(&self, rng: &mut DetRng) -> Self {
         let child = Self::new(self.state.object_id, rng);
 
-        // If already cancelled, cancel child immediately
+        // Hold the children lock across the cancelled check to avoid a TOCTOU
+        // race: cancel() sets the `cancelled` flag (SeqCst) *before* reading
+        // children, so if we observe !cancelled under the write lock the
+        // subsequent cancel() will see our child when it reads the list.
+        let mut children = self.state.children.write().expect("lock poisoned");
         if self.is_cancelled() {
+            drop(children);
             if let Some(at) = self.cancelled_at() {
                 let parent_reason = CancelReason::parent_cancelled();
                 child.cancel(&parent_reason, at);
             }
         } else {
-            // Register child for future propagation
-            self.state
-                .children
-                .write()
-                .expect("lock poisoned")
-                .push(child.clone());
+            children.push(child.clone());
         }
 
         child
@@ -248,19 +248,19 @@ impl SymbolCancelToken {
 
     /// Adds a listener to be notified on cancellation.
     pub fn add_listener(&self, listener: impl CancelListener + 'static) {
-        // If already cancelled, notify immediately
+        // Hold the listeners lock across the cancelled check to avoid a TOCTOU
+        // race: cancel() sets the `cancelled` flag (SeqCst) *before* draining
+        // listeners, so if we observe !cancelled under the write lock the
+        // subsequent cancel() will find our listener when it drains.
+        let mut listeners = self.state.listeners.write().expect("lock poisoned");
         if self.is_cancelled() {
+            drop(listeners);
             if let (Some(reason), Some(at)) = (self.reason(), self.cancelled_at()) {
                 listener.on_cancel(&reason, at);
-                return;
             }
+        } else {
+            listeners.push(Box::new(listener));
         }
-
-        self.state
-            .listeners
-            .write()
-            .expect("lock poisoned")
-            .push(Box::new(listener));
     }
 
     /// Serializes the token for embedding in symbol metadata.

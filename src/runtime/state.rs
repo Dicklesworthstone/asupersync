@@ -122,12 +122,7 @@ impl fmt::Display for LeakedObligationInfo {
         write!(
             f,
             "{:?} {:?} holder={:?} region={:?} acquired_at={} held_ns={}",
-            self.id,
-            self.kind,
-            self.holder,
-            self.region,
-            self.acquired_at,
-            self.held_duration_ns
+            self.id, self.kind, self.holder, self.region, self.acquired_at, self.held_duration_ns
         )?;
         if let Some(desc) = &self.description {
             write!(f, " desc={desc}")?;
@@ -771,6 +766,7 @@ impl RuntimeState {
             .collect()
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
         if error.leaks.is_empty() {
             return;
@@ -833,16 +829,17 @@ impl RuntimeState {
         let acquire_backtrace = Self::capture_obligation_backtrace();
         let reserved_at = self.now;
         let idx = if let Some(desc) = description {
-            self.obligations.insert(ObligationRecord::with_description_and_context(
-                ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
-                kind,
-                holder,
-                region,
-                reserved_at,
-                desc,
-                acquired_at,
-                acquire_backtrace.clone(),
-            ))
+            self.obligations
+                .insert(ObligationRecord::with_description_and_context(
+                    ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+                    kind,
+                    holder,
+                    region,
+                    reserved_at,
+                    desc,
+                    acquired_at,
+                    acquire_backtrace,
+                ))
         } else {
             self.obligations.insert(ObligationRecord::new_with_context(
                 ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
@@ -851,7 +848,7 @@ impl RuntimeState {
                 region,
                 reserved_at,
                 acquired_at,
-                acquire_backtrace.clone(),
+                acquire_backtrace,
             ))
         };
         let obligation_id = ObligationId::from_arena(idx);
@@ -1067,8 +1064,8 @@ impl RuntimeState {
                 acquired_at = %acquired_at
             );
             let _span_guard = span.enter();
+            #[allow(clippy::single_match, unused_variables)]
             match acquire_backtrace.as_ref() {
-                #[allow(unused_variables)]
                 Some(backtrace) => {
                     crate::tracing_compat::error!(
                         obligation_id = ?id,
@@ -1834,9 +1831,8 @@ impl RuntimeState {
                                 .is_none_or(|t| t.state.is_terminal())
                         });
                         if tasks_done {
-                            let leaks = self.collect_obligation_leaks(|record| {
-                                record.region == region_id
-                            });
+                            let leaks =
+                                self.collect_obligation_leaks(|record| record.region == region_id);
                             if !leaks.is_empty() {
                                 self.handle_obligation_leaks(ObligationLeakError {
                                     task_id: None,

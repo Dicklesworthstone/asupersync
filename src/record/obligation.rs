@@ -6,6 +6,47 @@
 use crate::tracing_compat::{error, info, trace};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use core::fmt;
+use std::backtrace::Backtrace;
+use std::sync::Arc;
+
+/// Source location captured at obligation acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// Source file path.
+    pub file: &'static str,
+    /// 1-based line number.
+    pub line: u32,
+    /// 1-based column number.
+    pub column: u32,
+}
+
+impl SourceLocation {
+    /// Returns an unknown source location placeholder.
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            file: "<unknown>",
+            line: 0,
+            column: 0,
+        }
+    }
+
+    /// Builds a source location from a `std::panic::Location`.
+    #[must_use]
+    pub fn from_panic_location(location: &'static std::panic::Location<'static>) -> Self {
+        Self {
+            file: location.file(),
+            line: location.line(),
+            column: location.column(),
+        }
+    }
+}
+
+impl fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+    }
+}
 
 /// The kind of obligation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -139,6 +180,10 @@ pub struct ObligationRecord {
     pub state: ObligationState,
     /// Optional description for debugging.
     pub description: Option<String>,
+    /// Source location where the obligation was acquired.
+    pub acquired_at: SourceLocation,
+    /// Optional backtrace captured at acquisition (debug-only).
+    pub acquire_backtrace: Option<Arc<Backtrace>>,
     /// Time when the obligation was reserved.
     pub reserved_at: Time,
     /// Time when the obligation was resolved.
@@ -157,12 +202,35 @@ impl ObligationRecord {
         region: RegionId,
         reserved_at: Time,
     ) -> Self {
+        Self::new_with_context(
+            id,
+            kind,
+            holder,
+            region,
+            reserved_at,
+            SourceLocation::unknown(),
+            None,
+        )
+    }
+
+    /// Creates a new obligation record with acquisition context.
+    #[must_use]
+    pub fn new_with_context(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+        acquired_at: SourceLocation,
+        acquire_backtrace: Option<Arc<Backtrace>>,
+    ) -> Self {
         trace!(
             obligation_id = ?id,
             kind = %kind,
             holder_task = ?holder,
             owning_region = ?region,
             reserved_at = ?reserved_at,
+            acquired_at = %acquired_at,
             "obligation reserved"
         );
         Self {
@@ -172,6 +240,8 @@ impl ObligationRecord {
             region,
             state: ObligationState::Reserved,
             description: None,
+            acquired_at,
+            acquire_backtrace,
             reserved_at,
             resolved_at: None,
             abort_reason: None,
@@ -188,6 +258,31 @@ impl ObligationRecord {
         reserved_at: Time,
         description: impl Into<String>,
     ) -> Self {
+        Self::with_description_and_context(
+            id,
+            kind,
+            holder,
+            region,
+            reserved_at,
+            description,
+            SourceLocation::unknown(),
+            None,
+        )
+    }
+
+    /// Creates an obligation with a description and acquisition context.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_description_and_context(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+        description: impl Into<String>,
+        acquired_at: SourceLocation,
+        acquire_backtrace: Option<Arc<Backtrace>>,
+    ) -> Self {
         let desc = description.into();
         trace!(
             obligation_id = ?id,
@@ -196,6 +291,7 @@ impl ObligationRecord {
             owning_region = ?region,
             reserved_at = ?reserved_at,
             description = %desc,
+            acquired_at = %acquired_at,
             "obligation reserved"
         );
         Self {
@@ -205,6 +301,8 @@ impl ObligationRecord {
             region,
             state: ObligationState::Reserved,
             description: Some(desc),
+            acquired_at,
+            acquire_backtrace,
             reserved_at,
             resolved_at: None,
             abort_reason: None,

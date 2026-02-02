@@ -130,7 +130,7 @@ impl RestartConfig {
 ///
 /// Backoff helps prevent thundering herd issues and gives transient
 /// failures time to resolve.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum BackoffStrategy {
     /// No delay between restarts.
     None,
@@ -145,8 +145,31 @@ pub enum BackoffStrategy {
         /// Maximum delay cap.
         max: Duration,
         /// Multiplier for each subsequent restart (typically 2.0).
+        /// Must be finite (not NaN or infinity).
         multiplier: f64,
     },
+}
+
+impl PartialEq for BackoffStrategy {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::None, Self::None) => true,
+            (Self::Fixed(a), Self::Fixed(b)) => a == b,
+            (
+                Self::Exponential {
+                    initial: i1,
+                    max: m1,
+                    multiplier: mul1,
+                },
+                Self::Exponential {
+                    initial: i2,
+                    max: m2,
+                    multiplier: mul2,
+                },
+            ) => i1 == i2 && m1 == m2 && mul1.to_bits() == mul2.to_bits(),
+            _ => false,
+        }
+    }
 }
 
 impl Default for BackoffStrategy {

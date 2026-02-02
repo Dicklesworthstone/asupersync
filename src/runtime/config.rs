@@ -42,6 +42,17 @@ impl BlockingPoolConfig {
     }
 }
 
+/// Response policy when obligation leaks are detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObligationLeakResponse {
+    /// Panic immediately with diagnostic details.
+    Panic,
+    /// Log the leak and continue.
+    Log,
+    /// Suppress logging for leaks (still marked as leaked).
+    Silent,
+}
+
 /// Runtime configuration.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -75,6 +86,8 @@ pub struct RuntimeConfig {
     pub metrics_provider: Arc<dyn MetricsProvider>,
     /// Optional runtime observability configuration.
     pub observability: Option<ObservabilityConfig>,
+    /// Response policy for obligation leaks detected at runtime.
+    pub obligation_leak_response: ObligationLeakResponse,
 }
 
 impl RuntimeConfig {
@@ -123,6 +136,7 @@ impl Default for RuntimeConfig {
             deadline_warning_handler: None,
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
+            obligation_leak_response: ObligationLeakResponse::Log,
         }
     }
 }

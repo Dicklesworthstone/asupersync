@@ -314,6 +314,7 @@ impl RespValue {
                     })
                 }
                 b'*' => {
+                    const MAX_ARRAY_LEN: usize = 1_000_000;
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
@@ -330,7 +331,6 @@ impl RespValue {
                     let n = usize::try_from(n)
                         .map_err(|_| RedisError::Protocol(format!("invalid array length: {n}")))?;
                     // Guard against absurdly large declared arrays (limit to 1M elements)
-                    const MAX_ARRAY_LEN: usize = 1_000_000;
                     if n > MAX_ARRAY_LEN {
                         return Err(RedisError::Protocol(format!(
                             "array length {n} exceeds maximum {MAX_ARRAY_LEN}"

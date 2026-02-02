@@ -195,6 +195,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the response policy for obligation leaks.
+    #[must_use]
+    pub fn obligation_leak_response(
+        mut self,
+        response: crate::runtime::config::ObligationLeakResponse,
+    ) -> Self {
+        self.config.obligation_leak_response = response;
+        self
+    }
+
     /// Set the worker thread stack size.
     #[must_use]
     pub fn thread_stack_size(mut self, size: usize) -> Self {
@@ -876,6 +886,7 @@ impl RuntimeInner {
             if let Some(observability) = config.observability.clone() {
                 guard.set_observability_config(observability);
             }
+            guard.set_obligation_leak_response(config.obligation_leak_response);
             if guard.timer_driver().is_none() {
                 guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
             }

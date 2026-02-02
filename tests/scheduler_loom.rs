@@ -195,12 +195,10 @@ impl LoomWakeState {
     /// Uses CAS instead of blind store to avoid clobbering a NOTIFIED state
     /// set by a concurrent waker, which would cause double scheduling.
     fn begin_poll(&self) -> bool {
-        match self.state.compare_exchange(
-            IDLE,
-            POLLING,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
+        match self
+            .state
+            .compare_exchange(IDLE, POLLING, Ordering::SeqCst, Ordering::SeqCst)
+        {
             Ok(_) => false, // IDLE -> POLLING, normal
             Err(actual) => {
                 assert_eq!(actual, NOTIFIED, "begin_poll called in unexpected state");
@@ -307,10 +305,7 @@ fn loom_wake_state_no_double_schedule() {
         let w = waker_scheduled.load(Ordering::SeqCst);
 
         // Both scheduling simultaneously is a double-schedule bug
-        assert!(
-            !(p && w),
-            "double schedule: poller={p}, waker={w}"
-        );
+        assert!(!(p && w), "double schedule: poller={p}, waker={w}");
     });
 }
 
