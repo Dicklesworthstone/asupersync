@@ -203,7 +203,10 @@ impl<T> RwLock<T> {
         self.acquire_read_state(cx)?;
 
         match self.data.read() {
-            Ok(guard) => Ok(RwLockReadGuard { lock: self, guard }),
+            Ok(guard) => Ok(RwLockReadGuard {
+                lock: self,
+                guard: Some(guard),
+            }),
             Err(poisoned) => {
                 self.poisoned.store(true, Ordering::Release);
                 self.release_reader_on_error();
@@ -218,7 +221,10 @@ impl<T> RwLock<T> {
         self.try_acquire_read_state()?;
 
         match self.data.read() {
-            Ok(guard) => Ok(RwLockReadGuard { lock: self, guard }),
+            Ok(guard) => Ok(RwLockReadGuard {
+                lock: self,
+                guard: Some(guard),
+            }),
             Err(poisoned) => {
                 self.poisoned.store(true, Ordering::Release);
                 self.release_reader_on_error();
@@ -236,7 +242,10 @@ impl<T> RwLock<T> {
         self.acquire_write_state(cx)?;
 
         match self.data.write() {
-            Ok(guard) => Ok(RwLockWriteGuard { lock: self, guard }),
+            Ok(guard) => Ok(RwLockWriteGuard {
+                lock: self,
+                guard: Some(guard),
+            }),
             Err(poisoned) => {
                 self.poisoned.store(true, Ordering::Release);
                 self.release_writer_on_error();
@@ -251,7 +260,10 @@ impl<T> RwLock<T> {
         self.try_acquire_write_state()?;
 
         match self.data.write() {
-            Ok(guard) => Ok(RwLockWriteGuard { lock: self, guard }),
+            Ok(guard) => Ok(RwLockWriteGuard {
+                lock: self,
+                guard: Some(guard),
+            }),
             Err(poisoned) => {
                 self.poisoned.store(true, Ordering::Release);
                 self.release_writer_on_error();
@@ -419,14 +431,14 @@ impl<T> RwLock<T> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct RwLockReadGuard<'a, T> {
     lock: &'a RwLock<T>,
-    guard: std::sync::RwLockReadGuard<'a, T>,
+    guard: Option<std::sync::RwLockReadGuard<'a, T>>,
 }
 
 impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.guard
+        self.guard.as_ref().expect("guard accessed after drop")
     }
 }
 
@@ -435,6 +447,10 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
         }
+        // Drop the StdRwLockReadGuard BEFORE notifying waiting writers,
+        // otherwise a woken writer blocks on data.write() because the
+        // std read guard is still held.
+        drop(self.guard.take());
         self.lock.release_reader();
     }
 }
@@ -443,20 +459,20 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct RwLockWriteGuard<'a, T> {
     lock: &'a RwLock<T>,
-    guard: std::sync::RwLockWriteGuard<'a, T>,
+    guard: Option<std::sync::RwLockWriteGuard<'a, T>>,
 }
 
 impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.guard
+        self.guard.as_ref().expect("guard accessed after drop")
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard
+        self.guard.as_mut().expect("guard accessed after drop")
     }
 }
 
@@ -465,6 +481,9 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
         }
+        // Drop the StdRwLockWriteGuard BEFORE notifying waiters,
+        // otherwise a woken reader/writer blocks on the std lock.
+        drop(self.guard.take());
         self.lock.release_writer();
     }
 }

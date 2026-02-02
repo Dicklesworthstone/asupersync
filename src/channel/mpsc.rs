@@ -330,6 +330,32 @@ impl<'a, T> Future for Reserve<'a, T> {
     }
 }
 
+impl<T> Drop for Reserve<'_, T> {
+    fn drop(&mut self) {
+        // If we have a waiter, we need to remove it from the sender's queue.
+        if let Some(waiter) = self.waiter.as_ref() {
+            // Optimization: if queued is already false (we were woken), no need to lock
+            if !waiter.load(Ordering::Acquire) {
+                return;
+            }
+
+            let mut inner = self
+                .sender
+                .shared
+                .inner
+                .lock()
+                .expect("channel lock poisoned");
+
+            // Check again under lock to be sure
+            if waiter.load(Ordering::Acquire) {
+                inner
+                    .send_wakers
+                    .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            }
+        }
+    }
+}
+
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         {

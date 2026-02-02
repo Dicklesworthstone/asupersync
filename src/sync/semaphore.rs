@@ -238,7 +238,20 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                     .state
                     .lock()
                     .expect("semaphore lock poisoned");
+
+                // If we are at the front, we need to wake the next waiter when we leave,
+                // otherwise the signal (permits available) might be lost.
+                let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
+
                 state.waiters.retain(|waiter| waiter.id != waiter_id);
+
+                if was_front {
+                    if let Some(next) = state.waiters.front() {
+                        next.waker.wake_by_ref();
+                    }
+                }
+                // Clear waiter_id so Drop doesn't try to remove it again
+                self.waiter_id = None;
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
@@ -359,7 +372,12 @@ impl OwnedSemaphorePermit {
         semaphore: std::sync::Arc<Semaphore>,
         count: usize,
     ) -> Result<Self, TryAcquireError> {
+        // Acquire permits via the semaphore's internal state directly.
+        // We forget the SemaphorePermit to avoid its Drop releasing permits,
+        // since OwnedSemaphorePermit's Drop will handle the release instead.
         let permit = semaphore.try_acquire(count)?;
+        // Transfer ownership: forget the borrow-based permit so it doesn't
+        // release on drop; the OwnedSemaphorePermit will release in its own Drop.
         std::mem::forget(permit);
         Ok(Self { semaphore, count })
     }
@@ -419,7 +437,13 @@ impl Future for OwnedAcquireFuture {
                     .state
                     .lock()
                     .expect("semaphore lock poisoned");
+                let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
                 state.waiters.retain(|waiter| waiter.id != waiter_id);
+                if was_front {
+                    if let Some(next) = state.waiters.front() {
+                        next.waker.wake_by_ref();
+                    }
+                }
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
