@@ -311,6 +311,11 @@ impl ThreeLaneWorker {
             let mut backoff = 0;
 
             loop {
+                // Check shutdown before parking to avoid hanging in the backoff loop.
+                if self.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 // Quick check for new work in both global and local queues.
                 // Previously only checked global, causing unnecessary spinning when
                 // local queue had work.
