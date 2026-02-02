@@ -503,6 +503,8 @@ impl Decoder for FrameCodec {
                     };
 
                     if payload_len > self.max_payload_size as u64 {
+                        // Reset state since we already consumed length bytes from src
+                        self.state = DecodeState::Header;
                         return Err(WsError::PayloadTooLarge {
                             size: payload_len,
                             max: self.max_payload_size,

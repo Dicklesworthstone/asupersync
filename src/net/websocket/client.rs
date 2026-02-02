@@ -157,6 +157,8 @@ impl MessageAssembler {
         partial.data.extend_from_slice(frame.payload.as_ref());
         let total_len = partial.data.len();
         if total_len > self.max_message_size {
+            // Clear partial state to prevent corrupt follow-up continuations
+            self.partial = None;
             return Err(WsError::PayloadTooLarge {
                 size: total_len as u64,
                 max: self.max_message_size,
