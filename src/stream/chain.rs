@@ -150,4 +150,147 @@ mod tests {
         crate::assert_with_log!(ok, "size hint", (4, Some(4)), hint);
         crate::test_complete!("chain_size_hint_combines");
     }
+
+    #[test]
+    fn chain_empty_first() {
+        init_test("chain_empty_first");
+        let mut stream = Chain::new(iter(Vec::<i32>::new()), iter(vec![1, 2]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(1)));
+        crate::assert_with_log!(ok, "skips empty first", "Poll::Ready(Some(1))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(2)));
+        crate::assert_with_log!(ok, "second item", "Poll::Ready(Some(2))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "done", "Poll::Ready(None)", poll);
+        crate::test_complete!("chain_empty_first");
+    }
+
+    #[test]
+    fn chain_empty_second() {
+        init_test("chain_empty_second");
+        let mut stream = Chain::new(iter(vec![1, 2]), iter(Vec::<i32>::new()));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(1)));
+        crate::assert_with_log!(ok, "first item", "Poll::Ready(Some(1))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(2)));
+        crate::assert_with_log!(ok, "second item", "Poll::Ready(Some(2))", poll);
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "done", "Poll::Ready(None)", poll);
+        crate::test_complete!("chain_empty_second");
+    }
+
+    #[test]
+    fn chain_both_empty() {
+        init_test("chain_both_empty");
+        let mut stream = Chain::new(iter(Vec::<i32>::new()), iter(Vec::<i32>::new()));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "immediately done", "Poll::Ready(None)", poll);
+        crate::test_complete!("chain_both_empty");
+    }
+
+    #[test]
+    fn chain_accessors() {
+        init_test("chain_accessors");
+        let stream = Chain::new(iter(vec![1, 2]), iter(vec![3]));
+
+        assert!(stream.first_ref().is_some());
+        assert_eq!(stream.second_ref().size_hint(), (1, Some(1)));
+        crate::test_complete!("chain_accessors");
+    }
+
+    #[test]
+    fn chain_first_consumed_after_exhaustion() {
+        init_test("chain_first_consumed_after_exhaustion");
+        let mut stream = Chain::new(iter(Vec::<i32>::new()), iter(vec![1]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First stream is empty, so after one poll it should be dropped
+        let _ = Pin::new(&mut stream).poll_next(&mut cx);
+        assert!(stream.first_ref().is_none(), "first should be None after exhaustion");
+        crate::test_complete!("chain_first_consumed_after_exhaustion");
+    }
+
+    #[test]
+    fn chain_into_inner() {
+        init_test("chain_into_inner");
+        let stream = Chain::new(iter(vec![1]), iter(vec![2]));
+        let (first, _second) = stream.into_inner();
+        assert!(first.is_some(), "first should be Some before polling");
+        crate::test_complete!("chain_into_inner");
+    }
+
+    #[test]
+    fn chain_size_hint_after_first_exhausted() {
+        init_test("chain_size_hint_after_first_exhausted");
+        let mut stream = Chain::new(iter(vec![1]), iter(vec![2, 3]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Consume first stream entirely
+        let _ = Pin::new(&mut stream).poll_next(&mut cx); // yields 1
+        let _ = Pin::new(&mut stream).poll_next(&mut cx); // first exhausted, yields 2
+
+        // Size hint should now reflect only second stream's remaining items
+        let hint = stream.size_hint();
+        let ok = hint == (0, Some(0));
+        crate::assert_with_log!(ok, "hint after exhaust", (0, Some(0)), hint);
+        crate::test_complete!("chain_size_hint_after_first_exhausted");
+    }
+
+    #[test]
+    fn chain_large_streams() {
+        init_test("chain_large_streams");
+        let first: Vec<i32> = (0..100).collect();
+        let second: Vec<i32> = (100..200).collect();
+        let mut stream = Chain::new(iter(first), iter(second));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending from iter stream"),
+            }
+        }
+        let expected: Vec<i32> = (0..200).collect();
+        assert_eq!(collected, expected);
+        crate::test_complete!("chain_large_streams");
+    }
+
+    #[test]
+    fn chain_multiple_chains() {
+        init_test("chain_multiple_chains");
+        let inner = Chain::new(iter(vec![1, 2]), iter(vec![3, 4]));
+        let mut stream = Chain::new(inner, iter(vec![5, 6]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
+        crate::test_complete!("chain_multiple_chains");
+    }
 }

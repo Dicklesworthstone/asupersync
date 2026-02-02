@@ -220,4 +220,182 @@ mod tests {
         crate::assert_with_log!(ok, "size hint", (0, Some(3)), hint);
         crate::test_complete!("filter_size_hint");
     }
+
+    #[test]
+    fn filter_empty_stream() {
+        init_test("filter_empty_stream");
+        let mut stream = Filter::new(iter(Vec::<i32>::new()), |_: &i32| true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "empty done", "Poll::Ready(None)", poll);
+        crate::test_complete!("filter_empty_stream");
+    }
+
+    #[test]
+    fn filter_all_accepted() {
+        init_test("filter_all_accepted");
+        let mut stream = Filter::new(iter(vec![2, 4, 6]), |&x: &i32| x % 2 == 0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        assert_eq!(collected, vec![2, 4, 6]);
+        crate::test_complete!("filter_all_accepted");
+    }
+
+    #[test]
+    fn filter_stateful_predicate() {
+        init_test("filter_stateful_predicate");
+        let mut count = 0usize;
+        let mut stream = Filter::new(iter(vec![10, 20, 30, 40, 50]), move |_: &i32| {
+            count += 1;
+            count <= 3
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        // Predicate accepts first 3 calls, rejects the rest
+        assert_eq!(collected, vec![10, 20, 30]);
+        crate::test_complete!("filter_stateful_predicate");
+    }
+
+    #[test]
+    fn filter_accessors() {
+        init_test("filter_accessors");
+        let stream = Filter::new(iter(vec![1, 2, 3]), |_: &i32| true);
+        assert_eq!(stream.get_ref().size_hint(), (3, Some(3)));
+
+        let inner = stream.into_inner();
+        assert_eq!(inner.size_hint(), (3, Some(3)));
+        crate::test_complete!("filter_accessors");
+    }
+
+    #[test]
+    fn filter_map_empty_stream() {
+        init_test("filter_map_empty_stream");
+        let mut stream = FilterMap::new(iter(Vec::<i32>::new()), |x: i32| Some(x));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "empty done", "Poll::Ready(None)", poll);
+        crate::test_complete!("filter_map_empty_stream");
+    }
+
+    #[test]
+    fn filter_map_all_none() {
+        init_test("filter_map_all_none");
+        let mut stream = FilterMap::new(iter(vec![1, 2, 3]), |_: i32| -> Option<i32> { None });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(ok, "all filtered", "Poll::Ready(None)", poll);
+        crate::test_complete!("filter_map_all_none");
+    }
+
+    #[test]
+    fn filter_map_alternating() {
+        init_test("filter_map_alternating");
+        let mut stream = FilterMap::new(iter(1..=6), |x: i32| {
+            if x % 2 == 0 { Some(x * 10) } else { None }
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        assert_eq!(collected, vec![20, 40, 60]);
+        crate::test_complete!("filter_map_alternating");
+    }
+
+    #[test]
+    fn filter_map_type_change() {
+        init_test("filter_map_type_change");
+        let mut stream = FilterMap::new(iter(vec![1, 2, 3]), |x: i32| Some(format!("v{x}")));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(Some("v1".to_string())));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(Some("v2".to_string())));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(Some("v3".to_string())));
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(None));
+        crate::test_complete!("filter_map_type_change");
+    }
+
+    #[test]
+    fn filter_map_size_hint() {
+        init_test("filter_map_size_hint");
+        let stream = FilterMap::new(iter(vec![1, 2, 3, 4, 5]), |x: i32| Some(x));
+        let hint = stream.size_hint();
+        // Lower bound 0 (all could be filtered), upper preserved
+        let ok = hint == (0, Some(5));
+        crate::assert_with_log!(ok, "size hint", (0, Some(5)), hint);
+        crate::test_complete!("filter_map_size_hint");
+    }
+
+    #[test]
+    fn filter_map_stateful_closure() {
+        init_test("filter_map_stateful_closure");
+        let mut sum = 0i32;
+        let mut stream = FilterMap::new(iter(vec![1, 2, 3, 4, 5]), move |x: i32| {
+            sum += x;
+            if sum > 6 { Some(sum) } else { None }
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        // sum: 1, 3, 6, 10, 15 — yields when sum > 6: [10, 15]
+        assert_eq!(collected, vec![10, 15]);
+        crate::test_complete!("filter_map_stateful_closure");
+    }
+
+    #[test]
+    fn filter_map_accessors() {
+        init_test("filter_map_accessors");
+        let stream = FilterMap::new(iter(vec![1, 2]), |x: i32| Some(x));
+        assert_eq!(stream.get_ref().size_hint(), (2, Some(2)));
+
+        let inner = stream.into_inner();
+        assert_eq!(inner.size_hint(), (2, Some(2)));
+        crate::test_complete!("filter_map_accessors");
+    }
 }
