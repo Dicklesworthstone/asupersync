@@ -186,8 +186,11 @@ impl Semaphore {
     pub fn add_permits(&self, count: usize) {
         let mut state = self.state.lock().expect("semaphore lock poisoned");
         state.permits = state.permits.saturating_add(count);
-        for waiter in &state.waiters {
-            waiter.waker.wake_by_ref();
+        // Only wake the first waiter since FIFO ordering means only it can acquire.
+        // Waking all waiters wastes CPU when only the front can make progress.
+        // If the first waiter acquires and releases, it will wake the next.
+        if let Some(first) = state.waiters.front() {
+            first.waker.wake_by_ref();
         }
     }
 }

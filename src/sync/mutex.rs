@@ -242,21 +242,27 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
 
-        // Only register the waker once to prevent unbounded queue growth.
-        // If the waker changes between polls (rare), we accept the stale waker -
-        // another waiter will be woken instead, which is harmless.
-        // A more sophisticated implementation would use intrusive linked lists
-        // with proper deregistration on drop.
+        // Register waiter or update existing waker. We must update the waker
+        // when it changes because some executors provide different wakers on
+        // each poll - failing to update would cause the task to never be woken.
         let mut new_waiter = None;
         match self.waiter.as_ref() {
             Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                // Was dequeued by unlock() but we're still waiting - re-register
                 waiter.store(true, Ordering::Release);
                 state.waiters.push_back(Waiter {
                     waker: context.waker().clone(),
                     queued: Arc::clone(waiter),
                 });
             }
-            Some(_) => {}
+            Some(waiter) => {
+                // Already queued - update the waker in case it changed.
+                // This is critical for correctness with executors that provide
+                // new wakers on each poll.
+                if let Some(existing) = state.waiters.iter_mut().find(|w| Arc::ptr_eq(&w.queued, waiter)) {
+                    existing.waker.clone_from(context.waker());
+                }
+            }
             None => {
                 let waiter = Arc::new(AtomicBool::new(true));
                 state.waiters.push_back(Waiter {
@@ -358,13 +364,19 @@ impl<T> OwnedMutexGuard<T> {
                 let mut new_waiter = None;
                 match self.waiter.as_ref() {
                     Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                        // Was dequeued by unlock() but we're still waiting - re-register
                         waiter.store(true, Ordering::Release);
                         state.waiters.push_back(Waiter {
                             waker: context.waker().clone(),
                             queued: Arc::clone(waiter),
                         });
                     }
-                    Some(_) => {}
+                    Some(waiter) => {
+                        // Already queued - update the waker in case it changed.
+                        if let Some(existing) = state.waiters.iter_mut().find(|w| Arc::ptr_eq(&w.queued, waiter)) {
+                            existing.waker.clone_from(context.waker());
+                        }
+                    }
                     None => {
                         let waiter = Arc::new(AtomicBool::new(true));
                         state.waiters.push_back(Waiter {
