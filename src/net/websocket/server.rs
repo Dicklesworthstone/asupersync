@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use super::client::{Message, WebSocketConfig};
+use super::client::{Message, MessageAssembler, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
@@ -230,6 +230,8 @@ pub struct ServerWebSocket<IO> {
     close_handshake: CloseHandshake,
     /// Configuration.
     config: WebSocketConfig,
+    /// Message assembler for fragmented frames.
+    assembler: MessageAssembler,
     /// Negotiated subprotocol (if any).
     protocol: Option<String>,
     /// Negotiated extensions.
@@ -244,6 +246,7 @@ where
 {
     /// Create a WebSocket from an already-upgraded I/O stream.
     fn from_upgraded(io: IO, config: WebSocketConfig, accept: AcceptResponse) -> Self {
+        let max_message_size = config.max_message_size;
         let codec = FrameCodec::server().max_payload_size(config.max_frame_size);
         Self {
             io,
@@ -252,6 +255,7 @@ where
             write_buf: BytesMut::with_capacity(8192),
             close_handshake: CloseHandshake::with_config(config.close_config.clone()),
             config,
+            assembler: MessageAssembler::new(max_message_size),
             protocol: accept.protocol,
             extensions: accept.extensions,
             pending_pongs: Vec::new(),
@@ -352,7 +356,17 @@ where
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
                     }
-                    _ => return Ok(Some(Message::from(frame))),
+                    _ => match self.assembler.push_frame(frame) {
+                        Ok(Some(msg)) => return Ok(Some(msg)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.close_handshake.force_close(CloseReason::new(
+                                super::CloseCode::ProtocolError,
+                                None,
+                            ));
+                            return Err(err);
+                        }
+                    },
                 }
             } else {
                 // Need more data - read from socket

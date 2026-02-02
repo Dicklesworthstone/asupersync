@@ -32,7 +32,7 @@
 //! futures::try_join!(reader, writer)?;
 //! ```
 
-use super::client::{Message, WebSocket, WebSocketConfig};
+use super::client::{Message, MessageAssembler, WebSocket, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use crate::bytes::{Bytes, BytesMut};
@@ -59,6 +59,8 @@ struct WebSocketShared<IO> {
     close_handshake: CloseHandshake,
     /// Configuration.
     config: WebSocketConfig,
+    /// Message assembler for fragmented frames.
+    assembler: MessageAssembler,
     /// Negotiated subprotocol (if any).
     protocol: Option<String>,
     /// Pending pong payloads to send.
@@ -134,6 +136,7 @@ where
             write_buf: self.write_buf,
             close_handshake: self.close_handshake,
             config: self.config,
+            assembler: self.assembler,
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
             id,
@@ -213,7 +216,23 @@ where
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
                     }
-                    _ => return Ok(Some(Message::from(frame))),
+                    _ => {
+                        let result = { self.shared.lock().assembler.push_frame(frame) };
+                        match result {
+                            Ok(Some(msg)) => return Ok(Some(msg)),
+                            Ok(None) => {}
+                            Err(err) => {
+                                self.shared
+                                    .lock()
+                                    .close_handshake
+                                    .force_close(CloseReason::new(
+                                        super::CloseCode::ProtocolError,
+                                        None,
+                                    ));
+                                return Err(err);
+                            }
+                        }
+                    }
                 }
             } else {
                 // Check if closed
@@ -276,6 +295,7 @@ where
             write_buf: shared.write_buf,
             close_handshake: shared.close_handshake,
             config: shared.config,
+            assembler: shared.assembler,
             protocol: shared.protocol,
             pending_pongs: shared.pending_pongs,
         })

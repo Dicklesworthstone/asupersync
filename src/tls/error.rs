@@ -116,3 +116,113 @@ impl From<rustls::Error> for TlsError {
         Self::Rustls(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_display_invalid_dns_name() {
+        init_test("test_display_invalid_dns_name");
+        let err = TlsError::InvalidDnsName("bad.local".to_string());
+        let rendered = format!("{err}");
+        crate::assert_with_log!(
+            rendered.contains("bad.local"),
+            "display contains name",
+            true,
+            rendered.contains("bad.local")
+        );
+        crate::test_complete!("test_display_invalid_dns_name");
+    }
+
+    #[test]
+    fn test_display_certificate_expired() {
+        init_test("test_display_certificate_expired");
+        let err = TlsError::CertificateExpired {
+            expired_at: 123,
+            description: "leaf".to_string(),
+        };
+        let rendered = format!("{err}");
+        crate::assert_with_log!(
+            rendered.contains("123") && rendered.contains("leaf"),
+            "display expired",
+            true,
+            rendered.contains("123") && rendered.contains("leaf")
+        );
+        crate::test_complete!("test_display_certificate_expired");
+    }
+
+    #[test]
+    fn test_display_pin_mismatch() {
+        init_test("test_display_pin_mismatch");
+        let err = TlsError::PinMismatch {
+            expected: vec!["pinA".to_string(), "pinB".to_string()],
+            actual: "pinC".to_string(),
+        };
+        let rendered = format!("{err}");
+        crate::assert_with_log!(
+            rendered.contains("pinC") && rendered.contains("pinA"),
+            "display pin mismatch",
+            true,
+            rendered.contains("pinC") && rendered.contains("pinA")
+        );
+        crate::test_complete!("test_display_pin_mismatch");
+    }
+
+    #[test]
+    fn test_io_error_source() {
+        init_test("test_io_error_source");
+        let io_err = io::Error::new(io::ErrorKind::Other, "boom");
+        let err = TlsError::from(io_err);
+        crate::assert_with_log!(
+            err.source().is_some(),
+            "source",
+            true,
+            err.source().is_some()
+        );
+        let rendered = format!("{err}");
+        crate::assert_with_log!(
+            rendered.contains("I/O error"),
+            "display io",
+            true,
+            rendered.contains("I/O error")
+        );
+        crate::test_complete!("test_io_error_source");
+    }
+
+    #[test]
+    fn test_display_timeout() {
+        init_test("test_display_timeout");
+        let err = TlsError::Timeout(Duration::from_millis(250));
+        let rendered = format!("{err}");
+        crate::assert_with_log!(
+            rendered.contains("250"),
+            "display timeout",
+            true,
+            rendered.contains("250")
+        );
+        crate::test_complete!("test_display_timeout");
+    }
+
+    #[test]
+    fn test_display_alpn_negotiation_failed() {
+        init_test("test_display_alpn_negotiation_failed");
+        let err = TlsError::AlpnNegotiationFailed {
+            expected: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            negotiated: Some(b"http/1.1".to_vec()),
+        };
+        let rendered = format!("{err}");
+        crate::assert_with_log!(
+            rendered.contains("ALPN") && rendered.contains("http/1.1"),
+            "display alpn",
+            true,
+            rendered.contains("ALPN") && rendered.contains("http/1.1")
+        );
+        crate::test_complete!("test_display_alpn_negotiation_failed");
+    }
+}

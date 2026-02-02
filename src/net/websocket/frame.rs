@@ -201,6 +201,8 @@ pub enum WsError {
     Io(io::Error),
     /// Invalid opcode value.
     InvalidOpcode(u8),
+    /// Protocol violation (e.g. unexpected continuation frame).
+    ProtocolViolation(&'static str),
     /// Reserved bits set without extension support.
     ReservedBitsSet,
     /// Payload exceeds maximum allowed size.
@@ -229,6 +231,7 @@ impl std::fmt::Display for WsError {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::InvalidOpcode(op) => write!(f, "invalid opcode: 0x{op:X}"),
+            Self::ProtocolViolation(msg) => write!(f, "protocol violation: {msg}"),
             Self::ReservedBitsSet => write!(f, "reserved bits set without extension"),
             Self::PayloadTooLarge { size, max } => {
                 write!(f, "payload too large: {size} bytes (max: {max})")
@@ -705,13 +708,12 @@ pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
 
 /// Generate a mask key for client-to-server frames.
 ///
-/// Note: This is a simple implementation. In production, use a cryptographic RNG.
+/// RFC 6455 §5.3 requires masking keys to be derived from a strong source of
+/// entropy to prevent cross-protocol attacks via intermediary cache poisoning.
 fn generate_mask_key() -> [u8; 4] {
-    // Use a simple counter-based approach for determinism in tests
-    // In production, use thread_rng or similar
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x1234_5678);
-    let val = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    val.to_ne_bytes()
+    let mut key = [0u8; 4];
+    getrandom::getrandom(&mut key).expect("OS RNG unavailable");
+    key
 }
 
 /// Close codes defined by RFC 6455.
@@ -813,10 +815,10 @@ mod tests {
         encoder.encode(frame, &mut buf).unwrap();
 
         // Decode the frame (server decodes client-masked frames)
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert!(decoded.fin);
-        assert_eq!(decoded.opcode, Opcode::Text);
-        assert_eq!(decoded.payload.as_ref(), b"Hello, WebSocket!");
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(parsed.fin);
+        assert_eq!(parsed.opcode, Opcode::Text);
+        assert_eq!(parsed.payload.as_ref(), b"Hello, WebSocket!");
     }
 
     #[test]
@@ -829,10 +831,10 @@ mod tests {
         let mut buf = BytesMut::new();
         encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert!(decoded.fin);
-        assert_eq!(decoded.opcode, Opcode::Binary);
-        assert_eq!(decoded.payload, payload);
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(parsed.fin);
+        assert_eq!(parsed.opcode, Opcode::Binary);
+        assert_eq!(parsed.payload, payload);
     }
 
     #[test]
@@ -845,20 +847,20 @@ mod tests {
         let mut buf = BytesMut::new();
         encoder.encode(ping_request, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert!(decoded.fin);
-        assert_eq!(decoded.opcode, Opcode::Ping);
-        assert_eq!(decoded.payload.as_ref(), b"ping-data");
+        let ping_received = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(ping_received.fin);
+        assert_eq!(ping_received.opcode, Opcode::Ping);
+        assert_eq!(ping_received.payload.as_ref(), b"ping-data");
 
         // Pong
         let pong_response = Frame::pong("pong-data");
         let mut buf = BytesMut::new();
         encoder.encode(pong_response, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert!(decoded.fin);
-        assert_eq!(decoded.opcode, Opcode::Pong);
-        assert_eq!(decoded.payload.as_ref(), b"pong-data");
+        let pong_response = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(pong_response.fin);
+        assert_eq!(pong_response.opcode, Opcode::Pong);
+        assert_eq!(pong_response.payload.as_ref(), b"pong-data");
     }
 
     #[test]
@@ -870,12 +872,12 @@ mod tests {
         let mut buf = BytesMut::new();
         encoder.encode(close, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert!(decoded.fin);
-        assert_eq!(decoded.opcode, Opcode::Close);
+        let close_frame = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(close_frame.fin);
+        assert_eq!(close_frame.opcode, Opcode::Close);
 
         // Parse close payload
-        let payload = decoded.payload;
+        let payload = close_frame.payload;
         assert!(payload.len() >= 2);
         let code = u16::from_be_bytes([payload[0], payload[1]]);
         assert_eq!(code, 1000);
@@ -892,8 +894,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded.payload.len(), 200);
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.len(), 200);
     }
 
     #[test]
@@ -905,8 +907,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded.payload.len(), 70_000);
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.len(), 70_000);
     }
 
     #[test]
@@ -924,8 +926,8 @@ mod tests {
         assert!(buf[1] & 0x80 != 0);
 
         // Server decodes (unmasks)
-        let decoded = server_codec.decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded.payload.as_ref(), b"masked message");
+        let parsed = server_codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.as_ref(), b"masked message");
     }
 
     #[test]
@@ -977,8 +979,8 @@ mod tests {
         let mut buf = BytesMut::new();
         encoder.encode(frame, &mut buf).unwrap();
 
-        let decoded = decoder.decode(&mut buf).unwrap().unwrap();
-        assert!(decoded.payload.is_empty());
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(parsed.payload.is_empty());
     }
 
     #[test]

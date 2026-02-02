@@ -91,6 +91,108 @@ impl Message {
     }
 }
 
+#[derive(Debug)]
+struct PartialMessage {
+    opcode: Opcode,
+    data: BytesMut,
+}
+
+#[derive(Debug)]
+pub(super) struct MessageAssembler {
+    max_message_size: usize,
+    partial: Option<PartialMessage>,
+}
+
+impl MessageAssembler {
+    pub(super) fn new(max_message_size: usize) -> Self {
+        Self {
+            max_message_size,
+            partial: None,
+        }
+    }
+
+    pub(super) fn push_frame(&mut self, frame: Frame) -> Result<Option<Message>, WsError> {
+        match frame.opcode {
+            Opcode::Text | Opcode::Binary => self.push_data_frame(frame),
+            Opcode::Continuation => self.push_continuation_frame(&frame),
+            _ => Err(WsError::InvalidOpcode(frame.opcode as u8)),
+        }
+    }
+
+    fn push_data_frame(&mut self, frame: Frame) -> Result<Option<Message>, WsError> {
+        if self.partial.is_some() {
+            return Err(WsError::ProtocolViolation(
+                "received new data frame while continuation expected",
+            ));
+        }
+
+        let payload_len = frame.payload.len();
+        if payload_len > self.max_message_size {
+            return Err(WsError::PayloadTooLarge {
+                size: payload_len as u64,
+                max: self.max_message_size,
+            });
+        }
+
+        if frame.fin {
+            return Ok(Some(message_from_payload(frame.opcode, frame.payload)?));
+        }
+
+        let mut data = BytesMut::with_capacity(payload_len);
+        data.extend_from_slice(frame.payload.as_ref());
+        self.partial = Some(PartialMessage {
+            opcode: frame.opcode,
+            data,
+        });
+        Ok(None)
+    }
+
+    fn push_continuation_frame(&mut self, frame: &Frame) -> Result<Option<Message>, WsError> {
+        let Some(partial) = self.partial.as_mut() else {
+            return Err(WsError::ProtocolViolation(
+                "received continuation without a started message",
+            ));
+        };
+
+        partial.data.extend_from_slice(frame.payload.as_ref());
+        let total_len = partial.data.len();
+        if total_len > self.max_message_size {
+            return Err(WsError::PayloadTooLarge {
+                size: total_len as u64,
+                max: self.max_message_size,
+            });
+        }
+
+        if !frame.fin {
+            return Ok(None);
+        }
+
+        let opcode = partial.opcode;
+        let data = std::mem::take(&mut partial.data).freeze();
+        self.partial = None;
+        Ok(Some(message_from_payload(opcode, data)?))
+    }
+}
+
+fn message_from_payload(opcode: Opcode, payload: Bytes) -> Result<Message, WsError> {
+    match opcode {
+        Opcode::Text => {
+            let text = std::str::from_utf8(payload.as_ref()).map_err(|_| WsError::InvalidUtf8)?;
+            Ok(Message::Text(text.to_owned()))
+        }
+        Opcode::Binary => Ok(Message::Binary(payload)),
+        Opcode::Continuation => Err(WsError::ProtocolViolation(
+            "unexpected continuation payload",
+        )),
+        Opcode::Ping => Ok(Message::Ping(payload)),
+        Opcode::Pong => Ok(Message::Pong(payload)),
+        Opcode::Close => {
+            let reason = CloseReason::parse(payload.as_ref()).ok();
+            Ok(Message::Close(reason))
+        }
+    }
+}
+
 impl From<Frame> for Message {
     fn from(frame: Frame) -> Self {
         match frame.opcode {
@@ -224,6 +326,8 @@ pub struct WebSocket<IO> {
     pub(super) close_handshake: CloseHandshake,
     /// Configuration.
     pub(super) config: WebSocketConfig,
+    /// Message assembler for fragmented frames.
+    pub(super) assembler: MessageAssembler,
     /// Negotiated subprotocol (if any).
     pub(super) protocol: Option<String>,
     /// Pending pong payloads to send.
@@ -239,6 +343,7 @@ where
     /// Use this when you've already performed the HTTP upgrade handshake.
     #[must_use]
     pub fn from_upgraded(io: IO, config: WebSocketConfig) -> Self {
+        let max_message_size = config.max_message_size;
         let codec = FrameCodec::client().max_payload_size(config.max_frame_size);
         Self {
             io,
@@ -247,6 +352,7 @@ where
             write_buf: BytesMut::with_capacity(8192),
             close_handshake: CloseHandshake::with_config(config.close_config.clone()),
             config,
+            assembler: MessageAssembler::new(max_message_size),
             protocol: None,
             pending_pongs: Vec::new(),
         }
@@ -346,7 +452,17 @@ where
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
                     }
-                    _ => return Ok(Some(Message::from(frame))),
+                    _ => match self.assembler.push_frame(frame) {
+                        Ok(Some(msg)) => return Ok(Some(msg)),
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.close_handshake.force_close(CloseReason::new(
+                                super::CloseCode::ProtocolError,
+                                None,
+                            ));
+                            return Err(err);
+                        }
+                    },
                 }
             } else {
                 // Need more data - read from socket
@@ -548,8 +664,9 @@ impl WebSocket<TcpStream> {
         let request = handshake.request_bytes();
         write_all(&mut tcp, &request).await?;
 
-        // Read response
-        let response_bytes = read_http_response(&mut tcp).await?;
+        // Read response — trailing bytes after \r\n\r\n belong to the
+        // first WebSocket frame and must be seeded into the read buffer.
+        let (response_bytes, trailing) = read_http_response(&mut tcp).await?;
         let response = HttpResponse::parse(&response_bytes)?;
 
         // Validate response
@@ -558,6 +675,9 @@ impl WebSocket<TcpStream> {
         // Create WebSocket
         let mut ws = Self::from_upgraded(tcp, config.clone());
         ws.protocol = response.header("sec-websocket-protocol").map(String::from);
+        if !trailing.is_empty() {
+            ws.read_buf.extend_from_slice(&trailing);
+        }
 
         Ok(ws)
     }
@@ -579,7 +699,11 @@ async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Resul
 }
 
 /// Read HTTP response (until \r\n\r\n).
-async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+///
+/// Returns `(headers, trailing)` where `trailing` contains any bytes read
+/// past the `\r\n\r\n` boundary (these belong to the first WebSocket frame
+/// and must be fed into the WebSocket codec's read buffer).
+async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<(Vec<u8>, Vec<u8>)> {
     use std::future::poll_fn;
 
     let mut buf = Vec::with_capacity(1024);
@@ -605,9 +729,13 @@ async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Ve
 
         buf.extend_from_slice(&temp[..n]);
 
-        // Check for end of headers
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
+        // Split at the header boundary so trailing bytes (part of the first
+        // WebSocket frame) are not lost.
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let split_at = pos + 4;
+            let trailing = buf[split_at..].to_vec();
+            buf.truncate(split_at);
+            return Ok((buf, trailing));
         }
 
         if buf.len() > 16384 {
@@ -617,8 +745,6 @@ async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Ve
             ));
         }
     }
-
-    Ok(buf)
 }
 
 /// WebSocket connection errors.
@@ -739,5 +865,92 @@ mod tests {
         assert!(Message::ping(vec![]).is_control());
         assert!(Message::pong(vec![]).is_control());
         assert!(Message::Close(None).is_control());
+    }
+
+    #[test]
+    fn message_assembler_rejects_invalid_utf8() {
+        let mut assembler = MessageAssembler::new(1024);
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Text,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(&[0xFF]),
+        };
+
+        let result = assembler.push_frame(frame);
+        assert!(matches!(result, Err(WsError::InvalidUtf8)));
+    }
+
+    #[test]
+    fn message_assembler_reassembles_fragmented_text() {
+        let mut assembler = MessageAssembler::new(1024);
+        let frame1 = Frame {
+            fin: false,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Text,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"hel"),
+        };
+        let frame2 = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Continuation,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"lo"),
+        };
+
+        let result1 = assembler.push_frame(frame1).unwrap();
+        assert!(result1.is_none());
+        let result2 = assembler.push_frame(frame2).unwrap();
+        assert!(matches!(result2, Some(Message::Text(s)) if s == "hello"));
+    }
+
+    #[test]
+    fn message_assembler_rejects_unexpected_continuation() {
+        let mut assembler = MessageAssembler::new(1024);
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Continuation,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"oops"),
+        };
+
+        let result = assembler.push_frame(frame);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn message_assembler_enforces_max_message_size() {
+        let mut assembler = MessageAssembler::new(4);
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"012345"),
+        };
+
+        let result = assembler.push_frame(frame);
+        assert!(matches!(
+            result,
+            Err(WsError::PayloadTooLarge { max: 4, .. })
+        ));
     }
 }

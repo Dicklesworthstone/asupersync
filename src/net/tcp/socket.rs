@@ -153,3 +153,187 @@ fn family_matches(family: TcpSocketFamily, addr: SocketAddr) -> bool {
         TcpSocketFamily::V6 => addr.is_ipv6(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::time::Duration;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_bind_family_match_v4() {
+        init_test("test_bind_family_match_v4");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let result = socket.bind(addr);
+        crate::assert_with_log!(result.is_ok(), "bind v4", true, result.is_ok());
+        crate::test_complete!("test_bind_family_match_v4");
+    }
+
+    #[test]
+    fn test_bind_family_mismatch() {
+        init_test("test_bind_family_mismatch");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        let addr = SocketAddr::from((Ipv6Addr::LOCALHOST, 0));
+        let err = socket.bind(addr).expect_err("expected mismatch error");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "bind mismatch kind",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        crate::test_complete!("test_bind_family_mismatch");
+    }
+
+    #[test]
+    fn test_listen_requires_bind() {
+        init_test("test_listen_requires_bind");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        let err = socket.listen(128).expect_err("listen without bind");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "listen requires bind",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        crate::test_complete!("test_listen_requires_bind");
+    }
+
+    #[test]
+    fn test_listen_reuseaddr_unsupported() {
+        init_test("test_listen_reuseaddr_unsupported");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind");
+        socket.set_reuseaddr(true).expect("set_reuseaddr");
+        let err = socket
+            .listen(128)
+            .expect_err("reuseaddr should be unsupported");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Unsupported,
+            "reuseaddr unsupported",
+            io::ErrorKind::Unsupported,
+            err.kind()
+        );
+        crate::test_complete!("test_listen_reuseaddr_unsupported");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_listen_reuseport_unsupported() {
+        init_test("test_listen_reuseport_unsupported");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind");
+        socket.set_reuseport(true).expect("set_reuseport");
+        let err = socket
+            .listen(128)
+            .expect_err("reuseport should be unsupported");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Unsupported,
+            "reuseport unsupported",
+            io::ErrorKind::Unsupported,
+            err.kind()
+        );
+        crate::test_complete!("test_listen_reuseport_unsupported");
+    }
+
+    #[test]
+    fn test_listen_success_v4() {
+        init_test("test_listen_success_v4");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind");
+        let listener = socket.listen(128).expect("listen");
+        let local = listener.local_addr().expect("local_addr");
+        crate::assert_with_log!(
+            local.ip() == Ipv4Addr::LOCALHOST,
+            "local addr ip",
+            Ipv4Addr::LOCALHOST,
+            local.ip()
+        );
+        crate::assert_with_log!(
+            local.port() != 0,
+            "local port assigned",
+            true,
+            local.port() != 0
+        );
+        crate::test_complete!("test_listen_success_v4");
+    }
+
+    #[test]
+    fn test_connect_rejects_configuration() {
+        init_test("test_connect_rejects_configuration");
+        futures_lite::future::block_on(async {
+            let socket = TcpSocket::new_v4().expect("new_v4");
+            socket
+                .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("bind");
+            let err = socket
+                .connect(SocketAddr::from((Ipv4Addr::LOCALHOST, 80)))
+                .await
+                .expect_err("connect should reject bound socket");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::Unsupported,
+                "connect configuration rejected",
+                io::ErrorKind::Unsupported,
+                err.kind()
+            );
+        });
+        crate::test_complete!("test_connect_rejects_configuration");
+    }
+
+    #[test]
+    fn test_connect_family_mismatch() {
+        init_test("test_connect_family_mismatch");
+        futures_lite::future::block_on(async {
+            let socket = TcpSocket::new_v4().expect("new_v4");
+            let err = socket
+                .connect(SocketAddr::from((Ipv6Addr::LOCALHOST, 80)))
+                .await
+                .expect_err("connect should reject IPv6");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::InvalidInput,
+                "connect family mismatch",
+                io::ErrorKind::InvalidInput,
+                err.kind()
+            );
+        });
+        crate::test_complete!("test_connect_family_mismatch");
+    }
+
+    #[test]
+    fn test_connect_success_v4() {
+        init_test("test_connect_success_v4");
+        let listener = net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept().expect("accept");
+            let _ = tx.send(());
+        });
+
+        futures_lite::future::block_on(async {
+            let stream = TcpSocket::new_v4().expect("new_v4").connect(addr).await;
+            crate::assert_with_log!(stream.is_ok(), "connect ok", true, stream.is_ok());
+            if let Ok(stream) = stream {
+                let peer = stream.peer_addr().expect("peer addr");
+                crate::assert_with_log!(peer.ip() == addr.ip(), "peer ip", addr.ip(), peer.ip());
+            }
+        });
+
+        let accepted = rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        crate::assert_with_log!(accepted, "accepted connection", true, accepted);
+        handle.join().expect("join accept thread");
+        crate::test_complete!("test_connect_success_v4");
+    }
+}

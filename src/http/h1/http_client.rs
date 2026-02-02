@@ -686,7 +686,7 @@ mod tests {
 
         let err = ClientError::TooManyRedirects { count: 5, max: 10 };
         let msg = format!("{err}");
-        assert!(msg.contains("5"));
+        assert!(msg.contains('5'));
         assert!(msg.contains("10"));
     }
 
@@ -697,7 +697,7 @@ mod tests {
         let err = ClientError::InvalidUrl("x".into());
         assert!(err.source().is_none());
 
-        let io_err = io::Error::new(io::ErrorKind::Other, "test");
+        let io_err = io::Error::other("test");
         let err = ClientError::Io(io_err);
         assert!(err.source().is_some());
     }

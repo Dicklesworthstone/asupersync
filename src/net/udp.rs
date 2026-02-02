@@ -339,14 +339,17 @@ impl From<StdUdpSocket> for UdpSocket {
 #[derive(Debug)]
 pub struct RecvStream<'a> {
     socket: &'a mut UdpSocket,
-    buf_size: usize,
+    buf: Vec<u8>,
 }
 
 impl<'a> RecvStream<'a> {
     /// Create a new datagram stream with the given buffer size.
     #[must_use]
     pub fn new(socket: &'a mut UdpSocket, buf_size: usize) -> Self {
-        Self { socket, buf_size }
+        Self {
+            socket,
+            buf: vec![0u8; buf_size],
+        }
     }
 }
 
@@ -355,12 +358,8 @@ impl Stream for RecvStream<'_> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let mut buf = vec![0u8; this.buf_size];
-        match this.socket.poll_recv_from(cx, &mut buf) {
-            Poll::Ready(Ok((n, addr))) => {
-                buf.truncate(n);
-                Poll::Ready(Some(Ok((buf, addr))))
-            }
+        match this.socket.poll_recv_from(cx, &mut this.buf) {
+            Poll::Ready(Ok((n, addr))) => Poll::Ready(Some(Ok((this.buf[..n].to_vec(), addr)))),
             Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
             Poll::Pending => Poll::Pending,
         }

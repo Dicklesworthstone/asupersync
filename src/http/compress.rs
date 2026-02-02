@@ -294,6 +294,14 @@ pub fn accept_encoding_from_headers(headers: &[(String, String)]) -> Option<&str
 mod tests {
     use super::*;
 
+    fn assert_quality(actual: f32, expected: f32) {
+        let delta = (actual - expected).abs();
+        assert!(
+            delta <= f32::EPSILON,
+            "quality mismatch: expected {expected}, got {actual}"
+        );
+    }
+
     // ====================================================================
     // ContentEncoding tests
     // ====================================================================
@@ -355,19 +363,19 @@ mod tests {
         let parsed = parse_accept_encoding("gzip, deflate");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].encoding, "gzip");
-        assert_eq!(parsed[0].quality, 1.0);
+        assert_quality(parsed[0].quality, 1.0);
         assert_eq!(parsed[1].encoding, "deflate");
-        assert_eq!(parsed[1].quality, 1.0);
+        assert_quality(parsed[1].quality, 1.0);
     }
 
     #[test]
     fn parse_accept_encoding_with_quality() {
         let parsed = parse_accept_encoding("gzip;q=1.0, deflate;q=0.5, *;q=0");
         assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].quality, 1.0);
-        assert_eq!(parsed[1].quality, 0.5);
+        assert_quality(parsed[0].quality, 1.0);
+        assert_quality(parsed[1].quality, 0.5);
         assert_eq!(parsed[2].encoding, "*");
-        assert_eq!(parsed[2].quality, 0.0);
+        assert_quality(parsed[2].quality, 0.0);
     }
 
     #[test]
@@ -381,9 +389,9 @@ mod tests {
         let parsed = parse_accept_encoding("  gzip  ;  q=0.8  ,  br  ");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].encoding, "gzip");
-        assert_eq!(parsed[0].quality, 0.8);
+        assert_quality(parsed[0].quality, 0.8);
         assert_eq!(parsed[1].encoding, "br");
-        assert_eq!(parsed[1].quality, 1.0);
+        assert_quality(parsed[1].quality, 1.0);
     }
 
     // ====================================================================
