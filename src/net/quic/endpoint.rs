@@ -24,12 +24,37 @@ impl QuicEndpoint {
     /// The client endpoint can connect to servers but cannot accept
     /// incoming connections.
     pub fn client(cx: &Cx, config: QuicConfig) -> Result<Self, QuicError> {
-        cx.checkpoint()?;
+        cx.checkpoint().map_err(|_| QuicError::Cancelled)?;
 
-        let mut crypto = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-            .with_no_client_auth();
+        let mut root_certs = if let Some(store) = config.root_certs.clone() {
+            store
+        } else {
+            let mut store = crate::tls::RootCertStore::empty();
+            #[cfg(feature = "tls-native-roots")]
+            {
+                store
+                    .extend_from_native_roots()
+                    .map_err(|e| QuicError::TlsConfig(e.to_string()))?;
+            }
+            store.extend_from_webpki_roots();
+            store
+        };
+
+        let mut crypto = if config.insecure_skip_verify {
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                .with_no_client_auth()
+        } else {
+            if root_certs.is_empty() {
+                return Err(QuicError::Config(
+                    "no root certificates configured; enable tls-native-roots/tls-webpki-roots or provide RootCertStore".into(),
+                ));
+            }
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_certs.into_inner())
+                .with_no_client_auth()
+        };
 
         if !config.alpn_protocols.is_empty() {
             crypto.alpn_protocols = config.alpn_protocols.clone();
@@ -159,11 +184,6 @@ impl QuicEndpoint {
     /// Wait for the endpoint to close completely.
     pub async fn wait_idle(&self) {
         self.inner.wait_idle().await;
-    }
-
-    /// Reject new incoming connections but allow existing ones to continue.
-    pub fn reject_new_connections(&self) {
-        self.inner.reject_new_connections();
     }
 
     /// Get a reference to the inner quinn endpoint.
