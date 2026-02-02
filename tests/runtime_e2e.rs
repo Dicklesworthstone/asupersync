@@ -375,11 +375,6 @@ fn e2e_trace_captures_events() {
 
     let events = runtime.state.trace.snapshot();
     let event_count = events.len();
-    assert_with_log!(
-        event_count > 0,
-        "trace captured events",
-        "> 0",
-        event_count
-    );
+    assert_with_log!(event_count > 0, "trace captured events", "> 0", event_count);
     test_complete!("e2e_trace_captures_events");
 }
