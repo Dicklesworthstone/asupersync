@@ -369,7 +369,8 @@ impl BackoffStrategy {
             } => {
                 // Allow lossy cast - precision loss is acceptable for backoff timing
                 #[allow(clippy::cast_precision_loss)]
-                let exp = i32::try_from(attempt).unwrap_or(i32::MAX);
+                // Cap exponent to prevent overflow/infinity in powi
+                let exp = i32::try_from(attempt).unwrap_or(30).min(30);
                 let base = initial.as_secs_f64() * multiplier.powi(exp);
                 let delay = Duration::from_secs_f64(base.min(max.as_secs_f64()));
                 Some(delay)
