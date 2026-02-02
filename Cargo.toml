@@ -41,6 +41,8 @@ cli = ["dep:clap", "dep:time", "trace-compression", "dep:conformance"]
 sqlite = ["dep:rusqlite"]
 # Enable PostgreSQL async client with wire protocol.
 postgres = ["dep:sha2"]
+# Enable MySQL async client with wire protocol.
+mysql = ["dep:sha2"]
 # Enable QUIC protocol support via quinn.
 quic = ["dep:quinn", "tls"]
 
@@ -143,6 +145,14 @@ harness = false
 
 [[bench]]
 name = "reactor_benchmark"
+harness = false
+
+[[bench]]
+name = "protocol_benchmark"
+harness = false
+
+[[bench]]
+name = "tracing_overhead"
 harness = false
 
 [lints.rust]
