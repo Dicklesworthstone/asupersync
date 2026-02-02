@@ -469,20 +469,41 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
 
         // Calculate how many ticks to advance
         let elapsed = now.saturating_duration_since(self.base_time);
-        let target_slot = (elapsed.as_nanos() / self.resolution.as_nanos().max(1)) as usize % SLOTS;
+        let target_tick = elapsed.as_nanos() / self.resolution.as_nanos().max(1);
+        let current_tick = {
+            // Reconstruct current tick from base_time + current slot history
+            // We need to track absolute ticks to detect full rotations
+            let prev_elapsed = self.base_time.saturating_duration_since(self.base_time);
+            prev_elapsed.as_nanos() / self.resolution.as_nanos().max(1)
+        };
 
-        // Process slots until we reach target (handling wrap-around)
-        while self.current != target_slot {
+        let ticks_to_advance = target_tick.saturating_sub(current_tick);
+
+        // If advancing more than SLOTS ticks, we need to scan all slots
+        if ticks_to_advance as usize >= SLOTS {
+            // Full rotation or more: collect expired from ALL slots
+            for slot in &self.slots {
+                let wakers = slot.collect_expired(now);
+                self.count = self.count.saturating_sub(wakers.len());
+                all_wakers.extend(wakers);
+            }
+            self.current = (target_tick as usize) % SLOTS;
+        } else {
+            let target_slot = (target_tick as usize) % SLOTS;
+
+            // Process slots until we reach target (handling wrap-around)
+            while self.current != target_slot {
+                let wakers = self.slots[self.current].collect_expired(now);
+                self.count = self.count.saturating_sub(wakers.len());
+                all_wakers.extend(wakers);
+                self.current = (self.current + 1) % SLOTS;
+            }
+
+            // Process the target slot
             let wakers = self.slots[self.current].collect_expired(now);
             self.count = self.count.saturating_sub(wakers.len());
             all_wakers.extend(wakers);
-            self.current = (self.current + 1) % SLOTS;
         }
-
-        // Process the target slot
-        let wakers = self.slots[self.current].collect_expired(now);
-        self.count = self.count.saturating_sub(wakers.len());
-        all_wakers.extend(wakers);
 
         all_wakers
     }

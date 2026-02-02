@@ -163,17 +163,20 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         now: Time,
         cx: &mut Context<'_>,
     ) -> Poll<Result<F::Output, Elapsed>> {
-        // Check the timeout first
+        // Poll the inner future first — if it's ready, return its result
+        // even if the timeout has also elapsed, to avoid losing completed work.
+        // SAFETY: We require F: Unpin, so this is safe
+        match Pin::new(&mut self.future).poll(cx) {
+            Poll::Ready(output) => return Poll::Ready(Ok(output)),
+            Poll::Pending => {}
+        }
+
+        // Check the timeout
         if self.sleep.poll_with_time(now).is_ready() {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
 
-        // Try the inner future
-        // SAFETY: We require F: Unpin, so this is safe
-        match Pin::new(&mut self.future).poll(cx) {
-            Poll::Ready(output) => Poll::Ready(Ok(output)),
-            Poll::Pending => Poll::Pending,
-        }
+        Poll::Pending
     }
 }
 
@@ -181,15 +184,17 @@ impl<F: Future + Unpin> Future for TimeoutFuture<F> {
     type Output = Result<F::Output, Elapsed>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Poll the sleep future to register wakeup (e.g. background thread in standalone mode)
-        match Pin::new(&mut self.sleep).poll(cx) {
-            Poll::Ready(()) => return Poll::Ready(Err(Elapsed::new(self.sleep.deadline()))),
+        // Poll the inner future first — if it's ready, we should return its
+        // result even if the timeout has also elapsed. This avoids losing
+        // completed work at the boundary.
+        match Pin::new(&mut self.future).poll(cx) {
+            Poll::Ready(output) => return Poll::Ready(Ok(output)),
             Poll::Pending => {}
         }
 
-        // Poll the inner future
-        match Pin::new(&mut self.future).poll(cx) {
-            Poll::Ready(output) => Poll::Ready(Ok(output)),
+        // Poll the sleep future to register wakeup (e.g. background thread in standalone mode)
+        match Pin::new(&mut self.sleep).poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(Elapsed::new(self.sleep.deadline()))),
             Poll::Pending => Poll::Pending,
         }
     }

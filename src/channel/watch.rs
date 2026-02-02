@@ -335,16 +335,11 @@ impl<T> Receiver<T> {
     pub fn changed(&mut self, cx: &Cx) -> Result<(), RecvError> {
         cx.trace("watch::changed starting wait");
 
-        let mut lock = self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
-
         loop {
-            // Check if sender dropped
+            // Read version and sender state WITHOUT holding receiver_count
+            // to avoid ABBA deadlock with send() which locks value then
+            // receiver_count.
             if self.inner.is_sender_dropped() {
-                // Still return change if value was updated before drop
                 let current = self.inner.current_version();
                 if current > self.seen_version {
                     self.seen_version = current;
@@ -354,7 +349,6 @@ impl<T> Receiver<T> {
                 return Err(RecvError::Closed);
             }
 
-            // Check if there's a new value
             let current_version = self.inner.current_version();
             if current_version > self.seen_version {
                 self.seen_version = current_version;
@@ -368,14 +362,18 @@ impl<T> Receiver<T> {
                 return Err(RecvError::Cancelled);
             }
 
-            // Wait for notification
-            // Use wait_timeout to allow periodic cancellation checks
-            let (guard, _timeout) = self
+            // Hold receiver_count only for the Condvar wait.
+            let lock = self
+                .inner
+                .receiver_count
+                .lock()
+                .expect("watch lock poisoned");
+            let (_guard, _timeout) = self
                 .inner
                 .notify
                 .wait_timeout(lock, std::time::Duration::from_millis(10))
                 .expect("watch lock poisoned");
-            lock = guard;
+            // Lock is dropped here before we re-check version.
         }
     }
 

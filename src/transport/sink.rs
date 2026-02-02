@@ -469,3 +469,458 @@ impl SymbolSink for CollectingSink {
         Poll::Ready(Ok(()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::authenticated::AuthenticatedSymbol;
+    use crate::security::tag::AuthenticationTag;
+    use crate::transport::channel;
+    use crate::transport::stream::SymbolStreamExt;
+    use crate::types::{Symbol, SymbolId, SymbolKind};
+    use futures_lite::future;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Wake, Waker};
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn create_symbol(esi: u32) -> AuthenticatedSymbol {
+        let id = SymbolId::new_for_test(1, 0, esi);
+        let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
+        let tag = AuthenticationTag::zero();
+        AuthenticatedSymbol::new_verified(symbol, tag)
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
+
+    #[allow(clippy::struct_excessive_bools)]
+    struct TrackingSinkState {
+        ready_after: usize,
+        ready_polls: usize,
+        send_pending_once: bool,
+        send_pending_done: bool,
+        send_error_once: bool,
+        sent: Vec<AuthenticatedSymbol>,
+        flush_count: usize,
+        closed: bool,
+    }
+
+    impl TrackingSinkState {
+        fn new() -> Self {
+            Self {
+                ready_after: 0,
+                ready_polls: 0,
+                send_pending_once: false,
+                send_pending_done: false,
+                send_error_once: false,
+                sent: Vec::new(),
+                flush_count: 0,
+                closed: false,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct TrackingSink {
+        state: Arc<Mutex<TrackingSinkState>>,
+    }
+
+    impl TrackingSink {
+        fn new(state: TrackingSinkState) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(state)),
+            }
+        }
+
+        fn state(&self) -> Arc<Mutex<TrackingSinkState>> {
+            Arc::clone(&self.state)
+        }
+    }
+
+    impl SymbolSink for TrackingSink {
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                drop(state);
+                return Poll::Ready(Err(SinkError::Closed));
+            }
+            if state.ready_polls < state.ready_after {
+                state.ready_polls += 1;
+                drop(state);
+                return Poll::Pending;
+            }
+            drop(state);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                drop(state);
+                return Poll::Ready(Err(SinkError::Closed));
+            }
+            if state.send_error_once {
+                state.send_error_once = false;
+                drop(state);
+                return Poll::Ready(Err(SinkError::SendFailed {
+                    reason: "send failed".to_string(),
+                }));
+            }
+            if state.send_pending_once && !state.send_pending_done {
+                state.send_pending_done = true;
+                drop(state);
+                return Poll::Pending;
+            }
+            state.sent.push(symbol);
+            drop(state);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                drop(state);
+                return Poll::Ready(Err(SinkError::Closed));
+            }
+            state.flush_count += 1;
+            drop(state);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            let mut state = self.state.lock().unwrap();
+            state.closed = true;
+            drop(state);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn test_send_future_pending_then_ready() {
+        init_test("test_send_future_pending_then_ready");
+        let mut sink = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.ready_after = 1;
+            state
+        });
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut fut = sink.send(create_symbol(1));
+        let mut fut = Pin::new(&mut fut);
+
+        let first = fut.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "pending",
+            true,
+            matches!(first, Poll::Pending)
+        );
+
+        let second = fut.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Ok(()))),
+            "ready",
+            true,
+            matches!(second, Poll::Ready(Ok(())))
+        );
+
+        let sent_len = {
+            let state = sink.state.lock().unwrap();
+            state.sent.len()
+        };
+        crate::assert_with_log!(sent_len == 1, "sent", 1usize, sent_len);
+        crate::test_complete!("test_send_future_pending_then_ready");
+    }
+
+    #[test]
+    fn test_send_future_propagates_send_error() {
+        init_test("test_send_future_propagates_send_error");
+        let mut sink = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.send_error_once = true;
+            state
+        });
+
+        let res = future::block_on(async { sink.send(create_symbol(2)).await });
+        crate::assert_with_log!(
+            matches!(res, Err(SinkError::SendFailed { .. })),
+            "send failed",
+            true,
+            matches!(res, Err(SinkError::SendFailed { .. }))
+        );
+
+        let sent_empty = {
+            let state = sink.state.lock().unwrap();
+            state.sent.is_empty()
+        };
+        crate::assert_with_log!(sent_empty, "no sent", true, sent_empty);
+        crate::test_complete!("test_send_future_propagates_send_error");
+    }
+
+    #[test]
+    fn test_send_all_counts_and_flushes() {
+        init_test("test_send_all_counts_and_flushes");
+        let mut sink = TrackingSink::new(TrackingSinkState::new());
+        let symbols = vec![create_symbol(1), create_symbol(2), create_symbol(3)];
+
+        let count = future::block_on(async { sink.send_all(symbols).await.unwrap() });
+        let (sent_len, flush_count) = {
+            let state = sink.state.lock().unwrap();
+            (state.sent.len(), state.flush_count)
+        };
+
+        crate::assert_with_log!(count == 3, "count", 3usize, count);
+        crate::assert_with_log!(sent_len == 3, "sent", 3usize, sent_len);
+        crate::assert_with_log!(flush_count == 1, "flush count", 1usize, flush_count);
+        crate::test_complete!("test_send_all_counts_and_flushes");
+    }
+
+    #[test]
+    fn test_send_all_propagates_error() {
+        init_test("test_send_all_propagates_error");
+        let mut sink = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.send_error_once = true;
+            state
+        });
+
+        let res = future::block_on(async { sink.send_all(vec![create_symbol(9)]).await });
+        crate::assert_with_log!(
+            matches!(res, Err(SinkError::SendFailed { .. })),
+            "error",
+            true,
+            matches!(res, Err(SinkError::SendFailed { .. }))
+        );
+        crate::test_complete!("test_send_all_propagates_error");
+    }
+
+    #[test]
+    fn test_buffered_sink_defers_send_until_flush() {
+        init_test("test_buffered_sink_defers_send_until_flush");
+        let mut buffered = BufferedSink::new(CollectingSink::new(), 2);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(1));
+        let second = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(2));
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(()))),
+            "first buffered",
+            true,
+            matches!(first, Poll::Ready(Ok(())))
+        );
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Ok(()))),
+            "second buffered",
+            true,
+            matches!(second, Poll::Ready(Ok(())))
+        );
+        crate::assert_with_log!(
+            buffered.inner.symbols.is_empty(),
+            "inner empty before flush",
+            true,
+            buffered.inner.symbols.is_empty()
+        );
+
+        let flushed = Pin::new(&mut buffered).poll_flush(&mut context);
+        crate::assert_with_log!(
+            matches!(flushed, Poll::Ready(Ok(()))),
+            "flush ok",
+            true,
+            matches!(flushed, Poll::Ready(Ok(())))
+        );
+        crate::assert_with_log!(
+            buffered.inner.symbols.len() == 2,
+            "inner received",
+            2usize,
+            buffered.inner.symbols.len()
+        );
+        crate::test_complete!("test_buffered_sink_defers_send_until_flush");
+    }
+
+    #[test]
+    fn test_buffered_sink_ready_pending_when_inner_not_ready() {
+        init_test("test_buffered_sink_ready_pending_when_inner_not_ready");
+        let inner = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.ready_after = 1;
+            state
+        });
+        let mut buffered = BufferedSink::new(inner, 1);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let send = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(7));
+        crate::assert_with_log!(
+            matches!(send, Poll::Ready(Ok(()))),
+            "buffered send",
+            true,
+            matches!(send, Poll::Ready(Ok(())))
+        );
+
+        let ready = Pin::new(&mut buffered).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Pending),
+            "ready pending",
+            true,
+            matches!(ready, Poll::Pending)
+        );
+        crate::assert_with_log!(
+            buffered.buffer.len() == 1,
+            "buffer retained",
+            1usize,
+            buffered.buffer.len()
+        );
+        crate::test_complete!("test_buffered_sink_ready_pending_when_inner_not_ready");
+    }
+
+    #[test]
+    fn test_channel_sink_pending_when_full_and_ready_after_recv() {
+        init_test("test_channel_sink_pending_when_full_and_ready_after_recv");
+        let (mut sink, mut stream) = channel(1);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let ready = Pin::new(&mut sink).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Ok(()))),
+            "ready ok",
+            true,
+            matches!(ready, Poll::Ready(Ok(())))
+        );
+        let send = Pin::new(&mut sink).poll_send(&mut context, create_symbol(1));
+        crate::assert_with_log!(
+            matches!(send, Poll::Ready(Ok(()))),
+            "send ok",
+            true,
+            matches!(send, Poll::Ready(Ok(())))
+        );
+
+        let pending = Pin::new(&mut sink).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(pending, Poll::Pending),
+            "pending when full",
+            true,
+            matches!(pending, Poll::Pending)
+        );
+        let queued = sink
+            .waiter
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        crate::assert_with_log!(queued, "waiter queued", true, queued);
+
+        future::block_on(async {
+            let _ = stream.next().await.unwrap().unwrap();
+        });
+
+        let ready_after = Pin::new(&mut sink).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready_after, Poll::Ready(Ok(()))),
+            "ready after recv",
+            true,
+            matches!(ready_after, Poll::Ready(Ok(())))
+        );
+        let queued_after = sink
+            .waiter
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        crate::assert_with_log!(!queued_after, "waiter cleared", false, queued_after);
+
+        crate::test_complete!("test_channel_sink_pending_when_full_and_ready_after_recv");
+    }
+
+    #[test]
+    fn test_channel_sink_poll_send_buffer_full() {
+        init_test("test_channel_sink_poll_send_buffer_full");
+        let (mut sink, _stream) = channel(1);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let ready = Pin::new(&mut sink).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Ok(()))),
+            "ready ok",
+            true,
+            matches!(ready, Poll::Ready(Ok(())))
+        );
+        let send = Pin::new(&mut sink).poll_send(&mut context, create_symbol(1));
+        crate::assert_with_log!(
+            matches!(send, Poll::Ready(Ok(()))),
+            "send ok",
+            true,
+            matches!(send, Poll::Ready(Ok(())))
+        );
+
+        let full = Pin::new(&mut sink).poll_send(&mut context, create_symbol(2));
+        crate::assert_with_log!(
+            matches!(full, Poll::Ready(Err(SinkError::BufferFull))),
+            "buffer full",
+            true,
+            matches!(full, Poll::Ready(Err(SinkError::BufferFull)))
+        );
+
+        crate::test_complete!("test_channel_sink_poll_send_buffer_full");
+    }
+
+    #[test]
+    fn test_collecting_sink_collects() {
+        init_test("test_collecting_sink_collects");
+        let mut sink = CollectingSink::new();
+
+        future::block_on(async {
+            sink.send(create_symbol(1)).await.unwrap();
+            sink.send(create_symbol(2)).await.unwrap();
+        });
+
+        crate::assert_with_log!(
+            sink.symbols().len() == 2,
+            "len",
+            2usize,
+            sink.symbols().len()
+        );
+        crate::test_complete!("test_collecting_sink_collects");
+    }
+
+    #[test]
+    fn test_channel_sink_close_sets_closed_and_ready_errors() {
+        init_test("test_channel_sink_close_sets_closed_and_ready_errors");
+        let (mut sink, _stream) = channel(1);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let close = Pin::new(&mut sink).poll_close(&mut context);
+        crate::assert_with_log!(
+            matches!(close, Poll::Ready(Ok(()))),
+            "close ok",
+            true,
+            matches!(close, Poll::Ready(Ok(())))
+        );
+
+        let ready = Pin::new(&mut sink).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Err(SinkError::Closed))),
+            "ready closed",
+            true,
+            matches!(ready, Poll::Ready(Err(SinkError::Closed)))
+        );
+
+        crate::test_complete!("test_channel_sink_close_sets_closed_and_ready_errors");
+    }
+}

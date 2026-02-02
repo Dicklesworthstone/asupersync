@@ -352,6 +352,11 @@ impl Buf for std::io::Cursor<&[u8]> {
     }
 
     fn advance(&mut self, cnt: usize) {
+        assert!(
+            cnt <= self.remaining(),
+            "advance out of bounds: cnt={cnt}, remaining={}",
+            self.remaining()
+        );
         let pos = self.position();
         self.set_position(pos + cnt as u64);
     }
@@ -375,6 +380,11 @@ impl Buf for std::io::Cursor<Vec<u8>> {
     }
 
     fn advance(&mut self, cnt: usize) {
+        assert!(
+            cnt <= self.remaining(),
+            "advance out of bounds: cnt={cnt}, remaining={}",
+            self.remaining()
+        );
         let pos = self.position();
         self.set_position(pos + cnt as u64);
     }

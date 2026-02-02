@@ -306,9 +306,12 @@ mod tests {
         let stack = Stack::new(inner_layer, outer_layer);
         let _svc = stack.layer(EchoService);
 
-        let applied = order.lock().unwrap();
+        let applied = {
+            let applied = order.lock().unwrap();
+            applied.clone()
+        };
         assert_eq!(
-            &*applied,
+            &applied,
             &[1, 2],
             "inner layer (1) must apply before outer layer (2)"
         );
@@ -324,9 +327,12 @@ mod tests {
             .layer(TrackingLayer::new(3, Arc::clone(&order)))
             .service(EchoService);
 
-        let applied = order.lock().unwrap();
+        let applied = {
+            let applied = order.lock().unwrap();
+            applied.clone()
+        };
         assert_eq!(
-            &*applied,
+            &applied,
             &[1, 2, 3],
             "ServiceBuilder layers apply in declaration order"
         );
@@ -348,7 +354,10 @@ mod tests {
         order.lock().unwrap().clear();
 
         let _fut = svc.call(42);
-        let calls = order.lock().unwrap();
+        let calls = {
+            let calls = order.lock().unwrap();
+            calls.clone()
+        };
         // Outer (2) call runs first, then inner (1)
         assert_eq!(calls[0], 2, "outer layer's call runs first");
         assert_eq!(calls[1], 1, "inner layer's call runs second");

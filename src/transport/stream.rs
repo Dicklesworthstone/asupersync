@@ -516,3 +516,444 @@ impl<S: SymbolStream + Unpin> SymbolStream for TimeoutStream<S> {
         Poll::Pending
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::authenticated::AuthenticatedSymbol;
+    use crate::security::tag::AuthenticationTag;
+    use crate::transport::sink::SymbolSink;
+    use crate::transport::{channel, SymbolStreamExt};
+    use crate::types::{Symbol, SymbolId, SymbolKind};
+    use futures_lite::future;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn create_symbol(esi: u32) -> AuthenticatedSymbol {
+        let id = SymbolId::new_for_test(1, 0, esi);
+        let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
+        let tag = AuthenticationTag::zero();
+        AuthenticatedSymbol::new_verified(symbol, tag)
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
+
+    struct PendingStream;
+
+    impl SymbolStream for PendingStream {
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            Poll::Pending
+        }
+    }
+
+    struct ErrorStream {
+        returned: bool,
+    }
+
+    impl ErrorStream {
+        fn new() -> Self {
+            Self { returned: false }
+        }
+    }
+
+    impl SymbolStream for ErrorStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            if self.returned {
+                Poll::Ready(None)
+            } else {
+                self.returned = true;
+                Poll::Ready(Some(Err(StreamError::Reset)))
+            }
+        }
+    }
+
+    struct ExhaustedStream {
+        items: Vec<AuthenticatedSymbol>,
+        index: usize,
+    }
+
+    impl ExhaustedStream {
+        fn new(items: Vec<AuthenticatedSymbol>) -> Self {
+            Self { items, index: 0 }
+        }
+    }
+
+    impl SymbolStream for ExhaustedStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            if self.index < self.items.len() {
+                let item = self.items[self.index].clone();
+                self.index += 1;
+                Poll::Ready(Some(Ok(item)))
+            } else {
+                Poll::Ready(None)
+            }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.items.len().saturating_sub(self.index);
+            (remaining, Some(remaining))
+        }
+
+        fn is_exhausted(&self) -> bool {
+            self.index >= self.items.len()
+        }
+    }
+
+    #[test]
+    fn test_next_future_yields_items_and_none() {
+        init_test("test_next_future_yields_items_and_none");
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(2)]);
+
+        future::block_on(async {
+            let first = stream.next().await.unwrap().unwrap();
+            let second = stream.next().await.unwrap().unwrap();
+            let done = stream.next().await;
+
+            let first_esi = first.symbol().id().esi();
+            let second_esi = second.symbol().id().esi();
+            crate::assert_with_log!(first_esi == 1, "first esi", 1u32, first_esi);
+            crate::assert_with_log!(second_esi == 2, "second esi", 2u32, second_esi);
+            crate::assert_with_log!(done.is_none(), "stream done", true, done.is_none());
+        });
+
+        crate::test_complete!("test_next_future_yields_items_and_none");
+    }
+
+    #[test]
+    fn test_collect_to_set_deduplicates_and_counts() {
+        init_test("test_collect_to_set_deduplicates_and_counts");
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(1), create_symbol(2)]);
+        let mut set = SymbolSet::new();
+
+        let count = future::block_on(async { stream.collect_to_set(&mut set).await.unwrap() });
+
+        crate::assert_with_log!(count == 2, "unique count", 2usize, count);
+        crate::assert_with_log!(set.len() == 2, "set size", 2usize, set.len());
+        crate::test_complete!("test_collect_to_set_deduplicates_and_counts");
+    }
+
+    #[test]
+    fn test_next_with_cancel_immediate() {
+        init_test("test_next_with_cancel_immediate");
+        let (_sink, mut stream) = channel(1);
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        future::block_on(async {
+            let res = stream.next_with_cancel(&cx).await;
+            crate::assert_with_log!(
+                matches!(res, Err(StreamError::Cancelled)),
+                "cancelled",
+                true,
+                matches!(res, Err(StreamError::Cancelled))
+            );
+        });
+
+        crate::test_complete!("test_next_with_cancel_immediate");
+    }
+
+    #[test]
+    fn test_next_with_cancel_after_pending() {
+        init_test("test_next_with_cancel_after_pending");
+        let mut stream = PendingStream;
+        let cx = Cx::for_testing();
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut fut = stream.next_with_cancel(&cx);
+        let mut fut = Pin::new(&mut fut);
+
+        let first = fut.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first pending",
+            true,
+            matches!(first, Poll::Pending)
+        );
+
+        cx.set_cancel_requested(true);
+        let second = fut.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(StreamError::Cancelled))),
+            "cancel after pending",
+            true,
+            matches!(second, Poll::Ready(Err(StreamError::Cancelled)))
+        );
+
+        crate::test_complete!("test_next_with_cancel_after_pending");
+    }
+
+    #[test]
+    fn test_map_stream_transforms_symbol() {
+        init_test("test_map_stream_transforms_symbol");
+        let stream = VecStream::new(vec![create_symbol(7)]);
+        let mut mapped = stream.map(|symbol| {
+            let id = symbol.symbol().id();
+            let new_symbol = Symbol::new(id, vec![42u8], SymbolKind::Source);
+            AuthenticatedSymbol::new_verified(new_symbol, AuthenticationTag::zero())
+        });
+
+        future::block_on(async {
+            let item = mapped.next().await.unwrap().unwrap();
+            crate::assert_with_log!(
+                item.symbol().data() == [42u8],
+                "mapped data",
+                true,
+                item.symbol().data() == [42u8]
+            );
+        });
+
+        crate::test_complete!("test_map_stream_transforms_symbol");
+    }
+
+    #[test]
+    fn test_filter_stream_skips_and_passes() {
+        init_test("test_filter_stream_skips_and_passes");
+        let stream = VecStream::new(vec![create_symbol(1), create_symbol(2), create_symbol(3)]);
+        let mut filtered = stream.filter(|symbol| symbol.symbol().id().esi() % 2 == 1);
+
+        future::block_on(async {
+            let first = filtered.next().await.unwrap().unwrap();
+            let second = filtered.next().await.unwrap().unwrap();
+            let done = filtered.next().await;
+
+            let first_esi = first.symbol().id().esi();
+            let second_esi = second.symbol().id().esi();
+            crate::assert_with_log!(first_esi == 1, "first", 1u32, first_esi);
+            crate::assert_with_log!(second_esi == 3, "second", 3u32, second_esi);
+            crate::assert_with_log!(done.is_none(), "done", true, done.is_none());
+        });
+
+        crate::test_complete!("test_filter_stream_skips_and_passes");
+    }
+
+    #[test]
+    fn test_filter_stream_propagates_error() {
+        init_test("test_filter_stream_propagates_error");
+        let stream = ErrorStream::new();
+        let mut filtered = stream.filter(|_symbol| true);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let poll = Pin::new(&mut filtered).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Ready(Some(Err(StreamError::Reset)))),
+            "error propagates",
+            true,
+            matches!(poll, Poll::Ready(Some(Err(StreamError::Reset))))
+        );
+
+        crate::test_complete!("test_filter_stream_propagates_error");
+    }
+
+    #[test]
+    fn test_merged_stream_round_robin_and_drop_exhausted() {
+        init_test("test_merged_stream_round_robin_and_drop_exhausted");
+        let s1 = VecStream::new(vec![create_symbol(1), create_symbol(3)]);
+        let s2 = VecStream::new(vec![create_symbol(2), create_symbol(4)]);
+        let mut merged = MergedStream::new(vec![s1, s2]);
+
+        future::block_on(async {
+            let mut out = Vec::new();
+            while let Some(item) = merged.next().await {
+                out.push(item.unwrap().symbol().id().esi());
+            }
+            crate::assert_with_log!(
+                out == vec![1, 2, 3, 4],
+                "merged order",
+                true,
+                out == vec![1, 2, 3, 4]
+            );
+        });
+
+        crate::test_complete!("test_merged_stream_round_robin_and_drop_exhausted");
+    }
+
+    #[test]
+    fn test_merged_stream_size_hint_and_is_exhausted() {
+        init_test("test_merged_stream_size_hint_and_is_exhausted");
+        let s1 = ExhaustedStream::new(vec![create_symbol(1), create_symbol(2)]);
+        let s2 = ExhaustedStream::new(vec![create_symbol(3)]);
+        let mut merged = MergedStream::new(vec![s1, s2]);
+
+        let hint = merged.size_hint();
+        crate::assert_with_log!(hint == (3, Some(3)), "size hint", (3, Some(3)), hint);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        while let Poll::Ready(Some(_)) = Pin::new(&mut merged).poll_next(&mut context) {}
+        crate::assert_with_log!(
+            merged.is_exhausted(),
+            "exhausted",
+            true,
+            merged.is_exhausted()
+        );
+
+        crate::test_complete!("test_merged_stream_size_hint_and_is_exhausted");
+    }
+
+    #[test]
+    fn test_channel_stream_registers_waiter_and_receives() {
+        init_test("test_channel_stream_registers_waiter_and_receives");
+        let shared = Arc::new(SharedChannel::new(1));
+        let mut stream = ChannelStream::new(Arc::clone(&shared));
+        let mut sink = crate::transport::sink::ChannelSink::new(shared);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "pending when empty",
+            true,
+            matches!(first, Poll::Pending)
+        );
+        let queued = stream
+            .waiter
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        crate::assert_with_log!(queued, "waiter queued", true, queued);
+
+        let symbol = create_symbol(9);
+        let send = Pin::new(&mut sink).poll_send(&mut context, symbol);
+        crate::assert_with_log!(
+            matches!(send, Poll::Ready(Ok(()))),
+            "send ok",
+            true,
+            matches!(send, Poll::Ready(Ok(())))
+        );
+
+        let second = Pin::new(&mut stream).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Some(Ok(_)))),
+            "receive after send",
+            true,
+            matches!(second, Poll::Ready(Some(Ok(_))))
+        );
+        let queued_after = stream
+            .waiter
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        crate::assert_with_log!(!queued_after, "waiter cleared", false, queued_after);
+
+        crate::test_complete!("test_channel_stream_registers_waiter_and_receives");
+    }
+
+    #[test]
+    fn test_timeout_stream_triggers_and_resets() {
+        static NOW: AtomicU64 = AtomicU64::new(0);
+        fn fake_now() -> Time {
+            Time::from_nanos(NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("test_timeout_stream_triggers_and_resets");
+        let inner = PendingStream;
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::from_nanos(10), fake_now);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        NOW.store(0, Ordering::SeqCst);
+        let first = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "pending before timeout",
+            true,
+            matches!(first, Poll::Pending)
+        );
+
+        NOW.store(10, Ordering::SeqCst);
+        let second = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Some(Err(StreamError::Timeout)))),
+            "timeout",
+            true,
+            matches!(second, Poll::Ready(Some(Err(StreamError::Timeout))))
+        );
+
+        NOW.store(10, Ordering::SeqCst);
+        let third = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(third, Poll::Pending),
+            "reset after timeout",
+            true,
+            matches!(third, Poll::Pending)
+        );
+
+        crate::test_complete!("test_timeout_stream_triggers_and_resets");
+    }
+
+    #[test]
+    fn test_timeout_stream_resets_on_item() {
+        static NOW: AtomicU64 = AtomicU64::new(0);
+        fn fake_now() -> Time {
+            Time::from_nanos(NOW.load(Ordering::SeqCst))
+        }
+
+        struct OneItemThenPending {
+            item: Option<AuthenticatedSymbol>,
+        }
+
+        impl SymbolStream for OneItemThenPending {
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+                self.item
+                    .take()
+                    .map_or(Poll::Pending, |item| Poll::Ready(Some(Ok(item))))
+            }
+        }
+
+        init_test("test_timeout_stream_resets_on_item");
+        let inner = OneItemThenPending {
+            item: Some(create_symbol(5)),
+        };
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::from_nanos(10), fake_now);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        NOW.store(0, Ordering::SeqCst);
+        let first = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Some(Ok(_)))),
+            "item received",
+            true,
+            matches!(first, Poll::Ready(Some(Ok(_))))
+        );
+
+        NOW.store(5, Ordering::SeqCst);
+        let second = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Pending),
+            "pending before new deadline",
+            true,
+            matches!(second, Poll::Pending)
+        );
+
+        crate::test_complete!("test_timeout_stream_resets_on_item");
+    }
+}

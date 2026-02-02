@@ -42,7 +42,15 @@ pub struct Notify {
     /// Number of stored notifications (for notify_one before wait).
     stored_notifications: AtomicUsize,
     /// Queue of waiters (protected by mutex).
-    waiters: StdMutex<Vec<WaiterEntry>>,
+    waiters: StdMutex<WaiterSlab>,
+}
+
+/// Slab-like storage for waiters that reuses freed slots to prevent
+/// unbounded Vec growth when cancelled waiters leave holes in the middle.
+#[derive(Debug)]
+struct WaiterSlab {
+    entries: Vec<WaiterEntry>,
+    free_slots: Vec<usize>,
 }
 
 /// Entry in the waiter queue.
@@ -56,6 +64,55 @@ struct WaiterEntry {
     generation: u64,
 }
 
+impl WaiterSlab {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            free_slots: Vec::new(),
+        }
+    }
+
+    /// Insert a waiter entry, reusing a free slot if available.
+    fn insert(&mut self, entry: WaiterEntry) -> usize {
+        if let Some(index) = self.free_slots.pop() {
+            self.entries[index] = entry;
+            index
+        } else {
+            let index = self.entries.len();
+            self.entries.push(entry);
+            index
+        }
+    }
+
+    /// Remove a waiter entry by index, returning its slot to the free list.
+    fn remove(&mut self, index: usize) {
+        if index < self.entries.len() {
+            self.entries[index].waker = None;
+            self.entries[index].notified = false;
+            self.free_slots.push(index);
+        }
+
+        // Shrink from the end: pop entries that are free and at the tail.
+        while self
+            .entries
+            .last()
+            .is_some_and(|e| e.waker.is_none() && !e.notified)
+        {
+            let tail_idx = self.entries.len() - 1;
+            self.entries.pop();
+            // Remove tail_idx from free_slots since the slot no longer exists.
+            if let Some(pos) = self.free_slots.iter().position(|&i| i == tail_idx) {
+                self.free_slots.swap_remove(pos);
+            }
+        }
+    }
+
+    /// Count active waiters (those with a waker set).
+    fn active_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.waker.is_some()).count()
+    }
+}
+
 impl Notify {
     /// Creates a new `Notify` in the empty state.
     #[must_use]
@@ -63,7 +120,7 @@ impl Notify {
         Self {
             generation: AtomicU64::new(0),
             stored_notifications: AtomicUsize::new(0),
-            waiters: StdMutex::new(Vec::new()),
+            waiters: StdMutex::new(WaiterSlab::new()),
         }
     }
 
@@ -93,7 +150,7 @@ impl Notify {
         };
 
         // Find a waiter to notify.
-        for entry in waiters.iter_mut() {
+        for entry in &mut waiters.entries {
             if !entry.notified && entry.waker.is_some() {
                 entry.notified = true;
                 if let Some(waker) = entry.waker.take() {
@@ -125,6 +182,7 @@ impl Notify {
             };
 
             waiters
+                .entries
                 .iter_mut()
                 .filter_map(|entry| {
                     entry.notified = true;
@@ -146,7 +204,7 @@ impl Notify {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        waiters.iter().filter(|e| e.waker.is_some()).count()
+        waiters.active_count()
     }
 }
 
@@ -221,8 +279,7 @@ impl Future for Notified<'_> {
                     Err(poisoned) => poisoned.into_inner(),
                 };
 
-                let index = waiters.len();
-                waiters.push(WaiterEntry {
+                let index = waiters.insert(WaiterEntry {
                     waker: Some(cx.waker().clone()),
                     notified: false,
                     generation: self.initial_generation,
@@ -249,17 +306,17 @@ impl Future for Notified<'_> {
                         Err(poisoned) => poisoned.into_inner(),
                     };
 
-                    if index < waiters.len() {
-                        if waiters[index].notified {
+                    if index < waiters.entries.len() {
+                        if waiters.entries[index].notified {
                             drop(waiters); // Release lock before cleanup.
                             self.cleanup();
                             self.state = NotifiedState::Done;
                             return Poll::Ready(());
                         }
                         // Update waker while we have the lock.
-                        waiters[index].waker = Some(cx.waker().clone());
+                        waiters.entries[index].waker = Some(cx.waker().clone());
                     } else {
-                        // Entry was popped by another task's cleanup. This only
+                        // Entry was popped by tail shrinking. This only
                         // happens if our waker was taken by notify_one/notify_waiters,
                         // which means we were notified.
                         drop(waiters); // Release lock.
@@ -285,14 +342,7 @@ impl Notified<'_> {
                 Err(poisoned) => poisoned.into_inner(),
             };
 
-            if index < waiters.len() {
-                waiters[index].waker = None;
-            }
-
-            // Clean up empty entries from the end.
-            while waiters.last().is_some_and(|e| e.waker.is_none()) {
-                waiters.pop();
-            }
+            waiters.remove(index);
             drop(waiters);
         }
     }
@@ -508,5 +558,88 @@ mod tests {
         let pending = poll_once(&mut fut3).is_pending();
         crate::assert_with_log!(pending, "third pending", true, pending);
         crate::test_complete!("test_notify_multiple_stored");
+    }
+
+    #[test]
+    fn test_cancelled_middle_waiter_no_leak() {
+        init_test("test_cancelled_middle_waiter_no_leak");
+        let notify = Notify::new();
+
+        // Register three waiters
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        let count = notify.waiter_count();
+        crate::assert_with_log!(count == 3, "three waiters", 3usize, count);
+
+        // Cancel the MIDDLE waiter - this was the leak trigger
+        drop(fut2);
+
+        let count = notify.waiter_count();
+        crate::assert_with_log!(count == 2, "two waiters after middle drop", 2usize, count);
+
+        // Check that the Vec hasn't grown unboundedly: entries should be <= 3
+        {
+            let waiters = notify.waiters.lock().unwrap();
+            let entries_len = waiters.entries.len();
+            crate::assert_with_log!(
+                entries_len <= 3,
+                "entries bounded",
+                true,
+                entries_len <= 3
+            );
+        }
+
+        // Cancel all and verify full cleanup
+        drop(fut1);
+        drop(fut3);
+
+        let count = notify.waiter_count();
+        crate::assert_with_log!(count == 0, "no waiters after all drops", 0usize, count);
+
+        // Vec should be empty after all waiters gone
+        {
+            let waiters = notify.waiters.lock().unwrap();
+            let entries_len = waiters.entries.len();
+            crate::assert_with_log!(entries_len == 0, "entries empty", 0usize, entries_len);
+        }
+
+        // Verify slot reuse: register new waiters, they should reuse freed slots
+        let mut fut_a = notify.notified();
+        assert!(poll_once(&mut fut_a).is_pending());
+        {
+            let waiters = notify.waiters.lock().unwrap();
+            let entries_len = waiters.entries.len();
+            crate::assert_with_log!(entries_len == 1, "reused slot", 1usize, entries_len);
+        }
+        drop(fut_a);
+
+        crate::test_complete!("test_cancelled_middle_waiter_no_leak");
+    }
+
+    #[test]
+    fn test_repeated_cancel_no_growth() {
+        init_test("test_repeated_cancel_no_growth");
+        let notify = Notify::new();
+
+        // Repeatedly register and cancel waiters to ensure no unbounded growth
+        for _ in 0..100 {
+            let mut fut = notify.notified();
+            assert!(poll_once(&mut fut).is_pending());
+            drop(fut);
+        }
+
+        // After all cancellations, the slab should be empty
+        {
+            let waiters = notify.waiters.lock().unwrap();
+            let entries_len = waiters.entries.len();
+            crate::assert_with_log!(entries_len == 0, "no growth", 0usize, entries_len);
+        }
+
+        crate::test_complete!("test_repeated_cancel_no_growth");
     }
 }

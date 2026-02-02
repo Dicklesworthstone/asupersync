@@ -110,3 +110,107 @@ where
         (0, upper)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::{iter, StreamExt};
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_take_basic() {
+        init_test("test_take_basic");
+        futures_lite::future::block_on(async {
+            let values = iter(vec![1, 2, 3]).take(2).collect::<Vec<_>>().await;
+            crate::assert_with_log!(values == vec![1, 2], "take values", vec![1, 2], values);
+        });
+        crate::test_complete!("test_take_basic");
+    }
+
+    #[test]
+    fn test_take_zero() {
+        init_test("test_take_zero");
+        futures_lite::future::block_on(async {
+            let values = iter(vec![1, 2]).take(0).collect::<Vec<_>>().await;
+            crate::assert_with_log!(values.is_empty(), "take zero", true, values.is_empty());
+        });
+        let take = Take::new(iter(vec![1, 2]), 0);
+        let hint = take.size_hint();
+        crate::assert_with_log!(hint == (0, Some(0)), "size_hint", (0, Some(0)), hint);
+        crate::test_complete!("test_take_zero");
+    }
+
+    #[test]
+    fn test_take_size_hint_after_poll() {
+        init_test("test_take_size_hint_after_poll");
+        let mut take = Take::new(iter(vec![1, 2, 3, 4]), 3);
+        let initial = take.size_hint();
+        crate::assert_with_log!(
+            initial == (3, Some(3)),
+            "initial size_hint",
+            (3, Some(3)),
+            initial
+        );
+        futures_lite::future::block_on(async {
+            let _ = take.next().await;
+        });
+        let after = take.size_hint();
+        crate::assert_with_log!(
+            after == (2, Some(2)),
+            "after size_hint",
+            (2, Some(2)),
+            after
+        );
+        crate::test_complete!("test_take_size_hint_after_poll");
+    }
+
+    #[test]
+    fn test_take_while_basic() {
+        init_test("test_take_while_basic");
+        futures_lite::future::block_on(async {
+            let values = iter(vec![1, 2, 3, 2])
+                .take_while(|v| *v < 3)
+                .collect::<Vec<_>>()
+                .await;
+            crate::assert_with_log!(
+                values == vec![1, 2],
+                "take_while values",
+                vec![1, 2],
+                values
+            );
+        });
+        crate::test_complete!("test_take_while_basic");
+    }
+
+    #[test]
+    fn test_take_while_done_behavior() {
+        init_test("test_take_while_done_behavior");
+        futures_lite::future::block_on(async {
+            let mut stream = iter(vec![1, 2, 3]).take_while(|v| *v < 3);
+            let first = stream.next().await;
+            crate::assert_with_log!(first == Some(1), "first", Some(1), first);
+            let second = stream.next().await;
+            crate::assert_with_log!(second == Some(2), "second", Some(2), second);
+            let third = stream.next().await;
+            crate::assert_with_log!(third.is_none(), "third none", true, third.is_none());
+            let fourth = stream.next().await;
+            crate::assert_with_log!(fourth.is_none(), "fourth none", true, fourth.is_none());
+            let hint = stream.size_hint();
+            crate::assert_with_log!(hint == (0, Some(0)), "size_hint done", (0, Some(0)), hint);
+        });
+        crate::test_complete!("test_take_while_done_behavior");
+    }
+
+    #[test]
+    fn test_take_while_size_hint() {
+        init_test("test_take_while_size_hint");
+        let stream = TakeWhile::new(iter(vec![1, 2, 3, 4]), |v: &i32| *v < 10);
+        let hint = stream.size_hint();
+        crate::assert_with_log!(hint == (0, Some(4)), "size_hint", (0, Some(4)), hint);
+        crate::test_complete!("test_take_while_size_hint");
+    }
+}

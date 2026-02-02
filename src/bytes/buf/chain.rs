@@ -64,7 +64,7 @@ impl<T, U> Chain<T, U> {
 
 impl<T: Buf, U: Buf> Buf for Chain<T, U> {
     fn remaining(&self) -> usize {
-        self.a.remaining() + self.b.remaining()
+        self.a.remaining().saturating_add(self.b.remaining())
     }
 
     fn chunk(&self) -> &[u8] {
