@@ -1398,19 +1398,29 @@ impl MySqlConnection {
         let s = std::str::from_utf8(data)
             .map_err(|e| MySqlError::Protocol(format!("invalid UTF-8: {e}")))?;
 
+        let parse_err =
+            |typ: &str| MySqlError::Protocol(format!("cannot parse {typ} from text value: {s:?}"));
         Ok(match col.column_type {
-            column_type::MYSQL_TYPE_TINY => MySqlValue::Tiny(s.parse().unwrap_or(0)),
+            column_type::MYSQL_TYPE_TINY => {
+                MySqlValue::Tiny(s.parse().map_err(|_| parse_err("TINY"))?)
+            }
             column_type::MYSQL_TYPE_SHORT | column_type::MYSQL_TYPE_YEAR => {
-                MySqlValue::Short(s.parse().unwrap_or(0))
+                MySqlValue::Short(s.parse().map_err(|_| parse_err("SHORT"))?)
             }
             column_type::MYSQL_TYPE_LONG | column_type::MYSQL_TYPE_INT24 => {
-                MySqlValue::Long(s.parse().unwrap_or(0))
+                MySqlValue::Long(s.parse().map_err(|_| parse_err("LONG"))?)
             }
-            column_type::MYSQL_TYPE_LONGLONG => MySqlValue::LongLong(s.parse().unwrap_or(0)),
-            column_type::MYSQL_TYPE_FLOAT => MySqlValue::Float(s.parse().unwrap_or(0.0)),
+            column_type::MYSQL_TYPE_LONGLONG => {
+                MySqlValue::LongLong(s.parse().map_err(|_| parse_err("LONGLONG"))?)
+            }
+            column_type::MYSQL_TYPE_FLOAT => {
+                MySqlValue::Float(s.parse().map_err(|_| parse_err("FLOAT"))?)
+            }
             column_type::MYSQL_TYPE_DOUBLE
             | column_type::MYSQL_TYPE_DECIMAL
-            | column_type::MYSQL_TYPE_NEWDECIMAL => MySqlValue::Double(s.parse().unwrap_or(0.0)),
+            | column_type::MYSQL_TYPE_NEWDECIMAL => {
+                MySqlValue::Double(s.parse().map_err(|_| parse_err("DOUBLE"))?)
+            }
             column_type::MYSQL_TYPE_TINY_BLOB
             | column_type::MYSQL_TYPE_MEDIUM_BLOB
             | column_type::MYSQL_TYPE_LONG_BLOB
@@ -1617,6 +1627,14 @@ impl MySqlConnection {
 
         let len = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
         let seq = header[3];
+
+        // Guard against oversized packets (max MySQL packet is 16 MB minus 1 byte)
+        const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
+        if len > MAX_PACKET_SIZE {
+            return Err(MySqlError::Protocol(format!(
+                "packet length {len} exceeds maximum allowed {MAX_PACKET_SIZE}"
+            )));
+        }
 
         // Read payload
         let mut data = vec![0u8; len as usize];
