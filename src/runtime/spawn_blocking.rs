@@ -168,7 +168,15 @@ where
             FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
         });
 
-    let _ = thread_result.expect("failed to spawn blocking thread");
+    match thread_result {
+        Ok(_) => {}
+        Err(e) => {
+            // Decrement the counter we incremented above before panicking,
+            // otherwise the slot leaks permanently on spawn failure.
+            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
+            panic!("failed to spawn blocking thread: {e}");
+        }
+    }
 
     loop {
         match rx.try_recv() {
