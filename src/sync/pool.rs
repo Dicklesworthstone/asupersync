@@ -761,7 +761,7 @@ where
         // Check if we are currently in the queue
         let in_queue = self
             .waiter_id
-            .map_or(false, |id| state.waiters.iter().any(|w| w.id == id));
+            .is_some_and(|id| state.waiters.iter().any(|w| w.id == id));
 
         if in_queue {
             // Update waker if necessary.
@@ -783,6 +783,7 @@ where
             self.waiter_id = Some(id);
         }
 
+        drop(state);
         Poll::Pending
     }
 }

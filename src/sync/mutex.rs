@@ -285,7 +285,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
     }
 }
 
-impl<'a, 'b, T> Drop for LockFuture<'a, 'b, T> {
+impl<T> Drop for LockFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(waiter) = self.waiter.as_ref() {
             let mut state = self.mutex.state.lock().expect("mutex state lock poisoned");
