@@ -27,6 +27,10 @@ pub enum QuicError {
     #[error("read to end error: {0}")]
     ReadToEnd(#[from] quinn::ReadToEndError),
 
+    /// Error sending datagram.
+    #[error("datagram send error: {0}")]
+    Datagram(#[from] quinn::SendDatagramError),
+
     /// Stream was closed.
     #[error("stream closed")]
     StreamClosed,

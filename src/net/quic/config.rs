@@ -179,8 +179,11 @@ impl QuicConfig {
         transport.max_idle_timeout(idle_timeout);
 
         transport.initial_max_udp_payload_size(1472);
-        transport.stream_receive_window(self.initial_max_stream_data.into());
-        transport.receive_window(self.initial_max_data.into());
+        // VarInt only supports values up to 2^62-1, cap at u32::MAX for safety
+        let stream_window = self.initial_max_stream_data.min(u32::MAX as u64) as u32;
+        let conn_window = self.initial_max_data.min(u32::MAX as u64) as u32;
+        transport.stream_receive_window(stream_window.into());
+        transport.receive_window(conn_window.into());
 
         transport
     }
