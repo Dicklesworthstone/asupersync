@@ -127,6 +127,75 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    #[derive(Debug)]
+    struct PendingEveryOther {
+        items: Vec<i32>,
+        index: usize,
+        pending_next: bool,
+    }
+
+    impl PendingEveryOther {
+        fn new(items: Vec<i32>) -> Self {
+            Self {
+                items,
+                index: 0,
+                pending_next: true,
+            }
+        }
+    }
+
+    impl Stream for PendingEveryOther {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<i32>> {
+            if self.pending_next {
+                self.pending_next = false;
+                return Poll::Pending;
+            }
+
+            if self.index >= self.items.len() {
+                return Poll::Ready(None);
+            }
+
+            let item = self.items[self.index];
+            self.index += 1;
+            self.pending_next = true;
+            Poll::Ready(Some(item))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.items.len().saturating_sub(self.index);
+            (remaining, Some(remaining))
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnknownUpper {
+        remaining: usize,
+    }
+
+    impl UnknownUpper {
+        fn new(remaining: usize) -> Self {
+            Self { remaining }
+        }
+    }
+
+    impl Stream for UnknownUpper {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<i32>> {
+            if self.remaining == 0 {
+                return Poll::Ready(None);
+            }
+            self.remaining -= 1;
+            Poll::Ready(Some(self.remaining as i32))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, None)
+        }
+    }
+
     #[test]
     fn merge_yields_all_items() {
         init_test("merge_yields_all_items");
@@ -147,6 +216,87 @@ mod tests {
         let ok = items == vec![1, 2, 3, 4, 5, 6];
         crate::assert_with_log!(ok, "merged items", vec![1, 2, 3, 4, 5, 6], items);
         crate::test_complete!("merge_yields_all_items");
+    }
+
+    #[test]
+    fn merge_round_robin_order() {
+        init_test("merge_round_robin_order");
+        let mut stream = merge([iter(vec![1, 3, 5]), iter(vec![2, 4, 6])]);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => {}
+            }
+        }
+
+        let ok = items == vec![1, 2, 3, 4, 5, 6];
+        crate::assert_with_log!(ok, "round robin order", vec![1, 2, 3, 4, 5, 6], items);
+        crate::test_complete!("merge_round_robin_order");
+    }
+
+    #[test]
+    fn merge_drops_exhausted_streams() {
+        init_test("merge_drops_exhausted_streams");
+        let mut stream = merge([iter(vec![10]), iter(vec![1, 2])]);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => {}
+            }
+        }
+
+        let ok = items == vec![10, 1, 2];
+        crate::assert_with_log!(ok, "exhausted drop", vec![10, 1, 2], items);
+        crate::test_complete!("merge_drops_exhausted_streams");
+    }
+
+    #[test]
+    fn merge_pending_streams_make_progress() {
+        init_test("merge_pending_streams_make_progress");
+        let mut stream = merge([PendingEveryOther::new(vec![1, 3, 5]), iter(vec![2, 4, 6])]);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut items = Vec::new();
+        let mut pending_count = 0usize;
+        let mut polls = 0usize;
+        loop {
+            polls += 1;
+            if polls > 64 {
+                break;
+            }
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => pending_count += 1,
+            }
+        }
+
+        items.sort_unstable();
+        let ok = items == vec![1, 2, 3, 4, 5, 6];
+        crate::assert_with_log!(ok, "merged items", vec![1, 2, 3, 4, 5, 6], items);
+        crate::assert_with_log!(pending_count > 0, "pending seen", true, pending_count > 0);
+        crate::test_complete!("merge_pending_streams_make_progress");
+    }
+
+    #[test]
+    fn merge_size_hint_unknown_upper() {
+        init_test("merge_size_hint_unknown_upper");
+        let stream = merge([UnknownUpper::new(3), iter(vec![1, 2])]);
+        let hint = stream.size_hint();
+        let ok = hint == (2, None);
+        crate::assert_with_log!(ok, "size hint", (2, None), hint);
+        crate::test_complete!("merge_size_hint_unknown_upper");
     }
 
     #[test]

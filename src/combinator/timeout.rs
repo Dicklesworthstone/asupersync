@@ -541,4 +541,250 @@ mod tests {
         assert_eq!(t1.deadline, t2.deadline);
         assert_eq!(t1.deadline, t3.deadline);
     }
+
+    // ========== Timeout-race interaction tests ==========
+
+    #[test]
+    fn test_timeout_race_complete_before_deadline() {
+        // Operation completes before deadline: should be Completed
+        let outcome: Outcome<i32, &str> = Outcome::Ok(42);
+        let deadline = Time::from_nanos(5000);
+        let result = make_timed_result(outcome, deadline, true);
+
+        assert!(result.is_completed());
+        assert!(!result.is_timed_out());
+        assert_eq!(result.into_result().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_timeout_race_deadline_fires_first() {
+        // Operation did not complete before deadline: should be TimedOut
+        let outcome: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::timeout());
+        let deadline = Time::from_nanos(1000);
+        let result = make_timed_result(outcome, deadline, false);
+
+        assert!(result.is_timed_out());
+        assert!(!result.is_completed());
+        let err = result.into_result().unwrap_err();
+        assert!(matches!(err, TimedError::TimedOut(_)));
+    }
+
+    #[test]
+    fn test_timeout_race_error_outcome_before_deadline() {
+        // Operation errors before deadline: Completed with error
+        let outcome: Outcome<i32, &str> = Outcome::Err("db failure");
+        let deadline = Time::from_nanos(5000);
+        let result = make_timed_result(outcome, deadline, true);
+
+        assert!(result.is_completed());
+        let err = result.into_result().unwrap_err();
+        assert!(matches!(err, TimedError::Error("db failure")));
+    }
+
+    #[test]
+    fn test_timeout_race_panic_outcome_before_deadline() {
+        // Operation panics before deadline: Completed with panic
+        let outcome: Outcome<i32, &str> =
+            Outcome::Panicked(crate::types::outcome::PanicPayload::new("boom"));
+        let deadline = Time::from_nanos(5000);
+        let result = make_timed_result(outcome, deadline, true);
+
+        assert!(result.is_completed());
+        let err = result.into_result().unwrap_err();
+        assert!(matches!(err, TimedError::Panicked(_)));
+    }
+
+    #[test]
+    fn test_timeout_race_cancelled_outcome_before_deadline() {
+        // Operation cancelled externally (not timeout) before deadline
+        let outcome: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+        let deadline = Time::from_nanos(5000);
+        let result = make_timed_result(outcome, deadline, true);
+
+        assert!(result.is_completed());
+        let err = result.into_result().unwrap_err();
+        assert!(matches!(err, TimedError::Cancelled(_)));
+    }
+
+    #[test]
+    fn test_timeout_into_outcome_timeout_becomes_cancelled() {
+        // TimedOut converts to Cancelled outcome (timeout semantics)
+        let result: TimedResult<i32, &str> =
+            TimedResult::TimedOut(TimeoutError::new(Time::from_nanos(1000)));
+        let outcome = result.into_outcome();
+        assert!(outcome.is_cancelled());
+    }
+
+    // ========== Zero-duration timeout ==========
+
+    #[test]
+    fn test_zero_duration_timeout() {
+        let now = Time::ZERO;
+        let timeout = Timeout::<()>::after_nanos(now, 0);
+        assert_eq!(timeout.deadline, Time::ZERO);
+        // Zero-duration timeout is immediately expired
+        assert!(timeout.is_expired(now));
+        assert_eq!(timeout.remaining(now), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_zero_duration_timeout_from_millis() {
+        let now = Time::from_nanos(5000);
+        let timeout = Timeout::<()>::after_millis(now, 0);
+        assert_eq!(timeout.deadline.as_nanos(), 5000);
+        assert!(timeout.is_expired(now));
+    }
+
+    // ========== Boundary timing ==========
+
+    #[test]
+    fn test_timeout_boundary_exact_deadline() {
+        // now == deadline: should be expired
+        let t = Time::from_nanos(1000);
+        let timeout = Timeout::<()>::new(t);
+        assert!(timeout.is_expired(t));
+        assert_eq!(timeout.remaining(t), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_timeout_boundary_one_nano_before() {
+        let deadline = Time::from_nanos(1000);
+        let now = Time::from_nanos(999);
+        let timeout = Timeout::<()>::new(deadline);
+        assert!(!timeout.is_expired(now));
+        assert_eq!(timeout.remaining(now), Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn test_timeout_boundary_one_nano_after() {
+        let deadline = Time::from_nanos(1000);
+        let now = Time::from_nanos(1001);
+        let timeout = Timeout::<()>::new(deadline);
+        assert!(timeout.is_expired(now));
+        assert_eq!(timeout.remaining(now), Duration::ZERO);
+    }
+
+    // ========== Nested timeouts (LAW-TIMEOUT-MIN) ==========
+
+    #[test]
+    fn test_nested_timeout_inner_tighter() {
+        let outer = Time::from_nanos(5000);
+        let inner = Time::from_nanos(2000);
+        // Inner is tighter: effective = inner
+        assert_eq!(effective_deadline(outer, Some(inner)).as_nanos(), 2000);
+    }
+
+    #[test]
+    fn test_nested_timeout_outer_tighter() {
+        let outer = Time::from_nanos(2000);
+        let inner = Time::from_nanos(5000);
+        // Outer is tighter: effective = outer
+        assert_eq!(effective_deadline(outer, Some(inner)).as_nanos(), 2000);
+    }
+
+    #[test]
+    fn test_nested_timeout_equal_deadlines() {
+        let d = Time::from_nanos(3000);
+        assert_eq!(effective_deadline(d, Some(d)).as_nanos(), 3000);
+    }
+
+    #[test]
+    fn test_nested_timeout_none_existing() {
+        let requested = Time::from_nanos(4000);
+        assert_eq!(effective_deadline(requested, None).as_nanos(), 4000);
+    }
+
+    #[test]
+    fn test_triple_nested_timeout_min_wins() {
+        // timeout(d1, timeout(d2, timeout(d3, f))) ≃ timeout(min(d1,d2,d3), f)
+        let d1 = Time::from_nanos(5000);
+        let d2 = Time::from_nanos(3000);
+        let d3 = Time::from_nanos(7000);
+
+        // Apply innermost first: effective(d3, None) = d3
+        let eff1 = effective_deadline(d3, None);
+        // Then: effective(d2, Some(d3)) = min(d2, d3) = d2
+        let eff2 = effective_deadline(d2, Some(eff1));
+        // Then: effective(d1, Some(eff2)) = min(d1, d2) = d2
+        let eff3 = effective_deadline(d1, Some(eff2));
+
+        assert_eq!(eff3.as_nanos(), 3000); // min of all three
+    }
+
+    // ========== TimeoutConfig tests ==========
+
+    #[test]
+    fn test_timeout_config_effective_respects_tighter() {
+        let config = TimeoutConfig::new(Time::from_nanos(5000));
+        // Existing is tighter
+        assert_eq!(
+            config.resolve(Some(Time::from_nanos(2000))).as_nanos(),
+            2000
+        );
+        // Existing is looser
+        assert_eq!(
+            config.resolve(Some(Time::from_nanos(8000))).as_nanos(),
+            5000
+        );
+    }
+
+    #[test]
+    fn test_timeout_config_absolute_ignores_existing() {
+        let config = TimeoutConfig::absolute(Time::from_nanos(5000));
+        // Even though existing is tighter, absolute ignores it
+        assert_eq!(
+            config.resolve(Some(Time::from_nanos(2000))).as_nanos(),
+            5000
+        );
+    }
+
+    #[test]
+    fn test_timeout_config_equality() {
+        let a = TimeoutConfig::new(Time::from_nanos(1000));
+        let b = TimeoutConfig::new(Time::from_nanos(1000));
+        let c = TimeoutConfig::absolute(Time::from_nanos(1000));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ========== TimeoutError edge cases ==========
+
+    #[test]
+    fn test_timeout_error_into_cancel_reason() {
+        let err = TimeoutError::new(Time::from_nanos(1000));
+        let reason = err.into_cancel_reason();
+        assert!(matches!(
+            reason.kind(),
+            crate::types::cancel::CancelKind::Timeout
+        ));
+    }
+
+    #[test]
+    fn test_timeout_error_equality() {
+        let a = TimeoutError::new(Time::from_nanos(1000));
+        let b = TimeoutError::new(Time::from_nanos(1000));
+        let c = TimeoutError::new(Time::from_nanos(2000));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ========== Saturating arithmetic edge cases ==========
+
+    #[test]
+    fn test_timeout_after_nanos_saturating() {
+        let now = Time::from_nanos(u64::MAX - 10);
+        let timeout = Timeout::<()>::after_nanos(now, 100);
+        // Should saturate, not overflow
+        assert!(timeout.deadline.as_nanos() >= now.as_nanos());
+    }
+
+    #[test]
+    fn test_timeout_after_secs_large_value() {
+        let now = Time::ZERO;
+        let timeout = Timeout::<()>::after_secs(now, 1_000_000);
+        assert_eq!(
+            timeout.deadline.as_nanos(),
+            1_000_000u64.saturating_mul(1_000_000_000)
+        );
+    }
 }

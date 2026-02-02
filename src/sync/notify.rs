@@ -586,12 +586,7 @@ mod tests {
         {
             let waiters = notify.waiters.lock().unwrap();
             let entries_len = waiters.entries.len();
-            crate::assert_with_log!(
-                entries_len <= 3,
-                "entries bounded",
-                true,
-                entries_len <= 3
-            );
+            crate::assert_with_log!(entries_len <= 3, "entries bounded", true, entries_len <= 3);
         }
 
         // Cancel all and verify full cleanup
