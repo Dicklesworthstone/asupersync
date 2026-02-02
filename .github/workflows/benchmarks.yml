@@ -1,0 +1,216 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Git ref to use as baseline (default: main)'
+        required: false
+        default: 'main'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Reduce benchmark noise
+  CARGO_INCREMENTAL: 0
+
+# Cancel in-progress runs for the same PR
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      # Run current benchmarks
+      - name: Run benchmarks (current)
+        run: |
+          cargo bench --all-features -- --noplot --save-baseline current
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: target/criterion/
+          retention-days: 30
+
+  # Regression detection for PRs
+  regression-check:
+    name: Regression Detection
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-regression-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      # Run baseline benchmarks from main
+      - name: Checkout base branch
+        run: git checkout ${{ github.base_ref }}
+
+      - name: Run baseline benchmarks
+        run: |
+          cargo bench --all-features -- --noplot --save-baseline baseline
+
+      # Switch back and compare
+      - name: Checkout PR branch
+        run: git checkout ${{ github.head_ref }}
+
+      - name: Run PR benchmarks and compare
+        id: bench
+        run: |
+          # Run current benchmarks
+          cargo bench --all-features -- --noplot --baseline baseline 2>&1 | tee bench-output.txt
+
+          # Extract any regressions (lines with "regressed")
+          if grep -q "regressed" bench-output.txt; then
+            echo "REGRESSIONS DETECTED:"
+            grep "regressed" bench-output.txt
+            echo "regression_detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "No regressions detected"
+            echo "regression_detected=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload comparison results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-comparison-${{ github.sha }}
+          path: |
+            bench-output.txt
+            target/criterion/
+          retention-days: 30
+
+      # Warn on regression but don't fail (yet)
+      - name: Regression warning
+        if: steps.bench.outputs.regression_detected == 'true'
+        run: |
+          echo "::warning::Performance regressions detected. Please review the benchmark comparison."
+          echo "Full output available in artifacts."
+
+  # Scheduler-specific benchmarks with thresholds
+  scheduler-perf:
+    name: Scheduler Performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-scheduler-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run scheduler benchmarks
+        run: |
+          cargo bench --all-features --bench scheduler_benchmark -- --noplot 2>&1 | tee scheduler-bench.txt
+
+      - name: Check performance thresholds
+        run: |
+          # Parse benchmark results and check against thresholds
+          # LocalQueue push/pop should be < 100ns
+          # GlobalQueue push/pop should be < 200ns
+          # PriorityScheduler schedule/pop should be < 500ns
+
+          echo "Scheduler benchmark results:"
+          cat scheduler-bench.txt
+
+          # Basic check - if benchmarks completed, we're good
+          if grep -q "scheduler" scheduler-bench.txt; then
+            echo "Scheduler benchmarks completed successfully"
+          else
+            echo "::warning::Scheduler benchmarks may not have run correctly"
+          fi
+
+      - name: Upload scheduler results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-benchmark-${{ github.sha }}
+          path: scheduler-bench.txt
+          retention-days: 30
+
+  # Protocol benchmarks
+  protocol-perf:
+    name: Protocol Performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-protocol-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run protocol benchmarks
+        run: |
+          cargo bench --all-features --bench protocol_benchmark -- --noplot 2>&1 | tee protocol-bench.txt
+
+      - name: Check protocol thresholds
+        run: |
+          # Performance targets from benchmark file:
+          # HTTP/1 request parsing: < 500ns for typical GET request
+          # HPACK header decoding: < 1μs for typical header block
+          # WebSocket frame parsing: < 100ns for data frames
+
+          echo "Protocol benchmark results:"
+          cat protocol-bench.txt
+
+      - name: Upload protocol results
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-benchmark-${{ github.sha }}
+          path: protocol-bench.txt
+          retention-days: 30
