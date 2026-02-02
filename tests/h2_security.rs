@@ -1,3 +1,4 @@
+#![allow(clippy::similar_names)]
 //! HTTP/2 Security Hardening Integration Tests (bd-1z7e).
 //!
 //! Verifies that all security fixes from the HTTP/2 Security Hardening epic
@@ -14,9 +15,7 @@ use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
     FrameHeader, FRAME_HEADER_SIZE, MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE,
 };
-use asupersync::http::h2::hpack::{
-    Decoder as HpackDecoder, Encoder as HpackEncoder, Header,
-};
+use asupersync::http::h2::hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder, Header};
 use asupersync::http::h2::settings::SettingsBuilder;
 use asupersync::http::h2::stream::StreamStore;
 
@@ -58,9 +57,7 @@ fn hpack_integer_shift_overflow_rejected() {
     // 0x7f = prefix filled (127)
     // Then many continuation bytes to push shift past 28
     let mut malicious = vec![0x00u8, 0x7f];
-    for _ in 0..6 {
-        malicious.push(0x80); // Continuation byte with value 0
-    }
+    malicious.extend(std::iter::repeat_n(0x80, 6)); // Continuation bytes with value 0
     malicious.push(0x01); // Final byte
 
     let mut src = Bytes::from(malicious);
@@ -104,11 +101,8 @@ fn hpack_consecutive_size_updates_limited() {
     let mut decoder = HpackDecoder::new();
 
     // Send 17 consecutive size update instructions (limit is 16)
-    let mut malicious = Vec::new();
-    for _ in 0..17 {
-        malicious.push(0x20); // Size update to 0
-    }
-    // Follow with a valid indexed header to trigger decoding
+    let mut malicious = vec![0x20; 17]; // 17 consecutive size update instructions (limit is 16)
+                                        // Follow with a valid indexed header to trigger decoding
     malicious.push(0x82); // :method GET (static index 2)
 
     let mut src = Bytes::from(malicious);
@@ -247,9 +241,7 @@ fn settings_max_frame_size_bounds() {
     assert_eq!(settings.max_frame_size, MAX_FRAME_SIZE);
 
     // Below minimum should clamp
-    let settings = SettingsBuilder::new()
-        .max_frame_size(100)
-        .build();
+    let settings = SettingsBuilder::new().max_frame_size(100).build();
     assert_eq!(settings.max_frame_size, MIN_MAX_FRAME_SIZE);
 
     test_complete!("settings_max_frame_size_bounds");
@@ -260,14 +252,10 @@ fn settings_header_table_size() {
     init_test_logging();
     test_phase!("settings_header_table_size");
 
-    let settings = SettingsBuilder::new()
-        .header_table_size(0)
-        .build();
+    let settings = SettingsBuilder::new().header_table_size(0).build();
     assert_eq!(settings.header_table_size, 0);
 
-    let settings = SettingsBuilder::new()
-        .header_table_size(65536)
-        .build();
+    let settings = SettingsBuilder::new().header_table_size(65536).build();
     assert_eq!(settings.header_table_size, 65536);
 
     test_complete!("settings_header_table_size");
@@ -450,7 +438,9 @@ fn hpack_decoder_handles_empty_input() {
 
     let mut decoder = HpackDecoder::new();
     let mut src = Bytes::new();
-    let result = decoder.decode(&mut src).expect("empty input should succeed");
+    let result = decoder
+        .decode(&mut src)
+        .expect("empty input should succeed");
     assert!(result.is_empty());
 
     test_complete!("hpack_empty_input");
@@ -465,7 +455,9 @@ fn hpack_decoder_handles_random_bytes() {
 
     // Test 100 random-ish byte sequences - must not panic
     for seed in 0u8..100 {
-        let data: Vec<u8> = (0..32).map(|i| seed.wrapping_mul(i).wrapping_add(i)).collect();
+        let data: Vec<u8> = (0..32)
+            .map(|i| seed.wrapping_mul(i).wrapping_add(i))
+            .collect();
         let mut src = Bytes::from(data);
         let _ = decoder.decode(&mut src);
     }
