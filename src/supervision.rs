@@ -162,6 +162,197 @@ impl Default for BackoffStrategy {
 // Allow the lossy cast since precision loss in backoff is acceptable
 impl Eq for BackoffStrategy {}
 
+/// Restart policy for supervised children.
+///
+/// Determines how failures in one child affect other children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RestartPolicy {
+    /// Only the failed child is restarted.
+    ///
+    /// Other children are unaffected. Use when children are independent
+    /// and don't share state.
+    #[default]
+    OneForOne,
+
+    /// All children are restarted when one fails.
+    ///
+    /// Use when children have shared state dependencies that become
+    /// inconsistent if one fails.
+    OneForAll,
+
+    /// The failed child and all children started after it are restarted.
+    ///
+    /// Use when children have ordered dependencies (later children depend
+    /// on earlier ones).
+    RestForOne,
+}
+
+/// Escalation policy when max_restarts is exceeded.
+///
+/// Determines what happens when the restart budget is exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EscalationPolicy {
+    /// Stop the failing actor permanently.
+    ///
+    /// The supervisor continues running other children.
+    #[default]
+    Stop,
+
+    /// Propagate the failure to the parent supervisor.
+    ///
+    /// The parent's supervision policy handles the failure.
+    Escalate,
+
+    /// Reset the restart counter and try again.
+    ///
+    /// Use with caution - can lead to infinite restart loops.
+    ResetCounter,
+}
+
+/// Full configuration for supervisor behavior.
+///
+/// Combines restart policy, rate limiting, backoff, and escalation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupervisionConfig {
+    /// Policy for how child failures affect other children.
+    pub restart_policy: RestartPolicy,
+
+    /// Maximum number of restarts allowed within the time window.
+    pub max_restarts: u32,
+
+    /// Time window for counting restarts.
+    pub restart_window: Duration,
+
+    /// Backoff strategy between restart attempts.
+    pub backoff: BackoffStrategy,
+
+    /// What to do when restart budget is exhausted.
+    pub escalation: EscalationPolicy,
+}
+
+impl Default for SupervisionConfig {
+    fn default() -> Self {
+        Self {
+            restart_policy: RestartPolicy::OneForOne,
+            max_restarts: 3,
+            restart_window: Duration::from_secs(60),
+            backoff: BackoffStrategy::default(),
+            escalation: EscalationPolicy::Stop,
+        }
+    }
+}
+
+impl SupervisionConfig {
+    /// Create a supervision config with the given limits.
+    #[must_use]
+    pub fn new(max_restarts: u32, restart_window: Duration) -> Self {
+        Self {
+            restart_policy: RestartPolicy::OneForOne,
+            max_restarts,
+            restart_window,
+            backoff: BackoffStrategy::default(),
+            escalation: EscalationPolicy::Stop,
+        }
+    }
+
+    /// Set the restart policy.
+    #[must_use]
+    pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
+        self.restart_policy = policy;
+        self
+    }
+
+    /// Set the backoff strategy.
+    #[must_use]
+    pub fn with_backoff(mut self, backoff: BackoffStrategy) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    /// Set the escalation policy.
+    #[must_use]
+    pub fn with_escalation(mut self, escalation: EscalationPolicy) -> Self {
+        self.escalation = escalation;
+        self
+    }
+
+    /// Create a "one for all" supervision config.
+    #[must_use]
+    pub fn one_for_all(max_restarts: u32, restart_window: Duration) -> Self {
+        Self::new(max_restarts, restart_window).with_restart_policy(RestartPolicy::OneForAll)
+    }
+
+    /// Create a "rest for one" supervision config.
+    #[must_use]
+    pub fn rest_for_one(max_restarts: u32, restart_window: Duration) -> Self {
+        Self::new(max_restarts, restart_window).with_restart_policy(RestartPolicy::RestForOne)
+    }
+}
+
+// Eq requires manual impl due to f64 in BackoffStrategy
+impl Eq for SupervisionConfig {}
+
+/// Specification for a supervised child actor.
+///
+/// Contains the child's configuration and optional custom supervision settings.
+#[derive(Debug, Clone)]
+pub struct ChildSpec {
+    /// Unique name for the child (for logging and lookup).
+    pub name: String,
+
+    /// Supervision config for this specific child (overrides parent's default).
+    pub config: Option<SupervisionConfig>,
+
+    /// Whether the child should be started immediately.
+    pub start_immediately: bool,
+
+    /// Whether the child is required (supervisor fails if child can't start).
+    pub required: bool,
+}
+
+impl Default for ChildSpec {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            config: None,
+            start_immediately: true,
+            required: true,
+        }
+    }
+}
+
+impl ChildSpec {
+    /// Create a new child spec with the given name.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Set a custom supervision config for this child.
+    #[must_use]
+    pub fn with_config(mut self, config: SupervisionConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Set whether the child should start immediately.
+    #[must_use]
+    pub fn with_start_immediately(mut self, start: bool) -> Self {
+        self.start_immediately = start;
+        self
+    }
+
+    /// Set whether the child is required.
+    #[must_use]
+    pub fn with_required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+}
+
 impl BackoffStrategy {
     /// Calculate the delay for a given restart attempt (0-indexed).
     ///
@@ -801,5 +992,146 @@ mod tests {
         assert!(history.can_restart(15_000_000_000));
 
         crate::test_complete!("restart_history_tracking");
+    }
+
+    // ---- Tests for new RestartPolicy, EscalationPolicy, SupervisionConfig ----
+
+    #[test]
+    fn restart_policy_defaults_to_one_for_one() {
+        init_test("restart_policy_defaults_to_one_for_one");
+
+        let policy = RestartPolicy::default();
+        assert_eq!(policy, RestartPolicy::OneForOne);
+
+        crate::test_complete!("restart_policy_defaults_to_one_for_one");
+    }
+
+    #[test]
+    fn escalation_policy_defaults_to_stop() {
+        init_test("escalation_policy_defaults_to_stop");
+
+        let policy = EscalationPolicy::default();
+        assert_eq!(policy, EscalationPolicy::Stop);
+
+        crate::test_complete!("escalation_policy_defaults_to_stop");
+    }
+
+    #[test]
+    fn supervision_config_defaults() {
+        init_test("supervision_config_defaults");
+
+        let config = SupervisionConfig::default();
+
+        assert_eq!(config.restart_policy, RestartPolicy::OneForOne);
+        assert_eq!(config.max_restarts, 3);
+        assert_eq!(config.restart_window, Duration::from_secs(60));
+        assert_eq!(config.escalation, EscalationPolicy::Stop);
+
+        crate::test_complete!("supervision_config_defaults");
+    }
+
+    #[test]
+    fn supervision_config_builder() {
+        init_test("supervision_config_builder");
+
+        let config = SupervisionConfig::new(5, Duration::from_secs(30))
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(100)))
+            .with_escalation(EscalationPolicy::Escalate);
+
+        assert_eq!(config.restart_policy, RestartPolicy::OneForAll);
+        assert_eq!(config.max_restarts, 5);
+        assert_eq!(config.restart_window, Duration::from_secs(30));
+        assert_eq!(
+            config.backoff,
+            BackoffStrategy::Fixed(Duration::from_millis(100))
+        );
+        assert_eq!(config.escalation, EscalationPolicy::Escalate);
+
+        crate::test_complete!("supervision_config_builder");
+    }
+
+    #[test]
+    fn supervision_config_one_for_all_helper() {
+        init_test("supervision_config_one_for_all_helper");
+
+        let config = SupervisionConfig::one_for_all(5, Duration::from_secs(120));
+
+        assert_eq!(config.restart_policy, RestartPolicy::OneForAll);
+        assert_eq!(config.max_restarts, 5);
+        assert_eq!(config.restart_window, Duration::from_secs(120));
+
+        crate::test_complete!("supervision_config_one_for_all_helper");
+    }
+
+    #[test]
+    fn supervision_config_rest_for_one_helper() {
+        init_test("supervision_config_rest_for_one_helper");
+
+        let config = SupervisionConfig::rest_for_one(10, Duration::from_secs(300));
+
+        assert_eq!(config.restart_policy, RestartPolicy::RestForOne);
+        assert_eq!(config.max_restarts, 10);
+        assert_eq!(config.restart_window, Duration::from_secs(300));
+
+        crate::test_complete!("supervision_config_rest_for_one_helper");
+    }
+
+    #[test]
+    fn child_spec_builder() {
+        init_test("child_spec_builder");
+
+        let spec = ChildSpec::new("worker-1")
+            .with_config(SupervisionConfig::default())
+            .with_start_immediately(false)
+            .with_required(false);
+
+        assert_eq!(spec.name, "worker-1");
+        assert!(spec.config.is_some());
+        assert!(!spec.start_immediately);
+        assert!(!spec.required);
+
+        crate::test_complete!("child_spec_builder");
+    }
+
+    #[test]
+    fn child_spec_defaults() {
+        init_test("child_spec_defaults");
+
+        let spec = ChildSpec::new("default-child");
+
+        assert_eq!(spec.name, "default-child");
+        assert!(spec.config.is_none());
+        assert!(spec.start_immediately);
+        assert!(spec.required);
+
+        crate::test_complete!("child_spec_defaults");
+    }
+
+    #[test]
+    fn restart_policy_equality() {
+        init_test("restart_policy_equality");
+
+        assert_eq!(RestartPolicy::OneForOne, RestartPolicy::OneForOne);
+        assert_ne!(RestartPolicy::OneForOne, RestartPolicy::OneForAll);
+        assert_ne!(RestartPolicy::OneForAll, RestartPolicy::RestForOne);
+
+        crate::test_complete!("restart_policy_equality");
+    }
+
+    #[test]
+    fn escalation_policy_variants() {
+        init_test("escalation_policy_variants");
+
+        // Test all variants exist and are distinguishable
+        let stop = EscalationPolicy::Stop;
+        let escalate = EscalationPolicy::Escalate;
+        let reset = EscalationPolicy::ResetCounter;
+
+        assert_ne!(stop, escalate);
+        assert_ne!(escalate, reset);
+        assert_ne!(stop, reset);
+
+        crate::test_complete!("escalation_policy_variants");
     }
 }
