@@ -251,9 +251,7 @@ fn e2e_http_codec_headers_too_large() {
 
     test_section!("build_oversized_request");
     let large_value = "X".repeat(300);
-    let raw = format!(
-        "GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {large_value}\r\n\r\n"
-    );
+    let raw = format!("GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {large_value}\r\n\r\n");
     let mut buf = BytesMut::from(raw.as_str());
     tracing::info!(buf_len = buf.len(), max = 256, "testing oversized headers");
 
@@ -270,7 +268,10 @@ fn e2e_http_codec_headers_too_large() {
             tracing::info!("incomplete frame with oversized headers");
         }
         Ok(Some(parsed)) => {
-            tracing::info!(headers = parsed.headers.len(), "parsed despite large headers");
+            tracing::info!(
+                headers = parsed.headers.len(),
+                "parsed despite large headers"
+            );
         }
     }
     test_complete!("e2e_http_codec_headers_too_large");
@@ -314,11 +315,18 @@ fn e2e_http_keepalive_multiple_requests() {
     init_test("e2e_http_keepalive_multiple_requests");
 
     test_section!("setup");
-    let config = Http1Config::default().keep_alive(true).max_requests(Some(5));
+    let config = Http1Config::default()
+        .keep_alive(true)
+        .max_requests(Some(5));
     tracing::info!(keep_alive = config.keep_alive, max_req = ?config.max_requests_per_connection, "config");
 
     test_section!("verify_config");
-    assert_with_log!(config.keep_alive, "keep_alive enabled", true, config.keep_alive);
+    assert_with_log!(
+        config.keep_alive,
+        "keep_alive enabled",
+        true,
+        config.keep_alive
+    );
     assert_with_log!(
         config.max_requests_per_connection == Some(5),
         "max requests",
@@ -368,8 +376,14 @@ fn e2e_http_concurrent_routes() {
     }
 
     let api = Router::new()
-        .route("/users", get(FnHandler::new(list_users)).post(FnHandler::new(create_user)))
-        .route("/users/:id", get(FnHandler1::<_, Path<String>>::new(get_user)));
+        .route(
+            "/users",
+            get(FnHandler::new(list_users)).post(FnHandler::new(create_user)),
+        )
+        .route(
+            "/users/:id",
+            get(FnHandler1::<_, Path<String>>::new(get_user)),
+        );
     let app = Router::new()
         .route("/health", get(FnHandler::new(health)))
         .nest("/api/v1", api);
@@ -389,16 +403,46 @@ fn e2e_http_concurrent_routes() {
     let mut results = Vec::new();
     for (method, path) in &requests {
         let resp = app.handle(Request::new(*method, *path));
-        tracing::info!(method = method, path = path, status = resp.status.as_u16(), "response");
+        tracing::info!(
+            method = method,
+            path = path,
+            status = resp.status.as_u16(),
+            "response"
+        );
         results.push((method, path, resp.status));
     }
 
     test_section!("verify");
-    assert_with_log!(results[0].2 == StatusCode::OK, "health ok", 200, results[0].2.as_u16());
-    assert_with_log!(results[1].2 == StatusCode::OK, "list users", 200, results[1].2.as_u16());
-    assert_with_log!(results[2].2 == StatusCode::CREATED, "create user", 201, results[2].2.as_u16());
-    assert_with_log!(results[3].2 == StatusCode::OK, "get user", 200, results[3].2.as_u16());
-    assert_with_log!(results[6].2 == StatusCode::NOT_FOUND, "missing 404", 404, results[6].2.as_u16());
+    assert_with_log!(
+        results[0].2 == StatusCode::OK,
+        "health ok",
+        200,
+        results[0].2.as_u16()
+    );
+    assert_with_log!(
+        results[1].2 == StatusCode::OK,
+        "list users",
+        200,
+        results[1].2.as_u16()
+    );
+    assert_with_log!(
+        results[2].2 == StatusCode::CREATED,
+        "create user",
+        201,
+        results[2].2.as_u16()
+    );
+    assert_with_log!(
+        results[3].2 == StatusCode::OK,
+        "get user",
+        200,
+        results[3].2.as_u16()
+    );
+    assert_with_log!(
+        results[6].2 == StatusCode::NOT_FOUND,
+        "missing 404",
+        404,
+        results[6].2.as_u16()
+    );
     assert_with_log!(
         results[7].2 == StatusCode::METHOD_NOT_ALLOWED,
         "delete health 405",
@@ -444,10 +488,19 @@ fn e2e_http_compression_negotiation() {
     init_test("e2e_http_compression_negotiation");
 
     test_section!("test_gzip_negotiation");
-    let supported = [ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Brotli];
+    let supported = [
+        ContentEncoding::Gzip,
+        ContentEncoding::Deflate,
+        ContentEncoding::Brotli,
+    ];
     let result = negotiate_encoding("gzip, deflate", &supported);
     tracing::info!(result = ?result.as_ref().map(ContentEncoding::as_token), "gzip negotiate");
-    assert_with_log!(result.is_some(), "encoding negotiated", true, result.is_some());
+    assert_with_log!(
+        result.is_some(),
+        "encoding negotiated",
+        true,
+        result.is_some()
+    );
 
     test_section!("test_brotli_preference");
     let result2 = negotiate_encoding("br;q=1.0, gzip;q=0.8", &supported);
@@ -522,7 +575,12 @@ fn e2e_http_pool_exhaustion_recovery() {
 
     let stats = pool.stats();
     tracing::info!(total = stats.total_connections, "after filling pool");
-    assert_with_log!(stats.total_connections >= 2, "pool has connections", ">= 2", stats.total_connections);
+    assert_with_log!(
+        stats.total_connections >= 2,
+        "pool has connections",
+        ">= 2",
+        stats.total_connections
+    );
 
     test_section!("verify_stats");
     let total = stats.total_connections;
@@ -542,7 +600,12 @@ fn e2e_http_pool_multiple_hosts() {
     let mut pool = Pool::with_config(config);
 
     test_section!("register_multiple_hosts");
-    let hosts = ["api.example.com", "cdn.example.com", "auth.example.com", "db.example.com"];
+    let hosts = [
+        "api.example.com",
+        "cdn.example.com",
+        "auth.example.com",
+        "db.example.com",
+    ];
     for (i, host) in hosts.iter().enumerate() {
         let key = PoolKey::https(*host, None);
         pool.register_connecting(key, Time::from_millis(i as u64 * 100), 2);
@@ -551,8 +614,17 @@ fn e2e_http_pool_multiple_hosts() {
 
     test_section!("verify");
     let stats = pool.stats();
-    tracing::info!(total = stats.total_connections, hosts = hosts.len(), "multi-host pool");
-    assert_with_log!(stats.total_connections >= 4, "multiple hosts", ">= 4", stats.total_connections);
+    tracing::info!(
+        total = stats.total_connections,
+        hosts = hosts.len(),
+        "multi-host pool"
+    );
+    assert_with_log!(
+        stats.total_connections >= 4,
+        "multiple hosts",
+        ">= 4",
+        stats.total_connections
+    );
     test_complete!("e2e_http_pool_multiple_hosts");
 }
 
@@ -566,18 +638,35 @@ fn e2e_http_body_full_size_hint() {
 
     test_section!("test_full_body");
     let data = b"The quick brown fox jumps over the lazy dog";
-    let body = Full::new(asupersync::bytes::BytesCursor::new(Bytes::from_static(data)));
+    let body = Full::new(asupersync::bytes::BytesCursor::new(Bytes::from_static(
+        data,
+    )));
     let hint = body.size_hint();
     tracing::info!(lower = hint.lower(), upper = ?hint.upper(), "full body hint");
     assert_with_log!(hint.lower() == 43, "lower bound", 43u64, hint.lower());
-    assert_with_log!(hint.upper() == Some(43), "upper bound", Some(43u64), hint.upper());
-    assert_with_log!(!body.is_end_stream(), "not end of stream", false, body.is_end_stream());
+    assert_with_log!(
+        hint.upper() == Some(43),
+        "upper bound",
+        Some(43u64),
+        hint.upper()
+    );
+    assert_with_log!(
+        !body.is_end_stream(),
+        "not end of stream",
+        false,
+        body.is_end_stream()
+    );
 
     test_section!("test_empty_body");
     let empty = Empty::new();
     let hint = empty.size_hint();
     assert_with_log!(hint.lower() == 0, "empty lower", 0u64, hint.lower());
-    assert_with_log!(empty.is_end_stream(), "empty is end", true, empty.is_end_stream());
+    assert_with_log!(
+        empty.is_end_stream(),
+        "empty is end",
+        true,
+        empty.is_end_stream()
+    );
     test_complete!("e2e_http_body_full_size_hint");
 }
 
@@ -623,10 +712,10 @@ fn e2e_http_full_crud_pipeline() {
     let router = Router::new()
         .route(
             "/items",
-            get(FnHandler::new(list_items))
-                .post(FnHandler1::<_, asupersync::web::extract::Json<serde_json::Value>>::new(
-                    create_item,
-                )),
+            get(FnHandler::new(list_items)).post(FnHandler1::<
+                _,
+                asupersync::web::extract::Json<serde_json::Value>,
+            >::new(create_item)),
         )
         .route(
             "/items/:id",
@@ -637,7 +726,12 @@ fn e2e_http_full_crud_pipeline() {
 
     test_section!("list_empty");
     let resp = router.handle(Request::new("GET", "/items"));
-    assert_with_log!(resp.status == StatusCode::OK, "list ok", 200, resp.status.as_u16());
+    assert_with_log!(
+        resp.status == StatusCode::OK,
+        "list ok",
+        200,
+        resp.status.as_u16()
+    );
     tracing::info!(body = %String::from_utf8_lossy(resp.body.as_ref()), "list response");
 
     test_section!("create");
@@ -647,21 +741,41 @@ fn e2e_http_full_crud_pipeline() {
             .with_header("content-type", "application/json")
             .with_body(Bytes::copy_from_slice(&body)),
     );
-    assert_with_log!(resp.status == StatusCode::CREATED, "create 201", 201, resp.status.as_u16());
+    assert_with_log!(
+        resp.status == StatusCode::CREATED,
+        "create 201",
+        201,
+        resp.status.as_u16()
+    );
     let created: serde_json::Value = serde_json::from_slice(resp.body.as_ref()).unwrap();
     tracing::info!(id = %created["id"], "created item");
 
     test_section!("read");
     let resp = router.handle(Request::new("GET", "/items/1"));
-    assert_with_log!(resp.status == StatusCode::OK, "read ok", 200, resp.status.as_u16());
+    assert_with_log!(
+        resp.status == StatusCode::OK,
+        "read ok",
+        200,
+        resp.status.as_u16()
+    );
 
     test_section!("update");
     let resp = router.handle(Request::new("PUT", "/items/1"));
-    assert_with_log!(resp.status == StatusCode::NO_CONTENT, "update 204", 204, resp.status.as_u16());
+    assert_with_log!(
+        resp.status == StatusCode::NO_CONTENT,
+        "update 204",
+        204,
+        resp.status.as_u16()
+    );
 
     test_section!("delete");
     let resp = router.handle(Request::new("DELETE", "/items/1"));
-    assert_with_log!(resp.status == StatusCode::NO_CONTENT, "delete 204", 204, resp.status.as_u16());
+    assert_with_log!(
+        resp.status == StatusCode::NO_CONTENT,
+        "delete 204",
+        204,
+        resp.status.as_u16()
+    );
 
     test_complete!("e2e_http_full_crud_pipeline");
 }
@@ -711,11 +825,15 @@ fn e2e_http_extractor_missing_content_type() {
 
     test_section!("test_no_content_type");
     // JSON extractor parses valid JSON regardless of content-type header
-    let req = Request::new("POST", "/")
-        .with_body(Bytes::from_static(b"{\"name\":\"test\"}"));
+    let req = Request::new("POST", "/").with_body(Bytes::from_static(b"{\"name\":\"test\"}"));
     let result = asupersync::web::extract::Json::<Input>::from_request(req);
     tracing::info!(is_ok = result.is_ok(), "no content-type result");
-    assert_with_log!(result.is_ok(), "accepts valid JSON without content-type", true, result.is_ok());
+    assert_with_log!(
+        result.is_ok(),
+        "accepts valid JSON without content-type",
+        true,
+        result.is_ok()
+    );
 
     test_section!("test_empty_body");
     let req2 = Request::new("POST", "/")
@@ -723,7 +841,12 @@ fn e2e_http_extractor_missing_content_type() {
         .with_body(Bytes::from_static(b""));
     let result2 = asupersync::web::extract::Json::<Input>::from_request(req2);
     tracing::info!(is_err = result2.is_err(), "empty body result");
-    assert_with_log!(result2.is_err(), "rejects empty body", true, result2.is_err());
+    assert_with_log!(
+        result2.is_err(),
+        "rejects empty body",
+        true,
+        result2.is_err()
+    );
     test_complete!("e2e_http_extractor_missing_content_type");
 }
 
@@ -743,7 +866,12 @@ fn e2e_http_query_edge_cases() {
     if let Ok(Query(params)) = &result2 {
         tracing::info!(params = ?params, "special chars parsed");
         if let Some(val) = params.get("key") {
-            assert_with_log!(val == "value with spaces", "decoded spaces", "value with spaces", val);
+            assert_with_log!(
+                val == "value with spaces",
+                "decoded spaces",
+                "value with spaces",
+                val
+            );
         }
     }
     test_complete!("e2e_http_query_edge_cases");
@@ -777,7 +905,12 @@ fn e2e_http_header_map_operations() {
     );
 
     tracing::info!(count = headers.len(), "header map size");
-    assert_with_log!(headers.len() >= 3, "multiple headers", ">= 3", headers.len());
+    assert_with_log!(
+        headers.len() >= 3,
+        "multiple headers",
+        ">= 3",
+        headers.len()
+    );
 
     test_section!("lookup");
     let ct = headers.get(&HeaderName::from_static("content-type"));
@@ -785,7 +918,12 @@ fn e2e_http_header_map_operations() {
 
     test_section!("case_insensitivity");
     let ct_upper = headers.get(&HeaderName::from_static("Content-Type"));
-    assert_with_log!(ct_upper.is_some(), "case insensitive lookup", true, ct_upper.is_some());
+    assert_with_log!(
+        ct_upper.is_some(),
+        "case insensitive lookup",
+        true,
+        ct_upper.is_some()
+    );
 
     test_complete!("e2e_http_header_map_operations");
 }
@@ -806,7 +944,12 @@ fn e2e_http_server_config_combinations() {
         keep_alive = default.keep_alive,
         "default config"
     );
-    assert_with_log!(default.keep_alive, "default keep_alive", true, default.keep_alive);
+    assert_with_log!(
+        default.keep_alive,
+        "default keep_alive",
+        true,
+        default.keep_alive
+    );
 
     test_section!("restrictive_config");
     let restrictive = Http1Config::default()
@@ -816,9 +959,24 @@ fn e2e_http_server_config_combinations() {
         .max_requests(Some(10))
         .idle_timeout(Some(std::time::Duration::from_secs(5)));
 
-    assert_with_log!(restrictive.max_headers_size == 1024, "max headers", 1024, restrictive.max_headers_size);
-    assert_with_log!(restrictive.max_body_size == 4096, "max body", 4096, restrictive.max_body_size);
-    assert_with_log!(!restrictive.keep_alive, "no keep_alive", false, restrictive.keep_alive);
+    assert_with_log!(
+        restrictive.max_headers_size == 1024,
+        "max headers",
+        1024,
+        restrictive.max_headers_size
+    );
+    assert_with_log!(
+        restrictive.max_body_size == 4096,
+        "max body",
+        4096,
+        restrictive.max_body_size
+    );
+    assert_with_log!(
+        !restrictive.keep_alive,
+        "no keep_alive",
+        false,
+        restrictive.keep_alive
+    );
     assert_with_log!(
         restrictive.max_requests_per_connection == Some(10),
         "max requests",
@@ -834,8 +992,18 @@ fn e2e_http_server_config_combinations() {
         .max_requests(None)
         .idle_timeout(None);
 
-    assert_with_log!(permissive.max_requests_per_connection.is_none(), "no request limit", true, permissive.max_requests_per_connection.is_none());
-    assert_with_log!(permissive.idle_timeout.is_none(), "no idle timeout", true, permissive.idle_timeout.is_none());
+    assert_with_log!(
+        permissive.max_requests_per_connection.is_none(),
+        "no request limit",
+        true,
+        permissive.max_requests_per_connection.is_none()
+    );
+    assert_with_log!(
+        permissive.idle_timeout.is_none(),
+        "no idle timeout",
+        true,
+        permissive.idle_timeout.is_none()
+    );
 
     test_complete!("e2e_http_server_config_combinations");
 }

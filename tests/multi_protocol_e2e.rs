@@ -167,7 +167,12 @@ fn e2e_multi_http_grpc_auth_pipeline() {
         status = resp.status.as_u16(),
         "HTTP auth success"
     );
-    assert_with_log!(resp.status == StatusCode::OK, "http auth ok", 200, resp.status.as_u16());
+    assert_with_log!(
+        resp.status == StatusCode::OK,
+        "http auth ok",
+        200,
+        resp.status.as_u16()
+    );
 
     test_section!("http_auth_failure");
     let resp = router.handle(Request::new("GET", "/denied"));
@@ -189,7 +194,12 @@ fn e2e_multi_http_grpc_auth_pipeline() {
     let result = auth.intercept_request(&mut grpc_req);
     assert_with_log!(result.is_ok(), "grpc auth ok", true, result.is_ok());
     let auth_header = grpc_req.metadata().get("authorization");
-    assert_with_log!(auth_header.is_some(), "grpc auth set", true, auth_header.is_some());
+    assert_with_log!(
+        auth_header.is_some(),
+        "grpc auth set",
+        true,
+        auth_header.is_some()
+    );
     tracing::info!(
         correlation_id = correlation_id,
         interceptor_count = grpc_interceptors.len(),
@@ -223,9 +233,10 @@ fn e2e_multi_websocket_http_codec() {
 
     if let Ok(Some(req)) = &http_result {
         // Verify upgrade headers
-        let has_upgrade = req.headers.iter().any(|(k, v)| {
-            k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
-        });
+        let has_upgrade = req
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket"));
         tracing::info!(has_upgrade = has_upgrade, "upgrade header found");
         assert_with_log!(has_upgrade, "upgrade header", true, has_upgrade);
     }
@@ -306,10 +317,10 @@ fn e2e_multi_pool_compression_multihost() {
     let grpc_key = PoolKey::http("grpc.example.com", Some(9090));
     let ws_key = PoolKey::http("ws.example.com", Some(8080));
 
-    pool.register_connecting(http_key.clone(), Time::ZERO, 2);
-    pool.register_connecting(https_key.clone(), Time::from_millis(10), 2);
-    pool.register_connecting(grpc_key.clone(), Time::from_millis(20), 2);
-    pool.register_connecting(ws_key.clone(), Time::from_millis(30), 2);
+    pool.register_connecting(http_key, Time::ZERO, 2);
+    pool.register_connecting(https_key, Time::from_millis(10), 2);
+    pool.register_connecting(grpc_key, Time::from_millis(20), 2);
+    pool.register_connecting(ws_key, Time::from_millis(30), 2);
 
     let stats = pool.stats();
     tracing::info!(
@@ -317,7 +328,12 @@ fn e2e_multi_pool_compression_multihost() {
         total = stats.total_connections,
         "multi-protocol pool"
     );
-    assert_with_log!(stats.total_connections >= 4, "pool connections", ">= 4", stats.total_connections);
+    assert_with_log!(
+        stats.total_connections >= 4,
+        "pool connections",
+        ">= 4",
+        stats.total_connections
+    );
 
     test_section!("compression_negotiation");
     // Different protocols may negotiate different encodings
@@ -327,8 +343,8 @@ fn e2e_multi_pool_compression_multihost() {
     let grpc_enc = negotiate_encoding("identity, gzip", &supported);
 
     tracing::info!(
-        http_encoding = ?http_enc.as_ref().map(|e| e.as_token()),
-        grpc_encoding = ?grpc_enc.as_ref().map(|e| e.as_token()),
+        http_encoding = ?http_enc.as_ref().map(ContentEncoding::as_token),
+        grpc_encoding = ?grpc_enc.as_ref().map(ContentEncoding::as_token),
         "compression negotiated per protocol"
     );
 
@@ -350,8 +366,7 @@ fn e2e_multi_concurrent_protocol_ops() {
     fn echo(Path(msg): Path<String>) -> String {
         format!("http:{msg}")
     }
-    let router = Router::new()
-        .route("/echo/:msg", get(FnHandler1::<_, Path<String>>::new(echo)));
+    let router = Router::new().route("/echo/:msg", get(FnHandler1::<_, Path<String>>::new(echo)));
 
     // gRPC health service
     let health = HealthService::new();
@@ -369,7 +384,7 @@ fn e2e_multi_concurrent_protocol_ops() {
 
     for i in 0..n {
         // HTTP request
-        let resp = router.handle(Request::new("GET", &format!("/echo/msg-{i}")));
+        let resp = router.handle(Request::new("GET", format!("/echo/msg-{i}")));
         if resp.status == StatusCode::OK {
             http_ok += 1;
         }
@@ -625,8 +640,7 @@ fn e2e_multi_metadata_correlation() {
         "type": "subscribe"
     });
     let ws_frame = WsFrame::text(Bytes::from(serde_json::to_vec(&ws_payload).unwrap()));
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&ws_frame.payload).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&ws_frame.payload).unwrap();
     assert_with_log!(
         parsed["trace_id"] == trace_id,
         "ws trace id",
@@ -684,7 +698,7 @@ fn e2e_multi_stress_all_protocols() {
 
         // WebSocket frame
         let frame = WsFrame::text(format!("stress-{i}"));
-        if frame.payload.len() > 0 {
+        if !frame.payload.is_empty() {
             ws_ok += 1;
         }
 

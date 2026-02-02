@@ -47,6 +47,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 #[cfg(unix)]
+#[allow(unused_imports)]
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -409,8 +410,7 @@ fn io_cancel_006_split_stream_cleanup() {
 
     assert!(
         result.is_ok(),
-        "split stream cleanup test should complete: {:?}",
-        result
+        "split stream cleanup test should complete: {result:?}",
     );
     test_complete!("io_cancel_006_split_stream_cleanup");
 }
@@ -451,7 +451,7 @@ fn io_cancel_007_nested_cancellation() {
                         cancelled_clone.store(true, Ordering::SeqCst);
                     }
                 }
-            })
+            });
         });
 
         // Accept and then close immediately (triggering cancellation-like behavior)
@@ -473,8 +473,7 @@ fn io_cancel_007_nested_cancellation() {
 
     assert!(
         result.is_ok(),
-        "nested cancellation test should complete: {:?}",
-        result
+        "nested cancellation test should complete: {result:?}",
     );
     test_complete!("io_cancel_007_nested_cancellation");
 }
@@ -486,9 +485,10 @@ fn io_cancel_007_nested_cancellation() {
 /// Verifies that multiple concurrent I/O operations can all be cancelled properly.
 #[test]
 fn io_cancel_008_multiple_concurrent_cancel() {
+    const NUM_CONNECTIONS: usize = 5;
+
     init_test("io_cancel_008_multiple_concurrent_cancel");
 
-    const NUM_CONNECTIONS: usize = 5;
     let cancelled_count = Arc::new(AtomicUsize::new(0));
 
     let result = block_on(async {
@@ -512,7 +512,7 @@ fn io_cancel_008_multiple_concurrent_cancel() {
                         }
                     }
                 }
-            })
+            });
         });
 
         // Give server time to start
@@ -536,7 +536,7 @@ fn io_cancel_008_multiple_concurrent_cancel() {
                             counter.fetch_add(1, Ordering::SeqCst);
                         }
                     }
-                })
+                });
             });
             handles.push(handle);
         }
@@ -561,8 +561,7 @@ fn io_cancel_008_multiple_concurrent_cancel() {
 
     assert!(
         result.is_ok(),
-        "multiple concurrent cancel test should complete: {:?}",
-        result
+        "multiple concurrent cancel test should complete: {result:?}",
     );
     assert_eq!(
         final_count, NUM_CONNECTIONS,
@@ -590,7 +589,7 @@ fn io_cancel_registration_count_tracking() {
     let addr = listener.local_addr().expect("local_addr");
 
     // Connect
-    let _client = std::net::TcpStream::connect(addr).expect("connect");
+    let client = std::net::TcpStream::connect(addr).expect("connect");
     let (server, _) = listener.accept().expect("accept");
     server.set_nonblocking(true).expect("nonblocking");
 
@@ -622,7 +621,7 @@ fn io_cancel_registration_count_tracking() {
     );
 
     // Cleanup
-    drop(_client);
+    drop(client);
 
     test_complete!("io_cancel_registration_count_tracking");
 }
@@ -802,7 +801,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
     }
 
     if let Some(task) = runtime.state.tasks.get_mut(task_id.arena_index()) {
-        task.complete(Outcome::Cancelled(cancel_reason.clone()));
+        task.complete(Outcome::Cancelled(cancel_reason));
     }
 
     let can_close_with_pending = runtime.state.can_region_complete_close(region);

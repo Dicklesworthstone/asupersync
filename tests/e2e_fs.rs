@@ -9,6 +9,7 @@
 mod common;
 
 use asupersync::fs;
+use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use futures_lite::future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,13 +42,11 @@ fn e2e_file_create_write_read_roundtrip() {
     future::block_on(async {
         let path = base.join("hello.txt");
         let mut file = fs::File::create(&path).await.unwrap();
-        use asupersync::io::AsyncWriteExt;
         file.write_all(b"hello e2e").await.unwrap();
         file.sync_all().await.unwrap();
         drop(file);
 
         let mut file = fs::File::open(&path).await.unwrap();
-        use asupersync::io::AsyncReadExt;
         let mut buf = String::new();
         file.read_to_string(&mut buf).await.unwrap();
         assert_eq!(buf, "hello e2e");
@@ -72,7 +71,6 @@ fn e2e_file_open_options_combinations() {
             .open(&path)
             .await
             .unwrap();
-        use asupersync::io::AsyncWriteExt;
         f.write_all(b"first").await.unwrap();
         drop(f);
 
@@ -147,7 +145,7 @@ fn e2e_path_read_write_roundtrip() {
 
     future::block_on(async {
         let path = base.join("data.bin");
-        let data: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
+        let data: Vec<u8> = (0u8..=255).collect();
         fs::write(&path, &data).await.unwrap();
 
         let read_back = fs::read(&path).await.unwrap();
@@ -465,7 +463,9 @@ fn e2e_large_file_roundtrip() {
     future::block_on(async {
         let path = base.join("big.bin");
         // 1MB of data
-        let data: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+        let data: Vec<u8> = (0u32..1_048_576)
+            .map(|i| u8::try_from(i % 251).expect("remainder fits in u8"))
+            .collect();
         fs::write(&path, &data).await.unwrap();
 
         let read_back = fs::read(&path).await.unwrap();

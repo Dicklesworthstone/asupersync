@@ -443,7 +443,11 @@ fn e2e_nested_region_create_teardown() {
     harness.exit_phase();
 
     let summary = harness.finish();
-    assert!(summary.passed, "test failed: {}", serde_json::to_string_pretty(&summary).unwrap());
+    assert!(
+        summary.passed,
+        "test failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
 }
 
 #[test]
@@ -900,7 +904,12 @@ fn e2e_concurrent_cancel_reasons() {
 
     test_section!("verify");
     let quiescent = runtime.is_quiescent();
-    assert_with_log!(quiescent, "quiescent after concurrent cancels", true, quiescent);
+    assert_with_log!(
+        quiescent,
+        "quiescent after concurrent cancels",
+        true,
+        quiescent
+    );
     let live = runtime.state.live_task_count();
     assert_with_log!(live == 0, "no live tasks", 0, live);
     test_complete!("e2e_concurrent_cancel_reasons", regions = n_regions);
@@ -958,12 +967,20 @@ fn e2e_cancel_with_timer_interleave() {
     test_section!("verify");
     let total = completed.load(Ordering::SeqCst);
     let cancels = cancelled_count.load(Ordering::SeqCst);
-    tracing::info!(completed = total, cancels = cancels, "timer interleave done");
+    tracing::info!(
+        completed = total,
+        cancels = cancels,
+        "timer interleave done"
+    );
     let quiescent = runtime.is_quiescent();
     assert_with_log!(quiescent, "quiescent", true, quiescent);
     let live = runtime.state.live_task_count();
     assert_with_log!(live == 0, "no live tasks", 0, live);
-    test_complete!("e2e_cancel_with_timer_interleave", completed = total, cancels = cancels);
+    test_complete!(
+        "e2e_cancel_with_timer_interleave",
+        completed = total,
+        cancels = cancels
+    );
 }
 
 /// Stress: loser drain after races — cancel the losing region after a "winner" completes.
