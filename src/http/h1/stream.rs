@@ -84,6 +84,7 @@ pub struct IncomingBody {
     receiver: mpsc::Receiver<Result<Frame<BytesCursor>, HttpError>>,
     cx: Cx,
     done: bool,
+    received: u64,
     size_hint: SizeHint,
     kind: BodyKind,
 }
@@ -113,6 +114,7 @@ impl IncomingBody {
             receiver: rx,
             cx: cx.clone(),
             done,
+            received: 0,
             size_hint,
             kind,
         };
@@ -142,7 +144,22 @@ impl Body for IncomingBody {
         let recv_future = self.receiver.recv(&self.cx);
         let mut pinned = std::pin::pin!(recv_future);
         match pinned.as_mut().poll(poll_cx) {
-            Poll::Ready(Ok(frame)) => Poll::Ready(Some(frame)),
+            Poll::Ready(Ok(frame)) => {
+                if let Ok(ref f) = frame {
+                    if f.is_trailers() {
+                        // Trailers mark the end of a chunked body
+                        self.done = true;
+                    } else if let Some(data) = f.data_ref() {
+                        self.received += data.remaining() as u64;
+                        if let BodyKind::ContentLength(expected) = self.kind {
+                            if self.received >= expected {
+                                self.done = true;
+                            }
+                        }
+                    }
+                }
+                Poll::Ready(Some(frame))
+            }
             Poll::Ready(Err(RecvError::Cancelled)) => {
                 self.done = true;
                 Poll::Ready(Some(Err(HttpError::BodyCancelled)))
