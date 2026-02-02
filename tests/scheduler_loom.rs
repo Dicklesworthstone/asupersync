@@ -4,15 +4,15 @@
 //! of concurrent operations, verifying that the scheduler's core protocols
 //! are free from lost wakeups, double scheduling, and deadlocks.
 //!
-//! Run with: RUSTFLAGS="--cfg loom" cargo test --test scheduler_loom --release
+//! Run with: cargo test --test scheduler_loom --features loom-tests --release
 //!
-//! Note: Loom tests are only compiled when the `loom` cfg is set.
+//! Note: Loom tests are only compiled when the `loom-tests` feature is enabled.
 //! Under normal `cargo test`, this file compiles to an empty module.
 
-// Only compile tests when loom cfg is active
-#![cfg(loom)]
+// Only compile tests when loom-tests feature is active
+#![cfg(feature = "loom-tests")]
 
-use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use loom::sync::{Arc, Condvar, Mutex};
 use loom::thread;
 use std::collections::VecDeque;
