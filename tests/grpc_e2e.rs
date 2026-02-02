@@ -18,9 +18,8 @@ use asupersync::grpc::{
     auth_bearer_interceptor, auth_validator, fn_interceptor, logging_interceptor,
     metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor, CallContext,
     Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
-    HealthCheckRequest, HealthService,
-    Interceptor, InterceptorLayer, Metadata, MetadataValue, MethodDescriptor, Request, Response,
-    Server, ServingStatus, Status,
+    HealthCheckRequest, HealthService, Interceptor, InterceptorLayer, Metadata, MetadataValue,
+    MethodDescriptor, Request, Response, Server, ServingStatus, Status,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -624,7 +623,10 @@ fn e2e_grpc_error_conversions() {
     let cases: Vec<(GrpcError, Code)> = vec![
         (GrpcError::transport("conn refused"), Code::Unavailable),
         (GrpcError::protocol("bad frame"), Code::Internal),
-        (GrpcError::invalid_message("bad proto"), Code::InvalidArgument),
+        (
+            GrpcError::invalid_message("bad proto"),
+            Code::InvalidArgument,
+        ),
         (GrpcError::compression("zstd fail"), Code::Internal),
         (GrpcError::MessageTooLarge, Code::ResourceExhausted),
     ];
@@ -863,7 +865,7 @@ fn e2e_grpc_interceptor_layer_composition() {
     test_section!("empty_layer");
     let empty = InterceptorLayer::new();
     assert_with_log!(empty.is_empty(), "empty layer", true, empty.is_empty());
-    assert_with_log!(empty.len() == 0, "zero length", 0, empty.len());
+    assert_with_log!(empty.is_empty(), "zero length", true, empty.is_empty());
 
     test_section!("single_layer");
     let single = InterceptorLayer::new().layer(trace_interceptor());

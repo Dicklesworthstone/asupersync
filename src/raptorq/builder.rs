@@ -207,3 +207,123 @@ impl<S: SymbolStream + Unpin> RaptorQReceiverBuilder<S> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::error::{SinkError, StreamError};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct NoopSink;
+
+    impl SymbolSink for NoopSink {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _symbol: crate::security::AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Unpin for NoopSink {}
+
+    struct NoopStream;
+
+    impl SymbolStream for NoopStream {
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<crate::security::AuthenticatedSymbol, StreamError>>> {
+            Poll::Ready(None)
+        }
+    }
+
+    impl Unpin for NoopStream {}
+
+    #[test]
+    fn test_sender_builder_missing_transport_errors() {
+        let result = RaptorQSenderBuilder::<NoopSink>::default()
+            .config(RaptorQConfig::default())
+            .build();
+        match result {
+            Err(err) => assert_eq!(err.kind(), ErrorKind::InvalidEncodingParams),
+            Ok(_) => panic!("expected missing transport error"),
+        }
+    }
+
+    #[test]
+    fn test_receiver_builder_missing_source_errors() {
+        let result = RaptorQReceiverBuilder::<NoopStream>::default()
+            .config(RaptorQConfig::default())
+            .build();
+        match result {
+            Err(err) => assert_eq!(err.kind(), ErrorKind::InvalidEncodingParams),
+            Ok(_) => panic!("expected missing source error"),
+        }
+    }
+
+    #[test]
+    fn test_sender_builder_invalid_config_errors() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 0;
+
+        let result = RaptorQSenderBuilder::new()
+            .config(config)
+            .transport(NoopSink)
+            .build();
+        match result {
+            Err(err) => assert_eq!(err.kind(), ErrorKind::InvalidEncodingParams),
+            Ok(_) => panic!("expected invalid config error"),
+        }
+    }
+
+    #[test]
+    fn test_receiver_builder_invalid_config_errors() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 0;
+
+        let result = RaptorQReceiverBuilder::new()
+            .config(config)
+            .source(NoopStream)
+            .build();
+        match result {
+            Err(err) => assert_eq!(err.kind(), ErrorKind::InvalidEncodingParams),
+            Ok(_) => panic!("expected invalid config error"),
+        }
+    }
+
+    #[test]
+    fn test_sender_builder_default_config_used_when_missing() {
+        let sender = RaptorQSenderBuilder::new()
+            .transport(NoopSink)
+            .build()
+            .unwrap();
+        assert_eq!(sender.config().encoding.symbol_size, 256);
+    }
+
+    #[test]
+    fn test_receiver_builder_accepts_security_and_metrics() {
+        let security = SecurityContext::for_testing(7);
+        let metrics = Metrics::new();
+        let receiver = RaptorQReceiverBuilder::new()
+            .source(NoopStream)
+            .security(security)
+            .metrics(metrics)
+            .build();
+        assert!(receiver.is_ok());
+    }
+}

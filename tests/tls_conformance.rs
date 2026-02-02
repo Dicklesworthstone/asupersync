@@ -173,12 +173,11 @@ W7n9v0wIyo4e/O0DO2fczXZD
         Result<asupersync::tls::TlsStream<VirtualTcpStream>, TlsError>,
     ) {
         let (client_io, server_io) = make_pair(port_base);
-        let (client_result, server_result) = futures_lite::future::block_on(
-            futures_lite::future::zip(
+        let (client_result, server_result) =
+            futures_lite::future::block_on(futures_lite::future::zip(
                 connector.connect("localhost", client_io),
                 acceptor.accept(server_io),
-            ),
-        );
+            ));
         (client_result, server_result)
     }
 
@@ -195,11 +194,9 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
         let writer = std::thread::spawn(move || {
             futures_lite::future::block_on(async {
-                let n = std::future::poll_fn(|cx| {
-                    Pin::new(&mut a).poll_write(cx, b"hello")
-                })
-                .await
-                .unwrap();
+                let n = std::future::poll_fn(|cx| Pin::new(&mut a).poll_write(cx, b"hello"))
+                    .await
+                    .unwrap();
                 assert_eq!(n, 5);
             });
         });
@@ -270,8 +267,8 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
         let (client_io, _server_io) = make_pair(6040);
         // Server never responds -> timeout
-        let err = futures_lite::future::block_on(connector.connect("localhost", client_io))
-            .unwrap_err();
+        let err =
+            futures_lite::future::block_on(connector.connect("localhost", client_io)).unwrap_err();
         assert!(matches!(err, TlsError::Timeout(_)));
     }
 
@@ -435,8 +432,8 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
         // Build client config with AcceptAnyCert + client identity
         let config = {
-            use std::sync::Arc;
             use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+            use std::sync::Arc;
 
             let cert_ders: Vec<CertificateDer<'static>> = {
                 let mut reader = std::io::BufReader::new(TEST_CERT_PEM);
@@ -486,7 +483,10 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
         let (client_res, server_res) = handshake_pair(make_connector(), acceptor, 6120);
         let either_failed = client_res.is_err() || server_res.is_err();
-        assert!(either_failed, "mTLS required but no client cert should fail");
+        assert!(
+            either_failed,
+            "mTLS required but no client cert should fail"
+        );
     }
 
     #[test]
@@ -769,7 +769,8 @@ W7n9v0wIyo4e/O0DO2fczXZD
     }
 }
 
-// Tests that work without the tls feature flag
+// Tests that require the tls feature to be available
+#[cfg(feature = "tls")]
 mod tls_error_tests {
     use asupersync::tls::TlsError;
     use std::time::Duration;
@@ -788,7 +789,7 @@ mod tls_error_tests {
     }
 }
 
-#[cfg(not(feature = "tls"))]
+#[cfg(feature = "tls")]
 mod tls_disabled_tests {
     use asupersync::tls::{TlsConnector, TlsConnectorBuilder};
 

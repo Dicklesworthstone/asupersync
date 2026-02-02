@@ -351,3 +351,281 @@ fn poll_next_blocking<S: SymbolStream + Unpin>(
         Poll::Ready(None) | Poll::Pending => Ok(None), // No symbol available in sync context
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::{AuthenticationTag, SecurityContext};
+    use crate::transport::error::{SinkError, StreamError};
+    use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct VecSink {
+        symbols: Vec<AuthenticatedSymbol>,
+    }
+
+    impl VecSink {
+        fn new() -> Self {
+            Self {
+                symbols: Vec::new(),
+            }
+        }
+    }
+
+    impl SymbolSink for VecSink {
+        fn poll_send(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            self.symbols.push(symbol);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Unpin for VecSink {}
+
+    struct PendingSink;
+
+    impl SymbolSink for PendingSink {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Unpin for PendingSink {}
+
+    struct VecStream {
+        symbols: Vec<AuthenticatedSymbol>,
+        index: usize,
+    }
+
+    impl VecStream {
+        fn new(symbols: Vec<AuthenticatedSymbol>) -> Self {
+            Self { symbols, index: 0 }
+        }
+    }
+
+    impl SymbolStream for VecStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            if self.index < self.symbols.len() {
+                let sym = self.symbols[self.index].clone();
+                self.index += 1;
+                Poll::Ready(Some(Ok(sym)))
+            } else {
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    impl Unpin for VecStream {}
+
+    fn params_for(
+        object_id: ObjectId,
+        data_len: usize,
+        symbol_size: u16,
+        source_symbols: usize,
+    ) -> ObjectParams {
+        ObjectParams::new(
+            object_id,
+            data_len as u64,
+            symbol_size,
+            1,
+            source_symbols as u16,
+        )
+    }
+
+    #[test]
+    fn test_send_object_roundtrip_all_symbols_succeeds() {
+        let cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0xABu8; 512];
+        let object_id = ObjectId::new_for_test(7);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        let stream = VecStream::new(symbols);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let recv = receiver.receive_object(&cx, &params).unwrap();
+        assert_eq!(&recv.data[..data.len()], &data);
+        assert!(!recv.authenticated);
+    }
+
+    #[test]
+    fn test_send_object_roundtrip_source_only_succeeds() {
+        let cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0xCDu8; 256];
+        let object_id = ObjectId::new_for_test(9);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let mut symbols: Vec<AuthenticatedSymbol> =
+            sender.transport_mut().symbols.drain(..).collect();
+        symbols.truncate(outcome.source_symbols);
+        let stream = VecStream::new(symbols);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let recv = receiver.receive_object(&cx, &params).unwrap();
+        assert_eq!(&recv.data[..data.len()], &data);
+    }
+
+    #[test]
+    fn test_send_object_rejects_oversized_data() {
+        let cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let max = u64::from(sender.config().encoding.symbol_size)
+            * sender.config().encoding.max_block_size as u64;
+        let data = vec![0u8; (max + 1) as usize];
+        let result = sender.send_object(&cx, ObjectId::new_for_test(1), &data);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::DataTooLarge);
+    }
+
+    #[test]
+    fn test_send_object_cancelled_returns_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+        let data = vec![0xEFu8; 64];
+        let result = sender.send_object(&cx, ObjectId::new_for_test(2), &data);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn test_send_symbols_direct_count_matches() {
+        let cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let symbols: Vec<AuthenticatedSymbol> = (0..3)
+            .map(|i| {
+                let sym = Symbol::new_for_test(1, 0, i, &[i as u8; 256]);
+                AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero())
+            })
+            .collect();
+
+        let count = sender.send_symbols(&cx, symbols).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(sender.transport_mut().symbols.len(), 3);
+    }
+
+    #[test]
+    fn test_send_object_pending_sink_returns_rejected() {
+        let cx = Cx::for_testing();
+        let sink = PendingSink;
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0xAAu8; 64];
+        let result = sender.send_object(&cx, ObjectId::new_for_test(3), &data);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::SinkRejected);
+    }
+
+    #[test]
+    fn test_receive_object_insufficient_symbols_errors() {
+        let cx = Cx::for_testing();
+        let stream = VecStream::new(vec![]);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let params = params_for(ObjectId::new_for_test(5), 128, 256, 4);
+        let result = receiver.receive_object(&cx, &params);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InsufficientSymbols);
+    }
+
+    #[test]
+    fn test_receive_object_cancelled_returns_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let stream = VecStream::new(vec![]);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+        let params = params_for(ObjectId::new_for_test(6), 256, 256, 4);
+        let result = receiver.receive_object(&cx, &params);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn test_receive_object_authenticated_flag_true_with_security() {
+        let cx = Cx::for_testing();
+        let security = SecurityContext::for_testing(42);
+        let sink = VecSink::new();
+        let mut sender =
+            RaptorQSender::new(RaptorQConfig::default(), sink, Some(security.clone()), None);
+
+        let data = vec![0x11u8; 128];
+        let object_id = ObjectId::new_for_test(10);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        let stream = VecStream::new(symbols);
+        let mut receiver =
+            RaptorQReceiver::new(RaptorQConfig::default(), stream, Some(security), None);
+
+        let recv = receiver.receive_object(&cx, &params).unwrap();
+        assert!(recv.authenticated);
+    }
+}

@@ -23,13 +23,13 @@ fn test_scope(region: RegionId, budget: Budget) -> Scope<'static> {
 #[test]
 fn spawn_factory_panic_causes_leak() {
     let mut state = RuntimeState::new();
-    let cx = test_cx();
+    let _cx = test_cx();
     let region = state.create_root_region(Budget::INFINITE);
-    let scope = test_scope(region, Budget::INFINITE);
+    let _scope = test_scope(region, Budget::INFINITE);
 
     // 1. Spawn a task where the factory panics
     // We expect this to panic, so we catch it
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+    let _result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         // We need to use unsafe code or a RefCell to mutate state inside catch_unwind
         // if we were capturing it, but here we just call spawn.
         // spawn takes &mut state.
@@ -63,7 +63,7 @@ fn repro_zombie_task() {
     // Wrapper to allow catch_unwind with mutable borrow
     let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut state_ref = state.borrow_mut();
-        let _ = scope.spawn(&mut *state_ref, &cx, |_| {
+        let _ = scope.spawn(&mut state_ref, &cx, |_| {
             panic!("factory panic");
             #[allow(unreachable_code)]
             async {
@@ -82,7 +82,6 @@ fn repro_zombie_task() {
     let tasks = region_record.task_ids();
     assert!(
         tasks.is_empty(),
-        "Region should be empty but has zombie tasks: {:?}",
-        tasks
+        "Region should be empty but has zombie tasks: {tasks:?}",
     );
 }
