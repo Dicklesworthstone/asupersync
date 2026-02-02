@@ -338,6 +338,112 @@ mod imp {
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         Ok(owned)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::unix::net::UnixStream;
+
+        fn new_or_skip() -> Option<IoUringReactor> {
+            match IoUringReactor::new() {
+                Ok(reactor) => Some(reactor),
+                Err(err) => {
+                    assert!(
+                        matches!(
+                            err.kind(),
+                            io::ErrorKind::Unsupported
+                                | io::ErrorKind::PermissionDenied
+                                | io::ErrorKind::Other
+                                | io::ErrorKind::InvalidInput
+                        ),
+                        "unexpected io_uring error kind: {err:?}"
+                    );
+                    None
+                }
+            }
+        }
+
+        #[test]
+        fn test_interest_roundtrip_all_flags_preserved() {
+            let interest = Interest::READABLE
+                .add(Interest::WRITABLE)
+                .add(Interest::PRIORITY)
+                .add(Interest::ERROR)
+                .add(Interest::HUP);
+            let mask = interest_to_poll_mask(interest);
+            let roundtrip = poll_mask_to_interest(mask);
+
+            assert!(roundtrip.is_readable());
+            assert!(roundtrip.is_writable());
+            assert!(roundtrip.is_priority());
+            assert!(roundtrip.is_error());
+            assert!(roundtrip.is_hup());
+        }
+
+        #[test]
+        fn test_interest_roundtrip_empty_is_none() {
+            let mask = interest_to_poll_mask(Interest::NONE);
+            let roundtrip = poll_mask_to_interest(mask);
+            assert!(roundtrip.is_empty());
+        }
+
+        #[test]
+        fn test_register_modify_deregister_tracks_count() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let token = Token::new(7);
+
+            reactor
+                .register(&left, token, Interest::READABLE)
+                .expect("register should succeed");
+            assert_eq!(reactor.registration_count(), 1);
+
+            reactor
+                .modify(token, Interest::WRITABLE)
+                .expect("modify should succeed");
+
+            reactor
+                .deregister(token)
+                .expect("deregister should succeed");
+            assert_eq!(reactor.registration_count(), 0);
+        }
+
+        #[test]
+        fn test_register_duplicate_token_returns_already_exists() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let token = Token::new(1);
+            reactor
+                .register(&left, token, Interest::READABLE)
+                .expect("register should succeed");
+            let err = reactor
+                .register(&left, token, Interest::READABLE)
+                .expect_err("duplicate token should error");
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+
+            reactor
+                .deregister(token)
+                .expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_deregister_unknown_token_returns_not_found() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let err = reactor
+                .deregister(Token::new(999))
+                .expect_err("unknown token should error");
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -409,6 +515,61 @@ mod imp {
 
         fn registration_count(&self) -> usize {
             0
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[cfg(unix)]
+        use std::os::unix::net::UnixStream;
+
+        #[test]
+        fn test_new_unsupported_returns_error() {
+            let err = IoUringReactor::new().expect_err("io_uring should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn test_register_modify_deregister_unsupported() {
+            let reactor = IoUringReactor::default();
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+
+            let err = reactor
+                .register(&left, Token::new(1), Interest::READABLE)
+                .expect_err("register should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+            let err = reactor
+                .modify(Token::new(1), Interest::WRITABLE)
+                .expect_err("modify should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+            let err = reactor
+                .deregister(Token::new(1))
+                .expect_err("deregister should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+
+        #[test]
+        fn test_poll_and_wake_unsupported() {
+            let reactor = IoUringReactor::default();
+            let mut events = Events::with_capacity(4);
+
+            let err = reactor
+                .poll(&mut events, None)
+                .expect_err("poll should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+            let err = reactor.wake().expect_err("wake should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+
+        #[test]
+        fn test_registration_count_zero() {
+            let reactor = IoUringReactor::default();
+            assert_eq!(reactor.registration_count(), 0);
         }
     }
 }

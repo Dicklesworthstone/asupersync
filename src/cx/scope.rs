@@ -154,6 +154,7 @@ impl<P: Policy> Scope<'_, P> {
     /// Creates a new scope (internal use).
     #[must_use]
     #[allow(dead_code)]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn new(region: RegionId, budget: Budget) -> Self {
         Self {
             region,

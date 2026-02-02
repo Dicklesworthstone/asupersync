@@ -101,3 +101,57 @@ impl super::Reactor for UringReactor {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn test_new_returns_unsupported() {
+        let err = UringReactor::new().expect_err("uring is not implemented");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn test_is_available_returns_false() {
+        assert!(!UringReactor::is_available());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_register_and_deregister_return_unsupported() {
+        let reactor = UringReactor { _private: () };
+        let (left, _right) = UnixStream::pair().expect("unix stream pair");
+
+        let err = reactor
+            .register(&left, Token::new(1), Interest::READABLE)
+            .expect_err("register should be unsupported");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+        let err = reactor
+            .reregister(&left, Token::new(1), Interest::WRITABLE)
+            .expect_err("reregister should be unsupported");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+        let err = reactor
+            .deregister(&left)
+            .expect_err("deregister should be unsupported");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn test_poll_and_wake_return_unsupported() {
+        let reactor = UringReactor { _private: () };
+        let mut events = super::Events::with_capacity(1);
+
+        let err = reactor
+            .poll(&mut events, None)
+            .expect_err("poll should be unsupported");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+        let err = reactor.wake().expect_err("wake should be unsupported");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+}

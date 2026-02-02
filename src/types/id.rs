@@ -21,6 +21,7 @@ pub struct RegionId(pub(crate) ArenaIndex);
 impl RegionId {
     /// Creates a new region ID from an arena index (internal use).
     #[must_use]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) const fn from_arena(index: ArenaIndex) -> Self {
         Self(index)
     }
@@ -92,6 +93,7 @@ impl TaskId {
     /// Creates a new task ID from an arena index (internal use).
     #[must_use]
     #[allow(dead_code)]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) const fn from_arena(index: ArenaIndex) -> Self {
         Self(index)
     }

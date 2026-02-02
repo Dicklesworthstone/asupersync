@@ -150,6 +150,29 @@ mod iocp_impl {
                 .finish_non_exhaustive()
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_interest_to_poll_event_and_back_roundtrip() {
+            let token = Token::new(9);
+            let interest = Interest::READABLE.add(Interest::WRITABLE);
+            let event = IocpReactor::interest_to_poll_event(token, interest);
+            let roundtrip = IocpReactor::poll_event_to_interest(&event);
+            assert!(roundtrip.is_readable());
+            assert!(roundtrip.is_writable());
+        }
+
+        #[test]
+        fn test_interest_to_poll_event_none_is_empty() {
+            let token = Token::new(1);
+            let event = IocpReactor::interest_to_poll_event(token, Interest::NONE);
+            let roundtrip = IocpReactor::poll_event_to_interest(&event);
+            assert!(roundtrip.is_empty());
+        }
+    }
 }
 
 // Stub for non-Windows platforms (keeps docs/builds consistent).
@@ -220,6 +243,61 @@ mod stub {
 
         fn registration_count(&self) -> usize {
             0
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[cfg(unix)]
+        use std::os::unix::net::UnixStream;
+
+        #[test]
+        fn test_new_unsupported_returns_error() {
+            let err = IocpReactor::new().expect_err("iocp should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn test_register_modify_deregister_unsupported() {
+            let reactor = IocpReactor::default();
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+
+            let err = reactor
+                .register(&left, Token::new(1), Interest::READABLE)
+                .expect_err("register should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+            let err = reactor
+                .modify(Token::new(1), Interest::WRITABLE)
+                .expect_err("modify should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+            let err = reactor
+                .deregister(Token::new(1))
+                .expect_err("deregister should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+
+        #[test]
+        fn test_poll_and_wake_unsupported() {
+            let reactor = IocpReactor::default();
+            let mut events = Events::with_capacity(2);
+
+            let err = reactor
+                .poll(&mut events, None)
+                .expect_err("poll should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+            let err = reactor.wake().expect_err("wake should be unsupported");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
+
+        #[test]
+        fn test_registration_count_zero() {
+            let reactor = IocpReactor::default();
+            assert_eq!(reactor.registration_count(), 0);
         }
     }
 }

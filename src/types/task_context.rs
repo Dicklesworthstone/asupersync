@@ -101,3 +101,157 @@ impl CxInner {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_checkpoint_state_default() {
+        init_test("test_checkpoint_state_default");
+        let state = CheckpointState::new();
+        crate::assert_with_log!(
+            state.last_checkpoint.is_none(),
+            "last_checkpoint",
+            true,
+            state.last_checkpoint.is_none()
+        );
+        crate::assert_with_log!(
+            state.last_message.is_none(),
+            "last_message",
+            true,
+            state.last_message.is_none()
+        );
+        crate::assert_with_log!(
+            state.checkpoint_count == 0,
+            "checkpoint_count",
+            0,
+            state.checkpoint_count
+        );
+        crate::test_complete!("test_checkpoint_state_default");
+    }
+
+    #[test]
+    fn test_checkpoint_state_record() {
+        init_test("test_checkpoint_state_record");
+        let mut state = CheckpointState::new();
+        state.record();
+        crate::assert_with_log!(
+            state.last_checkpoint.is_some(),
+            "last_checkpoint",
+            true,
+            state.last_checkpoint.is_some()
+        );
+        crate::assert_with_log!(
+            state.last_message.is_none(),
+            "last_message",
+            true,
+            state.last_message.is_none()
+        );
+        crate::assert_with_log!(
+            state.checkpoint_count == 1,
+            "checkpoint_count",
+            1,
+            state.checkpoint_count
+        );
+        state.record();
+        crate::assert_with_log!(
+            state.checkpoint_count == 2,
+            "checkpoint_count 2",
+            2,
+            state.checkpoint_count
+        );
+        crate::test_complete!("test_checkpoint_state_record");
+    }
+
+    #[test]
+    fn test_checkpoint_state_record_with_message() {
+        init_test("test_checkpoint_state_record_with_message");
+        let mut state = CheckpointState::new();
+        state.record_with_message("hello".to_string());
+        crate::assert_with_log!(
+            state.last_checkpoint.is_some(),
+            "last_checkpoint",
+            true,
+            state.last_checkpoint.is_some()
+        );
+        crate::assert_with_log!(
+            state.last_message.as_deref() == Some("hello"),
+            "last_message",
+            Some("hello"),
+            state.last_message.as_deref()
+        );
+        crate::assert_with_log!(
+            state.checkpoint_count == 1,
+            "checkpoint_count",
+            1,
+            state.checkpoint_count
+        );
+        state.record();
+        crate::assert_with_log!(
+            state.last_message.is_none(),
+            "last_message cleared",
+            true,
+            state.last_message.is_none()
+        );
+        crate::test_complete!("test_checkpoint_state_record_with_message");
+    }
+
+    #[test]
+    fn test_checkpoint_state_message_overwrite() {
+        init_test("test_checkpoint_state_message_overwrite");
+        let mut state = CheckpointState::new();
+        state.record_with_message("first".to_string());
+        state.record_with_message("second".to_string());
+        crate::assert_with_log!(
+            state.last_message.as_deref() == Some("second"),
+            "last_message overwrite",
+            Some("second"),
+            state.last_message.as_deref()
+        );
+        crate::assert_with_log!(
+            state.checkpoint_count == 2,
+            "checkpoint_count",
+            2,
+            state.checkpoint_count
+        );
+        crate::test_complete!("test_checkpoint_state_message_overwrite");
+    }
+
+    #[test]
+    fn test_cx_inner_new() {
+        init_test("test_cx_inner_new");
+        let region = RegionId::testing_default();
+        let task = TaskId::testing_default();
+        let budget = Budget::new();
+        let cx = CxInner::new(region, task, budget);
+        crate::assert_with_log!(cx.region == region, "region", region, cx.region);
+        crate::assert_with_log!(cx.task == task, "task", task, cx.task);
+        crate::assert_with_log!(cx.budget == budget, "budget", budget, cx.budget);
+        crate::assert_with_log!(
+            cx.budget_baseline == budget,
+            "budget_baseline",
+            budget,
+            cx.budget_baseline
+        );
+        crate::assert_with_log!(
+            !cx.cancel_requested,
+            "cancel_requested",
+            false,
+            cx.cancel_requested
+        );
+        crate::assert_with_log!(
+            cx.cancel_reason.is_none(),
+            "cancel_reason",
+            true,
+            cx.cancel_reason.is_none()
+        );
+        crate::assert_with_log!(cx.mask_depth == 0, "mask_depth", 0, cx.mask_depth);
+        crate::test_complete!("test_cx_inner_new");
+    }
+}

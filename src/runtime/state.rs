@@ -21,6 +21,7 @@ use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
 use crate::runtime::BlockingPoolHandle;
 use crate::time::TimerDriverHandle;
+use crate::trace::distributed::LogicalClockMode;
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
@@ -222,6 +223,8 @@ pub struct RuntimeState {
     /// When present, timers use the driver's timing wheel for efficient
     /// multiplexed wakeups. When `None`, timers fall back to thread-based sleeps.
     timer_driver: Option<TimerDriverHandle>,
+    /// Logical clock mode used for task contexts.
+    logical_clock_mode: LogicalClockMode,
     /// Entropy source for capability-based randomness.
     entropy_source: Arc<dyn EntropySource>,
     /// Optional observability configuration for runtime contexts.
@@ -245,6 +248,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("stored_futures", &self.stored_futures)
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
+            .field("logical_clock_mode", &self.logical_clock_mode)
             .field("entropy_source", &"<dyn EntropySource>")
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
@@ -277,6 +281,7 @@ impl RuntimeState {
             stored_futures: HashMap::new(),
             io_driver: None,
             timer_driver: None,
+            logical_clock_mode: LogicalClockMode::Lamport,
             entropy_source: Arc::new(OsEntropy),
             observability: None,
             blocking_pool: None,
@@ -312,6 +317,7 @@ impl RuntimeState {
         let mut state = Self::new_with_metrics(metrics);
         state.io_driver = Some(IoDriverHandle::new(reactor));
         state.timer_driver = Some(TimerDriverHandle::with_wall_clock());
+        state.logical_clock_mode = LogicalClockMode::Hybrid;
         state
     }
 
@@ -387,6 +393,17 @@ impl RuntimeState {
     /// Sets the timer driver for this runtime.
     pub fn set_timer_driver(&mut self, driver: TimerDriverHandle) {
         self.timer_driver = Some(driver);
+    }
+
+    /// Returns the logical clock mode for new task contexts.
+    #[must_use]
+    pub fn logical_clock_mode(&self) -> &LogicalClockMode {
+        &self.logical_clock_mode
+    }
+
+    /// Sets the logical clock mode for new task contexts.
+    pub fn set_logical_clock_mode(&mut self, mode: LogicalClockMode) {
+        self.logical_clock_mode = mode;
     }
 
     /// Returns the entropy source for this runtime.
@@ -626,6 +643,9 @@ impl RuntimeState {
             .observability
             .as_ref()
             .map(|obs| obs.for_task(region, task_id));
+        let logical_clock = self
+            .logical_clock_mode
+            .build_handle(self.timer_driver_handle());
         let cx = crate::cx::Cx::new_with_drivers(
             region,
             task_id,
@@ -636,7 +656,8 @@ impl RuntimeState {
             self.timer_driver_handle(),
             Some(entropy),
         )
-        .with_blocking_pool_handle(self.blocking_pool_handle());
+        .with_blocking_pool_handle(self.blocking_pool_handle())
+        .with_logical_clock(logical_clock);
         cx.set_trace_buffer(self.trace_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 

@@ -20,6 +20,7 @@
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
+use crate::trace::distributed::LogicalTime;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1347,6 +1348,32 @@ impl fmt::Display for IdempotencyKey {
 // ---------------------------------------------------------------------------
 // Protocol messages
 // ---------------------------------------------------------------------------
+
+/// Envelope for protocol messages with logical time metadata.
+///
+/// The `sender_time` field carries the sender's logical clock snapshot,
+/// enabling causal ordering across nodes without relying on wall clocks.
+#[derive(Clone, Debug)]
+pub struct MessageEnvelope<T> {
+    /// Logical identity of the sender.
+    pub sender: NodeId,
+    /// Logical time at send.
+    pub sender_time: LogicalTime,
+    /// The wrapped protocol message.
+    pub payload: T,
+}
+
+impl<T> MessageEnvelope<T> {
+    /// Creates a new message envelope.
+    #[must_use]
+    pub fn new(sender: NodeId, sender_time: LogicalTime, payload: T) -> Self {
+        Self {
+            sender,
+            sender_time,
+            payload,
+        }
+    }
+}
 
 /// A message in the remote structured concurrency protocol.
 ///

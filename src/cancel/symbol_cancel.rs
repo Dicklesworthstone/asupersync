@@ -6,7 +6,7 @@
 //! managing partial symbol set cleanup.
 
 use core::fmt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -573,8 +573,8 @@ pub struct CancelBroadcaster<S: CancelSink> {
     peers: RwLock<Vec<PeerId>>,
     /// Active cancellation tokens by object ID.
     active_tokens: RwLock<HashMap<ObjectId, SymbolCancelToken>>,
-    /// Seen message sequences for deduplication.
-    seen_sequences: RwLock<HashSet<(u64, u64)>>,
+    /// Seen message sequences for deduplication (with insertion order).
+    seen_sequences: RwLock<SeenSequences>,
     /// Maximum seen sequences to retain.
     max_seen: usize,
     /// Broadcast sink for sending messages.
@@ -585,13 +585,37 @@ pub struct CancelBroadcaster<S: CancelSink> {
     metrics: RwLock<CancelBroadcastMetrics>,
 }
 
+/// Deterministic dedup tracking with bounded memory.
+#[derive(Debug, Default)]
+struct SeenSequences {
+    set: HashSet<(u64, u64)>,
+    order: VecDeque<(u64, u64)>,
+}
+
+impl SeenSequences {
+    fn insert(&mut self, key: (u64, u64)) -> bool {
+        if self.set.insert(key) {
+            self.order.push_back(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove_oldest(&mut self) -> Option<(u64, u64)> {
+        let oldest = self.order.pop_front()?;
+        self.set.remove(&oldest);
+        Some(oldest)
+    }
+}
+
 impl<S: CancelSink> CancelBroadcaster<S> {
     /// Creates a new broadcaster with the given sink.
     pub fn new(sink: S) -> Self {
         Self {
             peers: RwLock::new(Vec::new()),
             active_tokens: RwLock::new(HashMap::new()),
-            seen_sequences: RwLock::new(HashSet::new()),
+            seen_sequences: RwLock::new(SeenSequences::default()),
             max_seen: 10_000,
             sink,
             next_sequence: AtomicU64::new(0),
@@ -737,18 +761,21 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         self.seen_sequences
             .read()
             .expect("lock poisoned")
+            .set
             .contains(&(token_id, sequence))
     }
 
     fn mark_seen(&self, token_id: u64, sequence: u64) {
         let mut seen = self.seen_sequences.write().expect("lock poisoned");
-        seen.insert((token_id, sequence));
+        let inserted = seen.insert((token_id, sequence));
+        if !inserted {
+            return;
+        }
 
-        // Simple eviction when capacity exceeded
-        if seen.len() > self.max_seen {
-            let to_remove: Vec<_> = seen.iter().take(self.max_seen / 2).copied().collect();
-            for key in to_remove {
-                seen.remove(&key);
+        // Deterministic eviction: remove oldest until under cap.
+        while seen.set.len() > self.max_seen {
+            if seen.remove_oldest().is_none() {
+                break;
             }
         }
     }
@@ -1163,6 +1190,31 @@ mod tests {
         let metrics = broadcaster.metrics();
         assert_eq!(metrics.received, 1);
         assert_eq!(metrics.forwarded, 1);
+    }
+
+    #[test]
+    fn test_broadcaster_seen_eviction_is_fifo() {
+        let mut broadcaster = CancelBroadcaster::new(NullSink);
+        broadcaster.max_seen = 3;
+
+        // Insert 4 distinct sequences; oldest should be evicted.
+        for seq in 0..4 {
+            broadcaster.mark_seen(1, seq);
+        }
+
+        let (len, has_10, has_11, front) = {
+            let seen = broadcaster.seen_sequences.read().expect("lock poisoned");
+            let len = seen.set.len();
+            let has_10 = seen.set.contains(&(1, 0));
+            let has_11 = seen.set.contains(&(1, 1));
+            let front = seen.order.front().copied();
+            drop(seen);
+            (len, has_10, has_11, front)
+        };
+        assert_eq!(len, 3);
+        assert!(!has_10);
+        assert!(has_11);
+        assert_eq!(front, Some((1, 1)));
     }
 
     #[test]

@@ -140,3 +140,211 @@ impl Default for RuntimeConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_default_config_sane() {
+        init_test("test_default_config_sane");
+        let config = RuntimeConfig::default();
+        crate::assert_with_log!(
+            config.worker_threads >= 1,
+            "worker_threads",
+            true,
+            config.worker_threads >= 1
+        );
+        crate::assert_with_log!(
+            config.thread_stack_size == 2 * 1024 * 1024,
+            "thread_stack_size",
+            2 * 1024 * 1024,
+            config.thread_stack_size
+        );
+        crate::assert_with_log!(
+            !config.thread_name_prefix.is_empty(),
+            "thread_name_prefix",
+            true,
+            !config.thread_name_prefix.is_empty()
+        );
+        crate::assert_with_log!(
+            config.poll_budget == 128,
+            "poll_budget",
+            128,
+            config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.obligation_leak_response == ObligationLeakResponse::Log,
+            "obligation_leak_response",
+            ObligationLeakResponse::Log,
+            config.obligation_leak_response
+        );
+        crate::test_complete!("test_default_config_sane");
+    }
+
+    #[test]
+    fn test_normalize_enforces_minimums() {
+        init_test("test_normalize_enforces_minimums");
+        let mut config = RuntimeConfig {
+            worker_threads: 0,
+            thread_stack_size: 0,
+            thread_name_prefix: String::new(),
+            global_queue_limit: 0,
+            steal_batch_size: 0,
+            blocking: BlockingPoolConfig {
+                min_threads: 4,
+                max_threads: 1,
+            },
+            enable_parking: true,
+            poll_budget: 0,
+            root_region_limits: None,
+            on_thread_start: None,
+            on_thread_stop: None,
+            deadline_monitor: None,
+            deadline_warning_handler: None,
+            metrics_provider: Arc::new(NoOpMetrics),
+            observability: None,
+            obligation_leak_response: ObligationLeakResponse::Log,
+        };
+
+        config.normalize();
+        crate::assert_with_log!(
+            config.worker_threads == 1,
+            "worker_threads",
+            1,
+            config.worker_threads
+        );
+        crate::assert_with_log!(
+            config.thread_stack_size == 2 * 1024 * 1024,
+            "thread_stack_size",
+            2 * 1024 * 1024,
+            config.thread_stack_size
+        );
+        crate::assert_with_log!(
+            config.steal_batch_size == 1,
+            "steal_batch_size",
+            1,
+            config.steal_batch_size
+        );
+        crate::assert_with_log!(
+            config.poll_budget == 1,
+            "poll_budget",
+            1,
+            config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.thread_name_prefix == "asupersync-worker",
+            "thread_name_prefix",
+            "asupersync-worker",
+            config.thread_name_prefix
+        );
+        crate::assert_with_log!(
+            config.blocking.max_threads == config.blocking.min_threads,
+            "blocking normalize",
+            config.blocking.min_threads,
+            config.blocking.max_threads
+        );
+        crate::test_complete!("test_normalize_enforces_minimums");
+    }
+
+    #[test]
+    fn test_blocking_pool_normalize() {
+        init_test("test_blocking_pool_normalize");
+        let mut blocking = BlockingPoolConfig {
+            min_threads: 2,
+            max_threads: 1,
+        };
+        blocking.normalize();
+        crate::assert_with_log!(
+            blocking.max_threads == blocking.min_threads,
+            "blocking max>=min",
+            blocking.min_threads,
+            blocking.max_threads
+        );
+        crate::test_complete!("test_blocking_pool_normalize");
+    }
+
+    #[test]
+    fn test_default_worker_threads_nonzero() {
+        init_test("test_default_worker_threads_nonzero");
+        let threads = RuntimeConfig::default_worker_threads();
+        crate::assert_with_log!(threads >= 1, "default_worker_threads", true, threads >= 1);
+        crate::test_complete!("test_default_worker_threads_nonzero");
+    }
+
+    #[test]
+    fn test_normalize_preserves_custom_values() {
+        init_test("test_normalize_preserves_custom_values");
+        let mut config = RuntimeConfig {
+            worker_threads: 4,
+            thread_stack_size: 1024,
+            thread_name_prefix: "custom".to_string(),
+            global_queue_limit: 64,
+            steal_batch_size: 8,
+            blocking: BlockingPoolConfig {
+                min_threads: 2,
+                max_threads: 4,
+            },
+            enable_parking: false,
+            poll_budget: 32,
+            root_region_limits: None,
+            on_thread_start: None,
+            on_thread_stop: None,
+            deadline_monitor: None,
+            deadline_warning_handler: None,
+            metrics_provider: Arc::new(NoOpMetrics),
+            observability: None,
+            obligation_leak_response: ObligationLeakResponse::Silent,
+        };
+
+        config.normalize();
+        crate::assert_with_log!(
+            config.worker_threads == 4,
+            "worker_threads",
+            4,
+            config.worker_threads
+        );
+        crate::assert_with_log!(
+            config.thread_stack_size == 1024,
+            "thread_stack_size",
+            1024,
+            config.thread_stack_size
+        );
+        crate::assert_with_log!(
+            config.thread_name_prefix == "custom",
+            "thread_name_prefix",
+            "custom",
+            config.thread_name_prefix
+        );
+        crate::assert_with_log!(
+            config.steal_batch_size == 8,
+            "steal_batch_size",
+            8,
+            config.steal_batch_size
+        );
+        crate::assert_with_log!(
+            config.poll_budget == 32,
+            "poll_budget",
+            32,
+            config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.blocking.max_threads == 4,
+            "blocking max",
+            4,
+            config.blocking.max_threads
+        );
+        crate::assert_with_log!(
+            config.obligation_leak_response == ObligationLeakResponse::Silent,
+            "obligation_leak_response",
+            ObligationLeakResponse::Silent,
+            config.obligation_leak_response
+        );
+        crate::test_complete!("test_normalize_preserves_custom_values");
+    }
+}

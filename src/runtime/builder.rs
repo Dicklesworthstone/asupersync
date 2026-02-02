@@ -144,6 +144,7 @@ use crate::runtime::SpawnError;
 use crate::time::TimerDriverHandle;
 use crate::types::Budget;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -707,7 +708,10 @@ impl Runtime {
     ) -> Result<Self, Error> {
         config.normalize();
         Ok(Self {
-            inner: Arc::new(RuntimeInner::new(config, reactor)),
+            inner: Arc::new(RuntimeInner::new(config, reactor).map_err(|e| {
+                Error::new(crate::error::ErrorKind::Internal)
+                    .with_message(format!("runtime init: {e}"))
+            })?),
         })
     }
 
@@ -885,7 +889,7 @@ struct RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> Self {
+    fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> io::Result<Self> {
         let state = Arc::new(Mutex::new(match reactor {
             Some(reactor) => {
                 RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
@@ -924,18 +928,19 @@ impl RuntimeInner {
                 if config.thread_stack_size > 0 {
                     builder = builder.stack_size(config.thread_stack_size);
                 }
-                if let Ok(handle) = builder.spawn(move || {
-                    if let Some(callback) = on_start.as_ref() {
-                        callback();
-                    }
-                    let mut worker = worker;
-                    worker.run_loop();
-                    if let Some(callback) = on_stop.as_ref() {
-                        callback();
-                    }
-                }) {
-                    worker_threads.push(handle);
-                }
+                let handle = builder
+                    .spawn(move || {
+                        if let Some(callback) = on_start.as_ref() {
+                            callback();
+                        }
+                        let mut worker = worker;
+                        worker.run_loop();
+                        if let Some(callback) = on_stop.as_ref() {
+                            callback();
+                        }
+                    })
+                    .map_err(|e| io::Error::other(format!("failed to spawn worker thread: {e}")))?;
+                worker_threads.push(handle);
             }
         }
 
@@ -961,7 +966,7 @@ impl RuntimeInner {
             guard.set_blocking_pool(pool.handle());
         }
 
-        Self {
+        Ok(Self {
             config,
             next_worker_id: AtomicUsize::new(0),
             state,
@@ -969,7 +974,7 @@ impl RuntimeInner {
             worker_threads: Mutex::new(worker_threads),
             root_region,
             blocking_pool,
-        }
+        })
     }
 
     fn next_thread_name(&self) -> String {

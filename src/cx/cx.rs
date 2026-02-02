@@ -61,6 +61,7 @@ use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
 use crate::time::{timeout, TimeSource, TimerDriverHandle, WallClock};
+use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, info, trace};
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
@@ -154,6 +155,7 @@ pub struct Cx {
     timer_driver: Option<TimerDriverHandle>,
     blocking_pool: Option<BlockingPoolHandle>,
     entropy: Arc<dyn EntropySource>,
+    logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
 }
 
@@ -246,6 +248,7 @@ impl Cx {
     /// Creates a new capability context (internal use).
     #[must_use]
     #[allow(dead_code)]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn new(region: RegionId, task: TaskId, budget: Budget) -> Self {
         Self::new_with_observability(region, task, budget, None, None, None)
     }
@@ -266,6 +269,7 @@ impl Cx {
             timer_driver: None,
             blocking_pool: None,
             entropy: Arc::new(OsEntropy),
+            logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
         }
     }
@@ -355,6 +359,7 @@ impl Cx {
             timer_driver,
             blocking_pool: None,
             entropy,
+            logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
         }
     }
@@ -516,6 +521,31 @@ impl Cx {
     pub(crate) fn with_blocking_pool_handle(mut self, handle: Option<BlockingPoolHandle>) -> Self {
         self.blocking_pool = handle;
         self
+    }
+
+    /// Attaches a logical clock handle to this context.
+    #[must_use]
+    pub(crate) fn with_logical_clock(mut self, clock: LogicalClockHandle) -> Self {
+        self.logical_clock = clock;
+        self
+    }
+
+    /// Returns the current logical time without ticking.
+    #[must_use]
+    pub fn logical_now(&self) -> LogicalTime {
+        self.logical_clock.now()
+    }
+
+    /// Records a local logical event and returns the updated time.
+    #[must_use]
+    pub fn logical_tick(&self) -> LogicalTime {
+        self.logical_clock.tick()
+    }
+
+    /// Merges a received logical time and returns the updated time.
+    #[must_use]
+    pub fn logical_receive(&self, sender_time: &LogicalTime) -> LogicalTime {
+        self.logical_clock.receive(sender_time)
     }
 
     /// Returns a cloned handle to the timer driver, if present.
