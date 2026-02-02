@@ -775,6 +775,8 @@ impl RuntimeState {
             region_record.resolve_obligation();
         }
 
+        self.advance_region_state(region);
+
         Ok(duration)
     }
 
@@ -841,6 +843,8 @@ impl RuntimeState {
             region_record.resolve_obligation();
         }
 
+        self.advance_region_state(region);
+
         Ok(duration)
     }
 
@@ -900,6 +904,8 @@ impl RuntimeState {
         if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
         }
+
+        self.advance_region_state(region);
 
         Ok(duration)
     }
@@ -1378,6 +1384,9 @@ impl RuntimeState {
             region.remove_task(task_id);
         }
 
+        // Advance region state if possible (e.g. if this was the last task)
+        self.advance_region_state(owner);
+
         // Return the waiters for the completed task
         waiters
     }
@@ -1472,20 +1481,19 @@ impl RuntimeState {
             .is_none_or(RegionRecord::finalizers_empty)
     }
 
-    /// Runs all synchronous finalizers for a region.
+    /// Runs synchronous finalizers for a region until an async finalizer is encountered or the stack is empty.
     ///
     /// This method pops and executes sync finalizers in LIFO order.
-    /// Async finalizers are skipped and must be handled separately by the
-    /// scheduler (they need to be polled to completion).
+    /// If an async finalizer is encountered, it is returned immediately (and not executed).
+    /// The caller must schedule/await the async finalizer before calling this method again
+    /// to process remaining finalizers.
     ///
     /// # Returns
-    /// A vector of async finalizers that need to be scheduled.
-    pub fn run_sync_finalizers(&mut self, region_id: RegionId) -> Vec<Finalizer> {
-        let mut async_finalizers = Vec::new();
-
+    /// An async finalizer that needs to be scheduled, or `None` if the stack is empty.
+    pub fn run_sync_finalizers(&mut self, region_id: RegionId) -> Option<Finalizer> {
         loop {
             let Some(finalizer) = self.pop_region_finalizer(region_id) else {
-                break;
+                return None;
             };
 
             match finalizer {
@@ -1495,13 +1503,11 @@ impl RuntimeState {
                     // Trace event would be recorded here in full implementation
                 }
                 Finalizer::Async(_) => {
-                    // Collect for scheduler to handle
-                    async_finalizers.push(finalizer);
+                    // Stop and return the async barrier
+                    return Some(finalizer);
                 }
             }
         }
-
-        async_finalizers
     }
 
     /// Checks if a region can complete its close sequence.
@@ -1547,6 +1553,76 @@ impl RuntimeState {
         }
 
         true
+    }
+
+    /// Advances the region state machine if possible.
+    ///
+    /// This method checks if the region can transition to the next state in its
+    /// lifecycle (Closing -> Draining -> Finalizing -> Closed). It drives the
+    /// transitions automatically when prerequisites (no children, no tasks, etc.)
+    /// are met.
+    ///
+    /// This should be called whenever a task completes, a child region closes,
+    /// or an obligation is resolved.
+    pub fn advance_region_state(&mut self, region_id: RegionId) {
+        // Get state and parent without holding a long borrow on self.regions
+        let (state, parent) = {
+            let Some(region) = self.regions.get(region_id.arena_index()) else {
+                return;
+            };
+            (region.state(), region.parent)
+        };
+
+        match state {
+            crate::record::region::RegionState::Closing
+            | crate::record::region::RegionState::Draining => {
+                // Check if we can transition to Finalizing (no children)
+                let transition_to_finalizing = {
+                    let Some(region) = self.regions.get(region_id.arena_index()) else {
+                        return;
+                    };
+                    if region.child_ids().is_empty() {
+                        region.begin_finalize()
+                    } else {
+                        if region.state() == crate::record::region::RegionState::Closing {
+                            region.begin_drain();
+                        }
+                        false
+                    }
+                };
+
+                if transition_to_finalizing {
+                    // Recurse to handle Finalizing immediately
+                    self.advance_region_state(region_id);
+                }
+            }
+            crate::record::region::RegionState::Finalizing => {
+                // Run sync finalizers (requires mut self)
+                let _async_barrier = self.run_sync_finalizers(region_id);
+
+                // Check if we can complete close
+                if self.can_region_complete_close(region_id) {
+                    let closed = {
+                        let Some(region) = self.regions.get(region_id.arena_index()) else {
+                            return;
+                        };
+                        region.complete_close()
+                    };
+
+                    if closed {
+                        if let Some(parent_id) = parent {
+                            // Remove from parent
+                            if let Some(parent_record) = self.regions.get(parent_id.arena_index()) {
+                                parent_record.remove_child(region_id);
+                            }
+                            // Recurse to parent
+                            self.advance_region_state(parent_id);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3482,27 +3558,47 @@ mod tests {
         let sync_called_clone = sync_called.clone();
 
         // Register mix of sync and async finalizers
+        // Execution Order (LIFO): Sync(empty), Async, Sync(flag=true)
         state.register_sync_finalizer(region, move || {
             sync_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         state.register_async_finalizer(region, async {});
         state.register_sync_finalizer(region, || {}); // Another sync
 
-        let async_finalizers = state.run_sync_finalizers(region);
+        // First pass: runs the top Sync(empty), stops at Async
+        let async_finalizer = state.run_sync_finalizers(region);
 
-        // Sync finalizers should have been called
+        // The first sync finalizer (bottom of stack) should NOT have run yet due to async barrier
         let sync_flag = sync_called.load(std::sync::atomic::Ordering::SeqCst);
-        crate::assert_with_log!(sync_flag, "sync finalizer called", true, sync_flag);
+        crate::assert_with_log!(
+            !sync_flag,
+            "first sync finalizer NOT called yet",
+            false,
+            sync_flag
+        );
 
         // One async finalizer should be returned
         crate::assert_with_log!(
-            async_finalizers.len() == 1,
-            "async finalizers len",
-            1usize,
-            async_finalizers.len()
+            async_finalizer.is_some(),
+            "async finalizer returned",
+            true,
+            async_finalizer.is_some()
         );
-        let is_async = matches!(async_finalizers[0], Finalizer::Async(_));
-        crate::assert_with_log!(is_async, "async finalizer returned", true, is_async);
+        let is_async = matches!(async_finalizer, Some(Finalizer::Async(_)));
+        crate::assert_with_log!(is_async, "is async", true, is_async);
+
+        // Second pass: runs the remaining Sync(flag=true)
+        let remaining = state.run_sync_finalizers(region);
+        crate::assert_with_log!(
+            remaining.is_none(),
+            "no more async",
+            true,
+            remaining.is_none()
+        );
+
+        // Now the first sync finalizer should have run
+        let sync_flag = sync_called.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(sync_flag, "first sync finalizer called", true, sync_flag);
 
         // All finalizers should be cleared from region
         let empty = state.region_finalizers_empty(region);
