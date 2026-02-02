@@ -1302,6 +1302,20 @@ mod tests {
     }
 
     #[test]
+    fn test_data_frame_padded_empty_payload_rejected() {
+        let header = FrameHeader {
+            length: 0,
+            frame_type: FrameType::Data as u8,
+            flags: data_flags::PADDED,
+            stream_id: 1,
+        };
+        let payload = Bytes::new();
+
+        let err = DataFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
     fn test_data_frame_padding_exact_length_rejected() {
         let header = FrameHeader {
             length: 2,

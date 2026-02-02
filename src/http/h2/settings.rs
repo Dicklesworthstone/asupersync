@@ -329,18 +329,34 @@ mod tests {
     fn test_apply_invalid_initial_window_size() {
         let mut settings = Settings::default();
         // Value too large
-        assert!(settings
+        let err = settings
             .apply(Setting::InitialWindowSize(0x8000_0000))
-            .is_err());
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::FlowControlError);
     }
 
     #[test]
     fn test_apply_invalid_max_frame_size() {
         let mut settings = Settings::default();
         // Value too small
-        assert!(settings.apply(Setting::MaxFrameSize(1000)).is_err());
+        let err = settings.apply(Setting::MaxFrameSize(1000)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
         // Value too large
-        assert!(settings.apply(Setting::MaxFrameSize(0x0100_0000)).is_err());
+        let err = settings
+            .apply(Setting::MaxFrameSize(0x0100_0000))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_apply_max_frame_size_bounds() {
+        let mut settings = Settings::default();
+        assert!(settings
+            .apply(Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE))
+            .is_ok());
+        assert!(settings
+            .apply(Setting::MaxFrameSize(MAX_MAX_FRAME_SIZE))
+            .is_ok());
     }
 
     #[test]
