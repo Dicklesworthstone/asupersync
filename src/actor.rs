@@ -460,20 +460,15 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
     /// Returns a clonable reference to this actor's mailbox.
     ///
     /// Use this to give other actors a way to send messages to this actor.
-    ///
-    /// Note: Requires `M: Clone` because `ActorRef` needs to clone the sender.
     #[must_use]
-    pub fn self_ref(&self) -> ActorRef<M>
-    where
-        M: Clone,
-    {
+    pub fn self_ref(&self) -> ActorRef<M> {
         self.self_ref.clone()
     }
 
     /// Returns this actor's unique identifier.
     ///
-    /// Unlike `self_ref()`, this doesn't require `M: Clone` and is useful
-    /// for logging, debugging, or identity comparisons.
+    /// Unlike `self_ref()`, this avoids cloning the actor reference and is
+    /// useful for logging, debugging, or identity comparisons.
     #[must_use]
     pub const fn self_actor_id(&self) -> ActorId {
         self.actor_id
@@ -585,11 +580,13 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
     ///
     /// This is a convenience method that checks both actor stopping
     /// and Cx cancellation.
+    #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
         if self.stopping {
-            return Err(crate::error::Error::cancelled(
-                &crate::types::CancelReason::user("actor stopping"),
-            ));
+            let reason = crate::types::CancelReason::user("actor stopping")
+                .with_region(self.cx.region_id())
+                .with_task(self.cx.task_id());
+            return Err(crate::error::Error::cancelled(&reason));
         }
         self.cx.checkpoint()
     }
