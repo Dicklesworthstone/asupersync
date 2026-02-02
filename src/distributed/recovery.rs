@@ -775,7 +775,7 @@ mod tests {
     use crate::distributed::encoding::{EncodedState, EncodingConfig, StateEncoder};
     use crate::distributed::snapshot::{BudgetSnapshot, TaskSnapshot, TaskState};
     use crate::record::region::RegionState;
-    use crate::types::symbol::ObjectId;
+    use crate::types::symbol::{ObjectId, SymbolId, SymbolKind};
     use crate::types::{RegionId, TaskId};
     use crate::util::DetRng;
 
@@ -1182,5 +1182,354 @@ mod tests {
             collected_at: Time::ZERO,
             verified: false,
         }
+    }
+
+    fn make_source_symbol(esi: u32, data: &[u8]) -> Symbol {
+        Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(1), 0, esi),
+            data.to_vec(),
+            SymbolKind::Source,
+        )
+    }
+
+    fn make_repair_symbol(esi: u32, data: &[u8]) -> Symbol {
+        Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(1), 0, esi),
+            data.to_vec(),
+            SymbolKind::Repair,
+        )
+    }
+
+    // =====================================================================
+    // Failure Mode Tests (bd-17uj)
+    // =====================================================================
+
+    #[test]
+    fn collector_duplicate_esi_from_same_replica() {
+        // Two symbols with same ESI from the SAME replica — second rejected.
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+
+        let sym1 = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 5, &[1, 2, 3]),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+        let sym2 = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 5, &[4, 5, 6]),
+            source_replica: "r1".to_string(),
+            collected_at: Time::from_secs(1),
+            verified: false,
+        };
+
+        assert!(collector.add_collected(sym1));
+        assert!(!collector.add_collected(sym2));
+        assert_eq!(collector.symbols().len(), 1);
+        assert_eq!(collector.metrics.symbols_duplicate, 1);
+        assert_eq!(collector.metrics.symbols_received, 1);
+    }
+
+    #[test]
+    fn collector_verify_rejects_out_of_range_esi() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        // K=10, total_source=10, min_symbols=0 → max_expected = 10+0 = 10, threshold = 110
+        collector.object_params = Some(ObjectParams::new(
+            ObjectId::new_for_test(1),
+            1280,
+            128,
+            1,
+            10,
+        ));
+
+        // ESI 200 > 110 threshold → rejected as corrupt
+        let cs = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 200, &[0u8; 128]),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+        let result = collector.add_collected_with_verify(cs);
+        assert!(result.is_err());
+        assert_eq!(collector.metrics.symbols_corrupt, 1);
+    }
+
+    #[test]
+    fn collector_verify_accepts_in_range_esi() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params = Some(ObjectParams::new(
+            ObjectId::new_for_test(1),
+            1280,
+            128,
+            1,
+            10,
+        ));
+
+        // ESI 15 <= 110 threshold → accepted
+        let cs = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 15, &[0u8; 128]),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+        let result = collector.add_collected_with_verify(cs);
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // was accepted (new ESI)
+    }
+
+    #[test]
+    fn collector_verify_no_params_accepts_any() {
+        // Without object_params set, verify skips range check
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+
+        let cs = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 999_999, &[0u8; 128]),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+        let result = collector.add_collected_with_verify(cs);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn collector_cancel_prevents_is_recovering() {
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+
+        // Start by setting recovering manually isn't possible, but cancel should
+        // ensure is_recovering returns false regardless.
+        orchestrator.cancel("test");
+        assert!(!orchestrator.is_recovering());
+        assert!(orchestrator.cancelled);
+    }
+
+    #[test]
+    fn collector_metrics_accuracy() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params = Some(ObjectParams::new(
+            ObjectId::new_for_test(1),
+            1280,
+            128,
+            1,
+            10,
+        ));
+
+        // Add 5 unique symbols
+        for i in 0..5 {
+            collector.add_collected(make_collected_symbol(i));
+        }
+        // Add 3 duplicates
+        for i in 0..3 {
+            collector.add_collected(make_collected_symbol(i));
+        }
+
+        assert_eq!(collector.metrics.symbols_received, 5);
+        assert_eq!(collector.metrics.symbols_duplicate, 3);
+        assert_eq!(collector.progress().symbols_collected, 5);
+        assert_eq!(collector.symbols().len(), 5);
+    }
+
+    #[test]
+    fn decoder_insufficient_symbols_error_kind() {
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 12800, 1280, 1, 10);
+
+        // Add K-1 = 9 symbols (need 10)
+        for i in 0..9 {
+            let sym = make_source_symbol(i, &[0u8; 1280]);
+            decoder.add_symbol(&sym).unwrap();
+        }
+
+        let err = decoder.decode(&params).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InsufficientSymbols);
+    }
+
+    #[test]
+    fn decoder_zero_symbols_fails() {
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 1280, 128, 1, 10);
+
+        let result = decoder.decode(&params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decoder_reset_allows_reuse() {
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+
+        // First use
+        let sym = make_source_symbol(0, &[1, 2, 3]);
+        decoder.add_symbol(&sym).unwrap();
+        assert_eq!(decoder.symbols_received(), 1);
+
+        // Reset
+        decoder.reset();
+        assert_eq!(decoder.symbols_received(), 0);
+        assert!(!decoder.can_decode());
+
+        // Reuse — same ESI should be accepted again after reset
+        decoder.add_symbol(&sym).unwrap();
+        assert_eq!(decoder.symbols_received(), 1);
+        assert!(decoder.can_decode());
+    }
+
+    #[test]
+    fn decoder_mixed_source_repair_boundary_decode() {
+        // Create a snapshot, encode it, then provide exactly K symbols
+        // (mix of source and repair) and verify decode works.
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let k = encoded.params.min_symbols_for_decode() as usize;
+        assert!(
+            encoded.symbols.len() >= k,
+            "encoded should have at least K symbols"
+        );
+
+        // Take exactly K symbols
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        for sym in encoded.symbols.iter().take(k) {
+            decoder.add_symbol(sym).unwrap();
+        }
+
+        let result = decoder.decode_snapshot(&encoded.params);
+        assert!(result.is_ok());
+        let recovered = result.unwrap();
+        assert_eq!(recovered.region_id, snapshot.region_id);
+    }
+
+    #[test]
+    fn orchestrator_recover_with_zero_symbols() {
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(1, 0),
+            initiator: "test".to_string(),
+            reason: None,
+        };
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 10);
+
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+
+        let result =
+            orchestrator.recover_from_symbols(&trigger, &[], params, Duration::from_millis(1));
+        assert!(result.is_err());
+        assert!(!orchestrator.is_recovering());
+    }
+
+    #[test]
+    fn orchestrator_attempt_counter_increments() {
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(1, 0),
+            initiator: "test".to_string(),
+            reason: None,
+        };
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 10);
+
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+
+        // First attempt (fails — no symbols)
+        let _ = orchestrator.recover_from_symbols(&trigger, &[], params, Duration::ZERO);
+        assert_eq!(orchestrator.attempt, 1);
+
+        // Second attempt
+        let _ = orchestrator.recover_from_symbols(&trigger, &[], params, Duration::ZERO);
+        assert_eq!(orchestrator.attempt, 2);
+    }
+
+    #[test]
+    fn orchestrator_cancel_after_start() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+
+        // Cancel before recovery — ensure subsequent recovery still fails gracefully
+        orchestrator.cancel("pre-emptive cancel");
+        assert!(orchestrator.cancelled);
+        assert!(!orchestrator.is_recovering());
+
+        // Even with valid symbols, cancelled orchestrator reports not recovering
+        let symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .map(|s| CollectedSymbol {
+                symbol: s.clone(),
+                source_replica: "r1".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+
+        // recover_from_symbols doesn't check cancelled flag — it still runs.
+        // But is_recovering() returns false because cancelled is true.
+        let _result = orchestrator.recover_from_symbols(
+            &RecoveryTrigger::ManualTrigger {
+                region_id: RegionId::new_for_test(1, 0),
+                initiator: "test".to_string(),
+                reason: None,
+            },
+            &symbols,
+            encoded.params,
+            Duration::ZERO,
+        );
+        assert!(!orchestrator.is_recovering());
+    }
+
+    #[test]
+    fn recovery_config_default_values() {
+        let config = RecoveryConfig::default();
+        assert_eq!(config.min_symbols, 0);
+        assert_eq!(config.recovery_timeout, Duration::from_secs(60));
+        assert_eq!(config.replica_timeout, Duration::from_secs(5));
+        assert_eq!(config.max_concurrent_requests, 10);
+        assert_eq!(config.collection_consistency, CollectionConsistency::Quorum);
+        assert!(!config.allow_partial);
+        assert_eq!(config.max_attempts, 3);
+    }
+
+    #[test]
+    fn decoding_config_default_values() {
+        let config = RecoveryDecodingConfig::default();
+        assert!(config.verify_integrity);
+        assert_eq!(config.max_decode_attempts, 3);
+        assert!(!config.allow_partial_decode);
+    }
+
+    #[test]
+    fn trigger_manual_with_reason() {
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(5, 0),
+            initiator: "admin".to_string(),
+            reason: Some("routine maintenance".to_string()),
+        };
+        assert_eq!(trigger.region_id(), RegionId::new_for_test(5, 0));
+        assert!(!trigger.is_critical());
+    }
+
+    #[test]
+    fn recovery_phase_equality() {
+        assert_eq!(RecoveryPhase::Initializing, RecoveryPhase::Initializing);
+        assert_ne!(RecoveryPhase::Collecting, RecoveryPhase::Verifying);
+        assert_ne!(RecoveryPhase::Complete, RecoveryPhase::Failed);
+    }
+
+    #[test]
+    fn collector_debug_format() {
+        let collector = RecoveryCollector::new(RecoveryConfig::default());
+        let debug = format!("{collector:?}");
+        assert!(debug.contains("RecoveryCollector"));
+        assert!(debug.contains("collected"));
+    }
+
+    #[test]
+    fn orchestrator_debug_format() {
+        let orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+        let debug = format!("{orchestrator:?}");
+        assert!(debug.contains("RecoveryOrchestrator"));
+        assert!(debug.contains("attempt"));
     }
 }

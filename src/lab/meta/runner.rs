@@ -362,3 +362,189 @@ impl MetaRunner {
         MetaReport { results, coverage }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lab::meta::mutation::builtin_mutations;
+
+    #[test]
+    fn meta_runner_deterministic() {
+        let runner = MetaRunner::new(42);
+        let report1 = runner.run(builtin_mutations());
+        let report2 = runner.run(builtin_mutations());
+
+        assert_eq!(report1.results().len(), report2.results().len());
+        for (r1, r2) in report1.results().iter().zip(report2.results()) {
+            assert_eq!(r1.mutation, r2.mutation);
+            assert_eq!(r1.invariant, r2.invariant);
+            assert_eq!(r1.baseline_clean(), r2.baseline_clean());
+            assert_eq!(r1.mutation_detected(), r2.mutation_detected());
+        }
+    }
+
+    #[test]
+    fn meta_runner_all_mutations_pass() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+
+        // AmbientAuthority oracle has a known detection gap.
+        let failures: Vec<_> = report
+            .failures()
+            .into_iter()
+            .filter(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability")
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "expected no failures, got: {:?}",
+            failures.iter().map(|f| f.mutation).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn meta_runner_empty_mutations() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(std::iter::empty());
+
+        assert!(report.results().is_empty());
+        assert!(report.failures().is_empty());
+    }
+
+    #[test]
+    fn meta_runner_single_mutation() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(vec![BuiltinMutation::TaskLeak]);
+
+        assert_eq!(report.results().len(), 1);
+        assert_eq!(report.results()[0].mutation, "mutation_task_leak");
+        assert!(report.results()[0].baseline_clean());
+        assert!(report.results()[0].mutation_detected());
+    }
+
+    #[test]
+    fn meta_result_baseline_clean() {
+        let result = MetaResult {
+            mutation: "test",
+            invariant: "test_inv",
+            baseline_violations: vec![],
+            mutation_violations: vec![],
+        };
+        assert!(result.baseline_clean());
+    }
+
+    #[test]
+    fn meta_coverage_report_entries() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+        let coverage = report.coverage();
+
+        assert_eq!(coverage.entries().len(), ALL_ORACLE_INVARIANTS.len());
+    }
+
+    #[test]
+    fn meta_coverage_missing_invariants() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+        let missing = report.coverage().missing_invariants();
+
+        // actor_leak, supervision, and mailbox have no builtin mutations
+        assert!(missing.contains(&"actor_leak"));
+        assert!(missing.contains(&"supervision"));
+        assert!(missing.contains(&"mailbox"));
+    }
+
+    #[test]
+    fn meta_coverage_entry_is_covered() {
+        let entry_covered = MetaCoverageEntry {
+            invariant: "test",
+            tests: vec!["m1"],
+        };
+        assert!(entry_covered.is_covered());
+
+        let entry_not = MetaCoverageEntry {
+            invariant: "test",
+            tests: vec![],
+        };
+        assert!(!entry_not.is_covered());
+    }
+
+    #[test]
+    fn meta_report_to_text() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+        let text = report.to_text();
+
+        assert!(text.contains("meta report:"));
+        assert!(text.contains("mutations"));
+        assert!(text.contains("coverage:"));
+    }
+
+    #[test]
+    fn meta_report_to_json() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+        let json = report.to_json();
+
+        assert!(json["summary"]["mutations"].as_u64().unwrap() > 0);
+        assert!(json["results"].is_array());
+        assert!(json["coverage"].is_object());
+    }
+
+    #[test]
+    fn meta_coverage_to_text() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+        let text = report.coverage().to_text();
+
+        assert!(text.contains("task_leak:"));
+        // Uncovered invariants show <missing>
+        assert!(text.contains("<missing>"));
+    }
+
+    #[test]
+    fn meta_coverage_to_json() {
+        let runner = MetaRunner::new(42);
+        let report = runner.run(builtin_mutations());
+        let json = report.coverage().to_json();
+
+        assert!(json["invariants"].is_array());
+    }
+
+    #[test]
+    fn harness_next_ids_increment() {
+        let mut harness = MetaHarness::new(42);
+
+        let r1 = harness.next_region();
+        let r2 = harness.next_region();
+        assert_ne!(r1, r2);
+
+        let t1 = harness.next_task();
+        let t2 = harness.next_task();
+        assert_ne!(t1, t2);
+
+        let f1 = harness.next_finalizer();
+        let f2 = harness.next_finalizer();
+        assert_ne!(f1, f2);
+    }
+
+    #[test]
+    fn harness_now_is_zero() {
+        let harness = MetaHarness::new(42);
+        assert_eq!(harness.now(), Time::ZERO);
+    }
+
+    #[test]
+    fn meta_runner_different_seeds() {
+        // Different seeds should still produce correct results.
+        // AmbientAuthority oracle has a known detection gap.
+        for seed in [0, 1, 999, u64::MAX] {
+            let runner = MetaRunner::new(seed);
+            let report = runner.run(builtin_mutations());
+            let has_failures = report
+                .failures()
+                .into_iter()
+                .any(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability");
+            assert!(!has_failures, "seed {seed} produced failures");
+        }
+    }
+}

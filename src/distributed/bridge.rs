@@ -1283,4 +1283,229 @@ mod tests {
             .map(|i| ReplicaInfo::new(&format!("r{i}"), &format!("addr{i}")))
             .collect()
     }
+
+    // =====================================================================
+    // Lifecycle Race / Edge Case Tests (bd-fgs0)
+    // =====================================================================
+
+    #[test]
+    fn upgrade_while_tasks_running() {
+        // Upgrade Local→Distributed while tasks are active in the region.
+        let mut bridge = create_local_bridge();
+        bridge.add_task(TaskId::new_for_test(1, 0)).unwrap();
+        bridge.add_task(TaskId::new_for_test(2, 0)).unwrap();
+        assert!(bridge.has_live_work());
+
+        let config = DistributedRegionConfig {
+            replication_factor: 3,
+            ..Default::default()
+        };
+        let result = bridge
+            .upgrade_to_distributed(config, &create_test_replicas(3))
+            .unwrap();
+
+        assert!(result.new_mode.is_distributed());
+        // Tasks should still be present after upgrade.
+        assert!(bridge.has_live_work());
+        // Snapshot taken during upgrade should include the tasks.
+        assert!(result.snapshot_sequence > 0);
+    }
+
+    #[test]
+    fn snapshot_monotonic_under_rapid_changes() {
+        let mut bridge = create_local_bridge();
+
+        let mut prev_seq = 0;
+        for i in 0..20 {
+            // Interleave task add/remove with snapshots.
+            let tid = TaskId::new_for_test(i, 0);
+            bridge.add_task(tid).unwrap();
+            let snap = bridge.create_snapshot();
+            assert!(
+                snap.sequence > prev_seq,
+                "sequence must be monotonically increasing"
+            );
+            prev_seq = snap.sequence;
+            bridge.remove_task(tid);
+        }
+    }
+
+    #[test]
+    fn double_close_local() {
+        let mut bridge = create_local_bridge();
+
+        let result1 = bridge.begin_close(None, Time::from_secs(0)).unwrap();
+        assert!(result1.local_changed);
+
+        // Second close — should not change state (already closing).
+        let result2 = bridge.begin_close(None, Time::from_secs(1)).unwrap();
+        assert!(!result2.local_changed);
+        assert_eq!(result2.effective_state, EffectiveState::Closing);
+    }
+
+    #[test]
+    fn double_complete_close_local() {
+        let mut bridge = create_local_bridge();
+        bridge.begin_close(None, Time::from_secs(0)).unwrap();
+        bridge.begin_drain().unwrap();
+        bridge.begin_finalize().unwrap();
+
+        let result1 = bridge.complete_close(Time::from_secs(1)).unwrap();
+        assert!(result1.local_changed);
+        assert_eq!(result1.effective_state, EffectiveState::Closed);
+
+        // Second complete_close — already closed, no change.
+        let result2 = bridge.complete_close(Time::from_secs(2)).unwrap();
+        assert!(!result2.local_changed);
+    }
+
+    #[test]
+    fn close_with_cancel_reason() {
+        let mut bridge = create_local_bridge();
+
+        let reason = CancelReason::timeout();
+        let result = bridge
+            .begin_close(Some(reason), Time::from_secs(0))
+            .unwrap();
+
+        assert!(result.local_changed);
+        assert_eq!(result.effective_state, EffectiveState::Closing);
+    }
+
+    #[test]
+    fn add_child_after_close_rejected() {
+        let mut bridge = create_local_bridge();
+        bridge.begin_close(None, Time::from_secs(0)).unwrap();
+
+        let result = bridge.add_child(RegionId::new_for_test(2, 0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sync_not_needed_when_no_changes() {
+        let mut bridge = create_distributed_bridge();
+        // sync_pending is false by default.
+        assert!(!bridge.sync_state.sync_pending);
+
+        let result = bridge.sync().unwrap();
+        assert!(matches!(result, SyncResult::NotNeeded));
+    }
+
+    #[test]
+    fn sync_clears_pending_ops() {
+        let mut bridge = create_distributed_bridge();
+        bridge.sync_state.sync_pending = true;
+        bridge.sync_state.pending_ops = 5;
+
+        let result = bridge.sync().unwrap();
+        assert!(matches!(result, SyncResult::Synced { .. }));
+        assert_eq!(bridge.sync_state.pending_ops, 0);
+        assert!(!bridge.sync_state.sync_pending);
+    }
+
+    #[test]
+    fn upgrade_snapshot_sequence_matches() {
+        let mut bridge = create_local_bridge();
+
+        // Create two snapshots first to advance sequence.
+        let _ = bridge.create_snapshot();
+        let _ = bridge.create_snapshot();
+        assert_eq!(bridge.sequence, 2);
+
+        let config = DistributedRegionConfig {
+            replication_factor: 3,
+            ..Default::default()
+        };
+        let result = bridge
+            .upgrade_to_distributed(config, &create_test_replicas(3))
+            .unwrap();
+
+        // Upgrade creates a snapshot, so sequence should be 3.
+        assert_eq!(result.snapshot_sequence, 3);
+    }
+
+    #[test]
+    fn bridge_with_mode_hybrid() {
+        let bridge = RegionBridge::with_mode(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+            RegionMode::hybrid(2),
+        );
+
+        assert!(bridge.mode().is_replicated());
+        assert!(!bridge.mode().is_distributed());
+        // Hybrid mode doesn't create distributed record in with_mode.
+        assert!(bridge.distributed().is_none());
+    }
+
+    #[test]
+    fn effective_state_draining_with_distributed_closing() {
+        let state =
+            EffectiveState::compute(RegionState::Draining, Some(DistributedRegionState::Closing));
+        assert_eq!(state, EffectiveState::Closing);
+    }
+
+    #[test]
+    fn effective_state_finalizing_with_distributed_closing() {
+        let state = EffectiveState::compute(
+            RegionState::Finalizing,
+            Some(DistributedRegionState::Closing),
+        );
+        assert_eq!(state, EffectiveState::Closing);
+    }
+
+    #[test]
+    fn bridge_config_defaults() {
+        let config = BridgeConfig::default();
+        assert!(config.allow_upgrade);
+        assert_eq!(config.sync_timeout, Duration::from_secs(5));
+        assert_eq!(config.sync_mode, SyncMode::Synchronous);
+        assert_eq!(
+            config.conflict_resolution,
+            ConflictResolution::DistributedWins
+        );
+    }
+
+    #[test]
+    fn sync_state_default() {
+        let state = SyncState::default();
+        assert_eq!(state.last_synced_sequence, 0);
+        assert!(!state.sync_pending);
+        assert_eq!(state.pending_ops, 0);
+        assert!(state.last_sync_time.is_none());
+        assert!(state.last_sync_error.is_none());
+    }
+
+    #[test]
+    fn snapshot_includes_children() {
+        let mut bridge = create_local_bridge();
+        bridge.add_child(RegionId::new_for_test(2, 0)).unwrap();
+        bridge.add_child(RegionId::new_for_test(3, 0)).unwrap();
+
+        let snap = bridge.create_snapshot();
+        assert_eq!(snap.children.len(), 2);
+    }
+
+    #[test]
+    fn distributed_close_full_lifecycle() {
+        let mut bridge = create_distributed_bridge();
+        // Activate distributed record.
+        if let Some(ref mut dist) = bridge.distributed {
+            let _ = dist.activate(Time::from_secs(0));
+        }
+
+        // Begin close — both local and distributed should transition.
+        let result = bridge.begin_close(None, Time::from_secs(1)).unwrap();
+        assert!(result.local_changed);
+        assert!(result.distributed_transition.is_some());
+
+        // Drain and finalize.
+        bridge.begin_drain().unwrap();
+        bridge.begin_finalize().unwrap();
+
+        // Complete close.
+        let result = bridge.complete_close(Time::from_secs(2)).unwrap();
+        assert_eq!(result.effective_state, EffectiveState::Closed);
+    }
 }

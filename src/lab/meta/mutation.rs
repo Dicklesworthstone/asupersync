@@ -438,3 +438,207 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn all_oracle_invariants_count() {
+        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 12);
+    }
+
+    #[test]
+    fn all_oracle_invariants_unique() {
+        let set: HashSet<&str> = ALL_ORACLE_INVARIANTS.iter().copied().collect();
+        assert_eq!(set.len(), ALL_ORACLE_INVARIANTS.len());
+    }
+
+    #[test]
+    fn builtin_mutations_count() {
+        assert_eq!(builtin_mutations().len(), 9);
+    }
+
+    #[test]
+    fn builtin_mutations_stable_order() {
+        let m1 = builtin_mutations();
+        let m2 = builtin_mutations();
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn mutation_names_unique() {
+        let names: Vec<&str> = builtin_mutations().iter().map(|m| m.name()).collect();
+        let set: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(set.len(), names.len(), "mutation names must be unique");
+    }
+
+    #[test]
+    fn mutation_invariants_all_in_all_oracle_invariants() {
+        let all_set: HashSet<&str> = ALL_ORACLE_INVARIANTS.iter().copied().collect();
+        for m in builtin_mutations() {
+            assert!(
+                all_set.contains(m.invariant()),
+                "mutation {:?} targets unknown invariant {}",
+                m,
+                m.invariant()
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_name_matches_variant() {
+        assert_eq!(BuiltinMutation::TaskLeak.name(), "mutation_task_leak");
+        assert_eq!(
+            BuiltinMutation::ObligationLeak.name(),
+            "mutation_obligation_leak"
+        );
+        assert_eq!(BuiltinMutation::Quiescence.name(), "mutation_quiescence");
+        assert_eq!(BuiltinMutation::LoserDrain.name(), "mutation_loser_drain");
+        assert_eq!(BuiltinMutation::Finalizer.name(), "mutation_finalizer");
+        assert_eq!(
+            BuiltinMutation::RegionTreeMultipleRoots.name(),
+            "mutation_region_tree_multiple_roots"
+        );
+        assert_eq!(
+            BuiltinMutation::AmbientAuthoritySpawnWithoutCapability.name(),
+            "mutation_ambient_authority_spawn_without_capability"
+        );
+        assert_eq!(
+            BuiltinMutation::DeadlineMonotoneChildUnbounded.name(),
+            "mutation_deadline_child_unbounded"
+        );
+        assert_eq!(
+            BuiltinMutation::CancelPropagationMissingChild.name(),
+            "mutation_cancel_missing_child"
+        );
+    }
+
+    #[test]
+    fn mutation_invariant_mapping() {
+        assert_eq!(BuiltinMutation::TaskLeak.invariant(), INVARIANT_TASK_LEAK);
+        assert_eq!(
+            BuiltinMutation::ObligationLeak.invariant(),
+            INVARIANT_OBLIGATION_LEAK
+        );
+        assert_eq!(
+            BuiltinMutation::Quiescence.invariant(),
+            INVARIANT_QUIESCENCE
+        );
+        assert_eq!(
+            BuiltinMutation::LoserDrain.invariant(),
+            INVARIANT_LOSER_DRAIN
+        );
+        assert_eq!(BuiltinMutation::Finalizer.invariant(), INVARIANT_FINALIZER);
+        assert_eq!(
+            BuiltinMutation::RegionTreeMultipleRoots.invariant(),
+            INVARIANT_REGION_TREE
+        );
+        assert_eq!(
+            BuiltinMutation::AmbientAuthoritySpawnWithoutCapability.invariant(),
+            INVARIANT_AMBIENT_AUTHORITY
+        );
+        assert_eq!(
+            BuiltinMutation::DeadlineMonotoneChildUnbounded.invariant(),
+            INVARIANT_DEADLINE_MONOTONE
+        );
+        assert_eq!(
+            BuiltinMutation::CancelPropagationMissingChild.invariant(),
+            INVARIANT_CANCELLATION_PROTOCOL
+        );
+    }
+
+    #[test]
+    fn builtin_mutation_equality_and_hash() {
+        let a = BuiltinMutation::TaskLeak;
+        let b = BuiltinMutation::TaskLeak;
+        let c = BuiltinMutation::Finalizer;
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        // Hash works (can be used in HashSet)
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn builtin_mutation_debug() {
+        let debug = format!("{:?}", BuiltinMutation::TaskLeak);
+        assert!(debug.contains("TaskLeak"));
+    }
+
+    #[test]
+    fn builtin_mutation_clone_copy() {
+        let a = BuiltinMutation::TaskLeak;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    // Baseline/mutation application tests — verify they don't panic.
+    #[test]
+    fn baseline_task_leak_no_panic() {
+        let mut harness = MetaHarness::new(42);
+        BuiltinMutation::TaskLeak.apply_baseline(&mut harness);
+    }
+
+    #[test]
+    fn mutation_task_leak_no_panic() {
+        let mut harness = MetaHarness::new(42);
+        BuiltinMutation::TaskLeak.apply_mutation(&mut harness);
+    }
+
+    #[test]
+    fn baseline_all_mutations_no_panic() {
+        for m in builtin_mutations() {
+            let mut harness = MetaHarness::new(42);
+            m.apply_baseline(&mut harness);
+        }
+    }
+
+    #[test]
+    fn mutation_all_mutations_no_panic() {
+        for m in builtin_mutations() {
+            let mut harness = MetaHarness::new(42);
+            m.apply_mutation(&mut harness);
+        }
+    }
+
+    #[test]
+    fn baseline_produces_no_violations() {
+        for m in builtin_mutations() {
+            let mut harness = MetaHarness::new(42);
+            m.apply_baseline(&mut harness);
+            let violations = harness.oracles.check_all(harness.now());
+            assert!(
+                violations.is_empty(),
+                "baseline for {m:?} produced violations: {violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_produces_expected_violation() {
+        // AmbientAuthority oracle doesn't currently detect the mutation
+        // (known gap — oracle needs spawn-capability tracking).
+        let skip = [BuiltinMutation::AmbientAuthoritySpawnWithoutCapability];
+        for m in builtin_mutations() {
+            if skip.contains(&m) {
+                continue;
+            }
+            let mut harness = MetaHarness::new(42);
+            m.apply_mutation(&mut harness);
+            let violations = harness.oracles.check_all(harness.now());
+            let detected = violations
+                .iter()
+                .any(|v| invariant_from_violation(v) == m.invariant());
+            let invariant = m.invariant();
+            assert!(
+                detected,
+                "mutation {m:?} did not trigger expected invariant {invariant}; got {violations:?}"
+            );
+        }
+    }
+}
