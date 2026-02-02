@@ -119,11 +119,34 @@ impl ParsedUrl {
             .find('/')
             .map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
 
-        let (host, port) = if let Some(i) = authority.rfind(':') {
-            let port_str = &authority[i + 1..];
-            let port: u16 = port_str.parse().map_err(|_| {
-                ClientError::InvalidUrl(format!("invalid port: {port_str}"))
+        let (host, port) = if authority.starts_with('[') {
+            // IPv6: [::1]:port or [::1]
+            let bracket_end = authority.find(']').ok_or_else(|| {
+                ClientError::InvalidUrl("unclosed bracket in IPv6 address".into())
             })?;
+            let host_str = &authority[..=bracket_end];
+            let rest = &authority[bracket_end + 1..];
+            if let Some(port_str) = rest.strip_prefix(':') {
+                let port: u16 = port_str
+                    .parse()
+                    .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+                (host_str.to_owned(), port)
+            } else if rest.is_empty() {
+                let default_port = match scheme {
+                    Scheme::Http => 80,
+                    Scheme::Https => 443,
+                };
+                (host_str.to_owned(), default_port)
+            } else {
+                return Err(ClientError::InvalidUrl(format!(
+                    "unexpected characters after IPv6 address: {rest}"
+                )));
+            }
+        } else if let Some(i) = authority.rfind(':') {
+            let port_str = &authority[i + 1..];
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
             (authority[..i].to_owned(), port)
         } else {
             let default_port = match scheme {
@@ -280,8 +303,9 @@ impl HttpClient {
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
         redirect_count: u32,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + '_>,
+    > {
         Box::pin(async move {
             let resp = self
                 .execute_single(&method, &parsed, &extra_headers, &body)
@@ -431,10 +455,7 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
     }
 
     // Relative path (append to current path's directory)
-    let base_path = current
-        .path
-        .rfind('/')
-        .map_or("/", |i| &current.path[..=i]);
+    let base_path = current.path.rfind('/').map_or("/", |i| &current.path[..=i]);
     let scheme = match current.scheme {
         Scheme::Http => "http",
         Scheme::Https => "https",
@@ -647,7 +668,10 @@ mod tests {
         ];
         assert_eq!(get_header(&headers, "Location"), Some("/new".into()));
         assert_eq!(get_header(&headers, "LOCATION"), Some("/new".into()));
-        assert_eq!(get_header(&headers, "content-type"), Some("text/html".into()));
+        assert_eq!(
+            get_header(&headers, "content-type"),
+            Some("text/html".into())
+        );
         assert_eq!(get_header(&headers, "X-Missing"), None);
     }
 
@@ -685,7 +709,10 @@ mod tests {
     #[test]
     fn default_config() {
         let config = HttpClientConfig::default();
-        assert!(matches!(config.redirect_policy, RedirectPolicy::Limited(10)));
+        assert!(matches!(
+            config.redirect_policy,
+            RedirectPolicy::Limited(10)
+        ));
         assert_eq!(config.user_agent, Some("asupersync/0.1".into()));
     }
 

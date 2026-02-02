@@ -262,24 +262,24 @@ fn parse_urlencoded(input: &str) -> HashMap<String, String> {
 
 /// Simple percent-decoding (handles %XX and + as space).
 fn percent_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.bytes();
-    while let Some(b) = chars.next() {
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut iter = input.bytes();
+    while let Some(b) = iter.next() {
         match b {
-            b'+' => result.push(' '),
+            b'+' => bytes.push(b' '),
             b'%' => {
-                let hi = chars.next().and_then(hex_val);
-                let lo = chars.next().and_then(hex_val);
+                let hi = iter.next().and_then(hex_val);
+                let lo = iter.next().and_then(hex_val);
                 if let (Some(h), Some(l)) = (hi, lo) {
-                    result.push((h << 4 | l) as char);
+                    bytes.push(h << 4 | l);
                 } else {
-                    result.push('%');
+                    bytes.push(b'%');
                 }
             }
-            _ => result.push(b as char),
+            _ => bytes.push(b),
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 fn hex_val(b: u8) -> Option<u8> {
