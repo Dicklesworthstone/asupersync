@@ -1068,6 +1068,13 @@ mod tests {
     }
 
     #[test]
+    fn test_frame_header_parse_insufficient_bytes() {
+        let mut buf = BytesMut::from(&b"\x00\x00\x00\x00\x00\x00\x00\x00"[..]);
+        let err = FrameHeader::parse(&mut buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
     fn test_data_frame_roundtrip() {
         let original = DataFrame::new(1, Bytes::from_static(b"hello"), true);
 
