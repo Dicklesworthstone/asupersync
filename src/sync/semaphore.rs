@@ -292,6 +292,14 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
             state.waiters.retain(|waiter| waiter.id != waiter_id);
+            // Wake next waiter if there are still permits available.
+            // Without this, add_permits(N) where N satisfies multiple waiters
+            // would only wake the first, leaving others sleeping indefinitely.
+            if state.permits > 0 {
+                if let Some(next) = state.waiters.front() {
+                    next.waker.wake_by_ref();
+                }
+            }
             return Poll::Ready(Ok(SemaphorePermit {
                 semaphore: self.semaphore,
                 count: self.count,

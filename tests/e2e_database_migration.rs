@@ -2,6 +2,9 @@
 //!
 //! Tests connection lifecycle, query execution, transactions, error recovery,
 //! and RaptorQ migration configuration.
+//!
+//! Requires the `sqlite` feature to compile.
+#![cfg(feature = "sqlite")]
 
 #[macro_use]
 mod common;
@@ -101,7 +104,10 @@ fn e2e_sqlite_create_table_and_insert() {
         assert_with_log!(affected == 1, "one row inserted", 1u64, affected);
 
         test_section!("Query rows");
-        let rows = match conn.query(&cx, "SELECT id, name, age FROM users", &[]).await {
+        let rows = match conn
+            .query(&cx, "SELECT id, name, age FROM users", &[])
+            .await
+        {
             Outcome::Ok(r) => r,
             other => panic!("expected Ok, got {other:?}"),
         };
@@ -344,7 +350,10 @@ fn e2e_sqlite_update_and_delete() {
         assert_eq!(affected, 1);
 
         test_section!("Verify state");
-        let rows = match conn.query(&cx, "SELECT id, val FROM t ORDER BY id", &[]).await {
+        let rows = match conn
+            .query(&cx, "SELECT id, val FROM t ORDER BY id", &[])
+            .await
+        {
             Outcome::Ok(r) => r,
             other => panic!("expected Ok, got {other:?}"),
         };
@@ -372,7 +381,10 @@ fn e2e_sqlite_row_column_access() {
         };
 
         match conn
-            .execute_batch(&cx, "CREATE TABLE t (a INTEGER, b TEXT); INSERT INTO t VALUES (1, 'x')")
+            .execute_batch(
+                &cx,
+                "CREATE TABLE t (a INTEGER, b TEXT); INSERT INTO t VALUES (1, 'x')",
+            )
             .await
         {
             Outcome::Ok(()) => {}
@@ -424,10 +436,7 @@ fn e2e_sqlite_transaction_commit() {
             other => panic!("expected Ok, got {other:?}"),
         };
 
-        match conn
-            .execute_batch(&cx, "CREATE TABLE t (v INTEGER)")
-            .await
-        {
+        match conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)").await {
             Outcome::Ok(()) => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -486,10 +495,7 @@ fn e2e_sqlite_transaction_rollback() {
         };
 
         match conn
-            .execute_batch(
-                &cx,
-                "CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)",
-            )
+            .execute_batch(&cx, "CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)")
             .await
         {
             Outcome::Ok(()) => {}
@@ -546,10 +552,7 @@ fn e2e_sqlite_transaction_drop_rollback() {
         };
 
         match conn
-            .execute_batch(
-                &cx,
-                "CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)",
-            )
+            .execute_batch(&cx, "CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)")
             .await
         {
             Outcome::Ok(()) => {}
@@ -564,7 +567,11 @@ fn e2e_sqlite_transaction_drop_rollback() {
                 _ => panic!("begin cancelled or panicked"),
             };
             match txn
-                .execute(&cx, "INSERT INTO t VALUES (?1)", &[SqliteValue::Integer(99)])
+                .execute(
+                    &cx,
+                    "INSERT INTO t VALUES (?1)",
+                    &[SqliteValue::Integer(99)],
+                )
                 .await
             {
                 Outcome::Ok(_) => {}
@@ -596,10 +603,7 @@ fn e2e_sqlite_immediate_transaction() {
             other => panic!("expected Ok, got {other:?}"),
         };
 
-        match conn
-            .execute_batch(&cx, "CREATE TABLE t (v INTEGER)")
-            .await
-        {
+        match conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)").await {
             Outcome::Ok(()) => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -609,10 +613,7 @@ fn e2e_sqlite_immediate_transaction() {
             Outcome::Err(e) => panic!("begin_immediate failed: {e}"),
             _ => panic!("begin_immediate cancelled or panicked"),
         };
-        match txn
-            .execute(&cx, "INSERT INTO t VALUES (1)", &[])
-            .await
-        {
+        match txn.execute(&cx, "INSERT INTO t VALUES (1)", &[]).await {
             Outcome::Ok(_) => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -642,10 +643,7 @@ fn e2e_sqlite_exclusive_transaction() {
             other => panic!("expected Ok, got {other:?}"),
         };
 
-        match conn
-            .execute_batch(&cx, "CREATE TABLE t (v INTEGER)")
-            .await
-        {
+        match conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)").await {
             Outcome::Ok(()) => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -655,10 +653,7 @@ fn e2e_sqlite_exclusive_transaction() {
             Outcome::Err(e) => panic!("begin_exclusive failed: {e}"),
             _ => panic!("begin_exclusive cancelled or panicked"),
         };
-        match txn
-            .execute(&cx, "INSERT INTO t VALUES (1)", &[])
-            .await
-        {
+        match txn.execute(&cx, "INSERT INTO t VALUES (1)", &[]).await {
             Outcome::Ok(_) => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -745,10 +740,7 @@ fn e2e_sqlite_invalid_sql() {
         }
 
         test_section!("Connection still usable after error");
-        match conn
-            .execute_batch(&cx, "CREATE TABLE t (v INTEGER)")
-            .await
-        {
+        match conn.execute_batch(&cx, "CREATE TABLE t (v INTEGER)").await {
             Outcome::Ok(()) => {}
             other => panic!("expected Ok after recovery, got {other:?}"),
         }
@@ -895,19 +887,13 @@ fn e2e_sqlite_transaction_error_recovery() {
         };
 
         // First insert succeeds
-        match txn
-            .execute(&cx, "INSERT INTO t VALUES (2)", &[])
-            .await
-        {
+        match txn.execute(&cx, "INSERT INTO t VALUES (2)", &[]).await {
             Outcome::Ok(_) => {}
             other => panic!("expected Ok, got {other:?}"),
         }
 
         // Second insert fails (duplicate)
-        match txn
-            .execute(&cx, "INSERT INTO t VALUES (1)", &[])
-            .await
-        {
+        match txn.execute(&cx, "INSERT INTO t VALUES (1)", &[]).await {
             Outcome::Err(_) => tracing::info!("got expected constraint error in transaction"),
             other => panic!("expected Err, got {other:?}"),
         }
@@ -954,10 +940,7 @@ fn e2e_sqlite_value_display_and_accessors() {
     assert_eq!(SqliteValue::Real(1.0).as_real(), Some(1.0));
     assert_eq!(SqliteValue::Integer(5).as_real(), Some(5.0)); // coercion
     assert_eq!(SqliteValue::Text("x".into()).as_text(), Some("x"));
-    assert_eq!(
-        SqliteValue::Blob(vec![0xFF]).as_blob(),
-        Some(&[0xFF][..])
-    );
+    assert_eq!(SqliteValue::Blob(vec![0xFF]).as_blob(), Some(&[0xFF][..]));
 
     // Negative cases
     assert_eq!(SqliteValue::Null.as_integer(), None);
@@ -1073,9 +1056,15 @@ fn e2e_migration_builder_lifecycle() {
         .override_operation("heavy_join", MigrationMode::SymbolNativeOnly)
         .override_operation("light_op", MigrationMode::TraditionalOnly)
         .build();
-    assert_eq!(config.mode_for("heavy_join"), MigrationMode::SymbolNativeOnly);
+    assert_eq!(
+        config.mode_for("heavy_join"),
+        MigrationMode::SymbolNativeOnly
+    );
     assert_eq!(config.mode_for("light_op"), MigrationMode::TraditionalOnly);
-    assert_eq!(config.mode_for("unset_op"), MigrationMode::PreferTraditional);
+    assert_eq!(
+        config.mode_for("unset_op"),
+        MigrationMode::PreferTraditional
+    );
 
     test_complete!("e2e_migration_builder_lifecycle");
 }
