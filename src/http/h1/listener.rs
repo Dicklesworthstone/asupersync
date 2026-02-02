@@ -254,17 +254,31 @@ fn spawn_connection<F, Fut>(
     std::thread::spawn(move || {
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config);
-        // Drive the server future to completion using poll_fn in a blocking loop
+        // Drive the server future to completion using a thread-parking waker
         let mut fut = Box::pin(server.serve(stream));
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
+        let thread = std::thread::current();
+        let waker = Arc::new(ThreadWaker(thread)).into();
+        let mut cx = std::task::Context::from_waker(&waker);
         loop {
             match fut.as_mut().poll(&mut cx) {
                 Poll::Ready(_result) => break,
-                Poll::Pending => std::thread::yield_now(),
+                Poll::Pending => std::thread::park(),
             }
         }
     });
+}
+
+/// Waker that unparks a thread when woken.
+struct ThreadWaker(std::thread::Thread);
+
+impl std::task::Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
 }
 
 /// Returns `true` for accept errors that are transient and should be retried.
