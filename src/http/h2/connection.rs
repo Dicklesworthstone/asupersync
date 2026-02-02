@@ -837,6 +837,11 @@ impl Connection {
     ) -> Result<Option<ReceivedFrame>, H2Error> {
         let increment = i32::try_from(frame.increment)
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
+        // RFC 9113 §6.9.1: increment of 0 MUST be treated as a connection
+        // error (stream 0) or stream error of type PROTOCOL_ERROR.
+        if increment == 0 {
+            return Err(H2Error::protocol("WINDOW_UPDATE with zero increment"));
+        }
         if frame.stream_id == 0 {
             // Connection-level window update
             // Check for overflow using wider arithmetic before adding
@@ -899,13 +904,15 @@ impl Connection {
                     let first_chunk = encoded.slice(..max_frame_size);
                     let remaining = encoded.slice(max_frame_size..);
 
-                    // Queue CONTINUATION frames for remaining data
+                    // Queue CONTINUATION frames for remaining data.
+                    // Use push_back to preserve chunk ordering (push_front
+                    // would reverse them, corrupting HPACK state).
                     let mut offset = 0;
                     while offset < remaining.len() {
                         let chunk_end = (offset + max_frame_size).min(remaining.len());
                         let chunk = remaining.slice(offset..chunk_end);
                         let is_last = chunk_end == remaining.len();
-                        self.pending_ops.push_front(PendingOp::Continuation {
+                        self.pending_ops.push_back(PendingOp::Continuation {
                             stream_id,
                             header_block: chunk,
                             end_headers: is_last,
