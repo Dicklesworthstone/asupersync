@@ -1240,10 +1240,14 @@ mod tests {
         let r = VarState::MayHold(k).join(VarState::Resolved);
         crate::assert_with_log!(r == VarState::MayHold(k), "m+r", VarState::MayHold(k), r);
 
-        // Different kinds => MayHold.
+        // Different kinds => MayHoldAmbiguous.
         let r = VarState::Held(k).join(VarState::Held(k2));
-        let is_may = matches!(r, VarState::MayHold(_));
-        crate::assert_with_log!(is_may, "h(k1)+h(k2)", true, is_may);
+        crate::assert_with_log!(
+            r == VarState::MayHoldAmbiguous,
+            "h(k1)+h(k2)",
+            VarState::MayHoldAmbiguous,
+            r
+        );
 
         // Commutativity check.
         let r1 = VarState::Held(k).join(VarState::Resolved);
