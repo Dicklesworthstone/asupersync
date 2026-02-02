@@ -35,7 +35,7 @@
 
 use super::nats::{Message, NatsClient, NatsError};
 use crate::cx::Cx;
-use crate::time::{timeout, wall_now};
+use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
 use std::fmt;
 use std::fmt::Write as _;
@@ -209,7 +209,7 @@ impl StreamConfig {
     /// Encode to JSON for API request.
     fn to_json(&self) -> String {
         let mut json = String::from("{");
-        write!(&mut json, "\"name\":\"{}\"", self.name).expect("write to String");
+        write!(&mut json, "\"name\":\"{}\"", json_escape(&self.name)).expect("write to String");
 
         if !self.subjects.is_empty() {
             json.push_str(",\"subjects\":[");
@@ -217,7 +217,7 @@ impl StreamConfig {
                 if i > 0 {
                     json.push(',');
                 }
-                write!(&mut json, "\"{s}\"").expect("write to String");
+                write!(&mut json, "\"{}\"", json_escape(s)).expect("write to String");
             }
             json.push(']');
         }
@@ -427,21 +427,24 @@ impl ConsumerConfig {
         let mut parts = Vec::new();
 
         if let Some(ref name) = self.name {
-            parts.push(format!("\"name\":\"{name}\""));
+            parts.push(format!("\"name\":\"{}\"", json_escape(name)));
         }
         if let Some(ref durable) = self.durable_name {
-            parts.push(format!("\"durable_name\":\"{durable}\""));
+            parts.push(format!("\"durable_name\":\"{}\"", json_escape(durable)));
         }
         parts.push(format!(
             "\"deliver_policy\":\"{}\"",
             self.deliver_policy.as_str()
         ));
+        if let DeliverPolicy::ByStartSequence(seq) = self.deliver_policy {
+            parts.push(format!("\"opt_start_seq\":{seq}"));
+        }
         parts.push(format!("\"ack_policy\":\"{}\"", self.ack_policy.as_str()));
         parts.push(format!("\"ack_wait\":{}", self.ack_wait.as_nanos()));
         parts.push(format!("\"max_deliver\":{}", self.max_deliver));
         parts.push(format!("\"max_ack_pending\":{}", self.max_ack_pending));
         if let Some(ref filter) = self.filter_subject {
-            parts.push(format!("\"filter_subject\":\"{filter}\""));
+            parts.push(format!("\"filter_subject\":\"{}\"", json_escape(filter)));
         }
 
         json.push_str(&parts.join(","));
@@ -650,7 +653,7 @@ impl JetStreamContext {
     }
 
     /// Publish with a message ID for deduplication.
-    pub async fn publish_with_id(
+    pub fn publish_with_id(
         &mut self,
         cx: &Cx,
         subject: &str,
@@ -659,20 +662,12 @@ impl JetStreamContext {
     ) -> Result<PubAck, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        // For deduplication, we need to send Nats-Msg-Id header
-        // Since our NATS client doesn't support headers yet, we'll use
-        // the API directly
-        let api_subject = format!("{}.STREAM.MSG.PUT", self.prefix);
-        let request = format!(
-            "{{\"subject\":\"{subject}\",\"msg_id\":\"{msg_id}\",\"payload\":\"{}\"}}",
-            base64_encode(payload)
-        );
-
-        let response = self
-            .client
-            .request(cx, &api_subject, request.as_bytes())
-            .await?;
-        Self::parse_pub_ack(&response.payload)
+        // JetStream dedup requires the Nats-Msg-Id header on a normal publish.
+        // Our NATS client does not support headers yet, so fail fast.
+        Err(JsError::InvalidConfig(format!(
+            "publish_with_id requires NATS headers (Nats-Msg-Id); subject={subject} msg_id={msg_id} payload_len={}",
+            payload.len()
+        )))
     }
 
     /// Create a consumer on a stream.
@@ -695,7 +690,8 @@ impl JetStreamContext {
         };
 
         let payload = format!(
-            "{{\"stream_name\":\"{stream}\",\"config\":{}}}",
+            "{{\"stream_name\":\"{}\",\"config\":{}}}",
+            json_escape(stream),
             config.to_json()
         );
         let response = self
@@ -922,14 +918,16 @@ impl Consumer {
         } else {
             Some(pull_timeout.saturating_add(Self::CLIENT_TIMEOUT_SLACK))
         };
+        let client_deadline = client_timeout
+            .map(|timeout_dur| now.saturating_add_nanos(timeout_dur.as_nanos() as u64));
         let mut result: Result<(), JsError> = Ok(());
 
         // Collect messages until we get batch or timeout
         for _ in 0..batch {
-            let item = if let Some(timeout_dur) = client_timeout {
-                // Box::pin is required because timeout() needs Unpin
+            let item = if let Some(deadline) = client_deadline {
+                // Box::pin is required because timeout_at() needs Unpin
                 let next = Box::pin(sub.next(cx));
-                timeout(now, timeout_dur, next).await
+                timeout_at(deadline, next).await
             } else {
                 Ok(sub.next(cx).await)
             };
@@ -1028,11 +1026,45 @@ impl JsMessage {
 
 // Helper functions
 
+/// Escape a string for safe embedding in JSON values.
+/// Handles `"`, `\`, and control characters (U+0000..U+001F).
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                // \u00XX for other control characters
+                for byte in c.encode_utf8(&mut [0; 4]).bytes() {
+                    write!(&mut out, "\\u{byte:04x}").expect("write to String");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
     let pattern = format!("\"{key}\":\"");
     let start = json.find(&pattern)? + pattern.len();
-    let end = json[start..].find('"')? + start;
-    Some(json[start..end].to_string())
+    // Walk forward, respecting backslash escapes
+    let slice = &json[start..];
+    let mut chars = slice.char_indices();
+    loop {
+        match chars.next()? {
+            (i, '"') => return Some(json[start..start + i].to_string()),
+            (_, '\\') => {
+                // Skip the escaped character
+                chars.next()?;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn extract_json_u64(json: &str, key: &str) -> Option<u64> {

@@ -229,8 +229,40 @@ impl ServerInfo {
 fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let pattern = format!("\"{key}\":\"");
     let start = json.find(&pattern)? + pattern.len();
-    let end = json[start..].find('"')? + start;
-    Some(json[start..end].to_string())
+    // Walk forward, respecting backslash escapes
+    let slice = &json[start..];
+    let mut chars = slice.char_indices();
+    loop {
+        match chars.next()? {
+            (i, '"') => return Some(json[start..start + i].to_string()),
+            (_, '\\') => {
+                chars.next()?;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Escape a string for safe embedding in JSON values.
+fn nats_json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                for byte in c.encode_utf8(&mut [0; 4]).bytes() {
+                    use std::fmt::Write;
+                    write!(&mut out, "\\u{byte:04x}").expect("write to String");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn extract_json_i64(json: &str, key: &str) -> Option<i64> {
@@ -446,25 +478,25 @@ impl NatsClient {
 
         if let Some(ref name) = self.config.name {
             connect.push_str(",\"name\":\"");
-            connect.push_str(name);
+            connect.push_str(&nats_json_escape(name));
             connect.push('"');
         }
 
         if let Some(ref user) = self.config.user {
             connect.push_str(",\"user\":\"");
-            connect.push_str(user);
+            connect.push_str(&nats_json_escape(user));
             connect.push('"');
         }
 
         if let Some(ref pass) = self.config.password {
             connect.push_str(",\"pass\":\"");
-            connect.push_str(pass);
+            connect.push_str(&nats_json_escape(pass));
             connect.push('"');
         }
 
         if let Some(ref token) = self.config.token {
             connect.push_str(",\"auth_token\":\"");
-            connect.push_str(token);
+            connect.push_str(&nats_json_escape(token));
             connect.push('"');
         }
 
