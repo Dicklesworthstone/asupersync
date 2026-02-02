@@ -259,7 +259,11 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
                 // Already queued - update the waker in case it changed.
                 // This is critical for correctness with executors that provide
                 // new wakers on each poll.
-                if let Some(existing) = state.waiters.iter_mut().find(|w| Arc::ptr_eq(&w.queued, waiter)) {
+                if let Some(existing) = state
+                    .waiters
+                    .iter_mut()
+                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
+                {
                     existing.waker.clone_from(context.waker());
                 }
             }
@@ -373,7 +377,11 @@ impl<T> OwnedMutexGuard<T> {
                     }
                     Some(waiter) => {
                         // Already queued - update the waker in case it changed.
-                        if let Some(existing) = state.waiters.iter_mut().find(|w| Arc::ptr_eq(&w.queued, waiter)) {
+                        if let Some(existing) = state
+                            .waiters
+                            .iter_mut()
+                            .find(|w| Arc::ptr_eq(&w.queued, waiter))
+                        {
                             existing.waker.clone_from(context.waker());
                         }
                     }
