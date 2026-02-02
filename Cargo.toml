@@ -45,6 +45,8 @@ postgres = ["dep:sha2"]
 mysql = ["dep:sha2"]
 # Enable QUIC protocol support via quinn.
 quic = ["dep:quinn", "tls"]
+# Enable Kafka client integration via rdkafka.
+kafka = ["dep:rdkafka"]
 # Enable Loom concurrency tests for scheduler verification.
 loom-tests = ["dep:loom"]
 
@@ -117,6 +119,8 @@ rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 sha2 = { version = "0.10", optional = true }
 # QUIC protocol implementation via quinn
 quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
+# Kafka client integration via rdkafka (optional, requires librdkafka on the system).
+rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
 loom = { version = "0.7", optional = true }
 

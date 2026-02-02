@@ -28,37 +28,37 @@ use std::collections::VecDeque;
 //   - unpark() sets permit and signals
 
 struct LoomParker {
-    notified: AtomicBool,
-    mutex: Mutex<()>,
-    cvar: Condvar,
+    inner: Arc<Mutex<bool>>,
+    cvar: Arc<Condvar>,
 }
 
 impl LoomParker {
     fn new() -> Self {
         Self {
-            notified: AtomicBool::new(false),
-            mutex: Mutex::new(()),
-            cvar: Condvar::new(),
+            inner: Arc::new(Mutex::new(false)),
+            cvar: Arc::new(Condvar::new()),
         }
     }
 
     fn park(&self) {
-        // Fast path: consume permit without blocking
-        if self.notified.swap(false, Ordering::Acquire) {
-            return;
-        }
-
-        let mut guard = self.mutex.lock().unwrap();
-        while !self.notified.swap(false, Ordering::Acquire) {
+        let mut guard = self.inner.lock().unwrap();
+        while !*guard {
             guard = self.cvar.wait(guard).unwrap();
         }
-        drop(guard);
+        *guard = false; // Consume the permit
     }
 
     fn unpark(&self) {
-        self.notified.store(true, Ordering::Release);
-        let _guard = self.mutex.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
+        *guard = true;
         self.cvar.notify_one();
+    }
+
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            cvar: self.cvar.clone(),
+        }
     }
 }
 
@@ -69,7 +69,7 @@ impl LoomParker {
 #[test]
 fn loom_parker_no_lost_wakeup() {
     loom::model(|| {
-        let parker = Arc::new(LoomParker::new());
+        let parker = LoomParker::new();
         let woken = Arc::new(AtomicBool::new(false));
 
         let p = parker.clone();
@@ -93,7 +93,7 @@ fn loom_parker_no_lost_wakeup() {
 #[test]
 fn loom_parker_unpark_before_park() {
     loom::model(|| {
-        let parker = Arc::new(LoomParker::new());
+        let parker = LoomParker::new();
 
         // Unpark first (store permit)
         parker.unpark();
@@ -114,7 +114,7 @@ fn loom_parker_unpark_before_park() {
 #[test]
 fn loom_parker_concurrent_unpark() {
     loom::model(|| {
-        let parker = Arc::new(LoomParker::new());
+        let parker = LoomParker::new();
 
         let p1 = parker.clone();
         let p2 = parker.clone();
@@ -143,7 +143,7 @@ fn loom_parker_concurrent_unpark() {
 #[test]
 fn loom_parker_reuse() {
     loom::model(|| {
-        let parker = Arc::new(LoomParker::new());
+        let parker = LoomParker::new();
 
         // First cycle
         parker.unpark();
@@ -187,8 +187,28 @@ impl LoomWakeState {
     }
 
     /// Called when starting to poll the task.
-    fn begin_poll(&self) {
-        self.state.store(POLLING, Ordering::Release);
+    ///
+    /// Returns true if the task was already NOTIFIED (pre-notified), meaning
+    /// the caller consumed the notification and should poll immediately.
+    /// Returns false if the transition was IDLE -> POLLING (normal case).
+    ///
+    /// Uses CAS instead of blind store to avoid clobbering a NOTIFIED state
+    /// set by a concurrent waker, which would cause double scheduling.
+    fn begin_poll(&self) -> bool {
+        match self.state.compare_exchange(
+            IDLE,
+            POLLING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => false, // IDLE -> POLLING, normal
+            Err(actual) => {
+                assert_eq!(actual, NOTIFIED, "begin_poll called in unexpected state");
+                // Already notified - consume notification, transition to POLLING
+                self.state.store(POLLING, Ordering::SeqCst);
+                true
+            }
+        }
     }
 
     /// Called when done polling. Returns true if task was woken during poll
@@ -197,13 +217,13 @@ impl LoomWakeState {
         // CAS POLLING -> IDLE. If state is NOTIFIED, swap to IDLE and return true.
         match self
             .state
-            .compare_exchange(POLLING, IDLE, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(POLLING, IDLE, Ordering::SeqCst, Ordering::SeqCst)
         {
             Ok(_) => false, // Was POLLING, now IDLE, no reschedule needed
             Err(actual) => {
                 // State was NOTIFIED (woken during poll)
                 assert_eq!(actual, NOTIFIED, "unexpected wake state");
-                self.state.store(IDLE, Ordering::Release);
+                self.state.store(IDLE, Ordering::SeqCst);
                 true // Needs reschedule
             }
         }
@@ -212,15 +232,15 @@ impl LoomWakeState {
     /// Called to wake the task. Returns true if the task should be scheduled.
     fn notify(&self) -> bool {
         loop {
-            let current = self.state.load(Ordering::Acquire);
+            let current = self.state.load(Ordering::SeqCst);
             match current {
                 IDLE => {
                     // CAS IDLE -> NOTIFIED: schedule the task
-                    match self.state.compare_exchange_weak(
+                    match self.state.compare_exchange(
                         IDLE,
                         NOTIFIED,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
                     ) {
                         Ok(_) => return true, // We set NOTIFIED, caller schedules
                         Err(_) => continue,   // Retry
@@ -228,11 +248,11 @@ impl LoomWakeState {
                 }
                 POLLING => {
                     // CAS POLLING -> NOTIFIED: task is being polled, mark for reschedule
-                    match self.state.compare_exchange_weak(
+                    match self.state.compare_exchange(
                         POLLING,
                         NOTIFIED,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
                     ) {
                         Ok(_) => return false, // Poller will reschedule via finish_poll
                         Err(_) => continue,    // Retry
@@ -256,36 +276,41 @@ impl LoomWakeState {
 fn loom_wake_state_no_double_schedule() {
     loom::model(|| {
         let ws = Arc::new(LoomWakeState::new());
-        let schedule_count = Arc::new(AtomicU32::new(0));
+        let poller_scheduled = Arc::new(AtomicBool::new(false));
+        let waker_scheduled = Arc::new(AtomicBool::new(false));
 
         // Thread 1: poller
         let ws1 = ws.clone();
-        let sc1 = schedule_count.clone();
+        let ps = poller_scheduled.clone();
         let h1 = thread::spawn(move || {
-            ws1.begin_poll();
-            // Simulate some work
+            let _pre_notified = ws1.begin_poll();
             let needs_reschedule = ws1.finish_poll();
             if needs_reschedule {
-                sc1.fetch_add(1, Ordering::Relaxed);
+                ps.store(true, Ordering::SeqCst);
             }
         });
 
         // Thread 2: waker
         let ws2 = ws.clone();
-        let sc2 = schedule_count.clone();
+        let wk = waker_scheduled.clone();
         let h2 = thread::spawn(move || {
             let should_schedule = ws2.notify();
             if should_schedule {
-                sc2.fetch_add(1, Ordering::Relaxed);
+                wk.store(true, Ordering::SeqCst);
             }
         });
 
         h1.join().unwrap();
         h2.join().unwrap();
 
-        // Exactly one schedule should happen (either waker or poller, not both)
-        let count = schedule_count.load(Ordering::Relaxed);
-        assert!(count <= 1, "double schedule detected: count={count}");
+        let p = poller_scheduled.load(Ordering::SeqCst);
+        let w = waker_scheduled.load(Ordering::SeqCst);
+
+        // Both scheduling simultaneously is a double-schedule bug
+        assert!(
+            !(p && w),
+            "double schedule: poller={p}, waker={w}"
+        );
     });
 }
 
@@ -361,10 +386,12 @@ fn loom_wake_state_notify_during_poll() {
 // Local queue model (Mutex<VecDeque> push/steal)
 // ============================================================================
 
+#[allow(dead_code)]
 struct LoomLocalQueue {
     inner: Arc<Mutex<VecDeque<u32>>>,
 }
 
+#[allow(dead_code)]
 impl LoomLocalQueue {
     fn new() -> Self {
         Self {
@@ -492,7 +519,7 @@ fn loom_local_queue_multiple_stealers() {
 fn loom_inject_while_parking() {
     loom::model(|| {
         let queue = Arc::new(Mutex::new(VecDeque::<u32>::new()));
-        let parker = Arc::new(LoomParker::new());
+        let parker = LoomParker::new();
         let executed = Arc::new(AtomicBool::new(false));
 
         // Worker thread: check queue, if empty -> park

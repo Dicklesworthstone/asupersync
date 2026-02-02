@@ -13,8 +13,9 @@ use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::record::{
     finalizer::Finalizer, region::RegionState, task::TaskState, AdmissionError,
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionLimits,
-    RegionRecord, TaskRecord,
+    RegionRecord, SourceLocation, TaskRecord,
 };
+use crate::runtime::config::ObligationLeakResponse;
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
@@ -29,7 +30,9 @@ use crate::types::{
 };
 use crate::util::{Arena, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +73,96 @@ impl std::fmt::Display for SpawnError {
 }
 
 impl std::error::Error for SpawnError {}
+
+#[derive(Debug, Clone, Copy)]
+enum TaskCompletionKind {
+    Ok,
+    Err,
+    Cancelled,
+    Panicked,
+    Unknown,
+}
+
+impl TaskCompletionKind {
+    fn from_state(state: &TaskState) -> Self {
+        match state {
+            TaskState::Completed(Outcome::Ok(())) => Self::Ok,
+            TaskState::Completed(Outcome::Err(_)) => Self::Err,
+            TaskState::Completed(Outcome::Cancelled(_)) => Self::Cancelled,
+            TaskState::Completed(Outcome::Panicked(_)) => Self::Panicked,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Err => "err",
+            Self::Cancelled => "cancelled",
+            Self::Panicked => "panicked",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LeakedObligationInfo {
+    id: ObligationId,
+    kind: ObligationKind,
+    holder: TaskId,
+    region: RegionId,
+    acquired_at: SourceLocation,
+    held_duration_ns: u64,
+    description: Option<String>,
+    acquire_backtrace: Option<Arc<Backtrace>>,
+}
+
+impl fmt::Display for LeakedObligationInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?} {:?} holder={:?} region={:?} acquired_at={} held_ns={}",
+            self.id,
+            self.kind,
+            self.holder,
+            self.region,
+            self.acquired_at,
+            self.held_duration_ns
+        )?;
+        if let Some(desc) = &self.description {
+            write!(f, " desc={desc}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ObligationLeakError {
+    task_id: Option<TaskId>,
+    region_id: RegionId,
+    completion: Option<TaskCompletionKind>,
+    leaks: Vec<LeakedObligationInfo>,
+}
+
+impl fmt::Display for ObligationLeakError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let completion = self
+            .completion
+            .map_or("unknown", TaskCompletionKind::as_str);
+        write!(
+            f,
+            "obligation leak: task={:?} region={:?} completion={} leaked={}",
+            self.task_id,
+            self.region_id,
+            completion,
+            self.leaks.len()
+        )?;
+        for leak in &self.leaks {
+            write!(f, "\n  - {leak}")?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CancelRegionNode {
@@ -140,6 +233,8 @@ pub struct RuntimeState {
     observability: Option<RuntimeObservability>,
     /// Blocking pool handle for offloading synchronous work.
     blocking_pool: Option<BlockingPoolHandle>,
+    /// Response policy when obligation leaks are detected.
+    obligation_leak_response: ObligationLeakResponse,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -158,6 +253,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("entropy_source", &"<dyn EntropySource>")
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
+            .field("obligation_leak_response", &self.obligation_leak_response)
             .finish()
     }
 }
@@ -189,6 +285,7 @@ impl RuntimeState {
             entropy_source: Arc::new(OsEntropy),
             observability: None,
             blocking_pool: None,
+            obligation_leak_response: ObligationLeakResponse::Log,
         }
     }
 
@@ -316,6 +413,11 @@ impl RuntimeState {
     /// Clears runtime observability configuration.
     pub fn clear_observability_config(&mut self) {
         self.observability = None;
+    }
+
+    /// Sets the response policy when obligation leaks are detected.
+    pub fn set_obligation_leak_response(&mut self, response: ObligationLeakResponse) {
+        self.obligation_leak_response = response;
     }
 
     /// Returns a handle to the trace buffer.
@@ -635,11 +737,74 @@ impl RuntimeState {
         self.metrics.task_completed(task.id, outcome_kind, duration);
     }
 
+    fn capture_obligation_backtrace() -> Option<Arc<Backtrace>> {
+        if cfg!(debug_assertions) {
+            Some(Arc::new(Backtrace::capture()))
+        } else {
+            None
+        }
+    }
+
+    fn collect_obligation_leaks<F>(&self, mut predicate: F) -> Vec<LeakedObligationInfo>
+    where
+        F: FnMut(&ObligationRecord) -> bool,
+    {
+        self.obligations
+            .iter()
+            .filter_map(|(_, record)| {
+                if !record.is_pending() || !predicate(record) {
+                    return None;
+                }
+
+                let held_duration_ns = self.now.duration_since(record.reserved_at);
+                Some(LeakedObligationInfo {
+                    id: record.id,
+                    kind: record.kind,
+                    holder: record.holder,
+                    region: record.region,
+                    acquired_at: record.acquired_at,
+                    held_duration_ns,
+                    description: record.description.clone(),
+                    acquire_backtrace: record.acquire_backtrace.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
+        if error.leaks.is_empty() {
+            return;
+        }
+
+        let leak_ids: Vec<ObligationId> = error.leaks.iter().map(|leak| leak.id).collect();
+        for id in leak_ids {
+            let _ = self.mark_obligation_leaked(id);
+        }
+
+        match self.obligation_leak_response {
+            ObligationLeakResponse::Panic => panic!("{error}"),
+            ObligationLeakResponse::Log => {
+                crate::tracing_compat::error!(
+                    task_id = ?error.task_id,
+                    region_id = ?error.region_id,
+                    completion = %error
+                        .completion
+                        .map_or("unknown", TaskCompletionKind::as_str),
+                    leak_count = error.leaks.len(),
+                    details = %error,
+                    "obligation leaks detected"
+                );
+            }
+            ObligationLeakResponse::Silent => {}
+        }
+    }
+
     /// Creates and registers an obligation for the given task and region.
     ///
     /// This records the obligation in the registry and emits a trace event.
     /// Returns an error if the region is closed or admission limits are reached.
     #[allow(clippy::result_large_err)]
+    #[track_caller]
     pub fn create_obligation(
         &mut self,
         kind: ObligationKind,
@@ -664,23 +829,29 @@ impl RuntimeState {
             });
         }
 
+        let acquired_at = SourceLocation::from_panic_location(std::panic::Location::caller());
+        let acquire_backtrace = Self::capture_obligation_backtrace();
         let reserved_at = self.now;
         let idx = if let Some(desc) = description {
-            self.obligations.insert(ObligationRecord::with_description(
+            self.obligations.insert(ObligationRecord::with_description_and_context(
                 ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
                 kind,
                 holder,
                 region,
                 reserved_at,
                 desc,
+                acquired_at,
+                acquire_backtrace.clone(),
             ))
         } else {
-            self.obligations.insert(ObligationRecord::new(
+            self.obligations.insert(ObligationRecord::new_with_context(
                 ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
                 kind,
                 holder,
                 region,
                 reserved_at,
+                acquired_at,
+                acquire_backtrace.clone(),
             ))
         };
         let obligation_id = ObligationId::from_arena(idx);
@@ -854,7 +1025,8 @@ impl RuntimeState {
     #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
         // Extract data first to avoid borrow conflicts with self.next_trace_seq()
-        let (duration, id, holder, region, kind) = {
+        #[allow(unused_variables)]
+        let (duration, id, holder, region, kind, acquired_at, acquire_backtrace) = {
             let record = self
                 .obligations
                 .get_mut(obligation.arena_index())
@@ -874,32 +1046,54 @@ impl RuntimeState {
                 record.holder,
                 record.region,
                 record.kind,
+                record.acquired_at,
+                record.acquire_backtrace.clone(),
             )
         };
-
-        let span = crate::tracing_compat::error_span!(
-            "obligation_leak",
-            obligation_id = ?id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            duration_ns = duration
-        );
-        let _span_guard = span.enter();
 
         let seq = self.next_trace_seq();
         self.trace.push_event(TraceEvent::obligation_leak(
             seq, self.now, id, holder, region, kind, duration,
         ));
         self.metrics.obligation_leaked(region);
-        crate::tracing_compat::error!(
-            obligation_id = ?id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            duration_ns = duration,
-            "obligation leaked"
-        );
+        if self.obligation_leak_response != ObligationLeakResponse::Silent {
+            let span = crate::tracing_compat::error_span!(
+                "obligation_leak",
+                obligation_id = ?id,
+                kind = ?kind,
+                holder_task = ?holder,
+                region_id = ?region,
+                duration_ns = duration,
+                acquired_at = %acquired_at
+            );
+            let _span_guard = span.enter();
+            match acquire_backtrace.as_ref() {
+                #[allow(unused_variables)]
+                Some(backtrace) => {
+                    crate::tracing_compat::error!(
+                        obligation_id = ?id,
+                        kind = ?kind,
+                        holder_task = ?holder,
+                        region_id = ?region,
+                        duration_ns = duration,
+                        acquired_at = %acquired_at,
+                        acquire_backtrace = ?backtrace,
+                        "obligation leaked"
+                    );
+                }
+                None => {
+                    crate::tracing_compat::error!(
+                        obligation_id = ?id,
+                        kind = ?kind,
+                        holder_task = ?holder,
+                        region_id = ?region,
+                        duration_ns = duration,
+                        acquired_at = %acquired_at,
+                        "obligation leaked"
+                    );
+                }
+            }
+        }
 
         if let Some(region_record) = self.regions.get(region.arena_index()) {
             region_record.resolve_obligation();
@@ -1361,6 +1555,17 @@ impl RuntimeState {
         let waiters = task.waiters.clone();
         let _waiter_count = waiters.len();
 
+        let completion = TaskCompletionKind::from_state(&task.state);
+        let leaks = self.collect_obligation_leaks(|record| record.holder == task_id);
+        if !leaks.is_empty() {
+            self.handle_obligation_leaks(ObligationLeakError {
+                task_id: Some(task_id),
+                region_id: owner,
+                completion: Some(completion),
+                leaks,
+            });
+        }
+
         // Trace task completion
         let _outcome_kind = match &task.state {
             crate::record::task::TaskState::Completed(outcome) => match outcome {
@@ -1378,6 +1583,18 @@ impl RuntimeState {
             waiter_count = _waiter_count,
             "task cleanup from runtime state"
         );
+
+        // Abort any pending obligations held by this task to prevent
+        // orphaned obligations from blocking region close (deadlock).
+        let orphaned: Vec<ObligationId> = self
+            .obligations
+            .iter()
+            .filter(|(_, r)| r.holder == task_id && r.is_pending())
+            .map(|(idx, _)| ObligationId::from_arena(idx))
+            .collect();
+        for ob_id in orphaned {
+            let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
+        }
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {
@@ -1606,6 +1823,30 @@ impl RuntimeState {
                         region.add_finalizer(async_finalizer);
                     }
                     return;
+                }
+
+                // If we are finalizing and obligations remain with no live tasks, mark leaks.
+                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    if region.pending_obligations() > 0 {
+                        let tasks_done = region.task_ids().iter().all(|&task_id| {
+                            self.tasks
+                                .get(task_id.arena_index())
+                                .is_none_or(|t| t.state.is_terminal())
+                        });
+                        if tasks_done {
+                            let leaks = self.collect_obligation_leaks(|record| {
+                                record.region == region_id
+                            });
+                            if !leaks.is_empty() {
+                                self.handle_obligation_leaks(ObligationLeakError {
+                                    task_id: None,
+                                    region_id,
+                                    completion: None,
+                                    leaks,
+                                });
+                            }
+                        }
+                    }
                 }
 
                 // Check if we can complete close
