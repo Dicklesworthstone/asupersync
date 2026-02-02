@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
@@ -175,7 +175,7 @@ impl Worker {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
         // Try to find the task in global state first
-        let (mut stored, task_cx, wake_state) = {
+        let (mut stored, task_cx, wake_state, metrics) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
 
             if let Some(stored) = state.remove_stored_future(task_id) {
@@ -185,8 +185,9 @@ impl Worker {
                     record.wake_state.begin_poll();
                     let task_cx = record.cx.clone();
                     let wake_state = Arc::clone(&record.wake_state);
+                    let metrics = state.metrics_provider();
                     drop(state);
-                    (AnyStoredTask::Global(stored), task_cx, wake_state)
+                    (AnyStoredTask::Global(stored), task_cx, wake_state, metrics)
                 } else {
                     return; // Task record missing?
                 }
@@ -203,8 +204,14 @@ impl Worker {
                         record.wake_state.begin_poll();
                         let task_cx = record.cx.clone();
                         let wake_state = Arc::clone(&record.wake_state);
+                        let metrics = state.metrics_provider();
                         drop(state);
-                        (AnyStoredTask::Local(local_task), task_cx, wake_state)
+                        (
+                            AnyStoredTask::Local(local_task),
+                            task_cx,
+                            wake_state,
+                            metrics,
+                        )
                     } else {
                         return; // Task record missing
                     }
@@ -223,6 +230,7 @@ impl Worker {
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
+        let poll_start = Instant::now();
         match stored.poll(&mut cx) {
             Poll::Ready(outcome) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
@@ -350,6 +358,7 @@ impl Worker {
                 }
             }
         }
+        metrics.scheduler_tick(1, poll_start.elapsed());
     }
 }
 

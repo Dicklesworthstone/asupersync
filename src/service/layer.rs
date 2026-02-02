@@ -307,7 +307,11 @@ mod tests {
         let _svc = stack.layer(EchoService);
 
         let applied = order.lock().unwrap();
-        assert_eq!(&*applied, &[1, 2], "inner layer (1) must apply before outer layer (2)");
+        assert_eq!(
+            &*applied,
+            &[1, 2],
+            "inner layer (1) must apply before outer layer (2)"
+        );
     }
 
     #[test]

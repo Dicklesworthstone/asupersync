@@ -1168,7 +1168,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "runtime metrics emission not wired yet"]
     fn otel_metrics_runtime_integration_emits_task_metrics() {
         init_test_logging();
         let exporter = OtelInMemoryExporter::default();
@@ -1185,6 +1184,14 @@ mod tests {
         let handle = runtime.handle().spawn(async { 7u8 });
         let result = runtime.block_on(handle);
         assert_eq!(result, 7);
+
+        for _ in 0..1024 {
+            if runtime.is_quiescent() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(runtime.is_quiescent(), "runtime did not reach quiescence");
 
         provider.force_flush().expect("force_flush");
         let finished = exporter.get_finished_metrics().expect("finished metrics");

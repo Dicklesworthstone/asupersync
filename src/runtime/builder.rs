@@ -737,6 +737,17 @@ impl Runtime {
         &self.inner.config
     }
 
+    /// Returns true if the runtime is quiescent (no live tasks or I/O).
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .expect("runtime state lock poisoned");
+        guard.is_quiescent()
+    }
+
     /// Spawns a blocking task on the blocking pool.
     ///
     /// Returns `None` if the blocking pool is not configured (max_threads = 0).

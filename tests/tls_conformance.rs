@@ -99,7 +99,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn handshake_completes_and_stream_is_ready() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6000);
@@ -121,7 +121,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn handshake_negotiates_tls_version() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6010);
@@ -146,7 +146,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn handshake_server_sees_sni_hostname() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6020);
@@ -167,7 +167,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn handshake_client_sni_is_none() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6030);
@@ -186,7 +186,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn handshake_timeout_fires() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
             let connector = TlsConnectorBuilder::new()
                 .add_root_certificates(certs)
@@ -209,7 +209,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
     fn data_roundtrip_through_tls() {
         use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
         use std::pin::Pin;
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6050);
@@ -251,7 +251,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn alpn_h2_negotiation() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key)
@@ -282,7 +282,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn alpn_http_negotiates_h2_preferred() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key)
@@ -314,7 +314,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn alpn_no_overlap_client_required_errors() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key)
@@ -343,7 +343,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn alpn_none_when_not_configured() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6090);
@@ -363,7 +363,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn alpn_grpc_negotiation() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key)
@@ -398,7 +398,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn mtls_required_client_provides_cert() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             // Server requires client certs
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -434,7 +434,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn mtls_required_client_no_cert_fails() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let certs_for_root = Certificate::from_pem(TEST_CERT_PEM).unwrap();
@@ -468,7 +468,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn mtls_optional_client_no_cert_ok() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let certs_for_root = Certificate::from_pem(TEST_CERT_PEM).unwrap();
@@ -540,7 +540,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn connect_invalid_dns_name_errors() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let connector = make_connector();
             let (client_io, _server_io) = make_pair(6140);
 
@@ -601,7 +601,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn forced_tls12_handshake() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
@@ -748,7 +748,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn stream_into_inner_recovers_io() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6160);
@@ -766,7 +766,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn stream_debug_impl() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
             let (client_io, server_io) = make_pair(6170);
@@ -789,7 +789,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn concurrent_handshakes() {
-        crate::common::run_test(|| async {
+        futures_lite::future::block_on(async {
             let acceptor = make_acceptor();
             let connector = make_connector();
 
