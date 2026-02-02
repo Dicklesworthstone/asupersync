@@ -249,14 +249,16 @@ impl<A: Actor> ActorHandle<A> {
         self.task_id
     }
 
-    /// Signals the actor to stop by closing the mailbox.
+    /// Signals the actor to stop gracefully.
     ///
-    /// The actor will finish processing any buffered messages, then call
-    /// `on_stop` and return its state.
+    /// Sets the actor state to `Stopping` and requests cancellation so the
+    /// actor loop will exit after the current message finishes processing.
+    /// The actor will call `on_stop` before returning.
+    ///
+    /// This is identical to [`abort`](Self::abort) — both request cancellation
+    /// and set the Stopping state. A future improvement could differentiate
+    /// them by having `stop()` drain buffered messages first.
     pub fn stop(&self) {
-        // Closing is achieved by dropping our sender clone won't work since
-        // we need to keep the handle alive. Instead, we abort the task which
-        // triggers cancellation.
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
             if let Ok(mut guard) = inner.write() {
@@ -288,7 +290,15 @@ impl<A: Actor> ActorHandle<A> {
         })
     }
 
-    /// Request the actor to stop by aborting its task.
+    /// Request the actor to stop immediately by aborting its task.
+    ///
+    /// Sets `cancel_requested` on the actor's context, causing the actor loop
+    /// to exit at the next cancellation check point. The actor will call
+    /// `on_stop` before returning.
+    ///
+    /// Currently identical to [`stop`](Self::stop). A future improvement
+    /// should differentiate them: `stop()` would drain buffered messages
+    /// while `abort()` exits immediately.
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
