@@ -11,13 +11,15 @@
 
 pub mod client;
 pub mod codec;
+pub mod listener;
 pub mod server;
 pub mod stream;
 pub mod types;
 
 pub use client::{Http1Client, Http1ClientCodec};
 pub use codec::{Http1Codec, HttpError};
-pub use server::{Http1Config, Http1Server};
+pub use listener::{Http1Listener, Http1ListenerConfig};
+pub use server::{ConnectionPhase, ConnectionState, Http1Config, Http1Server};
 pub use stream::{
     BodyKind, ChunkedEncoder, IncomingBody, IncomingBodyWriter, OutgoingBody, OutgoingBodySender,
     RequestHead, ResponseHead, StreamingRequest, StreamingResponse,

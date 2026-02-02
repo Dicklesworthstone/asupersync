@@ -19,6 +19,7 @@
 //! enabling connection reuse for improved performance.
 
 pub mod body;
+pub mod compress;
 pub mod h1;
 pub mod h2;
 pub mod pool;

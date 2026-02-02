@@ -224,7 +224,7 @@ pub fn race(input: TokenStream) -> TokenStream {
 /// present and string literals, then leaves the item unchanged.
 #[proc_macro_attribute]
 pub fn conformance(attr: TokenStream, item: TokenStream) -> TokenStream {
-    match parse_conformance_args(attr) {
+    match parse_conformance_args(&attr) {
         Ok(_) => item,
         Err(message) => util::compile_error(&message).into(),
     }
@@ -236,9 +236,12 @@ struct ConformanceArgs {
     requirement: String,
 }
 
-fn parse_conformance_args(attr: TokenStream) -> Result<ConformanceArgs, String> {
-    let raw = attr.to_string();
-    let raw = raw.trim();
+fn parse_conformance_args(attr: &TokenStream) -> Result<ConformanceArgs, String> {
+    parse_conformance_args_str(&attr.to_string())
+}
+
+fn parse_conformance_args_str(input: &str) -> Result<ConformanceArgs, String> {
+    let raw = input.trim();
     if raw.is_empty() {
         return Err("conformance attribute requires arguments".to_string());
     }
@@ -256,9 +259,11 @@ fn parse_conformance_args(attr: TokenStream) -> Result<ConformanceArgs, String> 
         match key {
             "spec" => spec = Some(value),
             "requirement" => requirement = Some(value),
-            other => return Err(format!(
+            other => {
+                return Err(format!(
                 "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
-            )),
+            ))
+            }
         }
     }
 
@@ -361,31 +366,26 @@ fn parse_string_literal(input: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_conformance_args;
-    use proc_macro2::TokenStream as TokenStream2;
-    use std::str::FromStr;
+    use super::parse_conformance_args_str;
 
     #[test]
     fn parse_conformance_args_ok() {
-        let tokens =
-            TokenStream2::from_str(r#"spec = "3.2.1", requirement = "Region close waits""#)
+        let args =
+            parse_conformance_args_str(r#"spec = "3.2.1", requirement = "Region close waits""#)
                 .unwrap();
-        let args = parse_conformance_args(tokens.into()).unwrap();
         assert_eq!(args.spec, "3.2.1");
         assert_eq!(args.requirement, "Region close waits");
     }
 
     #[test]
     fn parse_conformance_args_missing_spec() {
-        let tokens = TokenStream2::from_str(r#"requirement = "Region close waits""#).unwrap();
-        let err = parse_conformance_args(tokens.into()).unwrap_err();
+        let err = parse_conformance_args_str(r#"requirement = "Region close waits""#).unwrap_err();
         assert!(err.contains("missing 'spec'"));
     }
 
     #[test]
     fn parse_conformance_args_missing_requirement() {
-        let tokens = TokenStream2::from_str(r#"spec = "3.2.1""#).unwrap();
-        let err = parse_conformance_args(tokens.into()).unwrap_err();
+        let err = parse_conformance_args_str(r#"spec = "3.2.1""#).unwrap_err();
         assert!(err.contains("missing 'requirement'"));
     }
 }

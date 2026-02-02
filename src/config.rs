@@ -8,9 +8,13 @@
 //!
 //! Note: File parsing is intentionally minimal and deterministic.
 
+use crate::http::h1::listener::Http1ListenerConfig;
+use crate::http::h1::server::Http1Config;
+use crate::http::pool::PoolConfig;
 use crate::observability::{LogLevel, ObservabilityConfig};
 use crate::security::AuthMode;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -66,6 +70,161 @@ impl RaptorQConfig {
 
         Ok(())
     }
+}
+
+/// Unified server configuration combining runtime, HTTP, and protocol settings.
+///
+/// Provides a single entry point for configuring an asupersync server with
+/// validation and sensible defaults. Supports profiles for common deployment
+/// scenarios and lab overrides for deterministic testing.
+///
+/// # Example
+///
+/// ```
+/// # use asupersync::config::{ServerConfig, ServerProfile};
+/// let config = ServerConfig::from_profile(ServerProfile::Development);
+/// assert!(config.validate().is_ok());
+/// ```
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// Bind address for the HTTP listener.
+    pub bind_addr: SocketAddr,
+    /// HTTP/1.1 per-connection configuration.
+    pub http: Http1Config,
+    /// HTTP listener configuration (connection limits, drain timeout).
+    pub listener: Http1ListenerConfig,
+    /// Connection pool configuration.
+    pub pool: PoolConfig,
+    /// Graceful shutdown drain timeout.
+    pub shutdown_timeout: Duration,
+    /// Worker thread count override. `None` uses available parallelism.
+    pub worker_threads: Option<usize>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
+            http: Http1Config::default(),
+            listener: Http1ListenerConfig::default(),
+            pool: PoolConfig::default(),
+            shutdown_timeout: Duration::from_secs(30),
+            worker_threads: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Create a server config from a deployment profile.
+    #[must_use]
+    pub fn from_profile(profile: ServerProfile) -> Self {
+        match profile {
+            ServerProfile::Development => Self {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
+                listener: Http1ListenerConfig::default()
+                    .max_connections(Some(100))
+                    .drain_timeout(Duration::from_secs(5)),
+                shutdown_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+            ServerProfile::Testing => Self {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                http: Http1Config::default()
+                    .idle_timeout(Some(Duration::from_secs(5)))
+                    .max_requests(Some(100)),
+                listener: Http1ListenerConfig::default()
+                    .max_connections(Some(10))
+                    .drain_timeout(Duration::from_millis(500)),
+                shutdown_timeout: Duration::from_millis(500),
+                worker_threads: Some(1),
+                ..Default::default()
+            },
+            ServerProfile::Production => Self {
+                bind_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
+                http: Http1Config::default()
+                    .max_headers_size(32 * 1024)
+                    .max_body_size(8 * 1024 * 1024)
+                    .max_requests(Some(10_000))
+                    .idle_timeout(Some(Duration::from_secs(120))),
+                listener: Http1ListenerConfig::default()
+                    .max_connections(Some(50_000))
+                    .drain_timeout(Duration::from_secs(30)),
+                shutdown_timeout: Duration::from_secs(30),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Set the bind address.
+    #[must_use]
+    pub fn bind_addr(mut self, addr: SocketAddr) -> Self {
+        self.bind_addr = addr;
+        self
+    }
+
+    /// Set the HTTP configuration.
+    #[must_use]
+    pub fn http(mut self, config: Http1Config) -> Self {
+        self.http = config;
+        self
+    }
+
+    /// Set the listener configuration.
+    #[must_use]
+    pub fn listener(mut self, config: Http1ListenerConfig) -> Self {
+        self.listener = config;
+        self
+    }
+
+    /// Set the connection pool configuration.
+    #[must_use]
+    pub fn pool(mut self, config: PoolConfig) -> Self {
+        self.pool = config;
+        self
+    }
+
+    /// Set the shutdown timeout.
+    #[must_use]
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Set the worker thread count.
+    #[must_use]
+    pub fn worker_threads(mut self, threads: Option<usize>) -> Self {
+        self.worker_threads = threads;
+        self
+    }
+
+    /// Validate the server configuration.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.shutdown_timeout < Duration::from_millis(100) {
+            return Err(ConfigError::TimeoutTooShort);
+        }
+        if let Some(threads) = self.worker_threads {
+            if threads == 0 {
+                return Err(ConfigError::InvalidParallelism);
+            }
+        }
+        if let Some(max) = self.listener.max_connections {
+            if max == 0 {
+                return Err(ConfigError::Parse("max_connections must be > 0".to_owned()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Pre-defined server deployment profiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerProfile {
+    /// Development: localhost only, relaxed limits, fast shutdown.
+    Development,
+    /// Testing: deterministic, minimal resources, instant shutdown.
+    Testing,
+    /// Production: optimized defaults with generous limits.
+    Production,
 }
 
 /// Encoding configuration.
@@ -896,6 +1055,68 @@ default_timeout_ms = 5000
         assert_eq!(config.encoding.symbol_size, 512);
         assert!((config.encoding.repair_overhead - 1.2).abs() < f64::EPSILON);
         assert_eq!(config.timeouts.default_timeout, Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn server_config_default_valid() {
+        let config = ServerConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn server_config_profiles_valid() {
+        for profile in [
+            ServerProfile::Development,
+            ServerProfile::Testing,
+            ServerProfile::Production,
+        ] {
+            let config = ServerConfig::from_profile(profile);
+            assert!(config.validate().is_ok(), "Profile {profile:?} invalid");
+        }
+    }
+
+    #[test]
+    fn server_config_builder() {
+        let config = ServerConfig::default()
+            .bind_addr(SocketAddr::from(([127, 0, 0, 1], 9090)))
+            .shutdown_timeout(Duration::from_secs(60))
+            .worker_threads(Some(4));
+
+        assert_eq!(config.bind_addr.port(), 9090);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(60));
+        assert_eq!(config.worker_threads, Some(4));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn server_config_validation_errors() {
+        let config = ServerConfig::default().shutdown_timeout(Duration::from_millis(10));
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::TimeoutTooShort)
+        ));
+
+        let config = ServerConfig::default().worker_threads(Some(0));
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidParallelism)
+        ));
+    }
+
+    #[test]
+    fn server_config_testing_profile() {
+        let config = ServerConfig::from_profile(ServerProfile::Testing);
+        assert_eq!(config.bind_addr.port(), 0); // OS-assigned port
+        assert_eq!(config.worker_threads, Some(1));
+        assert_eq!(config.listener.max_connections, Some(10));
+    }
+
+    #[test]
+    fn server_config_production_profile() {
+        let config = ServerConfig::from_profile(ServerProfile::Production);
+        assert_eq!(config.bind_addr.port(), 8080);
+        assert_eq!(config.listener.max_connections, Some(50_000));
+        assert_eq!(config.http.max_body_size, 8 * 1024 * 1024);
     }
 
     #[test]
