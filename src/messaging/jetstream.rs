@@ -847,6 +847,8 @@ impl fmt::Debug for Consumer {
 impl Consumer {
     /// Default timeout for pull operations.
     pub const DEFAULT_PULL_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Extra time to allow server-side expiry/status messages to arrive.
+    const CLIENT_TIMEOUT_SLACK: Duration = Duration::from_millis(100);
 
     /// Get the consumer name.
     #[must_use]
@@ -872,6 +874,9 @@ impl Consumer {
     }
 
     /// Pull a batch of messages with a timeout.
+    ///
+    /// A zero duration disables the client-side timeout and sets JetStream
+    /// `expires` to 0 (no expiry). Use a non-zero duration to bound the request.
     pub async fn pull_with_timeout(
         &self,
         client: &mut NatsClient,
@@ -885,7 +890,14 @@ impl Consumer {
             "{}.CONSUMER.MSG.NEXT.{}.{}",
             self.prefix, self.stream, self.name
         );
-        let expires = u64::try_from(pull_timeout.as_nanos()).unwrap_or(u64::MAX);
+        let expires = if pull_timeout.is_zero() {
+            0_i64
+        } else {
+            let nanos = pull_timeout.as_nanos();
+            let max = i64::MAX as u128;
+            let clamped = if nanos > max { max } else { nanos };
+            clamped as i64
+        };
         let request = format!("{{\"batch\":{batch},\"expires\":{expires}}}");
 
         // Subscribe to get batch responses
@@ -893,20 +905,35 @@ impl Consumer {
             .subscribe(cx, &format!("_INBOX.{}", random_id(cx)))
             .await?;
         let sid = sub.sid();
-        client
+        if let Err(err) = client
             .publish_request(cx, &subject, sub.subject(), request.as_bytes())
-            .await?;
+            .await
+        {
+            let _ = client.unsubscribe(cx, sid).await;
+            return Err(err.into());
+        }
 
         let mut messages = Vec::with_capacity(batch);
         let now = cx
             .timer_driver()
             .map_or_else(wall_now, |driver| driver.now());
+        let client_timeout = if pull_timeout.is_zero() {
+            None
+        } else {
+            Some(pull_timeout.saturating_add(Self::CLIENT_TIMEOUT_SLACK))
+        };
         let mut result: Result<(), JsError> = Ok(());
 
         // Collect messages until we get batch or timeout
         for _ in 0..batch {
-            let next_fut = Box::pin(sub.next(cx));
-            match timeout(now, pull_timeout, next_fut).await {
+            let item = if let Some(timeout_dur) = client_timeout {
+                // Box::pin is required because timeout() needs Unpin
+                let next = Box::pin(sub.next(cx));
+                timeout(now, timeout_dur, next).await
+            } else {
+                Ok(sub.next(cx).await)
+            };
+            match item {
                 Ok(Ok(Some(msg))) => {
                     if let Some(js_msg) = Self::parse_js_message(msg) {
                         messages.push(js_msg);
@@ -914,18 +941,24 @@ impl Consumer {
                         break; // Status message or end
                     }
                 }
-                Ok(Ok(None)) => break, // Subscription closed
+                Ok(Ok(None)) | Err(_) => break, // Subscription closed or timeout
                 Ok(Err(e)) => {
                     result = Err(e.into());
                     break;
                 }
-                Err(_) => break, // Timeout - return what we have
             }
         }
 
-        let _ = client.unsubscribe(cx, sid).await;
+        if let Err(_err) = client.unsubscribe(cx, sid).await {
+            warn!(
+                subject = %sub.subject(),
+                sid,
+                error = ?_err,
+                "JetStream pull unsubscribe failed"
+            );
+        }
 
-        result.map(|_| messages)
+        result.map(|()| messages)
     }
 
     fn parse_js_message(msg: Message) -> Option<JsMessage> {
