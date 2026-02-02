@@ -1,0 +1,498 @@
+//! Scheduler benchmark suite for Asupersync.
+//!
+//! Benchmarks the performance of scheduling primitives:
+//! - LocalQueue: Per-worker LIFO queue operations
+//! - GlobalQueue: Cross-thread injection queue
+//! - PriorityScheduler: Three-lane scheduler (cancel/timed/ready)
+//! - Work stealing: Batch theft between workers
+//!
+//! Performance targets:
+//! - LocalQueue push/pop: < 50ns
+//! - GlobalQueue push/pop: < 100ns (lock-free)
+//! - PriorityScheduler schedule/pop: < 200ns (heap operations)
+//! - Batch steal: < 500ns for 8-task batch
+
+#![allow(missing_docs)]
+#![allow(clippy::semicolon_if_nothing_returned)]
+
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+};
+
+use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Scheduler};
+use asupersync::types::{TaskId, Time};
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/// Creates a test TaskId from an index.
+fn task(id: u32) -> TaskId {
+    TaskId::new_for_test(id, 0)
+}
+
+/// Creates a vector of test TaskIds.
+fn tasks(count: usize) -> Vec<TaskId> {
+    (0..count as u32).map(task).collect()
+}
+
+// =============================================================================
+// LOCAL QUEUE BENCHMARKS
+// =============================================================================
+
+fn bench_local_queue(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/local_queue");
+
+    // Single push/pop cycle
+    group.bench_function("push_pop_single", |b| {
+        b.iter_batched(
+            LocalQueue::new,
+            |queue| {
+                queue.push(task(1));
+                let result = queue.pop();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Sequential push then pop
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("push_then_pop", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || (LocalQueue::new(), task_ids.clone()),
+                    |(queue, tasks)| {
+                        for t in &tasks {
+                            queue.push(*t);
+                        }
+                        for _ in 0..tasks.len() {
+                            let _ = black_box(queue.pop());
+                        }
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Interleaved push/pop (simulates real workload)
+    group.bench_function("interleaved_push_pop", |b| {
+        b.iter_batched(
+            LocalQueue::new,
+            |queue| {
+                for i in 0..100u32 {
+                    queue.push(task(i * 2));
+                    queue.push(task(i * 2 + 1));
+                    let _ = black_box(queue.pop());
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
+// GLOBAL QUEUE BENCHMARKS
+// =============================================================================
+
+fn bench_global_queue(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/global_queue");
+
+    // Single push/pop
+    group.bench_function("push_pop_single", |b| {
+        b.iter_batched(
+            GlobalQueue::new,
+            |queue| {
+                queue.push(task(1));
+                let result = queue.pop();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Batch operations
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("push_batch", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || (GlobalQueue::new(), task_ids.clone()),
+                    |(queue, tasks)| {
+                        for t in &tasks {
+                            queue.push(*t);
+                        }
+                        black_box(queue.len())
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // FIFO ordering verification (pop all after push all)
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("push_then_pop", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || (GlobalQueue::new(), task_ids.clone()),
+                    |(queue, tasks)| {
+                        for t in &tasks {
+                            queue.push(*t);
+                        }
+                        for _ in 0..tasks.len() {
+                            let _ = black_box(queue.pop());
+                        }
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// PRIORITY SCHEDULER BENCHMARKS
+// =============================================================================
+
+fn bench_priority_scheduler(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/priority");
+
+    // Ready lane schedule/pop
+    group.bench_function("schedule_ready_pop", |b| {
+        b.iter_batched(
+            Scheduler::new,
+            |mut scheduler| {
+                scheduler.schedule(task(1), 0);
+                let result = scheduler.pop();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Cancel lane schedule/pop
+    group.bench_function("schedule_cancel_pop", |b| {
+        b.iter_batched(
+            Scheduler::new,
+            |mut scheduler| {
+                scheduler.schedule_cancel(task(1), 0);
+                let result = scheduler.pop();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Timed lane schedule/pop
+    group.bench_function("schedule_timed_pop", |b| {
+        b.iter_batched(
+            Scheduler::new,
+            |mut scheduler| {
+                scheduler.schedule_timed(task(1), Time::from_nanos(1_000_000));
+                let result = scheduler.pop();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Batch scheduling to ready lane
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("batch_schedule_ready", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || (Scheduler::new(), task_ids.clone()),
+                    |(mut scheduler, tasks)| {
+                        for (i, t) in tasks.iter().enumerate() {
+                            scheduler.schedule(*t, (i % 256) as u8);
+                        }
+                        black_box(scheduler.len())
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Batch scheduling then pop all
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("batch_schedule_then_pop", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || (Scheduler::new(), task_ids.clone()),
+                    |(mut scheduler, tasks)| {
+                        for t in &tasks {
+                            scheduler.schedule(*t, 0);
+                        }
+                        while scheduler.pop().is_some() {}
+                        black_box(scheduler.is_empty())
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Deduplication behavior (scheduling same task twice)
+    group.bench_function("dedup_same_task", |b| {
+        b.iter_batched(
+            Scheduler::new,
+            |mut scheduler| {
+                // Schedule same task 100 times - should only add once
+                for _ in 0..100 {
+                    scheduler.schedule(task(1), 0);
+                }
+                black_box(scheduler.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
+// LANE PRIORITY ORDERING BENCHMARKS
+// =============================================================================
+
+fn bench_lane_priority(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/lane_priority");
+
+    // Mixed lanes: cancel > timed > ready ordering
+    group.bench_function("mixed_lanes_pop_order", |b| {
+        b.iter_batched(
+            || {
+                let mut scheduler = Scheduler::new();
+                // Add tasks to each lane
+                scheduler.schedule(task(1), 0); // ready
+                scheduler.schedule_timed(task(2), Time::from_nanos(1_000_000)); // timed
+                scheduler.schedule_cancel(task(3), 0); // cancel
+                scheduler
+            },
+            |mut scheduler| {
+                // Pop should return: cancel(3), timed(2), ready(1)
+                let first = scheduler.pop();
+                let second = scheduler.pop();
+                let third = scheduler.pop();
+                black_box((first, second, third))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // EDF ordering within timed lane
+    group.bench_function("timed_edf_ordering", |b| {
+        b.iter_batched(
+            || {
+                let mut scheduler = Scheduler::new();
+                // Add tasks with different deadlines (out of order)
+                scheduler.schedule_timed(task(1), Time::from_nanos(3_000_000));
+                scheduler.schedule_timed(task(2), Time::from_nanos(1_000_000));
+                scheduler.schedule_timed(task(3), Time::from_nanos(2_000_000));
+                scheduler
+            },
+            |mut scheduler| {
+                // Pop should return: task(2), task(3), task(1) (earliest deadline first)
+                let first = scheduler.pop();
+                let second = scheduler.pop();
+                let third = scheduler.pop();
+                black_box((first, second, third))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Priority ordering within ready lane
+    group.bench_function("ready_priority_ordering", |b| {
+        b.iter_batched(
+            || {
+                let mut scheduler = Scheduler::new();
+                // Add tasks with different priorities
+                scheduler.schedule(task(1), 1); // low priority
+                scheduler.schedule(task(2), 100); // high priority
+                scheduler.schedule(task(3), 50); // medium priority
+                scheduler
+            },
+            |mut scheduler| {
+                // Pop should return highest priority first
+                let first = scheduler.pop();
+                let second = scheduler.pop();
+                let third = scheduler.pop();
+                black_box((first, second, third))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
+// WORK STEALING BENCHMARKS
+// =============================================================================
+
+fn bench_work_stealing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/work_stealing");
+
+    // Single steal operation
+    group.bench_function("steal_single", |b| {
+        b.iter_batched(
+            || {
+                let victim = LocalQueue::new();
+                victim.push(task(1));
+                let stealer = victim.stealer();
+                (victim, stealer)
+            },
+            |(_victim, stealer)| {
+                let result = stealer.steal();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Batch steal
+    for &victim_size in &[16, 64, 256] {
+        group.bench_with_input(
+            BenchmarkId::new("steal_batch", victim_size),
+            &victim_size,
+            |b, &victim_size| {
+                b.iter_batched(
+                    || {
+                        let victim = LocalQueue::new();
+                        for i in 0..victim_size as u32 {
+                            victim.push(task(i));
+                        }
+                        let stealer = victim.stealer();
+                        let dest = LocalQueue::new();
+                        (victim, stealer, dest)
+                    },
+                    |(_victim, stealer, dest)| {
+                        let success = stealer.steal_batch(&dest);
+                        black_box(success)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Steal from empty queue
+    group.bench_function("steal_empty", |b| {
+        b.iter_batched(
+            || {
+                let victim = LocalQueue::new();
+                let stealer = victim.stealer();
+                stealer
+            },
+            |stealer| {
+                let result = stealer.steal();
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
+// THROUGHPUT BENCHMARKS
+// =============================================================================
+
+fn bench_scheduler_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/throughput");
+    group.sample_size(50);
+
+    // High-throughput scheduling workload
+    for &count in &[1000, 10000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("schedule_pop_cycle", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let mut scheduler = Scheduler::new();
+                    for i in 0..count as u32 {
+                        scheduler.schedule(task(i), (i % 256) as u8);
+                    }
+                    let mut popped = 0;
+                    while scheduler.pop().is_some() {
+                        popped += 1;
+                    }
+                    black_box(popped)
+                })
+            },
+        );
+    }
+
+    // Mixed lane throughput
+    for &count in &[1000, 10000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("mixed_lane_cycle", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let mut scheduler = Scheduler::new();
+                    for i in 0..count as u32 {
+                        match i % 3 {
+                            0 => scheduler.schedule(task(i), 0),
+                            1 => scheduler
+                                .schedule_timed(task(i), Time::from_nanos((i as u64) * 1000)),
+                            _ => scheduler.schedule_cancel(task(i), 0),
+                        }
+                    }
+                    let mut popped = 0;
+                    while scheduler.pop().is_some() {
+                        popped += 1;
+                    }
+                    black_box(popped)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+criterion_group!(
+    benches,
+    bench_local_queue,
+    bench_global_queue,
+    bench_priority_scheduler,
+    bench_lane_priority,
+    bench_work_stealing,
+    bench_scheduler_throughput,
+);
+
+criterion_main!(benches);
