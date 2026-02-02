@@ -298,11 +298,24 @@ impl<A: Actor> ActorHandle<A> {
 ///
 /// Use this to send messages to an actor from multiple locations without
 /// needing to share the `ActorHandle`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ActorRef<M> {
     actor_id: ActorId,
     sender: mpsc::Sender<M>,
     state: Arc<ActorStateCell>,
+}
+
+// Manual Clone impl without requiring M: Clone, since all fields are
+// independently clonable (ActorId is Copy, Sender<M> clones without M: Clone,
+// and Arc is always Clone).
+impl<M> Clone for ActorRef<M> {
+    fn clone(&self) -> Self {
+        Self {
+            actor_id: self.actor_id,
+            sender: self.sender.clone(),
+            state: Arc::clone(&self.state),
+        }
+    }
 }
 
 impl<M: Send + 'static> ActorRef<M> {
@@ -432,6 +445,7 @@ pub struct ActorContext<'a, M: Send + 'static> {
     stopping: bool,
 }
 
+#[allow(clippy::elidable_lifetime_names)]
 impl<'a, M: Send + 'static> ActorContext<'a, M> {
     /// Create a new actor context.
     ///
@@ -451,18 +465,6 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
             children: Vec::new(),
             stopping: false,
         }
-    }
-
-    // ========================================================================
-    // Self-Reference Methods
-    // ========================================================================
-
-    /// Returns a clonable reference to this actor's mailbox.
-    ///
-    /// Use this to give other actors a way to send messages to this actor.
-    #[must_use]
-    pub fn self_ref(&self) -> ActorRef<M> {
-        self.self_ref.clone()
     }
 
     /// Returns this actor's unique identifier.
@@ -614,6 +616,15 @@ impl<'a, M: Send + 'static> ActorContext<'a, M> {
     /// Emit a trace event.
     pub fn trace(&self, event: &str) {
         self.cx.trace(event);
+    }
+
+    /// Returns a clonable reference to this actor's mailbox.
+    ///
+    /// Use this to give other actors a way to send messages to this actor.
+    /// The `ActorRef<M>` type is always Clone regardless of whether M is Clone.
+    #[must_use]
+    pub fn self_ref(&self) -> ActorRef<M> {
+        self.self_ref.clone()
     }
 
     /// Returns a reference to the underlying Cx.
