@@ -1,0 +1,15 @@
+error: macros that expand to items must be delimited with braces or followed by a semicolon
+ --> tests/compile_fail/conformance_missing_spec.rs:4:1
+  |
+4 | #[conformance(requirement = "test")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `conformance` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: conformance attribute missing 'spec'
+ --> tests/compile_fail/conformance_missing_spec.rs:4:1
+  |
+4 | #[conformance(requirement = "test")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `conformance` (in Nightly builds, run with -Z macro-backtrace for more info)

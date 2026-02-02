@@ -1,0 +1,5 @@
+error: scope! requires cx argument
+ --> tests/compile_fail/scope_missing_cx.rs:5:12
+  |
+5 |     scope!({ let x = 1; });
+  |            ^

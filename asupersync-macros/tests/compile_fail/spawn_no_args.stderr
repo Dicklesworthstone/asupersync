@@ -1,0 +1,7 @@
+error: spawn! requires a future expression
+ --> tests/compile_fail/spawn_no_args.rs:5:13
+  |
+5 |     let _ = spawn!();
+  |             ^^^^^^^^
+  |
+  = note: this error originates in the macro `spawn` (in Nightly builds, run with -Z macro-backtrace for more info)

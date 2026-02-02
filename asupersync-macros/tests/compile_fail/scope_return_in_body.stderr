@@ -1,0 +1,5 @@
+error: scope! body must not use return; use break or early return pattern
+ --> tests/compile_fail/scope_return_in_body.rs:5:18
+  |
+5 |     scope!(cx, { return 42; });
+  |                  ^^^^^^

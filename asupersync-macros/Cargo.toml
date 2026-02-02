@@ -18,6 +18,7 @@ proc-macro2 = "1.0"
 
 [dev-dependencies]
 asupersync = { path = ".." }
+trybuild = "1.0"
 
 [lints.rust]
 unsafe_code = "deny"
