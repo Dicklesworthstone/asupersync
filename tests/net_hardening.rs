@@ -1,3 +1,4 @@
+#![allow(clippy::items_after_statements, clippy::semicolon_if_nothing_returned)]
 //! Network Primitives Hardening Tests (bd-gl8u).
 //!
 //! Verifies hardening of TCP/UDP/Unix socket primitives:
@@ -23,9 +24,9 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
-use asupersync::net::{TcpListener, TcpStream};
 use asupersync::net::tcp::stream::TcpStreamBuilder;
 use asupersync::net::UdpSocket;
+use asupersync::net::{TcpListener, TcpStream};
 
 struct NoopWaker;
 
@@ -526,14 +527,10 @@ fn tcp_concurrent_connects() {
 
         thread::sleep(Duration::from_millis(10));
 
-        let handles: Vec<_> = (0..N)
+        let client_ok: usize = (0..N)
             .map(|_| {
                 thread::spawn(move || block_on(async { TcpStream::connect(addr).await.is_ok() }))
             })
-            .collect();
-
-        let client_ok: usize = handles
-            .into_iter()
             .filter_map(|h| h.join().ok())
             .filter(|&ok| ok)
             .count();

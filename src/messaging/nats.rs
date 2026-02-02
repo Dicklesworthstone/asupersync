@@ -288,14 +288,11 @@ fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
     }
 }
 
-/// Generate a random suffix for unique inbox subjects.
-fn random_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:016x}", nanos ^ u128::from(std::process::id()))
+/// Generate a random suffix for unique inbox subjects using capability-based entropy.
+fn random_suffix(cx: &Cx) -> String {
+    let hi = cx.random_u64();
+    let lo = cx.random_u64();
+    format!("{:016x}", hi ^ lo)
 }
 
 /// Internal read buffer for NATS protocol parsing.
@@ -788,7 +785,7 @@ impl NatsClient {
         let inbox = format!(
             "_INBOX.{}.{}",
             self.next_sid.load(Ordering::Relaxed),
-            random_suffix()
+            random_suffix(cx)
         );
 
         // Subscribe to inbox
@@ -1232,15 +1229,17 @@ mod tests {
     }
 
     #[test]
-    fn test_random_suffix_uniqueness() {
-        let s1 = random_suffix();
-        let s2 = random_suffix();
-        // Not guaranteed unique in same nanosecond, but in practice should differ
-        // Just verify format is correct (16 hex chars)
+    fn test_random_suffix_format() {
+        let cx = Cx::for_testing();
+        let s1 = random_suffix(&cx);
+        let s2 = random_suffix(&cx);
+        // Verify format is correct (16 hex chars)
         assert_eq!(s1.len(), 16);
         assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(s2.len(), 16);
         assert!(s2.chars().all(|c| c.is_ascii_hexdigit()));
+        // With deterministic entropy, successive calls should differ
+        assert_ne!(s1, s2);
     }
 
     #[test]
