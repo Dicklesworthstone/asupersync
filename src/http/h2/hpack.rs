@@ -917,6 +917,7 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
 /// scan approach. By grouping codes by bit length and checking shortest first,
 /// the decoder consumes at least 5 bits per iteration, bounding the work per
 /// input byte to a constant factor.
+#[allow(clippy::too_many_lines)] // Huffman decoding table is large; splitting obscures verification.
 fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
     let mut result = Vec::new();
     let mut accumulator: u64 = 0;
@@ -1963,5 +1964,143 @@ mod tests {
         encoder2.encode(&headers, &mut buf2);
 
         assert_eq!(buf1, buf2, "encoding should be deterministic");
+    }
+
+    // =========================================================================
+    // Security Stress Tests (bd-1z7e)
+    // =========================================================================
+
+    #[test]
+    fn stress_test_hpack_integer_malformed() {
+        // Malformed multi-byte integer sequences: verify no panics, only clean errors.
+        for shift in 0..=40u8 {
+            // Continuation bytes that would cause large shifts
+            let mut data = vec![0x7f_u8]; // 7-bit prefix full
+            for _ in 0..shift {
+                data.push(0xff); // continuation byte
+            }
+            data.push(0x00); // terminator
+            let mut src = Bytes::from(data);
+            let _ = decode_integer(&mut src, 7);
+        }
+
+        // Random-ish malformed sequences
+        for seed in 0..1000u16 {
+            let len = ((seed % 10) + 1) as usize;
+            let mut data = Vec::with_capacity(len);
+            for i in 0..len {
+                data.push(((seed.wrapping_mul(31).wrapping_add(i as u16)) & 0xff) as u8);
+            }
+            // Set prefix to trigger multi-byte path
+            if !data.is_empty() {
+                data[0] |= 0x1f;
+            }
+            let mut src = Bytes::from(data);
+            let _ = decode_integer(&mut src, 5);
+        }
+    }
+
+    #[test]
+    fn stress_test_huffman_random_bytes() {
+        // Random byte sequences: verify graceful failure or valid decode, never panic.
+        for seed in 0..2000u32 {
+            let len = ((seed % 200) + 1) as usize;
+            let mut data = Vec::with_capacity(len);
+            for i in 0..len {
+                data.push(((seed.wrapping_mul(97).wrapping_add(i as u32)) & 0xff) as u8);
+            }
+            let _ = decode_huffman(&Bytes::from(data));
+        }
+    }
+
+    #[test]
+    fn stress_test_dynamic_table_churn() {
+        // Rapid size oscillation with interleaved insertions: verify memory bounded.
+        let mut table = DynamicTable::new();
+        for i in 0..5000u32 {
+            if i % 3 == 0 {
+                table.set_max_size(0);
+            } else if i % 3 == 1 {
+                table.set_max_size(4096);
+            }
+            table.insert(Header::new(format!("x-churn-{i}"), format!("value-{i}")));
+            assert!(table.size() <= 4096);
+        }
+    }
+
+    #[test]
+    fn stress_test_decoder_malformed_blocks() {
+        // Fuzz-like: random byte sequences as HPACK header blocks.
+        for seed in 0..1000u32 {
+            let len = ((seed % 100) + 1) as usize;
+            let mut data = Vec::with_capacity(len);
+            for i in 0..len {
+                data.push(((seed.wrapping_mul(53).wrapping_add(i as u32 * 7)) & 0xff) as u8);
+            }
+            let mut decoder = Decoder::new();
+            let mut src = Bytes::from(data);
+            let _ = decoder.decode(&mut src);
+        }
+    }
+
+    #[test]
+    fn test_huffman_all_single_bytes() {
+        // Every single byte value 0x00-0xFF: encode always works, decode
+        // succeeds for valid UTF-8 bytes and fails gracefully for others.
+        for byte in 0..=255u8 {
+            let input = [byte];
+            let encoded = encode_huffman(&input);
+            let result = decode_huffman(&Bytes::from(encoded));
+            if std::str::from_utf8(&input).is_ok() {
+                let decoded = result.unwrap_or_else(|e| {
+                    panic!("decode failed for valid UTF-8 byte 0x{byte:02x}: {e:?}")
+                });
+                assert_eq!(
+                    decoded.as_bytes(),
+                    &input,
+                    "roundtrip failed for byte 0x{byte:02x}"
+                );
+            } else {
+                // Non-UTF-8 bytes: should not panic (error is acceptable)
+                let _ = result;
+            }
+        }
+    }
+
+    #[test]
+    fn test_huffman_long_code_symbols() {
+        // Symbols with the longest Huffman codes (9-30 bits) to exercise slow path.
+        // Byte values 0x00-0x1f are control chars with longer codes.
+        let mut input = Vec::new();
+        for b in 0..=31u8 {
+            input.push(b);
+        }
+        let encoded = encode_huffman(&input);
+        let decoded = decode_huffman(&Bytes::from(encoded)).unwrap();
+        assert_eq!(decoded.as_bytes(), &input[..]);
+    }
+
+    #[test]
+    fn test_integer_max_valid_value() {
+        // Encode and decode a large (but valid) integer.
+        let value = 1_000_000_usize;
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, value, 5, 0x00);
+        let mut src = buf.freeze();
+        let decoded = decode_integer(&mut src, 5).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_integer_all_prefix_sizes() {
+        for prefix in [5_u8, 6, 7, 8] {
+            for &value in &[0_usize, 1, 30, 31, 127, 128, 255, 256, 65535] {
+                let mut buf = BytesMut::new();
+                encode_integer(&mut buf, value, prefix, 0x00);
+                let mut src = buf.freeze();
+                let decoded = decode_integer(&mut src, prefix).unwrap();
+                assert_eq!(decoded, value, "prefix={prefix}, value={value}");
+            }
+        }
     }
 }
