@@ -40,11 +40,11 @@
 use crate::bytes::Bytes;
 use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
 use crate::remote::{
-    CancelRequest, IdempotencyKey, IdempotencyStore, LeaseRenewal, NodeId, RemoteMessage,
-    RemoteOutcome, RemoteTaskId, ResultDelivery, SpawnAck, SpawnAckStatus, SpawnRejectReason,
-    SpawnRequest,
+    CancelRequest, IdempotencyKey, IdempotencyStore, LeaseRenewal, MessageEnvelope, NodeId,
+    RemoteMessage, RemoteOutcome, RemoteTaskId, ResultDelivery, SpawnAck, SpawnAckStatus,
+    SpawnRejectReason, SpawnRequest,
 };
-use crate::trace::distributed::vclock::CausalTracker;
+use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
 use crate::types::Time;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -156,23 +156,33 @@ impl SimNode {
         }
     }
 
-    /// Processes an incoming remote message.
-    pub fn handle_message(&mut self, msg: RemoteMessage) {
+    /// Processes an incoming remote message with logical time metadata.
+    pub fn handle_message(&mut self, envelope: MessageEnvelope<RemoteMessage>) {
         if self.crashed {
             return; // Silently drop messages to crashed nodes
         }
 
-        match msg {
+        self.record_receive(&envelope.sender_time);
+
+        match envelope.payload {
             RemoteMessage::SpawnRequest(req) => self.handle_spawn(req),
-            RemoteMessage::SpawnAck(ack) => self.handle_spawn_ack(ack),
+            RemoteMessage::SpawnAck(ack) => Self::handle_spawn_ack(ack),
             RemoteMessage::CancelRequest(cancel) => self.handle_cancel(&cancel),
-            RemoteMessage::ResultDelivery(result) => self.handle_result(result),
+            RemoteMessage::ResultDelivery(result) => Self::handle_result(result),
             RemoteMessage::LeaseRenewal(renewal) => self.handle_lease_renewal(&renewal),
         }
     }
 
+    fn record_receive(&mut self, sender_time: &LogicalTime) {
+        match sender_time {
+            LogicalTime::Vector(clock) => self.causal.on_receive(clock),
+            _ => {
+                self.causal.record_local_event();
+            }
+        }
+    }
+
     fn handle_spawn(&mut self, req: SpawnRequest) {
-        self.causal.record_local_event();
         self.event_log.push(NodeEvent::SpawnReceived {
             task_id: req.remote_task_id,
             from: req.origin_node.clone(),
@@ -235,14 +245,12 @@ impl SimNode {
         });
     }
 
-    fn handle_spawn_ack(&mut self, _ack: SpawnAck) {
-        self.causal.record_local_event();
+    fn handle_spawn_ack(_ack: SpawnAck) {
         // Origin node processes ack — in a full implementation this would
         // update the RemoteHandle state. For harness testing, we log only.
     }
 
     fn handle_cancel(&mut self, cancel: &CancelRequest) {
-        self.causal.record_local_event();
         self.event_log.push(NodeEvent::CancelReceived {
             task_id: cancel.remote_task_id,
         });
@@ -252,13 +260,11 @@ impl SimNode {
         }
     }
 
-    fn handle_result(&mut self, _result: ResultDelivery) {
-        self.causal.record_local_event();
+    fn handle_result(_result: ResultDelivery) {
         // Result delivery handling — logged by origin node
     }
 
     fn handle_lease_renewal(&mut self, renewal: &LeaseRenewal) {
-        self.causal.record_local_event();
         self.event_log.push(NodeEvent::LeaseRenewed {
             task_id: renewal.remote_task_id,
         });
@@ -548,9 +554,15 @@ impl DistributedHarness {
             },
         });
 
+        let sender_time = self.nodes.get_mut(from).map_or_else(
+            || LogicalTime::Vector(VectorClock::new()),
+            |node| LogicalTime::Vector(node.causal.on_send()),
+        );
+        let envelope = MessageEnvelope::new(from.clone(), sender_time, msg.clone());
+
         // Serialize message as opaque bytes for the simulated network.
         // In Phase 0, we use a simple encoding: message type tag + task ID.
-        let encoded = encode_message(msg);
+        let encoded = encode_message(&envelope);
         self.network.send(src, dst, Bytes::from(encoded));
     }
 
@@ -589,34 +601,30 @@ impl DistributedHarness {
     /// Delivers packets from the simulated network to the appropriate nodes.
     fn deliver_packets(&mut self) {
         // Collect all inbox contents, then dispatch.
-        let mut deliveries: Vec<(NodeId, RemoteMessage)> = Vec::new();
+        let mut deliveries: Vec<(NodeId, MessageEnvelope<RemoteMessage>)> = Vec::new();
 
         for (node_id, node) in &self.nodes {
             if let Some(packets) = self.network.inbox(node.host_id) {
                 for packet in packets {
-                    if let Some(msg) = decode_message(&packet.payload) {
-                        let src_node = self
-                            .host_to_node
-                            .get(&packet.src)
-                            .cloned()
-                            .unwrap_or_else(|| NodeId::new("unknown"));
+                    if let Some(envelope) = decode_message(&packet.payload) {
+                        let src_node = envelope.sender.clone();
                         self.trace.push(HarnessTraceEvent {
                             time: self.sim_time,
                             kind: HarnessTraceKind::MessageDelivered {
                                 from: src_node,
                                 to: node_id.clone(),
-                                msg_type: msg_type_name(&msg).to_string(),
+                                msg_type: msg_type_name(&envelope.payload).to_string(),
                             },
                         });
-                        deliveries.push((node_id.clone(), msg));
+                        deliveries.push((node_id.clone(), envelope));
                     }
                 }
             }
         }
 
-        for (node_id, msg) in deliveries {
+        for (node_id, envelope) in deliveries {
             if let Some(node) = self.nodes.get_mut(&node_id) {
-                node.handle_message(msg);
+                node.handle_message(envelope);
             }
         }
     }
@@ -766,7 +774,7 @@ static NEXT_MSG_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 // Global message store for the Phase 0 side-channel.
 // In a real implementation, messages would be serialized into the packet payload.
 use std::sync::Mutex;
-static MSG_STORE: Mutex<Option<BTreeMap<u64, RemoteMessage>>> = Mutex::new(None);
+static MSG_STORE: Mutex<Option<BTreeMap<u64, MessageEnvelope<RemoteMessage>>>> = Mutex::new(None);
 
 fn init_msg_store() {
     let mut store = MSG_STORE.lock().unwrap();
@@ -775,7 +783,7 @@ fn init_msg_store() {
     }
 }
 
-fn encode_message(msg: &RemoteMessage) -> Vec<u8> {
+fn encode_message(msg: &MessageEnvelope<RemoteMessage>) -> Vec<u8> {
     init_msg_store();
     let id = NEXT_MSG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     MSG_STORE
@@ -787,7 +795,7 @@ fn encode_message(msg: &RemoteMessage) -> Vec<u8> {
     id.to_le_bytes().to_vec()
 }
 
-fn decode_message(payload: &Bytes) -> Option<RemoteMessage> {
+fn decode_message(payload: &Bytes) -> Option<MessageEnvelope<RemoteMessage>> {
     if payload.len() < 8 {
         return None;
     }

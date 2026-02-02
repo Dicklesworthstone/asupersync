@@ -238,7 +238,7 @@ impl VirtualTimerWheel {
     /// Returns all expired timers in deterministic order (sorted by deadline,
     /// then by timer_id within each deadline).
     pub fn advance_to(&mut self, target_tick: u64) -> Vec<ExpiredTimer> {
-        if target_tick <= self.current_tick {
+        if target_tick < self.current_tick {
             return Vec::new();
         }
 
@@ -516,6 +516,18 @@ mod tests {
         let mut wheel = VirtualTimerWheel::starting_at(100);
         let expired = wheel.advance_to(50);
         assert!(expired.is_empty());
+        assert_eq!(wheel.current_tick(), 100);
+    }
+
+    #[test]
+    fn advance_to_current_tick_fires_due_timers() {
+        let mut wheel = VirtualTimerWheel::starting_at(100);
+        let (_, waker) = counting_waker();
+        wheel.insert(100, waker);
+
+        let expired = wheel.advance_to(100);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].deadline, 100);
         assert_eq!(wheel.current_tick(), 100);
     }
 

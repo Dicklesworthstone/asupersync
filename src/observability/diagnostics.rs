@@ -28,7 +28,6 @@ use crate::tracing_compat::{debug, trace, warn};
 use crate::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Diagnostics engine for runtime troubleshooting.
 #[derive(Debug)]
@@ -277,7 +276,7 @@ impl Diagnostics {
 
         for (_, ob) in self.state.obligations.iter() {
             if ob.state == ObligationState::Reserved {
-                let age = Duration::from_nanos(now.duration_since(ob.reserved_at));
+                let age = std::time::Duration::from_nanos(now.duration_since(ob.reserved_at));
                 leaks.push(ObligationLeak {
                     obligation_id: ob.id,
                     obligation_type: format!("{:?}", ob.kind),
@@ -541,5 +540,400 @@ pub struct ObligationLeak {
     /// Region where the obligation was created/held.
     pub region_id: RegionId,
     /// Age since creation.
-    pub age: Duration,
+    pub age: std::time::Duration,
+}
+
+#[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync)]
+mod tests {
+    use super::*;
+    use crate::record::obligation::{ObligationKind, ObligationRecord};
+    use crate::record::region::RegionRecord;
+    use crate::record::task::{TaskRecord, TaskState};
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, CancelReason, Outcome};
+    use crate::util::ArenaIndex;
+    use std::sync::Arc;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn insert_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
+        let idx = state.regions.insert(RegionRecord::new(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            Some(parent),
+            Budget::INFINITE,
+        ));
+        let id = RegionId::from_arena(idx);
+        let record = state.regions.get_mut(idx).expect("child region missing");
+        record.id = id;
+        let added = state
+            .regions
+            .get(parent.arena_index())
+            .expect("parent missing")
+            .add_child(id);
+        crate::assert_with_log!(added.is_ok(), "child added", true, added.is_ok());
+        id
+    }
+
+    fn insert_task(state: &mut RuntimeState, region: RegionId, task_state: TaskState) -> TaskId {
+        let idx = state.tasks.insert(TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            region,
+            Budget::INFINITE,
+        ));
+        let id = TaskId::from_arena(idx);
+        let record = state.tasks.get_mut(idx).expect("task missing");
+        record.id = id;
+        record.state = task_state;
+        let added = state
+            .regions
+            .get(region.arena_index())
+            .expect("region missing")
+            .add_task(id);
+        crate::assert_with_log!(added.is_ok(), "task added", true, added.is_ok());
+        id
+    }
+
+    fn insert_obligation(
+        state: &mut RuntimeState,
+        region: RegionId,
+        holder: TaskId,
+        kind: ObligationKind,
+        reserved_at: Time,
+    ) -> ObligationId {
+        let idx = state.obligations.insert(ObligationRecord::new(
+            ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            kind,
+            holder,
+            region,
+            reserved_at,
+        ));
+        let id = ObligationId::from_arena(idx);
+        let record = state.obligations.get_mut(idx).expect("obligation missing");
+        record.id = id;
+        id
+    }
+
+    #[test]
+    fn test_explain_region_open_unknown_region_returns_reason() {
+        init_test("test_explain_region_open_unknown_region_returns_reason");
+        let state = Arc::new(RuntimeState::new());
+        let diagnostics = Diagnostics::new(state);
+        let missing = RegionId::new_for_test(99, 0);
+
+        let explanation = diagnostics.explain_region_open(missing);
+        crate::assert_with_log!(
+            explanation.region_state.is_none(),
+            "region_state none",
+            true,
+            explanation.region_state.is_none()
+        );
+        crate::assert_with_log!(
+            explanation.reasons.len() == 1,
+            "single reason",
+            1usize,
+            explanation.reasons.len()
+        );
+        let is_not_found = matches!(explanation.reasons.first(), Some(Reason::RegionNotFound));
+        crate::assert_with_log!(is_not_found, "region not found reason", true, is_not_found);
+        let has_recommendation = explanation
+            .recommendations
+            .iter()
+            .any(|rec| rec.contains("Verify region id"));
+        crate::assert_with_log!(
+            has_recommendation,
+            "recommendation present",
+            true,
+            has_recommendation
+        );
+        crate::test_complete!("test_explain_region_open_unknown_region_returns_reason");
+    }
+
+    #[test]
+    fn test_explain_region_open_closed_region_has_no_reasons() {
+        init_test("test_explain_region_open_closed_region_has_no_reasons");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state.region(root).expect("root missing");
+        let did_close =
+            region.begin_close(None) && region.begin_finalize() && region.complete_close();
+        crate::assert_with_log!(did_close, "region closed", true, did_close);
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let explanation = diagnostics.explain_region_open(root);
+        crate::assert_with_log!(
+            explanation.region_state == Some(RegionState::Closed),
+            "closed state",
+            true,
+            explanation.region_state == Some(RegionState::Closed)
+        );
+        crate::assert_with_log!(
+            explanation.reasons.is_empty(),
+            "no reasons",
+            true,
+            explanation.reasons.is_empty()
+        );
+        crate::assert_with_log!(
+            explanation.recommendations.is_empty(),
+            "no recommendations",
+            true,
+            explanation.recommendations.is_empty()
+        );
+        crate::test_complete!("test_explain_region_open_closed_region_has_no_reasons");
+    }
+
+    #[test]
+    fn test_explain_region_open_reports_children_tasks_obligations() {
+        init_test("test_explain_region_open_reports_children_tasks_obligations");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = insert_child_region(&mut state, root);
+
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+        let task = state
+            .tasks
+            .get_mut(task_id.arena_index())
+            .expect("task missing");
+        task.total_polls = 7;
+
+        let obligation_id = insert_obligation(
+            &mut state,
+            root,
+            task_id,
+            ObligationKind::SendPermit,
+            Time::from_millis(10),
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let explanation = diagnostics.explain_region_open(root);
+
+        let mut saw_child = false;
+        let mut saw_task = false;
+        let mut saw_obligation = false;
+        for reason in &explanation.reasons {
+            match reason {
+                Reason::ChildRegionOpen { child_id, .. } if *child_id == child => {
+                    saw_child = true;
+                }
+                Reason::TaskRunning {
+                    task_id: id,
+                    poll_count,
+                    ..
+                } if *id == task_id && *poll_count == 7 => {
+                    saw_task = true;
+                }
+                Reason::ObligationHeld {
+                    obligation_id: id,
+                    holder_task,
+                    ..
+                } if *id == obligation_id && *holder_task == task_id => {
+                    saw_obligation = true;
+                }
+                _ => {}
+            }
+        }
+        crate::assert_with_log!(saw_child, "child reason", true, saw_child);
+        crate::assert_with_log!(saw_task, "task reason", true, saw_task);
+        crate::assert_with_log!(saw_obligation, "obligation reason", true, saw_obligation);
+
+        let recs = &explanation.recommendations;
+        let has_child_rec = recs.iter().any(|r| r.contains("child regions"));
+        let has_task_rec = recs.iter().any(|r| r.contains("live tasks"));
+        let has_obligation_rec = recs.iter().any(|r| r.contains("obligations"));
+        crate::assert_with_log!(has_child_rec, "child rec", true, has_child_rec);
+        crate::assert_with_log!(has_task_rec, "task rec", true, has_task_rec);
+        crate::assert_with_log!(
+            has_obligation_rec,
+            "obligation rec",
+            true,
+            has_obligation_rec
+        );
+
+        let rendered = explanation.to_string();
+        crate::assert_with_log!(
+            rendered.contains("child region"),
+            "display includes child",
+            true,
+            rendered.contains("child region")
+        );
+        crate::assert_with_log!(
+            rendered.contains("obligation"),
+            "display includes obligation",
+            true,
+            rendered.contains("obligation")
+        );
+        crate::test_complete!("test_explain_region_open_reports_children_tasks_obligations");
+    }
+
+    #[test]
+    fn test_explain_region_open_nested_child_reports_immediate_child() {
+        init_test("test_explain_region_open_nested_child_reports_immediate_child");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = insert_child_region(&mut state, root);
+        let grandchild = insert_child_region(&mut state, child);
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let explanation = diagnostics.explain_region_open(child);
+
+        let saw_grandchild = explanation.reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                Reason::ChildRegionOpen { child_id, .. } if *child_id == grandchild
+            )
+        });
+        crate::assert_with_log!(saw_grandchild, "grandchild reason", true, saw_grandchild);
+        crate::test_complete!("test_explain_region_open_nested_child_reports_immediate_child");
+    }
+
+    #[test]
+    fn test_explain_task_blocked_running_notified_reports_schedule() {
+        init_test("test_explain_task_blocked_running_notified_reports_schedule");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Running);
+        let task = state
+            .tasks
+            .get_mut(task_id.arena_index())
+            .expect("task missing");
+        let notified = task.wake_state.notify();
+        crate::assert_with_log!(notified, "wake notified", true, notified);
+        task.waiters.push(TaskId::new_for_test(77, 0));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let explanation = diagnostics.explain_task_blocked(task_id);
+        crate::assert_with_log!(
+            matches!(explanation.block_reason, BlockReason::AwaitingSchedule),
+            "awaiting schedule",
+            true,
+            matches!(explanation.block_reason, BlockReason::AwaitingSchedule)
+        );
+        let has_waiters = explanation.details.iter().any(|d| d.contains("waiters"));
+        crate::assert_with_log!(has_waiters, "waiters detail", true, has_waiters);
+        crate::test_complete!("test_explain_task_blocked_running_notified_reports_schedule");
+    }
+
+    #[test]
+    fn test_explain_task_blocked_cancel_requested_includes_reason() {
+        init_test("test_explain_task_blocked_cancel_requested_includes_reason");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let reason = CancelReason::user("stop");
+        let cleanup_budget = reason.cleanup_budget();
+        let task_id = insert_task(
+            &mut state,
+            root,
+            TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            },
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let explanation = diagnostics.explain_task_blocked(task_id);
+        let matches_reason = matches!(
+            explanation.block_reason,
+            BlockReason::CancelRequested {
+                reason: CancelReasonInfo {
+                    kind: CancelKind::User,
+                    message: Some(_)
+                }
+            }
+        );
+        crate::assert_with_log!(matches_reason, "cancel requested", true, matches_reason);
+        let rendered = explanation.to_string();
+        crate::assert_with_log!(
+            rendered.contains("cancel requested"),
+            "display includes cancel",
+            true,
+            rendered.contains("cancel requested")
+        );
+        crate::test_complete!("test_explain_task_blocked_cancel_requested_includes_reason");
+    }
+
+    #[test]
+    fn test_explain_task_blocked_completed_reports_completed() {
+        init_test("test_explain_task_blocked_completed_reports_completed");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let explanation = diagnostics.explain_task_blocked(task_id);
+        crate::assert_with_log!(
+            matches!(explanation.block_reason, BlockReason::Completed),
+            "completed",
+            true,
+            matches!(explanation.block_reason, BlockReason::Completed)
+        );
+        crate::test_complete!("test_explain_task_blocked_completed_reports_completed");
+    }
+
+    #[test]
+    fn test_find_leaked_obligations_sorted_and_aged() {
+        init_test("test_find_leaked_obligations_sorted_and_aged");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = insert_child_region(&mut state, root);
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(100)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+
+        let root_task = insert_task(&mut state, root, TaskState::Running);
+        let child_task = insert_task(&mut state, child, TaskState::Running);
+
+        let root_ob = insert_obligation(
+            &mut state,
+            root,
+            root_task,
+            ObligationKind::Ack,
+            Time::from_millis(10),
+        );
+        let child_ob = insert_obligation(
+            &mut state,
+            child,
+            child_task,
+            ObligationKind::Lease,
+            Time::from_millis(20),
+        );
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let leaks = diagnostics.find_leaked_obligations();
+        crate::assert_with_log!(leaks.len() == 2, "two leaks", 2usize, leaks.len());
+
+        crate::assert_with_log!(
+            leaks[0].region_id == root,
+            "root first",
+            true,
+            leaks[0].region_id == root
+        );
+        crate::assert_with_log!(
+            leaks[1].region_id == child,
+            "child second",
+            true,
+            leaks[1].region_id == child
+        );
+        crate::assert_with_log!(
+            leaks[0].obligation_id == root_ob,
+            "root obligation id",
+            true,
+            leaks[0].obligation_id == root_ob
+        );
+        crate::assert_with_log!(
+            leaks[1].obligation_id == child_ob,
+            "child obligation id",
+            true,
+            leaks[1].obligation_id == child_ob
+        );
+
+        let root_age_ms = leaks[0].age.as_millis();
+        let child_age_ms = leaks[1].age.as_millis();
+        crate::assert_with_log!(root_age_ms == 90, "root age", 90u128, root_age_ms);
+        crate::assert_with_log!(child_age_ms == 80, "child age", 80u128, child_age_ms);
+
+        crate::test_complete!("test_find_leaked_obligations_sorted_and_aged");
+    }
 }

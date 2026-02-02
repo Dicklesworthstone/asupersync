@@ -49,7 +49,8 @@ pub use compat::{
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
 };
 pub use dpor::{
-    detect_races, estimated_classes, racing_events, BacktrackPoint, Race, RaceAnalysis,
+    detect_hb_races, detect_races, estimated_classes, racing_events, BacktrackPoint, DetectedRace,
+    HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind, RaceReport,
 };
 pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
 pub use event_structure::{Event, EventId, EventStructure, HdaCell, HdaComplex};
