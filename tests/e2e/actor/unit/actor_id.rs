@@ -25,12 +25,7 @@ fn actor_state_values_are_distinct() {
                 assert_with_log!(eq, "same state should equal itself", true, eq);
             } else {
                 let neq = a != b;
-                assert_with_log!(
-                    neq,
-                    &format!("{a:?} should not equal {b:?}"),
-                    true,
-                    neq
-                );
+                assert_with_log!(neq, &format!("{a:?} should not equal {b:?}"), true, neq);
             }
         }
     }

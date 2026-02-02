@@ -62,7 +62,7 @@ impl Actor for CounterActor {
             match msg {
                 CounterMessage::Increment(n) => {
                     self.count += n;
-                    self.log(&format!("increment:{n}->{}",self.count));
+                    self.log(&format!("increment:{n}->{}", self.count));
                 }
                 CounterMessage::Reset => {
                     self.count = 0;
@@ -175,7 +175,10 @@ impl Actor for FailingActor {
             self.log(&format!("failing:msg:{}", self.count));
             if self.count >= self.fail_after {
                 self.log("failing:panic!");
-                panic!("Intentional test failure after {} messages", self.fail_after);
+                panic!(
+                    "Intentional test failure after {} messages",
+                    self.fail_after
+                );
             }
         })
     }
