@@ -26,4 +26,8 @@ pub use sheaf::{
     SagaConstraint,
 };
 pub use span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
-pub use vclock::{CausalEvent, CausalOrder, CausalTracker, VectorClock};
+pub use vclock::{
+    CausalEvent, CausalOrder, CausalTracker, HybridClock, HybridTime, LamportClock, LamportTime,
+    LogicalClock, LogicalClockHandle, LogicalClockKind, LogicalClockMode, LogicalTime, VectorClock,
+    VectorClockHandle,
+};

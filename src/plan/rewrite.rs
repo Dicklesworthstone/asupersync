@@ -267,3 +267,173 @@ impl PlanDag {
         parents
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::init_test_logging;
+
+    fn init_test() {
+        init_test_logging();
+    }
+
+    fn shared_leaf_race_plan() -> (PlanDag, PlanId, PlanId, PlanId) {
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+        (dag, shared, left, right)
+    }
+
+    #[test]
+    fn test_apply_rewrites_empty_dag_no_steps() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_race_join_conservative_applies() {
+        init_test();
+        let (mut dag, shared, left, right) = shared_leaf_race_plan();
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert_eq!(report.steps().len(), 1);
+        let root = dag.root().expect("root set");
+        let PlanNode::Join { children } = dag.node(root).expect("root exists") else {
+            panic!("expected join at root");
+        };
+        assert!(children.contains(&shared));
+        let race_child = children
+            .iter()
+            .copied()
+            .find(|id| *id != shared)
+            .expect("race");
+        let PlanNode::Race { children } = dag.node(race_child).expect("race exists") else {
+            panic!("expected race child");
+        };
+        assert!(children.contains(&left));
+        assert!(children.contains(&right));
+    }
+
+    #[test]
+    fn test_dedup_race_join_conservative_rejects_non_leaf_shared() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let shared = dag.join(vec![a, b]);
+        let c = dag.leaf("c");
+        let d = dag.leaf("d");
+        let join_a = dag.join(vec![shared, c]);
+        let join_b = dag.join(vec![shared, d]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert!(report.is_empty());
+
+        let report = dag.apply_rewrites(
+            RewritePolicy::AssumeAssociativeComm,
+            &[RewriteRule::DedupRaceJoin],
+        );
+        assert_eq!(report.steps().len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_race_join_conservative_rejects_non_binary_joins() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let d = dag.leaf("d");
+        let join_a = dag.join(vec![shared, a, b]);
+        let join_b = dag.join(vec![shared, c, d]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert!(report.is_empty());
+
+        let report = dag.apply_rewrites(
+            RewritePolicy::AssumeAssociativeComm,
+            &[RewriteRule::DedupRaceJoin],
+        );
+        assert_eq!(report.steps().len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_race_join_idempotent_on_rewritten_shape() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let race = dag.race(vec![left, right]);
+        let join = dag.join(vec![shared, race]);
+        dag.set_root(join);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn test_apply_rewrites_handles_missing_child_gracefully() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let leaf = dag.leaf("leaf");
+        let missing = PlanId::new(999);
+        let join = dag.join(vec![leaf, missing]);
+        let race = dag.race(vec![join, leaf]);
+        dag.set_root(race);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert!(report.is_empty());
+        assert_eq!(dag.root(), Some(race));
+    }
+
+    #[test]
+    fn test_apply_rewrites_multiple_races_single_pass() {
+        init_test();
+        let (mut dag, _shared1, _left1, _right1) = shared_leaf_race_plan();
+        let shared2 = dag.leaf("shared2");
+        let left2 = dag.leaf("left2");
+        let right2 = dag.leaf("right2");
+        let join_a = dag.join(vec![shared2, left2]);
+        let join_b = dag.join(vec![shared2, right2]);
+        let race2 = dag.race(vec![join_a, join_b]);
+        let root = dag.join(vec![dag.root().expect("root"), race2]);
+        dag.set_root(root);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert_eq!(report.steps().len(), 2);
+        assert!(report
+            .steps()
+            .iter()
+            .all(|step| step.rule == RewriteRule::DedupRaceJoin));
+        let root = dag.root().expect("root");
+        let PlanNode::Join { children } = dag.node(root).expect("root exists") else {
+            panic!("expected join at root");
+        };
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_race_join_skips_single_child_race() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let leaf = dag.leaf("leaf");
+        let race = dag.race(vec![leaf]);
+        dag.set_root(race);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        assert!(report.is_empty());
+        assert_eq!(dag.root(), Some(race));
+    }
+}

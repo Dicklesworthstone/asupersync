@@ -80,6 +80,7 @@ impl LabRuntime {
             |chaos| Arc::new(LabReactor::with_chaos(chaos.clone())),
         );
         let mut state = RuntimeState::with_reactor(lab_reactor.clone());
+        state.set_logical_clock_mode(crate::trace::distributed::LogicalClockMode::Lamport);
         state.set_obligation_leak_response(if config.panic_on_obligation_leak {
             ObligationLeakResponse::Panic
         } else {
@@ -154,6 +155,12 @@ impl LabRuntime {
     #[must_use]
     pub fn trace(&self) -> &TraceBufferHandle {
         &self.state.trace
+    }
+
+    /// Returns a race report derived from the current trace buffer.
+    #[must_use]
+    pub fn detected_races(&self) -> crate::trace::dpor::RaceReport {
+        crate::trace::dpor::detect_hb_races(&self.state.trace.snapshot())
     }
 
     /// Returns a reference to the chaos statistics.

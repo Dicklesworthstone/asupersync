@@ -30,8 +30,498 @@
 //! ```
 
 use crate::remote::NodeId;
+use crate::time::{TimeSource, TimerDriverHandle, WallClock};
+use crate::types::Time;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Logical clock trait for causally ordering distributed events.
+///
+/// Uses `PartialOrd` so vector clocks (partial order) are supported.
+pub trait LogicalClock: Send + Sync {
+    /// The time representation produced by this clock.
+    type Time: Clone + PartialOrd + Send + Sync + 'static;
+
+    /// Records a local event and returns the updated time.
+    #[must_use]
+    fn tick(&self) -> Self::Time;
+
+    /// Updates the clock based on a received time and returns the updated time.
+    #[must_use]
+    fn receive(&self, sender_time: &Self::Time) -> Self::Time;
+
+    /// Returns the current time without ticking.
+    #[must_use]
+    fn now(&self) -> Self::Time;
+}
+
+/// Logical time for Lamport clocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LamportTime(u64);
+
+impl LamportTime {
+    /// Returns the raw counter value.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// Creates a Lamport time from a raw counter value.
+    #[must_use]
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Lamport logical clock (single counter).
+pub struct LamportClock {
+    counter: AtomicU64,
+}
+
+impl LamportClock {
+    /// Creates a new Lamport clock starting at zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Creates a Lamport clock starting at the given value.
+    #[must_use]
+    pub fn with_start(start: u64) -> Self {
+        Self {
+            counter: AtomicU64::new(start),
+        }
+    }
+
+    /// Returns the current Lamport time without incrementing.
+    #[must_use]
+    pub fn now(&self) -> LamportTime {
+        LamportTime(self.counter.load(Ordering::Acquire))
+    }
+
+    /// Records a local event and returns the updated time.
+    #[must_use]
+    pub fn tick(&self) -> LamportTime {
+        LamportTime(self.counter.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// Merges a received Lamport time and returns the updated time.
+    #[must_use]
+    pub fn receive(&self, sender: LamportTime) -> LamportTime {
+        let mut current = self.counter.load(Ordering::Acquire);
+        loop {
+            let next = current.max(sender.raw()) + 1;
+            match self
+                .counter
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::Relaxed)
+            {
+                Ok(_) => return LamportTime(next),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+impl Default for LamportClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for LamportClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LamportClock")
+            .field("counter", &self.counter.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl LogicalClock for LamportClock {
+    type Time = LamportTime;
+
+    fn tick(&self) -> Self::Time {
+        Self::tick(self)
+    }
+
+    fn receive(&self, sender_time: &Self::Time) -> Self::Time {
+        Self::receive(self, *sender_time)
+    }
+
+    fn now(&self) -> Self::Time {
+        Self::now(self)
+    }
+}
+
+/// Logical time for hybrid clocks (physical + logical).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HybridTime {
+    physical: Time,
+    logical: u64,
+}
+
+impl HybridTime {
+    /// Creates a new hybrid time.
+    #[must_use]
+    pub const fn new(physical: Time, logical: u64) -> Self {
+        Self { physical, logical }
+    }
+
+    /// Returns the physical component.
+    #[must_use]
+    pub const fn physical(self) -> Time {
+        self.physical
+    }
+
+    /// Returns the logical component.
+    #[must_use]
+    pub const fn logical(self) -> u64 {
+        self.logical
+    }
+}
+
+#[derive(Debug)]
+struct HybridState {
+    last_physical: Time,
+    logical: u64,
+}
+
+/// Hybrid logical clock (HLC) with a monotonic physical component.
+pub struct HybridClock {
+    time_source: Arc<dyn TimeSource>,
+    state: Mutex<HybridState>,
+}
+
+impl HybridClock {
+    /// Creates a new hybrid clock using the provided time source.
+    #[must_use]
+    pub fn new(time_source: Arc<dyn TimeSource>) -> Self {
+        let now = time_source.now();
+        Self {
+            time_source,
+            state: Mutex::new(HybridState {
+                last_physical: now,
+                logical: 0,
+            }),
+        }
+    }
+
+    /// Returns the current hybrid time without ticking.
+    #[must_use]
+    pub fn now(&self) -> HybridTime {
+        let state = self.state.lock().unwrap();
+        let physical = self.physical_now(&state);
+        HybridTime::new(physical, state.logical)
+    }
+
+    /// Records a local event and returns the updated time.
+    #[must_use]
+    pub fn tick(&self) -> HybridTime {
+        let mut state = self.state.lock().unwrap();
+        let physical = self.physical_now(&state);
+        if physical == state.last_physical {
+            state.logical = state.logical.saturating_add(1);
+        } else {
+            state.last_physical = physical;
+            state.logical = 0;
+        }
+        HybridTime::new(state.last_physical, state.logical)
+    }
+
+    /// Merges a received hybrid time and returns the updated time.
+    #[must_use]
+    pub fn receive(&self, sender: HybridTime) -> HybridTime {
+        let mut state = self.state.lock().unwrap();
+        let physical_now = self.physical_now(&state);
+        let max_physical = physical_now.max(state.last_physical).max(sender.physical);
+
+        let next_logical = if max_physical == state.last_physical && max_physical == sender.physical
+        {
+            state.logical.max(sender.logical).saturating_add(1)
+        } else if max_physical == state.last_physical {
+            state.logical.saturating_add(1)
+        } else if max_physical == sender.physical {
+            sender.logical.saturating_add(1)
+        } else {
+            0
+        };
+
+        state.last_physical = max_physical;
+        state.logical = next_logical;
+        HybridTime::new(state.last_physical, state.logical)
+    }
+
+    fn physical_now(&self, state: &HybridState) -> Time {
+        let physical = self.time_source.now();
+        if physical < state.last_physical {
+            state.last_physical
+        } else {
+            physical
+        }
+    }
+}
+
+impl fmt::Debug for HybridClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.lock().unwrap();
+        f.debug_struct("HybridClock")
+            .field("last_physical", &state.last_physical)
+            .field("logical", &state.logical)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LogicalClock for HybridClock {
+    type Time = HybridTime;
+
+    fn tick(&self) -> Self::Time {
+        Self::tick(self)
+    }
+
+    fn receive(&self, sender_time: &Self::Time) -> Self::Time {
+        Self::receive(self, *sender_time)
+    }
+
+    fn now(&self) -> Self::Time {
+        Self::now(self)
+    }
+}
+
+/// Logical clock wrapper for vector clocks with a local node identity.
+pub struct VectorClockHandle {
+    /// Local node identity for this vector clock.
+    node: NodeId,
+    /// Internal vector clock state protected by a mutex.
+    clock: Mutex<VectorClock>,
+}
+
+impl VectorClockHandle {
+    /// Creates a new vector clock handle for the given node.
+    #[must_use]
+    pub fn new(node: NodeId) -> Self {
+        Self {
+            node,
+            clock: Mutex::new(VectorClock::new()),
+        }
+    }
+
+    /// Returns the current vector clock snapshot.
+    #[must_use]
+    pub fn current(&self) -> VectorClock {
+        self.clock.lock().unwrap().clone()
+    }
+}
+
+impl fmt::Debug for VectorClockHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VectorClockHandle")
+            .field("node", &self.node)
+            .field("clock", &self.clock.lock().unwrap())
+            .finish()
+    }
+}
+
+impl LogicalClock for VectorClockHandle {
+    type Time = VectorClock;
+
+    fn tick(&self) -> Self::Time {
+        let mut clock = self.clock.lock().unwrap();
+        clock.increment(&self.node);
+        clock.clone()
+    }
+
+    fn receive(&self, sender_time: &Self::Time) -> Self::Time {
+        let mut clock = self.clock.lock().unwrap();
+        clock.receive(&self.node, sender_time);
+        clock.clone()
+    }
+
+    fn now(&self) -> Self::Time {
+        self.clock.lock().unwrap().clone()
+    }
+}
+
+/// Logical time values for heterogeneous clock types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogicalTime {
+    /// Lamport clock time.
+    Lamport(LamportTime),
+    /// Vector clock time.
+    Vector(VectorClock),
+    /// Hybrid clock time.
+    Hybrid(HybridTime),
+}
+
+impl LogicalTime {
+    /// Returns the logical clock kind for this time value.
+    #[must_use]
+    pub const fn kind(&self) -> LogicalClockKind {
+        match self {
+            Self::Lamport(_) => LogicalClockKind::Lamport,
+            Self::Vector(_) => LogicalClockKind::Vector,
+            Self::Hybrid(_) => LogicalClockKind::Hybrid,
+        }
+    }
+}
+
+impl PartialOrd for LogicalTime {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Lamport(a), Self::Lamport(b)) => a.partial_cmp(b),
+            (Self::Vector(a), Self::Vector(b)) => a.partial_cmp(b),
+            (Self::Hybrid(a), Self::Hybrid(b)) => a.partial_cmp(b),
+            _ => None,
+        }
+    }
+}
+
+/// Kind of logical clock in use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalClockKind {
+    /// Lamport clock.
+    Lamport,
+    /// Vector clock.
+    Vector,
+    /// Hybrid clock.
+    Hybrid,
+}
+
+/// Runtime-selected logical clock configuration.
+#[derive(Clone, Debug)]
+pub enum LogicalClockMode {
+    /// Use a Lamport clock.
+    Lamport,
+    /// Use a vector clock with the provided local node id.
+    Vector {
+        /// Local node identity for vector clock tracking.
+        node: NodeId,
+    },
+    /// Use a hybrid logical clock.
+    Hybrid,
+}
+
+/// Opaque handle to a logical clock instance.
+#[derive(Clone)]
+pub enum LogicalClockHandle {
+    /// Lamport clock handle.
+    Lamport(Arc<LamportClock>),
+    /// Vector clock handle.
+    Vector(Arc<VectorClockHandle>),
+    /// Hybrid clock handle.
+    Hybrid(Arc<HybridClock>),
+}
+
+impl LogicalClockHandle {
+    /// Returns the kind of clock this handle wraps.
+    #[must_use]
+    pub const fn kind(&self) -> LogicalClockKind {
+        match self {
+            Self::Lamport(_) => LogicalClockKind::Lamport,
+            Self::Vector(_) => LogicalClockKind::Vector,
+            Self::Hybrid(_) => LogicalClockKind::Hybrid,
+        }
+    }
+
+    /// Records a local event and returns the updated logical time.
+    #[must_use]
+    pub fn tick(&self) -> LogicalTime {
+        match self {
+            Self::Lamport(clock) => LogicalTime::Lamport(clock.tick()),
+            Self::Vector(clock) => LogicalTime::Vector(clock.tick()),
+            Self::Hybrid(clock) => LogicalTime::Hybrid(clock.tick()),
+        }
+    }
+
+    /// Updates the clock using a received logical time and returns the updated time.
+    #[must_use]
+    pub fn receive(&self, sender_time: &LogicalTime) -> LogicalTime {
+        match (self, sender_time) {
+            (Self::Lamport(clock), LogicalTime::Lamport(time)) => {
+                LogicalTime::Lamport(clock.receive(*time))
+            }
+            (Self::Vector(clock), LogicalTime::Vector(time)) => {
+                LogicalTime::Vector(clock.receive(time))
+            }
+            (Self::Hybrid(clock), LogicalTime::Hybrid(time)) => {
+                LogicalTime::Hybrid(clock.receive(*time))
+            }
+            // Mismatched clock kinds: fall back to a local tick.
+            _ => self.tick(),
+        }
+    }
+
+    /// Returns the current logical time without ticking.
+    #[must_use]
+    pub fn now(&self) -> LogicalTime {
+        match self {
+            Self::Lamport(clock) => LogicalTime::Lamport(clock.now()),
+            Self::Vector(clock) => LogicalTime::Vector(clock.now()),
+            Self::Hybrid(clock) => LogicalTime::Hybrid(clock.now()),
+        }
+    }
+}
+
+impl fmt::Debug for LogicalClockHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lamport(_) => f.write_str("LogicalClockHandle::Lamport"),
+            Self::Vector(_) => f.write_str("LogicalClockHandle::Vector"),
+            Self::Hybrid(_) => f.write_str("LogicalClockHandle::Hybrid"),
+        }
+    }
+}
+
+impl Default for LogicalClockHandle {
+    fn default() -> Self {
+        Self::Lamport(Arc::new(LamportClock::new()))
+    }
+}
+
+impl LogicalClockMode {
+    /// Builds a logical clock handle for the given timer driver context.
+    #[must_use]
+    pub fn build_handle(&self, timer_driver: Option<TimerDriverHandle>) -> LogicalClockHandle {
+        match self {
+            Self::Lamport => LogicalClockHandle::Lamport(Arc::new(LamportClock::new())),
+            Self::Vector { node } => {
+                LogicalClockHandle::Vector(Arc::new(VectorClockHandle::new(node.clone())))
+            }
+            Self::Hybrid => {
+                let time_source: Arc<dyn TimeSource> = match timer_driver {
+                    Some(driver) => Arc::new(TimerDriverSource::new(driver)),
+                    None => Arc::new(WallClock::new()),
+                };
+                LogicalClockHandle::Hybrid(Arc::new(HybridClock::new(time_source)))
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TimerDriverSource {
+    timer: TimerDriverHandle,
+}
+
+impl TimerDriverSource {
+    fn new(timer: TimerDriverHandle) -> Self {
+        Self { timer }
+    }
+}
+
+impl fmt::Debug for TimerDriverSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TimerDriverSource").finish()
+    }
+}
+
+impl TimeSource for TimerDriverSource {
+    fn now(&self) -> Time {
+        self.timer.now()
+    }
+}
 
 /// A vector clock for causal ordering in a distributed system.
 ///
@@ -341,6 +831,8 @@ impl CausalTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::VirtualClock;
+    use std::sync::Arc;
 
     fn node(name: &str) -> NodeId {
         NodeId::new(name)
@@ -375,6 +867,32 @@ mod tests {
         assert_eq!(a.causal_order(&b), CausalOrder::Concurrent);
         assert!(a.is_concurrent_with(&b));
         assert_eq!(a.partial_cmp(&b), None);
+    }
+
+    #[test]
+    fn lamport_tick_and_receive() {
+        let clock = LamportClock::new();
+        let t1 = clock.tick();
+        let t2 = clock.tick();
+        assert!(t2 > t1);
+
+        let remote = LamportTime::from_raw(10);
+        let merged = clock.receive(remote);
+        assert!(merged.raw() > remote.raw());
+    }
+
+    #[test]
+    fn hybrid_clock_deterministic_with_virtual_time() {
+        let virtual_clock = Arc::new(VirtualClock::new());
+        let hlc = HybridClock::new(virtual_clock.clone());
+
+        let t1 = hlc.tick();
+        let t2 = hlc.tick();
+        assert!(t2 >= t1);
+
+        virtual_clock.advance(1_000);
+        let t3 = hlc.tick();
+        assert!(t3.physical() >= t2.physical());
     }
 
     #[test]
