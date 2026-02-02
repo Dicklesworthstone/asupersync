@@ -268,6 +268,44 @@ impl IoUringFile {
         Ok(new_pos)
     }
 
+    /// Truncates or extends the underlying file to the specified length.
+    ///
+    /// Uses `ftruncate` syscall (no io_uring opcode for truncate).
+    pub fn set_len(&self, size: u64) -> io::Result<()> {
+        let fd = self.inner.fd.as_raw_fd();
+        // SAFETY: ftruncate is safe with a valid fd.
+        let result = unsafe { libc::ftruncate(fd, size as libc::off_t) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // If position is past new length, clamp it
+        let pos = self.inner.position.load(Ordering::Relaxed);
+        if pos > size {
+            self.inner.position.store(size, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Queries metadata about the underlying file via `fstat`.
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        let fd = self.inner.fd.as_raw_fd();
+        // SAFETY: We borrow the fd temporarily; the OwnedFd still owns it.
+        let std_file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let meta = std_file.metadata();
+        // Prevent the std File from closing our fd
+        std::mem::forget(std_file);
+        meta
+    }
+
+    /// Changes the permissions on the underlying file.
+    pub fn set_permissions(&self, perm: std::fs::Permissions) -> io::Result<()> {
+        let fd = self.inner.fd.as_raw_fd();
+        let std_file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let result = std_file.set_permissions(perm);
+        std::mem::forget(std_file);
+        result
+    }
+
     /// Returns the raw file descriptor.
     #[must_use]
     pub fn as_raw_fd(&self) -> RawFd {
@@ -623,5 +661,154 @@ mod tests {
             file.sync_all().await.unwrap();
         });
         crate::test_complete!("test_uring_file_sync_data");
+    }
+
+    #[test]
+    fn test_uring_file_set_len_truncate() {
+        init_test("test_uring_file_set_len_truncate");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_truncate_test.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            // Write 20 bytes
+            file.write(b"01234567890123456789").await.unwrap();
+            file.sync_all().await.unwrap();
+
+            // Truncate to 10
+            file.set_len(10).unwrap();
+
+            // Position should be clamped from 19 to 10
+            crate::assert_with_log!(
+                file.position() <= 10,
+                "position clamped after truncate",
+                true,
+                file.position() <= 10
+            );
+
+            // Read back and verify
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let mut buf = vec![0u8; 32];
+            let n = file.read(&mut buf).await.unwrap();
+            crate::assert_with_log!(n == 10, "truncated read length", 10usize, n);
+            crate::assert_with_log!(
+                &buf[..n] == b"0123456789",
+                "truncated content",
+                "0123456789",
+                String::from_utf8_lossy(&buf[..n])
+            );
+        });
+        crate::test_complete!("test_uring_file_set_len_truncate");
+    }
+
+    #[test]
+    fn test_uring_file_set_len_extend() {
+        init_test("test_uring_file_set_len_extend");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_extend_test.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            file.write(b"hello").await.unwrap();
+            file.sync_all().await.unwrap();
+
+            // Extend to 10 bytes (zero-filled beyond 5)
+            file.set_len(10).unwrap();
+
+            let meta = file.metadata().unwrap();
+            crate::assert_with_log!(meta.len() == 10, "extended length", 10u64, meta.len());
+
+            // Read the extended region
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let mut buf = vec![0u8; 10];
+            let n = file.read_at(&mut buf, 0).await.unwrap();
+            crate::assert_with_log!(n == 10, "read length", 10usize, n);
+            crate::assert_with_log!(
+                &buf[..5] == b"hello",
+                "original content preserved",
+                "hello",
+                String::from_utf8_lossy(&buf[..5])
+            );
+            crate::assert_with_log!(
+                buf[5..] == [0u8; 5],
+                "extended bytes are zero",
+                true,
+                buf[5..] == [0u8; 5]
+            );
+        });
+        crate::test_complete!("test_uring_file_set_len_extend");
+    }
+
+    #[test]
+    fn test_uring_file_metadata() {
+        init_test("test_uring_file_metadata");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_metadata_test.txt");
+
+            let file = IoUringFile::create(&path).unwrap();
+            file.write(b"metadata test").await.unwrap();
+            file.sync_all().await.unwrap();
+
+            let meta = file.metadata().unwrap();
+            crate::assert_with_log!(meta.is_file(), "is_file", true, meta.is_file());
+            crate::assert_with_log!(meta.len() == 13, "file length", 13u64, meta.len());
+        });
+        crate::test_complete!("test_uring_file_metadata");
+    }
+
+    #[test]
+    fn test_uring_file_large_io() {
+        init_test("test_uring_file_large_io");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_large_test.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            // Write 64KB of data in 4KB chunks
+            let data: Vec<u8> = (0..65536u32).map(|i| (i % 256) as u8).collect();
+            let mut written = 0usize;
+            while written < data.len() {
+                let end = std::cmp::min(written + 4096, data.len());
+                let n = file.write_at(&data[written..end], written as u64).await.unwrap();
+                written += n;
+            }
+            file.sync_all().await.unwrap();
+
+            // Read back in one shot and verify
+            let mut buf = vec![0u8; 65536];
+            let mut read_total = 0usize;
+            while read_total < buf.len() {
+                let n = file
+                    .read_at(&mut buf[read_total..], read_total as u64)
+                    .await
+                    .unwrap();
+                if n == 0 {
+                    break;
+                }
+                read_total += n;
+            }
+            crate::assert_with_log!(read_total == 65536, "total read", 65536usize, read_total);
+            crate::assert_with_log!(buf == data, "data integrity", true, buf == data);
+        });
+        crate::test_complete!("test_uring_file_large_io");
     }
 }
