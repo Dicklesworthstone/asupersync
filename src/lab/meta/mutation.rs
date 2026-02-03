@@ -1,8 +1,11 @@
 //! Built-in meta-mutations for testing the oracle suite.
 
+use crate::actor::ActorId;
 use crate::lab::oracle::{CapabilityKind, OracleViolation};
 use crate::record::ObligationKind;
-use crate::types::{Budget, CancelReason};
+use crate::supervision::{EscalationPolicy, RestartPolicy};
+use crate::types::{Budget, CancelReason, TaskId};
+use crate::util::ArenaIndex;
 
 use super::runner::MetaHarness;
 
@@ -68,6 +71,12 @@ pub enum BuiltinMutation {
     DeadlineMonotoneChildUnbounded,
     /// Cancel does not propagate to child region.
     CancelPropagationMissingChild,
+    /// Actor not stopped before region close.
+    ActorLeak,
+    /// Supervision restart limit exceeded without escalation.
+    SupervisionRestartLimitExceeded,
+    /// Mailbox capacity exceeded.
+    MailboxCapacityExceeded,
 }
 
 /// Returns all built-in mutations in a stable order.
@@ -83,6 +92,9 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
         BuiltinMutation::AmbientAuthoritySpawnWithoutCapability,
         BuiltinMutation::DeadlineMonotoneChildUnbounded,
         BuiltinMutation::CancelPropagationMissingChild,
+        BuiltinMutation::ActorLeak,
+        BuiltinMutation::SupervisionRestartLimitExceeded,
+        BuiltinMutation::MailboxCapacityExceeded,
     ]
 }
 
@@ -102,6 +114,9 @@ impl BuiltinMutation {
             }
             Self::DeadlineMonotoneChildUnbounded => "mutation_deadline_child_unbounded",
             Self::CancelPropagationMissingChild => "mutation_cancel_missing_child",
+            Self::ActorLeak => "mutation_actor_leak",
+            Self::SupervisionRestartLimitExceeded => "mutation_supervision_restart_limit",
+            Self::MailboxCapacityExceeded => "mutation_mailbox_capacity_exceeded",
         }
     }
 
@@ -118,6 +133,9 @@ impl BuiltinMutation {
             Self::AmbientAuthoritySpawnWithoutCapability => INVARIANT_AMBIENT_AUTHORITY,
             Self::DeadlineMonotoneChildUnbounded => INVARIANT_DEADLINE_MONOTONE,
             Self::CancelPropagationMissingChild => INVARIANT_CANCELLATION_PROTOCOL,
+            Self::ActorLeak => INVARIANT_ACTOR_LEAK,
+            Self::SupervisionRestartLimitExceeded => INVARIANT_SUPERVISION,
+            Self::MailboxCapacityExceeded => INVARIANT_MAILBOX,
         }
     }
 
@@ -132,6 +150,9 @@ impl BuiltinMutation {
             Self::AmbientAuthoritySpawnWithoutCapability => baseline_ambient_authority(harness),
             Self::DeadlineMonotoneChildUnbounded => baseline_deadline_monotone(harness),
             Self::CancelPropagationMissingChild => baseline_cancel_propagation(harness),
+            Self::ActorLeak => baseline_actor_leak(harness),
+            Self::SupervisionRestartLimitExceeded => baseline_supervision_restart(harness),
+            Self::MailboxCapacityExceeded => baseline_mailbox_capacity(harness),
         }
     }
 
@@ -146,8 +167,15 @@ impl BuiltinMutation {
             Self::AmbientAuthoritySpawnWithoutCapability => mutation_ambient_authority(harness),
             Self::DeadlineMonotoneChildUnbounded => mutation_deadline_monotone(harness),
             Self::CancelPropagationMissingChild => mutation_cancel_propagation(harness),
+            Self::ActorLeak => mutation_actor_leak(harness),
+            Self::SupervisionRestartLimitExceeded => mutation_supervision_restart(harness),
+            Self::MailboxCapacityExceeded => mutation_mailbox_capacity(harness),
         }
     }
+}
+
+fn actor(n: u32) -> ActorId {
+    ActorId::from_task(TaskId::from_arena(ArenaIndex::new(n, 0)))
 }
 
 fn baseline_task_leak(harness: &mut MetaHarness) {

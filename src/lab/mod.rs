@@ -94,9 +94,10 @@ pub use oracle::{
     assert_deterministic, assert_deterministic_multi, ActorLeakOracle, ActorLeakViolation,
     DeterminismOracle, DeterminismViolation, FinalizerId, FinalizerOracle, FinalizerViolation,
     LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
-    ObligationLeakOracle, ObligationLeakViolation, OracleSuite, OracleViolation, QuiescenceOracle,
-    QuiescenceViolation, SupervisionOracle, SupervisionViolation, SupervisionViolationKind,
-    TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
+    ObligationLeakOracle, ObligationLeakViolation, OracleEntryReport, OracleReport, OracleStats,
+    OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation, SupervisionOracle,
+    SupervisionViolation, SupervisionViolationKind, TaskLeakOracle, TaskLeakViolation,
+    TraceEventSummary,
 };
 pub use replay::{
     compare_normalized, normalize_for_replay, normalize_for_replay_with_config, traces_equivalent,
