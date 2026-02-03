@@ -1151,6 +1151,24 @@ impl TestContext {
         );
     }
 
+    /// Derive a component-specific seed from this context's root seed.
+    #[must_use]
+    pub fn component_seed(&self, component: &str) -> u64 {
+        derive_component_seed(self.seed, component)
+    }
+
+    /// Derive a scenario-specific seed from this context's root seed.
+    #[must_use]
+    pub fn scenario_seed(&self, scenario: &str) -> u64 {
+        derive_scenario_seed(self.seed, scenario)
+    }
+
+    /// Derive an entropy seed for a given iteration index.
+    #[must_use]
+    pub fn entropy_seed(&self, index: u64) -> u64 {
+        derive_entropy_seed(self.seed, index)
+    }
+
     /// Emit a structured error dump with full context for failure triage.
     pub fn log_failure(&self, reason: &str) {
         tracing::error!(
@@ -1175,6 +1193,966 @@ impl std::fmt::Display for TestContext {
             self.subsystem.as_deref().unwrap_or("-"),
             self.invariant.as_deref().unwrap_or("-"),
         )
+    }
+}
+
+// ============================================================================
+// Seed Derivation — Canonical taxonomy and propagation rules
+// ============================================================================
+//
+// Seed taxonomy (all seeds derive from a single root):
+//
+//   root_seed                         — top-level test seed (from env, CLI, or hardcoded)
+//     ├── scenario_seed(root, name)   — per-scenario derivation (deterministic)
+//     ├── component_seed(root, comp)  — per-subsystem (scheduler, io, rng, etc.)
+//     └── entropy_seed(root, idx)     — per-iteration for property/fuzz tests
+//
+// Derivation formula:
+//   derived = FNV-1a(root ⊕ tag_bytes)
+//
+// This avoids DefaultHasher (which is randomized per-process on some targets)
+// and ensures cross-platform determinism.
+
+/// Derive a deterministic seed for a named component from a root seed.
+///
+/// Uses FNV-1a hashing for cross-platform determinism.
+#[must_use]
+pub fn derive_component_seed(root: u64, component: &str) -> u64 {
+    fnv1a_mix(root, component.as_bytes())
+}
+
+/// Derive a deterministic seed for a named scenario from a root seed.
+#[must_use]
+pub fn derive_scenario_seed(root: u64, scenario: &str) -> u64 {
+    let tag = format!("scenario:{scenario}");
+    fnv1a_mix(root, tag.as_bytes())
+}
+
+/// Derive a deterministic entropy seed for a given iteration index.
+#[must_use]
+pub fn derive_entropy_seed(root: u64, index: u64) -> u64 {
+    fnv1a_mix(root, &index.to_le_bytes())
+}
+
+/// FNV-1a-based deterministic mixing function.
+fn fnv1a_mix(root: u64, tag: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in root.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for &byte in tag {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+// ============================================================================
+// Artifact Schema — Versioned, deterministic test artifacts
+// ============================================================================
+
+/// Current artifact schema version.
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
+
+/// A reproducibility manifest for a test failure or notable execution.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReproManifest {
+    /// Schema version for forward compatibility.
+    pub schema_version: u32,
+    /// Root seed used for the test execution.
+    pub seed: u64,
+    /// Scenario identifier (test name or scenario tag).
+    pub scenario_id: String,
+    /// Entropy seed derived from root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entropy_seed: Option<u64>,
+    /// Hash of the test configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+    /// Fingerprint of the execution trace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_fingerprint: Option<String>,
+    /// Digest of the test input data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_digest: Option<String>,
+    /// Oracle violations detected during the execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oracle_violations: Vec<String>,
+    /// Whether the execution passed or failed.
+    pub passed: bool,
+    /// Subsystem under test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    /// Invariant being verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invariant: Option<String>,
+    /// Relative path to the trace file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_file: Option<String>,
+    /// Relative path to the failing input file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_file: Option<String>,
+}
+
+impl ReproManifest {
+    /// Create a new manifest with required fields.
+    #[must_use]
+    pub fn new(seed: u64, scenario_id: &str, passed: bool) -> Self {
+        Self {
+            schema_version: ARTIFACT_SCHEMA_VERSION,
+            seed,
+            scenario_id: scenario_id.to_string(),
+            entropy_seed: None,
+            config_hash: None,
+            trace_fingerprint: None,
+            input_digest: None,
+            oracle_violations: Vec::new(),
+            passed,
+            subsystem: None,
+            invariant: None,
+            trace_file: None,
+            input_file: None,
+        }
+    }
+
+    /// Create a manifest from a [`TestContext`] and pass/fail status.
+    #[must_use]
+    pub fn from_context(ctx: &TestContext, passed: bool) -> Self {
+        Self {
+            schema_version: ARTIFACT_SCHEMA_VERSION,
+            seed: ctx.seed,
+            scenario_id: ctx.test_id.clone(),
+            entropy_seed: None,
+            config_hash: None,
+            trace_fingerprint: None,
+            input_digest: None,
+            oracle_violations: Vec::new(),
+            passed,
+            subsystem: ctx.subsystem.clone(),
+            invariant: ctx.invariant.clone(),
+            trace_file: None,
+            input_file: None,
+        }
+    }
+
+    /// Serialize to pretty-printed JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Write this manifest to a file at the canonical artifact path.
+    pub fn write_to_dir(&self, base_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        let dir = base_dir
+            .join(&self.scenario_id)
+            .join(format!("0x{:X}", self.seed));
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("manifest.json");
+        let json = self
+            .to_json()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&path, json)?;
+        tracing::info!(
+            path = %path.display(),
+            scenario = %self.scenario_id,
+            seed = %format_args!("0x{:X}", self.seed),
+            "wrote repro manifest"
+        );
+        Ok(path)
+    }
+}
+
+/// Load a [`ReproManifest`] from a JSON file.
+pub fn load_repro_manifest(path: &std::path::Path) -> Result<ReproManifest, std::io::Error> {
+    let content = std::fs::read_to_string(path)?;
+    serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Create a [`TestContext`] from a [`ReproManifest`] for replay.
+#[must_use]
+pub fn replay_context_from_manifest(manifest: &ReproManifest) -> TestContext {
+    let mut ctx = TestContext::new(&manifest.scenario_id, manifest.seed);
+    if let Some(ref subsystem) = manifest.subsystem {
+        ctx = ctx.with_subsystem(subsystem);
+    }
+    if let Some(ref invariant) = manifest.invariant {
+        ctx = ctx.with_invariant(invariant);
+    }
+    ctx
+}
+
+// ============================================================================
+// E2E Environment Orchestration
+// ============================================================================
+
+/// An OS-assigned ephemeral port with a label for identification.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AllocatedPort {
+    /// Human-readable label.
+    pub label: String,
+    /// The allocated port number.
+    pub port: u16,
+}
+
+/// Manages allocation of OS-assigned ephemeral ports for test isolation.
+#[derive(Debug)]
+pub struct PortAllocator {
+    entries: Vec<PortEntry>,
+}
+
+#[derive(Debug)]
+struct PortEntry {
+    label: String,
+    port: u16,
+    listener: Option<std::net::TcpListener>,
+}
+
+impl PortAllocator {
+    /// Create a new, empty allocator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Allocate a single ephemeral port with a label.
+    pub fn allocate(&mut self, label: &str) -> std::io::Result<u16> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        tracing::debug!(label = %label, port = port, "allocated ephemeral port");
+        self.entries.push(PortEntry {
+            label: label.to_string(),
+            port,
+            listener: Some(listener),
+        });
+        Ok(port)
+    }
+
+    /// Allocate `count` ephemeral ports with a shared label prefix.
+    pub fn allocate_n(&mut self, label: &str, count: usize) -> std::io::Result<Vec<u16>> {
+        let mut ports = Vec::with_capacity(count);
+        for i in 0..count {
+            let suffixed = format!("{label}_{i}");
+            ports.push(self.allocate(&suffixed)?);
+        }
+        Ok(ports)
+    }
+
+    /// Release all held ports.
+    pub fn release_all(&mut self) {
+        for entry in &mut self.entries {
+            entry.listener = None;
+        }
+        tracing::debug!(count = self.entries.len(), "released all held ports");
+    }
+
+    /// Returns the list of allocated ports with their labels.
+    #[must_use]
+    pub fn allocated_ports(&self) -> Vec<AllocatedPort> {
+        self.entries
+            .iter()
+            .map(|e| AllocatedPort {
+                label: e.label.clone(),
+                port: e.port,
+            })
+            .collect()
+    }
+
+    /// Look up a port by label.
+    #[must_use]
+    pub fn port_for(&self, label: &str) -> Option<u16> {
+        self.entries
+            .iter()
+            .find(|e| e.label == label)
+            .map(|e| e.port)
+    }
+
+    /// Returns the number of currently allocated ports.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl Default for PortAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Trait for deterministic fixture services in E2E tests.
+pub trait FixtureService: std::fmt::Debug {
+    /// Returns the service name.
+    fn name(&self) -> &str;
+    /// Start the service.
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>>;
+    /// Stop the service.
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>>;
+    /// Returns `true` if the service is healthy.
+    fn is_healthy(&self) -> bool;
+}
+
+#[derive(Debug)]
+struct ServiceEntry {
+    service: Box<dyn FixtureService>,
+    started_at: Instant,
+}
+
+/// Structured metadata about the test environment.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvironmentMetadata {
+    /// Operating system.
+    pub os: &'static str,
+    /// CPU architecture.
+    pub arch: &'static str,
+    /// Pointer width in bits.
+    pub pointer_width: u32,
+    /// Test identifier.
+    pub test_id: String,
+    /// Root seed.
+    pub seed: u64,
+    /// Allocated ports with labels.
+    pub ports: Vec<AllocatedPort>,
+    /// Names of registered fixture services.
+    pub services: Vec<String>,
+}
+
+impl EnvironmentMetadata {
+    /// Emit all metadata fields as a structured tracing event.
+    pub fn log(&self) {
+        tracing::info!(
+            test_id = %self.test_id,
+            seed = %format_args!("0x{:X}", self.seed),
+            os = %self.os,
+            arch = %self.arch,
+            pointer_width = self.pointer_width,
+            port_count = self.ports.len(),
+            service_count = self.services.len(),
+            "E2E ENVIRONMENT METADATA"
+        );
+    }
+
+    /// Serialize to pretty-printed JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Write metadata to a file alongside other test artifacts.
+    pub fn write_to_dir(&self, base_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        let safe_id = self.test_id.replace(|c: char| !c.is_alphanumeric(), "_");
+        let dir = base_dir.join(&safe_id);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("environment.json");
+        let json = self
+            .to_json()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&path, json)?;
+        tracing::info!(path = %path.display(), test_id = %self.test_id, "wrote environment metadata");
+        Ok(path)
+    }
+}
+
+impl std::fmt::Display for EnvironmentMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "env[test_id={} seed=0x{:X} os={} arch={} ports={} services={}]",
+            self.test_id,
+            self.seed,
+            self.os,
+            self.arch,
+            self.ports.len(),
+            self.services.len(),
+        )
+    }
+}
+
+/// Hermetic E2E test environment with managed services, ports, and metadata.
+pub struct TestEnvironment {
+    context: TestContext,
+    ports: PortAllocator,
+    services: Vec<ServiceEntry>,
+    cleanup_fns: Vec<Box<dyn FnOnce()>>,
+    torn_down: bool,
+}
+
+impl std::fmt::Debug for TestEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestEnvironment")
+            .field("context", &self.context)
+            .field("ports", &self.ports)
+            .field("services", &self.services)
+            .field(
+                "cleanup_fns",
+                &format_args!("[{} fns]", self.cleanup_fns.len()),
+            )
+            .field("torn_down", &self.torn_down)
+            .finish()
+    }
+}
+
+impl TestEnvironment {
+    /// Create a new test environment from a [`TestContext`].
+    #[must_use]
+    pub fn new(context: TestContext) -> Self {
+        context.log_start();
+        tracing::info!(
+            test_id = %context.test_id,
+            seed = %format_args!("0x{:X}", context.seed),
+            "E2E environment created"
+        );
+        Self {
+            context,
+            ports: PortAllocator::new(),
+            services: Vec::new(),
+            cleanup_fns: Vec::new(),
+            torn_down: false,
+        }
+    }
+
+    /// Returns a reference to the underlying [`TestContext`].
+    #[must_use]
+    pub fn context(&self) -> &TestContext {
+        &self.context
+    }
+
+    /// Returns a reference to the [`PortAllocator`].
+    #[must_use]
+    pub fn ports(&self) -> &PortAllocator {
+        &self.ports
+    }
+
+    /// Allocate a single ephemeral port with a label.
+    pub fn allocate_port(&mut self, label: &str) -> std::io::Result<u16> {
+        self.ports.allocate(label)
+    }
+
+    /// Allocate multiple ephemeral ports with a shared label prefix.
+    pub fn allocate_ports(&mut self, label: &str, count: usize) -> std::io::Result<Vec<u16>> {
+        self.ports.allocate_n(label, count)
+    }
+
+    /// Look up a previously allocated port by label.
+    #[must_use]
+    pub fn port_for(&self, label: &str) -> Option<u16> {
+        self.ports.port_for(label)
+    }
+
+    /// Register a fixture service (does not start it).
+    pub fn register_service(&mut self, service: Box<dyn FixtureService>) {
+        tracing::debug!(service = %service.name(), "registered fixture service");
+        self.services.push(ServiceEntry {
+            service,
+            started_at: Instant::now(),
+        });
+    }
+
+    /// Start all registered services.
+    pub fn start_all_services(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        for entry in &mut self.services {
+            tracing::info!(service = %entry.service.name(), "starting fixture service");
+            entry.service.start()?;
+            entry.started_at = Instant::now();
+        }
+        Ok(())
+    }
+
+    /// Check health of all services.
+    #[must_use]
+    pub fn health_check(&self) -> Vec<(&str, bool)> {
+        self.services
+            .iter()
+            .map(|e| (e.service.name(), e.service.is_healthy()))
+            .collect()
+    }
+
+    /// Register a cleanup function to run during teardown.
+    pub fn on_teardown<F: FnOnce() + 'static>(&mut self, f: F) {
+        self.cleanup_fns.push(Box::new(f));
+    }
+
+    /// Build the current [`EnvironmentMetadata`] snapshot.
+    #[must_use]
+    pub fn metadata(&self) -> EnvironmentMetadata {
+        EnvironmentMetadata {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            pointer_width: (std::mem::size_of::<usize>() * 8) as u32,
+            test_id: self.context.test_id.clone(),
+            seed: self.context.seed,
+            ports: self.ports.allocated_ports(),
+            services: self
+                .services
+                .iter()
+                .map(|e| e.service.name().to_string())
+                .collect(),
+        }
+    }
+
+    /// Emit environment metadata to structured logs.
+    pub fn emit_metadata(&self) {
+        self.metadata().log();
+    }
+
+    /// Write environment metadata to the artifact directory (if configured).
+    #[must_use]
+    pub fn write_metadata_artifact(&self) -> Option<std::io::Result<std::path::PathBuf>> {
+        artifact_dir_from_env().map(|dir| self.metadata().write_to_dir(&dir))
+    }
+
+    /// Perform explicit teardown: stop services, release ports, run cleanup fns.
+    pub fn teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
+        self.torn_down = true;
+        tracing::info!(test_id = %self.context.test_id, "E2E environment teardown");
+
+        for entry in self.services.iter_mut().rev() {
+            let elapsed = entry.started_at.elapsed();
+            tracing::debug!(
+                service = %entry.service.name(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                "stopping fixture service"
+            );
+            if let Err(e) = entry.service.stop() {
+                tracing::warn!(service = %entry.service.name(), error = %e, "fixture service stop failed");
+            }
+        }
+        self.ports.release_all();
+        let fns: Vec<_> = self.cleanup_fns.drain(..).collect();
+        for f in fns.into_iter().rev() {
+            f();
+        }
+        tracing::info!(test_id = %self.context.test_id, "E2E environment teardown complete");
+    }
+}
+
+impl Drop for TestEnvironment {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}
+
+/// A no-op fixture service for testing the environment orchestration itself.
+#[derive(Debug)]
+pub struct NoOpFixtureService {
+    name: String,
+    started: bool,
+}
+
+impl NoOpFixtureService {
+    /// Create a no-op service with the given name.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            started: false,
+        }
+    }
+}
+
+impl FixtureService for NoOpFixtureService {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.started = true;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.started = false;
+        Ok(())
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.started
+    }
+}
+
+// ============================================================================
+// Concrete Fixture Services (bd-76y5)
+// ============================================================================
+
+/// Poll a [`FixtureService`] until `is_healthy()` returns `true`, with
+/// exponential backoff. Returns an error if `timeout` elapses first.
+pub fn wait_until_healthy(
+    service: &dyn FixtureService,
+    timeout: Duration,
+) -> Result<Duration, Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    let mut interval = Duration::from_millis(50);
+    let max_interval = Duration::from_millis(500);
+
+    loop {
+        if service.is_healthy() {
+            let elapsed = start.elapsed();
+            tracing::info!(
+                service = %service.name(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                "service healthy"
+            );
+            return Ok(elapsed);
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "service '{}' not healthy after {:?}",
+                service.name(),
+                timeout
+            )
+            .into());
+        }
+
+        std::thread::sleep(interval);
+        interval = (interval * 2).min(max_interval);
+    }
+}
+
+/// A fixture service backed by a Docker container.
+///
+/// Launches a container with `docker run`, removes it on stop, and health
+/// checks via a configurable command (defaults to checking if the container
+/// is in `running` state).
+///
+/// # Example
+///
+/// ```ignore
+/// let mut redis = DockerFixtureService::new("redis", "redis:7-alpine")
+///     .with_port_map(port, 6379)
+///     .with_health_cmd(vec!["redis-cli", "ping"]);
+/// redis.start()?;
+/// wait_until_healthy(&redis, Duration::from_secs(10))?;
+/// ```
+#[derive(Debug)]
+pub struct DockerFixtureService {
+    service_name: String,
+    image: String,
+    container_name: String,
+    port_maps: Vec<(u16, u16)>,
+    env_vars: Vec<(String, String)>,
+    health_cmd: Option<Vec<String>>,
+    started: bool,
+}
+
+impl DockerFixtureService {
+    /// Create a new Docker fixture with a service name and image.
+    ///
+    /// A unique container name is generated from the service name and process
+    /// ID to avoid collisions between parallel test runs.
+    #[must_use]
+    pub fn new(service_name: &str, image: &str) -> Self {
+        let container_name = format!(
+            "asupersync-test-{}-{}",
+            service_name,
+            std::process::id()
+        );
+        Self {
+            service_name: service_name.to_string(),
+            image: image.to_string(),
+            container_name,
+            port_maps: Vec::new(),
+            env_vars: Vec::new(),
+            health_cmd: None,
+            started: false,
+        }
+    }
+
+    /// Map a host port to a container port.
+    #[must_use]
+    pub fn with_port_map(mut self, host_port: u16, container_port: u16) -> Self {
+        self.port_maps.push((host_port, container_port));
+        self
+    }
+
+    /// Set an environment variable in the container.
+    #[must_use]
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.env_vars.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    /// Set a custom health check command to run inside the container via
+    /// `docker exec`.
+    #[must_use]
+    pub fn with_health_cmd(mut self, cmd: Vec<&str>) -> Self {
+        self.health_cmd = Some(cmd.into_iter().map(String::from).collect());
+        self
+    }
+
+    /// Returns the container name.
+    #[must_use]
+    pub fn container_name(&self) -> &str {
+        &self.container_name
+    }
+
+    fn run_docker_cmd(&self, args: &[&str]) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new("docker")
+            .args(args)
+            .output()?;
+        Ok(output)
+    }
+}
+
+impl FixtureService for DockerFixtureService {
+    fn name(&self) -> &str {
+        &self.service_name
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Remove any stale container with the same name.
+        let _ = self.run_docker_cmd(&["rm", "-f", &self.container_name]);
+
+        let mut args = vec!["run", "-d", "--name", &self.container_name];
+
+        let port_strings: Vec<String> = self
+            .port_maps
+            .iter()
+            .map(|(h, c)| format!("127.0.0.1:{h}:{c}"))
+            .collect();
+        for ps in &port_strings {
+            args.push("-p");
+            args.push(ps);
+        }
+
+        let env_strings: Vec<String> = self
+            .env_vars
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        for es in &env_strings {
+            args.push("-e");
+            args.push(es);
+        }
+
+        args.push(&self.image);
+
+        tracing::info!(
+            container = %self.container_name,
+            image = %self.image,
+            "starting docker container"
+        );
+
+        let output = self.run_docker_cmd(&args)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "docker run failed for '{}': {}",
+                self.container_name, stderr
+            )
+            .into());
+        }
+
+        self.started = true;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.started {
+            return Ok(());
+        }
+        tracing::info!(container = %self.container_name, "stopping docker container");
+        let output = self.run_docker_cmd(&["rm", "-f", &self.container_name])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                container = %self.container_name,
+                error = %stderr,
+                "docker rm failed"
+            );
+        }
+        self.started = false;
+        Ok(())
+    }
+
+    fn is_healthy(&self) -> bool {
+        if !self.started {
+            return false;
+        }
+
+        if let Some(cmd) = &self.health_cmd {
+            let mut args = vec!["exec", &self.container_name];
+            let cmd_refs: Vec<&str> = cmd.iter().map(String::as_str).collect();
+            args.extend(cmd_refs);
+            match self.run_docker_cmd(&args) {
+                Ok(output) => output.status.success(),
+                Err(_) => false,
+            }
+        } else {
+            // Fallback: check container state via docker inspect.
+            match self.run_docker_cmd(&[
+                "inspect",
+                "-f",
+                "{{.State.Running}}",
+                &self.container_name,
+            ]) {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    stdout.trim() == "true"
+                }
+                Err(_) => false,
+            }
+        }
+    }
+}
+
+/// Per-test temporary directory that is automatically cleaned up on drop.
+///
+/// Wraps [`tempfile::TempDir`] behind the [`FixtureService`] trait so it can
+/// be managed by [`TestEnvironment`] alongside other fixtures.
+#[derive(Debug)]
+pub struct TempDirFixture {
+    service_name: String,
+    prefix: String,
+    dir: Option<tempfile::TempDir>,
+}
+
+impl TempDirFixture {
+    /// Create a new temp-dir fixture. The directory is created on `start()`.
+    #[must_use]
+    pub fn new(service_name: &str) -> Self {
+        Self {
+            service_name: service_name.to_string(),
+            prefix: format!("asupersync-{service_name}-"),
+            dir: None,
+        }
+    }
+
+    /// Override the directory-name prefix (default: `asupersync-<name>-`).
+    #[must_use]
+    pub fn with_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.to_string();
+        self
+    }
+
+    /// Returns the path if the directory has been created.
+    #[must_use]
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.dir.as_ref().map(|d| d.path())
+    }
+}
+
+impl FixtureService for TempDirFixture {
+    fn name(&self) -> &str {
+        &self.service_name
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::Builder::new().prefix(&self.prefix).tempdir()?;
+        tracing::debug!(
+            service = %self.service_name,
+            path = %dir.path().display(),
+            "created temp directory"
+        );
+        self.dir = Some(dir);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(dir) = self.dir.take() {
+            let path = dir.path().display().to_string();
+            // TempDir::drop handles cleanup; we just log.
+            drop(dir);
+            tracing::debug!(service = %self.service_name, path = %path, "cleaned up temp directory");
+        }
+        Ok(())
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.dir
+            .as_ref()
+            .map_or(false, |d| d.path().is_dir())
+    }
+}
+
+/// Wraps a closure-based in-process service behind [`FixtureService`].
+///
+/// Use this for lightweight, in-process test servers (WebSocket echo, HTTP
+/// mock, etc.) where a full Docker container is unnecessary.
+///
+/// The `start_fn` receives a mutable reference to `state` and should spawn
+/// whatever background work is needed, storing handles in `state`.
+/// The `stop_fn` receives the state and must shut everything down.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+///
+/// let running = Arc::new(AtomicBool::new(false));
+/// let r = running.clone();
+/// let svc = InProcessService::new(
+///     "echo_ws",
+///     running,
+///     move |state| { state.store(true, Ordering::SeqCst); Ok(()) },
+///     |state| { state.store(false, Ordering::SeqCst); Ok(()) },
+///     |state| state.load(Ordering::SeqCst),
+/// );
+/// ```
+pub struct InProcessService<S: std::fmt::Debug + 'static> {
+    service_name: String,
+    state: S,
+    start_fn: Box<dyn FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>>>,
+    stop_fn: Box<dyn FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>>>,
+    health_fn: Box<dyn Fn(&S) -> bool>,
+}
+
+impl<S: std::fmt::Debug + 'static> std::fmt::Debug for InProcessService<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InProcessService")
+            .field("service_name", &self.service_name)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl<S: std::fmt::Debug + 'static> InProcessService<S> {
+    /// Create a new in-process service.
+    pub fn new(
+        name: &str,
+        state: S,
+        start_fn: impl FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>> + 'static,
+        stop_fn: impl FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>> + 'static,
+        health_fn: impl Fn(&S) -> bool + 'static,
+    ) -> Self {
+        Self {
+            service_name: name.to_string(),
+            state,
+            start_fn: Box::new(start_fn),
+            stop_fn: Box::new(stop_fn),
+            health_fn: Box::new(health_fn),
+        }
+    }
+
+    /// Returns a reference to the service state.
+    #[must_use]
+    pub fn state(&self) -> &S {
+        &self.state
+    }
+}
+
+impl<S: std::fmt::Debug + 'static> FixtureService for InProcessService<S> {
+    fn name(&self) -> &str {
+        &self.service_name
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        (self.start_fn)(&mut self.state)
+    }
+
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        (self.stop_fn)(&mut self.state)
+    }
+
+    fn is_healthy(&self) -> bool {
+        (self.health_fn)(&self.state)
     }
 }
 
@@ -2383,5 +3361,472 @@ mod tests {
         test_structured!(ctx, "with fields", count = 5);
         test_structured!(ctx, "multi fields", count = 5, label = "test");
         crate::test_complete!("test_structured_macros");
+    }
+
+    // ----------------------------------------------------------------
+    // Seed derivation tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_seed_derivation_deterministic() {
+        init_test("test_seed_derivation_deterministic");
+        let root = 0xDEAD_BEEF;
+        assert_eq!(
+            derive_component_seed(root, "scheduler"),
+            derive_component_seed(root, "scheduler")
+        );
+        assert_eq!(
+            derive_scenario_seed(root, "cancel"),
+            derive_scenario_seed(root, "cancel")
+        );
+        assert_eq!(derive_entropy_seed(root, 0), derive_entropy_seed(root, 0));
+        crate::test_complete!("test_seed_derivation_deterministic");
+    }
+
+    #[test]
+    fn test_seed_derivation_unique() {
+        init_test("test_seed_derivation_unique");
+        let root = 0xDEAD_BEEF;
+        assert_ne!(
+            derive_component_seed(root, "scheduler"),
+            derive_component_seed(root, "io")
+        );
+        assert_ne!(
+            derive_scenario_seed(root, "cancel"),
+            derive_scenario_seed(root, "join")
+        );
+        assert_ne!(derive_entropy_seed(root, 0), derive_entropy_seed(root, 1));
+        // Component and scenario with same name differ due to prefix.
+        assert_ne!(
+            derive_component_seed(root, "cancel"),
+            derive_scenario_seed(root, "cancel")
+        );
+        crate::test_complete!("test_seed_derivation_unique");
+    }
+
+    #[test]
+    fn test_seed_derivation_cross_platform_stability() {
+        init_test("test_seed_derivation_cross_platform_stability");
+        // Pinned value for regression: FNV-1a of 0xDEAD_BEEF + "scheduler".
+        let root = 0xDEAD_BEEF;
+        let expected = 13_888_874_950_133_950_416;
+        assert_eq!(
+            derive_component_seed(root, "scheduler"),
+            expected,
+            "seed derivation must be platform-stable"
+        );
+        crate::test_complete!("test_seed_derivation_cross_platform_stability");
+    }
+
+    #[test]
+    fn test_context_seed_methods() {
+        init_test("test_context_seed_methods");
+        let ctx = TestContext::new("seed_test", 0xCAFE);
+        assert_eq!(
+            ctx.component_seed("io"),
+            derive_component_seed(0xCAFE, "io")
+        );
+        assert_eq!(
+            ctx.scenario_seed("cancel"),
+            derive_scenario_seed(0xCAFE, "cancel")
+        );
+        assert_eq!(ctx.entropy_seed(5), derive_entropy_seed(0xCAFE, 5));
+        crate::test_complete!("test_context_seed_methods");
+    }
+
+    // ----------------------------------------------------------------
+    // ReproManifest tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_repro_manifest_from_context() {
+        init_test("test_repro_manifest_from_context");
+        let ctx = TestContext::new("obligation_leak", 42)
+            .with_subsystem("obligation")
+            .with_invariant("committed_or_aborted");
+        let manifest = ReproManifest::from_context(&ctx, false);
+        assert_eq!(manifest.seed, 42);
+        assert_eq!(manifest.scenario_id, "obligation_leak");
+        assert_eq!(manifest.subsystem.as_deref(), Some("obligation"));
+        assert!(!manifest.passed);
+        crate::test_complete!("test_repro_manifest_from_context");
+    }
+
+    #[test]
+    fn test_repro_manifest_json_roundtrip() {
+        init_test("test_repro_manifest_json_roundtrip");
+        let mut manifest = ReproManifest::new(0xCAFE, "roundtrip_test", true);
+        manifest.entropy_seed = Some(0xBEEF);
+        manifest.config_hash = Some("abc123".to_string());
+        let json = manifest.to_json().expect("serialize");
+        let parsed: ReproManifest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.seed, manifest.seed);
+        assert_eq!(parsed.scenario_id, manifest.scenario_id);
+        assert_eq!(parsed.entropy_seed, manifest.entropy_seed);
+        assert_eq!(parsed.schema_version, ARTIFACT_SCHEMA_VERSION);
+        crate::test_complete!("test_repro_manifest_json_roundtrip");
+    }
+
+    #[test]
+    fn test_repro_manifest_optional_fields_omitted() {
+        init_test("test_repro_manifest_optional_fields_omitted");
+        let manifest = ReproManifest::new(0, "minimal_test", true);
+        let json = manifest.to_json().expect("serialize");
+        assert!(!json.contains("entropy_seed"));
+        assert!(!json.contains("config_hash"));
+        assert!(!json.contains("oracle_violations"));
+        crate::test_complete!("test_repro_manifest_optional_fields_omitted");
+    }
+
+    #[test]
+    fn test_replay_context_from_manifest() {
+        init_test("test_replay_context_from_manifest");
+        let mut manifest = ReproManifest::new(0xDEAD, "replay_scenario", false);
+        manifest.subsystem = Some("scheduler".to_string());
+        manifest.invariant = Some("quiescence".to_string());
+        let ctx = replay_context_from_manifest(&manifest);
+        assert_eq!(ctx.test_id, "replay_scenario");
+        assert_eq!(ctx.seed, 0xDEAD);
+        assert_eq!(ctx.subsystem.as_deref(), Some("scheduler"));
+        crate::test_complete!("test_replay_context_from_manifest");
+    }
+
+    // ----------------------------------------------------------------
+    // E2E Environment Orchestration tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_port_allocator_allocates_unique_ports() {
+        init_test("test_port_allocator_allocates_unique_ports");
+        let mut alloc = PortAllocator::new();
+        let p1 = alloc.allocate("http").expect("allocate http");
+        let p2 = alloc.allocate("ws").expect("allocate ws");
+        let p3 = alloc.allocate("grpc").expect("allocate grpc");
+        assert_ne!(p1, p2, "ports must be unique");
+        assert_ne!(p2, p3, "ports must be unique");
+        assert_ne!(p1, p3, "ports must be unique");
+        assert!(p1 > 0);
+        assert_eq!(alloc.count(), 3);
+        crate::test_complete!("test_port_allocator_allocates_unique_ports");
+    }
+
+    #[test]
+    fn test_port_allocator_lookup_by_label() {
+        init_test("test_port_allocator_lookup_by_label");
+        let mut alloc = PortAllocator::new();
+        let port = alloc.allocate("my_service").expect("allocate");
+        assert_eq!(alloc.port_for("my_service"), Some(port));
+        assert_eq!(alloc.port_for("nonexistent"), None);
+        crate::test_complete!("test_port_allocator_lookup_by_label");
+    }
+
+    #[test]
+    fn test_port_allocator_allocate_n() {
+        init_test("test_port_allocator_allocate_n");
+        let mut alloc = PortAllocator::new();
+        let ports = alloc.allocate_n("worker", 4).expect("allocate_n");
+        assert_eq!(ports.len(), 4);
+        let mut sorted = ports.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "all ports must be unique");
+        assert!(alloc.port_for("worker_0").is_some());
+        assert!(alloc.port_for("worker_3").is_some());
+        crate::test_complete!("test_port_allocator_allocate_n");
+    }
+
+    #[test]
+    fn test_noop_fixture_service_lifecycle() {
+        init_test("test_noop_fixture_service_lifecycle");
+        let mut svc = NoOpFixtureService::new("test_echo");
+        assert_eq!(svc.name(), "test_echo");
+        assert!(!svc.is_healthy());
+        svc.start().expect("start");
+        assert!(svc.is_healthy());
+        svc.stop().expect("stop");
+        assert!(!svc.is_healthy());
+        crate::test_complete!("test_noop_fixture_service_lifecycle");
+    }
+
+    #[test]
+    fn test_environment_metadata_fields() {
+        init_test("test_environment_metadata_fields");
+        let ctx = TestContext::new("env_meta_test", 0xBEEF);
+        let mut env = TestEnvironment::new(ctx);
+        let _ = env.allocate_port("http").expect("allocate");
+        env.register_service(Box::new(NoOpFixtureService::new("echo_svc")));
+        let meta = env.metadata();
+        assert_eq!(meta.test_id, "env_meta_test");
+        assert_eq!(meta.seed, 0xBEEF);
+        assert_eq!(meta.ports.len(), 1);
+        assert_eq!(meta.services.len(), 1);
+        crate::test_complete!("test_environment_metadata_fields");
+    }
+
+    #[test]
+    fn test_environment_metadata_json_roundtrip() {
+        init_test("test_environment_metadata_json_roundtrip");
+        let ctx = TestContext::new("json_meta", 42);
+        let env = TestEnvironment::new(ctx);
+        let meta = env.metadata();
+        let json = meta.to_json().expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["test_id"], "json_meta");
+        assert_eq!(parsed["seed"], 42);
+        crate::test_complete!("test_environment_metadata_json_roundtrip");
+    }
+
+    #[test]
+    fn test_environment_service_lifecycle() {
+        init_test("test_environment_service_lifecycle");
+        let ctx = TestContext::new("svc_lifecycle", 1);
+        let mut env = TestEnvironment::new(ctx);
+        env.register_service(Box::new(NoOpFixtureService::new("svc_a")));
+        env.register_service(Box::new(NoOpFixtureService::new("svc_b")));
+        let health = env.health_check();
+        assert!(!health[0].1);
+        assert!(!health[1].1);
+        env.start_all_services().expect("start all");
+        let health = env.health_check();
+        assert!(health[0].1);
+        assert!(health[1].1);
+        env.teardown();
+        let health = env.health_check();
+        assert!(!health[0].1);
+        assert!(!health[1].1);
+        crate::test_complete!("test_environment_service_lifecycle");
+    }
+
+    #[test]
+    fn test_environment_port_isolation() {
+        init_test("test_environment_port_isolation");
+        let mut env_a = TestEnvironment::new(TestContext::new("env_a", 1));
+        let mut env_b = TestEnvironment::new(TestContext::new("env_b", 2));
+        let port_a = env_a.allocate_port("http").expect("allocate a");
+        let port_b = env_b.allocate_port("http").expect("allocate b");
+        assert_ne!(
+            port_a, port_b,
+            "concurrent environments must get distinct ports"
+        );
+        crate::test_complete!("test_environment_port_isolation");
+    }
+
+    #[test]
+    fn test_environment_teardown_idempotent() {
+        init_test("test_environment_teardown_idempotent");
+        let mut env = TestEnvironment::new(TestContext::new("idempotent", 0));
+        env.register_service(Box::new(NoOpFixtureService::new("svc")));
+        env.start_all_services().expect("start");
+        env.teardown();
+        env.teardown();
+        env.teardown();
+        crate::test_complete!("test_environment_teardown_idempotent");
+    }
+
+    #[test]
+    fn test_environment_on_teardown_callbacks() {
+        init_test("test_environment_on_teardown_callbacks");
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c1 = counter.clone();
+        let c2 = counter.clone();
+        let mut env = TestEnvironment::new(TestContext::new("callbacks", 0));
+        env.on_teardown(move || {
+            c1.fetch_add(1, Ordering::SeqCst);
+        });
+        env.on_teardown(move || {
+            c2.fetch_add(10, Ordering::SeqCst);
+        });
+        env.teardown();
+        assert_eq!(counter.load(Ordering::SeqCst), 11, "both callbacks ran");
+        crate::test_complete!("test_environment_on_teardown_callbacks");
+    }
+
+    #[test]
+    fn test_environment_metadata_write_artifact() {
+        init_test("test_environment_metadata_write_artifact");
+        let mut env = TestEnvironment::new(TestContext::new("artifact_write", 0xABCD));
+        let _ = env.allocate_port("tcp").expect("allocate");
+        let tmp = std::env::temp_dir().join("asupersync_env_meta_test");
+        let meta = env.metadata();
+        let path = meta.write_to_dir(&tmp).expect("write metadata");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(parsed["test_id"], "artifact_write");
+        assert_eq!(parsed["seed"], 0xABCD);
+        let _ = std::fs::remove_dir_all(tmp.join("artifact_write"));
+        crate::test_complete!("test_environment_metadata_write_artifact");
+    }
+
+    // =========================================================================
+    // Tests for concrete fixture services (bd-76y5)
+    // =========================================================================
+
+    #[test]
+    fn test_wait_until_healthy_immediate() {
+        init_test("test_wait_until_healthy_immediate");
+        let mut svc = NoOpFixtureService::new("fast_svc");
+        svc.start().expect("start");
+        let elapsed = wait_until_healthy(&svc, Duration::from_secs(1)).expect("healthy");
+        assert!(elapsed < Duration::from_millis(100));
+        crate::test_complete!("test_wait_until_healthy_immediate");
+    }
+
+    #[test]
+    fn test_wait_until_healthy_timeout() {
+        init_test("test_wait_until_healthy_timeout");
+        let svc = NoOpFixtureService::new("never_starts");
+        // Not started, so is_healthy() is always false.
+        let result = wait_until_healthy(&svc, Duration::from_millis(200));
+        assert!(result.is_err(), "should timeout");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not healthy"),
+            "error should mention health: {err_msg}"
+        );
+        crate::test_complete!("test_wait_until_healthy_timeout");
+    }
+
+    #[test]
+    fn test_temp_dir_fixture_lifecycle() {
+        init_test("test_temp_dir_fixture_lifecycle");
+        let mut fixture = TempDirFixture::new("scratch");
+        assert!(!fixture.is_healthy());
+        assert!(fixture.path().is_none());
+
+        fixture.start().expect("start");
+        assert!(fixture.is_healthy());
+        let path = fixture.path().expect("path exists").to_owned();
+        assert!(path.is_dir());
+        assert!(
+            path.to_string_lossy().contains("asupersync-scratch-"),
+            "prefix should match: {:?}",
+            path
+        );
+
+        fixture.stop().expect("stop");
+        assert!(!fixture.is_healthy());
+        assert!(!path.is_dir(), "temp dir should be cleaned up");
+
+        crate::test_complete!("test_temp_dir_fixture_lifecycle");
+    }
+
+    #[test]
+    fn test_temp_dir_fixture_custom_prefix() {
+        init_test("test_temp_dir_fixture_custom_prefix");
+        let mut fixture = TempDirFixture::new("custom").with_prefix("myprefix-");
+        fixture.start().expect("start");
+        let path = fixture.path().expect("path exists");
+        assert!(
+            path.to_string_lossy().contains("myprefix-"),
+            "custom prefix should appear: {:?}",
+            path
+        );
+        crate::test_complete!("test_temp_dir_fixture_custom_prefix");
+    }
+
+    #[test]
+    fn test_in_process_service_lifecycle() {
+        init_test("test_in_process_service_lifecycle");
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let running = Arc::new(AtomicBool::new(false));
+        let mut svc = InProcessService::new(
+            "echo",
+            running.clone(),
+            |state: &mut Arc<AtomicBool>| {
+                state.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            |state: &mut Arc<AtomicBool>| {
+                state.store(false, Ordering::SeqCst);
+                Ok(())
+            },
+            |state: &Arc<AtomicBool>| state.load(Ordering::SeqCst),
+        );
+
+        assert_eq!(svc.name(), "echo");
+        assert!(!svc.is_healthy());
+
+        svc.start().expect("start");
+        assert!(svc.is_healthy());
+        assert!(running.load(Ordering::SeqCst));
+
+        svc.stop().expect("stop");
+        assert!(!svc.is_healthy());
+        assert!(!running.load(Ordering::SeqCst));
+
+        crate::test_complete!("test_in_process_service_lifecycle");
+    }
+
+    #[test]
+    fn test_docker_fixture_service_name_and_container() {
+        init_test("test_docker_fixture_service_name_and_container");
+        let svc = DockerFixtureService::new("redis", "redis:7-alpine")
+            .with_port_map(16379, 6379)
+            .with_env("REDIS_PASSWORD", "test")
+            .with_health_cmd(vec!["redis-cli", "ping"]);
+
+        assert_eq!(svc.name(), "redis");
+        assert!(
+            svc.container_name().starts_with("asupersync-test-redis-"),
+            "container name format: {}",
+            svc.container_name()
+        );
+        assert!(!svc.is_healthy(), "not started yet");
+        crate::test_complete!("test_docker_fixture_service_name_and_container");
+    }
+
+    #[test]
+    fn test_environment_with_temp_dir_fixture() {
+        init_test("test_environment_with_temp_dir_fixture");
+        let ctx = TestContext::new("env_tempdir", 0x1234);
+        let mut env = TestEnvironment::new(ctx);
+
+        let mut tmp = TempDirFixture::new("workdir");
+        tmp.start().expect("start");
+        assert!(tmp.is_healthy());
+        let dir_path = tmp.path().expect("path").to_owned();
+
+        env.register_service(Box::new(tmp));
+        let meta = env.metadata();
+        assert_eq!(meta.services.len(), 1);
+        assert_eq!(meta.services[0], "workdir");
+
+        env.teardown();
+        // After teardown the temp dir should be cleaned up.
+        assert!(!dir_path.is_dir(), "temp dir cleaned up after env teardown");
+        crate::test_complete!("test_environment_with_temp_dir_fixture");
+    }
+
+    #[test]
+    fn test_environment_with_in_process_service() {
+        init_test("test_environment_with_in_process_service");
+        use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+        use std::sync::Arc;
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let svc = InProcessService::new(
+            "mock_http",
+            flag.clone(),
+            |s: &mut Arc<AtomicBool>| { s.store(true, AtOrd::SeqCst); Ok(()) },
+            |s: &mut Arc<AtomicBool>| { s.store(false, AtOrd::SeqCst); Ok(()) },
+            |s: &Arc<AtomicBool>| s.load(AtOrd::SeqCst),
+        );
+
+        let ctx = TestContext::new("env_inproc", 42);
+        let mut env = TestEnvironment::new(ctx);
+        env.register_service(Box::new(svc));
+        env.start_all_services().expect("start all");
+
+        let health = env.health_check();
+        assert!(health[0].1, "in-process service should be healthy");
+        assert!(flag.load(AtOrd::SeqCst));
+
+        env.teardown();
+        assert!(!flag.load(AtOrd::SeqCst), "stopped after teardown");
+        crate::test_complete!("test_environment_with_in_process_service");
     }
 }

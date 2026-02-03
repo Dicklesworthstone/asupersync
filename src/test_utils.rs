@@ -6,7 +6,7 @@
 //! - Lab runtime constructors
 //! - Async test runners
 //! - Outcome assertion macros
-//! - Mock types for pool-style tests
+//! - Test types for pool-style tests
 //!
 //! # Example
 //! ```
@@ -23,7 +23,12 @@
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::runtime::RuntimeBuilder;
-pub use crate::test_logging::TestContext;
+pub use crate::test_logging::{
+    derive_component_seed, derive_entropy_seed, derive_scenario_seed, wait_until_healthy,
+    AllocatedPort, DockerFixtureService, EnvironmentMetadata, FixtureService, InProcessService,
+    NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext,
+    TestEnvironment, ARTIFACT_SCHEMA_VERSION,
+};
 use crate::time::timeout;
 use crate::types::Time;
 use std::future::Future;
@@ -243,15 +248,15 @@ macro_rules! assert_outcome_panicked {
     };
 }
 
-/// Mock connection for pool testing.
+/// Deterministic in-memory connection for pool testing.
 #[derive(Debug)]
-pub struct MockConnection {
+pub struct TestConnection {
     id: usize,
     query_count: std::sync::atomic::AtomicUsize,
 }
 
-impl MockConnection {
-    /// Create a new mock connection with a stable ID.
+impl TestConnection {
+    /// Create a new test connection with a stable ID.
     #[must_use]
     pub fn new(id: usize) -> Self {
         Self {
@@ -273,21 +278,21 @@ impl MockConnection {
     }
 
     /// Simulate a query.
-    pub fn query(&self, _sql: &str) -> Result<(), MockError> {
+    pub fn query(&self, _sql: &str) -> Result<(), TestError> {
         self.query_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
 
-/// Mock error for testing.
+/// Test error for pool testing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MockError(pub String);
+pub struct TestError(pub String);
 
-impl std::error::Error for MockError {}
+impl std::error::Error for TestError {}
 
-impl std::fmt::Display for MockError {
+impl std::fmt::Display for TestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MockError: {}", self.0)
+        write!(f, "TestError: {}", self.0)
     }
 }
