@@ -23,6 +23,7 @@
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::runtime::RuntimeBuilder;
+pub use crate::test_logging::TestContext;
 use crate::time::timeout;
 use crate::types::Time;
 use std::future::Future;
@@ -82,6 +83,24 @@ pub fn test_lab_with_seed(seed: u64) -> LabRuntime {
 #[must_use]
 pub fn test_lab_with_tracing() -> LabRuntime {
     LabRuntime::new(LabConfig::new(DEFAULT_TEST_SEED).trace_capacity(64 * 1024))
+}
+
+/// Create a lab runtime from a [`TestContext`], using the context's seed.
+#[must_use]
+pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
+    LabRuntime::new(LabConfig::new(ctx.seed))
+}
+
+/// Create a [`TestContext`] for a unit test with the default seed.
+#[must_use]
+pub fn test_context(test_id: &str) -> TestContext {
+    TestContext::new(test_id, DEFAULT_TEST_SEED)
+}
+
+/// Create a [`TestContext`] for a unit test with a specific seed.
+#[must_use]
+pub fn test_context_with_seed(test_id: &str, seed: u64) -> TestContext {
+    TestContext::new(test_id, seed)
 }
 
 /// Run async test code using a lightweight current-thread runtime.

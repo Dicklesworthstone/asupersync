@@ -617,6 +617,10 @@ impl RecoveryOrchestrator {
         params: ObjectParams,
         duration: Duration,
     ) -> Result<RecoveryResult, Error> {
+        if self.cancelled {
+            return Err(Error::new(ErrorKind::RecoveryFailed)
+                .with_message("recovery session was cancelled"));
+        }
         self.recovering = true;
         self.attempt += 1;
 

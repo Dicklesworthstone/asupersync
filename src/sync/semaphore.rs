@@ -440,20 +440,23 @@ impl Future for OwnedAcquireFuture {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
-                let mut state = self
-                    .semaphore
-                    .state
-                    .lock()
-                    .expect("semaphore lock poisoned");
-                let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
-                state.waiters.retain(|waiter| waiter.id != waiter_id);
-                if was_front {
-                    if let Some(next) = state.waiters.front() {
-                        next.waker.wake_by_ref();
+                {
+                    let mut state = self
+                        .semaphore
+                        .state
+                        .lock()
+                        .expect("semaphore lock poisoned");
+                    let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
+                    state.waiters.retain(|waiter| waiter.id != waiter_id);
+                    if was_front {
+                        if let Some(next) = state.waiters.front() {
+                            next.waker.wake_by_ref();
+                        }
                     }
                 }
-                drop(state);
-                // Clear waiter_id so Drop doesn't try to remove again
+                // Clear waiter_id so Drop doesn't try to remove it again.
+                // Must happen after `state` is dropped (end of block above)
+                // to satisfy the borrow checker.
                 self.waiter_id = None;
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
