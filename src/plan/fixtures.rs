@@ -1120,11 +1120,6 @@ pub fn run_lab_dynamic_equivalence(
 fn compute_dag_cost(dag: &PlanDag) -> PlanCost {
     use super::PlanNode;
 
-    let root = match dag.root() {
-        Some(r) => r,
-        None => return PlanCost::default(),
-    };
-
     fn recurse(dag: &PlanDag, id: PlanId, memo: &mut HashMap<PlanId, PlanCost>) -> PlanCost {
         if let Some(&c) = memo.get(&id) {
             return c;
@@ -1189,6 +1184,9 @@ fn compute_dag_cost(dag: &PlanDag) -> PlanCost {
         cost
     }
 
+    let Some(root) = dag.root() else {
+        return PlanCost::default();
+    };
     let mut memo = HashMap::new();
     recurse(dag, root, &mut memo)
 }
@@ -1315,7 +1313,7 @@ pub fn run_e2e_pipeline(
         use super::extractor::Extractor;
         let mut eg = crate::plan::EGraph::new();
         let mut cache = HashMap::new();
-        original_dag.root().map_or(true, |root| {
+        original_dag.root().is_none_or(|root| {
             let root_ec = dag_to_egraph_rec(&original_dag, root, &mut eg, &mut cache);
             let (extracted, _) = Extractor::new(&mut eg).extract(root_ec);
             let extracted_outcomes = extracted
@@ -1331,7 +1329,7 @@ pub fn run_e2e_pipeline(
         use super::extractor::Extractor;
         let mut eg = crate::plan::EGraph::new();
         let mut cache = HashMap::new();
-        if let Some(root) = optimized_dag.root() {
+        optimized_dag.root().is_none_or(|root| {
             let root_ec = dag_to_egraph_rec(&optimized_dag, root, &mut eg, &mut cache);
             let (extracted, _) = Extractor::new(&mut eg).extract(root_ec);
             let extracted_outcomes = extracted
@@ -1339,9 +1337,7 @@ pub fn run_e2e_pipeline(
                 .map(|r| outcome_sets(&extracted, r))
                 .unwrap_or_default();
             original_static == extracted_outcomes
-        } else {
-            true
-        }
+        })
     };
 
     // Dynamic lab execution with tracing (seed 42).
