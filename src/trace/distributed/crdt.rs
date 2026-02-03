@@ -790,4 +790,337 @@ mod tests {
         let c: MVRegister<String> = MVRegister::new();
         assert_semilattice_laws(&a, &b, &c);
     }
+
+    // ── GCounter: multi-node and edge cases ─────────────────────────────
+
+    #[test]
+    fn gcounter_five_replicas_semilattice() {
+        let nodes: Vec<_> = (0..5).map(|i| node(&format!("n{i}"))).collect();
+        let mut a = GCounter::new();
+        a.increment(&nodes[0], 10);
+        a.increment(&nodes[1], 20);
+
+        let mut b = GCounter::new();
+        b.increment(&nodes[1], 15);
+        b.increment(&nodes[2], 30);
+        b.increment(&nodes[3], 5);
+
+        let mut c = GCounter::new();
+        c.increment(&nodes[2], 25);
+        c.increment(&nodes[4], 100);
+
+        assert_semilattice_laws(&a, &b, &c);
+    }
+
+    #[test]
+    fn gcounter_merge_disjoint_nodes() {
+        let mut a = GCounter::new();
+        a.increment(&node("x"), 42);
+        let mut b = GCounter::new();
+        b.increment(&node("y"), 99);
+
+        let mut merged = a.clone();
+        merged.merge(&b);
+        assert_eq!(merged.value(), 141);
+        assert_eq!(merged.get(&node("x")), 42);
+        assert_eq!(merged.get(&node("y")), 99);
+    }
+
+    #[test]
+    fn gcounter_get_missing_node_returns_zero() {
+        let g = GCounter::new();
+        assert_eq!(g.get(&node("nonexistent")), 0);
+    }
+
+    #[test]
+    fn gcounter_merge_chain_converges() {
+        // Simulate ring gossip: a→b→c→a
+        let mut a = GCounter::new();
+        a.increment(&node("a"), 10);
+        let mut b = GCounter::new();
+        b.increment(&node("b"), 20);
+        let mut c = GCounter::new();
+        c.increment(&node("c"), 30);
+
+        a.merge(&b);
+        b.merge(&c);
+        c.merge(&a);
+        a.merge(&c);
+        b.merge(&a);
+
+        // All should converge to the same state.
+        assert_eq!(a.value(), 60);
+        assert_eq!(b.value(), 60);
+        assert_eq!(c.value(), 60);
+    }
+
+    // ── PNCounter: edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn pncounter_five_replicas_semilattice() {
+        let mut a = PNCounter::new();
+        a.increment(&node("n1"), 100);
+        a.decrement(&node("n2"), 30);
+
+        let mut b = PNCounter::new();
+        b.increment(&node("n2"), 50);
+        b.decrement(&node("n3"), 10);
+
+        let mut c = PNCounter::new();
+        c.decrement(&node("n1"), 40);
+        c.increment(&node("n4"), 25);
+
+        assert_semilattice_laws(&a, &b, &c);
+    }
+
+    #[test]
+    fn pncounter_zero_after_symmetric_ops() {
+        let mut pn = PNCounter::new();
+        pn.increment(&node("a"), 50);
+        pn.decrement(&node("b"), 50);
+        assert_eq!(pn.value(), 0);
+    }
+
+    #[test]
+    fn pncounter_merge_chain_converges() {
+        let mut a = PNCounter::new();
+        a.increment(&node("a"), 10);
+        let mut b = PNCounter::new();
+        b.decrement(&node("b"), 5);
+        let mut c = PNCounter::new();
+        c.increment(&node("c"), 3);
+
+        a.merge(&b);
+        b.merge(&c);
+        c.merge(&a);
+        a.merge(&c);
+        b.merge(&a);
+
+        assert_eq!(a.value(), 8);
+        assert_eq!(b.value(), 8);
+        assert_eq!(c.value(), 8);
+    }
+
+    // ── LWWRegister: edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn lww_five_replicas_semilattice() {
+        let a = LWWRegister::new(1, 10, node("n1"));
+        let b = LWWRegister::new(2, 20, node("n2"));
+        let c = LWWRegister::new(3, 15, node("n3"));
+        assert_semilattice_laws(&a, &b, &c);
+    }
+
+    #[test]
+    fn lww_set_same_timestamp_different_node_tiebreak() {
+        let mut r = LWWRegister::new("first".to_string(), 1, node("a"));
+        r.set("second".to_string(), 1, node("b"));
+        // "b" > "a" so "second" wins the tie.
+        assert_eq!(r.value(), "second");
+    }
+
+    #[test]
+    fn lww_set_same_timestamp_lower_node_rejected() {
+        let mut r = LWWRegister::new("from_b".to_string(), 1, node("b"));
+        r.set("from_a".to_string(), 1, node("a"));
+        // "a" < "b" so update rejected.
+        assert_eq!(r.value(), "from_b");
+    }
+
+    #[test]
+    fn lww_merge_chain_converges() {
+        let mut a = LWWRegister::new("a".to_string(), 1, node("n1"));
+        let b = LWWRegister::new("b".to_string(), 3, node("n2"));
+        let c = LWWRegister::new("c".to_string(), 2, node("n3"));
+
+        a.merge(&b);
+        let mut c2 = c.clone();
+        c2.merge(&a);
+        // Both should have "b" (highest timestamp).
+        assert_eq!(a.value(), "b");
+        assert_eq!(c2.value(), "b");
+    }
+
+    // ── ORSet: extended scenarios ────────────────────────────────────────
+
+    #[test]
+    fn orset_five_replicas_semilattice() {
+        let mut a = ORSet::new();
+        a.add("x", &node("n1"));
+        a.add("y", &node("n1"));
+
+        let mut b = ORSet::new();
+        b.add("y", &node("n2"));
+        b.add("z", &node("n2"));
+        b.add("w", &node("n2"));
+
+        let mut c = ORSet::new();
+        c.add("x", &node("n3"));
+        c.add("w", &node("n3"));
+
+        assert_semilattice_laws(&a, &b, &c);
+    }
+
+    #[test]
+    fn orset_add_remove_add_cycle() {
+        let mut s = ORSet::new();
+        s.add("item", &node("a"));
+        assert!(s.contains(&"item"));
+        s.remove(&"item");
+        assert!(!s.contains(&"item"));
+        s.add("item", &node("a"));
+        assert!(s.contains(&"item"));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn orset_remove_nonexistent_is_noop() {
+        let mut s = ORSet::new();
+        s.remove(&"missing");
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn orset_concurrent_adds_same_value_both_survive_remove() {
+        // Both replicas add "x" concurrently.
+        let mut s1 = ORSet::new();
+        s1.add("x", &node("a"));
+        let mut s2 = ORSet::new();
+        s2.add("x", &node("b"));
+
+        // Merge to see both tags.
+        s1.merge(&s2);
+        assert!(s1.contains(&"x"));
+
+        // Fork: one side removes (clears all known tags), other has a tag.
+        let mut fork = s1.clone();
+        fork.remove(&"x");
+        // After re-merge from a fresh concurrent add, "x" should re-appear.
+        let mut s3 = ORSet::new();
+        s3.add("x", &node("c"));
+        fork.merge(&s3);
+        assert!(fork.contains(&"x"));
+    }
+
+    #[test]
+    fn orset_merge_chain_converges() {
+        let mut a = ORSet::new();
+        a.add(1, &node("a"));
+        let mut b = ORSet::new();
+        b.add(2, &node("b"));
+        let mut c = ORSet::new();
+        c.add(3, &node("c"));
+
+        a.merge(&b);
+        b.merge(&c);
+        c.merge(&a);
+        a.merge(&c);
+        b.merge(&a);
+
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 3);
+        assert_eq!(c.len(), 3);
+    }
+
+    // ── MVRegister: extended scenarios ───────────────────────────────────
+
+    #[test]
+    fn mvregister_five_replicas_semilattice() {
+        let mut a = MVRegister::new();
+        a.set("a", &node("n1"));
+        let mut b = MVRegister::new();
+        b.set("b", &node("n2"));
+        let mut c = MVRegister::new();
+        c.set("c", &node("n3"));
+        assert_semilattice_laws(&a, &b, &c);
+    }
+
+    #[test]
+    fn mvregister_three_concurrent_writes() {
+        let mut r1 = MVRegister::new();
+        r1.set("a", &node("n1"));
+        let mut r2 = MVRegister::new();
+        r2.set("b", &node("n2"));
+        let mut r3 = MVRegister::new();
+        r3.set("c", &node("n3"));
+
+        r1.merge(&r2);
+        r1.merge(&r3);
+        // All three concurrent values preserved.
+        assert_eq!(r1.len(), 3);
+    }
+
+    #[test]
+    fn mvregister_later_write_supersedes_all() {
+        let mut r1 = MVRegister::new();
+        r1.set("a", &node("n1"));
+        let mut r2 = MVRegister::new();
+        r2.set("b", &node("n2"));
+
+        // Merge both concurrent values.
+        r1.merge(&r2);
+        assert_eq!(r1.len(), 2);
+
+        // A new write from n3 that has seen both should supersede them.
+        let mut r3 = r1.clone();
+        r3.set("final", &node("n3"));
+        r1.merge(&r3);
+        let vals: Vec<_> = r1.values().collect();
+        assert_eq!(vals, vec![&"final"]);
+    }
+
+    #[test]
+    fn mvregister_merge_chain_converges() {
+        let mut a = MVRegister::new();
+        a.set("a", &node("n1"));
+        let mut b = MVRegister::new();
+        b.set("b", &node("n2"));
+
+        a.merge(&b);
+        b.merge(&a);
+        assert_eq!(a, b);
+    }
+
+    // ── dominates helper ────────────────────────────────────────────────
+
+    #[test]
+    fn dominates_strict() {
+        let mut a = BTreeMap::new();
+        a.insert(node("n1"), 2);
+        let mut b = BTreeMap::new();
+        b.insert(node("n1"), 1);
+        assert!(dominates(&a, &b));
+        assert!(!dominates(&b, &a));
+    }
+
+    #[test]
+    fn dominates_equal_is_false() {
+        let mut a = BTreeMap::new();
+        a.insert(node("n1"), 3);
+        let b = a.clone();
+        assert!(!dominates(&a, &b));
+    }
+
+    #[test]
+    fn dominates_concurrent_is_false() {
+        let mut a = BTreeMap::new();
+        a.insert(node("n1"), 2);
+        a.insert(node("n2"), 0);
+        let mut b = BTreeMap::new();
+        b.insert(node("n1"), 0);
+        b.insert(node("n2"), 2);
+        assert!(!dominates(&a, &b));
+        assert!(!dominates(&b, &a));
+    }
+
+    #[test]
+    fn dominates_superset_keys() {
+        let mut a = BTreeMap::new();
+        a.insert(node("n1"), 1);
+        a.insert(node("n2"), 1);
+        let mut b = BTreeMap::new();
+        b.insert(node("n1"), 1);
+        // a has extra key n2 with value > 0, so a dominates b.
+        assert!(dominates(&a, &b));
+    }
 }

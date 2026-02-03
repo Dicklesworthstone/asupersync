@@ -37,8 +37,13 @@
 //! - [`Cx`]: The capability context token
 //! - [`Scope`]: API for spawning tasks and creating child regions
 
+pub mod cap;
 pub mod cx;
 pub mod scope;
 
+pub use cap::{
+    All as AllCaps, CapSet, HasIo, HasRandom, HasRemote, HasSpawn, HasTime, None as NoCaps,
+    SubsetOf,
+};
 pub use cx::{Cx, SpanGuard};
 pub use scope::Scope;

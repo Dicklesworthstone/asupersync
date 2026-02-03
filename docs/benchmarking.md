@@ -101,9 +101,29 @@ After an intentional behavioral change:
 4. Update with recorded values
 5. Document why behavior changed in the commit message
 
+## Baseline Capture
+
+```bash
+# Print baseline JSON to stdout (requires jq)
+./scripts/capture_baseline.sh
+
+# Save to baselines/ with timestamp + latest symlink
+./scripts/capture_baseline.sh --save baselines/
+```
+
+Reads `target/criterion/*/new/estimates.json` and produces a single JSON with `{name, mean_ns, median_ns, std_dev_ns}` per benchmark. Baselines are saved as `baselines/baseline_<timestamp>.json` and `baselines/baseline_latest.json`.
+
 ## CI Integration
 
-The benchmark CI workflow (`.github/workflows/benchmarks.yml`) runs on PRs and saves baselines for regression detection. See the workflow file for details.
+Recommended CI workflow:
+
+```yaml
+- cargo test --test golden_outputs  # behavioral equivalence
+- cargo bench                        # run benchmarks
+- ./scripts/capture_baseline.sh --save baselines/  # archive baseline
+```
+
+The conformance bench runner (`conformance/src/bench/`) also supports regression checking with configurable thresholds (default: 10% mean, 15% p95, 25% p99, 10% allocation count).
 
 ## Measurement Methodology
 

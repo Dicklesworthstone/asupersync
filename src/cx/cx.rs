@@ -51,6 +51,7 @@
 //! - Framework can add domain-specific context
 //! - All capabilities flow through the wrapped Cx
 
+use super::cap;
 use crate::combinator::select::SelectAll;
 use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
@@ -68,6 +69,7 @@ use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, 
 use crate::util::{EntropySource, OsEntropy};
 use std::cell::RefCell;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Wake, Waker};
@@ -147,7 +149,7 @@ fn noop_waker() -> Waker {
 /// task within a specific region. The runtime ensures proper cleanup when
 /// tasks complete.
 #[derive(Debug, Clone)]
-pub struct Cx {
+pub struct Cx<Caps = cap::All> {
     pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
     observability: Arc<std::sync::RwLock<ObservabilityState>>,
     io_driver: Option<IoDriverHandle>,
@@ -157,6 +159,7 @@ pub struct Cx {
     entropy: Arc<dyn EntropySource>,
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
+    _caps: PhantomData<Caps>,
 }
 
 /// Internal observability state shared by `Cx` clones.
@@ -225,14 +228,16 @@ impl Drop for MaskGuard<'_> {
     }
 }
 
+type FullCx = Cx<cap::All>;
+
 thread_local! {
-    static CURRENT_CX: RefCell<Option<Cx>> = const { RefCell::new(None) };
+    static CURRENT_CX: RefCell<Option<FullCx>> = const { RefCell::new(None) };
 }
 
 /// Guard that restores the previous Cx on drop.
 #[cfg_attr(feature = "test-internals", visibility::make(pub))]
 pub(crate) struct CurrentCxGuard {
-    prev: Option<Cx>,
+    prev: Option<FullCx>,
 }
 
 impl Drop for CurrentCxGuard {
@@ -244,7 +249,7 @@ impl Drop for CurrentCxGuard {
     }
 }
 
-impl Cx {
+impl<Caps> Cx<Caps> {
     /// Creates a new capability context (internal use).
     #[must_use]
     #[allow(dead_code)]
@@ -271,6 +276,7 @@ impl Cx {
             entropy: Arc::new(OsEntropy),
             logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
+            _caps: PhantomData,
         }
     }
 
@@ -361,6 +367,7 @@ impl Cx {
             entropy,
             logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
+            _caps: PhantomData,
         }
     }
 
@@ -487,14 +494,14 @@ impl Cx {
     ///
     /// This is set by the runtime while polling a task.
     #[must_use]
-    pub fn current() -> Option<Self> {
+    pub fn current() -> Option<FullCx> {
         CURRENT_CX.with(|slot| slot.borrow().clone())
     }
 
     /// Sets the current task context for the duration of the guard.
     #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
-    pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
+    pub(crate) fn set_current(cx: Option<FullCx>) -> CurrentCxGuard {
         let prev = CURRENT_CX.with(|slot| {
             let mut guard = slot.borrow_mut();
             let prev = guard.take();
@@ -530,6 +537,35 @@ impl Cx {
         self
     }
 
+    /// Re-type this context to a narrower capability set.
+    ///
+    /// This is a zero-cost type-level restriction. It does not change runtime behavior,
+    /// but removes access to gated APIs at compile time.
+    #[must_use]
+    pub fn restrict<NewCaps>(&self) -> Cx<NewCaps>
+    where
+        NewCaps: cap::SubsetOf<Caps>,
+    {
+        self.retype()
+    }
+
+    /// Internal re-typing helper (no subset enforcement).
+    #[must_use]
+    pub(crate) fn retype<NewCaps>(&self) -> Cx<NewCaps> {
+        Cx {
+            inner: self.inner.clone(),
+            observability: self.observability.clone(),
+            io_driver: self.io_driver.clone(),
+            io_cap: self.io_cap.clone(),
+            timer_driver: self.timer_driver.clone(),
+            blocking_pool: self.blocking_pool.clone(),
+            entropy: self.entropy.clone(),
+            logical_clock: self.logical_clock.clone(),
+            remote_cap: self.remote_cap.clone(),
+            _caps: PhantomData,
+        }
+    }
+
     /// Returns the current logical time without ticking.
     #[must_use]
     pub fn logical_now(&self) -> LogicalTime {
@@ -563,7 +599,10 @@ impl Cx {
     /// }
     /// ```
     #[must_use]
-    pub fn timer_driver(&self) -> Option<TimerDriverHandle> {
+    pub fn timer_driver(&self) -> Option<TimerDriverHandle>
+    where
+        Caps: cap::HasTime,
+    {
         self.timer_driver.clone()
     }
 
@@ -572,7 +611,10 @@ impl Cx {
     /// When true, time operations can use the runtime's timer wheel.
     /// When false, time operations fall back to OS-level timing.
     #[must_use]
-    pub fn has_timer(&self) -> bool {
+    pub fn has_timer(&self) -> bool
+    where
+        Caps: cap::HasTime,
+    {
         self.timer_driver.is_some()
     }
 
@@ -601,7 +643,10 @@ impl Cx {
     /// }
     /// ```
     #[must_use]
-    pub fn io(&self) -> Option<&dyn crate::io::IoCap> {
+    pub fn io(&self) -> Option<&dyn crate::io::IoCap>
+    where
+        Caps: cap::HasIo,
+    {
         self.io_cap.as_ref().map(AsRef::as_ref)
     }
 
@@ -609,7 +654,10 @@ impl Cx {
     ///
     /// Convenience method to check if I/O operations can be performed.
     #[must_use]
-    pub fn has_io(&self) -> bool {
+    pub fn has_io(&self) -> bool
+    where
+        Caps: cap::HasIo,
+    {
         self.io_cap.is_some()
     }
 
@@ -626,7 +674,10 @@ impl Cx {
     /// - Lab runtime can configure it for deterministic distributed testing
     /// - Code that needs remote spawning must check for this capability
     #[must_use]
-    pub fn remote(&self) -> Option<&RemoteCap> {
+    pub fn remote(&self) -> Option<&RemoteCap>
+    where
+        Caps: cap::HasRemote,
+    {
         self.remote_cap.as_ref().map(AsRef::as_ref)
     }
 
@@ -634,7 +685,10 @@ impl Cx {
     ///
     /// Convenience method to check if remote task operations can be performed.
     #[must_use]
-    pub fn has_remote(&self) -> bool {
+    pub fn has_remote(&self) -> bool
+    where
+        Caps: cap::HasRemote,
+    {
         self.remote_cap.is_some()
     }
 
@@ -664,7 +718,10 @@ impl Cx {
         &self,
         source: &S,
         interest: Interest,
-    ) -> std::io::Result<IoRegistration> {
+    ) -> std::io::Result<IoRegistration>
+    where
+        Caps: cap::HasIo,
+    {
         let Some(driver) = self.io_driver_handle() else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
