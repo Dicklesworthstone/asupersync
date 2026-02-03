@@ -51,6 +51,9 @@ def strengthenOpt (current : Option CancelReason) (incoming : CancelReason) : Ca
   | none => incoming
   | some r => strengthenReason r incoming
 
+def parentCancelledReason : CancelReason :=
+  { kind := CancelKind.parentCancelled, message := none }
+
 /-- Budget semiring (min-plus with priority max). -/
 structure Budget where
   deadline : Option Time
@@ -457,6 +460,37 @@ inductive Step (Value Error Panic : Type) :
         s' =
           setTask s t
             { task with state := TaskState.completed (Outcome.cancelled reason) }) :
+      Step s (Label.tau) s'
+
+  /-- CANCEL-PROPAGATE: push parent cancellation to a subregion. -/
+  | cancelPropagate {s s' : State Value Error Panic} {r r' : RegionId}
+      {region : Region Value Error Panic} {sub : Region Value Error Panic}
+      (reason : CancelReason)
+      (hRegion : getRegion s r = some region)
+      (hCancel : region.cancel = some reason)
+      (hChild : r' ∈ region.subregions)
+      (hSub : getRegion s r' = some sub)
+      (hUpdate :
+        s' =
+          setRegion s r'
+            { sub with cancel := some (strengthenOpt sub.cancel parentCancelledReason) }) :
+      Step s (Label.tau) s'
+
+  /-- CANCEL-CHILD: mark a child task for cancellation due to region cancel. -/
+  | cancelChild {s s' : State Value Error Panic} {r : RegionId} {t : TaskId}
+      {region : Region Value Error Panic} {task : Task Value Error Panic}
+      (reason : CancelReason) (cleanup : Budget)
+      (hRegion : getRegion s r = some region)
+      (hCancel : region.cancel = some reason)
+      (hChild : t ∈ region.children)
+      (hTask : getTask s t = some task)
+      (hNotCompleted :
+        match task.state with
+        | TaskState.completed _ => False
+        | _ => True)
+      (hUpdate :
+        s' =
+          setTask s t { task with state := TaskState.cancelRequested reason cleanup }) :
       Step s (Label.tau) s'
 
   /-- CLOSE: close a quiescent region with an outcome. -/
