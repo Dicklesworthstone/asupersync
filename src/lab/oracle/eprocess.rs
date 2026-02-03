@@ -193,7 +193,15 @@ impl EProcess {
         // Clamp factor to prevent negative or zero values.
         let factor = factor.max(1e-15);
 
-        self.current = (self.current * factor).min(self.config.max_evalue);
+        // Guard against NaN propagation — if current or factor became NaN
+        // (e.g., from corrupt config), clamp to 1.0 rather than silently
+        // disabling rejection detection.
+        let product = self.current * factor;
+        self.current = if product.is_finite() {
+            product.min(self.config.max_evalue)
+        } else {
+            self.config.max_evalue
+        };
         self.observations += 1;
         if violated {
             self.violations_observed += 1;
