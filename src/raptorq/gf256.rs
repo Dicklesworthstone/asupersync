@@ -319,8 +319,7 @@ mod tests {
     #[test]
     fn exp_table_generates_all_nonzero() {
         let mut seen = [false; 256];
-        for i in 0..255 {
-            let v = EXP[i];
+        for (i, &v) in EXP.iter().enumerate().take(255) {
             assert!(!seen[v as usize], "duplicate EXP[{i}] = {v}");
             seen[v as usize] = true;
         }

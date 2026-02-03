@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn select_pivot_basic_finds_first() {
         let rows: Vec<Vec<u8>> = vec![vec![0, 0, 1], vec![0, 0, 0], vec![0, 0, 2]];
-        let matrix: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
 
         // Looking for pivot in column 2
         assert_eq!(select_pivot_basic(&matrix, 0, 3, 2), Some(0));
@@ -969,7 +969,7 @@ mod tests {
             vec![1, 0, 0, 0, 0], // 1 nonzero
             vec![1, 1, 0, 0, 0], // 2 nonzeros
         ];
-        let matrix: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
 
         // Column 0: rows 0, 2, 3 have nonzero. Row 2 is sparsest.
         let result = select_pivot_markowitz(&matrix, 0, 4, 0);

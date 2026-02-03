@@ -14,6 +14,7 @@ mod common;
 use common::*;
 
 use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer, TopologyExplorer};
+use asupersync::lab::ExplorationReport;
 use asupersync::lab::LabRuntime;
 use asupersync::types::Budget;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -955,5 +956,94 @@ fn benchmark_discovery_efficiency() {
         "benchmark_discovery_efficiency",
         baseline_eff = format!("{:.2}%", baseline_efficiency * 100.0),
         topo_eff = format!("{:.2}%", topo_efficiency * 100.0)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// End-to-End Report: Topology-Guided Coverage Summary
+// ---------------------------------------------------------------------------
+//
+// Produce a deterministic, human-readable coverage summary comparing baseline
+// vs topology-guided exploration. This is the "coverage report" artifact for
+// bd-32n6 (embedded in test logs for CI capture).
+
+fn format_coverage_report(label: &str, report: &ExplorationReport) -> String {
+    let coverage = &report.coverage;
+    let novelty_histogram = coverage
+        .novelty_histogram
+        .iter()
+        .map(|(novelty, count)| format!("{novelty}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let top_unexplored = report
+        .top_unexplored
+        .iter()
+        .take(5)
+        .map(|entry| match entry.score {
+            Some(score) => format!(
+                "{}@n{}:p{}",
+                entry.seed, score.novelty, score.persistence_sum
+            ),
+            None => format!("{}", entry.seed),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        "{label}: runs={} classes={} new={} rate={:.2}% saturated={} hits={} since_new={:?} novelty=[{}] top_unexplored=[{}]",
+        report.total_runs,
+        coverage.equivalence_classes,
+        coverage.new_class_discoveries,
+        coverage.discovery_rate() * 100.0,
+        coverage.saturation.saturated,
+        coverage.saturation.existing_class_hits,
+        coverage.saturation.runs_since_last_new_class,
+        novelty_histogram,
+        top_unexplored
+    )
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn e2e_topology_coverage_report() {
+    const MAX_RUNS: usize = 60;
+    const BASE_SEED: u64 = 12_345;
+
+    init_test_logging();
+    test_phase!("e2e_topology_coverage_report");
+
+    // Baseline exploration
+    let baseline_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut baseline = ScheduleExplorer::new(baseline_config);
+    let baseline_report = baseline.explore(|runtime| {
+        run_dining_philosophers(runtime, 4);
+    });
+
+    // Topology-prioritized exploration
+    let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut topo = TopologyExplorer::new(topo_config);
+    let topo_report = topo.explore(|runtime| {
+        run_dining_philosophers(runtime, 4);
+    });
+
+    let baseline_summary = format_coverage_report("baseline", &baseline_report);
+    let topo_summary = format_coverage_report("topology", &topo_report);
+
+    tracing::info!(%baseline_summary, %topo_summary, "topology coverage report");
+
+    assert!(
+        baseline_report.coverage.equivalence_classes >= 1,
+        "baseline should discover at least 1 equivalence class"
+    );
+    assert!(
+        topo_report.coverage.equivalence_classes >= 1,
+        "topology should discover at least 1 equivalence class"
+    );
+
+    test_complete!(
+        "e2e_topology_coverage_report",
+        baseline = baseline_summary,
+        topology = topo_summary
     );
 }

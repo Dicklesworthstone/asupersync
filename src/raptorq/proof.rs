@@ -76,16 +76,13 @@ impl DecodeProof {
     ///
     /// Returns a detailed [`ReplayError`] if any divergence is detected.
     pub fn replay_and_verify(&self, symbols: &[ReceivedSymbol]) -> Result<(), ReplayError> {
-        let decoder = InactivationDecoder::new(
-            self.config.k,
-            self.config.symbol_size,
-            self.config.seed,
-        );
-        let actual = match decoder.decode_with_proof(symbols, self.config.object_id, self.config.sbn)
-        {
-            Ok(result) => result.proof,
-            Err((_err, proof)) => proof,
-        };
+        let decoder =
+            InactivationDecoder::new(self.config.k, self.config.symbol_size, self.config.seed);
+        let actual =
+            match decoder.decode_with_proof(symbols, self.config.object_id, self.config.sbn) {
+                Ok(result) => result.proof,
+                Err((_err, proof)) => proof,
+            };
         compare_proofs(self, &actual)
     }
 }
@@ -150,7 +147,12 @@ fn mismatch<T: fmt::Debug>(field: &'static str, expected: T, actual: T) -> Repla
     }
 }
 
-fn sequence_mismatch(label: &'static str, index: usize, expected: String, actual: String) -> ReplayError {
+fn sequence_mismatch(
+    label: &'static str,
+    index: usize,
+    expected: String,
+    actual: String,
+) -> ReplayError {
     ReplayError::SequenceMismatch {
         label,
         index,
@@ -175,7 +177,12 @@ fn compare_prefix<T: PartialEq + fmt::Debug>(
     }
     for (idx, (exp, act)) in expected.iter().zip(actual.iter()).enumerate() {
         if exp != act {
-            return Err(sequence_mismatch(label, idx, format!("{exp:?}"), format!("{act:?}")));
+            return Err(sequence_mismatch(
+                label,
+                idx,
+                format!("{exp:?}"),
+                format!("{act:?}"),
+            ));
         }
     }
     if !truncated && actual.len() != expected.len() {
@@ -188,6 +195,7 @@ fn compare_prefix<T: PartialEq + fmt::Debug>(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), ReplayError> {
     if expected.version != actual.version {
         return Err(mismatch("version", expected.version, actual.version));
@@ -258,7 +266,11 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
         ));
     }
     if exp_elim.pivots != act_elim.pivots {
-        return Err(mismatch("elimination.pivots", exp_elim.pivots, act_elim.pivots));
+        return Err(mismatch(
+            "elimination.pivots",
+            exp_elim.pivots,
+            act_elim.pivots,
+        ));
     }
     if exp_elim.row_ops != act_elim.row_ops {
         return Err(mismatch(

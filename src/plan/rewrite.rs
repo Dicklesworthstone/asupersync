@@ -731,8 +731,7 @@ pub(crate) fn check_side_conditions(
                 join_children.push(children.clone());
             }
 
-            let mut intersection: HashSet<PlanId> =
-                join_children[0].iter().copied().collect();
+            let mut intersection: HashSet<PlanId> = join_children[0].iter().copied().collect();
             for nodes in join_children.iter().skip(1) {
                 let set: HashSet<PlanId> = nodes.iter().copied().collect();
                 intersection.retain(|id| set.contains(id));
@@ -773,8 +772,7 @@ pub(crate) fn check_side_conditions(
                 None => return Err("missing race candidate".to_string()),
             };
 
-            let mut expected_signatures: Vec<Vec<usize>> =
-                Vec::with_capacity(join_children.len());
+            let mut expected_signatures: Vec<Vec<usize>> = Vec::with_capacity(join_children.len());
             for nodes in &join_children {
                 let mut remaining: Vec<PlanId> =
                     nodes.iter().copied().filter(|id| *id != shared).collect();
@@ -792,8 +790,7 @@ pub(crate) fn check_side_conditions(
                 }
             }
 
-            let mut actual_signatures: Vec<Vec<usize>> =
-                Vec::with_capacity(actual_branches.len());
+            let mut actual_signatures: Vec<Vec<usize>> = Vec::with_capacity(actual_branches.len());
             for branch in actual_branches {
                 actual_signatures.push(branch_signature(dag, branch)?);
             }

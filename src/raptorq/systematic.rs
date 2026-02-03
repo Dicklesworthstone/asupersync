@@ -625,7 +625,7 @@ mod tests {
         let mut rng = DetRng::new(42);
         for _ in 0..1000 {
             let d = sol.sample(rng.next_u64() as u32);
-            assert!(d >= 1 && d <= 50, "degree {d} out of range");
+            assert!((1..=50).contains(&d), "degree {d} out of range");
         }
     }
 

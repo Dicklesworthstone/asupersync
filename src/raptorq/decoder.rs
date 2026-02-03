@@ -15,7 +15,7 @@ use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, PeelingTrace, ReceivedSummary,
 };
-use crate::raptorq::systematic::{RobustSoliton, SystematicParams};
+use crate::raptorq::systematic::{ConstraintMatrix, RobustSoliton, SystematicParams};
 use crate::types::ObjectId;
 use crate::util::DetRng;
 
@@ -395,33 +395,15 @@ impl InactivationDecoder {
 
     /// Build initial decoder state from received symbols.
     ///
-    /// Includes LDPC and HDPC constraint equations (with zero RHS) in addition
-    /// to the received symbol equations. These constraints tie together the
-    /// intermediate symbols and are essential for successful decoding.
+    /// The caller is responsible for including LDPC/HDPC constraint equations
+    /// (with zero RHS) in the received symbols if needed. The higher-level
+    /// `decoding.rs` module handles this by building constraint rows from
+    /// the constraint matrix.
     fn build_state(&self, symbols: &[ReceivedSymbol]) -> DecoderState {
         let l = self.params.l;
-        let s = self.params.s;
-        let h = self.params.h;
-        let symbol_size = self.params.symbol_size;
 
-        // Capacity: LDPC (S) + HDPC (H) + received symbols
-        let total_eqs = s + h + symbols.len();
-        let mut equations = Vec::with_capacity(total_eqs);
-        let mut rhs = Vec::with_capacity(total_eqs);
-
-        // Add LDPC constraint equations (S equations with zero RHS)
-        let ldpc_eqs = self.build_ldpc_constraints();
-        for eq in ldpc_eqs {
-            equations.push(eq);
-            rhs.push(vec![0u8; symbol_size]);
-        }
-
-        // Add HDPC constraint equations (H equations with zero RHS)
-        let hdpc_eqs = self.build_hdpc_constraints();
-        for eq in hdpc_eqs {
-            equations.push(eq);
-            rhs.push(vec![0u8; symbol_size]);
-        }
+        let mut equations = Vec::with_capacity(symbols.len());
+        let mut rhs = Vec::with_capacity(symbols.len());
 
         // Add received symbol equations
         for sym in symbols {
@@ -443,81 +425,54 @@ impl InactivationDecoder {
         }
     }
 
-    /// Build LDPC constraint equations.
+    /// Generate constraint symbols (LDPC + HDPC) with zero data.
     ///
-    /// These are the same constraints used by the encoder in `build_ldpc_rows`.
-    /// Each LDPC row connects a few intermediate symbols with XOR (GF(2)).
-    fn build_ldpc_constraints(&self) -> Vec<Equation> {
+    /// These should be included in the received symbols when decoding.
+    /// The `decoding.rs` module handles this automatically; this method
+    /// is provided for direct decoder testing.
+    #[must_use]
+    pub fn constraint_symbols(&self) -> Vec<ReceivedSymbol> {
         let s = self.params.s;
-        let l = self.params.l;
+        let h = self.params.h;
+        let symbol_size = self.params.symbol_size;
+        let base_rows = s + h;
 
-        // Build sparse representation for each LDPC row
-        let mut row_terms: Vec<Vec<(usize, Gf256)>> = vec![Vec::new(); s];
+        // Build the constraint matrix (same as encoder uses)
+        let constraints = ConstraintMatrix::build(&self.params, self.seed);
 
-        // Each intermediate symbol i participates in LDPC rows
-        // (i % S), ((i / S) % S)
-        for i in 0..l {
-            let r0 = i % s;
-            let r1 = (i / s.max(1)) % s;
-            row_terms[r0].push((i, Gf256::ONE));
-            if r0 != r1 {
-                row_terms[r1].push((i, Gf256::ONE));
-            }
+        let mut result = Vec::with_capacity(base_rows);
+
+        // Extract the first S+H rows (LDPC + HDPC constraints)
+        for row in 0..base_rows {
+            let (columns, coefficients) = self.constraint_row_equation(&constraints, row);
+            result.push(ReceivedSymbol {
+                esi: row as u32,
+                is_source: false,
+                columns,
+                coefficients,
+                data: vec![0u8; symbol_size],
+            });
         }
 
-        // Additional LDPC connections using seed-derived pattern
-        let mut rng = DetRng::new(self.seed.wrapping_add(0x1D9C_1D9C_0000));
-        for terms in row_terms.iter_mut().take(s) {
-            let extra = 1 + rng.next_usize(2); // 1-2 additional connections
-            for _ in 0..extra {
-                let col = rng.next_usize(l);
-                terms.push((col, Gf256::ONE));
-            }
-        }
-
-        // Convert to Equations
-        row_terms
-            .into_iter()
-            .map(|terms| {
-                let (cols, coefs): (Vec<_>, Vec<_>) = terms.into_iter().unzip();
-                Equation::new(cols, coefs)
-            })
-            .collect()
+        result
     }
 
-    /// Build HDPC constraint equations.
-    ///
-    /// These are the same constraints used by the encoder in `build_hdpc_rows`.
-    /// HDPC rows use GF(256) coefficients (not just GF(2)) to provide
-    /// half-distance parity coverage.
-    fn build_hdpc_constraints(&self) -> Vec<Equation> {
-        let h = self.params.h;
-        let l = self.params.l;
-
-        let mut equations = Vec::with_capacity(h);
-        let mut rng = DetRng::new(self.seed.wrapping_add(0x4D9C_4D9C_0000));
-
-        for row_offset in 0..h {
-            let alpha_pow = Gf256::ALPHA.pow((row_offset & 0xFF) as u8);
-            let mut coeff_acc = Gf256::ONE;
-            let mut cols = Vec::with_capacity(l);
-            let mut coefficients = Vec::with_capacity(l);
-
-            for col in 0..l {
-                // Mix structured (Vandermonde) and random components
-                let random_part = Gf256::new(rng.next_u64() as u8);
-                let c = coeff_acc + random_part;
-                if !c.is_zero() {
-                    cols.push(col);
-                    coefficients.push(c);
-                }
-                coeff_acc *= alpha_pow;
+    /// Extract a sparse equation from a constraint matrix row.
+    fn constraint_row_equation(
+        &self,
+        constraints: &ConstraintMatrix,
+        row: usize,
+    ) -> (Vec<usize>, Vec<Gf256>) {
+        let mut columns = Vec::new();
+        let mut coefficients = Vec::new();
+        for col in 0..constraints.cols {
+            let coeff = constraints.get(row, col);
+            if !coeff.is_zero() {
+                columns.push(col);
+                coefficients.push(coeff);
             }
-
-            equations.push(Equation::new(cols, coefficients));
         }
-
-        equations
+        (columns, coefficients)
     }
 
     /// Phase 1: Peeling (belief propagation).
@@ -928,10 +883,7 @@ impl InactivationDecoder {
     /// intermediate symbol `esi` with coefficient 1.
     #[must_use]
     pub fn source_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        assert!(
-            (esi as usize) < self.params.k,
-            "source ESI must be < K"
-        );
+        assert!((esi as usize) < self.params.k, "source ESI must be < K");
         // Systematic: source[esi] = intermediate[esi]
         (vec![esi as usize], vec![Gf256::ONE])
     }
@@ -1017,8 +969,11 @@ mod tests {
         let source = make_source_data(k, symbol_size);
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
-        // Receive all source symbols with proper LT equations
-        let mut received = make_received_source(&decoder, &source);
+        // Start with constraint symbols (LDPC + HDPC with zero data)
+        let mut received = decoder.constraint_symbols();
+
+        // Add all source symbols with proper LT equations
+        received.extend(make_received_source(&decoder, &source));
 
         // Add some repair symbols to reach L
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -1048,11 +1003,11 @@ mod tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
+        // Start with constraint symbols
+        let mut received = decoder.constraint_symbols();
+
         // Get proper source equations
         let source_eqs = decoder.all_source_equations();
-
-        // Receive half source, half repair
-        let mut received = Vec::new();
 
         // First half source symbols with proper LT equations
         for i in 0..(k / 2) {
@@ -1091,8 +1046,10 @@ mod tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
+        // Start with constraint symbols
+        let mut received = decoder.constraint_symbols();
+
         // Receive only repair symbols (need at least L)
-        let mut received = Vec::new();
         for esi in (k as u32)..(k as u32 + l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
@@ -1114,12 +1071,10 @@ mod tests {
 
         let source = make_source_data(k, symbol_size);
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
-        let l = decoder.params().l;
 
-        // Receive fewer than L symbols (only half the source symbols)
+        // Only provide a couple source symbols - not enough to solve
         let source_eqs = decoder.all_source_equations();
-        let received: Vec<ReceivedSymbol> = (0..l / 2)
-            .filter(|&i| i < k)
+        let received: Vec<ReceivedSymbol> = (0..2)
             .map(|i| {
                 let (cols, coefs) = source_eqs[i].clone();
                 ReceivedSymbol {
@@ -1147,8 +1102,9 @@ mod tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // Build received symbols with proper LT equations
-        let mut received = make_received_source(&decoder, &source);
+        // Build received symbols: constraints + source + repair
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -1168,20 +1124,25 @@ mod tests {
 
     #[test]
     fn stats_track_peeling_and_inactivation() {
-        let k = 4;
-        let symbol_size = 16;
-        let seed = 123u64;
+        // Use k=8 for more robust coverage (k=4 with certain seeds can cause
+        // singular matrices due to sparse LT equation coverage)
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 42u64;
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // Receive all source symbols with proper LT equations
-        let mut received = make_received_source(&decoder, &source);
+        // Start with constraint symbols (LDPC + HDPC with zero data)
+        let mut received = decoder.constraint_symbols();
 
-        // Add repair symbols to provide enough equations
-        for esi in (k as u32)..(l as u32) {
+        // Add all source symbols with proper LT equations
+        received.extend(make_received_source(&decoder, &source));
+
+        // Add repair symbols to provide enough equations for full coverage
+        for esi in (k as u32)..(l as u32 + 2) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));

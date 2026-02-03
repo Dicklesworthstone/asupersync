@@ -490,8 +490,7 @@ mod tests {
         let region = make_region();
 
         let _token = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
-        // Intentionally not resolving — simulate dropping the token.
-        std::mem::forget(_token);
+        // Intentionally not resolving — simulate a lost token.
 
         let result = ledger.check_leaks();
         let is_clean = result.is_clean();
@@ -548,11 +547,6 @@ mod tests {
 
         let r1_clean = ledger.is_region_clean(r1);
         crate::assert_with_log!(!r1_clean, "r1 not clean", false, r1_clean);
-
-        // Clean up to avoid leak panic.
-        std::mem::forget(_t1);
-        std::mem::forget(_t2);
-        std::mem::forget(_t3);
         crate::test_complete!("pending_for_region");
     }
 
@@ -572,8 +566,6 @@ mod tests {
         crate::assert_with_log!(ids[0] == t1.id(), "first id", t1.id(), ids[0]);
         crate::assert_with_log!(ids[1] == t2.id(), "second id", t2.id(), ids[1]);
 
-        std::mem::forget(t1);
-        std::mem::forget(t2);
         crate::test_complete!("pending_ids_for_region_returns_sorted");
     }
 
@@ -588,7 +580,7 @@ mod tests {
 
         let token = ledger.acquire(ObligationKind::IoOp, task, region, Time::from_nanos(0));
         let id = token.id();
-        std::mem::forget(token); // Simulate lost token.
+        // Intentionally not resolving token; mark as leaked below.
 
         ledger.mark_leaked(id, Time::from_nanos(100));
 
@@ -619,9 +611,6 @@ mod tests {
         let t2_pending = ledger.pending_for_task(t2);
         crate::assert_with_log!(t2_pending == 1, "t2 pending", 1, t2_pending);
 
-        std::mem::forget(_tok1);
-        std::mem::forget(_tok2);
-        std::mem::forget(_tok3);
         crate::test_complete!("pending_for_task");
     }
 
@@ -650,7 +639,6 @@ mod tests {
         let r2_result = ledger.check_region_leaks(r2);
         crate::assert_with_log!(r2_result.is_clean(), "r2 clean", true, r2_result.is_clean());
 
-        std::mem::forget(_t1);
         crate::test_complete!("check_region_leaks_scoped");
     }
 
@@ -663,7 +651,8 @@ mod tests {
         let result = ledger.check_leaks();
         crate::assert_with_log!(result.is_clean(), "clean", true, result.is_clean());
         crate::assert_with_log!(ledger.is_empty(), "empty", true, ledger.is_empty());
-        crate::assert_with_log!(ledger.len() == 0, "len", 0, ledger.len());
+        let len = ledger.len();
+        crate::assert_with_log!(len == 0, "len", 0, len);
         crate::test_complete!("empty_ledger_is_clean");
     }
 
@@ -707,21 +696,17 @@ mod tests {
         let region = make_region();
 
         // Acquire multiple obligations.
-        let _t1 = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
-        let _t2 = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
-        let _t3 = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let t1 = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let t2 = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let t3 = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
 
         // Iteration order should be by ID (BTreeMap).
         let ids: Vec<ObligationId> = ledger.iter().map(|(id, _)| *id).collect();
         crate::assert_with_log!(ids.len() == 3, "len", 3, ids.len());
         // IDs are monotonically increasing since we allocate sequentially.
-        crate::assert_with_log!(ids[0] == _t1.id(), "first", _t1.id(), ids[0]);
-        crate::assert_with_log!(ids[1] == _t2.id(), "second", _t2.id(), ids[1]);
-        crate::assert_with_log!(ids[2] == _t3.id(), "third", _t3.id(), ids[2]);
-
-        std::mem::forget(_t1);
-        std::mem::forget(_t2);
-        std::mem::forget(_t3);
+        crate::assert_with_log!(ids[0] == t1.id(), "first", t1.id(), ids[0]);
+        crate::assert_with_log!(ids[1] == t2.id(), "second", t2.id(), ids[1]);
+        crate::assert_with_log!(ids[2] == t3.id(), "third", t3.id(), ids[2]);
         crate::test_complete!("iteration_is_deterministic");
     }
 

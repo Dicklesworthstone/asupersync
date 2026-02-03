@@ -19,8 +19,13 @@ use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
 
-use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Parker, Scheduler};
-use asupersync::types::{TaskId, Time};
+use asupersync::record::task::TaskRecord;
+use asupersync::runtime::scheduler::{
+    GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, Scheduler, QUEUE_TAG_READY,
+};
+use asupersync::types::{Budget, RegionId, TaskId, Time};
+use asupersync::util::{Arena, ArenaIndex};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 // =============================================================================
@@ -35,6 +40,23 @@ fn task(id: u32) -> TaskId {
 /// Creates a vector of test TaskIds.
 fn tasks(count: usize) -> Vec<TaskId> {
     (0..count as u32).map(task).collect()
+}
+
+/// Creates a test RegionId.
+fn region() -> RegionId {
+    RegionId::from_arena(ArenaIndex::new(0, 0))
+}
+
+/// Creates an arena with `count` TaskRecords.
+fn setup_arena(count: u32) -> Arena<TaskRecord> {
+    let mut arena = Arena::new();
+    for i in 0..count {
+        let id = task(i);
+        let record = TaskRecord::new(id, region(), Budget::INFINITE);
+        let idx = arena.insert(record);
+        assert_eq!(idx.index(), i);
+    }
+    arena
 }
 
 // =============================================================================
@@ -548,6 +570,248 @@ fn bench_parker(c: &mut Criterion) {
 }
 
 // =============================================================================
+// INTRUSIVE QUEUE BENCHMARKS
+// =============================================================================
+
+fn bench_intrusive_ring(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/intrusive_ring");
+
+    // Single push_back/pop_front cycle
+    group.bench_function("push_pop_single", |b| {
+        b.iter_batched(
+            || {
+                let arena = setup_arena(1);
+                let ring = IntrusiveRing::new(QUEUE_TAG_READY);
+                (arena, ring)
+            },
+            |(mut arena, mut ring)| {
+                ring.push_back(task(0), &mut arena);
+                let result = ring.pop_front(&mut arena);
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Batch push then pop (compare with VecDeque)
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("push_then_pop", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let arena = setup_arena(count as u32);
+                        let ring = IntrusiveRing::new(QUEUE_TAG_READY);
+                        (arena, ring, task_ids.clone())
+                    },
+                    |(mut arena, mut ring, tasks)| {
+                        for t in &tasks {
+                            ring.push_back(*t, &mut arena);
+                        }
+                        for _ in 0..tasks.len() {
+                            let _ = black_box(ring.pop_front(&mut arena));
+                        }
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Interleaved push/pop
+    group.bench_function("interleaved_push_pop", |b| {
+        b.iter_batched(
+            || {
+                let arena = setup_arena(200);
+                let ring = IntrusiveRing::new(QUEUE_TAG_READY);
+                (arena, ring)
+            },
+            |(mut arena, mut ring)| {
+                for i in 0..100u32 {
+                    ring.push_back(task(i * 2), &mut arena);
+                    ring.push_back(task(i * 2 + 1), &mut arena);
+                    let _ = black_box(ring.pop_front(&mut arena));
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+fn bench_intrusive_stack(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/intrusive_stack");
+
+    // Single push/pop cycle
+    group.bench_function("push_pop_single", |b| {
+        b.iter_batched(
+            || {
+                let arena = setup_arena(1);
+                let stack = IntrusiveStack::new(QUEUE_TAG_READY);
+                (arena, stack)
+            },
+            |(mut arena, mut stack)| {
+                stack.push(task(0), &mut arena);
+                let result = stack.pop(&mut arena);
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Batch push then pop (LIFO)
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("push_then_pop", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let arena = setup_arena(count as u32);
+                        let stack = IntrusiveStack::new(QUEUE_TAG_READY);
+                        (arena, stack, task_ids.clone())
+                    },
+                    |(mut arena, mut stack, tasks)| {
+                        for t in &tasks {
+                            stack.push(*t, &mut arena);
+                        }
+                        for _ in 0..tasks.len() {
+                            let _ = black_box(stack.pop(&mut arena));
+                        }
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Work stealing: push then steal half
+    for &count in &[16, 64, 256] {
+        group.bench_with_input(
+            BenchmarkId::new("push_then_steal_batch", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let arena = setup_arena(count as u32);
+                        let stack = IntrusiveStack::new(QUEUE_TAG_READY);
+                        (arena, stack, task_ids.clone())
+                    },
+                    |(mut arena, mut stack, tasks)| {
+                        for t in &tasks {
+                            stack.push(*t, &mut arena);
+                        }
+                        let stolen = stack.steal_batch(count as usize / 2, &mut arena);
+                        black_box(stolen)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_intrusive_vs_vecdeque(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/intrusive_vs_vecdeque");
+    group.sample_size(100);
+
+    // Compare FIFO push/pop throughput
+    for &count in &[100, 1000, 10000] {
+        group.throughput(Throughput::Elements(count));
+
+        // IntrusiveRing (allocation-free)
+        group.bench_with_input(
+            BenchmarkId::new("intrusive_ring", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let arena = setup_arena(count as u32);
+                        let ring = IntrusiveRing::new(QUEUE_TAG_READY);
+                        (arena, ring, task_ids.clone())
+                    },
+                    |(mut arena, mut ring, tasks)| {
+                        for t in &tasks {
+                            ring.push_back(*t, &mut arena);
+                        }
+                        let mut popped = 0;
+                        while ring.pop_front(&mut arena).is_some() {
+                            popped += 1;
+                        }
+                        black_box(popped)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+
+        // VecDeque (allocates on growth)
+        group.bench_with_input(
+            BenchmarkId::new("vecdeque", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let deque: VecDeque<TaskId> = VecDeque::new();
+                        (deque, task_ids.clone())
+                    },
+                    |(mut deque, tasks)| {
+                        for t in &tasks {
+                            deque.push_back(*t);
+                        }
+                        let mut popped = 0;
+                        while deque.pop_front().is_some() {
+                            popped += 1;
+                        }
+                        black_box(popped)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+
+        // VecDeque with pre-allocated capacity
+        group.bench_with_input(
+            BenchmarkId::new("vecdeque_preallocated", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let deque: VecDeque<TaskId> = VecDeque::with_capacity(count as usize);
+                        (deque, task_ids.clone())
+                    },
+                    |(mut deque, tasks)| {
+                        for t in &tasks {
+                            deque.push_back(*t);
+                        }
+                        let mut popped = 0;
+                        while deque.pop_front().is_some() {
+                            popped += 1;
+                        }
+                        black_box(popped)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -560,6 +824,9 @@ criterion_group!(
     bench_work_stealing,
     bench_scheduler_throughput,
     bench_parker,
+    bench_intrusive_ring,
+    bench_intrusive_stack,
+    bench_intrusive_vs_vecdeque,
 );
 
 criterion_main!(benches);

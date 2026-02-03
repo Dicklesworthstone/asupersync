@@ -28,10 +28,13 @@ use crate::trace::event_structure::TracePoset;
 use crate::trace::scoring::{
     score_persistence, seed_fingerprint, ClassId, EvidenceLedger, TopologicalScore,
 };
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 
 const DEFAULT_SATURATION_WINDOW: usize = 10;
 const DEFAULT_UNEXPLORED_LIMIT: usize = 5;
+const DEFAULT_DERIVED_SEEDS: usize = 4;
 
 /// Exploration mode: baseline seed-sweep or topology-prioritized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -856,6 +859,7 @@ impl TopologyExplorer {
             score_persistence(&pairs, &mut self.seen_classes, fp)
         };
 
+        self.enqueue_derived_seeds(seed, &ledger);
         self.ledgers.push(ledger);
 
         let violations = runtime.check_invariants();
@@ -878,6 +882,29 @@ impl TopologyExplorer {
             violations,
             certificate_hash,
         });
+    }
+
+    fn enqueue_derived_seeds(&mut self, seed: u64, ledger: &EvidenceLedger) {
+        if ledger.entries.is_empty() {
+            return;
+        }
+        if ledger.score.novelty == 0 && ledger.score.persistence_sum == 0 {
+            return;
+        }
+        let mut pushed = 0usize;
+        for (idx, entry) in ledger.entries.iter().enumerate() {
+            if pushed >= DEFAULT_DERIVED_SEEDS {
+                break;
+            }
+            let derived_seed = derive_seed(seed, entry.class, idx as u64);
+            if self.explored_seeds.contains(&derived_seed) {
+                continue;
+            }
+            let mut score = ledger.score;
+            score.fingerprint = seed_fingerprint(derived_seed);
+            self.frontier.push((score, derived_seed));
+            pushed += 1;
+        }
     }
 
     fn build_report(&self) -> ExplorationReport {
@@ -943,6 +970,15 @@ impl TopologyExplorer {
         }
         out
     }
+}
+
+fn derive_seed(seed: u64, class: ClassId, index: u64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    seed.hash(&mut hasher);
+    class.birth.hash(&mut hasher);
+    class.death.hash(&mut hasher);
+    index.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ViolationReport needs Clone for build_report.

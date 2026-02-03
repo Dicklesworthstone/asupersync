@@ -553,9 +553,9 @@ mod tests {
         // Simulate 1000 observations with ages ≤ expected_lifetime
         // (drawn from the "easy half" of the exponential).
         // E-value should stay bounded.
-        for i in 0..1000 {
+        for i in 0u64..1000 {
             // Deterministic sequence that stays under expected lifetime.
-            let age = ((i % 10) as u64 + 1) * 100_000; // 0.1ms to 1.0ms
+            let age = ((i % 10) + 1) * 100_000; // 0.1ms to 1.0ms
             monitor.observe(age);
         }
 
