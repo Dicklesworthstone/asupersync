@@ -26,7 +26,7 @@ use asupersync::runtime::scheduler::{
 use asupersync::runtime::RuntimeState;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, ArenaIndex};
-use std::collections::VecDeque;
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -829,6 +829,121 @@ fn bench_intrusive_vs_vecdeque(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compare IntrusiveRing vs BinaryHeap for the ready lane hot path.
+///
+/// This benchmark measures the operation targeted by bd-3nod: replacing
+/// the BinaryHeap in the local priority scheduler's ready/cancel lanes with
+/// an IntrusiveRing. For the common case (all tasks at priority 0), BinaryHeap
+/// performs O(log n) comparisons per push/pop with no ordering benefit, while
+/// IntrusiveRing performs O(1) with better cache locality.
+fn bench_intrusive_vs_binaryheap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/intrusive_vs_binaryheap");
+    group.sample_size(100);
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct HeapEntry {
+        task_id: u32,
+        priority: u8,
+        generation: u64,
+    }
+
+    impl Ord for HeapEntry {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.priority
+                .cmp(&other.priority)
+                .then_with(|| other.generation.cmp(&self.generation))
+        }
+    }
+
+    impl PartialOrd for HeapEntry {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    for &count in &[10, 100, 1000] {
+        group.throughput(Throughput::Elements(count));
+
+        // IntrusiveRing: O(1) push/pop, zero allocation
+        group.bench_with_input(
+            BenchmarkId::new("intrusive_ring", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || {
+                        let arena = setup_arena(count as u32);
+                        let ring = IntrusiveRing::new(QUEUE_TAG_READY);
+                        (arena, ring, task_ids.clone())
+                    },
+                    |(mut arena, mut ring, tasks)| {
+                        for t in &tasks {
+                            ring.push_back(*t, &mut arena);
+                        }
+                        let mut popped = 0;
+                        while ring.pop_front(&mut arena).is_some() {
+                            popped += 1;
+                        }
+                        black_box(popped)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+
+        // BinaryHeap: O(log n) push/pop, allocating
+        group.bench_with_input(
+            BenchmarkId::new("binaryheap_uniform_priority", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    BinaryHeap::new,
+                    |mut heap: BinaryHeap<HeapEntry>| {
+                        for i in 0..count {
+                            heap.push(HeapEntry {
+                                task_id: i as u32,
+                                priority: 0,
+                                generation: i,
+                            });
+                        }
+                        let mut popped = 0;
+                        while heap.pop().is_some() {
+                            popped += 1;
+                        }
+                        black_box(popped)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+
+        // PriorityScheduler: full schedule/pop cycle (actual hot path)
+        group.bench_with_input(
+            BenchmarkId::new("priority_scheduler", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count as usize);
+                b.iter_batched(
+                    || (Scheduler::new(), task_ids.clone()),
+                    |(mut scheduler, tasks)| {
+                        for t in &tasks {
+                            scheduler.schedule(*t, 0);
+                        }
+                        let mut popped = 0;
+                        while scheduler.pop().is_some() {
+                            popped += 1;
+                        }
+                        black_box(popped)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // MAIN
 // =============================================================================
@@ -845,6 +960,7 @@ criterion_group!(
     bench_intrusive_ring,
     bench_intrusive_stack,
     bench_intrusive_vs_vecdeque,
+    bench_intrusive_vs_binaryheap,
 );
 
 criterion_main!(benches);

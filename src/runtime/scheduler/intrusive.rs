@@ -37,12 +37,31 @@
 //! | `LocalQueue` | Intrusive stack | Shared via `Arc<Mutex>` + RuntimeState arena |
 //! | `GlobalInjector` | Regular queues | Concurrent access |
 //!
-//! # Safety
+//! # Safety Proof: No ABA, No Use-After-Free
 //!
-//! This implementation avoids ABA and use-after-free issues by:
-//! 1. Requiring exclusive `&mut` access to the arena during all operations
-//! 2. Using `queue_tag` to detect stale references
-//! 3. Clearing links immediately on removal
+//! ## Invariants (maintained by all operations):
+//!
+//! **INV-1 (Exclusive Access):** Every operation takes `&mut Arena<TaskRecord>`,
+//! guaranteeing no concurrent mutation. This eliminates data races entirely.
+//!
+//! **INV-2 (Tag Consistency):** A task's `queue_tag` equals the queue's `tag`
+//! if and only if the task is logically in that queue. On removal, `clear_queue_links()`
+//! sets `queue_tag = 0` atomically with link erasure.
+//!
+//! **INV-3 (Link Validity):** If `task.next_in_queue = Some(id)`, then `id` is a
+//! valid arena index with `queue_tag == self.tag`. Conversely on removal.
+//!
+//! ## No ABA:
+//! ABA requires a slot to be freed and reallocated while a stale reference exists.
+//! Since we use arena indices (not pointers), and INV-2 ensures `queue_tag` is zeroed
+//! on removal, any stale index would fail the `is_in_queue_tag(tag)` check. The arena
+//! itself is `&mut`-borrowed, preventing concurrent reuse of slots.
+//!
+//! ## No Use-After-Free:
+//! Tasks are never freed while in a queue. The arena is `&mut`-borrowed during all
+//! operations, so no external code can free arena entries during queue manipulation.
+//! After `clear_queue_links()`, the task's link fields are zeroed, and subsequent
+//! operations will not follow stale links.
 //!
 //! # Queue Tags
 //!
