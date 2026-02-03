@@ -1110,8 +1110,10 @@ impl ThreeLaneLocalCancelWaker {
         self.wake_state.notify();
 
         // Inject to local cancel lane
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
-        local.schedule_cancel(self.task_id, priority);
+        {
+            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            local.schedule_cancel(self.task_id, priority);
+        }
         self.parker.unpark();
     }
 }
