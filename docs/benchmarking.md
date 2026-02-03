@@ -301,6 +301,25 @@ Track scored opportunities in the beads system with labels:
 
 Use `br list --label=perf-approved` to find ready perf work.
 
+### CI Enforcement
+
+Performance PRs are automatically validated by `.github/workflows/perf-pr-check.yml`:
+
+1. **Detection**: PRs are identified as performance-related by:
+   - Title containing "perf", "performance", or "optim"
+   - Labels `performance` or `perf`
+   - `[x] Performance optimization` checked in PR template
+
+2. **Validation**: The CI check verifies:
+   - Opportunity Score table is present with Impact, Confidence, Effort
+   - Score >= 2.0 (errors if below threshold)
+   - Isomorphism Proof section is present
+   - One Lever Rule documentation
+
+3. **Feedback**: The bot comments on PRs with validation results and links to this guide.
+
+Use the PR template at `.github/PULL_REQUEST_TEMPLATE.md` which includes pre-formatted sections for all required fields.
+
 ---
 
 ## Isomorphism Proof Template (required for perf changes)

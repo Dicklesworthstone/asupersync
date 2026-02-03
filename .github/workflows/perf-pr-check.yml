@@ -1,0 +1,145 @@
+name: Performance PR Validation
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  validate-perf-pr:
+    name: Validate Performance PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR description for perf requirements
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const title = pr.title || '';
+            const labels = pr.labels.map(l => l.name);
+
+            // Check if this is a performance-related PR
+            const isPerfPR =
+              title.toLowerCase().includes('perf') ||
+              title.toLowerCase().includes('performance') ||
+              title.toLowerCase().includes('optim') ||
+              labels.includes('performance') ||
+              labels.includes('perf') ||
+              body.includes('[x] Performance optimization');
+
+            if (!isPerfPR) {
+              console.log('Not a performance PR, skipping validation');
+              return;
+            }
+
+            console.log('Performance PR detected, validating...');
+
+            const errors = [];
+            const warnings = [];
+
+            // Check for Opportunity Score section
+            const hasScoreTable = body.includes('| Impact |') &&
+                                  body.includes('| Confidence |') &&
+                                  body.includes('| Effort |');
+
+            if (!hasScoreTable) {
+              errors.push('Missing Opportunity Score table. Performance PRs require scoring (Impact x Confidence / Effort >= 2.0)');
+            }
+
+            // Check for One Lever Rule
+            const hasOneLever = body.includes('One Lever Rule') ||
+                               body.includes('one optimization lever');
+            if (!hasOneLever) {
+              warnings.push('Consider documenting which single optimization lever this change targets');
+            }
+
+            // Check for Isomorphism Proof section
+            const hasIsomorphismProof = body.includes('Isomorphism Proof') ||
+                                       (body.includes('Semantic invariants') && body.includes('Determinism'));
+            if (!hasIsomorphismProof) {
+              errors.push('Missing Isomorphism Proof section. Performance PRs require proof of behavioral equivalence');
+            }
+
+            // Check for baseline metrics
+            const hasMetrics = body.includes('| Before | After |') ||
+                              (body.includes('p50') && body.includes('p99')) ||
+                              body.includes('Baseline Metrics');
+            if (!hasMetrics) {
+              warnings.push('Consider including baseline vs current metrics (p50, p99, allocations)');
+            }
+
+            // Check for golden output verification
+            const hasGoldenCheck = body.includes('golden_outputs') ||
+                                  body.includes('[x] `cargo test --test golden_outputs` passed');
+            if (!hasGoldenCheck) {
+              warnings.push('Confirm golden output tests pass to verify behavioral equivalence');
+            }
+
+            // Extract and validate score if present
+            const scoreMatch = body.match(/\*\*Score\*\*.*?\*\*([0-9.]+)\*\*/);
+            if (scoreMatch) {
+              const score = parseFloat(scoreMatch[1]);
+              if (score < 2.0) {
+                errors.push(`Opportunity score ${score} is below threshold (2.0). Consider gathering more evidence or reducing scope.`);
+              } else {
+                console.log(`Opportunity score: ${score} (passes threshold)`);
+              }
+            }
+
+            // Report results
+            let comment = '';
+
+            if (errors.length > 0) {
+              comment += '## Performance PR Validation Failed\n\n';
+              comment += '### Errors (must fix)\n\n';
+              errors.forEach(e => comment += `- ${e}\n`);
+              comment += '\n';
+            }
+
+            if (warnings.length > 0) {
+              if (errors.length === 0) {
+                comment += '## Performance PR Validation Passed (with suggestions)\n\n';
+              }
+              comment += '### Suggestions\n\n';
+              warnings.forEach(w => comment += `- ${w}\n`);
+              comment += '\n';
+            }
+
+            if (errors.length === 0 && warnings.length === 0) {
+              comment = '## Performance PR Validation Passed\n\nAll required sections present and score >= 2.0.';
+            }
+
+            comment += '\n\n---\n*See [docs/benchmarking.md](../blob/main/docs/benchmarking.md#opportunity-matrix-scoring-performance-work) for the full opportunity matrix guide.*';
+
+            // Find existing comment to update or create new
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              c.body.includes('Performance PR Validation')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: comment,
+              });
+            }
+
+            // Fail if there are errors
+            if (errors.length > 0) {
+              core.setFailed(`Performance PR validation failed: ${errors.join('; ')}`);
+            }

@@ -7,10 +7,12 @@
 //! reconstitutes source symbols deterministically for testing.
 
 use crate::error::{Error, ErrorKind};
+use crate::raptorq::decoder::{DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
-use crate::util::DetRng;
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
@@ -505,7 +507,11 @@ impl DecodingPipeline {
         }
 
         let decoded_symbols =
-            match decode_block(block_plan, &symbols) {
+            match decode_block(
+                block_plan,
+                &symbols,
+                usize::from(self.config.symbol_size),
+            ) {
                 Ok(symbols) => symbols,
                 Err(
                     DecodingError::MatrixInversionFailed { .. }
