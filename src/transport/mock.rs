@@ -344,23 +344,23 @@ struct PendingSymbol {
     delay: Delay,
 }
 
-/// Mock symbol sink for testing send operations.
-pub struct MockSymbolSink {
-    inner: Arc<MockQueue>,
+/// Simulated symbol sink for testing send operations.
+pub struct SimSymbolSink {
+    inner: Arc<SimQueue>,
     delay: Option<Delay>,
     operation_count: usize,
     /// Tracks if we already have a waiter registered to prevent unbounded queue growth.
     waiter: Option<Arc<AtomicBool>>,
 }
 
-impl MockSymbolSink {
-    /// Create a new mock sink with given configuration.
+impl SimSymbolSink {
+    /// Create a new simulated sink with given configuration.
     #[must_use]
-    pub fn new(config: MockTransportConfig) -> Self {
-        Self::from_shared(Arc::new(MockQueue::new(config)))
+    pub fn new(config: SimTransportConfig) -> Self {
+        Self::from_shared(Arc::new(SimQueue::new(config)))
     }
 
-    fn from_shared(inner: Arc<MockQueue>) -> Self {
+    fn from_shared(inner: Arc<SimQueue>) -> Self {
         Self {
             inner,
             delay: None,
@@ -372,20 +372,20 @@ impl MockSymbolSink {
     /// Get all symbols that were successfully "sent" (post-loss/dup/corrupt).
     #[must_use]
     pub fn sent_symbols(&self) -> Vec<AuthenticatedSymbol> {
-        let state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let state = self.inner.state.lock().expect("sim queue lock poisoned");
         state.sent_symbols.clone()
     }
 
     /// Get count of sent symbols.
     #[must_use]
     pub fn sent_count(&self) -> usize {
-        let state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let state = self.inner.state.lock().expect("sim queue lock poisoned");
         state.sent_symbols.len()
     }
 
     /// Clear the sent symbols buffer.
     pub fn clear(&self) {
-        let mut state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let mut state = self.inner.state.lock().expect("sim queue lock poisoned");
         state.sent_symbols.clear();
     }
 
@@ -395,34 +395,34 @@ impl MockSymbolSink {
     }
 }
 
-/// Mock symbol stream for testing receive operations.
-pub struct MockSymbolStream {
-    inner: Arc<MockQueue>,
+/// Simulated symbol stream for testing receive operations.
+pub struct SimSymbolStream {
+    inner: Arc<SimQueue>,
     pending: Option<PendingSymbol>,
     operation_count: usize,
     /// Tracks if we already have a waiter registered to prevent unbounded queue growth.
     waiter: Option<Arc<AtomicBool>>,
 }
 
-impl MockSymbolStream {
-    /// Create a new mock stream with given configuration.
+impl SimSymbolStream {
+    /// Create a new simulated stream with given configuration.
     #[must_use]
-    pub fn new(config: MockTransportConfig) -> Self {
-        Self::from_shared(Arc::new(MockQueue::new(config)))
+    pub fn new(config: SimTransportConfig) -> Self {
+        Self::from_shared(Arc::new(SimQueue::new(config)))
     }
 
     /// Create from a list of symbols to deliver.
     #[must_use]
-    pub fn from_symbols(symbols: Vec<AuthenticatedSymbol>, config: MockTransportConfig) -> Self {
-        let shared = Arc::new(MockQueue::new(config));
+    pub fn from_symbols(symbols: Vec<AuthenticatedSymbol>, config: SimTransportConfig) -> Self {
+        let shared = Arc::new(SimQueue::new(config));
         {
-            let mut state = shared.state.lock().expect("mock queue lock poisoned");
+            let mut state = shared.state.lock().expect("sim queue lock poisoned");
             state.queue.extend(symbols);
         }
         Self::from_shared(shared)
     }
 
-    fn from_shared(inner: Arc<MockQueue>) -> Self {
+    fn from_shared(inner: Arc<SimQueue>) -> Self {
         Self {
             inner,
             pending: None,
@@ -433,7 +433,7 @@ impl MockSymbolStream {
 
     /// Add a symbol to the stream dynamically.
     pub fn push(&self, symbol: AuthenticatedSymbol) -> Result<(), StreamError> {
-        let mut state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let mut state = self.inner.state.lock().expect("sim queue lock poisoned");
         if state.closed {
             return Err(StreamError::Closed);
         }
@@ -466,7 +466,7 @@ impl MockSymbolStream {
     /// Check if all symbols have been consumed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let state = self.inner.state.lock().expect("sim queue lock poisoned");
         state.queue.is_empty()
     }
 
@@ -476,33 +476,33 @@ impl MockSymbolStream {
     }
 }
 
-/// Mock channel sink (alias of MockSymbolSink).
-pub type MockChannelSink = MockSymbolSink;
+/// Simulated channel sink (alias of SimSymbolSink).
+pub type SimChannelSink = SimSymbolSink;
 
-/// Mock channel stream (alias of MockSymbolStream).
-pub type MockChannelStream = MockSymbolStream;
+/// Simulated channel stream (alias of SimSymbolStream).
+pub type SimChannelStream = SimSymbolStream;
 
-/// Create a connected mock transport pair (sender/receiver).
+/// Create a connected simulated transport pair (sender/receiver).
 #[must_use]
-pub fn mock_channel(config: MockTransportConfig) -> (MockChannelSink, MockChannelStream) {
-    let shared = Arc::new(MockQueue::new(config));
+pub fn sim_channel(config: SimTransportConfig) -> (SimChannelSink, SimChannelStream) {
+    let shared = Arc::new(SimQueue::new(config));
     channel_from_shared(shared)
 }
 
-fn channel_from_shared(shared: Arc<MockQueue>) -> (MockChannelSink, MockChannelStream) {
+fn channel_from_shared(shared: Arc<SimQueue>) -> (SimChannelSink, SimChannelStream) {
     (
-        MockChannelSink::from_shared(shared.clone()),
-        MockChannelStream::from_shared(shared),
+        SimChannelSink::from_shared(shared.clone()),
+        SimChannelStream::from_shared(shared),
     )
 }
 
-fn closed_channel(config: MockTransportConfig) -> (MockChannelSink, MockChannelStream) {
-    let shared = Arc::new(MockQueue::new(config));
+fn closed_channel(config: SimTransportConfig) -> (SimChannelSink, SimChannelStream) {
+    let shared = Arc::new(SimQueue::new(config));
     shared.close();
     channel_from_shared(shared)
 }
 
-impl SymbolSink for MockSymbolSink {
+impl SymbolSink for SimSymbolSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
         let mut state = this.inner.state.lock().expect("mock queue lock poisoned");
