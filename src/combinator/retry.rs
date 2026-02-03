@@ -210,6 +210,10 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
     Duration::from_nanos(clamp_nanos_f64(final_nanos))
 }
 
+#[allow(
+    clippy::cast_precision_loss, // clamp boundary requires f64 comparison
+    clippy::cast_sign_loss,      // negative/NaN handled above before cast
+)]
 fn clamp_nanos_f64(nanos: f64) -> u64 {
     if !nanos.is_finite() || nanos <= 0.0 {
         return 0;
