@@ -627,6 +627,7 @@ impl SharedLabHandle {
                 }
                 LabJoinState::Empty => {
                     *state = LabJoinState::InFlight;
+                    drop(state);
                     i_am_joiner = true;
                 }
             }
@@ -662,6 +663,7 @@ impl SharedLabHandle {
                 Ok(None) => None,
                 Err(_) => {
                     *state = LabJoinState::Ready(BTreeSet::new());
+                    drop(state);
                     Some(BTreeSet::new())
                 }
             },
