@@ -34,6 +34,7 @@ use super::{PlanDag, PlanId, PlanNode};
 ///     .with_distributivity(false);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RewritePolicy {
     /// Allow associativity rewrites: `Join[Join[a,b], c] -> Join[a,b,c]`.
     ///

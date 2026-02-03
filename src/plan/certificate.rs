@@ -952,21 +952,28 @@ mod tests {
     #[test]
     fn verify_steps_rejects_missing_after_node() {
         init_test();
+        // Create a valid DedupRaceJoin structure (Race of Joins with shared child)
         let mut dag = PlanDag::new();
-        let a = dag.leaf("a");
-        dag.set_root(a);
+        let shared = dag.leaf("shared"); // node 0
+        let left = dag.leaf("left"); // node 1
+        let right = dag.leaf("right"); // node 2
+        let join_a = dag.join(vec![shared, left]); // node 3
+        let join_b = dag.join(vec![shared, right]); // node 4
+        let race = dag.race(vec![join_a, join_b]); // node 5
+        dag.set_root(race);
 
+        // Create certificate with valid before (the race) but non-existent after
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
             before_hash: PlanHash::of(&dag),
             after_hash: PlanHash::of(&dag),
-            before_node_count: 1,
-            after_node_count: 1,
+            before_node_count: 6,
+            after_node_count: 6,
             steps: vec![CertifiedStep {
                 rule: RewriteRule::DedupRaceJoin,
-                before: PlanId::new(0),
-                after: PlanId::new(999),
+                before: race,
+                after: PlanId::new(999), // doesn't exist
                 detail: "fake".to_string(),
             }],
         };
@@ -981,21 +988,28 @@ mod tests {
     #[test]
     fn verify_steps_rejects_wrong_after_shape() {
         init_test();
+        // Create a valid DedupRaceJoin structure (Race of Joins with shared child)
         let mut dag = PlanDag::new();
-        let a = dag.leaf("a");
-        dag.set_root(a);
+        let shared = dag.leaf("shared"); // node 0
+        let left = dag.leaf("left"); // node 1
+        let right = dag.leaf("right"); // node 2
+        let join_a = dag.join(vec![shared, left]); // node 3
+        let join_b = dag.join(vec![shared, right]); // node 4
+        let race = dag.race(vec![join_a, join_b]); // node 5
+        dag.set_root(race);
 
+        // Create certificate with valid before (the race) but wrong after shape (a Leaf)
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
             before_hash: PlanHash::of(&dag),
             after_hash: PlanHash::of(&dag),
-            before_node_count: 1,
-            after_node_count: 1,
+            before_node_count: 6,
+            after_node_count: 6,
             steps: vec![CertifiedStep {
                 rule: RewriteRule::DedupRaceJoin,
-                before: PlanId::new(0),
-                after: PlanId::new(0), // points to a Leaf, not a Join
+                before: race,
+                after: shared, // points to a Leaf, not a Join
                 detail: "fake".to_string(),
             }],
         };

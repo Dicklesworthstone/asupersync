@@ -629,10 +629,17 @@ impl PlanAnalyzer {
     #[must_use]
     pub fn analyze(dag: &PlanDag) -> PlanAnalysis {
         let mut results = BTreeMap::new();
-        let Some(root) = dag.root() else {
-            return PlanAnalysis { nodes: results };
-        };
-        Self::analyze_node(dag, root, &mut results);
+        if let Some(root) = dag.root() {
+            Self::analyze_node(dag, root, &mut results);
+        }
+        // Include any unreachable nodes so rewrite side-condition checks
+        // can still reason about "before" nodes after a structural rewrite.
+        for idx in 0..dag.nodes.len() {
+            if !results.contains_key(&idx) {
+                let id = PlanId::new(idx);
+                Self::analyze_node(dag, id, &mut results);
+            }
+        }
         PlanAnalysis { nodes: results }
     }
 

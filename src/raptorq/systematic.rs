@@ -518,7 +518,11 @@ impl EncodingStats {
         if self.degree_count == 0 {
             0.0
         } else {
-            self.degree_sum as f64 / self.degree_count as f64
+            #[allow(clippy::cast_precision_loss)]
+            let sum = self.degree_sum as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let count = self.degree_count as f64;
+            sum / count
         }
     }
 
@@ -528,7 +532,11 @@ impl EncodingStats {
         if self.source_symbol_count == 0 {
             0.0
         } else {
-            self.intermediate_symbol_count as f64 / self.source_symbol_count as f64
+            #[allow(clippy::cast_precision_loss)]
+            let intermediate = self.intermediate_symbol_count as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let source = self.source_symbol_count as f64;
+            intermediate / source
         }
     }
 }
@@ -1155,13 +1163,16 @@ mod tests {
         let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
 
         // Before any repairs
-        assert_eq!(enc.stats().average_degree(), 0.0);
+        let baseline = enc.stats().average_degree();
+        assert!(baseline.abs() < f64::EPSILON);
 
         enc.emit_repair(100);
 
         let avg = enc.stats().average_degree();
         assert!(avg >= 1.0, "average degree should be at least 1");
-        assert!(avg <= enc.params().l as f64, "average should not exceed L");
+        #[allow(clippy::cast_precision_loss)]
+        let max_degree = enc.params().l as f64;
+        assert!(avg <= max_degree, "average should not exceed L");
     }
 
     #[test]
