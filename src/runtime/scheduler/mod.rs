@@ -19,7 +19,7 @@ pub mod worker;
 
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
-pub use intrusive::{IntrusiveRing, QUEUE_TAG_CANCEL, QUEUE_TAG_READY};
+pub use intrusive::{IntrusiveRing, IntrusiveStack, QUEUE_TAG_CANCEL, QUEUE_TAG_READY};
 pub use local_queue::LocalQueue;
 pub use priority::{
     DispatchLane, ScheduleCertificate, Scheduler as PriorityScheduler, SchedulerMode,

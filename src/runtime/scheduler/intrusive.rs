@@ -292,6 +292,193 @@ impl Default for IntrusiveRing {
     }
 }
 
+/// An intrusive LIFO stack for work-stealing local queues.
+///
+/// Unlike `IntrusiveRing` which is FIFO, this stack provides LIFO
+/// semantics for the owner while supporting FIFO stealing.
+/// This matches the cache-locality optimization of processing
+/// recently-pushed work first.
+///
+/// # Invariants
+///
+/// - If `top.is_none()`, then `len == 0`
+/// - For all tasks in the stack: `task.queue_tag == self.tag`
+#[derive(Debug)]
+pub struct IntrusiveStack {
+    /// Top of the stack (most recently pushed).
+    top: Option<TaskId>,
+    /// Bottom of the stack (oldest, for stealing).
+    bottom: Option<TaskId>,
+    /// Number of tasks in the stack.
+    len: usize,
+    /// Queue tag for membership detection.
+    tag: u8,
+}
+
+impl IntrusiveStack {
+    /// Creates a new empty intrusive stack with the given queue tag.
+    #[must_use]
+    pub const fn new(tag: u8) -> Self {
+        Self {
+            top: None,
+            bottom: None,
+            len: 0,
+            tag,
+        }
+    }
+
+    /// Returns the number of tasks in the stack.
+    #[must_use]
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns true if the stack is empty.
+    #[must_use]
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Pushes a task onto the top of the stack.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) time, O(0) allocations.
+    pub fn push(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
+        let Some(record) = arena.get_mut(task_id.arena_index()) else {
+            return;
+        };
+
+        if record.is_in_queue() {
+            return;
+        }
+
+        match self.top {
+            None => {
+                // Empty stack
+                record.set_queue_links(None, None, self.tag);
+                self.top = Some(task_id);
+                self.bottom = Some(task_id);
+            }
+            Some(old_top) => {
+                // Link new task as new top, pointing down to old top
+                record.set_queue_links(None, Some(old_top), self.tag);
+
+                // Update old top's prev pointer (points up to new top)
+                if let Some(old_top_record) = arena.get_mut(old_top.arena_index()) {
+                    old_top_record.prev_in_queue = Some(task_id);
+                }
+
+                self.top = Some(task_id);
+            }
+        }
+
+        self.len += 1;
+    }
+
+    /// Pops a task from the top of the stack (LIFO).
+    ///
+    /// # Complexity
+    ///
+    /// O(1) time, O(0) allocations.
+    #[must_use]
+    pub fn pop(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
+        let top_id = self.top?;
+
+        let next_down = {
+            let record = arena.get_mut(top_id.arena_index())?;
+            let next_down = record.next_in_queue; // Points down to older task
+            record.clear_queue_links();
+            next_down
+        };
+
+        self.top = next_down;
+
+        match next_down {
+            None => {
+                // Stack is now empty
+                self.bottom = None;
+            }
+            Some(new_top) => {
+                // Update new top's prev pointer
+                if let Some(new_top_record) = arena.get_mut(new_top.arena_index()) {
+                    new_top_record.prev_in_queue = None;
+                }
+            }
+        }
+
+        self.len -= 1;
+        Some(top_id)
+    }
+
+    /// Steals tasks from the bottom of the stack (FIFO for stealing).
+    ///
+    /// Returns up to `max_steal` tasks, starting from the oldest.
+    ///
+    /// # Complexity
+    ///
+    /// O(k) time where k is the number stolen, O(0) allocations.
+    pub fn steal_batch(
+        &mut self,
+        max_steal: usize,
+        arena: &mut Arena<TaskRecord>,
+    ) -> Vec<TaskId> {
+        let steal_count = (self.len / 2).max(1).min(max_steal);
+        let mut stolen = Vec::with_capacity(steal_count);
+
+        for _ in 0..steal_count {
+            if let Some(bottom_id) = self.steal_one(arena) {
+                stolen.push(bottom_id);
+            } else {
+                break;
+            }
+        }
+
+        stolen
+    }
+
+    /// Steals one task from the bottom of the stack.
+    #[must_use]
+    fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
+        let bottom_id = self.bottom?;
+
+        let prev_up = {
+            let record = arena.get_mut(bottom_id.arena_index())?;
+            let prev_up = record.prev_in_queue; // Points up to newer task
+            record.clear_queue_links();
+            prev_up
+        };
+
+        self.bottom = prev_up;
+
+        match prev_up {
+            None => {
+                // Stack is now empty
+                self.top = None;
+            }
+            Some(new_bottom) => {
+                // Update new bottom's next pointer
+                if let Some(new_bottom_record) = arena.get_mut(new_bottom.arena_index()) {
+                    new_bottom_record.next_in_queue = None;
+                }
+            }
+        }
+
+        self.len -= 1;
+        Some(bottom_id)
+    }
+
+    /// Returns true if the given task is in this stack.
+    #[must_use]
+    pub fn contains(&self, task_id: TaskId, arena: &Arena<TaskRecord>) -> bool {
+        arena
+            .get(task_id.arena_index())
+            .is_some_and(|record| record.is_in_queue_tag(self.tag))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +769,142 @@ mod tests {
         // Should get task 0 first (FIFO)
         assert_eq!(ring.pop_front(&mut arena), Some(task(0)));
         assert_eq!(ring.pop_front(&mut arena), Some(task(1)));
+    }
+
+    // ── IntrusiveStack tests ─────────────────────────────────────────────
+
+    #[test]
+    fn stack_empty() {
+        let stack = IntrusiveStack::new(QUEUE_TAG_READY);
+        assert!(stack.is_empty());
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn stack_push_pop_single() {
+        let mut arena = setup_arena(1);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        stack.push(task(0), &mut arena);
+        assert_eq!(stack.len(), 1);
+        assert!(!stack.is_empty());
+
+        let popped = stack.pop(&mut arena);
+        assert_eq!(popped, Some(task(0)));
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn stack_lifo_ordering() {
+        let mut arena = setup_arena(5);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        // Push 0, 1, 2, 3, 4
+        for i in 0..5 {
+            stack.push(task(i), &mut arena);
+        }
+        assert_eq!(stack.len(), 5);
+
+        // Pop should return 4, 3, 2, 1, 0 (LIFO)
+        for i in (0..5).rev() {
+            let popped = stack.pop(&mut arena);
+            assert_eq!(popped, Some(task(i)), "expected task {i}");
+        }
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn stack_steal_fifo() {
+        let mut arena = setup_arena(8);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        // Push 0, 1, 2, 3, 4, 5, 6, 7
+        for i in 0..8 {
+            stack.push(task(i), &mut arena);
+        }
+
+        // Steal should return oldest first (FIFO for stealing)
+        let stolen = stack.steal_batch(4, &mut arena);
+        assert_eq!(stolen.len(), 4);
+        // Should have stolen 0, 1, 2, 3 (the oldest)
+        for (i, task_id) in stolen.into_iter().enumerate() {
+            assert_eq!(task_id, task(i as u32), "stolen task {i}");
+        }
+
+        // Remaining should be 7, 6, 5, 4 (LIFO order)
+        assert_eq!(stack.len(), 4);
+        assert_eq!(stack.pop(&mut arena), Some(task(7)));
+        assert_eq!(stack.pop(&mut arena), Some(task(6)));
+        assert_eq!(stack.pop(&mut arena), Some(task(5)));
+        assert_eq!(stack.pop(&mut arena), Some(task(4)));
+    }
+
+    #[test]
+    fn stack_work_stealing_semantics() {
+        // Simulates owner pushing and popping while thief steals
+        let mut arena = setup_arena(10);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        // Owner pushes 0, 1, 2, 3
+        for i in 0..4 {
+            stack.push(task(i), &mut arena);
+        }
+
+        // Owner pops most recent (3)
+        assert_eq!(stack.pop(&mut arena), Some(task(3)));
+
+        // Thief steals oldest (0, 1)
+        let stolen = stack.steal_batch(2, &mut arena);
+        assert_eq!(stolen.len(), 2);
+        assert_eq!(stolen[0], task(0));
+        assert_eq!(stolen[1], task(1));
+
+        // Owner pushes 4
+        stack.push(task(4), &mut arena);
+
+        // Owner pops remaining (4, then 2)
+        assert_eq!(stack.pop(&mut arena), Some(task(4)));
+        assert_eq!(stack.pop(&mut arena), Some(task(2)));
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn stack_steal_from_small() {
+        let mut arena = setup_arena(2);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        stack.push(task(0), &mut arena);
+
+        // Steal from single-element stack
+        let stolen = stack.steal_batch(4, &mut arena);
+        assert_eq!(stolen.len(), 1);
+        assert_eq!(stolen[0], task(0));
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn stack_steal_from_empty() {
+        let mut arena = setup_arena(0);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        let stolen = stack.steal_batch(4, &mut arena);
+        assert!(stolen.is_empty());
+    }
+
+    #[test]
+    fn stack_contains() {
+        let mut arena = setup_arena(3);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        stack.push(task(0), &mut arena);
+        stack.push(task(1), &mut arena);
+
+        assert!(stack.contains(task(0), &arena));
+        assert!(stack.contains(task(1), &arena));
+        assert!(!stack.contains(task(2), &arena));
+
+        stack.pop(&mut arena); // Remove task 1
+        assert!(stack.contains(task(0), &arena));
+        assert!(!stack.contains(task(1), &arena));
     }
 }
