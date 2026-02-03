@@ -1,16 +1,41 @@
 //! Cache-local intrusive ring queue for scheduler hot paths.
 //!
-//! This module provides an intrusive doubly-linked ring implementation that
-//! uses the link fields embedded in `TaskRecord` rather than allocating
-//! separate node structures. This eliminates per-operation allocations and
-//! improves cache locality by keeping queue metadata with task data.
+//! This module provides intrusive data structures that use link fields embedded
+//! in `TaskRecord` rather than allocating separate nodes. This eliminates
+//! per-operation allocations and improves cache locality.
+//!
+//! # Structures
+//!
+//! - [`IntrusiveRing`]: FIFO queue with O(1) push_back, pop_front, remove
+//! - [`IntrusiveStack`]: LIFO stack with FIFO steal (work-stealing pattern)
 //!
 //! # Design
 //!
 //! - Links (`next_in_queue`, `prev_in_queue`, `queue_tag`) are stored in `TaskRecord`
-//! - The ring maintains only head/tail indices into the task arena
+//! - Queues maintain only head/tail indices into the task arena
 //! - Each task can be in at most one queue (enforced by `queue_tag`)
-//! - O(1) push_back, pop_front, and remove operations
+//! - All operations are O(1) with zero allocations
+//!
+//! # When to Use
+//!
+//! Use intrusive structures when:
+//! - You have exclusive `&mut Arena<TaskRecord>` access
+//! - You need zero-allocation queue operations (hot paths)
+//! - You're in a single-owner context (not shared across threads)
+//!
+//! Use regular queues (VecDeque, BinaryHeap) when:
+//! - You need shared access (`Arc<Mutex<...>>`)
+//! - You don't have arena access (TaskId-only APIs)
+//! - You need priority ordering (heap-based)
+//!
+//! # Integration Points
+//!
+//! | Component | Uses | Why |
+//! |-----------|------|-----|
+//! | `ThreeLaneWorker` | Can use intrusive | Has arena via `state` |
+//! | `PriorityScheduler` | Regular queues | No arena access, needs priority |
+//! | `LocalQueue` | Regular queues | Shared via `Arc<Mutex>` |
+//! | `GlobalInjector` | Regular queues | Concurrent access |
 //!
 //! # Safety
 //!

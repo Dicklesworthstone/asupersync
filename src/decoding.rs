@@ -92,6 +92,12 @@ pub enum RejectReason {
     SymbolSizeMismatch,
     /// Block already decoded.
     BlockAlreadyDecoded,
+    /// Decode failed due to insufficient rank.
+    InsufficientRank,
+    /// Decode failed due to inconsistent equations.
+    InconsistentEquations,
+    /// Invalid or inconsistent metadata.
+    InvalidMetadata,
     /// Memory or buffer limit reached.
     MemoryLimitReached,
 }
@@ -511,11 +517,29 @@ impl DecodingPipeline {
         let decoded_symbols =
             match decode_block(block_plan, &symbols, usize::from(self.config.symbol_size)) {
                 Ok(symbols) => symbols,
-                Err(
-                    DecodingError::MatrixInversionFailed { .. }
-                    | DecodingError::InsufficientSymbols { .. },
-                ) => {
-                    return None;
+                Err(DecodingError::InsufficientSymbols { .. }) => {
+                    return Some(SymbolAcceptResult::Rejected(RejectReason::InsufficientRank));
+                }
+                Err(DecodingError::MatrixInversionFailed { .. }) => {
+                    return Some(SymbolAcceptResult::Rejected(
+                        RejectReason::InconsistentEquations,
+                    ));
+                }
+                Err(DecodingError::InconsistentMetadata { .. }) => {
+                    let block = self.blocks.get_mut(&sbn);
+                    if let Some(block) = block {
+                        block.state = BlockDecodingState::Failed;
+                    }
+                    return Some(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
+                }
+                Err(DecodingError::SymbolSizeMismatch { .. }) => {
+                    let block = self.blocks.get_mut(&sbn);
+                    if let Some(block) = block {
+                        block.state = BlockDecodingState::Failed;
+                    }
+                    return Some(SymbolAcceptResult::Rejected(
+                        RejectReason::SymbolSizeMismatch,
+                    ));
                 }
                 Err(_err) => {
                     let block = self.blocks.get_mut(&sbn);
@@ -935,6 +959,40 @@ mod tests {
         let ok = result == expected;
         crate::assert_with_log!(ok, "symbol size mismatch", expected, result);
         crate::test_complete!("reject_symbol_size_mismatch");
+    }
+
+    #[test]
+    fn reject_invalid_metadata_esi_out_of_range() {
+        init_test("reject_invalid_metadata_esi_out_of_range");
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        let object_id = ObjectId::new_for_test(21);
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 8, 8, 1, 1))
+            .expect("params");
+
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, 1),
+            vec![0u8; 8],
+            SymbolKind::Source,
+        );
+        let auth = AuthenticatedSymbol::from_parts(
+            symbol,
+            crate::security::tag::AuthenticationTag::zero(),
+        );
+
+        let result = decoder.feed(auth).expect("feed");
+        let expected = SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata);
+        let ok = result == expected;
+        crate::assert_with_log!(ok, "invalid metadata", expected, result);
+        crate::test_complete!("reject_invalid_metadata_esi_out_of_range");
     }
 
     #[test]

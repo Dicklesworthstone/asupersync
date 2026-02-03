@@ -42,6 +42,7 @@ pub const DEFAULT_PROPTEST_SEED: u64 = 0x5EED_5EED;
 const PROPTEST_SEED_ENV: &str = "ASUPERSYNC_PROPTEST_SEED";
 const PROPTEST_MAX_SHRINK_ITERS_ENV: &str = "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS";
 const CONFORMANCE_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_CONFORMANCE_ARTIFACTS_DIR";
+const TOPOLOGY_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TOPOLOGY_ARTIFACTS_DIR";
 
 /// Configuration for property tests with optional deterministic seed support.
 #[derive(Debug, Clone)]
@@ -189,6 +190,21 @@ fn conformance_artifacts_dir() -> Option<PathBuf> {
     None
 }
 
+fn topology_artifacts_dir() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var(TOPOLOGY_ARTIFACTS_DIR_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    if std::env::var("CI").is_ok() {
+        return Some(PathBuf::from("target/topology"));
+    }
+
+    None
+}
+
 pub fn write_conformance_artifacts(suite_name: &str, summary: &conformance::runner::SuiteResult) {
     let Some(dir) = conformance_artifacts_dir() else {
         return;
@@ -223,6 +239,90 @@ pub fn write_conformance_artifacts(suite_name: &str, summary: &conformance::runn
         suite = %suite_name,
         "conformance artifacts written"
     );
+}
+
+pub fn write_topology_report<T: serde::Serialize>(suite_name: &str, report: &T) {
+    let Some(dir) = topology_artifacts_dir() else {
+        return;
+    };
+
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %err, path = %dir.display(), "failed to create topology artifact dir");
+        return;
+    }
+
+    let json_path = dir.join(format!("{suite_name}.json"));
+    let json = match serde_json::to_string_pretty(report) {
+        Ok(json) => json,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize topology report");
+            return;
+        }
+    };
+
+    if let Err(err) = std::fs::write(&json_path, json) {
+        tracing::warn!(
+            error = %err,
+            path = %json_path.display(),
+            "failed to write topology json report"
+        );
+        return;
+    }
+
+    tracing::info!(
+        path = %json_path.display(),
+        suite = %suite_name,
+        "topology report written"
+    );
+}
+
+pub fn topology_report_json(
+    suite_name: &str,
+    scenario_name: &str,
+    baseline: &asupersync::lab::explorer::ExplorationReport,
+    topology: &asupersync::lab::explorer::ExplorationReport,
+    top_ledgers: &[asupersync::trace::EvidenceLedger],
+    scoring_overhead_ms: Option<u64>,
+) -> serde_json::Value {
+    fn report_metrics(
+        report: &asupersync::lab::explorer::ExplorationReport,
+    ) -> serde_json::Value {
+        let novelty_histogram = serde_json::to_value(&report.coverage.novelty_histogram)
+            .unwrap_or(serde_json::Value::Null);
+        let saturation = serde_json::json!({
+            "window": report.coverage.saturation.window,
+            "saturated": report.coverage.saturation.saturated,
+            "existing_class_hits": report.coverage.saturation.existing_class_hits,
+            "runs_since_last_new_class": report.coverage.saturation.runs_since_last_new_class,
+        });
+        let violation_seeds: Vec<u64> = report.violation_seeds();
+        let first_violation_seed = violation_seeds.iter().copied().min();
+
+        serde_json::json!({
+            "total_runs": report.total_runs,
+            "unique_classes": report.unique_classes,
+            "new_class_discoveries": report.coverage.new_class_discoveries,
+            "violations": report.violations.len(),
+            "violation_seeds": violation_seeds,
+            "first_violation_seed": first_violation_seed,
+            "novelty_histogram": novelty_histogram,
+            "saturation": saturation,
+        })
+    }
+
+    let baseline_metrics = report_metrics(baseline);
+    let topology_metrics = report_metrics(topology);
+    let top_ledger_summaries: Vec<String> =
+        top_ledgers.iter().map(|ledger| ledger.summary()).collect();
+
+    serde_json::json!({
+        "suite": suite_name,
+        "scenario": scenario_name,
+        "baseline": baseline_metrics,
+        "topology": topology_metrics,
+        "top_ledger_summaries": top_ledger_summaries,
+        "scoring_overhead_ms": scoring_overhead_ms,
+    })
 }
 
 /// Assert that an async operation completes within a timeout.

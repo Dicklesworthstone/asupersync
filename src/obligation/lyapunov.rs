@@ -600,6 +600,9 @@ impl LyapunovGovernor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::ObligationKind;
+    use crate::runtime::RuntimeState;
+    use crate::types::Budget;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -633,10 +636,6 @@ mod tests {
     #[test]
     fn snapshot_from_runtime_counts_tasks_obligations_and_regions() {
         init_test("snapshot_from_runtime_counts_tasks_obligations_and_regions");
-
-        use crate::record::ObligationKind;
-        use crate::runtime::RuntimeState;
-        use crate::types::Budget;
 
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::unlimited());
@@ -710,9 +709,6 @@ mod tests {
     #[test]
     fn snapshot_from_runtime_computes_deadline_pressure() {
         init_test("snapshot_from_runtime_computes_deadline_pressure");
-
-        use crate::runtime::RuntimeState;
-        use crate::types::Budget;
 
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::unlimited());

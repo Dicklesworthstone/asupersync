@@ -1142,7 +1142,7 @@ impl IndependenceRelation {
     }
 }
 
-impl<'a> SideConditionChecker<'a> {
+impl SideConditionChecker<'_> {
     // =========================================================================
     // Independence / commutativity analysis for Mazurkiewicz traces
     // =========================================================================
@@ -1316,9 +1316,9 @@ impl<'a> SideConditionChecker<'a> {
             // from all current members
             let mut added = false;
             for group in &mut groups {
-                let independent_from_all = group.iter().all(|&j| {
-                    self.check_independence(child, children[j]).is_independent()
-                });
+                let independent_from_all = group
+                    .iter()
+                    .all(|&j| self.check_independence(child, children[j]).is_independent());
                 if independent_from_all {
                     group.push(i);
                     added = true;
@@ -1344,7 +1344,7 @@ impl<'a> SideConditionChecker<'a> {
         };
 
         match node {
-            PlanNode::Leaf { .. } => TraceEquivalenceHint::Atomic,
+            PlanNode::Leaf { .. } | PlanNode::Timeout { .. } => TraceEquivalenceHint::Atomic,
             PlanNode::Join { children } => {
                 let independent_groups = self.reorderable_join_children(children);
                 if independent_groups.len() == 1 && independent_groups[0].len() == children.len() {
@@ -1366,7 +1366,6 @@ impl<'a> SideConditionChecker<'a> {
                     TraceEquivalenceHint::Atomic
                 }
             }
-            PlanNode::Timeout { .. } => TraceEquivalenceHint::Atomic,
         }
     }
 }
@@ -1910,7 +1909,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100)); // original
         let t2 = dag.timeout(b, Duration::from_millis(50)); // tighter (different leaf)
-        // Make both reachable via join at root
+                                                            // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -1925,7 +1924,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(50)); // original: tight
         let t2 = dag.timeout(b, Duration::from_millis(100)); // looser (different leaf)
-        // Make both reachable via join at root
+                                                             // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -1952,7 +1951,7 @@ mod tests {
         let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100));
         let t2 = dag.timeout(b, Duration::from_millis(110)); // 10ms looser (different leaf)
-        // Make both reachable via join at root
+                                                             // Make both reachable via join at root
         let root = dag.join(vec![t1, t2]);
         dag.set_root(root);
 
@@ -2043,7 +2042,10 @@ mod tests {
 
     #[test]
     fn independence_result_display() {
-        assert_eq!(format!("{}", IndependenceResult::Independent), "independent");
+        assert_eq!(
+            format!("{}", IndependenceResult::Independent),
+            "independent"
+        );
         assert_eq!(format!("{}", IndependenceResult::Dependent), "dependent");
         assert_eq!(format!("{}", IndependenceResult::Uncertain), "uncertain");
     }
@@ -2134,7 +2136,10 @@ mod tests {
         dag.set_root(a);
 
         let checker = SideConditionChecker::new(&dag);
-        assert_eq!(checker.trace_equivalence_hint(a), TraceEquivalenceHint::Atomic);
+        assert_eq!(
+            checker.trace_equivalence_hint(a),
+            TraceEquivalenceHint::Atomic
+        );
     }
 
     #[test]
@@ -2208,7 +2213,10 @@ mod tests {
             format!("{}", TraceEquivalenceHint::FullyCommutative),
             "fully-commutative"
         );
-        assert_eq!(format!("{}", TraceEquivalenceHint::Sequential), "sequential");
+        assert_eq!(
+            format!("{}", TraceEquivalenceHint::Sequential),
+            "sequential"
+        );
         assert_eq!(format!("{}", TraceEquivalenceHint::Unknown), "unknown");
 
         let hint = TraceEquivalenceHint::PartiallyCommutative {
