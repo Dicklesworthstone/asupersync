@@ -578,6 +578,31 @@ fn verify_dedup_race_join_result(
     policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
+    let after_node = dag
+        .node(step.after)
+        .ok_or(StepVerifyError::MissingAfterNode {
+            step: idx,
+            node: step.after,
+        })?;
+
+    // After node must be a Join.
+    let PlanNode::Join {
+        children: after_children,
+    } = after_node
+    else {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Join node after DedupRaceJoin",
+        });
+    };
+
+    if after_children.len() != 2 {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Join with exactly 2 children (shared + race)",
+        });
+    }
+
     let before_node = dag
         .node(step.before)
         .ok_or(StepVerifyError::MissingBeforeNode {
@@ -653,36 +678,14 @@ fn verify_dedup_race_join_result(
         }
     }
 
-    let after_node = dag
-        .node(step.after)
-        .ok_or(StepVerifyError::MissingAfterNode {
-            step: idx,
-            node: step.after,
-        })?;
-
-    // After node must be a Join.
-    let PlanNode::Join { children } = after_node else {
-        return Err(StepVerifyError::InvalidAfterShape {
-            step: idx,
-            expected: "Join node after DedupRaceJoin",
-        });
-    };
-
-    if children.len() != 2 {
-        return Err(StepVerifyError::InvalidAfterShape {
-            step: idx,
-            expected: "Join with exactly 2 children (shared + race)",
-        });
-    }
-
     // One child should be the shared leaf/node, and the other a Race.
-    if !children.contains(&shared) {
+    if !after_children.contains(&shared) {
         return Err(StepVerifyError::InvalidAfterShape {
             step: idx,
             expected: "Join containing the shared child after DedupRaceJoin",
         });
     }
-    let has_race_child = children.iter().any(|child_id| {
+    let has_race_child = after_children.iter().any(|child_id| {
         dag.node(*child_id)
             .is_some_and(|n| matches!(n, PlanNode::Race { .. }))
     });

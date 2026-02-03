@@ -528,6 +528,61 @@ impl fmt::Display for ObligationFlow {
 }
 
 // ===========================================================================
+// Plan cost model (for deterministic extraction)
+// ===========================================================================
+
+/// Deterministic cost summary for a plan node.
+///
+/// Lower values are preferred; comparison is lexicographic in field order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PlanCost {
+    /// Estimated allocations (node count proxy).
+    pub allocations: u32,
+    /// Cancel checkpoints (poll count proxy).
+    pub cancel_checkpoints: u32,
+    /// Obligation pressure (number of obligations that must resolve).
+    pub obligation_pressure: u32,
+    /// Critical-path depth (Foata depth proxy).
+    pub critical_path: u32,
+}
+
+impl PlanCost {
+    /// Zero cost (used for empty aggregations).
+    pub const ZERO: Self = Self {
+        allocations: 0,
+        cancel_checkpoints: 0,
+        obligation_pressure: 0,
+        critical_path: 0,
+    };
+
+    /// Worst-case/unknown cost (conservative default).
+    pub const UNKNOWN: Self = Self {
+        allocations: u32::MAX,
+        cancel_checkpoints: u32::MAX,
+        obligation_pressure: u32::MAX,
+        critical_path: u32::MAX,
+    };
+}
+
+fn obligation_pressure(flow: &ObligationFlow) -> u32 {
+    flow.must_resolve
+        .len()
+        .saturating_add(flow.leak_on_cancel.len()) as u32
+}
+
+fn sum_costs(costs: impl Iterator<Item = u32>) -> u32 {
+    costs.fold(0u32, |acc, v| acc.saturating_add(v))
+}
+
+fn max_cost(costs: impl Iterator<Item = u32>) -> u32 {
+    costs.max().unwrap_or(0)
+}
+
+fn min_cost(costs: impl Iterator<Item = u32>) -> u32 {
+    costs.min().unwrap_or(0)
+}
+
+// ===========================================================================
 // Per-node analysis result
 // ===========================================================================
 
@@ -544,6 +599,8 @@ pub struct NodeAnalysis {
     pub cancel: CancelSafety,
     /// Budget effects.
     pub budget: BudgetEffect,
+    /// Cost summary for extraction.
+    pub cost: PlanCost,
 }
 
 impl NodeAnalysis {
@@ -660,25 +717,37 @@ impl PlanAnalyzer {
                 obligation_flow: ObligationFlow::empty(),
                 cancel: CancelSafety::Unknown,
                 budget: BudgetEffect::UNKNOWN,
+                cost: PlanCost::UNKNOWN,
             };
             results.insert(id.index(), analysis.clone());
             return analysis;
         };
 
         let analysis = match node.clone() {
-            PlanNode::Leaf { label } => NodeAnalysis {
-                id,
-                obligation: ObligationSafety::Clean,
+            PlanNode::Leaf { label } => {
                 // Leaves with labels that look like obligations get tracked.
                 // Convention: labels starting with "obl:" have obligations.
-                obligation_flow: if label.starts_with("obl:") {
+                let obligation_flow = if label.starts_with("obl:") {
                     ObligationFlow::leaf_with_obligation(label)
                 } else {
                     ObligationFlow::empty()
-                },
-                cancel: CancelSafety::Safe,
-                budget: BudgetEffect::LEAF,
-            },
+                };
+                let cost = PlanCost {
+                    allocations: 1,
+                    cancel_checkpoints: BudgetEffect::LEAF.min_polls,
+                    obligation_pressure: obligation_pressure(&obligation_flow),
+                    critical_path: 1,
+                };
+
+                NodeAnalysis {
+                    id,
+                    obligation: ObligationSafety::Clean,
+                    obligation_flow,
+                    cancel: CancelSafety::Safe,
+                    budget: BudgetEffect::LEAF,
+                    cost,
+                }
+            }
 
             PlanNode::Join { children } => {
                 let child_analyses: Vec<NodeAnalysis> = children
@@ -728,6 +797,15 @@ impl PlanAnalyzer {
                     .map(|a| a.obligation_flow.clone())
                     .fold(ObligationFlow::empty(), ObligationFlow::join);
 
+                let cost = PlanCost {
+                    allocations: sum_costs(child_analyses.iter().map(|a| a.cost.allocations))
+                        .saturating_add(1),
+                    cancel_checkpoints: min_polls,
+                    obligation_pressure: obligation_pressure(&obligation_flow),
+                    critical_path: max_cost(child_analyses.iter().map(|a| a.cost.critical_path))
+                        .saturating_add(1),
+                };
+
                 NodeAnalysis {
                     id,
                     obligation,
@@ -741,6 +819,7 @@ impl PlanAnalyzer {
                         min_deadline,
                         max_deadline,
                     },
+                    cost,
                 }
             }
 
@@ -814,6 +893,15 @@ impl PlanAnalyzer {
                     .map(|a| a.obligation_flow.clone())
                     .fold(ObligationFlow::empty(), ObligationFlow::race);
 
+                let cost = PlanCost {
+                    allocations: sum_costs(child_analyses.iter().map(|a| a.cost.allocations))
+                        .saturating_add(1),
+                    cancel_checkpoints: min_polls,
+                    obligation_pressure: obligation_pressure(&obligation_flow),
+                    critical_path: min_cost(child_analyses.iter().map(|a| a.cost.critical_path))
+                        .saturating_add(1),
+                };
+
                 NodeAnalysis {
                     id,
                     obligation,
@@ -827,6 +915,7 @@ impl PlanAnalyzer {
                         min_deadline,
                         max_deadline,
                     },
+                    cost,
                 }
             }
 
@@ -843,6 +932,13 @@ impl PlanAnalyzer {
 
                 // Compute deadline from the Duration
                 let deadline = DeadlineMicros::from_duration(duration);
+
+                let cost = PlanCost {
+                    allocations: child_analysis.cost.allocations.saturating_add(1),
+                    cancel_checkpoints: child_analysis.budget.min_polls,
+                    obligation_pressure: obligation_pressure(&obligation_flow),
+                    critical_path: child_analysis.cost.critical_path.saturating_add(1),
+                };
 
                 NodeAnalysis {
                     id,
@@ -866,6 +962,7 @@ impl PlanAnalyzer {
                         min_deadline: child_analysis.budget.min_deadline.min(deadline),
                         max_deadline: deadline, // Timeout caps the max deadline
                     },
+                    cost,
                 }
             }
         };
@@ -1435,6 +1532,25 @@ mod tests {
         assert_eq!(node.budget.max_polls, Some(1));
     }
 
+    #[test]
+    fn leaf_cost_is_minimal() {
+        let (dag, root) = leaf_dag("a");
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let cost = analysis.get(root).expect("root analyzed").cost;
+        assert_eq!(cost.allocations, 1);
+        assert_eq!(cost.cancel_checkpoints, 1);
+        assert_eq!(cost.obligation_pressure, 0);
+        assert_eq!(cost.critical_path, 1);
+    }
+
+    #[test]
+    fn leaf_obligation_increases_pressure() {
+        let (dag, root) = leaf_dag("obl:permit");
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let cost = analysis.get(root).expect("root analyzed").cost;
+        assert_eq!(cost.obligation_pressure, 1);
+    }
+
     // ---- Join analysis ----
 
     #[test]
@@ -1451,6 +1567,21 @@ mod tests {
         assert_eq!(node.budget.min_polls, 2);
         assert_eq!(node.budget.max_polls, Some(2));
         assert_eq!(node.budget.parallelism, 2);
+    }
+
+    #[test]
+    fn join_cost_uses_max_critical_path() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let cost = analysis.get(join).expect("join analyzed").cost;
+        assert_eq!(cost.allocations, 3);
+        assert_eq!(cost.cancel_checkpoints, 2);
+        assert_eq!(cost.critical_path, 2);
     }
 
     // ---- Race analysis ----
@@ -1470,6 +1601,21 @@ mod tests {
         assert_eq!(node.budget.max_polls, Some(1));
     }
 
+    #[test]
+    fn race_cost_uses_min_critical_path() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let race = dag.race(vec![a, b]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let cost = analysis.get(race).expect("race analyzed").cost;
+        assert_eq!(cost.allocations, 3);
+        assert_eq!(cost.cancel_checkpoints, 1);
+        assert_eq!(cost.critical_path, 2);
+    }
+
     // ---- Timeout analysis ----
 
     #[test]
@@ -1483,6 +1629,20 @@ mod tests {
         let node = analysis.get(t).expect("timeout analyzed");
         assert!(node.is_safe());
         assert!(node.budget.has_deadline);
+    }
+
+    #[test]
+    fn timeout_cost_adds_node_overhead() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t = dag.timeout(a, Duration::from_secs(1));
+        dag.set_root(t);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let cost = analysis.get(t).expect("timeout analyzed").cost;
+        assert_eq!(cost.allocations, 2);
+        assert_eq!(cost.cancel_checkpoints, 1);
+        assert_eq!(cost.critical_path, 2);
     }
 
     // ---- Composite: Race[Join[s,a], Join[s,b]] (the DedupRaceJoin pattern) ----
