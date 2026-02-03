@@ -123,6 +123,98 @@ impl fmt::Display for CancelSafety {
 }
 
 // ===========================================================================
+// Deadline bounds (for rewrite safety side conditions)
+// ===========================================================================
+
+/// Bound on a deadline duration (microseconds for precision).
+///
+/// Uses microseconds internally to avoid floating point while supporting
+/// sub-millisecond precision. This is a min-plus semiring element where:
+/// - `None` = +∞ (unbounded)
+/// - `Some(n)` = finite bound of n microseconds
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeadlineMicros(pub Option<u64>);
+
+impl DeadlineMicros {
+    /// Unbounded deadline (no constraint).
+    pub const UNBOUNDED: Self = Self(None);
+
+    /// Zero deadline (instant).
+    pub const ZERO: Self = Self(Some(0));
+
+    /// Creates a deadline from microseconds.
+    #[must_use]
+    pub const fn from_micros(micros: u64) -> Self {
+        Self(Some(micros))
+    }
+
+    /// Creates a deadline from a Duration.
+    #[must_use]
+    pub fn from_duration(d: std::time::Duration) -> Self {
+        Self(Some(d.as_micros().try_into().unwrap_or(u64::MAX)))
+    }
+
+    /// Returns the inner value (None = unbounded).
+    #[must_use]
+    pub const fn as_micros(self) -> Option<u64> {
+        self.0
+    }
+
+    /// Returns true if this deadline is unbounded.
+    #[must_use]
+    pub const fn is_unbounded(self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Min-plus addition: min(a, b) in the deadline semiring.
+    ///
+    /// The tighter (smaller) deadline wins.
+    #[must_use]
+    pub fn min(self, other: Self) -> Self {
+        match (self.0, other.0) {
+            (None, _) => other,
+            (_, None) => self,
+            (Some(a), Some(b)) => Self(Some(a.min(b))),
+        }
+    }
+
+    /// Min-plus "multiplication": a + b (sequential composition).
+    ///
+    /// Sequential work adds deadlines.
+    #[must_use]
+    pub fn add(self, other: Self) -> Self {
+        match (self.0, other.0) {
+            (None, _) | (_, None) => Self::UNBOUNDED,
+            (Some(a), Some(b)) => Self(Some(a.saturating_add(b))),
+        }
+    }
+
+    /// Returns true if `self` is at least as tight as `other`.
+    ///
+    /// Used for rewrite safety: a rewrite is safe if the new deadline
+    /// is at least as tight as the original.
+    #[must_use]
+    pub fn is_at_least_as_tight_as(self, other: Self) -> bool {
+        match (self.0, other.0) {
+            (_, None) => true,           // anything is as tight as unbounded
+            (None, Some(_)) => false,    // unbounded is looser than any bound
+            (Some(a), Some(b)) => a <= b, // tighter means smaller
+        }
+    }
+}
+
+impl fmt::Display for DeadlineMicros {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            None => f.write_str("∞"),
+            Some(us) if us >= 1_000_000 => write!(f, "{}s", us / 1_000_000),
+            Some(us) if us >= 1_000 => write!(f, "{}ms", us / 1_000),
+            Some(us) => write!(f, "{}µs", us),
+        }
+    }
+}
+
+// ===========================================================================
 // Budget effects
 // ===========================================================================
 
@@ -137,6 +229,10 @@ pub struct BudgetEffect {
     pub has_deadline: bool,
     /// Number of concurrent branches (for cost estimation).
     pub parallelism: u32,
+    /// Minimum deadline bound (tightest deadline on any path).
+    pub min_deadline: DeadlineMicros,
+    /// Maximum deadline bound (loosest deadline, for worst-case analysis).
+    pub max_deadline: DeadlineMicros,
 }
 
 impl BudgetEffect {
@@ -146,6 +242,8 @@ impl BudgetEffect {
         max_polls: Some(1),
         has_deadline: false,
         parallelism: 1,
+        min_deadline: DeadlineMicros::UNBOUNDED,
+        max_deadline: DeadlineMicros::UNBOUNDED,
     };
 
     /// An unknown effect (conservative: unbounded).
@@ -154,7 +252,57 @@ impl BudgetEffect {
         max_polls: None,
         has_deadline: false,
         parallelism: 1,
+        min_deadline: DeadlineMicros::UNBOUNDED,
+        max_deadline: DeadlineMicros::UNBOUNDED,
     };
+
+    /// Creates a budget effect with a specific deadline.
+    #[must_use]
+    pub const fn with_deadline(mut self, deadline: DeadlineMicros) -> Self {
+        self.has_deadline = true;
+        self.min_deadline = deadline;
+        self.max_deadline = deadline;
+        self
+    }
+
+    /// Sequential composition (Join semantics): both effects must complete.
+    ///
+    /// Polls sum, deadlines add (sequential work).
+    #[must_use]
+    pub fn sequential(self, other: Self) -> Self {
+        Self {
+            min_polls: self.min_polls.saturating_add(other.min_polls),
+            max_polls: match (self.max_polls, other.max_polls) {
+                (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                _ => None,
+            },
+            has_deadline: self.has_deadline || other.has_deadline,
+            parallelism: self.parallelism.max(other.parallelism),
+            // Tightest deadline in sequence (min of mins)
+            min_deadline: self.min_deadline.min(other.min_deadline),
+            // Loosest deadline in sequence (we need both to complete)
+            max_deadline: self.max_deadline.add(other.max_deadline),
+        }
+    }
+
+    /// Parallel composition (Race semantics): first to complete wins.
+    ///
+    /// Polls take min (fastest path), deadlines take min (tightest constraint).
+    #[must_use]
+    pub fn parallel(self, other: Self) -> Self {
+        Self {
+            min_polls: self.min_polls.min(other.min_polls),
+            max_polls: match (self.max_polls, other.max_polls) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                _ => None,
+            },
+            has_deadline: self.has_deadline || other.has_deadline,
+            parallelism: self.parallelism.max(other.parallelism),
+            // In a race, the tightest deadline applies
+            min_deadline: self.min_deadline.min(other.min_deadline),
+            max_deadline: self.max_deadline.min(other.max_deadline),
+        }
+    }
 
     /// Returns true if this effect is no worse than `before`.
     ///
@@ -162,6 +310,7 @@ impl BudgetEffect {
     /// - does not remove a deadline
     /// - does not increase the minimum polls required
     /// - does not increase (or unbound) the maximum polls when previously bounded
+    /// - does not loosen the deadline guarantee
     #[must_use]
     pub fn is_not_worse_than(self, before: Self) -> bool {
         if before.has_deadline && !self.has_deadline {
@@ -176,7 +325,40 @@ impl BudgetEffect {
                 _ => return false,
             }
         }
+        // Deadline must be at least as tight
+        if !self.min_deadline.is_at_least_as_tight_as(before.min_deadline) {
+            return false;
+        }
         true
+    }
+
+    /// Returns true if the rewrite preserves deadline guarantees.
+    ///
+    /// More precise than `is_not_worse_than` for deadline-specific checks:
+    /// - If `before` has no deadline, any deadline is acceptable
+    /// - If `before` has a deadline, `after` must have one at least as tight
+    #[must_use]
+    pub fn preserves_deadline_guarantee(self, before: Self) -> bool {
+        if !before.has_deadline {
+            return true;
+        }
+        if !self.has_deadline {
+            return false;
+        }
+        self.min_deadline.is_at_least_as_tight_as(before.min_deadline)
+    }
+
+    /// Returns the effective deadline for worst-case analysis.
+    ///
+    /// Returns `None` if no deadline is set, otherwise returns the
+    /// tightest deadline constraint.
+    #[must_use]
+    pub fn effective_deadline(self) -> Option<DeadlineMicros> {
+        if self.has_deadline {
+            Some(self.min_deadline)
+        } else {
+            None
+        }
     }
 }
 
@@ -188,7 +370,7 @@ impl fmt::Display for BudgetEffect {
             None => f.write_str("∞]")?,
         }
         if self.has_deadline {
-            f.write_str(" +deadline")?;
+            write!(f, " deadline=[{}, {}]", self.min_deadline, self.max_deadline)?;
         }
         if self.parallelism > 1 {
             write!(f, " par={}", self.parallelism)?;
@@ -507,6 +689,17 @@ impl PlanAnalyzer {
                     .sum::<u32>()
                     .max(1);
 
+                // Join deadline: tightest min_deadline (all must meet it),
+                // and sequential max_deadline (all must complete).
+                let min_deadline = child_analyses
+                    .iter()
+                    .map(|a| a.budget.min_deadline)
+                    .fold(DeadlineMicros::UNBOUNDED, DeadlineMicros::min);
+                let max_deadline = child_analyses
+                    .iter()
+                    .map(|a| a.budget.max_deadline)
+                    .fold(DeadlineMicros::ZERO, DeadlineMicros::add);
+
                 // Join obligation flow: combine all children's flows.
                 let obligation_flow = child_analyses
                     .iter()
@@ -523,6 +716,8 @@ impl PlanAnalyzer {
                         max_polls,
                         has_deadline,
                         parallelism,
+                        min_deadline,
+                        max_deadline,
                     },
                 }
             }
@@ -580,6 +775,16 @@ impl PlanAnalyzer {
                     .max()
                     .unwrap_or(1);
 
+                // Race deadline: tightest constraint wins (first to complete).
+                let min_deadline = child_analyses
+                    .iter()
+                    .map(|a| a.budget.min_deadline)
+                    .fold(DeadlineMicros::UNBOUNDED, DeadlineMicros::min);
+                let max_deadline = child_analyses
+                    .iter()
+                    .map(|a| a.budget.max_deadline)
+                    .fold(DeadlineMicros::UNBOUNDED, DeadlineMicros::min);
+
                 // Race obligation flow: combine with race semantics
                 // (losers may leak if not drained).
                 let obligation_flow = child_analyses
@@ -597,11 +802,13 @@ impl PlanAnalyzer {
                         max_polls,
                         has_deadline,
                         parallelism,
+                        min_deadline,
+                        max_deadline,
                     },
                 }
             }
 
-            PlanNode::Timeout { child, .. } => {
+            PlanNode::Timeout { child, duration } => {
                 let child_analysis = Self::analyze_node(dag, child, results);
 
                 // Timeout obligation flow: child's flow with added leak risk.
@@ -611,6 +818,9 @@ impl PlanAnalyzer {
                     .leak_on_cancel
                     .extend(obligation_flow.must_resolve.iter().cloned());
                 ObligationFlow::dedupe_vec(&mut obligation_flow.leak_on_cancel);
+
+                // Compute deadline from the Duration
+                let deadline = DeadlineMicros::from_duration(duration);
 
                 NodeAnalysis {
                     id,
@@ -630,6 +840,9 @@ impl PlanAnalyzer {
                         max_polls: child_analysis.budget.max_polls,
                         has_deadline: true,
                         parallelism: child_analysis.budget.parallelism,
+                        // Deadline is the tighter of child's deadline and this timeout
+                        min_deadline: child_analysis.budget.min_deadline.min(deadline),
+                        max_deadline: deadline, // Timeout caps the max deadline
                     },
                 }
             }
@@ -718,6 +931,64 @@ impl<'a> SideConditionChecker<'a> {
             return false;
         };
         after.budget.is_not_worse_than(before.budget)
+    }
+
+    /// Check if a rewrite preserves deadline guarantees specifically.
+    ///
+    /// This is a more focused check than `rewrite_preserves_budget`:
+    /// - If the original has no deadline, any deadline is acceptable
+    /// - If the original has a deadline, the rewritten must have one
+    ///   that is at least as tight
+    #[must_use]
+    pub fn rewrite_preserves_deadline(&self, before: PlanId, after: PlanId) -> bool {
+        let Some(before) = self.analysis.get(before) else {
+            return false;
+        };
+        let Some(after) = self.analysis.get(after) else {
+            return false;
+        };
+        after.budget.preserves_deadline_guarantee(before.budget)
+    }
+
+    /// Returns the effective deadline for a node, if any.
+    #[must_use]
+    pub fn effective_deadline(&self, id: PlanId) -> Option<DeadlineMicros> {
+        self.analysis.get(id).and_then(|a| a.budget.effective_deadline())
+    }
+
+    /// Check if a rewrite does not worsen the deadline by more than a given amount.
+    ///
+    /// Useful for allowing small deadline relaxations in exchange for other benefits.
+    #[must_use]
+    pub fn deadline_within_tolerance(
+        &self,
+        before: PlanId,
+        after: PlanId,
+        tolerance_micros: u64,
+    ) -> bool {
+        let Some(before_analysis) = self.analysis.get(before) else {
+            return false;
+        };
+        let Some(after_analysis) = self.analysis.get(after) else {
+            return false;
+        };
+
+        match (
+            before_analysis.budget.effective_deadline(),
+            after_analysis.budget.effective_deadline(),
+        ) {
+            // No deadline before: any deadline is acceptable
+            (None, _) => true,
+            // Had deadline, lost it: not acceptable (infinite tolerance doesn't help)
+            (Some(_), None) => false,
+            // Both have deadlines: check tolerance
+            (Some(before_dl), Some(after_dl)) => {
+                match (before_dl.as_micros(), after_dl.as_micros()) {
+                    (Some(b), Some(a)) => a <= b.saturating_add(tolerance_micros),
+                    _ => false,
+                }
+            }
+        }
     }
 
     /// Check whether all children are pairwise independent.
@@ -1107,5 +1378,250 @@ mod tests {
         assert!(!diags.is_empty());
         assert!(diags.iter().any(|d| d.contains("not all paths")));
         assert!(diags.iter().any(|d| d.contains("leak on cancel")));
+    }
+
+    // ---- DeadlineMicros tests ----
+
+    #[test]
+    fn deadline_micros_unbounded() {
+        let unbounded = DeadlineMicros::UNBOUNDED;
+        assert!(unbounded.is_unbounded());
+        assert_eq!(unbounded.as_micros(), None);
+    }
+
+    #[test]
+    fn deadline_micros_from_duration() {
+        let deadline = DeadlineMicros::from_duration(Duration::from_millis(500));
+        assert!(!deadline.is_unbounded());
+        assert_eq!(deadline.as_micros(), Some(500_000));
+    }
+
+    #[test]
+    fn deadline_micros_min_takes_tighter() {
+        let d1 = DeadlineMicros::from_micros(1000);
+        let d2 = DeadlineMicros::from_micros(500);
+        let unbounded = DeadlineMicros::UNBOUNDED;
+
+        assert_eq!(d1.min(d2), d2); // 500 < 1000
+        assert_eq!(d2.min(d1), d2);
+        assert_eq!(d1.min(unbounded), d1); // finite < unbounded
+        assert_eq!(unbounded.min(d1), d1);
+    }
+
+    #[test]
+    fn deadline_micros_add_sequential() {
+        let d1 = DeadlineMicros::from_micros(1000);
+        let d2 = DeadlineMicros::from_micros(500);
+        let unbounded = DeadlineMicros::UNBOUNDED;
+
+        assert_eq!(d1.add(d2), DeadlineMicros::from_micros(1500));
+        assert_eq!(d1.add(unbounded), DeadlineMicros::UNBOUNDED);
+        assert_eq!(unbounded.add(d1), DeadlineMicros::UNBOUNDED);
+    }
+
+    #[test]
+    fn deadline_micros_is_at_least_as_tight() {
+        let tight = DeadlineMicros::from_micros(100);
+        let loose = DeadlineMicros::from_micros(1000);
+        let unbounded = DeadlineMicros::UNBOUNDED;
+
+        assert!(tight.is_at_least_as_tight_as(loose));
+        assert!(!loose.is_at_least_as_tight_as(tight));
+        assert!(tight.is_at_least_as_tight_as(unbounded));
+        assert!(loose.is_at_least_as_tight_as(unbounded));
+        assert!(!unbounded.is_at_least_as_tight_as(tight));
+    }
+
+    #[test]
+    fn deadline_micros_display() {
+        assert_eq!(format!("{}", DeadlineMicros::UNBOUNDED), "∞");
+        assert_eq!(format!("{}", DeadlineMicros::from_micros(500)), "500µs");
+        assert_eq!(format!("{}", DeadlineMicros::from_micros(5000)), "5ms");
+        assert_eq!(format!("{}", DeadlineMicros::from_micros(5_000_000)), "5s");
+    }
+
+    // ---- Budget deadline tracking tests ----
+
+    #[test]
+    fn timeout_tracks_actual_deadline() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t = dag.timeout(a, Duration::from_millis(100));
+        dag.set_root(t);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(t).expect("timeout analyzed");
+        assert!(node.budget.has_deadline);
+        assert_eq!(
+            node.budget.min_deadline,
+            DeadlineMicros::from_micros(100_000)
+        );
+    }
+
+    #[test]
+    fn nested_timeout_takes_tighter_deadline() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t1 = dag.timeout(a, Duration::from_millis(200)); // outer: looser
+        let t2 = dag.timeout(t1, Duration::from_millis(100)); // inner: tighter
+        dag.set_root(t2);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(t2).expect("timeout analyzed");
+        // Tightest deadline should be 100ms
+        assert_eq!(
+            node.budget.min_deadline,
+            DeadlineMicros::from_micros(100_000)
+        );
+    }
+
+    #[test]
+    fn join_propagates_deadline_from_child() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let t = dag.timeout(a, Duration::from_millis(50));
+        let join = dag.join(vec![t, b]);
+        dag.set_root(join);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(join).expect("join analyzed");
+        assert!(node.budget.has_deadline);
+        assert_eq!(node.budget.min_deadline, DeadlineMicros::from_micros(50_000));
+    }
+
+    #[test]
+    fn race_propagates_tightest_deadline() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let t1 = dag.timeout(a, Duration::from_millis(100));
+        let t2 = dag.timeout(b, Duration::from_millis(50)); // tighter
+        let race = dag.race(vec![t1, t2]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(race).expect("race analyzed");
+        assert!(node.budget.has_deadline);
+        assert_eq!(node.budget.min_deadline, DeadlineMicros::from_micros(50_000));
+    }
+
+    // ---- Side condition deadline preservation tests ----
+
+    #[test]
+    fn rewrite_preserves_deadline_when_tighter() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t1 = dag.timeout(a, Duration::from_millis(100)); // original
+        let t2 = dag.timeout(a, Duration::from_millis(50)); // tighter
+        dag.set_root(t1);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(checker.rewrite_preserves_deadline(t1, t2)); // tighter is ok
+    }
+
+    #[test]
+    fn rewrite_fails_deadline_when_looser() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t1 = dag.timeout(a, Duration::from_millis(50)); // original: tight
+        let t2 = dag.timeout(a, Duration::from_millis(100)); // looser
+        dag.set_root(t1);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(!checker.rewrite_preserves_deadline(t1, t2)); // looser not ok
+    }
+
+    #[test]
+    fn rewrite_allows_deadline_when_none_before() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t = dag.timeout(a, Duration::from_millis(100));
+        dag.set_root(t);
+
+        let checker = SideConditionChecker::new(&dag);
+        // No deadline -> any deadline is ok
+        assert!(checker.rewrite_preserves_deadline(a, t));
+    }
+
+    #[test]
+    fn deadline_tolerance_check() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t1 = dag.timeout(a, Duration::from_millis(100));
+        let t2 = dag.timeout(a, Duration::from_millis(110)); // 10ms looser
+        dag.set_root(t1);
+
+        let checker = SideConditionChecker::new(&dag);
+        // 10ms tolerance: 110ms - 100ms = 10ms, should pass
+        assert!(checker.deadline_within_tolerance(t1, t2, 10_000));
+        // 5ms tolerance: should fail (10ms > 5ms)
+        assert!(!checker.deadline_within_tolerance(t1, t2, 5_000));
+    }
+
+    #[test]
+    fn effective_deadline_returns_none_for_no_deadline() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        dag.set_root(a);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(checker.effective_deadline(a).is_none());
+    }
+
+    #[test]
+    fn effective_deadline_returns_value_for_timeout() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t = dag.timeout(a, Duration::from_millis(75));
+        dag.set_root(t);
+
+        let checker = SideConditionChecker::new(&dag);
+        let deadline = checker.effective_deadline(t);
+        assert!(deadline.is_some());
+        assert_eq!(deadline.unwrap().as_micros(), Some(75_000));
+    }
+
+    // ---- Budget effect composition tests ----
+
+    #[test]
+    fn budget_effect_sequential_adds_deadlines() {
+        let e1 = BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(100));
+        let e2 = BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(200));
+        let combined = e1.sequential(e2);
+
+        assert!(combined.has_deadline);
+        // Sequential: max_deadline adds up
+        assert_eq!(combined.max_deadline, DeadlineMicros::from_micros(300));
+        // min_deadline takes tighter
+        assert_eq!(combined.min_deadline, DeadlineMicros::from_micros(100));
+    }
+
+    #[test]
+    fn budget_effect_parallel_takes_tighter_deadline() {
+        let e1 = BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(100));
+        let e2 = BudgetEffect::LEAF.with_deadline(DeadlineMicros::from_micros(200));
+        let combined = e1.parallel(e2);
+
+        assert!(combined.has_deadline);
+        // Parallel: both take min (tightest)
+        assert_eq!(combined.min_deadline, DeadlineMicros::from_micros(100));
+        assert_eq!(combined.max_deadline, DeadlineMicros::from_micros(100));
+    }
+
+    #[test]
+    fn budget_effect_display_shows_deadline_range() {
+        let effect = BudgetEffect {
+            min_polls: 2,
+            max_polls: Some(5),
+            has_deadline: true,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::from_micros(100_000),
+            max_deadline: DeadlineMicros::from_micros(500_000),
+        };
+        let display = format!("{effect}");
+        assert!(display.contains("deadline="));
+        assert!(display.contains("100ms"));
+        assert!(display.contains("500ms"));
     }
 }
