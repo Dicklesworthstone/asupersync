@@ -1219,8 +1219,8 @@ mod tests {
         use crate::time::{TimerDriverHandle, VirtualClock};
         use crate::types::{Budget, RegionId, TaskId, Time};
         use crate::Cx;
-        use std::future::pending;
-        use std::pin::Pin;
+        use std::future::{pending, Future};
+        use std::pin::pin;
         use std::sync::Arc;
         use std::task::{Context, Poll, Wake, Waker};
         use std::time::Duration;
@@ -1239,10 +1239,19 @@ mod tests {
         #[derive(Clone)]
         struct PendingService;
 
+        #[derive(Debug)]
+        struct TestError;
+
+        impl std::fmt::Display for TestError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "test error")
+            }
+        }
+
         impl tower::Service<()> for PendingService {
             type Response = ();
-            type Error = ();
-            type Future = std::future::Pending<Result<(), ()>>;
+            type Error = TestError;
+            type Future = std::future::Pending<Result<(), TestError>>;
 
             fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
                 Poll::Ready(Ok(()))
@@ -1278,17 +1287,17 @@ mod tests {
                 .fallback_timeout(Duration::from_millis(5));
             let adapter = AsupersyncAdapter::with_config(PendingService, config);
 
-            let mut fut = adapter.call(&cx, ());
+            let mut fut = pin!(adapter.call(&cx, ()));
             let waker = noop_waker();
             let mut context = Context::from_waker(&waker);
 
-            let first = Pin::new(&mut fut).poll(&mut context);
+            let first = fut.as_mut().poll(&mut context);
             assert!(first.is_pending());
 
             clock.advance(Time::from_millis(6).as_nanos());
             timer.process_timers();
 
-            let result = Pin::new(&mut fut).poll(&mut context);
+            let result = fut.as_mut().poll(&mut context);
             let timed_out = matches!(result, Poll::Ready(Err(TowerAdapterError::Timeout)));
             crate::assert_with_log!(timed_out, "timeout error", true, timed_out);
             crate::test_complete!("timeout_fallback_triggers_timeout_error");
