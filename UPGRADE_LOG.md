@@ -11,7 +11,7 @@
 | Metric | Count |
 |--------|-------|
 | **Total dependencies** | 48 |
-| **Updated** | 1 |
+| **Updated** | 2 |
 | **Skipped** | 0 |
 | **Failed (rolled back)** | 0 |
 | **Requires attention** | 1 |
@@ -31,6 +31,18 @@ error[E0308]: arguments to this function are incorrect
     |
 263 |         let div = find_divergence(&a, &b);
     |                   ^^^^^^^^^^^^^^^ --  -- expected `&TraceBufferHandle`, found `&TraceBuffer`
+```
+
+#### bytes: 1.7 → 1.11
+
+**Changelog:** https://docs.rs/crate/bytes/latest/source/CHANGELOG.md citeturn0search0
+
+**Breaking changes:** None (minor update; MSRV bump to 1.57 noted in 1.11.0) citeturn0search0
+
+**Tests:** Failed due to pre-existing compile errors in `src/trace/mod.rs` / `src/trace/certificate.rs`
+```
+error[E0252]: the name `VerificationResult` is defined multiple times
+  --> src/trace/mod.rs:77:26
 ```
 
 ### Requires Attention

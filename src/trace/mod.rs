@@ -28,6 +28,7 @@ pub mod boundary;
 pub mod buffer;
 pub mod canonicalize;
 pub mod causality;
+pub mod certificate;
 pub mod compat;
 pub mod distributed;
 pub mod dpor;
@@ -47,6 +48,7 @@ pub mod tla_export;
 
 pub use boundary::{matmul_gf2, SquareComplex};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
+pub use certificate::{CertificateVerifier, TraceCertificate, VerificationResult};
 pub use canonicalize::{
     canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
 };
