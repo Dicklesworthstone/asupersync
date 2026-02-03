@@ -1747,4 +1747,174 @@ mod tests {
         crate::assert_with_log!(sched.is_empty(), "empty", true, sched.is_empty());
         crate::test_complete!("high_volume_cancel_ready_interleaving");
     }
+
+    // ── Cancel promotion parity regression tests (bd-1zaql) ─────────────
+
+    #[test]
+    fn move_to_cancel_promotes_from_ready() {
+        init_test("move_to_cancel_promotes_from_ready");
+        let mut sched = Scheduler::new();
+        let task = TaskId::new_for_test(1, 0);
+
+        // Schedule in ready lane
+        sched.schedule(task, 50);
+        crate::assert_with_log!(
+            !sched.is_in_cancel_lane(task),
+            "not in cancel before promotion",
+            true,
+            true
+        );
+
+        // Promote to cancel lane
+        sched.move_to_cancel_lane(task, 100);
+        crate::assert_with_log!(
+            sched.is_in_cancel_lane(task),
+            "in cancel after promotion",
+            true,
+            true
+        );
+
+        // Pop should come from cancel lane
+        let (popped, lane) = sched.pop_with_lane(0).expect("should have task");
+        crate::assert_with_log!(popped == task, "correct task", task, popped);
+        crate::assert_with_log!(
+            matches!(lane, DispatchLane::Cancel),
+            "dispatched from cancel lane",
+            true,
+            true
+        );
+
+        // Ready lane should be empty (task was removed during promotion)
+        crate::assert_with_log!(
+            sched.pop_ready_only().is_none(),
+            "ready lane empty after promotion",
+            true,
+            true
+        );
+        crate::test_complete!("move_to_cancel_promotes_from_ready");
+    }
+
+    #[test]
+    fn move_to_cancel_promotes_from_timed() {
+        init_test("move_to_cancel_promotes_from_timed");
+        let mut sched = Scheduler::new();
+        let task = TaskId::new_for_test(2, 0);
+
+        // Schedule in timed lane
+        sched.schedule_timed(task, Time::from_nanos(5000));
+        crate::assert_with_log!(
+            !sched.is_in_cancel_lane(task),
+            "not in cancel before promotion",
+            true,
+            true
+        );
+
+        // Promote to cancel lane
+        sched.move_to_cancel_lane(task, 80);
+        crate::assert_with_log!(
+            sched.is_in_cancel_lane(task),
+            "in cancel after promotion",
+            true,
+            true
+        );
+
+        // Pop should come from cancel lane
+        let (popped, lane) = sched.pop_with_lane(0).expect("should have task");
+        crate::assert_with_log!(popped == task, "correct task", task, popped);
+        crate::assert_with_log!(
+            matches!(lane, DispatchLane::Cancel),
+            "dispatched from cancel lane",
+            true,
+            true
+        );
+        crate::test_complete!("move_to_cancel_promotes_from_timed");
+    }
+
+    #[test]
+    fn move_to_cancel_idempotent_updates_priority() {
+        init_test("move_to_cancel_idempotent_updates_priority");
+        let mut sched = Scheduler::new();
+        let task = TaskId::new_for_test(3, 0);
+
+        // Schedule in cancel lane at low priority
+        sched.schedule_cancel(task, 10);
+        crate::assert_with_log!(sched.is_in_cancel_lane(task), "in cancel lane", true, true);
+
+        // Promote again with higher priority (idempotent, updates priority)
+        sched.move_to_cancel_lane(task, 200);
+        crate::assert_with_log!(
+            sched.is_in_cancel_lane(task),
+            "still in cancel lane",
+            true,
+            true
+        );
+
+        // Only one task should be in scheduler
+        crate::assert_with_log!(sched.len() == 1, "exactly one task", 1usize, sched.len());
+        crate::test_complete!("move_to_cancel_idempotent_updates_priority");
+    }
+
+    #[test]
+    fn schedule_cancel_silently_drops_when_in_ready() {
+        init_test("schedule_cancel_silently_drops_when_in_ready");
+        let mut sched = Scheduler::new();
+        let task = TaskId::new_for_test(4, 0);
+
+        // Schedule in ready lane
+        sched.schedule(task, 50);
+
+        // schedule_cancel is a no-op because task is already in scheduled set
+        sched.schedule_cancel(task, 100);
+        crate::assert_with_log!(
+            !sched.is_in_cancel_lane(task),
+            "schedule_cancel does NOT promote from ready (pre-fix behavior)",
+            true,
+            true
+        );
+
+        // But move_to_cancel_lane does promote
+        sched.move_to_cancel_lane(task, 100);
+        crate::assert_with_log!(
+            sched.is_in_cancel_lane(task),
+            "move_to_cancel_lane DOES promote from ready",
+            true,
+            true
+        );
+        crate::test_complete!("schedule_cancel_silently_drops_when_in_ready");
+    }
+
+    #[test]
+    fn repeated_cancel_requests_are_idempotent() {
+        init_test("repeated_cancel_requests_are_idempotent");
+        let mut sched = Scheduler::new();
+        let task = TaskId::new_for_test(5, 0);
+
+        // First cancel
+        sched.move_to_cancel_lane(task, 50);
+        crate::assert_with_log!(
+            sched.len() == 1,
+            "one task after first cancel",
+            1usize,
+            sched.len()
+        );
+
+        // Repeated cancel (same priority)
+        sched.move_to_cancel_lane(task, 50);
+        crate::assert_with_log!(
+            sched.len() == 1,
+            "still one task after repeat",
+            1usize,
+            sched.len()
+        );
+
+        // Repeated cancel (higher priority)
+        sched.move_to_cancel_lane(task, 200);
+        crate::assert_with_log!(
+            sched.len() == 1,
+            "still one task after priority bump",
+            1usize,
+            sched.len()
+        );
+        crate::test_complete!("repeated_cancel_requests_are_idempotent");
+    }
 }

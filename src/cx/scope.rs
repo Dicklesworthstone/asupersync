@@ -537,7 +537,7 @@ impl<P: Policy> Scope<'_, P> {
     /// let counter = Rc::new(RefCell::new(0));
     /// let counter_clone = counter.clone();
     ///
-    /// let (handle, stored) = scope.spawn_local(&mut state, &cx, |cx| async move {
+    /// let handle = scope.spawn_local(&mut state, &cx, |cx| async move {
     ///     // Rc<RefCell<_>> is !Send but allowed in local tasks
     ///     *counter_clone.borrow_mut() += 1;
     /// });
@@ -547,7 +547,7 @@ impl<P: Policy> Scope<'_, P> {
         state: &mut RuntimeState,
         _cx: &Cx<Caps>,
         f: F,
-    ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
+    ) -> Result<TaskHandle<Fut::Output>, SpawnError>
     where
         Caps: cap::HasSpawn + Send + Sync + 'static,
         F: FnOnce(Cx<Caps>) -> Fut + 'static,
@@ -628,43 +628,23 @@ impl<P: Policy> Scope<'_, P> {
         // Store in thread-local storage
         crate::runtime::local::store_local_task(task_id, stored);
 
-        // Schedule the task on the current worker's local queue.
-        // If we are not on a worker thread (e.g. Phase 0 main thread without worker loop),
-        // this might fail. But spawn_local is intended for worker threads.
-        // In Phase 0 main thread, there is no LocalQueue.
-        // However, Phase 0 implies we are running synchronously or via a simple loop.
-        // If we use Runtime::current_thread(), it starts a worker.
-        // If we are in a pure test environment (manual RuntimeState), we might not have a worker.
-        // But spawn_local requires a runtime environment to be useful (otherwise who polls?).
-        // We'll ignore the error if schedule_local fails (assuming manual polling or Phase 0 compat).
-        // TODO: LocalQueue::schedule_local does not exist yet; task is stored in TLS above.
-        // When a worker-local scheduling API is added, wire it here.
-        let _ = task_id;
+        // Schedule the task on the current worker's NON-STEALABLE local scheduler.
+        // spawn_local tasks MUST NOT be stealable.
+        let scheduled = crate::runtime::scheduler::three_lane::schedule_local_task(task_id);
 
-        // Return a placeholder StoredTask because the API signature expects it.
-        // This allows existing callers (if any) to continue working, although
-        // they shouldn't try to store this placeholder in RuntimeState.
-        // Since spawn_local stores it implicitly in TLS, the caller doesn't need to do anything.
-        //
-        // Note: This effectively changes the semantics of the returned StoredTask.
-        // It is now a dummy. This is necessary to preserve the function signature
-        // while changing the storage mechanism.
-        //
-        // Ideally, we would change the signature to return just TaskHandle,
-        // but that would break the trait if Scope implements one (it doesn't).
-        //
-        // We create a dummy StoredTask that does nothing.
-        // Since we can't easily create a dummy Future that returns Outcome,
-        // we assume the caller won't use it or will try to store it and fail?
-        // No, spawn_local callers usually look like:
-        // let (handle, _) = scope.spawn_local(...)
-        //
-        // To be safe, we return a dummy StoredTask that panics if polled.
-        let dummy = StoredTask::new(async {
-            panic!("spawn_local task placeholder should not be polled");
-        });
+        if scheduled {
+            if let Some(record) = state.tasks.get(task_id.arena_index()) {
+                let _ = record.wake_state.notify();
+            }
+        } else {
+            debug!(
+                task_id = ?task_id,
+                region_id = ?self.region,
+                "spawn_local called without active local scheduler"
+            );
+        }
 
-        Ok((handle, dummy))
+        Ok(handle)
     }
 
     /// Spawns a blocking operation on a dedicated thread pool.
@@ -1145,7 +1125,7 @@ mod tests {
 
         // In Phase 0, spawn_local requires Send bounds
         // In Phase 1+, this will work with !Send futures
-        let (handle, _stored) = scope
+        let handle = scope
             .spawn_local(&mut state, &cx, |_| async move { 42_i32 })
             .unwrap();
 
