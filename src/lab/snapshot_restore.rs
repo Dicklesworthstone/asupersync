@@ -282,6 +282,7 @@ impl RestorableSnapshot {
     /// - Closed regions have no live children/tasks
     /// - Timestamps are consistent
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> ValidationResult {
         let mut errors = Vec::new();
         let mut stats = SnapshotStats::default();
@@ -409,7 +410,7 @@ impl RestorableSnapshot {
                                     .regions
                                     .iter()
                                     .find(|r| r.id.index == child_id)
-                                    .map_or(false, |r| !is_region_closed(&r.state))
+                                    .is_some_and(|r| !is_region_closed(&r.state))
                             })
                             .copied()
                             .collect()
