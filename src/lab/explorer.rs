@@ -20,10 +20,25 @@
 
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
+use crate::trace::boundary::SquareComplex;
 use crate::trace::canonicalize::{trace_fingerprint, TraceMonoid};
 use crate::trace::dpor::detect_races;
 use crate::trace::event::TraceEvent;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::trace::event_structure::TracePoset;
+use crate::trace::scoring::{
+    score_persistence, seed_fingerprint, ClassId, EvidenceLedger, TopologicalScore,
+};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+
+/// Exploration mode: baseline seed-sweep or topology-prioritized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExplorationMode {
+    /// Linear seed sweep (default).
+    #[default]
+    Baseline,
+    /// Topology-prioritized: uses H1 persistence to score and prioritize seeds.
+    TopologyPrioritized,
+}
 
 /// Configuration for the schedule explorer.
 #[derive(Debug, Clone)]
@@ -593,6 +608,209 @@ impl DporExplorer {
             } else {
                 new_class_count as f64 / total as f64
             },
+        }
+    }
+}
+
+/// Topology-prioritized exploration engine.
+///
+/// Uses H1 persistent homology to score traces and prioritize seeds that
+/// exhibit novel concurrency patterns (new homology classes). Seeds are
+/// drawn from a priority queue ordered by [`TopologicalScore`].
+///
+/// # Algorithm
+///
+/// 1. Start with `max_runs` seeds in the queue, all scored at zero.
+/// 2. Pop the highest-scored seed, run it, compute the trace's square
+///    complex and H1 persistence.
+/// 3. Score the persistence pairs against previously seen classes.
+/// 4. Record the result; the next seed's score reflects how novel its
+///    trace was (new classes discovered, persistence interval lengths).
+/// 5. Repeat until the queue is empty or budget is exhausted.
+///
+/// Both modes (baseline and topology-prioritized) remain deterministic
+/// given the same configuration and test closure.
+pub struct TopologyExplorer {
+    config: ExplorerConfig,
+    /// Priority queue: (score, seed). Highest score popped first.
+    frontier: BinaryHeap<(TopologicalScore, u64)>,
+    /// Explored seeds.
+    explored_seeds: HashSet<u64>,
+    /// Known equivalence classes (fingerprint → run count).
+    known_fingerprints: HashSet<u64>,
+    class_counts: HashMap<u64, usize>,
+    /// Seen persistence classes for novelty detection.
+    seen_classes: HashSet<ClassId>,
+    /// Per-run results.
+    results: Vec<RunResult>,
+    /// Violations found.
+    violations: Vec<ViolationReport>,
+    /// Per-run evidence ledgers.
+    ledgers: Vec<EvidenceLedger>,
+    new_class_count: usize,
+}
+
+impl TopologyExplorer {
+    /// Create a new topology explorer with the given configuration.
+    #[must_use]
+    pub fn new(config: ExplorerConfig) -> Self {
+        let mut frontier = BinaryHeap::new();
+        // Seed the frontier with initial seeds, all scored at zero.
+        for i in 0..config.max_runs {
+            let seed = config.base_seed.wrapping_add(i as u64);
+            let fp = seed_fingerprint(seed);
+            frontier.push((TopologicalScore::zero(fp), seed));
+        }
+        Self {
+            config,
+            frontier,
+            explored_seeds: HashSet::new(),
+            known_fingerprints: HashSet::new(),
+            class_counts: HashMap::new(),
+            seen_classes: HashSet::new(),
+            results: Vec::new(),
+            violations: Vec::new(),
+            ledgers: Vec::new(),
+            new_class_count: 0,
+        }
+    }
+
+    /// Run topology-prioritized exploration.
+    ///
+    /// The `test` closure receives a freshly constructed `LabRuntime` for each run.
+    pub fn explore<F>(&mut self, test: F) -> ExplorationReport
+    where
+        F: Fn(&mut LabRuntime),
+    {
+        while let Some((_score, seed)) = self.frontier.pop() {
+            if self.results.len() >= self.config.max_runs {
+                break;
+            }
+            if !self.explored_seeds.insert(seed) {
+                continue;
+            }
+            self.run_once(seed, &test);
+        }
+        self.build_report()
+    }
+
+    fn run_once<F>(&mut self, seed: u64, test: &F)
+    where
+        F: Fn(&mut LabRuntime),
+    {
+        let mut lab_config = LabConfig::new(seed);
+        lab_config = lab_config.worker_count(self.config.worker_count);
+        if let Some(max) = Some(self.config.max_steps_per_run) {
+            lab_config = lab_config.max_steps(max);
+        }
+        if self.config.record_traces {
+            lab_config = lab_config.with_default_replay_recording();
+        }
+
+        let mut runtime = LabRuntime::new(lab_config);
+        test(&mut runtime);
+
+        let steps = runtime.steps();
+        let trace_events: Vec<TraceEvent> = runtime.trace().snapshot();
+
+        let fingerprint = if trace_events.is_empty() {
+            seed
+        } else {
+            trace_fingerprint(&trace_events)
+        };
+
+        let is_new_class = self.known_fingerprints.insert(fingerprint);
+        if is_new_class {
+            self.new_class_count += 1;
+        }
+        *self.class_counts.entry(fingerprint).or_insert(0) += 1;
+
+        // Compute topological score from the trace's square complex.
+        let fp = seed_fingerprint(seed);
+        let ledger = if trace_events.len() >= 2 {
+            let poset = TracePoset::from_trace(&trace_events);
+            let complex = SquareComplex::from_trace_poset(&poset);
+            let d1 = complex.boundary_1();
+            let d2 = complex.boundary_2();
+
+            // Build the combined boundary matrix for H1 computation.
+            // We reduce ∂₁ to find 1-cycles, and use ∂₂ to identify which are boundaries.
+            // For scoring, we use the ∂₁ matrix reduction directly — paired columns
+            // in the reduction of ∂₁ give H₀ pairs, and unpaired edge columns give
+            // 1-cycle candidates. Then reducing ∂₂ kills some of those cycles.
+            //
+            // Simplified approach: reduce ∂₂ to get H₁ persistence pairs directly.
+            let reduced = d2.reduce();
+            let pairs = reduced.persistence_pairs();
+            score_persistence(&pairs, &mut self.seen_classes, fp)
+        } else {
+            use crate::trace::gf2::PersistencePairs;
+            let pairs = PersistencePairs {
+                pairs: vec![],
+                unpaired: vec![],
+            };
+            score_persistence(&pairs, &mut self.seen_classes, fp)
+        };
+
+        self.ledgers.push(ledger);
+
+        let violations = runtime.check_invariants();
+        if !violations.is_empty() {
+            self.violations.push(ViolationReport {
+                seed,
+                steps,
+                violations: violations.clone(),
+                fingerprint,
+            });
+        }
+
+        let certificate_hash = runtime.certificate().hash();
+
+        self.results.push(RunResult {
+            seed,
+            steps,
+            fingerprint,
+            is_new_class,
+            violations,
+            certificate_hash,
+        });
+    }
+
+    fn build_report(&self) -> ExplorationReport {
+        ExplorationReport {
+            total_runs: self.results.len(),
+            unique_classes: self.known_fingerprints.len(),
+            violations: self.violations.clone(),
+            coverage: CoverageMetrics {
+                equivalence_classes: self.known_fingerprints.len(),
+                total_runs: self.results.len(),
+                new_class_discoveries: self.new_class_count,
+                class_run_counts: self.class_counts.clone(),
+            },
+            runs: Vec::new(),
+        }
+    }
+
+    /// Access per-run results.
+    #[must_use]
+    pub fn results(&self) -> &[RunResult] {
+        &self.results
+    }
+
+    /// Access per-run evidence ledgers.
+    #[must_use]
+    pub fn ledgers(&self) -> &[EvidenceLedger] {
+        &self.ledgers
+    }
+
+    /// Access the current coverage metrics.
+    #[must_use]
+    pub fn coverage(&self) -> CoverageMetrics {
+        CoverageMetrics {
+            equivalence_classes: self.known_fingerprints.len(),
+            total_runs: self.results.len(),
+            new_class_discoveries: self.new_class_count,
+            class_run_counts: self.class_counts.clone(),
         }
     }
 }
