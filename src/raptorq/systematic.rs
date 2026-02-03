@@ -33,6 +33,12 @@ use crate::util::DetRng;
 // ============================================================================
 
 /// Systematic encoding parameters for a single source block.
+///
+/// RFC 6330 defines several derived parameters:
+/// - L = K + S + H: total intermediate symbols
+/// - W = K + S: number of LT symbols (non-PI symbols)
+/// - P = H: number of PI symbols (= HDPC symbols for our systematic encoding)
+/// - B = W - S = K: number of non-LDPC LT symbols
 #[derive(Debug, Clone)]
 pub struct SystematicParams {
     /// K: number of source symbols in this block.
@@ -43,6 +49,12 @@ pub struct SystematicParams {
     pub h: usize,
     /// L = K + S + H: total intermediate symbols.
     pub l: usize,
+    /// W = K + S: number of LT symbols.
+    pub w: usize,
+    /// P = H: number of PI symbols.
+    pub p: usize,
+    /// B = K: number of non-LDPC LT symbols.
+    pub b: usize,
     /// Symbol size in bytes.
     pub symbol_size: usize,
 }
@@ -53,17 +65,29 @@ impl SystematicParams {
     /// S and H are chosen to provide good erasure protection:
     /// - S ≈ ceil(0.01 * K) + X where X provides LDPC density
     /// - H ≈ ceil(sqrt(K)) for half-distance check coverage
+    ///
+    /// Derived parameters per RFC 6330:
+    /// - W = K + S (LT symbols)
+    /// - P = H (PI symbols = HDPC for systematic encoding)
+    /// - B = K (non-LDPC LT symbols)
+    /// - L = W + P = K + S + H
     #[must_use]
     pub fn for_source_block(k: usize, symbol_size: usize) -> Self {
         assert!(k > 0, "source block must have at least one symbol");
         let s = compute_s(k);
         let h = compute_h(k);
         let l = k + s + h;
+        let w = k + s; // LT symbols
+        let p = h; // PI symbols = HDPC
+        let b = k; // non-LDPC LT symbols = source symbols
         Self {
             k,
             s,
             h,
             l,
+            w,
+            p,
+            b,
             symbol_size,
         }
     }
@@ -399,31 +423,49 @@ fn gf256_mul_slice_inplace(data: &mut [u8], c: Gf256) {
 
 /// Build LDPC constraint rows (rows 0..S).
 ///
-/// Each LDPC row connects a few intermediate symbols with XOR (GF(2)).
-/// Uses a deterministic pattern based on symbol index modulo S.
-fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, seed: u64) {
+/// RFC 6330 Section 5.3.3.3: LDPC pre-coding relationships.
+///
+/// Two parts:
+/// 1. For i = 0..B-1: each intermediate symbol C[i] participates in 3 LDPC rows
+///    using a circulant-like pattern with step a = 1 + floor(i/S).
+/// 2. For i = 0..S-1: each LDPC row i connects to PI symbols C[W+a] and C[W+b]
+///    where a = i % P and b = (i+1) % P.
+fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
-    let l = params.l;
+    let b = params.b;
+    let w = params.w;
+    let p = params.p;
 
-    // Each intermediate symbol i participates in LDPC rows
-    // (i % S), ((i / S) % S), and ((i + 1) % S)
-    for i in 0..l {
-        let r0 = i % s;
-        let r1 = (i / s.max(1)) % s;
-        // GF(2) = GF(256) element 1
-        matrix.add_assign(r0, i, Gf256::ONE);
-        if r0 != r1 {
-            matrix.add_assign(r1, i, Gf256::ONE);
-        }
+    // Part 1: For each of the first B intermediate symbols
+    // RFC 6330: For i = 0, ..., B-1
+    //   a = 1 + floor(i/S)
+    //   b = i % S
+    //   D[b] = D[b] + C[i]; b = (b + a) % S
+    //   D[b] = D[b] + C[i]; b = (b + a) % S
+    //   D[b] = D[b] + C[i]
+    for i in 0..b {
+        let a = 1 + i / s.max(1);
+        let mut row = i % s;
+        // Each C[i] participates in 3 LDPC rows
+        matrix.add_assign(row, i, Gf256::ONE);
+        row = (row + a) % s;
+        matrix.add_assign(row, i, Gf256::ONE);
+        row = (row + a) % s;
+        matrix.add_assign(row, i, Gf256::ONE);
     }
 
-    // Additional LDPC connections using seed-derived pattern
-    let mut rng = DetRng::new(seed.wrapping_add(0x1D9C_1D9C_0000));
-    for row in 0..s {
-        let extra = 1 + rng.next_usize(2); // 1-2 additional connections
-        for _ in 0..extra {
-            let col = rng.next_usize(l);
-            matrix.add_assign(row, col, Gf256::ONE);
+    // Part 2: Connect LDPC rows to PI symbols
+    // RFC 6330: For i = 0, ..., S-1
+    //   a = i % P
+    //   b = (i+1) % P
+    //   D[i] = D[i] + C[W+a] + C[W+b]
+    if p > 0 {
+        for i in 0..s {
+            let a = i % p;
+            let b_idx = (i + 1) % p;
+            // Add connections to PI symbols (columns W+a and W+b)
+            matrix.add_assign(i, w + a, Gf256::ONE);
+            matrix.add_assign(i, w + b_idx, Gf256::ONE);
         }
     }
 }
