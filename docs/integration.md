@@ -162,7 +162,7 @@ RaptorQSender / RaptorQReceiver
 
 ### Formal Semantics (v4.0.0)
 
-The canonical small-step semantics live in `asupersync_v4_formal_semantics.md`
+The canonical small-step semantics live in `docs/asupersync_v4_formal_semantics.md`
 and are tagged **v4.0.0**. This is the ground-truth model for regions, tasks,
 obligations, cancellation, scheduler lanes, and trace equivalence. It is intended
 to be mechanically translatable to TLA+/Lean/Coq without a rewrite.
