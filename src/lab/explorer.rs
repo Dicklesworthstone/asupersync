@@ -189,7 +189,7 @@ pub struct UnexploredSeed {
 fn novelty_histogram_from_flags(results: &[RunResult]) -> BTreeMap<u32, usize> {
     let mut histogram = BTreeMap::new();
     for r in results {
-        let novelty = if r.is_new_class { 1 } else { 0 };
+        let novelty = u32::from(r.is_new_class);
         *histogram.entry(novelty).or_insert(0) += 1;
     }
     histogram
@@ -213,10 +213,7 @@ fn saturation_metrics(
         None
     } else {
         let last_new = results.iter().rposition(|r| r.is_new_class);
-        Some(match last_new {
-            Some(idx) => results.len() - 1 - idx,
-            None => results.len(),
-        })
+        Some(last_new.map_or(results.len(), |idx| results.len() - 1 - idx))
     };
     let window = DEFAULT_SATURATION_WINDOW;
     let saturated = if total_runs < window {
