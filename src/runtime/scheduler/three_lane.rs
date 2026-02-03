@@ -282,14 +282,14 @@ impl ThreeLaneScheduler {
 
     /// Signals all workers to shutdown.
     pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Release);
         self.wake_all();
     }
 
     /// Returns true if shutdown has been signaled.
     #[must_use]
     pub fn is_shutdown(&self) -> bool {
-        self.shutdown.load(Ordering::Relaxed)
+        self.shutdown.load(Ordering::Acquire)
     }
 }
 
@@ -375,7 +375,7 @@ impl ThreeLaneWorker {
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
 
-        while !self.shutdown.load(Ordering::Relaxed) {
+        while !self.shutdown.load(Ordering::Acquire) {
             if let Some(task) = self.next_task() {
                 self.execute(task);
                 continue;
@@ -386,7 +386,7 @@ impl ThreeLaneWorker {
 
             loop {
                 // Check shutdown before parking to avoid hanging in the backoff loop.
-                if self.shutdown.load(Ordering::Relaxed) {
+                if self.shutdown.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -536,8 +536,10 @@ impl ThreeLaneWorker {
         };
         if self.cancel_streak >= effective_limit {
             if let Some(task) = self.try_cancel_work() {
-                self.cancel_streak += 1;
-                self.record_cancel_dispatch();
+                // Fallback: no ready work available, so dispatch another cancel.
+                // Don't extend the streak peak — the limit bounds the maximum
+                // consecutive cancel dispatches before a fairness yield.
+                self.preemption_metrics.cancel_dispatches += 1;
                 self.preemption_metrics.fallback_cancel_dispatches += 1;
                 self.cancel_streak = 0;
                 return Some(task);
@@ -591,7 +593,7 @@ impl ThreeLaneWorker {
     ///
     /// Returns `true` if a task was executed.
     pub(crate) fn run_once(&mut self) -> bool {
-        if self.shutdown.load(Ordering::Relaxed) {
+        if self.shutdown.load(Ordering::Acquire) {
             return false;
         }
 
@@ -2334,7 +2336,7 @@ mod tests {
             let mut workers = scheduler.take_workers().into_iter();
             let mut worker = workers.next().unwrap();
 
-            for _ in 0..n_cancel + 1 {
+            for _ in 0..=n_cancel {
                 worker.next_task();
             }
 

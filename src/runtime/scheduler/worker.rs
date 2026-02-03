@@ -616,6 +616,7 @@ mod tests {
     fn test_parker_no_lost_wakeup() {
         // Signal should never be lost in any interleaving
         // Run multiple iterations to increase chance of catching races
+        let mut rng = crate::util::DetRng::new(0x5eed_1234);
         for _ in 0..100 {
             let parker = Arc::new(Parker::new());
             let woken = Arc::new(AtomicBool::new(false));
@@ -628,7 +629,7 @@ mod tests {
             });
 
             // Random delay to vary interleaving
-            if rand_bool() {
+            if rng.next_bool() {
                 thread::yield_now();
             }
 
@@ -806,12 +807,5 @@ mod tests {
         );
     }
 
-    // Helper function for random boolean
-    fn rand_bool() -> bool {
-        use std::time::SystemTime;
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos() % 2 == 0)
-            .unwrap_or(false)
-    }
+    // Deterministic RNG for scheduling fuzz in tests: no ambient time.
 }

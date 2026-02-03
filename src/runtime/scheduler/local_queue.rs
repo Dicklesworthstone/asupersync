@@ -110,6 +110,9 @@ impl Stealer {
             return false;
         }
 
+        if !Arc::ptr_eq(&self.state, &dest.state) {
+            return false;
+        }
         debug_assert!(
             Arc::ptr_eq(&self.state, &dest.state),
             "steal_batch requires a shared RuntimeState"
