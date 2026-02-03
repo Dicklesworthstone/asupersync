@@ -733,11 +733,7 @@ impl RuntimeState {
         Ok((task_id, handle))
     }
 
-    fn attach_logical_time_for_task(
-        &self,
-        task_id: TaskId,
-        event: TraceEvent,
-    ) -> TraceEvent {
+    fn attach_logical_time_for_task(&self, task_id: TaskId, event: TraceEvent) -> TraceEvent {
         let Some(record) = self.tasks.get(task_id.arena_index()) else {
             return event;
         };
@@ -910,14 +906,8 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_reserve(
-            seq,
-            self.now,
-            obligation_id,
-            holder,
-            region,
-            kind,
-        );
+        let event =
+            TraceEvent::obligation_reserve(seq, self.now, obligation_id, holder, region, kind);
         self.trace
             .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_created(region);
@@ -973,9 +963,8 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_commit(
-            seq, self.now, id, holder, region, kind, duration,
-        );
+        let event =
+            TraceEvent::obligation_commit(seq, self.now, id, holder, region, kind, duration);
         self.trace
             .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_discharged(region);
@@ -1043,9 +1032,8 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_abort(
-            seq, self.now, id, holder, region, kind, duration, reason,
-        );
+        let event =
+            TraceEvent::obligation_abort(seq, self.now, id, holder, region, kind, duration, reason);
         self.trace
             .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_discharged(region);
@@ -1092,8 +1080,7 @@ impl RuntimeState {
         };
 
         let seq = self.next_trace_seq();
-        let event =
-            TraceEvent::obligation_leak(seq, self.now, id, holder, region, kind, duration);
+        let event = TraceEvent::obligation_leak(seq, self.now, id, holder, region, kind, duration);
         self.trace
             .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_leaked(region);
@@ -1275,13 +1262,8 @@ impl RuntimeState {
             };
             if newly_cancelled {
                 let seq = self.trace.next_seq();
-                let event = TraceEvent::cancel_request(
-                    seq,
-                    self.now,
-                    task_id,
-                    region,
-                    reason.clone(),
-                );
+                let event =
+                    TraceEvent::cancel_request(seq, self.now, task_id, region, reason.clone());
                 self.trace
                     .push_event(self.attach_logical_time_for_task(task_id, event));
             }

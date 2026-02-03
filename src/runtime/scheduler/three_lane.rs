@@ -551,7 +551,15 @@ impl ThreeLaneWorker {
     pub(crate) fn execute(&self, task_id: TaskId) {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        let (mut stored, task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker) = {
+        let (
+            mut stored,
+            task_cx,
+            wake_state,
+            priority,
+            cx_inner,
+            cached_waker,
+            cached_cancel_waker,
+        ) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
             let Some(stored) = state.remove_stored_future(task_id) else {
                 return;
@@ -573,7 +581,15 @@ impl ThreeLaneWorker {
             let cached_waker = record.cached_waker.take();
             let cached_cancel_waker = record.cached_cancel_waker.take();
             drop(state);
-            (stored, task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker)
+            (
+                stored,
+                task_cx,
+                wake_state,
+                priority,
+                cx_inner,
+                cached_waker,
+                cached_cancel_waker,
+            )
         };
 
         // Reuse cached waker if priority hasn't changed, otherwise allocate new one
@@ -587,7 +603,8 @@ impl ThreeLaneWorker {
                 parker: self.parker.clone(),
             })),
         };
-        if let Some(inner) = cx_inner.as_ref() {
+        // Create/reuse cancel waker if cx_inner exists
+        let cancel_waker_for_cache = if let Some(inner) = cx_inner.as_ref() {
             let cancel_waker = match cached_cancel_waker {
                 Some((w, cached_priority)) if cached_priority == priority => w,
                 _ => Waker::from(Arc::new(CancelLaneWaker {
@@ -602,15 +619,10 @@ impl ThreeLaneWorker {
             if let Ok(mut guard) = inner.write() {
                 guard.cancel_waker = Some(cancel_waker.clone());
             }
-            // Cache cancel waker in task record for reuse on next poll
-            // (stored alongside the regular waker in the Pending branch below)
-            // We temporarily hold it here; it will be cached if Pending.
-            // For Ready, the task is done so no caching needed.
-            // Use a local binding to pass through to Pending branch.
-            let _cancel_waker_for_cache = Some((cancel_waker, priority));
-            // Note: we can't easily pass this through the match arms, so instead
-            // we cache it immediately via the state lock in the Pending path.
-        }
+            Some((cancel_waker, priority))
+        } else {
+            None
+        };
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
@@ -649,6 +661,7 @@ impl ThreeLaneWorker {
                 // Cache wakers back in the task record for reuse on next poll
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     record.cached_waker = Some((waker, priority));
+                    record.cached_cancel_waker = cancel_waker_for_cache;
                 }
                 drop(state);
                 if wake_state.finish_poll() {

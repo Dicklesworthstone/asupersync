@@ -281,6 +281,7 @@ impl PlanAnalyzer {
         PlanAnalysis { nodes: results }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn analyze_node(
         dag: &PlanDag,
         id: PlanId,
@@ -382,9 +383,7 @@ impl PlanAnalyzer {
                 let cancel = if children.len() <= 1 {
                     child_cancel
                 } else if child_cancel.is_safe()
-                    && child_analyses
-                        .iter()
-                        .all(|a| a.obligation.is_safe())
+                    && child_analyses.iter().all(|a| a.obligation.is_safe())
                 {
                     CancelSafety::Safe
                 } else {
@@ -398,13 +397,9 @@ impl PlanAnalyzer {
                     .map(|a| a.budget.min_polls)
                     .min()
                     .unwrap_or(0);
-                let max_polls = child_analyses.iter().try_fold(None::<u32>, |acc, a| {
-                    match (acc, a.budget.max_polls) {
-                        (None, m) => Some(m),
-                        (Some(None), _) | (_, None) => Some(None),
-                        (Some(Some(prev)), Some(m)) => Some(Some(prev.max(m))),
-                    }
-                }).flatten();
+                let max_polls = child_analyses.iter().try_fold(0u32, |acc, a| {
+                    a.budget.max_polls.map(|m| acc.max(m))
+                });
                 let has_deadline = child_analyses.iter().any(|a| a.budget.has_deadline);
                 let parallelism = child_analyses
                     .iter()
@@ -487,7 +482,7 @@ impl<'a> SideConditionChecker<'a> {
     pub fn obligations_safe(&self, id: PlanId) -> bool {
         self.analysis
             .get(id)
-            .map_or(false, |a| a.obligation.is_safe())
+            .is_some_and(|a| a.obligation.is_safe())
     }
 
     /// Check if a node's cancel behavior is safe (losers drained).
@@ -495,7 +490,7 @@ impl<'a> SideConditionChecker<'a> {
     pub fn cancel_safe(&self, id: PlanId) -> bool {
         self.analysis
             .get(id)
-            .map_or(false, |a| a.cancel.is_safe())
+            .is_some_and(|a| a.cancel.is_safe())
     }
 
     /// Check if two subtrees are independent (no shared mutable state).
@@ -709,7 +704,8 @@ mod tests {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
         let b = dag.leaf("b");
-        dag.set_root(dag.join(vec![a, b]));
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
 
         let checker = SideConditionChecker::new(&dag);
         assert!(checker.rewrite_preserves_obligations(a, b));

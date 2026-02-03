@@ -663,7 +663,9 @@ mod tests {
         let sol = RobustSoliton::new(30, 0.2, 0.05);
         let run = |seed: u64| -> Vec<usize> {
             let mut rng = DetRng::new(seed);
-            (0..100).map(|_| sol.sample(rng.next_u64() as u32)).collect()
+            (0..100)
+                .map(|_| sol.sample(rng.next_u64() as u32))
+                .collect()
         };
         let a = run(42);
         let b = run(42);
@@ -675,7 +677,9 @@ mod tests {
         let sol = RobustSoliton::new(30, 0.2, 0.05);
         let run = |seed: u64| -> Vec<usize> {
             let mut rng = DetRng::new(seed);
-            (0..100).map(|_| sol.sample(rng.next_u64() as u32)).collect()
+            (0..100)
+                .map(|_| sol.sample(rng.next_u64() as u32))
+                .collect()
         };
         let a = run(42);
         let b = run(12345);
@@ -743,7 +747,10 @@ mod tests {
             .map(|_| sol_b.sample(rng_b.next_u64() as u32))
             .collect();
         // Same seed but different distributions should differ
-        assert_ne!(a, b, "different parameters should produce different samples");
+        assert_ne!(
+            a, b,
+            "different parameters should produce different samples"
+        );
     }
 
     #[test]
