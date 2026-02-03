@@ -624,7 +624,7 @@ impl ThreeLaneWorker {
     /// Runs a single scheduling step.
     ///
     /// Returns `true` if a task was executed.
-    pub(crate) fn run_once(&mut self) -> bool {
+    pub fn run_once(&mut self) -> bool {
         if self.shutdown.load(Ordering::Acquire) {
             return false;
         }

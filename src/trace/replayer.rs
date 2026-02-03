@@ -212,10 +212,11 @@ impl TraceReplayer {
         }
 
         let event_index = self.current_index;
-        let should_break = {
-            let event = self.trace.events.get(event_index)?;
-            self.check_breakpoint(event, event_index + 1)
+        let Some(event) = self.trace.events.get(event_index) else {
+            self.completed = true;
+            return None;
         };
+        let should_break = self.check_breakpoint(event, event_index + 1);
 
         self.current_index = event_index + 1;
 

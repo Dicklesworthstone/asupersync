@@ -1,3 +1,5 @@
+//! Reproduction test for scheduling bugs in `spawn_registered`.
+
 #[cfg(test)]
 mod tests {
     use asupersync::cx::Cx;
@@ -19,7 +21,7 @@ mod tests {
 
         // 3. Create a scope manually
         // We need a Cx bound to root_region to create a Scope.
-        let cx = Cx::new_with_observability(
+        let cx: Cx = Cx::new_with_observability(
             root_region,
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
@@ -34,14 +36,14 @@ mod tests {
 
         // 4. Spawn a task using spawn_registered
         // We simulate being inside a task where we have access to state (locked)
-        let _handle = {
+        let res = {
             let mut guard = state.lock().unwrap();
-            let res = scope.spawn_registered(&mut *guard, &cx, |_| async move {
+            scope.spawn_registered(&mut guard, &cx, |_| async move {
                 inner_ran_clone.store(true, Ordering::SeqCst);
                 42
-            });
-            res.expect("spawn failed")
+            })
         }; // Lock dropped here
+        let _handle = res.expect("spawn failed");
 
         // 5. Run the worker to drive the task
         let mut worker = scheduler.take_workers().pop().unwrap();

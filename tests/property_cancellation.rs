@@ -49,18 +49,7 @@ const ALL_CANCEL_PHASES: [CancelPhase; 4] = [
 ];
 
 fn arb_cancel_kind() -> impl Strategy<Value = CancelKind> {
-    prop_oneof![
-        Just(CancelKind::User),
-        Just(CancelKind::Timeout),
-        Just(CancelKind::Deadline),
-        Just(CancelKind::PollQuota),
-        Just(CancelKind::CostBudget),
-        Just(CancelKind::FailFast),
-        Just(CancelKind::RaceLost),
-        Just(CancelKind::ParentCancelled),
-        Just(CancelKind::ResourceUnavailable),
-        Just(CancelKind::Shutdown),
-    ]
+    (0usize..ALL_CANCEL_KINDS.len()).prop_map(|idx| ALL_CANCEL_KINDS[idx])
 }
 
 fn arb_cancel_phase() -> impl Strategy<Value = CancelPhase> {
@@ -298,7 +287,10 @@ proptest! {
         epoch in 0u64..=1000,
     ) {
         init_test_logging();
-        // Witness validation uses Ord on CancelKind (discriminant order), not severity()
+        // Only test when cancellation kind ordering is monotone.
+        //
+        // `CancelWitness::validate_transition` enforces monotonicity using `CancelKind`'s `Ord`,
+        // not the coarser `severity()` buckets.
         prop_assume!(kind2 >= kind1);
 
         let task = TaskId::new_for_test(0, 0);

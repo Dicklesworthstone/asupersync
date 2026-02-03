@@ -1595,14 +1595,16 @@ impl RuntimeState {
         let _waiter_count = waiters.len();
 
         let completion = TaskCompletionKind::from_state(&task.state);
-        let leaks = self.collect_obligation_leaks(|record| record.holder == task_id);
-        if !leaks.is_empty() {
-            self.handle_obligation_leaks(ObligationLeakError {
-                task_id: Some(task_id),
-                region_id: owner,
-                completion: Some(completion),
-                leaks,
-            });
+        if !matches!(completion, TaskCompletionKind::Cancelled) {
+            let leaks = self.collect_obligation_leaks(|record| record.holder == task_id);
+            if !leaks.is_empty() {
+                self.handle_obligation_leaks(ObligationLeakError {
+                    task_id: Some(task_id),
+                    region_id: owner,
+                    completion: Some(completion),
+                    leaks,
+                });
+            }
         }
 
         // Trace task completion
@@ -1779,6 +1781,10 @@ impl RuntimeState {
         let Some(region) = self.regions.get(region_id.arena_index()) else {
             return false;
         };
+
+        if region.state() == crate::record::region::RegionState::Closed {
+            return true;
+        }
 
         // Must be in Finalizing state
         if region.state() != crate::record::region::RegionState::Finalizing {
@@ -4690,6 +4696,7 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
         let task = insert_task(&mut state, region);
+        state.record_task_spawn(task, region);
 
         // Create obligation
         let _obl = state
