@@ -182,13 +182,12 @@ fn meta_mutations_all_12_covered() {
     assert_eq!(report.results().len(), 12, "should run 12 mutations");
 
     // AmbientAuthority oracle has a known detection gap.
-    let failures: Vec<_> = report
+    let has_unexpected = report
         .failures()
         .into_iter()
-        .filter(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability")
-        .collect();
+        .any(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability");
     assert!(
-        failures.is_empty(),
+        !has_unexpected,
         "unexpected meta oracle failures:\n{}",
         report.to_text()
     );
@@ -642,7 +641,7 @@ fn eprocess_custom_config() {
     };
     assert!(config.validate().is_ok());
 
-    let monitor = EProcessMonitor::standard_with_config(config.clone());
+    let monitor = EProcessMonitor::standard_with_config(config);
     assert!((monitor.config().alpha - 0.01).abs() < 1e-10);
     assert!((monitor.config().threshold() - 100.0).abs() < 1e-10);
 
@@ -704,8 +703,8 @@ fn eprocess_early_stopping_valid_integration() {
 
     // Verify the anytime-valid property: repeatedly checking a clean suite
     // should not produce false rejections beyond the alpha rate.
-    let n_trials = 500;
-    let n_obs = 50;
+    let n_trials: u32 = 500;
+    let n_obs: u32 = 50;
     let config = EProcessConfig {
         alpha: 0.05,
         ..EProcessConfig::default()
@@ -713,7 +712,7 @@ fn eprocess_early_stopping_valid_integration() {
 
     let suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
-    let mut false_rejections = 0;
+    let mut false_rejections: u32 = 0;
 
     for seed in 0..n_trials {
         let mut monitor = EProcessMonitor::standard_with_config(config.clone());
@@ -729,7 +728,7 @@ fn eprocess_early_stopping_valid_integration() {
         let _ = seed;
     }
 
-    let fpr = false_rejections as f64 / n_trials as f64;
+    let fpr = f64::from(false_rejections) / f64::from(n_trials);
     assert!(
         fpr < 0.10,
         "false positive rate should be well below alpha, got {fpr:.4}"

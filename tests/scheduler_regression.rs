@@ -280,7 +280,10 @@ fn smoke_report_format_parses() {
     );
     assert!(report.config.compare_path.is_none());
     assert_eq!(report.config.metric, "median_ns");
-    assert_eq!(report.config.max_regression_pct, 10.0);
+    assert!(
+        (report.config.max_regression_pct - 10.0).abs() < f64::EPSILON,
+        "max_regression_pct should be 10.0"
+    );
     assert_eq!(report.seed.as_deref(), Some("3735928559"));
     assert_eq!(
         report.git_sha.as_deref(),

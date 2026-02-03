@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines)]
 //! Comprehensive OTel metrics test suite.
 //!
 //! Validates the full metrics pipeline:
@@ -14,8 +15,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::observability::{Metrics, MetricsProvider, NoOpMetrics, OutcomeKind};
+use asupersync::record::ObligationKind;
+use asupersync::runtime::config::ObligationLeakResponse;
+use asupersync::runtime::RuntimeState;
+use asupersync::trace::TraceEventKind;
 use asupersync::types::cancel::CancelKind;
 use asupersync::types::id::{RegionId, TaskId};
+use asupersync::types::{Budget, Outcome};
 
 /// Lightweight logging init for integration tests (no test_utils dependency).
 fn init_test_logging() {
@@ -348,6 +354,75 @@ fn test_arc_dyn_provider_send_sync() {
         p2.task_spawned(RegionId::testing_default(), TaskId::testing_default());
     });
     handle.join().expect("thread join");
+}
+
+// ─── Obligation leak escalation policy ─────────────────────────────────────
+
+fn setup_leaked_obligation(state: &mut RuntimeState) -> TaskId {
+    let region = state.create_root_region(Budget::INFINITE);
+    let (task_id, _handle) = state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task");
+    state
+        .create_obligation(ObligationKind::SendPermit, task_id, region, None)
+        .expect("create obligation");
+    if let Some(task) = state.tasks.get_mut(task_id.arena_index()) {
+        task.complete(Outcome::Ok(()));
+    }
+    task_id
+}
+
+fn trace_has_obligation_leak(state: &RuntimeState) -> bool {
+    state
+        .trace
+        .snapshot()
+        .iter()
+        .any(|event| event.kind == TraceEventKind::ObligationLeak)
+}
+
+#[test]
+fn obligation_leak_response_log_emits_metric_and_trace() {
+    init_test_logging();
+    let provider = Arc::new(TestMetricsProvider::new());
+    let mut state = RuntimeState::new_with_metrics(provider.clone());
+    state.set_obligation_leak_response(ObligationLeakResponse::Log);
+
+    let task_id = setup_leaked_obligation(&mut state);
+    let _ = state.task_completed(task_id);
+
+    assert_eq!(provider.obligations_leaked.load(Ordering::SeqCst), 1);
+    assert!(trace_has_obligation_leak(&state));
+}
+
+#[test]
+fn obligation_leak_response_silent_still_records_trace_and_metric() {
+    init_test_logging();
+    let provider = Arc::new(TestMetricsProvider::new());
+    let mut state = RuntimeState::new_with_metrics(provider.clone());
+    state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+
+    let task_id = setup_leaked_obligation(&mut state);
+    let _ = state.task_completed(task_id);
+
+    assert_eq!(provider.obligations_leaked.load(Ordering::SeqCst), 1);
+    assert!(trace_has_obligation_leak(&state));
+}
+
+#[test]
+fn obligation_leak_response_panics() {
+    init_test_logging();
+    let provider = Arc::new(TestMetricsProvider::new());
+    let mut state = RuntimeState::new_with_metrics(provider.clone());
+    state.set_obligation_leak_response(ObligationLeakResponse::Panic);
+
+    let task_id = setup_leaked_obligation(&mut state);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = state.task_completed(task_id);
+    }));
+
+    assert!(result.is_err(), "expected panic on obligation leak");
+    assert_eq!(provider.obligations_leaked.load(Ordering::SeqCst), 1);
+    assert!(trace_has_obligation_leak(&state));
 }
 
 // ─── Built-in Counter / Gauge / Histogram (via Metrics registry) ────────────

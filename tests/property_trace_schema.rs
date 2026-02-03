@@ -363,7 +363,7 @@ proptest! {
             stats.record_read();
         }
         for i in 0..skips {
-            stats.record_skipped(Some(&format!("Unknown{}", i)));
+            stats.record_skipped(Some(&format!("Unknown{i}")));
         }
         prop_assert_eq!(
             stats.has_issues(),
@@ -435,8 +435,10 @@ proptest! {
     fn vector_clock_merge_identity(a in arb_vector_clock()) {
         init_test_logging();
         let empty = VectorClock::new();
-        prop_assert_eq!(a.merge(&empty), a.clone());
-        prop_assert_eq!(empty.merge(&a), a);
+        let merged = a.merge(&empty);
+        prop_assert_eq!(&merged, &a);
+        let merged_back = empty.merge(&a);
+        prop_assert_eq!(&merged_back, &a);
     }
 
     /// increment always produces a strictly greater clock.

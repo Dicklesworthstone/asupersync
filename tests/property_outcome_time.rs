@@ -3,7 +3,7 @@
 
 mod common;
 
-use asupersync::time::{TimerWheel, TimerWheelConfig};
+use asupersync::time::{CoalescingConfig, TimerWheel, TimerWheelConfig};
 use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::outcome::{join_outcomes, Outcome, PanicPayload, Severity};
 use asupersync::types::Time;
@@ -97,7 +97,7 @@ proptest! {
         let eq = a == b;
         let gt = a > b;
         prop_assert!(
-            (lt as u8) + (eq as u8) + (gt as u8) == 1,
+            u8::from(lt) + u8::from(eq) + u8::from(gt) == 1,
             "total order violated for {:?} vs {:?}", a, b
         );
     }
@@ -134,8 +134,10 @@ proptest! {
     #[test]
     fn outcome_exactly_one_predicate(o in arb_outcome()) {
         init_test_logging();
-        let count = o.is_ok() as u8 + o.is_err() as u8
-            + o.is_cancelled() as u8 + o.is_panicked() as u8;
+        let count = u8::from(o.is_ok())
+            + u8::from(o.is_err())
+            + u8::from(o.is_cancelled())
+            + u8::from(o.is_panicked());
         prop_assert_eq!(count, 1, "exactly one predicate should be true");
     }
 }
@@ -415,7 +417,7 @@ proptest! {
         let mut wheel = TimerWheel::with_config(
             Time::ZERO,
             wheel_config,
-            Default::default(),
+            CoalescingConfig::default(),
         );
         let deadline = Time::from_nanos((60 + extra_secs) * 1_000_000_000);
         let result = wheel.try_register(deadline, noop_waker());
@@ -430,7 +432,7 @@ proptest! {
         let mut wheel = TimerWheel::with_config(
             Time::ZERO,
             config,
-            Default::default(),
+            CoalescingConfig::default(),
         );
         let deadline = Time::from_nanos(secs * 1_000_000_000);
         let result = wheel.try_register(deadline, noop_waker());

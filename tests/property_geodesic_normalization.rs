@@ -297,7 +297,7 @@ proptest! {
         let result = geodesic_normalize(&poset, &GeodesicConfig::default());
 
         let n = events.len();
-        let max_possible = if n > 1 { n - 1 } else { 0 };
+        let max_possible = n.saturating_sub(1);
         prop_assert!(
             result.switch_count <= max_possible,
             "switch_count {} exceeds max possible {} for {} events",
@@ -326,11 +326,6 @@ proptest! {
 
 /// Brute-force optimal switch count via exhaustive permutation search.
 fn brute_force_min_switches(poset: &TracePoset) -> usize {
-    let n = poset.len();
-    if n <= 1 {
-        return 0;
-    }
-
     fn search(
         poset: &TracePoset,
         scheduled: &mut Vec<usize>,
@@ -374,6 +369,11 @@ fn brute_force_min_switches(poset: &TracePoset) -> usize {
                 in_degree[succ] += 1;
             }
         }
+    }
+
+    let n = poset.len();
+    if n <= 1 {
+        return 0;
     }
 
     let mut in_degree: Vec<usize> = (0..n).map(|i| poset.preds(i).len()).collect();
@@ -451,7 +451,7 @@ proptest! {
         );
         // Greedy should be reasonable (at most n-1 switches total)
         let n = events.len();
-        let max = if n > 1 { n - 1 } else { 0 };
+        let max = n.saturating_sub(1);
         prop_assert!(
             result.switch_count <= max,
             "greedy ({}) exceeds max ({}) for {} events (optimal {})",

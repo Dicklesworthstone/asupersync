@@ -50,6 +50,7 @@ fn record_simple_trace() -> ReplayTrace {
 /// structured diagnostics, verify the report and minimal prefix are correct,
 /// and emit structured JSON output.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e2e_divergence_diagnostics_structured_report() {
     init_test("e2e_divergence_diagnostics_structured_report");
 
@@ -58,7 +59,10 @@ fn e2e_divergence_diagnostics_structured_report() {
     let trace = record_simple_trace();
     let event_count = trace.len();
     tracing::info!(event_count, seed = trace.metadata.seed, "Recorded trace");
-    assert!(event_count >= 2, "need at least 2 events for divergence test");
+    assert!(
+        event_count >= 2,
+        "need at least 2 events for divergence test"
+    );
 
     // Phase 2: Replay with a deliberate divergence.
     test_section!("introduce-divergence");
@@ -77,7 +81,6 @@ fn e2e_divergence_diagnostics_structured_report() {
             task: CompactTaskId(9999),
             at_tick: *at_tick,
         },
-        ReplayEvent::RngSeed { .. } => ReplayEvent::RngSeed { seed: 0xBAD_5EED },
         ReplayEvent::TaskCompleted { task, .. } => ReplayEvent::TaskCompleted {
             task: *task,
             outcome: 99,
@@ -203,7 +206,7 @@ fn e2e_divergence_diagnostics_structured_report() {
         prefix.len()
     );
     assert_with_log!(
-        prefix.len() >= report.divergence_index + 1,
+        prefix.len() > report.divergence_index,
         "prefix includes divergence point",
         report.divergence_index + 1,
         prefix.len()
