@@ -469,9 +469,12 @@ impl ObligationFlow {
         self.leak_on_cancel.extend(other.leak_on_cancel);
         self.leak_on_cancel
             .extend(self.must_resolve.iter().cloned());
-        // Conservative: can't guarantee all paths resolve in a race unless
-        // both children guarantee it and are properly drained.
-        self.all_paths_resolve = self.all_paths_resolve && other_all_paths_resolve;
+        // Conservative: in a race the loser is cancelled, so its obligations
+        // will not resolve.  Only claim all_paths_resolve if there are no
+        // must_resolve obligations at all (nothing can leak from either branch).
+        self.all_paths_resolve = self.all_paths_resolve
+            && other_all_paths_resolve
+            && self.must_resolve.is_empty();
         self.dedupe();
         self
     }

@@ -766,12 +766,17 @@ mod tests {
         // persistence_pairs() with cols > rows (e.g., ∂₁ in a dense graph).
         let mut d = BoundaryMatrix::zeros(3, 5);
         // 5 edges connecting 3 vertices
-        d.set(0, 0); d.set(1, 0); // edge 0: v0-v1
-        d.set(1, 1); d.set(2, 1); // edge 1: v1-v2
-        d.set(0, 2); d.set(2, 2); // edge 2: v0-v2
-        // edges 3,4 duplicate edge 0
-        d.set(0, 3); d.set(1, 3);
-        d.set(0, 4); d.set(1, 4);
+        d.set(0, 0);
+        d.set(1, 0); // edge 0: v0-v1
+        d.set(1, 1);
+        d.set(2, 1); // edge 1: v1-v2
+        d.set(0, 2);
+        d.set(2, 2); // edge 2: v0-v2
+                     // edges 3,4 duplicate edge 0
+        d.set(0, 3);
+        d.set(1, 3);
+        d.set(0, 4);
+        d.set(1, 4);
 
         let reduced = d.reduce();
         let pairs = reduced.persistence_pairs();

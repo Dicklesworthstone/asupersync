@@ -352,6 +352,21 @@ impl LabRuntime {
             scheduler: self.scheduler.clone(),
         }));
         let mut cx = Context::from_waker(&waker);
+
+        // Set cancel_waker so abort_with_reason can reschedule cancelled tasks.
+        if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+            if let Some(inner) = record.cx_inner.as_ref() {
+                let cancel_waker = Waker::from(Arc::new(CancelTaskWaker {
+                    task_id,
+                    priority,
+                    scheduler: self.scheduler.clone(),
+                }));
+                if let Ok(mut guard) = inner.write() {
+                    guard.cancel_waker = Some(cancel_waker);
+                }
+            }
+        }
+
         let current_cx = self
             .state
             .tasks
@@ -982,6 +997,25 @@ impl Wake for TaskWaker {
             .lock()
             .unwrap()
             .schedule(self.task_id, self.priority);
+    }
+}
+
+/// Waker that reschedules a task into the cancel lane.
+///
+/// Set as `cancel_waker` on each task's `CxInner` before polling so that
+/// `abort_with_reason` can wake cancelled tasks.
+struct CancelTaskWaker {
+    task_id: crate::types::TaskId,
+    priority: u8,
+    scheduler: Arc<Mutex<LabScheduler>>,
+}
+
+impl Wake for CancelTaskWaker {
+    fn wake(self: Arc<Self>) {
+        self.scheduler
+            .lock()
+            .unwrap()
+            .schedule_cancel(self.task_id, self.priority);
     }
 }
 
