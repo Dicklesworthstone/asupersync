@@ -96,6 +96,8 @@ pub use geodesic::{
     count_switches, is_valid_linear_extension, normalize as geodesic_normalize, GeodesicAlgorithm,
     GeodesicConfig, GeodesicResult,
 };
+#[cfg(feature = "test-internals")]
+pub use geodesic::{normalize_with_ledger, DecisionEntry, DecisionLedger};
 pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
 pub use independence::{
     accesses_conflict, independent, resource_footprint, AccessMode, Resource, ResourceAccess,
