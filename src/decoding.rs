@@ -711,24 +711,24 @@ fn decode_block(
         }
     };
 
-    let mut decoded = Vec::with_capacity(k);
+    let mut decoded_symbols = Vec::with_capacity(k);
     for esi in 0..k {
         let row = base_rows + esi;
         let mut data = vec![0u8; symbol_size];
-        for col in 0..params.l {
+        for (col, symbol) in intermediate.iter().enumerate().take(params.l) {
             let coeff = constraints.get(row, col);
             if !coeff.is_zero() {
-                gf256_addmul_slice(&mut data, &intermediate[col], coeff);
+                gf256_addmul_slice(&mut data, symbol, coeff);
             }
         }
-        decoded.push(Symbol::new(
+        decoded_symbols.push(Symbol::new(
             SymbolId::new(object_id, plan.sbn, esi as u32),
             data,
             SymbolKind::Source,
         ));
     }
 
-    Ok(decoded)
+    Ok(decoded_symbols)
 }
 
 fn constraint_row_equation(
