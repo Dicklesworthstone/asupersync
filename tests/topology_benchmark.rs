@@ -24,16 +24,13 @@
 mod common;
 use common::*;
 
-use asupersync::lab::config::LabConfig;
 use asupersync::lab::explorer::{
     ExplorationReport, ExplorerConfig, ScheduleExplorer, TopologyExplorer,
 };
 use asupersync::lab::runtime::LabRuntime;
 use asupersync::record::ObligationKind;
-use asupersync::types::{Budget, ObligationId, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use asupersync::types::Budget;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // ============================================================================
@@ -65,7 +62,7 @@ impl BenchmarkResult {
                 report
                     .violations
                     .iter()
-                    .map(|v| {
+                    .map(|_v| {
                         // Count runs up to and including this seed
                         // Since seeds are sequential from base_seed, the index is seed - base_seed + 1
                         1 // Simplified: just count that we found it
@@ -242,22 +239,12 @@ fn run_obligation_leak(runtime: &mut LabRuntime) {
         })
         .expect("create task");
 
-    // Manually create an obligation that won't be resolved
-    // This simulates a task acquiring a permit but not committing/aborting
-    let obl_idx = runtime
+    // Create an obligation using the public API - it won't be resolved,
+    // simulating a task acquiring a permit but not committing/aborting
+    let _obl_id = runtime
         .state
-        .obligations
-        .insert(asupersync::record::ObligationRecord::new(
-            ObligationId::from_arena(ArenaIndex::new(0, 0)),
-            ObligationKind::SendPermit,
-            task_id,
-            region,
-            Time::ZERO,
-        ));
-    let obl_id = ObligationId::from_arena(obl_idx);
-    if let Some(obl) = runtime.state.obligations.get_mut(obl_idx) {
-        obl.id = obl_id;
-    }
+        .create_obligation(ObligationKind::SendPermit, task_id, region, None)
+        .expect("create obligation");
 
     // Schedule and run
     runtime.scheduler.lock().unwrap().schedule(task_id, 0);
