@@ -444,7 +444,7 @@ impl IntrusiveStack {
     ///
     /// # Complexity
     ///
-    /// O(k) time where k is the number stolen, O(0) allocations.
+    /// O(k) time where k is the number stolen. Allocates a Vec for the result.
     pub fn steal_batch(&mut self, max_steal: usize, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
         let steal_count = (self.len / 2).max(1).min(max_steal);
         let mut stolen = Vec::with_capacity(steal_count);
