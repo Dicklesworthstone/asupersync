@@ -48,6 +48,7 @@ pub mod certificate;
 pub mod compat;
 pub mod compression;
 pub mod distributed;
+pub mod divergence;
 pub mod dpor;
 pub mod event;
 pub mod event_structure;
@@ -79,6 +80,10 @@ pub use compat::{
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
 };
 pub use compression::{compress as compress_trace, CompressedTrace, Level as CompressionLevel};
+pub use divergence::{
+    diagnose_divergence, minimal_divergent_prefix, AffectedEntities, DiagnosticConfig,
+    DivergenceCategory, DivergenceReport, EventSummary,
+};
 pub use dpor::{
     detect_hb_races, detect_races, estimated_classes, racing_events, BacktrackPoint, DetectedRace,
     HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind, RaceReport,
