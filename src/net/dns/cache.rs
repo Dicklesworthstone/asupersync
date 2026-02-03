@@ -99,7 +99,33 @@ impl DnsCache {
                 // A more sophisticated implementation would adjust the TTL
                 Some(entry.data)
             }
-            _ => {
+            Some(_) => {
+                let mut refreshed: Option<LookupIp> = None;
+                let mut evicted = false;
+                {
+                    let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+                    if let Some(entry) = cache.get(host) {
+                        if entry.is_expired() {
+                            cache.remove(host);
+                            evicted = true;
+                        } else {
+                            refreshed = Some(entry.data.clone());
+                        }
+                    }
+                }
+
+                let mut stats = self.stats.write().expect("stats lock poisoned");
+                if let Some(data) = refreshed {
+                    stats.hits += 1;
+                    return Some(data);
+                }
+                stats.misses += 1;
+                if evicted {
+                    stats.evictions += 1;
+                }
+                None
+            }
+            None => {
                 self.stats.write().expect("stats lock poisoned").misses += 1;
                 None
             }
@@ -287,6 +313,8 @@ mod tests {
         // Should be expired
         let expired = cache.get_ip("example.com");
         crate::assert_with_log!(expired.is_none(), "expired", true, expired.is_none());
+        let size = cache.stats().size;
+        crate::assert_with_log!(size == 0, "expired evicted", 0, size);
         crate::test_complete!("cache_expiration");
     }
 

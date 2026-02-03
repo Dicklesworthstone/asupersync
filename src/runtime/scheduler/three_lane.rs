@@ -102,12 +102,14 @@ impl WorkerCoordinator {
 }
 
 thread_local! {
-    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = RefCell::new(None);
+    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> =
+        const { RefCell::new(None) };
     /// Non-stealable queue for local (`!Send`) tasks.
     ///
     /// Local tasks must never be stolen across workers. This queue is only
     /// drained by the owner worker, never exposed to stealers.
-    static CURRENT_LOCAL_READY: RefCell<Option<Arc<Mutex<Vec<TaskId>>>>> = RefCell::new(None);
+    static CURRENT_LOCAL_READY: RefCell<Option<Arc<Mutex<Vec<TaskId>>>>> =
+        const { RefCell::new(None) };
 }
 
 pub(crate) struct ScopedLocalScheduler {
