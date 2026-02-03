@@ -179,6 +179,26 @@ impl CrdtObligationLedger {
         self.record_resolve(id, LatticeState::Aborted)
     }
 
+    /// Forces an obligation into an aborted, linear state.
+    ///
+    /// This is a recovery-only repair that collapses conflicts or linearity
+    /// violations by resetting counters and witnesses to a single abort.
+    pub fn force_abort_repair(&mut self, id: ObligationId) {
+        let entry = self
+            .entries
+            .entry(id)
+            .or_insert_with(CrdtObligationEntry::new);
+        entry.state = LatticeState::Aborted;
+        entry.witnesses.clear();
+        entry
+            .witnesses
+            .insert(self.local_node.clone(), LatticeState::Aborted);
+        entry.acquire_counts.clear();
+        entry.resolve_counts.clear();
+        entry.acquire_counts.insert(self.local_node.clone(), 1);
+        entry.resolve_counts.insert(self.local_node.clone(), 1);
+    }
+
     fn record_resolve(&mut self, id: ObligationId, terminal: LatticeState) -> LatticeState {
         let entry = self
             .entries

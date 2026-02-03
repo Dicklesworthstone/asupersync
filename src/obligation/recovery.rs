@@ -283,8 +283,8 @@ impl RecoveryGovernor {
                     break;
                 }
                 if self.config.auto_resolve_conflicts {
-                    // Abort-wins: record another abort to ensure terminal
-                    ledger.record_abort(id);
+                    // Abort-wins repair: collapse conflict into a single abort.
+                    ledger.force_abort_repair(id);
                     actions.push(RecoveryAction::ConflictResolved { id });
                 } else {
                     actions.push(RecoveryAction::Flagged {
@@ -304,7 +304,7 @@ impl RecoveryGovernor {
                     break;
                 }
                 if self.config.auto_abort_violations {
-                    ledger.record_abort(v.id);
+                    ledger.force_abort_repair(v.id);
                     actions.push(RecoveryAction::ViolationAborted {
                         id: v.id,
                         total_acquires: v.total_acquires,
