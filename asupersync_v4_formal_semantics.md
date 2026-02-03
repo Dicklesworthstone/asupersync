@@ -1,5 +1,7 @@
 # Asupersync 4.0: Operational Semantics (Plan v4 Edition)
 
+**Version:** `v4.0.0` (stable semantics tag)
+
 ## A Practical Small-Step Semantics for Implementation and Testing
 
 This document defines the operational semantics of Asupersync 4.0 in a style suitable for:
@@ -161,6 +163,27 @@ e1 ∥ e2  iff  neither VC(e1) ≤ VC(e2) nor VC(e2) ≤ VC(e1)
 
 This lets remote traces remain honest: concurrent events stay unordered until causality forces an order.
 
+### 1.11 Scheduler lanes (priority model)
+
+Asupersync scheduling is modeled as **three priority lanes**:
+
+```
+Lane ::= Cancel | Timed | Ready
+Priority order: Cancel > Timed > Ready
+```
+
+The lane selection function is:
+
+```
+lane(t) =
+  Cancel  if T[t].state ∈ {CancelRequested, Cancelling, Finalizing}
+  Timed   if deadline(T[t].region) is defined
+  Ready   otherwise
+```
+
+Timed lane ordering is Earliest-Deadline-First (EDF). When deadlines tie,
+deterministic task-id ordering breaks ties.
+
 ---
 
 ## 2. Global State
@@ -168,11 +191,12 @@ This lets remote traces remain honest: concurrent events stay unordered until ca
 The machine state Σ consists of:
 
 ```
-Σ = ⟨R, T, O, τ_now⟩
+Σ = ⟨R, T, O, S, τ_now⟩
 
 R: RegionId → RegionRecord
 T: TaskId → TaskRecord
 O: ObligationId → ObligationRecord
+S: SchedulerState
 τ_now: Time
 ```
 
@@ -214,6 +238,22 @@ ObligationRecord = {
 }
 ```
 
+### 2.4 SchedulerState
+
+```
+SchedulerState = {
+  cancel_lane: Queue<TaskId>,
+  timed_lane:  EDFQueue<TaskId>,
+  ready_lane:  Queue<TaskId>
+}
+```
+
+Queues are abstract; the only requirements are:
+
+- Tasks appear at most once across all lanes.
+- `cancel_lane` has strict priority over `timed_lane`, which has strict priority over `ready_lane`.
+- `timed_lane` is ordered by deadline, with deterministic tie-breaking.
+
 ---
 
 ## 3. Transition Rules
@@ -237,6 +277,37 @@ label ::= τ                        // Silent/internal
 ```
 
 ---
+
+### 3.0 Scheduling
+
+Scheduling is factored from task semantics to highlight the priority lanes.
+Task readiness is abstracted by `is_ready(t)` (e.g., a waker fires or a poll yields).
+
+#### ENQUEUE — Put a runnable task into the correct lane
+
+```
+Preconditions:
+  is_ready(t)
+  T[t].state ∈ {Created, Running, CancelRequested(_), Cancelling(_), Finalizing(_)}
+
+Σ —[τ]→ Σ' where:
+  S'[lane(t)].push(t)
+```
+
+#### SCHEDULE-STEP — Pick next runnable task
+
+```
+Preconditions:
+  S.cancel_lane ∪ S.timed_lane ∪ S.ready_lane ≠ ∅
+
+Σ —[τ]→ Σ' where:
+  t = pick_next(S)
+  // pick_next obeys lane priority and EDF within timed lane
+  // t is polled once; it may complete or yield
+```
+
+If `t` yields, it is re-enqueued via `ENQUEUE`. If `t` completes, it is not re-enqueued.
+This captures the lane priority model without committing to a specific queue implementation.
 
 ### 3.1 Task Lifecycle
 
@@ -699,6 +770,15 @@ This ensures cancellation is not indefinitely deferrable without consuming an ex
 ```
 After race(f1, f2) returns:
   both t1 and t2 are in Completed(_) state
+```
+
+### INV-SCHED-LANES: Runnable tasks are lane-consistent
+
+```
+∀t:
+  t ∈ S.cancel_lane  ⇒ lane(t) = Cancel
+  t ∈ S.timed_lane   ⇒ lane(t) = Timed
+  t ∈ S.ready_lane   ⇒ lane(t) = Ready
 ```
 
 ### Meta: Compositional specs (separation + rely/guarantee)
