@@ -226,7 +226,7 @@ impl PlanDag {
         for idx in 0..original_len {
             let id = PlanId::new(idx);
             for rule in rules {
-                if let Some(step) = self.apply_rule(id, policy, *rule) {
+                if let Some(step) = self.apply_rule_checked(id, policy, *rule) {
                     report.steps.push(step);
                 }
             }
@@ -235,15 +235,214 @@ impl PlanDag {
         report
     }
 
-    fn apply_rule(
+    fn apply_rule_checked(
+        &mut self,
+        id: PlanId,
+        policy: RewritePolicy,
+        rule: RewriteRule,
+    ) -> Option<RewriteStep> {
+        let mut scratch = self.clone();
+        let step = scratch.apply_rule_unchecked(id, policy, rule)?;
+        let checker = SideConditionChecker::new(&scratch);
+        if check_side_conditions(rule, policy, &checker, &scratch, step.before, step.after).is_err()
+        {
+            return None;
+        }
+        self.apply_rule_unchecked(id, policy, rule)
+    }
+
+    fn apply_rule_unchecked(
         &mut self,
         id: PlanId,
         policy: RewritePolicy,
         rule: RewriteRule,
     ) -> Option<RewriteStep> {
         match rule {
+            RewriteRule::JoinAssoc => self.rewrite_join_assoc(id, policy),
+            RewriteRule::RaceAssoc => self.rewrite_race_assoc(id, policy),
+            RewriteRule::JoinCommute => self.rewrite_join_commute(id, policy),
+            RewriteRule::RaceCommute => self.rewrite_race_commute(id, policy),
+            RewriteRule::TimeoutMin => self.rewrite_timeout_min(id, policy),
             RewriteRule::DedupRaceJoin => self.rewrite_dedup_race_join(id, policy),
         }
+    }
+
+    fn rewrite_join_assoc(
+        &mut self,
+        id: PlanId,
+        policy: RewritePolicy,
+    ) -> Option<RewriteStep> {
+        if !policy.allows_associative() {
+            return None;
+        }
+        let PlanNode::Join { children } = self.node(id)?.clone() else {
+            return None;
+        };
+        let mut flattened = Vec::with_capacity(children.len());
+        let mut changed = false;
+        for child in children {
+            match self.node(child)? {
+                PlanNode::Join { children } => {
+                    flattened.extend(children.iter().copied());
+                    changed = true;
+                }
+                _ => flattened.push(child),
+            }
+        }
+        if !changed {
+            return None;
+        }
+
+        let new_join_id = self.push_node(PlanNode::Join { children: flattened });
+        self.replace_parents(id, new_join_id);
+        if self.root == Some(id) {
+            self.root = Some(new_join_id);
+        }
+        Some(RewriteStep {
+            rule: RewriteRule::JoinAssoc,
+            before: id,
+            after: new_join_id,
+            detail: "flattened nested join".to_string(),
+        })
+    }
+
+    fn rewrite_race_assoc(
+        &mut self,
+        id: PlanId,
+        policy: RewritePolicy,
+    ) -> Option<RewriteStep> {
+        if !policy.allows_associative() {
+            return None;
+        }
+        let PlanNode::Race { children } = self.node(id)?.clone() else {
+            return None;
+        };
+        let mut flattened = Vec::with_capacity(children.len());
+        let mut changed = false;
+        for child in children {
+            match self.node(child)? {
+                PlanNode::Race { children } => {
+                    flattened.extend(children.iter().copied());
+                    changed = true;
+                }
+                _ => flattened.push(child),
+            }
+        }
+        if !changed {
+            return None;
+        }
+
+        let new_race_id = self.push_node(PlanNode::Race { children: flattened });
+        self.replace_parents(id, new_race_id);
+        if self.root == Some(id) {
+            self.root = Some(new_race_id);
+        }
+        Some(RewriteStep {
+            rule: RewriteRule::RaceAssoc,
+            before: id,
+            after: new_race_id,
+            detail: "flattened nested race".to_string(),
+        })
+    }
+
+    fn rewrite_join_commute(
+        &mut self,
+        id: PlanId,
+        policy: RewritePolicy,
+    ) -> Option<RewriteStep> {
+        if !policy.allows_commutative() {
+            return None;
+        }
+        let PlanNode::Join { children } = self.node(id)?.clone() else {
+            return None;
+        };
+        if children.len() < 2 {
+            return None;
+        }
+        let mut ordered = children.clone();
+        ordered.sort_by_key(|child| child.index());
+        if ordered == children {
+            return None;
+        }
+        let new_join_id = self.push_node(PlanNode::Join { children: ordered });
+        self.replace_parents(id, new_join_id);
+        if self.root == Some(id) {
+            self.root = Some(new_join_id);
+        }
+        Some(RewriteStep {
+            rule: RewriteRule::JoinCommute,
+            before: id,
+            after: new_join_id,
+            detail: "reordered join children into canonical order".to_string(),
+        })
+    }
+
+    fn rewrite_race_commute(
+        &mut self,
+        id: PlanId,
+        policy: RewritePolicy,
+    ) -> Option<RewriteStep> {
+        if !policy.allows_commutative() {
+            return None;
+        }
+        let PlanNode::Race { children } = self.node(id)?.clone() else {
+            return None;
+        };
+        if children.len() < 2 {
+            return None;
+        }
+        let mut ordered = children.clone();
+        ordered.sort_by_key(|child| child.index());
+        if ordered == children {
+            return None;
+        }
+        let new_race_id = self.push_node(PlanNode::Race { children: ordered });
+        self.replace_parents(id, new_race_id);
+        if self.root == Some(id) {
+            self.root = Some(new_race_id);
+        }
+        Some(RewriteStep {
+            rule: RewriteRule::RaceCommute,
+            before: id,
+            after: new_race_id,
+            detail: "reordered race children into canonical order".to_string(),
+        })
+    }
+
+    fn rewrite_timeout_min(
+        &mut self,
+        id: PlanId,
+        _policy: RewritePolicy,
+    ) -> Option<RewriteStep> {
+        let PlanNode::Timeout { child, duration } = self.node(id)?.clone() else {
+            return None;
+        };
+        let PlanNode::Timeout {
+            child: inner_child,
+            duration: inner_duration,
+        } = self.node(child)?.clone()
+        else {
+            return None;
+        };
+        let min_duration = if duration <= inner_duration {
+            duration
+        } else {
+            inner_duration
+        };
+        let new_timeout_id = self.push_node(PlanNode::Timeout {
+            child: inner_child,
+            duration: min_duration,
+        });
+        self.replace_parents(id, new_timeout_id);
+        if self.root == Some(id) {
+            self.root = Some(new_timeout_id);
+        }
+        Some(RewriteStep {
+            rule: RewriteRule::TimeoutMin,
+            before: id,
+            after: new_timeout_id,
+            detail: "collapsed nested timeouts".to_string(),
+        })
     }
 
     fn rewrite_dedup_race_join(
@@ -392,6 +591,115 @@ impl PlanDag {
         }
         parents
     }
+}
+
+fn check_side_conditions(
+    rule: RewriteRule,
+    policy: RewritePolicy,
+    checker: &SideConditionChecker<'_>,
+    dag: &PlanDag,
+    before: PlanId,
+    after: PlanId,
+) -> Result<(), String> {
+    if !checker.obligations_safe(before) {
+        return Err("obligations not safe before rewrite".to_string());
+    }
+    if !checker.obligations_safe(after) {
+        return Err("obligations not safe after rewrite".to_string());
+    }
+    if !checker.cancel_safe(before) {
+        return Err("cancel safety not satisfied before rewrite".to_string());
+    }
+    if !checker.cancel_safe(after) {
+        return Err("cancel safety not satisfied after rewrite".to_string());
+    }
+    if !checker.rewrite_preserves_budget(before, after) {
+        return Err("budget monotonicity violated".to_string());
+    }
+
+    match rule {
+        RewriteRule::JoinAssoc | RewriteRule::RaceAssoc => {
+            if !policy.allows_associative() {
+                return Err("policy disallows associativity".to_string());
+            }
+        }
+        RewriteRule::JoinCommute => {
+            if !policy.allows_commutative() {
+                return Err("policy disallows join commutation".to_string());
+            }
+            let PlanNode::Join { children } = dag
+                .node(before)
+                .ok_or_else(|| "missing before join".to_string())?
+            else {
+                return Err("before node is not Join".to_string());
+            };
+            if !checker.children_pairwise_independent(children) {
+                return Err("join children not pairwise independent".to_string());
+            }
+            let PlanNode::Join {
+                children: after_children,
+            } = dag
+                .node(after)
+                .ok_or_else(|| "missing after join".to_string())?
+            else {
+                return Err("after node is not Join".to_string());
+            };
+            if !same_children_unordered(children, after_children) {
+                return Err("join children mismatch after commutation".to_string());
+            }
+            if !is_sorted_children(after_children) {
+                return Err("join children not in canonical order".to_string());
+            }
+        }
+        RewriteRule::RaceCommute => {
+            if !policy.allows_commutative() {
+                return Err("policy disallows race commutation".to_string());
+            }
+            let PlanNode::Race { children } = dag
+                .node(before)
+                .ok_or_else(|| "missing before race".to_string())?
+            else {
+                return Err("before node is not Race".to_string());
+            };
+            if !checker.children_pairwise_independent(children) {
+                return Err("race children not pairwise independent".to_string());
+            }
+            let PlanNode::Race {
+                children: after_children,
+            } = dag
+                .node(after)
+                .ok_or_else(|| "missing after race".to_string())?
+            else {
+                return Err("after node is not Race".to_string());
+            };
+            if !same_children_unordered(children, after_children) {
+                return Err("race children mismatch after commutation".to_string());
+            }
+            if !is_sorted_children(after_children) {
+                return Err("race children not in canonical order".to_string());
+            }
+        }
+        RewriteRule::TimeoutMin | RewriteRule::DedupRaceJoin => {}
+    }
+
+    Ok(())
+}
+
+fn same_children_unordered(a: &[PlanId], b: &[PlanId]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut left = a.to_vec();
+    let mut right = b.to_vec();
+    left.sort_by_key(|id| id.index());
+    right.sort_by_key(|id| id.index());
+    left == right
+}
+
+fn is_sorted_children(children: &[PlanId]) -> bool {
+    children
+        .windows(2)
+        .all(|pair| pair[0].index() <= pair[1].index())
 }
 
 #[cfg(test)]

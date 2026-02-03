@@ -198,6 +198,137 @@ impl fmt::Display for BudgetEffect {
 }
 
 // ===========================================================================
+// Obligation flow analysis (detailed)
+// ===========================================================================
+
+/// Abstract obligation descriptor for a plan node.
+///
+/// Unlike `ObligationSafety` which gives a yes/no answer about leaks,
+/// `ObligationFlow` tracks which obligations may be reserved, committed,
+/// or aborted at this node, providing detailed diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ObligationFlow {
+    /// Obligations that may be reserved (created) at this node.
+    ///
+    /// Empty for leaf nodes without obligation annotations; populated
+    /// by analyzing join/race/timeout structure.
+    pub reserves: Vec<String>,
+    /// Obligations that must be resolved (committed or aborted) for this
+    /// node to complete cleanly.
+    pub must_resolve: Vec<String>,
+    /// Obligations that may leak if this node is cancelled.
+    pub leak_on_cancel: Vec<String>,
+    /// Whether all paths through this node resolve all obligations.
+    pub all_paths_resolve: bool,
+}
+
+impl ObligationFlow {
+    /// Creates an empty flow (no obligations).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            reserves: Vec::new(),
+            must_resolve: Vec::new(),
+            leak_on_cancel: Vec::new(),
+            all_paths_resolve: true,
+        }
+    }
+
+    /// Creates a flow for a leaf with a single obligation.
+    #[must_use]
+    pub fn leaf_with_obligation(name: String) -> Self {
+        Self {
+            reserves: vec![name.clone()],
+            must_resolve: vec![name.clone()],
+            leak_on_cancel: vec![name],
+            all_paths_resolve: true, // Leaf obligation is resolved by leaf completing
+        }
+    }
+
+    /// Joins two flows (for Join nodes).
+    ///
+    /// All obligations from both children are combined.
+    #[must_use]
+    pub fn join(mut self, other: Self) -> Self {
+        self.reserves.extend(other.reserves);
+        self.must_resolve.extend(other.must_resolve);
+        self.leak_on_cancel.extend(other.leak_on_cancel);
+        self.all_paths_resolve = self.all_paths_resolve && other.all_paths_resolve;
+        self.dedupe();
+        self
+    }
+
+    /// Races two flows (for Race nodes).
+    ///
+    /// Obligations from losers become leak candidates.
+    #[must_use]
+    pub fn race(mut self, other: Self) -> Self {
+        // Both sets of obligations are started, but only winner completes.
+        // Loser's obligations become leak candidates.
+        self.reserves.extend(other.reserves.iter().cloned());
+        self.must_resolve.extend(other.must_resolve.iter().cloned());
+        // In a race, the loser's obligations may leak unless explicitly drained.
+        self.leak_on_cancel.extend(other.leak_on_cancel.iter().cloned());
+        self.leak_on_cancel.extend(self.must_resolve.iter().cloned());
+        // Conservative: can't guarantee all paths resolve in a race unless
+        // both children guarantee it and are properly drained.
+        self.all_paths_resolve = self.all_paths_resolve && other.all_paths_resolve;
+        self.dedupe();
+        self
+    }
+
+    /// Deduplicates the obligation lists while preserving order.
+    fn dedupe(&mut self) {
+        Self::dedupe_vec(&mut self.reserves);
+        Self::dedupe_vec(&mut self.must_resolve);
+        Self::dedupe_vec(&mut self.leak_on_cancel);
+    }
+
+    /// Deduplicates a vector while preserving order.
+    pub fn dedupe_vec(v: &mut Vec<String>) {
+        let mut seen = std::collections::BTreeSet::new();
+        v.retain(|s| seen.insert(s.clone()));
+    }
+
+    /// Returns diagnostics about potential obligation issues.
+    #[must_use]
+    pub fn diagnostics(&self) -> Vec<String> {
+        let mut diags = Vec::new();
+        if !self.all_paths_resolve && !self.must_resolve.is_empty() {
+            diags.push(format!(
+                "not all paths resolve obligations: {:?}",
+                self.must_resolve
+            ));
+        }
+        if !self.leak_on_cancel.is_empty() {
+            diags.push(format!(
+                "obligations may leak on cancel: {:?}",
+                self.leak_on_cancel
+            ));
+        }
+        diags
+    }
+}
+
+impl fmt::Display for ObligationFlow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "reserves={:?}", self.reserves)?;
+        if !self.must_resolve.is_empty() {
+            write!(f, " must_resolve={:?}", self.must_resolve)?;
+        }
+        if !self.leak_on_cancel.is_empty() {
+            write!(f, " leak_on_cancel={:?}", self.leak_on_cancel)?;
+        }
+        if self.all_paths_resolve {
+            f.write_str(" [all-paths-ok]")?;
+        } else {
+            f.write_str(" [LEAK-RISK]")?;
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
 // Per-node analysis result
 // ===========================================================================
 
@@ -206,8 +337,10 @@ impl fmt::Display for BudgetEffect {
 pub struct NodeAnalysis {
     /// Node identifier.
     pub id: PlanId,
-    /// Obligation safety.
+    /// Obligation safety (summary).
     pub obligation: ObligationSafety,
+    /// Detailed obligation flow.
+    pub obligation_flow: ObligationFlow,
     /// Cancel safety.
     pub cancel: CancelSafety,
     /// Budget effects.
@@ -318,6 +451,7 @@ impl PlanAnalyzer {
             let analysis = NodeAnalysis {
                 id,
                 obligation: ObligationSafety::Unknown,
+                obligation_flow: ObligationFlow::empty(),
                 cancel: CancelSafety::Unknown,
                 budget: BudgetEffect::UNKNOWN,
             };
@@ -326,9 +460,16 @@ impl PlanAnalyzer {
         };
 
         let analysis = match node.clone() {
-            PlanNode::Leaf { .. } => NodeAnalysis {
+            PlanNode::Leaf { label } => NodeAnalysis {
                 id,
                 obligation: ObligationSafety::Clean,
+                // Leaves with labels that look like obligations get tracked.
+                // Convention: labels starting with "obl:" have obligations.
+                obligation_flow: if label.starts_with("obl:") {
+                    ObligationFlow::leaf_with_obligation(label)
+                } else {
+                    ObligationFlow::empty()
+                },
                 cancel: CancelSafety::Safe,
                 budget: BudgetEffect::LEAF,
             },
@@ -364,9 +505,16 @@ impl PlanAnalyzer {
                     .sum::<u32>()
                     .max(1);
 
+                // Join obligation flow: combine all children's flows.
+                let obligation_flow = child_analyses
+                    .iter()
+                    .map(|a| a.obligation_flow.clone())
+                    .fold(ObligationFlow::empty(), ObligationFlow::join);
+
                 NodeAnalysis {
                     id,
                     obligation,
+                    obligation_flow,
                     cancel,
                     budget: BudgetEffect {
                         min_polls,
@@ -430,9 +578,17 @@ impl PlanAnalyzer {
                     .max()
                     .unwrap_or(1);
 
+                // Race obligation flow: combine with race semantics
+                // (losers may leak if not drained).
+                let obligation_flow = child_analyses
+                    .iter()
+                    .map(|a| a.obligation_flow.clone())
+                    .fold(ObligationFlow::empty(), ObligationFlow::race);
+
                 NodeAnalysis {
                     id,
                     obligation,
+                    obligation_flow,
                     cancel,
                     budget: BudgetEffect {
                         min_polls,
@@ -446,9 +602,18 @@ impl PlanAnalyzer {
             PlanNode::Timeout { child, .. } => {
                 let child_analysis = Self::analyze_node(dag, child, results);
 
+                // Timeout obligation flow: child's flow with added leak risk.
+                let mut obligation_flow = child_analysis.obligation_flow.clone();
+                // On timeout, child obligations may leak.
+                obligation_flow.leak_on_cancel.extend(
+                    obligation_flow.must_resolve.iter().cloned()
+                );
+                ObligationFlow::dedupe_vec(&mut obligation_flow.leak_on_cancel);
+
                 NodeAnalysis {
                     id,
                     obligation: child_analysis.obligation,
+                    obligation_flow,
                     // Timeout introduces cancel: if child exceeds the deadline,
                     // it is cancelled. Same logic as race with deadline branch.
                     cancel: if child_analysis.cancel.is_safe()
