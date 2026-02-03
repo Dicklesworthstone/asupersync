@@ -1397,7 +1397,47 @@ capped (e.g., first `K` violations). Large traces do not inflate certificates.
 
 ---
 
-## 9. TLA+ Sketch
+## 9. Mechanization Plan (Lean)
+
+Goal: mechanize this semantics in `formal/lean/Asupersync.lean` and prove the
+core invariants that the runtime depends on. The plan below is designed to map
+directly onto the existing small-step rules and the lab/runtime tests.
+
+### 9.1 Structure map
+
+- **State definitions**: `Task`, `Region`, `Obligation`, `Budget`, `Trace` records.
+- **Step relation**: `Step : State → Action → State → Prop` mirroring the rules.
+- **Invariants**: `WellFormed`, `NoLeaks`, `Quiescent`, `LosersDrained`,
+  `CancelProtocol`, `NoAmbientAuthority`.
+- **Trace projection**: `trace : Exec → List Label` + Mazurkiewicz equivalence.
+
+### 9.2 Proof obligations (checklist)
+
+1. **Preservation**: `WellFormed σ → Step σ a σ' → WellFormed σ'`.
+2. **Quiescence on close**: `RegionClosed r σ → Quiescent r σ`.
+3. **No obligation leaks**: `TaskCompleted t σ → Held(t, σ) = ∅`.
+4. **Loser drain**: race completion implies all losers completed.
+5. **Cancel protocol**: request → drain → finalize is monotone and idempotent.
+6. **Deterministic trace projection**: `trace` respects label ordering and
+   independence (`~`), enabling canonicalization.
+
+### 9.3 Code alignment points
+
+- Each rule has a direct Rust counterpart in `src/runtime/state.rs` and
+  `src/runtime/scheduler/three_lane.rs`.
+- Each invariant maps to lab oracles and property tests; proofs should cite
+  the same predicates as the test harness (`no_task_leaks`, `no_obligation_leaks`,
+  `losers_drained`, `quiescence_on_close`, `cancel_protocol_respected`).
+- Trace normalization rules align with `src/trace/*` (Foata, geodesic, DPOR).
+
+### 9.4 Suggested milestone slicing
+
+- M1: core state + Step relation + Preservation proof.
+- M2: cancellation rules + cancel protocol lemma suite.
+- M3: obligation rules + no-leak lemmas.
+- M4: trace equivalence + canonicalization lemmas.
+
+## 10. TLA+ Sketch
 
 For model checking, translate to TLA+:
 
@@ -1445,7 +1485,7 @@ CancelRequest(r, reason) == ...
 
 ---
 
-## 10. Summary
+## 11. Summary
 
 This semantics provides:
 
