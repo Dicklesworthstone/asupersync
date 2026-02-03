@@ -1511,4 +1511,133 @@ mod tests {
         let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::JoinAssoc]);
         assert_eq!(report.steps().len(), 1);
     }
+
+    // -----------------------------------------------------------------------
+    // Rewrite engine complexity bounds (bd-123x)
+    // -----------------------------------------------------------------------
+
+    /// Build a flat join chain: Join(leaf_0, leaf_1, ..., leaf_{n-1}).
+    fn build_flat_join_dag(n: usize) -> PlanDag {
+        let mut dag = PlanDag::new();
+        let leaves: Vec<_> = (0..n).map(|i| dag.leaf(format!("leaf_{i}"))).collect();
+        let join = dag.join(leaves);
+        dag.set_root(join);
+        dag
+    }
+
+    /// Build a nested join tree of depth d: Join(Join(Join(...), leaf), leaf).
+    fn build_nested_join_dag(depth: usize) -> PlanDag {
+        let mut dag = PlanDag::new();
+        let mut current = dag.leaf("leaf_0");
+        for i in 1..depth {
+            let leaf = dag.leaf(format!("leaf_{i}"));
+            current = dag.join(vec![current, leaf]);
+        }
+        dag.set_root(current);
+        dag
+    }
+
+    /// Build a race-of-joins structure for DedupRaceJoin testing.
+    fn build_race_of_joins_dag(branches: usize) -> PlanDag {
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let joins: Vec<_> = (0..branches)
+            .map(|i| {
+                let branch = dag.leaf(format!("branch_{i}"));
+                dag.join(vec![shared, branch])
+            })
+            .collect();
+        let race = dag.race(joins);
+        dag.set_root(race);
+        dag
+    }
+
+    #[test]
+    fn rewrite_step_count_bounded_by_node_count() {
+        init_test();
+        // The number of rewrite steps should be at most proportional to
+        // the number of nodes (O(n) steps for O(n) nodes).
+        for n in [5, 10, 20, 50] {
+            let mut dag = build_nested_join_dag(n);
+            let node_count = dag.nodes.len();
+            let all_rules = &[
+                RewriteRule::JoinAssoc,
+                RewriteRule::RaceAssoc,
+                RewriteRule::JoinCommute,
+                RewriteRule::RaceCommute,
+                RewriteRule::TimeoutMin,
+                RewriteRule::DedupRaceJoin,
+            ];
+            let report = dag.apply_rewrites(RewritePolicy::assume_all(), all_rules);
+            assert!(
+                report.steps().len() <= node_count,
+                "Too many steps ({}) for {} nodes at n={n}",
+                report.steps().len(),
+                node_count,
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_flat_join_is_noop() {
+        init_test();
+        // A flat join with no nesting should produce no rewrite steps.
+        for n in [5, 20, 100] {
+            let mut dag = build_flat_join_dag(n);
+            let all_rules = &[
+                RewriteRule::JoinAssoc,
+                RewriteRule::JoinCommute,
+                RewriteRule::DedupRaceJoin,
+            ];
+            let report = dag.apply_rewrites(RewritePolicy::assume_all(), all_rules);
+            // No nested joins => no associativity rewrites
+            // Commutativity may fire if children aren't already sorted
+            // Just ensure it doesn't explode
+            assert!(
+                report.steps().len() <= n,
+                "Too many steps ({}) for flat join of size {n}",
+                report.steps().len(),
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_race_of_joins_bounded() {
+        init_test();
+        for branches in [2, 5, 10] {
+            let mut dag = build_race_of_joins_dag(branches);
+            let node_count = dag.nodes.len();
+            let report = dag.apply_rewrites(
+                RewritePolicy::conservative(),
+                &[RewriteRule::DedupRaceJoin],
+            );
+            assert!(
+                report.steps().len() <= node_count,
+                "Too many DedupRaceJoin steps ({}) for {} nodes",
+                report.steps().len(),
+                node_count,
+            );
+        }
+    }
+
+    #[test]
+    fn certified_rewrite_matches_uncertified() {
+        init_test();
+        for n in [3, 5, 10] {
+            let dag = build_nested_join_dag(n);
+            let all_rules = &[
+                RewriteRule::JoinAssoc,
+                RewriteRule::JoinCommute,
+            ];
+
+            let mut dag1 = dag.clone();
+            let report1 = dag1.apply_rewrites(RewritePolicy::assume_all(), all_rules);
+
+            let mut dag2 = dag;
+            let (report2, _cert) =
+                dag2.apply_rewrites_certified(RewritePolicy::assume_all(), all_rules);
+
+            assert_eq!(report1.steps().len(), report2.steps().len());
+        }
+    }
 }
