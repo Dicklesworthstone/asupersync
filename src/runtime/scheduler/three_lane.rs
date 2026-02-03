@@ -2,6 +2,51 @@
 //!
 //! This scheduler coordinates multiple worker threads while maintaining
 //! strict priority ordering: cancel > timed > ready.
+//!
+//! # Cancel-lane preemption with bounded fairness (bd-17uu)
+//!
+//! The cancel lane has strict preemption over timed and ready lanes, but a
+//! fairness mechanism prevents starvation of lower-priority work.
+//!
+//! ## Invariant
+//!
+//! **Fairness bound**: If the ready or timed lane has pending work, that work
+//! is dispatched after at most `cancel_streak_limit` consecutive cancel-lane
+//! dispatches (or `2 * cancel_streak_limit` under `DrainObligations`/`DrainRegions`).
+//!
+//! ## Proof sketch (per-worker, single-threaded scheduling loop)
+//!
+//! 1. Each worker maintains a monotone counter `cancel_streak` that increments
+//!    on every cancel dispatch and resets to 0 on any non-cancel dispatch (or
+//!    when the cancel lane is empty).
+//!
+//! 2. In `next_task()`, the cancel lane is only consulted when
+//!    `cancel_streak < cancel_streak_limit`. Once the limit is reached, the
+//!    scheduler falls through to timed, ready, and steal.
+//!
+//! 3. If timed or ready work is pending when cancel_streak hits the limit,
+//!    that work is dispatched next, resetting cancel_streak to 0. Cancel work
+//!    resumes on the following call to `next_task()`.
+//!
+//! 4. If no timed/ready/steal work is available when the limit is hit, a
+//!    fallback path allows one more cancel dispatch with cancel_streak reset
+//!    to 1. This ensures cancel work is not blocked indefinitely when it is
+//!    the only pending work.
+//!
+//! 5. On backoff/park (no work found), cancel_streak resets to 0. This
+//!    prevents stale counters from deferring cancel work after an idle period.
+//!
+//! **Corollary**: Under sustained cancel injection, the ready lane observes a
+//! dispatch slot at least every `cancel_streak_limit + 1` scheduling steps,
+//! giving a worst-case ready-lane stall of O(cancel_streak_limit) dispatch
+//! cycles per worker.
+//!
+//! ## Cross-worker note
+//!
+//! Fairness is enforced per-worker. Global fairness follows from each worker
+//! independently bounding its cancel streak. Work stealing operates only on
+//! the ready lane, so a worker whose ready lane is starved by cancel work
+//! will not have its ready tasks stolen.
 
 use crate::obligation::lyapunov::{LyapunovGovernor, SchedulingSuggestion, StateSnapshot};
 use crate::runtime::scheduler::global_injector::GlobalInjector;
@@ -132,6 +177,7 @@ impl ThreeLaneScheduler {
                 cached_suggestion: SchedulingSuggestion::NoPreference,
                 steps_since_snapshot: 0,
                 governor_interval,
+                preemption_metrics: PreemptionMetrics::default(),
             });
         }
 
@@ -288,9 +334,33 @@ pub struct ThreeLaneWorker {
     steps_since_snapshot: u32,
     /// Steps between governor snapshots.
     governor_interval: u32,
+    /// Preemption fairness metrics (cancel-lane preemption tracking).
+    preemption_metrics: PreemptionMetrics,
+}
+
+/// Per-worker metrics tracking cancel-lane preemption and fairness.
+#[derive(Debug, Clone, Default)]
+pub struct PreemptionMetrics {
+    /// Total cancel-lane dispatches.
+    pub cancel_dispatches: u64,
+    /// Total timed-lane dispatches.
+    pub timed_dispatches: u64,
+    /// Total ready-lane dispatches.
+    pub ready_dispatches: u64,
+    /// Times the cancel streak hit the fairness limit.
+    pub fairness_yields: u64,
+    /// Maximum cancel streak observed.
+    pub max_cancel_streak: usize,
+    /// Fallback cancel dispatches (after limit, no other work available).
+    pub fallback_cancel_dispatches: u64,
 }
 
 impl ThreeLaneWorker {
+    /// Returns the preemption fairness metrics for this worker.
+    pub fn preemption_metrics(&self) -> &PreemptionMetrics {
+        &self.preemption_metrics
+    }
+
     /// Runs the worker scheduling loop.
     ///
     /// The loop maintains strict priority ordering:
@@ -383,15 +453,19 @@ impl ThreeLaneWorker {
                 // Deadline pressure dominates: check timed lane first.
                 if let Some(task) = self.try_timed_work() {
                     self.cancel_streak = 0;
+                    self.preemption_metrics.timed_dispatches += 1;
                     return Some(task);
                 }
                 // Then cancel work with standard fairness.
                 if self.cancel_streak < self.cancel_streak_limit {
                     if let Some(task) = self.try_cancel_work() {
                         self.cancel_streak += 1;
+                        self.record_cancel_dispatch();
                         return Some(task);
                     }
                     self.cancel_streak = 0;
+                } else {
+                    self.preemption_metrics.fairness_yields += 1;
                 }
             }
             SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions => {
@@ -401,13 +475,17 @@ impl ThreeLaneWorker {
                 if self.cancel_streak < boosted_limit {
                     if let Some(task) = self.try_cancel_work() {
                         self.cancel_streak += 1;
+                        self.record_cancel_dispatch();
                         return Some(task);
                     }
                     self.cancel_streak = 0;
+                } else {
+                    self.preemption_metrics.fairness_yields += 1;
                 }
                 // Timed work (still respect EDF).
                 if let Some(task) = self.try_timed_work() {
                     self.cancel_streak = 0;
+                    self.preemption_metrics.timed_dispatches += 1;
                     return Some(task);
                 }
             }
@@ -416,12 +494,16 @@ impl ThreeLaneWorker {
                 if self.cancel_streak < self.cancel_streak_limit {
                     if let Some(task) = self.try_cancel_work() {
                         self.cancel_streak += 1;
+                        self.record_cancel_dispatch();
                         return Some(task);
                     }
                     self.cancel_streak = 0;
+                } else {
+                    self.preemption_metrics.fairness_yields += 1;
                 }
                 if let Some(task) = self.try_timed_work() {
                     self.cancel_streak = 0;
+                    self.preemption_metrics.timed_dispatches += 1;
                     return Some(task);
                 }
             }
@@ -430,12 +512,14 @@ impl ThreeLaneWorker {
         // Ready work (always checked regardless of suggestion).
         if let Some(task) = self.try_ready_work() {
             self.cancel_streak = 0;
+            self.preemption_metrics.ready_dispatches += 1;
             return Some(task);
         }
 
         // Steal from other workers.
         if let Some(task) = self.try_steal() {
             self.cancel_streak = 0;
+            self.preemption_metrics.ready_dispatches += 1;
             return Some(task);
         }
 
@@ -449,12 +533,23 @@ impl ThreeLaneWorker {
         if self.cancel_streak >= effective_limit {
             if let Some(task) = self.try_cancel_work() {
                 self.cancel_streak = 1;
+                self.preemption_metrics.cancel_dispatches += 1;
+                self.preemption_metrics.fallback_cancel_dispatches += 1;
                 return Some(task);
             }
             self.cancel_streak = 0;
         }
 
         None
+    }
+
+    /// Record a cancel dispatch and update max streak metric.
+    #[inline]
+    fn record_cancel_dispatch(&mut self) {
+        self.preemption_metrics.cancel_dispatches += 1;
+        if self.cancel_streak > self.preemption_metrics.max_cancel_streak {
+            self.preemption_metrics.max_cancel_streak = self.cancel_streak;
+        }
     }
 
     /// Consult the governor for a scheduling suggestion, taking a fresh
@@ -2149,5 +2244,125 @@ mod tests {
         let on_2 = w_on.next_task();
         assert_eq!(off_2, on_2, "second dispatch should match");
         assert_eq!(off_2, Some(ready));
+    }
+
+    // ========================================================================
+    // Cancel-lane preemption fairness tests (bd-17uu)
+    // ========================================================================
+
+    #[test]
+    fn test_preemption_metrics_track_dispatches() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+
+        for i in 0..3u32 {
+            scheduler.inject_cancel(TaskId::new_for_test(1, i), 100);
+        }
+        for i in 3..5u32 {
+            scheduler.inject_ready(TaskId::new_for_test(1, i), 50);
+        }
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        for _ in 0..5 {
+            worker.next_task();
+        }
+
+        let m = worker.preemption_metrics();
+        assert_eq!(m.cancel_dispatches, 3);
+        assert_eq!(m.ready_dispatches, 2);
+        assert_eq!(m.cancel_dispatches + m.ready_dispatches + m.timed_dispatches, 5);
+    }
+
+    #[test]
+    fn test_preemption_fairness_yield_under_cancel_flood() {
+        let limit: usize = 4;
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+
+        let cancel_count: u32 = 20;
+        let ready_count: u32 = 5;
+
+        for i in 0..cancel_count {
+            scheduler.inject_cancel(TaskId::new_for_test(1, i), 100);
+        }
+        for i in cancel_count..cancel_count + ready_count {
+            scheduler.inject_ready(TaskId::new_for_test(1, i), 50);
+        }
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        let total = cancel_count + ready_count;
+        for _ in 0..total {
+            worker.next_task();
+        }
+
+        let m = worker.preemption_metrics();
+        assert_eq!(m.cancel_dispatches, u64::from(cancel_count));
+        assert_eq!(m.ready_dispatches, u64::from(ready_count));
+        assert!(
+            m.max_cancel_streak <= limit,
+            "max cancel streak {} exceeded limit {}",
+            m.max_cancel_streak,
+            limit
+        );
+        assert!(m.fairness_yields > 0, "should yield under cancel flood");
+    }
+
+    #[test]
+    fn test_preemption_max_streak_bounded_by_limit() {
+        for limit in [1, 2, 4, 8, 16] {
+            let state = Arc::new(Mutex::new(RuntimeState::new()));
+            let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+
+            let n_cancel = (limit * 3) as u32;
+            for i in 0..n_cancel {
+                scheduler.inject_cancel(TaskId::new_for_test(1, i), 100);
+            }
+            scheduler.inject_ready(TaskId::new_for_test(1, n_cancel), 50);
+
+            let mut workers = scheduler.take_workers().into_iter();
+            let mut worker = workers.next().unwrap();
+
+            for _ in 0..n_cancel + 1 {
+                worker.next_task();
+            }
+
+            let m = worker.preemption_metrics();
+            assert!(
+                m.max_cancel_streak <= limit,
+                "limit={}: max_cancel_streak {} exceeded",
+                limit,
+                m.max_cancel_streak,
+            );
+        }
+    }
+
+    #[test]
+    fn test_preemption_fallback_cancel_when_only_cancel_work() {
+        let limit: usize = 2;
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+
+        for i in 0..6u32 {
+            scheduler.inject_cancel(TaskId::new_for_test(1, i), 100);
+        }
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        let mut count = 0u32;
+        for _ in 0..6 {
+            if worker.next_task().is_some() {
+                count += 1;
+            }
+        }
+
+        assert_eq!(count, 6);
+        let m = worker.preemption_metrics();
+        assert_eq!(m.cancel_dispatches, 6);
+        assert!(m.fallback_cancel_dispatches > 0, "should use fallback path");
     }
 }
