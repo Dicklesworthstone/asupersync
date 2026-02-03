@@ -46,6 +46,8 @@ pub enum SpawnError {
     RegionNotFound(RegionId),
     /// The target region is closed or draining and cannot accept new tasks.
     RegionClosed(RegionId),
+    /// Local spawn attempted without an active worker-local scheduler.
+    LocalSchedulerUnavailable,
     /// The target region has reached its admission limit.
     RegionAtCapacity {
         /// The region that rejected the spawn.
@@ -62,6 +64,9 @@ impl std::fmt::Display for SpawnError {
         match self {
             Self::RegionNotFound(id) => write!(f, "region not found: {id:?}"),
             Self::RegionClosed(id) => write!(f, "region closed: {id:?}"),
+            Self::LocalSchedulerUnavailable => {
+                write!(f, "local spawn requires an active worker scheduler")
+            }
             Self::RegionAtCapacity {
                 region,
                 limit,

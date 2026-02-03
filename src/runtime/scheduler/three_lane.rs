@@ -110,6 +110,8 @@ thread_local! {
     /// drained by the owner worker, never exposed to stealers.
     static CURRENT_LOCAL_READY: RefCell<Option<Arc<Mutex<Vec<TaskId>>>>> =
         const { RefCell::new(None) };
+    /// Thread-local worker id for routing local tasks.
+    static CURRENT_WORKER_ID: RefCell<Option<WorkerId>> = const { RefCell::new(None) };
 }
 
 /// Scoped setter for the thread-local scheduler pointer.
@@ -132,6 +134,27 @@ impl Drop for ScopedLocalScheduler {
     fn drop(&mut self) {
         let prev = self.prev.take();
         CURRENT_LOCAL.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
+
+/// Scoped setter for the thread-local worker id.
+pub(crate) struct ScopedWorkerId {
+    prev: Option<WorkerId>,
+}
+
+impl ScopedWorkerId {
+    pub(crate) fn new(id: WorkerId) -> Self {
+        let prev = CURRENT_WORKER_ID.with(|cell| cell.replace(Some(id)));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedWorkerId {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        CURRENT_WORKER_ID.with(|cell| {
             *cell.borrow_mut() = prev;
         });
     }
@@ -168,6 +191,30 @@ pub(crate) fn schedule_local_task(task: TaskId) -> bool {
     })
 }
 
+fn remove_from_local_ready(queue: &Arc<Mutex<Vec<TaskId>>>, task: TaskId) -> bool {
+    if let Ok(mut queue) = queue.lock() {
+        let mut removed = false;
+        while let Some(pos) = queue.iter().position(|t| *t == task) {
+            queue.swap_remove(pos);
+            removed = true;
+        }
+        return removed;
+    }
+    false
+}
+
+pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
+    CURRENT_LOCAL_READY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|queue| remove_from_local_ready(queue, task))
+    })
+}
+
+pub(crate) fn current_worker_id() -> Option<WorkerId> {
+    CURRENT_WORKER_ID.with(|cell| cell.borrow().clone())
+}
+
 pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
     // Fast path: O(1) push to LocalQueue IntrusiveStack
     if LocalQueue::schedule_local(task) {
@@ -178,6 +225,18 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
         if let Some(local) = cell.borrow().as_ref() {
             let mut guard = local.lock().expect("local scheduler lock poisoned");
             guard.schedule(task, priority);
+            return true;
+        }
+        false
+    })
+}
+
+pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bool {
+    CURRENT_LOCAL.with(|cell| {
+        if let Some(local) = cell.borrow().as_ref() {
+            let mut guard = local.lock().expect("local scheduler lock poisoned");
+            guard.move_to_cancel_lane(task, priority);
+            let _ = remove_from_current_local_ready(task);
             return true;
         }
         false
