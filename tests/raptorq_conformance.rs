@@ -667,6 +667,7 @@ mod pipeline_e2e {
     use std::hash::{Hash, Hasher};
 
     #[derive(Clone, Copy)]
+    #[allow(dead_code)]
     enum BurstPosition {
         Early,
         Late,
@@ -1039,14 +1040,14 @@ mod pipeline_e2e {
     ) -> (String, u64, u64, bool) {
         let symbol_size = usize::from(encoding.symbol_size);
         let data = make_bytes(data_len, data_seed);
+        let block_k = data_len.div_ceil(symbol_size);
+        let repair_count = block_k / 2;
         let mut encoder = EncodingPipeline::new(encoding.clone(), pool_for(encoding.symbol_size));
         let symbols: Vec<Symbol> = encoder
-            .encode(object_id, &data)
+            .encode_with_repair(object_id, &data, repair_count)
             .map(|res| res.expect("encode").into_symbol())
             .collect();
         let symbol_hash = hash_symbols(&symbols);
-
-        let block_k = data_len.div_ceil(symbol_size);
         let (received_symbols, loss_report) = apply_loss(&symbols, block_k, scenario.loss);
         let received_counts = count_symbols(&received_symbols);
         let generated_counts = count_symbols(&symbols);
@@ -1073,8 +1074,10 @@ mod pipeline_e2e {
         for symbol in &received_symbols {
             let auth = AuthenticatedSymbol::from_parts(symbol.clone(), AuthenticationTag::zero());
             let result = decoder.feed(auth).expect("feed");
-            if let SymbolAcceptResult::Rejected(reason) = result {
-                last_reject = Some(reason);
+            match result {
+                SymbolAcceptResult::Rejected(reason) => last_reject = Some(reason),
+                SymbolAcceptResult::BlockComplete { .. } => break,
+                _ => {}
             }
         }
 
@@ -1173,7 +1176,7 @@ mod pipeline_e2e {
         let encoding = EncodingConfig {
             symbol_size: 64,
             max_block_size: 1024,
-            repair_overhead: 1.2,
+            repair_overhead: 1.0,
             encoding_parallelism: 1,
             decoding_parallelism: 1,
         };

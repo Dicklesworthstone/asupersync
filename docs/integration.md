@@ -379,6 +379,30 @@ Canonical serialization (for hashing):
   returns a decode result plus a proof artifact (or a failure + proof).
 - `DecodeProof::replay_and_verify(symbols)` replays and validates the artifact.
 - `DecodeProof::content_hash()` provides a stable fingerprint for deduplication.
+
+Example usage:
+
+```ignore
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::DecodeProof;
+use asupersync::types::ObjectId;
+
+let decoder = InactivationDecoder::new(k, symbol_size, seed);
+let object_id = ObjectId::new(42);
+let sbn = 0u8;
+
+match decoder.decode_with_proof(&symbols, object_id, sbn) {
+    Ok(result) => {
+        let proof: DecodeProof = result.proof;
+        let _fingerprint = proof.content_hash();
+        proof.replay_and_verify(&symbols)?;
+    }
+    Err((_err, proof)) => {
+        let _fingerprint = proof.content_hash();
+        proof.replay_and_verify(&symbols)?;
+    }
+}
+```
 - Integer fields are serialized in little-endian fixed-width form.
 - Vectors are serialized in recorded order with a length prefix.
 

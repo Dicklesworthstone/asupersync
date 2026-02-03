@@ -581,12 +581,13 @@ mod property_tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // All source symbols
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC with zero data)
+        let mut received = decoder.constraint_symbols();
+
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
 
         // Enough repair to reach L
         for esi in (k as u32)..(l as u32) {
@@ -615,12 +616,13 @@ mod property_tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // All source symbols
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC with zero data)
+        let mut received = decoder.constraint_symbols();
+
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
 
         // 2x overhead (L + extra repair symbols)
         let overhead = l;
