@@ -92,10 +92,12 @@ pub use network::{
 };
 pub use oracle::{
     assert_deterministic, assert_deterministic_multi, ActorLeakOracle, ActorLeakViolation,
-    DeterminismOracle, DeterminismViolation, FinalizerId, FinalizerOracle, FinalizerViolation,
-    LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
-    ObligationLeakOracle, ObligationLeakViolation, OracleEntryReport, OracleReport, OracleStats,
-    OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation, SupervisionOracle,
+    BayesFactor, DetectionModel, DeterminismOracle, DeterminismViolation, EvidenceEntry,
+    EvidenceLedger, EvidenceLine, EvidenceStrength, EvidenceSummary, FinalizerId, FinalizerOracle,
+    FinalizerViolation, LogLikelihoodContributions, LoserDrainOracle, LoserDrainViolation,
+    MailboxOracle, MailboxViolation, MailboxViolationKind, ObligationLeakOracle,
+    ObligationLeakViolation, OracleEntryReport, OracleReport, OracleStats, OracleSuite,
+    OracleViolation, QuiescenceOracle, QuiescenceViolation, SupervisionOracle,
     SupervisionViolation, SupervisionViolationKind, TaskLeakOracle, TaskLeakViolation,
     TraceEventSummary,
 };

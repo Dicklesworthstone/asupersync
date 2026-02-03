@@ -17,12 +17,12 @@
 
 mod common;
 
+use asupersync::trace::event_structure::{OwnerKey, TracePoset};
+use asupersync::trace::independence::independent;
 use asupersync::trace::{
     count_switches, geodesic_normalize, is_valid_linear_extension, GeodesicAlgorithm,
     GeodesicConfig, TraceEvent,
 };
-use asupersync::trace::event_structure::{OwnerKey, TracePoset};
-use asupersync::trace::independence::independent;
 use asupersync::types::{RegionId, TaskId, Time};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
@@ -42,10 +42,7 @@ fn rid(n: u32) -> RegionId {
 /// Generate a trace with `n` events across `owners` task-lanes.
 /// Events with the same owner are dependent (same task → sequential).
 /// Events with different owners are typically independent.
-fn arb_trace_events(
-    max_n: usize,
-    max_owners: u32,
-) -> impl Strategy<Value = Vec<TraceEvent>> {
+fn arb_trace_events(max_n: usize, max_owners: u32) -> impl Strategy<Value = Vec<TraceEvent>> {
     (1..=max_n).prop_flat_map(move |n| {
         proptest::collection::vec(1..=max_owners, n).prop_map(move |owners| {
             owners
@@ -66,36 +63,31 @@ fn arb_trace_events(
 
 /// Generate traces with mixed event kinds (spawn + complete) for richer
 /// independence structure.
-fn arb_mixed_trace(
-    max_n: usize,
-    max_owners: u32,
-) -> impl Strategy<Value = Vec<TraceEvent>> {
+fn arb_mixed_trace(max_n: usize, max_owners: u32) -> impl Strategy<Value = Vec<TraceEvent>> {
     (2..=max_n).prop_flat_map(move |n| {
-        proptest::collection::vec((1..=max_owners, prop::bool::ANY), n).prop_map(
-            move |specs| {
-                specs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (owner, is_complete))| {
-                        if is_complete {
-                            TraceEvent::complete(
-                                (i + 1) as u64,
-                                Time::from_nanos(i as u64 * 1000),
-                                tid(owner),
-                                rid(owner),
-                            )
-                        } else {
-                            TraceEvent::spawn(
-                                (i + 1) as u64,
-                                Time::from_nanos(i as u64 * 1000),
-                                tid(owner),
-                                rid(owner),
-                            )
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
+        proptest::collection::vec((1..=max_owners, prop::bool::ANY), n).prop_map(move |specs| {
+            specs
+                .into_iter()
+                .enumerate()
+                .map(|(i, (owner, is_complete))| {
+                    if is_complete {
+                        TraceEvent::complete(
+                            (i + 1) as u64,
+                            Time::from_nanos(i as u64 * 1000),
+                            tid(owner),
+                            rid(owner),
+                        )
+                    } else {
+                        TraceEvent::spawn(
+                            (i + 1) as u64,
+                            Time::from_nanos(i as u64 * 1000),
+                            tid(owner),
+                            rid(owner),
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
     })
 }
 

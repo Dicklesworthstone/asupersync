@@ -3,6 +3,7 @@
 use crate::actor::ActorId;
 use crate::lab::oracle::{CapabilityKind, OracleViolation};
 use crate::record::ObligationKind;
+use crate::supervision::{EscalationPolicy, RestartPolicy};
 use crate::types::{Budget, CancelReason, TaskId};
 use crate::util::ArenaIndex;
 
@@ -98,6 +99,7 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
 }
 
 impl BuiltinMutation {
+    /// Returns a stable name for the mutation.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -118,6 +120,7 @@ impl BuiltinMutation {
         }
     }
 
+    /// Returns the invariant expected to fail for this mutation.
     #[must_use]
     pub fn invariant(self) -> &'static str {
         match self {
@@ -197,12 +200,20 @@ fn baseline_obligation_leak(harness: &mut MetaHarness) {
     let region = harness.create_root_region();
     let task = harness.create_runtime_task(region);
     let obligation = harness
-        .runtime.state
+        .runtime
+        .state
         .create_obligation(ObligationKind::SendPermit, task, region, None)
         .expect("create obligation");
-    harness.runtime.state.commit_obligation(obligation).expect("commit obligation");
+    harness
+        .runtime
+        .state
+        .commit_obligation(obligation)
+        .expect("commit obligation");
     harness.close_region(region);
-    harness.oracles.obligation_leak.snapshot_from_state(&harness.runtime.state, now);
+    harness
+        .oracles
+        .obligation_leak
+        .snapshot_from_state(&harness.runtime.state, now);
 }
 
 fn mutation_obligation_leak(harness: &mut MetaHarness) {
@@ -210,11 +221,15 @@ fn mutation_obligation_leak(harness: &mut MetaHarness) {
     let region = harness.create_root_region();
     let task = harness.create_runtime_task(region);
     let _obligation = harness
-        .runtime.state
+        .runtime
+        .state
         .create_obligation(ObligationKind::SendPermit, task, region, None)
         .expect("create obligation");
     harness.close_region(region);
-    harness.oracles.obligation_leak.snapshot_from_state(&harness.runtime.state, now);
+    harness
+        .oracles
+        .obligation_leak
+        .snapshot_from_state(&harness.runtime.state, now);
 }
 
 fn baseline_quiescence(harness: &mut MetaHarness) {
@@ -222,7 +237,10 @@ fn baseline_quiescence(harness: &mut MetaHarness) {
     let parent = harness.next_region();
     let child = harness.next_region();
     harness.oracles.quiescence.on_region_create(parent, None);
-    harness.oracles.quiescence.on_region_create(child, Some(parent));
+    harness
+        .oracles
+        .quiescence
+        .on_region_create(child, Some(parent));
     harness.oracles.quiescence.on_region_close(child, now);
     harness.oracles.quiescence.on_region_close(parent, now);
 }
@@ -232,7 +250,10 @@ fn mutation_quiescence(harness: &mut MetaHarness) {
     let parent = harness.next_region();
     let child = harness.next_region();
     harness.oracles.quiescence.on_region_create(parent, None);
-    harness.oracles.quiescence.on_region_create(child, Some(parent));
+    harness
+        .oracles
+        .quiescence
+        .on_region_create(child, Some(parent));
     harness.oracles.quiescence.on_region_close(parent, now);
 }
 
@@ -241,10 +262,16 @@ fn baseline_loser_drain(harness: &mut MetaHarness) {
     let region = harness.next_region();
     let winner = harness.next_task();
     let loser = harness.next_task();
-    let race_id = harness.oracles.loser_drain.on_race_start(region, vec![winner, loser], now);
+    let race_id = harness
+        .oracles
+        .loser_drain
+        .on_race_start(region, vec![winner, loser], now);
     harness.oracles.loser_drain.on_task_complete(winner, now);
     harness.oracles.loser_drain.on_task_complete(loser, now);
-    harness.oracles.loser_drain.on_race_complete(race_id, winner, now);
+    harness
+        .oracles
+        .loser_drain
+        .on_race_complete(race_id, winner, now);
 }
 
 fn mutation_loser_drain(harness: &mut MetaHarness) {
@@ -252,16 +279,25 @@ fn mutation_loser_drain(harness: &mut MetaHarness) {
     let region = harness.next_region();
     let winner = harness.next_task();
     let loser = harness.next_task();
-    let race_id = harness.oracles.loser_drain.on_race_start(region, vec![winner, loser], now);
+    let race_id = harness
+        .oracles
+        .loser_drain
+        .on_race_start(region, vec![winner, loser], now);
     harness.oracles.loser_drain.on_task_complete(winner, now);
-    harness.oracles.loser_drain.on_race_complete(race_id, winner, now);
+    harness
+        .oracles
+        .loser_drain
+        .on_race_complete(race_id, winner, now);
 }
 
 fn baseline_finalizer(harness: &mut MetaHarness) {
     let now = harness.now();
     let region = harness.next_region();
     let finalizer = harness.next_finalizer();
-    harness.oracles.finalizer.on_register(finalizer, region, now);
+    harness
+        .oracles
+        .finalizer
+        .on_register(finalizer, region, now);
     harness.oracles.finalizer.on_run(finalizer, now);
     harness.oracles.finalizer.on_region_close(region, now);
 }
@@ -270,7 +306,10 @@ fn mutation_finalizer(harness: &mut MetaHarness) {
     let now = harness.now();
     let region = harness.next_region();
     let finalizer = harness.next_finalizer();
-    harness.oracles.finalizer.on_register(finalizer, region, now);
+    harness
+        .oracles
+        .finalizer
+        .on_register(finalizer, region, now);
     harness.oracles.finalizer.on_region_close(region, now);
 }
 
@@ -278,16 +317,28 @@ fn baseline_region_tree(harness: &mut MetaHarness) {
     let now = harness.now();
     let root = harness.next_region();
     let child = harness.next_region();
-    harness.oracles.region_tree.on_region_create(root, None, now);
-    harness.oracles.region_tree.on_region_create(child, Some(root), now);
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(root, None, now);
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(child, Some(root), now);
 }
 
 fn mutation_region_tree(harness: &mut MetaHarness) {
     let now = harness.now();
     let root_a = harness.next_region();
     let root_b = harness.next_region();
-    harness.oracles.region_tree.on_region_create(root_a, None, now);
-    harness.oracles.region_tree.on_region_create(root_b, None, now);
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(root_a, None, now);
+    harness
+        .oracles
+        .region_tree
+        .on_region_create(root_b, None, now);
 }
 
 fn baseline_ambient_authority(harness: &mut MetaHarness) {
@@ -295,8 +346,14 @@ fn baseline_ambient_authority(harness: &mut MetaHarness) {
     let region = harness.next_region();
     let task = harness.next_task();
     let child = harness.next_task();
-    harness.oracles.ambient_authority.on_task_created(task, region, None, now);
-    harness.oracles.ambient_authority.on_spawn_effect(task, child, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_task_created(task, region, None, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_spawn_effect(task, child, now);
 }
 
 fn mutation_ambient_authority(harness: &mut MetaHarness) {
@@ -304,9 +361,18 @@ fn mutation_ambient_authority(harness: &mut MetaHarness) {
     let region = harness.next_region();
     let task = harness.next_task();
     let child = harness.next_task();
-    harness.oracles.ambient_authority.on_task_created(task, region, None, now);
-    harness.oracles.ambient_authority.on_capability_revoked(task, CapabilityKind::Spawn, now);
-    harness.oracles.ambient_authority.on_spawn_effect(task, child, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_task_created(task, region, None, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_capability_revoked(task, CapabilityKind::Spawn, now);
+    harness
+        .oracles
+        .ambient_authority
+        .on_spawn_effect(task, child, now);
 }
 
 fn baseline_deadline_monotone(harness: &mut MetaHarness) {
@@ -315,8 +381,14 @@ fn baseline_deadline_monotone(harness: &mut MetaHarness) {
     let child = harness.next_region();
     let parent_budget = Budget::with_deadline_secs(10);
     let child_budget = Budget::with_deadline_secs(5);
-    harness.oracles.deadline_monotone.on_region_create(parent, None, &parent_budget, now);
-    harness.oracles.deadline_monotone.on_region_create(child, Some(parent), &child_budget, now);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(parent, None, &parent_budget, now);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(child, Some(parent), &child_budget, now);
 }
 
 fn mutation_deadline_monotone(harness: &mut MetaHarness) {
@@ -325,27 +397,55 @@ fn mutation_deadline_monotone(harness: &mut MetaHarness) {
     let child = harness.next_region();
     let parent_budget = Budget::with_deadline_secs(10);
     let child_budget = Budget::INFINITE;
-    harness.oracles.deadline_monotone.on_region_create(parent, None, &parent_budget, now);
-    harness.oracles.deadline_monotone.on_region_create(child, Some(parent), &child_budget, now);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(parent, None, &parent_budget, now);
+    harness
+        .oracles
+        .deadline_monotone
+        .on_region_create(child, Some(parent), &child_budget, now);
 }
 
 fn baseline_cancel_propagation(harness: &mut MetaHarness) {
     let now = harness.now();
     let parent = harness.next_region();
     let child = harness.next_region();
-    harness.oracles.cancellation_protocol.on_region_create(parent, None);
-    harness.oracles.cancellation_protocol.on_region_create(child, Some(parent));
-    harness.oracles.cancellation_protocol.on_region_cancel(parent, CancelReason::shutdown(), now);
-    harness.oracles.cancellation_protocol.on_region_cancel(child, CancelReason::parent_cancelled(), now);
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(parent, None);
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(child, Some(parent));
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_cancel(parent, CancelReason::shutdown(), now);
+    harness.oracles.cancellation_protocol.on_region_cancel(
+        child,
+        CancelReason::parent_cancelled(),
+        now,
+    );
 }
 
 fn mutation_cancel_propagation(harness: &mut MetaHarness) {
     let now = harness.now();
     let parent = harness.next_region();
     let child = harness.next_region();
-    harness.oracles.cancellation_protocol.on_region_create(parent, None);
-    harness.oracles.cancellation_protocol.on_region_create(child, Some(parent));
-    harness.oracles.cancellation_protocol.on_region_cancel(parent, CancelReason::shutdown(), now);
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(parent, None);
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_create(child, Some(parent));
+    harness
+        .oracles
+        .cancellation_protocol
+        .on_region_cancel(parent, CancelReason::shutdown(), now);
 }
 
 fn baseline_actor_leak(harness: &mut MetaHarness) {
@@ -367,12 +467,18 @@ fn baseline_supervision_restart(harness: &mut MetaHarness) {
     let now = harness.now();
     harness.oracles.supervision.register_supervisor(
         actor(200),
-        crate::supervision::RestartPolicy::OneForOne,
+        RestartPolicy::OneForOne,
         2,
-        crate::supervision::EscalationPolicy::Escalate,
+        EscalationPolicy::Escalate,
     );
-    harness.oracles.supervision.register_child(actor(200), actor(201));
-    harness.oracles.supervision.on_child_failed(actor(200), actor(201), now, "test error".into());
+    harness
+        .oracles
+        .supervision
+        .register_child(actor(200), actor(201));
+    harness
+        .oracles
+        .supervision
+        .on_child_failed(actor(200), actor(201), now, "test error".into());
     harness.oracles.supervision.on_restart(actor(201), 1, now);
 }
 
@@ -380,25 +486,37 @@ fn mutation_supervision_restart(harness: &mut MetaHarness) {
     let now = harness.now();
     harness.oracles.supervision.register_supervisor(
         actor(200),
-        crate::supervision::RestartPolicy::OneForOne,
+        RestartPolicy::OneForOne,
         2,
-        crate::supervision::EscalationPolicy::Escalate,
+        EscalationPolicy::Escalate,
     );
-    harness.oracles.supervision.register_child(actor(200), actor(201));
-    harness.oracles.supervision.on_child_failed(actor(200), actor(201), now, "test error".into());
+    harness
+        .oracles
+        .supervision
+        .register_child(actor(200), actor(201));
+    harness
+        .oracles
+        .supervision
+        .on_child_failed(actor(200), actor(201), now, "test error".into());
     harness.oracles.supervision.on_restart(actor(201), 3, now);
 }
 
 fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
     let now = harness.now();
-    harness.oracles.mailbox.configure_mailbox(actor(300), 2, false);
+    harness
+        .oracles
+        .mailbox
+        .configure_mailbox(actor(300), 2, false);
     harness.oracles.mailbox.on_send(actor(300), now);
     harness.oracles.mailbox.on_send(actor(300), now);
 }
 
 fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
     let now = harness.now();
-    harness.oracles.mailbox.configure_mailbox(actor(300), 2, false);
+    harness
+        .oracles
+        .mailbox
+        .configure_mailbox(actor(300), 2, false);
     harness.oracles.mailbox.on_send(actor(300), now);
     harness.oracles.mailbox.on_send(actor(300), now);
     harness.oracles.mailbox.on_send(actor(300), now);
@@ -446,9 +564,7 @@ mod tests {
 
     #[test]
     fn builtin_mutations_stable_order() {
-        let m1 = builtin_mutations();
-        let m2 = builtin_mutations();
-        assert_eq!(m1, m2);
+        assert_eq!(builtin_mutations(), builtin_mutations());
     }
 
     #[test]
@@ -474,33 +590,81 @@ mod tests {
     #[test]
     fn mutation_name_matches_variant() {
         assert_eq!(BuiltinMutation::TaskLeak.name(), "mutation_task_leak");
-        assert_eq!(BuiltinMutation::ObligationLeak.name(), "mutation_obligation_leak");
+        assert_eq!(
+            BuiltinMutation::ObligationLeak.name(),
+            "mutation_obligation_leak"
+        );
         assert_eq!(BuiltinMutation::Quiescence.name(), "mutation_quiescence");
         assert_eq!(BuiltinMutation::LoserDrain.name(), "mutation_loser_drain");
         assert_eq!(BuiltinMutation::Finalizer.name(), "mutation_finalizer");
-        assert_eq!(BuiltinMutation::RegionTreeMultipleRoots.name(), "mutation_region_tree_multiple_roots");
-        assert_eq!(BuiltinMutation::AmbientAuthoritySpawnWithoutCapability.name(), "mutation_ambient_authority_spawn_without_capability");
-        assert_eq!(BuiltinMutation::DeadlineMonotoneChildUnbounded.name(), "mutation_deadline_child_unbounded");
-        assert_eq!(BuiltinMutation::CancelPropagationMissingChild.name(), "mutation_cancel_missing_child");
+        assert_eq!(
+            BuiltinMutation::RegionTreeMultipleRoots.name(),
+            "mutation_region_tree_multiple_roots"
+        );
+        assert_eq!(
+            BuiltinMutation::AmbientAuthoritySpawnWithoutCapability.name(),
+            "mutation_ambient_authority_spawn_without_capability"
+        );
+        assert_eq!(
+            BuiltinMutation::DeadlineMonotoneChildUnbounded.name(),
+            "mutation_deadline_child_unbounded"
+        );
+        assert_eq!(
+            BuiltinMutation::CancelPropagationMissingChild.name(),
+            "mutation_cancel_missing_child"
+        );
         assert_eq!(BuiltinMutation::ActorLeak.name(), "mutation_actor_leak");
-        assert_eq!(BuiltinMutation::SupervisionRestartLimitExceeded.name(), "mutation_supervision_restart_limit");
-        assert_eq!(BuiltinMutation::MailboxCapacityExceeded.name(), "mutation_mailbox_capacity_exceeded");
+        assert_eq!(
+            BuiltinMutation::SupervisionRestartLimitExceeded.name(),
+            "mutation_supervision_restart_limit"
+        );
+        assert_eq!(
+            BuiltinMutation::MailboxCapacityExceeded.name(),
+            "mutation_mailbox_capacity_exceeded"
+        );
     }
 
     #[test]
     fn mutation_invariant_mapping() {
         assert_eq!(BuiltinMutation::TaskLeak.invariant(), INVARIANT_TASK_LEAK);
-        assert_eq!(BuiltinMutation::ObligationLeak.invariant(), INVARIANT_OBLIGATION_LEAK);
-        assert_eq!(BuiltinMutation::Quiescence.invariant(), INVARIANT_QUIESCENCE);
-        assert_eq!(BuiltinMutation::LoserDrain.invariant(), INVARIANT_LOSER_DRAIN);
+        assert_eq!(
+            BuiltinMutation::ObligationLeak.invariant(),
+            INVARIANT_OBLIGATION_LEAK
+        );
+        assert_eq!(
+            BuiltinMutation::Quiescence.invariant(),
+            INVARIANT_QUIESCENCE
+        );
+        assert_eq!(
+            BuiltinMutation::LoserDrain.invariant(),
+            INVARIANT_LOSER_DRAIN
+        );
         assert_eq!(BuiltinMutation::Finalizer.invariant(), INVARIANT_FINALIZER);
-        assert_eq!(BuiltinMutation::RegionTreeMultipleRoots.invariant(), INVARIANT_REGION_TREE);
-        assert_eq!(BuiltinMutation::AmbientAuthoritySpawnWithoutCapability.invariant(), INVARIANT_AMBIENT_AUTHORITY);
-        assert_eq!(BuiltinMutation::DeadlineMonotoneChildUnbounded.invariant(), INVARIANT_DEADLINE_MONOTONE);
-        assert_eq!(BuiltinMutation::CancelPropagationMissingChild.invariant(), INVARIANT_CANCELLATION_PROTOCOL);
+        assert_eq!(
+            BuiltinMutation::RegionTreeMultipleRoots.invariant(),
+            INVARIANT_REGION_TREE
+        );
+        assert_eq!(
+            BuiltinMutation::AmbientAuthoritySpawnWithoutCapability.invariant(),
+            INVARIANT_AMBIENT_AUTHORITY
+        );
+        assert_eq!(
+            BuiltinMutation::DeadlineMonotoneChildUnbounded.invariant(),
+            INVARIANT_DEADLINE_MONOTONE
+        );
+        assert_eq!(
+            BuiltinMutation::CancelPropagationMissingChild.invariant(),
+            INVARIANT_CANCELLATION_PROTOCOL
+        );
         assert_eq!(BuiltinMutation::ActorLeak.invariant(), INVARIANT_ACTOR_LEAK);
-        assert_eq!(BuiltinMutation::SupervisionRestartLimitExceeded.invariant(), INVARIANT_SUPERVISION);
-        assert_eq!(BuiltinMutation::MailboxCapacityExceeded.invariant(), INVARIANT_MAILBOX);
+        assert_eq!(
+            BuiltinMutation::SupervisionRestartLimitExceeded.invariant(),
+            INVARIANT_SUPERVISION
+        );
+        assert_eq!(
+            BuiltinMutation::MailboxCapacityExceeded.invariant(),
+            INVARIANT_MAILBOX
+        );
     }
 
     #[test]
@@ -518,8 +682,7 @@ mod tests {
 
     #[test]
     fn builtin_mutation_debug() {
-        let debug = format!("{:?}", BuiltinMutation::TaskLeak);
-        assert!(debug.contains("TaskLeak"));
+        assert!(format!("{:?}", BuiltinMutation::TaskLeak).contains("TaskLeak"));
     }
 
     #[test]
@@ -531,39 +694,42 @@ mod tests {
 
     #[test]
     fn baseline_task_leak_no_panic() {
-        let mut harness = MetaHarness::new(42);
-        BuiltinMutation::TaskLeak.apply_baseline(&mut harness);
+        let mut h = MetaHarness::new(42);
+        BuiltinMutation::TaskLeak.apply_baseline(&mut h);
     }
 
     #[test]
     fn mutation_task_leak_no_panic() {
-        let mut harness = MetaHarness::new(42);
-        BuiltinMutation::TaskLeak.apply_mutation(&mut harness);
+        let mut h = MetaHarness::new(42);
+        BuiltinMutation::TaskLeak.apply_mutation(&mut h);
     }
 
     #[test]
     fn baseline_all_mutations_no_panic() {
         for m in builtin_mutations() {
-            let mut harness = MetaHarness::new(42);
-            m.apply_baseline(&mut harness);
+            let mut h = MetaHarness::new(42);
+            m.apply_baseline(&mut h);
         }
     }
 
     #[test]
     fn mutation_all_mutations_no_panic() {
         for m in builtin_mutations() {
-            let mut harness = MetaHarness::new(42);
-            m.apply_mutation(&mut harness);
+            let mut h = MetaHarness::new(42);
+            m.apply_mutation(&mut h);
         }
     }
 
     #[test]
     fn baseline_produces_no_violations() {
         for m in builtin_mutations() {
-            let mut harness = MetaHarness::new(42);
-            m.apply_baseline(&mut harness);
-            let violations = harness.oracles.check_all(harness.now());
-            assert!(violations.is_empty(), "baseline for {m:?} produced violations: {violations:?}");
+            let mut h = MetaHarness::new(42);
+            m.apply_baseline(&mut h);
+            let v = h.oracles.check_all(h.now());
+            assert!(
+                v.is_empty(),
+                "baseline for {m:?} produced violations: {v:?}"
+            );
         }
     }
 
@@ -571,13 +737,20 @@ mod tests {
     fn mutation_produces_expected_violation() {
         let skip = [BuiltinMutation::AmbientAuthoritySpawnWithoutCapability];
         for m in builtin_mutations() {
-            if skip.contains(&m) { continue; }
-            let mut harness = MetaHarness::new(42);
-            m.apply_mutation(&mut harness);
-            let violations = harness.oracles.check_all(harness.now());
-            let detected = violations.iter().any(|v| invariant_from_violation(v) == m.invariant());
-            let invariant = m.invariant();
-            assert!(detected, "mutation {m:?} did not trigger expected invariant {invariant}; got {violations:?}");
+            if skip.contains(&m) {
+                continue;
+            }
+            let mut h = MetaHarness::new(42);
+            m.apply_mutation(&mut h);
+            let v = h.oracles.check_all(h.now());
+            let detected = v
+                .iter()
+                .any(|vv| invariant_from_violation(vv) == m.invariant());
+            let inv = m.invariant();
+            assert!(
+                detected,
+                "mutation {m:?} did not trigger expected invariant {inv}; got {v:?}"
+            );
         }
     }
 }

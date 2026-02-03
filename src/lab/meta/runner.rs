@@ -35,7 +35,9 @@ impl MetaHarness {
         }
     }
 
-    pub(crate) fn now(&self) -> Time { self.now }
+    pub(crate) fn now(&self) -> Time {
+        self.now
+    }
 
     pub(crate) fn next_region(&mut self) -> RegionId {
         let id = RegionId::new_for_test(self.next_region, 0);
@@ -67,7 +69,9 @@ impl MetaHarness {
     }
 
     pub(crate) fn create_runtime_task(&mut self, region: RegionId) -> TaskId {
-        let (task, _handle) = self.runtime.state
+        let (task, _handle) = self
+            .runtime
+            .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
         task
@@ -84,7 +88,8 @@ impl MetaHarness {
 
     #[allow(dead_code)]
     pub(crate) fn create_obligation(&mut self, holder: TaskId, region: RegionId) -> ObligationId {
-        self.runtime.state
+        self.runtime
+            .state
             .create_obligation(ObligationKind::SendPermit, holder, region, None)
             .expect("create obligation")
     }
@@ -101,11 +106,15 @@ pub struct MetaResult {
 
 impl MetaResult {
     #[must_use]
-    pub fn baseline_clean(&self) -> bool { self.baseline_violations.is_empty() }
+    pub fn baseline_clean(&self) -> bool {
+        self.baseline_violations.is_empty()
+    }
 
     #[must_use]
     pub fn mutation_detected(&self) -> bool {
-        self.mutation_violations.iter().any(|v| invariant_from_violation(v) == self.invariant)
+        self.mutation_violations
+            .iter()
+            .any(|v| invariant_from_violation(v) == self.invariant)
     }
 }
 
@@ -117,28 +126,44 @@ pub struct MetaCoverageEntry {
 
 impl MetaCoverageEntry {
     #[must_use]
-    pub fn is_covered(&self) -> bool { !self.tests.is_empty() }
+    pub fn is_covered(&self) -> bool {
+        !self.tests.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct MetaCoverageReport { entries: Vec<MetaCoverageEntry> }
+pub struct MetaCoverageReport {
+    entries: Vec<MetaCoverageEntry>,
+}
 
 impl MetaCoverageReport {
-    fn from_map(all_invariants: &[&'static str], map: &BTreeMap<&'static str, BTreeSet<&'static str>>) -> Self {
+    fn from_map(
+        all_invariants: &[&'static str],
+        map: &BTreeMap<&'static str, BTreeSet<&'static str>>,
+    ) -> Self {
         let mut entries = Vec::with_capacity(all_invariants.len());
         for &invariant in all_invariants {
-            let tests = map.get(invariant).map(|set| set.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
+            let tests = map
+                .get(invariant)
+                .map(|set| set.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
             entries.push(MetaCoverageEntry { invariant, tests });
         }
         Self { entries }
     }
 
     #[must_use]
-    pub fn entries(&self) -> &[MetaCoverageEntry] { &self.entries }
+    pub fn entries(&self) -> &[MetaCoverageEntry] {
+        &self.entries
+    }
 
     #[must_use]
     pub fn missing_invariants(&self) -> Vec<&'static str> {
-        self.entries.iter().filter(|e| !e.is_covered()).map(|e| e.invariant).collect()
+        self.entries
+            .iter()
+            .filter(|e| !e.is_covered())
+            .map(|e| e.invariant)
+            .collect()
     }
 
     #[must_use]
@@ -156,32 +181,57 @@ impl MetaCoverageReport {
 
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
-        let invariants = self.entries.iter().map(|entry| {
-            json!({ "invariant": entry.invariant, "tests": entry.tests })
-        }).collect::<Vec<_>>();
+        let invariants = self
+            .entries
+            .iter()
+            .map(|entry| json!({ "invariant": entry.invariant, "tests": entry.tests }))
+            .collect::<Vec<_>>();
         json!({ "invariants": invariants })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct MetaReport { results: Vec<MetaResult>, coverage: MetaCoverageReport }
+pub struct MetaReport {
+    results: Vec<MetaResult>,
+    coverage: MetaCoverageReport,
+}
 
 impl MetaReport {
-    #[must_use] pub fn results(&self) -> &[MetaResult] { &self.results }
-    #[must_use] pub fn coverage(&self) -> &MetaCoverageReport { &self.coverage }
+    #[must_use]
+    pub fn results(&self) -> &[MetaResult] {
+        &self.results
+    }
+    #[must_use]
+    pub fn coverage(&self) -> &MetaCoverageReport {
+        &self.coverage
+    }
 
     #[must_use]
     pub fn failures(&self) -> Vec<&MetaResult> {
-        self.results.iter().filter(|r| !r.baseline_clean() || !r.mutation_detected()).collect()
+        self.results
+            .iter()
+            .filter(|r| !r.baseline_clean() || !r.mutation_detected())
+            .collect()
     }
 
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         let failures = self.failures();
-        let _ = writeln!(&mut out, "meta report: {} mutations, {} failures", self.results.len(), failures.len());
+        let _ = writeln!(
+            &mut out,
+            "meta report: {} mutations, {} failures",
+            self.results.len(),
+            failures.len()
+        );
         if !failures.is_empty() {
-            for f in failures { let _ = writeln!(&mut out, "failure: {} (invariant {})", f.mutation, f.invariant); }
+            for f in failures {
+                let _ = writeln!(
+                    &mut out,
+                    "failure: {} (invariant {})",
+                    f.mutation, f.invariant
+                );
+            }
         }
         let _ = writeln!(&mut out, "coverage:");
         out.push_str(&self.coverage.to_text());
@@ -206,14 +256,21 @@ impl MetaReport {
 }
 
 #[derive(Debug, Clone)]
-pub struct MetaRunner { seed: u64 }
+pub struct MetaRunner {
+    seed: u64,
+}
 
 impl MetaRunner {
     #[must_use]
-    pub const fn new(seed: u64) -> Self { Self { seed } }
+    pub const fn new(seed: u64) -> Self {
+        Self { seed }
+    }
 
     #[must_use]
-    pub fn run<I>(&self, mutations: I) -> MetaReport where I: IntoIterator<Item = BuiltinMutation> {
+    pub fn run<I>(&self, mutations: I) -> MetaReport
+    where
+        I: IntoIterator<Item = BuiltinMutation>,
+    {
         let mut results = Vec::new();
         let mut coverage_map: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
         for mutation in mutations {
@@ -227,9 +284,17 @@ impl MetaRunner {
                 mutation.apply_mutation(&mut harness);
                 harness.oracles.check_all(harness.now())
             };
-            let result = MetaResult { mutation: mutation.name(), invariant: mutation.invariant(), baseline_violations, mutation_violations };
+            let result = MetaResult {
+                mutation: mutation.name(),
+                invariant: mutation.invariant(),
+                baseline_violations,
+                mutation_violations,
+            };
             if result.baseline_clean() && result.mutation_detected() {
-                coverage_map.entry(result.invariant).or_default().insert(result.mutation);
+                coverage_map
+                    .entry(result.invariant)
+                    .or_default()
+                    .insert(result.mutation);
             }
             results.push(result);
         }
@@ -261,9 +326,16 @@ mod tests {
     fn meta_runner_all_mutations_pass() {
         let runner = MetaRunner::new(42);
         let report = runner.run(builtin_mutations());
-        let failures: Vec<_> = report.failures().into_iter()
-            .filter(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability").collect();
-        assert!(failures.is_empty(), "expected no failures, got: {:?}", failures.iter().map(|f| f.mutation).collect::<Vec<_>>());
+        let failures: Vec<_> = report
+            .failures()
+            .into_iter()
+            .filter(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability")
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "expected no failures, got: {:?}",
+            failures.iter().map(|f| f.mutation).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -286,7 +358,12 @@ mod tests {
 
     #[test]
     fn meta_result_baseline_clean() {
-        let result = MetaResult { mutation: "test", invariant: "test_inv", baseline_violations: vec![], mutation_violations: vec![] };
+        let result = MetaResult {
+            mutation: "test",
+            invariant: "test_inv",
+            baseline_violations: vec![],
+            mutation_violations: vec![],
+        };
         assert!(result.baseline_clean());
     }
 
@@ -294,7 +371,10 @@ mod tests {
     fn meta_coverage_report_entries() {
         let runner = MetaRunner::new(42);
         let report = runner.run(builtin_mutations());
-        assert_eq!(report.coverage().entries().len(), ALL_ORACLE_INVARIANTS.len());
+        assert_eq!(
+            report.coverage().entries().len(),
+            ALL_ORACLE_INVARIANTS.len()
+        );
     }
 
     #[test]
@@ -302,16 +382,28 @@ mod tests {
         let runner = MetaRunner::new(42);
         let report = runner.run(builtin_mutations());
         let missing = report.coverage().missing_invariants();
-        assert!(!missing.contains(&"actor_leak"), "actor_leak should be covered");
-        assert!(!missing.contains(&"supervision"), "supervision should be covered");
+        assert!(
+            !missing.contains(&"actor_leak"),
+            "actor_leak should be covered"
+        );
+        assert!(
+            !missing.contains(&"supervision"),
+            "supervision should be covered"
+        );
         assert!(!missing.contains(&"mailbox"), "mailbox should be covered");
     }
 
     #[test]
     fn meta_coverage_entry_is_covered() {
-        let covered = MetaCoverageEntry { invariant: "test", tests: vec!["m1"] };
+        let covered = MetaCoverageEntry {
+            invariant: "test",
+            tests: vec!["m1"],
+        };
         assert!(covered.is_covered());
-        let not_covered = MetaCoverageEntry { invariant: "test", tests: vec![] };
+        let not_covered = MetaCoverageEntry {
+            invariant: "test",
+            tests: vec![],
+        };
         assert!(!not_covered.is_covered());
     }
 
@@ -352,9 +444,15 @@ mod tests {
     #[test]
     fn harness_next_ids_increment() {
         let mut h = MetaHarness::new(42);
-        let r1 = h.next_region(); let r2 = h.next_region(); assert_ne!(r1, r2);
-        let t1 = h.next_task(); let t2 = h.next_task(); assert_ne!(t1, t2);
-        let f1 = h.next_finalizer(); let f2 = h.next_finalizer(); assert_ne!(f1, f2);
+        let r1 = h.next_region();
+        let r2 = h.next_region();
+        assert_ne!(r1, r2);
+        let t1 = h.next_task();
+        let t2 = h.next_task();
+        assert_ne!(t1, t2);
+        let f1 = h.next_finalizer();
+        let f2 = h.next_finalizer();
+        assert_ne!(f1, f2);
     }
 
     #[test]
@@ -367,7 +465,9 @@ mod tests {
         for seed in [0, 1, 999, u64::MAX] {
             let runner = MetaRunner::new(seed);
             let report = runner.run(builtin_mutations());
-            let has_failures = report.failures().into_iter()
+            let has_failures = report
+                .failures()
+                .into_iter()
                 .any(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability");
             assert!(!has_failures, "seed {seed} produced failures");
         }
