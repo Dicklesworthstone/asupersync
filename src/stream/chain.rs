@@ -98,6 +98,7 @@ where
 mod tests {
     use super::*;
     use crate::stream::iter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -114,6 +115,50 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct DropProbe {
+        id: usize,
+        items: Vec<i32>,
+        index: usize,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl DropProbe {
+        fn new(id: usize, items: Vec<i32>, dropped: Arc<AtomicUsize>) -> Self {
+            Self {
+                id,
+                items,
+                index: 0,
+                dropped,
+            }
+        }
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let count = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::info!(stream = self.id, dropped = count, "chain stream dropped");
+        }
+    }
+
+    impl Stream for DropProbe {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<i32>> {
+            if self.index >= self.items.len() {
+                return Poll::Ready(None);
+            }
+            let item = self.items[self.index];
+            self.index += 1;
+            Poll::Ready(Some(item))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.items.len().saturating_sub(self.index);
+            (remaining, Some(remaining))
+        }
     }
 
     #[test]
@@ -295,5 +340,70 @@ mod tests {
         }
         assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
         crate::test_complete!("chain_multiple_chains");
+    }
+
+    #[test]
+    fn chain_error_in_first_stream() {
+        init_test("chain_error_in_first_stream");
+        let mut stream = Chain::new(iter(vec![Ok(1), Err("boom"), Ok(2)]), iter(vec![Ok(10)]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => items.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending from iter stream"),
+            }
+        }
+
+        let expected = vec![Ok(1), Err("boom"), Ok(2), Ok(10)];
+        crate::assert_with_log!(items == expected, "error in first", expected, items);
+        crate::test_complete!("chain_error_in_first_stream");
+    }
+
+    #[test]
+    fn chain_error_in_second_stream() {
+        init_test("chain_error_in_second_stream");
+        let mut stream = Chain::new(
+            iter(vec![Ok(1), Ok(2)]),
+            iter(vec![Ok(3), Err("boom"), Ok(4)]),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => items.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending from iter stream"),
+            }
+        }
+
+        let expected = vec![Ok(1), Ok(2), Ok(3), Err("boom"), Ok(4)];
+        crate::assert_with_log!(items == expected, "error in second", expected, items);
+        crate::test_complete!("chain_error_in_second_stream");
+    }
+
+    #[test]
+    fn chain_drop_cancels_both_streams() {
+        init_test("chain_drop_cancels_both_streams");
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let first = DropProbe::new(0, vec![1, 2], dropped.clone());
+        let second = DropProbe::new(1, vec![10], dropped.clone());
+        let mut stream = Chain::new(first, second);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(1)));
+        crate::assert_with_log!(ok, "first item", "Poll::Ready(Some(1))", poll);
+
+        drop(stream);
+        let count = dropped.load(Ordering::Relaxed);
+        crate::assert_with_log!(count == 2, "drop count", 2usize, count);
+        crate::test_complete!("chain_drop_cancels_both_streams");
     }
 }

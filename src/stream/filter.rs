@@ -135,7 +135,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::iter;
+    use crate::stream::{iter, StreamExt};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -397,6 +397,98 @@ mod tests {
         // sum: 1, 3, 6, 10, 15 — yields when sum > 6: [10, 15]
         assert_eq!(collected, vec![10, 15]);
         crate::test_complete!("filter_map_stateful_closure");
+    }
+
+    #[test]
+    fn filter_map_identity() {
+        init_test("filter_map_identity");
+        let mut stream = FilterMap::new(iter(vec![1, 2, 3, 4]), |x: i32| Some(x));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        assert_eq!(collected, vec![1, 2, 3, 4]);
+        crate::test_complete!("filter_map_identity");
+    }
+
+    #[test]
+    fn filter_map_composition() {
+        init_test("filter_map_composition");
+        let mut stream = iter(vec!["1", "2", "x", "3", "4"])
+            .filter_map(|s| s.parse::<i32>().ok())
+            .filter_map(|n| if n % 2 == 1 { Some(n * 10) } else { None });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        assert_eq!(collected, vec![10, 30]);
+        crate::test_complete!("filter_map_composition");
+    }
+
+    #[test]
+    fn filter_map_large_stream() {
+        init_test("filter_map_large_stream");
+        let data: Vec<i32> = (0..1000).collect();
+        let mut stream = FilterMap::new(
+            iter(data),
+            |x: i32| {
+                if x % 10 == 0 {
+                    Some(x)
+                } else {
+                    None
+                }
+            },
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        let expected: Vec<i32> = (0..1000).filter(|x| x % 10 == 0).collect();
+        assert_eq!(collected, expected);
+        crate::test_complete!("filter_map_large_stream");
+    }
+
+    #[test]
+    fn filter_map_result_error_handling() {
+        init_test("filter_map_result_error_handling");
+        let mut stream = FilterMap::new(
+            iter(vec![Ok(1), Err("boom"), Ok(2), Err("nope")]),
+            |v: Result<i32, &str>| v.ok(),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut collected = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(v)) => collected.push(v),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending"),
+            }
+        }
+        assert_eq!(collected, vec![1, 2]);
+        crate::test_complete!("filter_map_result_error_handling");
     }
 
     #[test]

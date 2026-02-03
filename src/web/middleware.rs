@@ -513,6 +513,33 @@ mod tests {
         Request::new("GET", "/test")
     }
 
+    struct CountingHandler {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+        delay: Duration,
+        status: StatusCode,
+    }
+
+    impl Handler for CountingHandler {
+        fn call(&self, _req: Request) -> Response {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                std::thread::sleep(self.delay);
+            }
+            Response::new(self.status, b"counted".to_vec())
+        }
+    }
+
+    struct InspectHandler;
+
+    impl Handler for InspectHandler {
+        fn call(&self, req: Request) -> Response {
+            req.extensions.get("trace_id").map_or_else(
+                || Response::new(StatusCode::BAD_REQUEST, b"missing trace_id".to_vec()),
+                |value| Response::new(StatusCode::OK, value.as_bytes().to_vec()),
+            )
+        }
+    }
+
     // --- TimeoutMiddleware ---
 
     #[test]
@@ -574,6 +601,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn circuit_breaker_surfaces_handler_error() {
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 10,
+            ..Default::default()
+        };
+        let mw = CircuitBreakerMiddleware::new(FnHandler::new(error_handler), policy);
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(String::from_utf8_lossy(&resp.body).contains("server error"));
+    }
+
     // --- RateLimitMiddleware ---
 
     #[test]
@@ -606,6 +645,28 @@ mod tests {
         let resp2 = mw.call(make_request());
         assert_eq!(resp2.status, StatusCode::TOO_MANY_REQUESTS);
         assert!(resp2.headers.contains_key("retry-after"));
+    }
+
+    #[test]
+    fn rate_limit_short_circuits_inner_handler() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let handler = CountingHandler {
+            calls: Arc::clone(&calls),
+            delay: Duration::from_millis(0),
+            status: StatusCode::OK,
+        };
+        let policy = RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            period: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let mw = RateLimitMiddleware::new(handler, policy);
+
+        let _ = mw.call(make_request());
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // --- BulkheadMiddleware ---
@@ -737,6 +798,43 @@ mod tests {
 
         let resp = handler.call(make_request());
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn middleware_stack_preserves_request_extensions() {
+        let handler = MiddlewareStack::new(InspectHandler)
+            .with_timeout(Duration::from_secs(1))
+            .with_rate_limit(RateLimitPolicy {
+                rate: 100,
+                burst: 100,
+                period: Duration::from_secs(1),
+                ..Default::default()
+            })
+            .build();
+
+        let mut req = Request::new("GET", "/ctx");
+        req.extensions.insert("trace_id", "trace-123");
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(&resp.body[..], b"trace-123");
+    }
+
+    #[test]
+    fn middleware_stack_retry_wraps_timeout() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let handler = CountingHandler {
+            calls: Arc::clone(&calls),
+            delay: Duration::from_millis(10),
+            status: StatusCode::OK,
+        };
+        let stacked = MiddlewareStack::new(handler)
+            .with_timeout(Duration::from_millis(1))
+            .with_retry(RetryPolicy::immediate(3))
+            .build();
+
+        let resp = stacked.call(make_request());
+        assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     // --- Observability ---

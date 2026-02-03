@@ -43,7 +43,7 @@ pub mod streaming;
 pub mod tla_export;
 
 pub use buffer::{TraceBuffer, TraceBufferHandle};
-pub use canonicalize::{canonicalize, trace_fingerprint, FoataTrace};
+pub use canonicalize::{canonicalize, trace_fingerprint, FoataTrace, TraceMonoid};
 pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,

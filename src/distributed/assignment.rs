@@ -289,4 +289,195 @@ mod tests {
             assert_eq!(assignment.symbol_indices.len(), 5);
         }
     }
+
+    // ========== Edge case tests (bd-3k9o) ==========
+
+    #[test]
+    fn full_more_replicas_than_symbols() {
+        // 3 symbols, 10 replicas — every replica gets all 3
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let symbols = create_test_symbols(3);
+        let replicas = create_test_replicas(10);
+
+        let assignments = assigner.assign(&symbols, &replicas, 2);
+
+        assert_eq!(assignments.len(), 10);
+        for a in &assignments {
+            assert_eq!(a.symbol_indices.len(), 3);
+            assert!(a.can_decode);
+        }
+    }
+
+    #[test]
+    fn full_single_symbol() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let symbols = create_test_symbols(1);
+        let replicas = create_test_replicas(3);
+
+        let assignments = assigner.assign(&symbols, &replicas, 1);
+
+        for a in &assignments {
+            assert_eq!(a.symbol_indices.len(), 1);
+            assert!(a.can_decode);
+        }
+    }
+
+    #[test]
+    fn full_k_greater_than_symbol_count() {
+        // k=10 but only 5 symbols — can_decode should be false
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let symbols = create_test_symbols(5);
+        let replicas = create_test_replicas(2);
+
+        let assignments = assigner.assign(&symbols, &replicas, 10);
+
+        for a in &assignments {
+            assert_eq!(a.symbol_indices.len(), 5);
+            assert!(!a.can_decode);
+        }
+    }
+
+    #[test]
+    fn striped_uneven_distribution() {
+        // 10 symbols across 3 replicas: 4, 4, 2 (or 4, 3, 3)
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let symbols = create_test_symbols(10);
+        let replicas = create_test_replicas(3);
+
+        let assignments = assigner.assign(&symbols, &replicas, 3);
+
+        let total: usize = assignments.iter().map(|a| a.symbol_indices.len()).sum();
+        assert_eq!(total, 10, "all symbols assigned");
+
+        // No replica should get 0 or all
+        for a in &assignments {
+            assert!(!a.symbol_indices.is_empty());
+            assert!(a.symbol_indices.len() <= 4);
+        }
+    }
+
+    #[test]
+    fn striped_single_replica() {
+        // Single replica gets all symbols via striping
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let symbols = create_test_symbols(5);
+        let replicas = create_test_replicas(1);
+
+        let assignments = assigner.assign(&symbols, &replicas, 3);
+
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].symbol_indices.len(), 5);
+        assert!(assignments[0].can_decode);
+    }
+
+    #[test]
+    fn striped_more_replicas_than_symbols() {
+        // 3 symbols, 5 replicas — some replicas get 0 or 1 symbol
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let symbols = create_test_symbols(3);
+        let replicas = create_test_replicas(5);
+
+        let assignments = assigner.assign(&symbols, &replicas, 2);
+
+        let total: usize = assignments.iter().map(|a| a.symbol_indices.len()).sum();
+        assert_eq!(total, 3);
+
+        // Replicas 0,1,2 get one symbol each, replicas 3,4 get none
+        let nonempty = assignments
+            .iter()
+            .filter(|a| !a.symbol_indices.is_empty())
+            .count();
+        assert_eq!(nonempty, 3);
+    }
+
+    #[test]
+    fn minimum_k_single_replica() {
+        // Single replica should get at least K symbols
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let symbols = create_test_symbols(10);
+        let replicas = create_test_replicas(1);
+
+        let assignments = assigner.assign(&symbols, &replicas, 5);
+
+        assert_eq!(assignments.len(), 1);
+        assert!(assignments[0].symbol_indices.len() >= 5);
+        assert!(assignments[0].can_decode);
+    }
+
+    #[test]
+    fn minimum_k_k_equals_symbol_count() {
+        // k == total symbols: every replica gets all
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let symbols = create_test_symbols(5);
+        let replicas = create_test_replicas(3);
+
+        let assignments = assigner.assign(&symbols, &replicas, 5);
+
+        for a in &assignments {
+            assert_eq!(a.symbol_indices.len(), 5);
+            assert!(a.can_decode);
+        }
+    }
+
+    #[test]
+    fn minimum_k_k_greater_than_symbols() {
+        // k=10 but only 5 symbols — can't reach K, can_decode false
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let symbols = create_test_symbols(5);
+        let replicas = create_test_replicas(2);
+
+        let assignments = assigner.assign(&symbols, &replicas, 10);
+
+        for a in &assignments {
+            assert!(!a.can_decode);
+        }
+    }
+
+    #[test]
+    fn minimum_k_no_duplicate_indices() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let symbols = create_test_symbols(20);
+        let replicas = create_test_replicas(4);
+
+        let assignments = assigner.assign(&symbols, &replicas, 8);
+
+        for a in &assignments {
+            let mut sorted = a.symbol_indices.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                a.symbol_indices.len(),
+                "no duplicate indices for replica {}",
+                a.replica_id
+            );
+        }
+    }
+
+    #[test]
+    fn strategy_accessor() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
+        assert_eq!(assigner.strategy(), AssignmentStrategy::Striped);
+    }
+
+    #[test]
+    fn both_empty_returns_empty() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let assignments = assigner.assign(&[], &[], 5);
+        assert!(assignments.is_empty());
+    }
+
+    #[test]
+    fn full_k_zero() {
+        // k=0: every replica can decode (0 symbols needed)
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let symbols = create_test_symbols(5);
+        let replicas = create_test_replicas(2);
+
+        let assignments = assigner.assign(&symbols, &replicas, 0);
+
+        for a in &assignments {
+            assert!(a.can_decode);
+        }
+    }
 }

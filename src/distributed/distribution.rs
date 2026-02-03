@@ -443,4 +443,296 @@ mod tests {
 
         assert!(result.quorum_achieved);
     }
+
+    // ========== Edge case tests (bd-3k9o) ==========
+
+    #[test]
+    fn partial_ack_quorum_evaluation() {
+        // 5 of 10 replicas ack — quorum is (10/2)+1 = 6, so 5 is NOT enough
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::Quorum,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(10);
+        let encoded = create_test_encoded_state();
+
+        let mut outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>> = Vec::new();
+        for i in 0..5 {
+            outcomes.push(Outcome::Ok(make_ack(&format!("r{i}"), 10)));
+        }
+        for i in 5..10 {
+            outcomes.push(Outcome::Err(make_failure(&format!("r{i}"))));
+        }
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(!result.quorum_achieved);
+        assert_eq!(result.acks.len(), 5);
+        assert_eq!(result.failures.len(), 5);
+    }
+
+    #[test]
+    fn partial_ack_quorum_exactly_met() {
+        // 6 of 10 replicas ack — quorum is (10/2)+1 = 6, exactly met
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::Quorum,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(10);
+        let encoded = create_test_encoded_state();
+
+        let mut outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>> = Vec::new();
+        for i in 0..6 {
+            outcomes.push(Outcome::Ok(make_ack(&format!("r{i}"), 10)));
+        }
+        for i in 6..10 {
+            outcomes.push(Outcome::Err(make_failure(&format!("r{i}"))));
+        }
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(result.quorum_achieved);
+        assert_eq!(result.acks.len(), 6);
+    }
+
+    #[test]
+    fn quorum_with_only_one_replica_available() {
+        // Quorum config but only 1 replica: required = (1/2)+1 = 1
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::Quorum,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(1);
+        let encoded = create_test_encoded_state();
+
+        let outcomes = vec![Outcome::Ok(make_ack("r0", 10))];
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(result.quorum_achieved);
+    }
+
+    #[test]
+    fn quorum_with_one_replica_failing() {
+        // Quorum config, 1 replica, it fails: required=1, got 0
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::Quorum,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(1);
+        let encoded = create_test_encoded_state();
+
+        let outcomes = vec![Outcome::Err(make_failure("r0"))];
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(!result.quorum_achieved);
+    }
+
+    #[test]
+    fn all_consistency_one_failure_breaks_quorum() {
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::All,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(5);
+        let encoded = create_test_encoded_state();
+
+        let mut outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>> = Vec::new();
+        for i in 0..4 {
+            outcomes.push(Outcome::Ok(make_ack(&format!("r{i}"), 10)));
+        }
+        outcomes.push(Outcome::Err(make_failure("r4")));
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(!result.quorum_achieved);
+        assert_eq!(result.acks.len(), 4);
+        assert_eq!(result.failures.len(), 1);
+    }
+
+    #[test]
+    fn one_consistency_needs_only_one() {
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::One,
+            ..Default::default()
+        };
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(5);
+        let encoded = create_test_encoded_state();
+
+        // Only first succeeds, rest fail
+        let mut outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>> = Vec::new();
+        outcomes.push(Outcome::Ok(make_ack("r0", 10)));
+        for i in 1..5 {
+            outcomes.push(Outcome::Err(make_failure(&format!("r{i}"))));
+        }
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(result.quorum_achieved);
+    }
+
+    #[test]
+    fn distribution_zero_duration() {
+        let config = DistributionConfig::default();
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+
+        let outcomes = vec![
+            Outcome::Ok(make_ack("r0", 10)),
+            Outcome::Ok(make_ack("r1", 10)),
+            Outcome::Ok(make_ack("r2", 10)),
+        ];
+
+        let result = distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::ZERO);
+
+        assert!(result.quorum_achieved);
+        assert_eq!(result.duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn metrics_accumulate_across_multiple_distributions() {
+        let config = DistributionConfig::default();
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+
+        // First distribution: success
+        let outcomes1 = vec![
+            Outcome::Ok(make_ack("r0", 10)),
+            Outcome::Ok(make_ack("r1", 10)),
+            Outcome::Ok(make_ack("r2", 10)),
+        ];
+        distributor.evaluate_outcomes(&encoded, &replicas, outcomes1, Duration::from_millis(50));
+
+        // Second distribution: failure
+        let outcomes2 = vec![
+            Outcome::Err(make_failure("r0")),
+            Outcome::Err(make_failure("r1")),
+            Outcome::Err(make_failure("r2")),
+        ];
+        distributor.evaluate_outcomes(&encoded, &replicas, outcomes2, Duration::from_millis(50));
+
+        assert_eq!(distributor.metrics.distributions_total, 2);
+        assert_eq!(distributor.metrics.distributions_successful, 1);
+        assert_eq!(distributor.metrics.distributions_failed, 1);
+        assert_eq!(distributor.metrics.acks_received_total, 3);
+        assert_eq!(distributor.metrics.quorum_achieved_count, 1);
+        assert_eq!(distributor.metrics.quorum_missed_count, 1);
+    }
+
+    #[test]
+    fn required_acks_boundary_values() {
+        // Even replica counts
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::Quorum, 2),
+            2
+        ); // (2/2)+1
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::Quorum, 4),
+            3
+        ); // (4/2)+1
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::Quorum, 100),
+            51
+        );
+
+        // Single replica
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::One, 1),
+            1
+        );
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::All, 1),
+            1
+        );
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::Quorum, 1),
+            1
+        );
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::Local, 1),
+            0
+        );
+
+        // Zero replicas
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::Local, 0),
+            0
+        );
+        assert_eq!(
+            SymbolDistributor::required_acks(ConsistencyLevel::One, 0),
+            1
+        ); // Can never be met
+    }
+
+    #[test]
+    fn cancelled_outcomes_not_counted_as_failures() {
+        let config = DistributionConfig::default();
+        let mut distributor = SymbolDistributor::new(config);
+
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+
+        let outcomes = vec![
+            Outcome::Ok(make_ack("r0", 10)),
+            Outcome::Ok(make_ack("r1", 10)),
+            Outcome::Cancelled(crate::types::CancelReason::timeout()),
+        ];
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert!(result.quorum_achieved);
+        assert_eq!(result.acks.len(), 2);
+        // Cancelled is not an Error variant, so failures should be empty
+        assert!(result.failures.is_empty());
+    }
+
+    #[test]
+    fn config_accessors() {
+        let config = DistributionConfig {
+            consistency: ConsistencyLevel::All,
+            ack_timeout: Duration::from_secs(10),
+            max_concurrent: 5,
+            hedge_enabled: true,
+            hedge_delay: Duration::from_millis(100),
+        };
+        let distributor = SymbolDistributor::new(config);
+
+        assert_eq!(distributor.config().consistency, ConsistencyLevel::All);
+        assert_eq!(distributor.config().ack_timeout, Duration::from_secs(10));
+        assert_eq!(distributor.config().max_concurrent, 5);
+        assert!(distributor.config().hedge_enabled);
+    }
+
+    #[test]
+    fn debug_format() {
+        let distributor = SymbolDistributor::new(DistributionConfig::default());
+        let debug = format!("{distributor:?}");
+        assert!(debug.contains("SymbolDistributor"));
+        assert!(debug.contains("config"));
+        assert!(debug.contains("metrics"));
+    }
 }

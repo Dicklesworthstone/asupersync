@@ -407,6 +407,8 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
@@ -435,6 +437,33 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingWaker {
+        wakes: AtomicUsize,
+    }
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                wakes: AtomicUsize::new(0),
+            })
+        }
+
+        fn wake_count(&self) -> usize {
+            self.wakes.load(AtomicOrdering::Acquire)
+        }
+    }
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, AtomicOrdering::AcqRel);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, AtomicOrdering::AcqRel);
         }
     }
 
@@ -476,7 +505,7 @@ mod tests {
             Err(RecvError::Lagged(n)) => {
                 crate::assert_with_log!(n == 1, "lagged count", 1, n);
             }
-            other => panic!("expected lagged, got {other:?}"),
+            other => unreachable!("expected lagged, got {other:?}"),
         }
 
         // next should be 2
@@ -540,5 +569,127 @@ mod tests {
         let rx2_first = block_on(rx2.recv(&cx)).unwrap();
         crate::assert_with_log!(rx2_first == 2, "rx2 first", 2, rx2_first);
         crate::test_complete!("subscribe_sees_future");
+    }
+
+    #[test]
+    fn send_returns_live_receiver_count() {
+        init_test("send_returns_live_receiver_count");
+        let cx = test_cx();
+        let (tx, rx1) = channel::<i32>(10);
+        let rx2 = tx.subscribe();
+        let rx3 = rx2.clone();
+
+        let count = tx.send(&cx, 1).expect("send failed");
+        crate::assert_with_log!(count == 3, "receiver count", 3, count);
+
+        drop(rx1);
+        let count2 = tx.send(&cx, 2).expect("send failed");
+        crate::assert_with_log!(count2 == 2, "receiver count after drop", 2, count2);
+
+        drop(rx2);
+        drop(rx3);
+        let closed = tx.send(&cx, 3);
+        crate::assert_with_log!(
+            matches!(closed, Err(SendError::Closed(3))),
+            "send closed when no receivers",
+            "Err(Closed(3))",
+            format!("{:?}", closed)
+        );
+
+        crate::test_complete!("send_returns_live_receiver_count");
+    }
+
+    #[test]
+    fn recv_waiter_dedup_and_wake_on_send() {
+        init_test("recv_waiter_dedup_and_wake_on_send");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        // No message yet: should pend and register exactly one waiter.
+        let first_pending = matches!(fut.as_mut().poll(&mut ctx), Poll::Pending);
+        crate::assert_with_log!(first_pending, "first poll pending", true, first_pending);
+        let second_pending = matches!(fut.as_mut().poll(&mut ctx), Poll::Pending);
+        crate::assert_with_log!(second_pending, "second poll pending", true, second_pending);
+
+        tx.send(&cx, 123).expect("send failed");
+
+        // Waiter list should not contain duplicates: a single send wakes once.
+        let wake_count = wake_state.wake_count();
+        crate::assert_with_log!(wake_count == 1, "wake count", 1, wake_count);
+
+        let got = match fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(Ok(v)) => v,
+            other => {
+                unreachable!("expected Ready(Ok), got {other:?}");
+            }
+        };
+        crate::assert_with_log!(got == 123, "received", 123, got);
+
+        crate::test_complete!("recv_waiter_dedup_and_wake_on_send");
+    }
+
+    #[test]
+    fn pending_recv_woken_on_sender_drop_returns_closed() {
+        init_test("pending_recv_woken_on_sender_drop_returns_closed");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(rx.recv(&cx));
+        let pending = matches!(fut.as_mut().poll(&mut ctx), Poll::Pending);
+        crate::assert_with_log!(pending, "poll pending", true, pending);
+
+        drop(tx);
+
+        let wake_count = wake_state.wake_count();
+        crate::assert_with_log!(wake_count == 1, "wake count", 1, wake_count);
+
+        let got = match fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(Err(e)) => e,
+            other => {
+                unreachable!("expected Ready(Err), got {other:?}");
+            }
+        };
+        crate::assert_with_log!(
+            got == RecvError::Closed,
+            "recv closed after sender drop",
+            RecvError::Closed,
+            got
+        );
+
+        crate::test_complete!("pending_recv_woken_on_sender_drop_returns_closed");
+    }
+
+    #[test]
+    fn recv_cancelled_does_not_advance_cursor() {
+        init_test("recv_cancelled_does_not_advance_cursor");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        cx.set_cancel_requested(true);
+        let cancelled = block_on(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(cancelled, Err(RecvError::Cancelled)),
+            "recv cancelled",
+            "Err(Cancelled)",
+            format!("{:?}", cancelled)
+        );
+
+        // Clear cancellation and ensure the cursor didn't advance past the first message.
+        cx.set_cancel_requested(false);
+        tx.send(&cx, 7).expect("send failed");
+        let got = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 7, "received after cancel", 7, got);
+
+        crate::test_complete!("recv_cancelled_does_not_advance_cursor");
     }
 }
