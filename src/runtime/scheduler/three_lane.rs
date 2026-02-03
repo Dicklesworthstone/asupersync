@@ -536,9 +536,10 @@ impl ThreeLaneWorker {
         };
         if self.cancel_streak >= effective_limit {
             if let Some(task) = self.try_cancel_work() {
-                self.cancel_streak = 1;
-                self.preemption_metrics.cancel_dispatches += 1;
+                self.cancel_streak += 1;
+                self.record_cancel_dispatch();
                 self.preemption_metrics.fallback_cancel_dispatches += 1;
+                self.cancel_streak = 0;
                 return Some(task);
             }
             self.cancel_streak = 0;
