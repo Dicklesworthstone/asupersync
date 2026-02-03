@@ -180,8 +180,6 @@ impl StateEncoder {
     }
 }
 
-}
-
 /// Rebuild source data bytes from an encoded state by concatenating source symbols.
 fn rebuild_source_bytes(encoded: &EncodedState) -> Vec<u8> {
     let mut sources: Vec<&Symbol> = encoded.source_symbols().collect();
