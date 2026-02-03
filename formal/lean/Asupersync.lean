@@ -114,20 +114,24 @@ structure State (Value Error Panic : Type) where
   now : Time
 
 /-- Observable labels (extend as rules are added). -/
-inductive Label where
+inductive Label (Value Error Panic : Type) where
   | tau
   | spawn (r : RegionId) (t : TaskId)
-  | complete (t : TaskId)
-  | cancel (r : RegionId)
+  | complete (t : TaskId) (outcome : Outcome Value Error CancelReason Panic)
+  | cancel (r : RegionId) (reason : CancelReason)
   | reserve (o : ObligationId)
   | commit (o : ObligationId)
   | abort (o : ObligationId)
-  | close (r : RegionId)
+  | leak (o : ObligationId)
+  | defer (r : RegionId) (f : TaskId)
+  | finalize (r : RegionId) (f : TaskId)
+  | close (r : RegionId) (outcome : Outcome Value Error CancelReason Panic)
+  | tick
   deriving DecidableEq, Repr
 
 /-- Small-step operational relation. -/
 inductive Step (Value Error Panic : Type) :
-  State Value Error Panic -> Label -> State Value Error Panic -> Prop where
+  State Value Error Panic -> Label Value Error Panic -> State Value Error Panic -> Prop where
   -- Rules to be added here (spawn, cancel, join, obligations, close, ...)
 
 end Asupersync
