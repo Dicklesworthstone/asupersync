@@ -184,6 +184,25 @@ lane(t) =
 Timed lane ordering is Earliest-Deadline-First (EDF). When deadlines tie,
 deterministic task-id ordering breaks ties.
 
+### 1.12 Derived predicates (definitions)
+
+We will use the following derived predicates:
+
+```
+Resolved(o)   ≜ O[o].state ∈ {Committed, Aborted}
+
+Quiescent(r)  ≜
+  (∀t ∈ R[r].children: T[t].state = Completed(_)) ∧
+  (∀r' ∈ R[r].subregions: R[r'].state = Closed(_)) ∧
+  ledger(r) = ∅
+
+LoserDrained(t1, t2) ≜
+  T[t1].state = Completed(_) ∧ T[t2].state = Completed(_)
+```
+
+These are explicit names for the notions used throughout the invariants
+and combinator rules.
+
 ---
 
 ## 2. Global State
