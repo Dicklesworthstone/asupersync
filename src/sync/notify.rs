@@ -583,10 +583,8 @@ mod tests {
         crate::assert_with_log!(count == 2, "two waiters after middle drop", 2usize, count);
 
         // Check that the Vec hasn't grown unboundedly: entries should be <= 3
-        {
-            let entries_len = notify.waiters.lock().unwrap().entries.len();
-            crate::assert_with_log!(entries_len <= 3, "entries bounded", true, entries_len <= 3);
-        }
+        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        crate::assert_with_log!(entries_len <= 3, "entries bounded", true, entries_len <= 3);
 
         // Cancel all and verify full cleanup
         drop(fut1);
@@ -596,18 +594,14 @@ mod tests {
         crate::assert_with_log!(count == 0, "no waiters after all drops", 0usize, count);
 
         // Vec should be empty after all waiters gone
-        {
-            let entries_len = notify.waiters.lock().unwrap().entries.len();
-            crate::assert_with_log!(entries_len == 0, "entries empty", 0usize, entries_len);
-        }
+        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        crate::assert_with_log!(entries_len == 0, "entries empty", 0usize, entries_len);
 
         // Verify slot reuse: register new waiters, they should reuse freed slots
         let mut fut_a = notify.notified();
         assert!(poll_once(&mut fut_a).is_pending());
-        {
-            let entries_len = notify.waiters.lock().unwrap().entries.len();
-            crate::assert_with_log!(entries_len == 1, "reused slot", 1usize, entries_len);
-        }
+        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        crate::assert_with_log!(entries_len == 1, "reused slot", 1usize, entries_len);
         drop(fut_a);
 
         crate::test_complete!("test_cancelled_middle_waiter_no_leak");
@@ -626,10 +620,8 @@ mod tests {
         }
 
         // After all cancellations, the slab should be empty
-        {
-            let entries_len = notify.waiters.lock().unwrap().entries.len();
-            crate::assert_with_log!(entries_len == 0, "no growth", 0usize, entries_len);
-        }
+        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        crate::assert_with_log!(entries_len == 0, "no growth", 0usize, entries_len);
 
         crate::test_complete!("test_repeated_cancel_no_growth");
     }

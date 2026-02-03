@@ -272,7 +272,10 @@ mod tests {
 
     #[test]
     fn test_builder_is_clone() {
+        fn assert_clone<T: Clone>(_value: &T) {}
+
         let builder = ServiceBuilder::new().timeout(Duration::from_secs(1));
+        assert_clone(&builder);
         let clone = builder.clone();
         let _ = builder.layer_ref();
         let _ = clone.layer_ref();
