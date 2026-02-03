@@ -437,16 +437,24 @@ impl ReducedMatrix {
             }
         }
 
-        // Find unpaired columns (births without deaths)
+        // Find unpaired columns (births without deaths).
+        // `is_death` tracks column indices (0..cols), while `is_birth` tracks
+        // row indices (pivot positions, 0..rows). These dimensions differ for
+        // non-square matrices, so they must be sized independently.
         let mut is_death = vec![false; self.matrix.cols()];
-        let mut is_birth = vec![false; self.matrix.cols()];
+        let mut is_birth = vec![false; self.matrix.rows()];
         for &(birth, death) in &pairs {
             is_birth[birth] = true;
             is_death[death] = true;
         }
 
         for j in 0..self.matrix.cols() {
-            if !is_death[j] && !is_birth[j] && self.matrix.column(j).is_zero() {
+            // For square (combined filtration) matrices, row `j` and column `j`
+            // refer to the same simplex, so is_birth[j] correctly identifies
+            // columns that are already paired as births. For non-square boundary
+            // operators (rows != cols), the check only applies when `j < rows`.
+            let j_is_birth = j < self.matrix.rows() && is_birth[j];
+            if !is_death[j] && !j_is_birth && self.matrix.column(j).is_zero() {
                 // Zero column that is not paired as a birth — it's an unpaired cycle
                 unpaired.push(j);
             }
@@ -730,5 +738,44 @@ mod tests {
         // Vertex 1 is unpaired (it survives)
         // Actually v1 (row index 1) is not a column, so it won't appear
         // in unpaired. The unpaired list is for zero columns that aren't paired.
+    }
+
+    #[test]
+    fn persistence_pairs_non_square_more_rows_than_cols() {
+        // Regression test: persistence_pairs() must not panic when rows > cols.
+        // Example: ∂₂ for a small complex with 6 edges (rows) and 2 squares (cols).
+        let mut d = BoundaryMatrix::zeros(6, 2);
+        // Square 0 boundary: edges 0, 1, 2
+        d.set(0, 0);
+        d.set(1, 0);
+        d.set(2, 0);
+        // Square 1 boundary: edges 2, 3, 4
+        d.set(2, 1);
+        d.set(3, 1);
+        d.set(4, 1);
+
+        let reduced = d.reduce();
+        // This must not panic (previously indexed is_birth[pivot] with pivot >= cols).
+        let pairs = reduced.persistence_pairs();
+        // Both columns should be non-zero after reduction, giving 2 pairs.
+        assert_eq!(pairs.pairs.len() + pairs.unpaired.len(), 2);
+    }
+
+    #[test]
+    fn persistence_pairs_non_square_more_cols_than_rows() {
+        // persistence_pairs() with cols > rows (e.g., ∂₁ in a dense graph).
+        let mut d = BoundaryMatrix::zeros(3, 5);
+        // 5 edges connecting 3 vertices
+        d.set(0, 0); d.set(1, 0); // edge 0: v0-v1
+        d.set(1, 1); d.set(2, 1); // edge 1: v1-v2
+        d.set(0, 2); d.set(2, 2); // edge 2: v0-v2
+        // edges 3,4 duplicate edge 0
+        d.set(0, 3); d.set(1, 3);
+        d.set(0, 4); d.set(1, 4);
+
+        let reduced = d.reduce();
+        let pairs = reduced.persistence_pairs();
+        // Should not panic and results should be consistent.
+        assert!(pairs.pairs.len() + pairs.unpaired.len() <= 5);
     }
 }
