@@ -280,4 +280,176 @@ mod tests {
         assert_eq!(span.status(), SymbolSpanStatus::Error);
         assert_eq!(span.error_message(), Some("decode failed"));
     }
+
+    #[test]
+    fn span_cancelled_status_transition() {
+        let mut rng = DetRng::new(10);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(3),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let mut span = SymbolSpan::new_encode(ctx, ObjectId::new_for_test(3), Time::from_millis(0));
+        assert_eq!(span.status(), SymbolSpanStatus::InProgress);
+
+        span.complete_cancelled(Time::from_millis(5));
+        assert_eq!(span.status(), SymbolSpanStatus::Cancelled);
+        assert!(span.end_time().is_some());
+        assert!(span.error_message().is_none());
+    }
+
+    #[test]
+    fn span_dropped_status_transition() {
+        let mut rng = DetRng::new(11);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(4),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let sid = SymbolId::new(ObjectId::new_for_test(4), 0, 0);
+        let mut span = SymbolSpan::new_transmit(ctx, sid, Time::from_millis(100));
+        assert_eq!(span.kind(), SymbolSpanKind::Transmit);
+
+        span.mark_dropped(Time::from_millis(200));
+        assert_eq!(span.status(), SymbolSpanStatus::Dropped);
+        assert_eq!(span.duration(), Some(Time::from_millis(100)));
+    }
+
+    #[test]
+    fn span_receive_kind_and_symbol_id() {
+        let mut rng = DetRng::new(12);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(5),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let oid = ObjectId::new_for_test(5);
+        let sid = SymbolId::new(oid, 3, 0);
+        let span = SymbolSpan::new_receive(ctx, sid, Time::from_millis(50));
+
+        assert_eq!(span.kind(), SymbolSpanKind::Receive);
+        assert_eq!(span.symbol_id(), Some(sid));
+        assert_eq!(span.object_id(), Some(oid));
+        assert_eq!(span.status(), SymbolSpanStatus::InProgress);
+    }
+
+    #[test]
+    fn span_decode_has_symbol_count() {
+        let mut rng = DetRng::new(13);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(6),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let span = SymbolSpan::new_decode(ctx, ObjectId::new_for_test(6), 10, Time::from_millis(0));
+        assert_eq!(span.kind(), SymbolSpanKind::Decode);
+        assert_eq!(span.symbol_count(), Some(10));
+        assert!(span.symbol_id().is_none());
+    }
+
+    #[test]
+    fn span_set_symbol_count() {
+        let mut rng = DetRng::new(14);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(7),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let mut span = SymbolSpan::new_encode(ctx, ObjectId::new_for_test(7), Time::from_millis(0));
+        assert!(span.symbol_count().is_none());
+
+        span.set_symbol_count(42);
+        assert_eq!(span.symbol_count(), Some(42));
+    }
+
+    #[test]
+    fn span_attributes_set_and_retrieve() {
+        let mut rng = DetRng::new(15);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(8),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let mut span = SymbolSpan::new_encode(ctx, ObjectId::new_for_test(8), Time::from_millis(0));
+
+        assert!(span.attributes().is_empty());
+
+        span.set_attribute("codec", "raptorq");
+        span.set_attribute("overhead", "1.05");
+
+        assert_eq!(span.attributes().len(), 2);
+        assert_eq!(
+            span.attributes().get("codec").map(|s| s.as_str()),
+            Some("raptorq")
+        );
+        assert_eq!(
+            span.attributes().get("overhead").map(|s| s.as_str()),
+            Some("1.05")
+        );
+    }
+
+    #[test]
+    fn span_attributes_overwrite_existing_key() {
+        let mut rng = DetRng::new(16);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(9),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let mut span = SymbolSpan::new_encode(ctx, ObjectId::new_for_test(9), Time::from_millis(0));
+
+        span.set_attribute("retry", "0");
+        span.set_attribute("retry", "1");
+
+        assert_eq!(span.attributes().len(), 1);
+        assert_eq!(
+            span.attributes().get("retry").map(|s| s.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn span_ok_completion_clears_in_progress() {
+        let mut rng = DetRng::new(17);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(10),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let mut span =
+            SymbolSpan::new_encode(ctx, ObjectId::new_for_test(10), Time::from_millis(0));
+
+        assert_eq!(span.status(), SymbolSpanStatus::InProgress);
+        assert!(span.end_time().is_none());
+        assert!(span.error_message().is_none());
+
+        span.complete_ok(Time::from_millis(50));
+
+        assert_eq!(span.status(), SymbolSpanStatus::Ok);
+        assert_eq!(span.end_time(), Some(Time::from_millis(50)));
+        assert!(span.error_message().is_none());
+    }
+
+    #[test]
+    fn span_context_is_accessible() {
+        let mut rng = DetRng::new(18);
+        let trace_id = TraceId::new_for_test(11);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            trace_id,
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let span = SymbolSpan::new_encode(ctx, ObjectId::new_for_test(11), Time::from_millis(0));
+
+        assert_eq!(span.context().trace_id(), trace_id);
+    }
 }
