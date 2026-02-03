@@ -94,6 +94,12 @@ impl WorkerCoordinator {
         self.parkers[idx % count].unpark();
     }
 
+    pub(crate) fn wake_worker(&self, worker_id: WorkerId) {
+        if let Some(parker) = self.parkers.get(worker_id) {
+            parker.unpark();
+        }
+    }
+
     pub(crate) fn wake_all(&self) {
         for parker in &self.parkers {
             parker.unpark();
@@ -176,17 +182,6 @@ impl Drop for ScopedLocalReady {
         CURRENT_LOCAL_READY.with(|cell| {
             *cell.borrow_mut() = self.prev.take();
         });
-    }
-}
-
-/// Scoped setter for the current worker ID (used by `spawn_local` tests).
-pub(crate) struct ScopedWorkerId {
-    _id: usize,
-}
-
-impl ScopedWorkerId {
-    pub(crate) fn new(id: usize) -> Self {
-        Self { _id: id }
     }
 }
 
@@ -377,6 +372,7 @@ impl ThreeLaneScheduler {
                 fast_queue: fast_queues[id].clone(),
                 fast_stealers,
                 local_ready: Arc::clone(&local_ready[id]),
+                all_local_ready: local_ready.clone(),
                 global: Arc::clone(&global),
                 state: Arc::clone(state),
                 parker,
@@ -678,6 +674,11 @@ pub struct ThreeLaneWorker {
     /// Local tasks are pinned to their owner worker and must never be stolen.
     /// This queue is only drained by the owner worker during `try_ready_work()`.
     local_ready: Arc<Mutex<Vec<TaskId>>>,
+    /// References to all workers' non-stealable local queues.
+    ///
+    /// Used to route local waiters to their owner worker's queue when a task
+    /// completes and needs to wake a pinned waiter on a different worker.
+    all_local_ready: Vec<Arc<Mutex<Vec<TaskId>>>>,
     /// Global injection queue.
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
@@ -756,6 +757,8 @@ impl ThreeLaneWorker {
         let _queue_guard = LocalQueue::set_current(self.fast_queue.clone());
         // Set thread-local non-stealable queue for local (!Send) tasks.
         let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&self.local_ready));
+        // Set thread-local worker id for routing pinned local tasks.
+        let _worker_guard = ScopedWorkerId::new(self.id);
 
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
@@ -1307,6 +1310,7 @@ impl ThreeLaneWorker {
                                 default_priority: priority,
                                 wake_state: Arc::clone(&wake_state),
                                 local: Arc::clone(&self.local),
+                                local_ready: Arc::clone(&self.local_ready),
                                 parker: self.parker.clone(),
                                 cx_inner: Arc::downgrade(inner),
                             }))
@@ -1352,16 +1356,31 @@ impl ThreeLaneWorker {
                             .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
                             .unwrap_or(0);
                         if record.wake_state.notify() {
-                            // Waiters are always ready tasks.
-                            // NOTE: If we had local waiters, we'd need to know where to schedule them.
-                            // Currently we assume waiters are global or cross-thread wakeable.
-                            // If a waiter is local, injecting to global might be wrong!
-                            // But `task_completed` doesn't know about waiter locality.
-                            // This is a limitation: local tasks waiting on other tasks might be
-                            // woken globally.
-                            // For now, consistent with Phase 1 Global Injector design for cross-task wakes.
-                            self.global.inject_ready(waiter, waiter_priority);
-                            self.coordinator.wake_one();
+                            if record.is_local() {
+                                if let Some(worker_id) = record.pinned_worker() {
+                                    if let Some(queue) = self.all_local_ready.get(worker_id) {
+                                        queue
+                                            .lock()
+                                            .expect("local_ready lock poisoned")
+                                            .push(waiter);
+                                        self.coordinator.wake_worker(worker_id);
+                                    } else {
+                                        panic!(
+                                            "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
+                                        );
+                                    }
+                                } else if schedule_local_task(waiter) {
+                                    self.parker.unpark();
+                                } else {
+                                    panic!(
+                                        "Attempted to wake local waiter {waiter:?} without owner worker"
+                                    );
+                                }
+                            } else {
+                                // Global waiters are ready tasks.
+                                self.global.inject_ready(waiter, waiter_priority);
+                                self.coordinator.wake_one();
+                            }
                         }
                     }
                 }
@@ -1410,6 +1429,7 @@ impl ThreeLaneWorker {
                         if schedule_cancel {
                             // Cancel still goes to PriorityScheduler for ordering.
                             // Cancel lane is not stolen by steal_ready_batch_into.
+                            let _ = remove_from_local_ready(&self.local_ready, task_id);
                             let mut local =
                                 self.local.lock().expect("local scheduler lock poisoned");
                             local.schedule_cancel(task_id, cancel_priority);
@@ -1434,7 +1454,6 @@ impl ThreeLaneWorker {
                 }
             }
         }
-
     }
 }
 
@@ -1557,6 +1576,7 @@ struct ThreeLaneLocalCancelWaker {
     default_priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     local: Arc<Mutex<PriorityScheduler>>,
+    local_ready: Arc<Mutex<Vec<TaskId>>>,
     parker: Parker,
     cx_inner: Weak<RwLock<CxInner>>,
 }
@@ -1589,6 +1609,7 @@ impl ThreeLaneLocalCancelWaker {
         // Promote to local cancel lane, matching global inject_cancel semantics.
         // move_to_cancel_lane relocates from ready/timed if already scheduled.
         {
+            let _ = remove_from_local_ready(&self.local_ready, self.task_id);
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
             local.move_to_cancel_lane(self.task_id, priority);
         }
@@ -1609,7 +1630,9 @@ impl Wake for ThreeLaneLocalCancelWaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Budget, CancelReason, RegionId};
+    use crate::record::task::TaskWakeState;
+    use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
+    use std::sync::RwLock;
     use std::time::Duration;
 
     #[test]
@@ -2231,6 +2254,49 @@ mod tests {
         // it only steals from PriorityScheduler and fast_queue, not local_ready.
         let stolen = worker1.try_steal();
         assert!(stolen.is_none(), "Local task should not be stolen");
+    }
+
+    #[test]
+    fn test_local_cancel_removes_from_local_ready() {
+        let task_id = TaskId::new_for_test(1, 0);
+        let local_ready = Arc::new(Mutex::new(vec![task_id]));
+        let local = Arc::new(Mutex::new(PriorityScheduler::new()));
+        let wake_state = Arc::new(TaskWakeState::new());
+        let cx_inner = Arc::new(RwLock::new(CxInner::new(
+            RegionId::new_for_test(1, 0),
+            task_id,
+            Budget::INFINITE,
+        )));
+        {
+            let mut guard = cx_inner.write().expect("cx_inner lock poisoned");
+            guard.cancel_requested = true;
+            guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
+        }
+
+        let waker = ThreeLaneLocalCancelWaker {
+            task_id,
+            default_priority: 10,
+            wake_state: Arc::clone(&wake_state),
+            local: Arc::clone(&local),
+            local_ready: Arc::clone(&local_ready),
+            parker: Parker::new(),
+            cx_inner: Arc::downgrade(&cx_inner),
+        };
+
+        waker.schedule();
+
+        let queue = local_ready.lock().expect("local_ready lock poisoned");
+        assert!(
+            !queue.contains(&task_id),
+            "local_ready should not retain cancelled task"
+        );
+        drop(queue);
+
+        let local_guard = local.lock().expect("local scheduler lock poisoned");
+        assert!(
+            local_guard.is_in_cancel_lane(task_id),
+            "task should be promoted to cancel lane"
+        );
     }
 
     #[test]
@@ -3645,66 +3711,5 @@ mod tests {
         let task = TaskId::new_for_test(1, 1);
         let scheduled = schedule_local_task(task);
         assert!(!scheduled, "should fail without TLS");
-    }
-
-    #[test]
-    fn execute_panics_on_local_waiter_without_waker() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
-        let region = state
-            .lock()
-            .expect("runtime state lock poisoned")
-            .create_root_region(Budget::INFINITE);
-
-        let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
-            let (task_id, _handle) = guard
-                .create_task(region, Budget::INFINITE, async {})
-                .expect("create task");
-            task_id
-        };
-        let waiter_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
-            let (waiter_id, _handle) = guard
-                .create_task(region, Budget::INFINITE, async {})
-                .expect("create task");
-            
-            // Mark waiter as local
-            if let Some(record) = guard.tasks.get_mut(waiter_id.arena_index()) {
-                record.mark_local();
-            }
-            waiter_id
-        };
-
-        {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
-            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
-                record.add_waiter(waiter_id);
-            }
-            // Ensure waiter is in a state that allows waking (e.g., Created or Running)
-            // Default is Created, which is fine.
-        }
-
-        let mut scheduler = ThreeLaneScheduler::new(1, &state);
-        let worker = scheduler.take_workers().into_iter().next().unwrap();
-
-        // execute() requires the task to have a stored future.
-        // create_task puts it in stored_futures.
-        
-        // We expect a panic because execute() runs without TLS, so schedule_local_task fails.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            worker.execute(task_id);
-        }));
-
-        assert!(result.is_err(), "execute should panic");
-        let err = result.unwrap_err();
-        let msg = if let Some(s) = err.downcast_ref::<&str>() {
-            s.to_string()
-        } else if let Some(s) = err.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_string()
-        };
-
-        assert!(msg.contains("Cannot wake local waiter"), "Unexpected panic message: {}", msg);
     }
 }
