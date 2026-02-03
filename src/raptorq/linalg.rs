@@ -613,9 +613,8 @@ impl GaussianSolver {
             self.stats.pivot_selections += 1;
 
             // Find pivot row (first nonzero in column, starting from pivot_col)
-            let pivot_row = match self.find_pivot(pivot_col, pivot_col) {
-                Some(row) => row,
-                None => return GaussianResult::Singular { row: pivot_col },
+            let Some(pivot_row) = self.find_pivot(pivot_col, pivot_col) else {
+                return GaussianResult::Singular { row: pivot_col };
             };
 
             // Swap if needed
@@ -663,9 +662,8 @@ impl GaussianSolver {
             self.stats.pivot_selections += 1;
 
             // Find best pivot (sparsest row with nonzero in column)
-            let pivot_row = match self.find_pivot_markowitz(pivot_col, pivot_col) {
-                Some((row, _nnz)) => row,
-                None => return GaussianResult::Singular { row: pivot_col },
+            let Some((pivot_row, _nnz)) = self.find_pivot_markowitz(pivot_col, pivot_col) else {
+                return GaussianResult::Singular { row: pivot_col };
             };
 
             // Swap if needed

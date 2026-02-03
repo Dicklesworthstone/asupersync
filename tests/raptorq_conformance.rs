@@ -218,7 +218,9 @@ fn full_roundtrip_deterministic() {
         let l = decoder.params().l;
 
         // Drop some symbols
-        let drop: Vec<usize> = (0..k).filter(|i| (i + seed as usize) % 3 == 0).collect();
+        let drop: Vec<usize> = (0..k)
+            .filter(|i| (i + seed as usize).is_multiple_of(3))
+            .collect();
         let max_repair = (l + drop.len()) as u32;
         let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair);
 
@@ -284,7 +286,9 @@ fn edge_case_tiny_symbol_size() {
 
     let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
 
-    let result = decoder.decode(&received).expect("tiny symbol decode failed");
+    let result = decoder
+        .decode(&received)
+        .expect("tiny symbol decode failed");
     assert_eq!(result.source, source, "tiny symbol roundtrip failed");
 }
 
@@ -301,7 +305,9 @@ fn edge_case_large_symbol_size() {
 
     let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
 
-    let result = decoder.decode(&received).expect("large symbol decode failed");
+    let result = decoder
+        .decode(&received)
+        .expect("large symbol decode failed");
     assert_eq!(result.source, source, "large symbol roundtrip failed");
 }
 
@@ -351,8 +357,7 @@ fn insufficient_symbols_fails() {
     let err = decoder.decode(&received).unwrap_err();
     assert!(
         matches!(err, DecodeError::InsufficientSymbols { .. }),
-        "expected InsufficientSymbols, got {:?}",
-        err
+        "expected InsufficientSymbols, got {err:?}"
     );
 }
 
@@ -373,8 +378,7 @@ fn symbol_size_mismatch_fails() {
     let err = decoder.decode(&received).unwrap_err();
     assert!(
         matches!(err, DecodeError::SymbolSizeMismatch { .. }),
-        "expected SymbolSizeMismatch, got {:?}",
-        err
+        "expected SymbolSizeMismatch, got {err:?}"
     );
 }
 
@@ -384,6 +388,7 @@ fn symbol_size_mismatch_fails() {
 
 /// Fuzz test with deterministic seeds for reproducibility.
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn fuzz_roundtrip_various_sizes() {
     // Test matrix: (k, symbol_size, loss_ratio, seed)
     let test_cases = [
@@ -416,7 +421,7 @@ fn fuzz_roundtrip_various_sizes() {
 
         let result = decoder
             .decode(&received)
-            .unwrap_or_else(|e| panic!("fuzz case k={k}, seed={seed} failed: {:?}", e));
+            .unwrap_or_else(|e| panic!("fuzz case k={k}, seed={seed} failed: {e:?}"));
 
         for (i, original) in source.iter().enumerate() {
             assert_eq!(
@@ -487,7 +492,7 @@ fn stress_many_small_decodes() {
 
         let result = decoder
             .decode(&received)
-            .unwrap_or_else(|e| panic!("stress iteration {iteration} failed: {:?}", e));
+            .unwrap_or_else(|e| panic!("stress iteration {iteration} failed: {e:?}"));
 
         assert_eq!(
             result.source, source,
@@ -525,8 +530,9 @@ fn soliton_distribution_coverage() {
 
         // Low degrees should dominate
         let low_total: u32 = degrees[1..=5.min(k)].iter().sum();
+        let samples_u32 = u32::try_from(samples).unwrap_or(u32::MAX);
         assert!(
-            low_total > samples as u32 / 2,
+            low_total > samples_u32 / 2,
             "k={k}: low degrees should dominate, got {low_total}/{samples}"
         );
     }
@@ -573,6 +579,7 @@ fn params_consistency() {
 }
 
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn params_overhead_bounded() {
     // Overhead should be reasonable (not excessive)
     for k in [10, 50, 100, 500] {
@@ -622,8 +629,7 @@ fn gf256_alpha_powers() {
         let val = current.raw() as usize;
         assert!(
             !seen[val],
-            "alpha^{i} = {} already seen, not a generator",
-            val
+            "alpha^{i} = {val} already seen, not a generator"
         );
         seen[val] = true;
         current *= Gf256::ALPHA;
