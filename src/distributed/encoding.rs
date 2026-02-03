@@ -178,8 +178,8 @@ impl StateEncoder {
             symbols_needed as u16,
         )
     }
-
 }
+
 }
 
 /// Rebuild source data bytes from an encoded state by concatenating source symbols.
