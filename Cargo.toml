@@ -149,7 +149,7 @@ conformance = { package = "asupersync-conformance", path = "conformance" }
 tempfile = "3.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-opentelemetry_sdk = { version = "0.28", default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "0.28", default-features = false, features = ["metrics", "testing"] }
 lz4_flex = "0.11"
 toml = "0.8"
 # Certificate generation for TLS/QUIC tests

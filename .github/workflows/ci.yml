@@ -121,13 +121,16 @@ jobs:
 
       - name: Run coverage
         env:
-          COVERAGE_MIN_LINES: 1
+          COVERAGE_MIN_LINE_PCT: 5
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --all-features \
+          cargo llvm-cov --lib --all-features \
             --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
-            --fail-under-lines "$COVERAGE_MIN_LINES" \
-            --text --output-path coverage/coverage.txt
+            --fail-under-lines "$COVERAGE_MIN_LINE_PCT" \
+            --lcov --output-path coverage/lcov.info
+          cargo llvm-cov --lib --all-features \
+            --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+            --text --output-path coverage/coverage.txt --no-run
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -135,6 +138,12 @@ jobs:
           name: llvm-cov-report
           path: coverage/
           retention-days: 30
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
 
   conformance:
     name: Conformance Tests
@@ -348,26 +357,3 @@ jobs:
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Generate coverage report
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
