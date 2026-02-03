@@ -548,6 +548,7 @@ impl ThreeLaneWorker {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn execute(&self, task_id: TaskId) {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
@@ -604,25 +605,26 @@ impl ThreeLaneWorker {
             })),
         };
         // Create/reuse cancel waker if cx_inner exists
-        let cancel_waker_for_cache = if let Some(inner) = cx_inner.as_ref() {
-            let cancel_waker = match cached_cancel_waker {
-                Some((w, cached_priority)) if cached_priority == priority => w,
-                _ => Waker::from(Arc::new(CancelLaneWaker {
-                    task_id,
-                    default_priority: priority,
-                    wake_state: Arc::clone(&wake_state),
-                    global: Arc::clone(&self.global),
-                    parker: self.parker.clone(),
-                    cx_inner: Arc::downgrade(inner),
-                })),
-            };
-            if let Ok(mut guard) = inner.write() {
-                guard.cancel_waker = Some(cancel_waker.clone());
-            }
-            Some((cancel_waker, priority))
-        } else {
-            None
-        };
+        let cancel_waker_for_cache = cx_inner.as_ref().map_or_else(
+            || None,
+            |inner| {
+                let cancel_waker = match cached_cancel_waker {
+                    Some((w, cached_priority)) if cached_priority == priority => w,
+                    _ => Waker::from(Arc::new(CancelLaneWaker {
+                        task_id,
+                        default_priority: priority,
+                        wake_state: Arc::clone(&wake_state),
+                        global: Arc::clone(&self.global),
+                        parker: self.parker.clone(),
+                        cx_inner: Arc::downgrade(inner),
+                    })),
+                };
+                if let Ok(mut guard) = inner.write() {
+                    guard.cancel_waker = Some(cancel_waker.clone());
+                }
+                Some((cancel_waker, priority))
+            },
+        );
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
