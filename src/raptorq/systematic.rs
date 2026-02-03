@@ -473,17 +473,20 @@ fn gf256_mul_slice_inplace(data: &mut [u8], c: Gf256) {
 /// RFC 6330 Section 5.3.3.3: LDPC pre-coding relationships.
 ///
 /// Two parts:
-/// 1. For i = 0..B-1: each intermediate symbol C[i] participates in 3 LDPC rows
-///    using a circulant-like pattern with step a = 1 + floor(i/S).
-/// 2. For i = 0..S-1: each LDPC row i connects to PI symbols C[W+a] and C[W+b]
-///    where a = i % P and b = (i+1) % P.
+/// 1. For i = 0..B-1: each source-like intermediate symbol C[i] participates
+///    in 3 LDPC rows via a circulant pattern with step a = 1 + floor(i/S).
+/// 2. Identity block: row i has coefficient 1 in column B+i (= K+i), tying
+///    each LDPC row to its check symbol C[K+i].
+///
+/// This produces a block structure where LDPC rows span columns 0..K+S-1
+/// (source + LDPC check symbols) but never touch PI columns, keeping the
+/// overall constraint matrix lower block-triangular with identity diagonal
+/// blocks (LT -> LDPC -> HDPC).
 fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
     let b = params.b;
-    let w = params.w;
-    let p = params.p;
 
-    // Part 1: For each of the first B intermediate symbols
+    // Part 1: Circulant connections to source-like symbols.
     // RFC 6330: For i = 0, ..., B-1
     //   a = 1 + floor(i/S)
     //   b = i % S
@@ -493,7 +496,6 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
     for i in 0..b {
         let a = 1 + i / s.max(1);
         let mut row = i % s;
-        // Each C[i] participates in 3 LDPC rows
         matrix.add_assign(row, i, Gf256::ONE);
         row = (row + a) % s;
         matrix.add_assign(row, i, Gf256::ONE);
@@ -501,19 +503,12 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
         matrix.add_assign(row, i, Gf256::ONE);
     }
 
-    // Part 2: Connect LDPC rows to PI symbols
-    // RFC 6330: For i = 0, ..., S-1
-    //   a = i % P
-    //   b = (i+1) % P
-    //   D[i] = D[i] + C[W+a] + C[W+b]
-    if p > 0 {
-        for i in 0..s {
-            let a = i % p;
-            let b_idx = (i + 1) % p;
-            // Add connections to PI symbols (columns W+a and W+b)
-            matrix.add_assign(i, w + a, Gf256::ONE);
-            matrix.add_assign(i, w + b_idx, Gf256::ONE);
-        }
+    // Part 2: LDPC check symbol identity block.
+    // RFC 6330: For i = 0, ..., S-1: A[i][B+i] = 1
+    // Each LDPC row i is tied to check symbol C[B+i] = C[K+i].
+    let k = params.k;
+    for i in 0..s {
+        matrix.set(i, k + i, Gf256::ONE);
     }
 }
 
@@ -915,10 +910,7 @@ impl SystematicEncoder {
 
         // Invariant: ESIs are strictly ascending 0..K
         debug_assert!(
-            symbols
-                .iter()
-                .enumerate()
-                .all(|(i, s)| s.esi == i as u32),
+            symbols.iter().enumerate().all(|(i, s)| s.esi == i as u32),
             "systematic emission ESIs must be 0..K in order"
         );
 
@@ -974,9 +966,7 @@ impl SystematicEncoder {
             "repair emission ESIs must be monotonically ascending"
         );
         debug_assert!(
-            result
-                .iter()
-                .all(|s| s.esi >= self.params.k as u32),
+            result.iter().all(|s| s.esi >= self.params.k as u32),
             "repair ESIs must be >= K"
         );
 
@@ -1298,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn different_seeds_different_intermediate() {
+    fn different_seeds_different_repair() {
         let k = 4;
         let symbol_size = 32;
         let source = make_source_symbols(k, symbol_size);
@@ -1306,12 +1296,14 @@ mod tests {
         let enc1 = SystematicEncoder::new(&source, symbol_size, 1).unwrap();
         let enc2 = SystematicEncoder::new(&source, symbol_size, 2).unwrap();
 
-        // At least one intermediate symbol should differ
-        let any_diff = (0..enc1.params().l)
-            .any(|i| enc1.intermediate_symbol(i) != enc2.intermediate_symbol(i));
-        assert!(
-            any_diff,
-            "different seeds should produce different intermediates"
+        // Intermediate symbols are determined solely by the constraint matrix
+        // and source data, so they are seed-independent. Repair symbols use
+        // the seed, so those must differ.
+        let esi = k as u32; // first repair ESI
+        assert_ne!(
+            enc1.repair_symbol(esi),
+            enc2.repair_symbol(esi),
+            "different seeds should produce different repair symbols"
         );
     }
 
@@ -1523,7 +1515,11 @@ mod tests {
 
         let batch2 = enc.emit_repair(5);
         assert_eq!(enc.next_repair_esi(), k as u32 + 8);
-        assert_eq!(batch2[0].esi, k as u32 + 3, "second batch continues from cursor");
+        assert_eq!(
+            batch2[0].esi,
+            k as u32 + 3,
+            "second batch continues from cursor"
+        );
         assert_eq!(batch2[4].esi, k as u32 + 7);
     }
 
