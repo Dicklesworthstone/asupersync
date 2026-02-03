@@ -47,13 +47,22 @@ impl DetRng {
 
     /// Generates a pseudo-random usize value in the range [0, bound).
     ///
+    /// Uses rejection sampling to avoid modulo bias.
+    ///
     /// # Panics
     ///
     /// Panics if `bound` is zero.
     #[allow(clippy::cast_possible_truncation)]
     pub fn next_usize(&mut self, bound: usize) -> usize {
         assert!(bound > 0, "bound must be non-zero");
-        (self.next_u64() as usize) % bound
+        let bound_u64 = bound as u64;
+        let threshold = u64::MAX - (u64::MAX % bound_u64);
+        loop {
+            let value = self.next_u64();
+            if value < threshold {
+                return (value % bound_u64) as usize;
+            }
+        }
     }
 
     /// Generates a pseudo-random boolean.

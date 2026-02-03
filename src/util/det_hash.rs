@@ -34,14 +34,6 @@ impl Hasher for DetHasher {
         }
     }
 
-    fn write_u8(&mut self, i: u8) {
-        self.state = self.state.wrapping_mul(Self::MULTIPLIER) ^ u64::from(i);
-    }
-
-    fn write_u64(&mut self, i: u64) {
-        self.state = self.state.wrapping_mul(Self::MULTIPLIER) ^ i;
-    }
-
     fn finish(&self) -> u64 {
         // Final mixing for better distribution.
         let mut h = self.state;
@@ -66,10 +58,16 @@ impl BuildHasher for DetBuildHasher {
     }
 }
 
-/// Deterministic `HashMap` with reproducible iteration order across runs.
+/// `HashMap` with deterministic hashing (same keys produce same bucket placement).
+///
+/// Note: iteration order is NOT guaranteed to be reproducible across runs or
+/// Rust versions. Use `BTreeMap` if deterministic iteration order is required.
 pub type DetHashMap<K, V> = std::collections::HashMap<K, V, DetBuildHasher>;
 
-/// Deterministic `HashSet` with reproducible iteration order across runs.
+/// `HashSet` with deterministic hashing (same keys produce same bucket placement).
+///
+/// Note: iteration order is NOT guaranteed to be reproducible across runs or
+/// Rust versions. Use `BTreeSet` if deterministic iteration order is required.
 pub type DetHashSet<K> = std::collections::HashSet<K, DetBuildHasher>;
 
 /// Deterministic ordered collections.
@@ -137,17 +135,20 @@ mod tests {
     }
 
     #[test]
-    fn det_hasher_write_u8() {
-        let mut h = DetHasher::default();
-        h.write_u8(42);
-        let _ = h.finish(); // Should not panic
-    }
+    fn det_hasher_write_u64_consistent_with_write() {
+        // Verify that write_u64 (default impl) and write produce the same hash
+        // for the same logical value, satisfying the Hasher contract.
+        let mut h1 = DetHasher::default();
+        h1.write_u64(0xDEAD_BEEF_CAFE_BABE);
 
-    #[test]
-    fn det_hasher_write_u64() {
-        let mut h = DetHasher::default();
-        h.write_u64(0xDEAD_BEEF_CAFE_BABE);
-        let _ = h.finish(); // Should not panic
+        let mut h2 = DetHasher::default();
+        h2.write(&0xDEAD_BEEF_CAFE_BABEu64.to_ne_bytes());
+
+        assert_eq!(
+            h1.finish(),
+            h2.finish(),
+            "write_u64 must match write for same bytes",
+        );
     }
 
     // =========================================================================

@@ -91,7 +91,7 @@ impl DetEntropy {
         ((u64::from(idx.generation())) << 32) | u64::from(idx.index())
     }
 
-    fn mix_seed(mut seed: u64) -> u64 {
+    pub(crate) fn mix_seed(mut seed: u64) -> u64 {
         seed ^= seed >> 30;
         seed = seed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
         seed ^= seed >> 27;
@@ -149,11 +149,11 @@ impl ThreadLocalEntropy {
     /// Deterministically derive an entropy source for a worker index.
     #[must_use]
     pub fn for_thread(&self, thread_index: usize) -> DetEntropy {
-        let seed = self
+        let combined = self
             .global_seed
-            .wrapping_mul(0x517c_c1b7_2722_0a95)
+            .wrapping_add(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(thread_index as u64);
-        DetEntropy::new(seed)
+        DetEntropy::new(DetEntropy::mix_seed(combined))
     }
 }
 
@@ -395,6 +395,25 @@ mod tests {
         let e1 = tl.for_thread(1);
 
         assert_ne!(e0.next_u64(), e1.next_u64());
+    }
+
+    #[test]
+    fn thread_local_entropy_zero_seed_not_correlated() {
+        // Regression: global_seed=0 previously produced correlated thread seeds
+        // because 0 * constant = 0, making seeds just 0, 1, 2, ...
+        let tl = ThreadLocalEntropy::new(0);
+
+        let e0 = tl.for_thread(0);
+        let e1 = tl.for_thread(1);
+        let e2 = tl.for_thread(2);
+
+        let v0 = e0.next_u64();
+        let v1 = e1.next_u64();
+        let v2 = e2.next_u64();
+
+        assert_ne!(v0, v1);
+        assert_ne!(v1, v2);
+        assert_ne!(v0, v2);
     }
 
     // =========================================================================
