@@ -315,11 +315,10 @@ pub fn topology_report_json(
 
     let baseline_metrics = report_metrics(baseline);
     let topology_metrics = report_metrics(topology);
-    let top_ledger_summaries: Vec<String> =
-        top_ledgers
-            .iter()
-            .map(asupersync::trace::EvidenceLedger::summary)
-            .collect();
+    let top_ledger_summaries: Vec<String> = top_ledgers
+        .iter()
+        .map(asupersync::trace::EvidenceLedger::summary)
+        .collect();
 
     let scoring_disabled = top_ledgers.iter().all(|ledger| ledger.entries.is_empty());
     let scoring_note = if scoring_overhead_ms.is_some() {

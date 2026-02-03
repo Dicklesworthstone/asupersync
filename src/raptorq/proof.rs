@@ -724,12 +724,15 @@ mod tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC with zero data)
+        let mut received = decoder.constraint_symbols();
 
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+
+        // Add repair symbols
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
@@ -765,12 +768,15 @@ mod tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC with zero data)
+        let mut received = decoder.constraint_symbols();
 
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+
+        // Add repair symbols
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);

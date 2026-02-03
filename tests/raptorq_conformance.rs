@@ -642,3 +642,597 @@ fn gf256_alpha_powers() {
         "alpha^255 should equal 1 (group order)"
     );
 }
+
+// ============================================================================
+// E2E: EncodingPipeline/DecodingPipeline + proof artifacts (bd-15c5)
+// ============================================================================
+
+mod pipeline_e2e {
+    use super::*;
+    use asupersync::config::EncodingConfig;
+    use asupersync::decoding::{
+        DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult,
+    };
+    use asupersync::encoding::EncodingPipeline;
+    use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+    use asupersync::raptorq::proof::{FailureReason, ProofOutcome};
+    use asupersync::raptorq::systematic::ConstraintMatrix;
+    use asupersync::security::tag::AuthenticationTag;
+    use asupersync::security::AuthenticatedSymbol;
+    use asupersync::types::resource::{PoolConfig, SymbolPool};
+    use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
+    use asupersync::util::DetRng;
+    use serde::Serialize;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    #[derive(Clone, Copy)]
+    enum BurstPosition {
+        Early,
+        Late,
+    }
+
+    #[derive(Clone, Copy)]
+    enum LossPattern {
+        None,
+        Random {
+            seed: u64,
+            drop_per_mille: u16,
+        },
+        Burst {
+            drop_per_mille: u16,
+            position: BurstPosition,
+        },
+        Insufficient,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Scenario {
+        name: &'static str,
+        loss: LossPattern,
+        expect_success: bool,
+    }
+
+    #[derive(Serialize)]
+    struct ConfigReport {
+        symbol_size: u16,
+        max_block_size: usize,
+        repair_overhead: f64,
+        min_overhead: usize,
+        seed: u64,
+        block_k: usize,
+        block_count: usize,
+        data_len: usize,
+    }
+
+    #[derive(Serialize)]
+    struct LossReport {
+        kind: &'static str,
+        seed: Option<u64>,
+        drop_per_mille: Option<u16>,
+        drop_count: usize,
+        keep_count: usize,
+        burst_start: Option<usize>,
+        burst_len: Option<usize>,
+    }
+
+    #[derive(Serialize)]
+    struct SymbolCounts {
+        total: usize,
+        source: usize,
+        repair: usize,
+    }
+
+    #[derive(Serialize)]
+    struct SymbolReport {
+        generated: SymbolCounts,
+        received: SymbolCounts,
+    }
+
+    #[derive(Serialize)]
+    struct OutcomeReport {
+        success: bool,
+        reject_reason: Option<String>,
+        decoded_bytes: usize,
+    }
+
+    #[derive(Serialize)]
+    struct ProofReport {
+        hash: u64,
+        summary_bytes: usize,
+        outcome: String,
+        received_total: usize,
+        received_source: usize,
+        received_repair: usize,
+        peeling_solved: usize,
+        inactivated: usize,
+        pivots: usize,
+        row_ops: usize,
+        equations_used: usize,
+    }
+
+    #[derive(Serialize)]
+    struct Report {
+        scenario: &'static str,
+        config: ConfigReport,
+        loss: LossReport,
+        symbols: SymbolReport,
+        outcome: OutcomeReport,
+        proof: ProofReport,
+    }
+
+    #[derive(Serialize)]
+    struct ProofSummary {
+        version: u8,
+        hash: u64,
+        received_total: usize,
+        peeling_solved: usize,
+        inactivated: usize,
+        pivots: usize,
+        row_ops: usize,
+        outcome: String,
+    }
+
+    fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
+        let obj = object_id.as_u128();
+        let hi = (obj >> 64) as u64;
+        let lo = obj as u64;
+        let mut seed = hi ^ lo.rotate_left(13);
+        seed ^= u64::from(sbn) << 56;
+        if seed == 0 {
+            1
+        } else {
+            seed
+        }
+    }
+
+    fn pool_for(symbol_size: u16) -> SymbolPool {
+        SymbolPool::new(PoolConfig::new(symbol_size, 64, 256, true, 64))
+    }
+
+    fn make_bytes(len: usize, seed: u64) -> Vec<u8> {
+        let mut rng = DetRng::new(seed);
+        let mut data = vec![0u8; len];
+        rng.fill_bytes(&mut data);
+        data
+    }
+
+    fn count_symbols(symbols: &[Symbol]) -> SymbolCounts {
+        let mut source = 0usize;
+        let mut repair = 0usize;
+        for symbol in symbols {
+            match symbol.kind() {
+                SymbolKind::Source => source += 1,
+                SymbolKind::Repair => repair += 1,
+            }
+        }
+        SymbolCounts {
+            total: symbols.len(),
+            source,
+            repair,
+        }
+    }
+
+    fn hash_symbols(symbols: &[Symbol]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for symbol in symbols {
+            symbol.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn choose_drop_count(total: usize, min_keep: usize, drop_per_mille: u16) -> usize {
+        if total <= min_keep {
+            return 0;
+        }
+        let max_drop = total - min_keep;
+        let desired = (total.saturating_mul(usize::from(drop_per_mille)) + 999) / 1000;
+        desired.min(max_drop)
+    }
+
+    fn apply_loss(
+        symbols: &[Symbol],
+        min_keep: usize,
+        loss: LossPattern,
+    ) -> (Vec<Symbol>, LossReport) {
+        let total = symbols.len();
+        match loss {
+            LossPattern::None => (
+                symbols.to_vec(),
+                LossReport {
+                    kind: "none",
+                    seed: None,
+                    drop_per_mille: None,
+                    drop_count: 0,
+                    keep_count: total,
+                    burst_start: None,
+                    burst_len: None,
+                },
+            ),
+            LossPattern::Random {
+                seed,
+                drop_per_mille,
+            } => {
+                let drop_count = choose_drop_count(total, min_keep, drop_per_mille);
+                let mut indices: Vec<usize> = (0..total).collect();
+                let mut rng = DetRng::new(seed);
+                rng.shuffle(&mut indices);
+                let mut drop = vec![false; total];
+                for idx in indices.into_iter().take(drop_count) {
+                    drop[idx] = true;
+                }
+                let kept: Vec<Symbol> = symbols
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, sym)| (!drop[idx]).then(|| sym.clone()))
+                    .collect();
+                (
+                    kept,
+                    LossReport {
+                        kind: "random",
+                        seed: Some(seed),
+                        drop_per_mille: Some(drop_per_mille),
+                        drop_count,
+                        keep_count: total - drop_count,
+                        burst_start: None,
+                        burst_len: None,
+                    },
+                )
+            }
+            LossPattern::Burst {
+                drop_per_mille,
+                position,
+            } => {
+                let drop_count = choose_drop_count(total, min_keep, drop_per_mille);
+                let start = match position {
+                    BurstPosition::Early => 0,
+                    BurstPosition::Late => total.saturating_sub(drop_count),
+                };
+                let end = start.saturating_add(drop_count);
+                let kept: Vec<Symbol> = symbols
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, sym)| (idx < start || idx >= end).then(|| sym.clone()))
+                    .collect();
+                (
+                    kept,
+                    LossReport {
+                        kind: "burst",
+                        seed: None,
+                        drop_per_mille: Some(drop_per_mille),
+                        drop_count,
+                        keep_count: total - drop_count,
+                        burst_start: Some(start),
+                        burst_len: Some(drop_count),
+                    },
+                )
+            }
+            LossPattern::Insufficient => {
+                let keep_count = min_keep.saturating_sub(1).min(total);
+                let kept: Vec<Symbol> = symbols.iter().take(keep_count).cloned().collect();
+                (
+                    kept,
+                    LossReport {
+                        kind: "insufficient",
+                        seed: None,
+                        drop_per_mille: None,
+                        drop_count: total - keep_count,
+                        keep_count,
+                        burst_start: None,
+                        burst_len: None,
+                    },
+                )
+            }
+        }
+    }
+
+    fn constraint_row_equation(
+        constraints: &ConstraintMatrix,
+        row: usize,
+    ) -> (Vec<usize>, Vec<Gf256>) {
+        let mut columns = Vec::new();
+        let mut coefficients = Vec::new();
+        for col in 0..constraints.cols {
+            let coeff = constraints.get(row, col);
+            if !coeff.is_zero() {
+                columns.push(col);
+                coefficients.push(coeff);
+            }
+        }
+        (columns, coefficients)
+    }
+
+    fn build_received_symbols(
+        symbols: &[Symbol],
+        object_id: ObjectId,
+        k: usize,
+        symbol_size: usize,
+        sbn: u8,
+    ) -> Vec<ReceivedSymbol> {
+        let seed = seed_for_block(object_id, sbn);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let params = decoder.params();
+        let base_rows = params.s + params.h;
+        let constraints = ConstraintMatrix::build(params, seed);
+
+        let mut received = decoder.constraint_symbols();
+
+        for symbol in symbols.iter().filter(|sym| sym.sbn() == sbn) {
+            match symbol.kind() {
+                SymbolKind::Source => {
+                    let esi = symbol.esi() as usize;
+                    let row = base_rows + esi;
+                    let (columns, coefficients) = constraint_row_equation(&constraints, row);
+                    received.push(ReceivedSymbol {
+                        esi: symbol.esi(),
+                        is_source: true,
+                        columns,
+                        coefficients,
+                        data: symbol.data().to_vec(),
+                    });
+                }
+                SymbolKind::Repair => {
+                    let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                    received.push(ReceivedSymbol {
+                        esi: symbol.esi(),
+                        is_source: false,
+                        columns,
+                        coefficients,
+                        data: symbol.data().to_vec(),
+                    });
+                }
+            }
+        }
+
+        received
+    }
+
+    fn reject_reason_from_failure(reason: &FailureReason) -> RejectReason {
+        match reason {
+            FailureReason::InsufficientSymbols { .. } => RejectReason::InsufficientRank,
+            FailureReason::SingularMatrix { .. } => RejectReason::InconsistentEquations,
+            FailureReason::SymbolSizeMismatch { .. } => RejectReason::SymbolSizeMismatch,
+        }
+    }
+
+    fn proof_report(proof: &asupersync::raptorq::DecodeProof) -> ProofReport {
+        let hash = proof.content_hash();
+        let outcome = match &proof.outcome {
+            ProofOutcome::Success { .. } => "success".to_string(),
+            ProofOutcome::Failure { reason } => format!("{reason:?}"),
+        };
+        let summary = ProofSummary {
+            version: proof.version,
+            hash,
+            received_total: proof.received.total,
+            peeling_solved: proof.peeling.solved,
+            inactivated: proof.elimination.inactivated,
+            pivots: proof.elimination.pivots,
+            row_ops: proof.elimination.row_ops,
+            outcome: outcome.clone(),
+        };
+        let summary_bytes = serde_json::to_vec(&summary)
+            .expect("serialize proof summary")
+            .len();
+        ProofReport {
+            hash,
+            summary_bytes,
+            outcome,
+            received_total: proof.received.total,
+            received_source: proof.received.source_count,
+            received_repair: proof.received.repair_count,
+            peeling_solved: proof.peeling.solved,
+            inactivated: proof.elimination.inactivated,
+            pivots: proof.elimination.pivots,
+            row_ops: proof.elimination.row_ops,
+            equations_used: proof.received.total,
+        }
+    }
+
+    fn run_scenario(
+        scenario: Scenario,
+        encoding: &EncodingConfig,
+        decoding_min_overhead: usize,
+        data_len: usize,
+        data_seed: u64,
+        object_id: ObjectId,
+    ) -> (String, u64, u64, bool) {
+        let symbol_size = usize::from(encoding.symbol_size);
+        let data = make_bytes(data_len, data_seed);
+        let mut encoder = EncodingPipeline::new(encoding.clone(), pool_for(encoding.symbol_size));
+        let symbols: Vec<Symbol> = encoder
+            .encode(object_id, &data)
+            .map(|res| res.expect("encode").into_symbol())
+            .collect();
+        let symbol_hash = hash_symbols(&symbols);
+
+        let block_k = data_len.div_ceil(symbol_size);
+        let (received_symbols, loss_report) = apply_loss(&symbols, block_k, scenario.loss);
+        let received_counts = count_symbols(&received_symbols);
+        let generated_counts = count_symbols(&symbols);
+
+        let params = ObjectParams::new(
+            object_id,
+            data_len as u64,
+            encoding.symbol_size,
+            1,
+            u16::try_from(block_k).expect("k fits u16"),
+        );
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: encoding.symbol_size,
+            max_block_size: encoding.max_block_size,
+            repair_overhead: encoding.repair_overhead,
+            min_overhead: decoding_min_overhead,
+            max_buffered_symbols: 0,
+            block_timeout: std::time::Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder.set_object_params(params).expect("params");
+
+        let mut last_reject = None;
+        for symbol in &received_symbols {
+            let auth = AuthenticatedSymbol::from_parts(symbol.clone(), AuthenticationTag::zero());
+            let result = decoder.feed(auth).expect("feed");
+            if let SymbolAcceptResult::Rejected(reason) = result {
+                last_reject = Some(reason);
+            }
+        }
+
+        let decoded = decoder.into_data();
+        let (success, decoded_bytes) = match decoded {
+            Ok(decoded_data) => {
+                assert_eq!(decoded_data, data, "roundtrip mismatch");
+                (true, decoded_data.len())
+            }
+            Err(err) => {
+                assert!(
+                    matches!(
+                        err,
+                        asupersync::decoding::DecodingError::InsufficientSymbols { .. }
+                    ),
+                    "unexpected failure {err:?}"
+                );
+                (false, 0usize)
+            }
+        };
+
+        let sbn = 0u8;
+        let block_seed = seed_for_block(object_id, sbn);
+        let raptor_decoder = InactivationDecoder::new(block_k, symbol_size, block_seed);
+        let received_for_proof =
+            build_received_symbols(&received_symbols, object_id, block_k, symbol_size, sbn);
+
+        let proof = match raptor_decoder.decode_with_proof(&received_for_proof, object_id, sbn) {
+            Ok(result) => {
+                assert!(scenario.expect_success, "unexpected proof success");
+                result.proof
+            }
+            Err((err, proof)) => {
+                if scenario.expect_success {
+                    panic!("unexpected proof failure {err:?}");
+                }
+                match err {
+                    DecodeError::InsufficientSymbols { .. } => {}
+                    DecodeError::SingularMatrix { .. } | DecodeError::SymbolSizeMismatch { .. } => {
+                        panic!("unexpected decode error {err:?}");
+                    }
+                }
+                proof
+            }
+        };
+
+        proof
+            .replay_and_verify(&received_for_proof)
+            .expect("proof replay");
+
+        let proof_hash = proof.content_hash();
+        let proof_report = proof_report(&proof);
+
+        let reject_reason = match last_reject {
+            Some(reason) => Some(format!("{reason:?}")),
+            None => match &proof.outcome {
+                ProofOutcome::Failure { reason } => {
+                    let mapped = reject_reason_from_failure(reason);
+                    Some(format!("{mapped:?}"))
+                }
+                ProofOutcome::Success { .. } => None,
+            },
+        };
+
+        let report = Report {
+            scenario: scenario.name,
+            config: ConfigReport {
+                symbol_size: encoding.symbol_size,
+                max_block_size: encoding.max_block_size,
+                repair_overhead: encoding.repair_overhead,
+                min_overhead: decoding_min_overhead,
+                seed: block_seed,
+                block_k,
+                block_count: 1,
+                data_len,
+            },
+            loss: loss_report,
+            symbols: SymbolReport {
+                generated: generated_counts,
+                received: received_counts,
+            },
+            outcome: OutcomeReport {
+                success,
+                reject_reason,
+                decoded_bytes,
+            },
+            proof: proof_report,
+        };
+
+        let report_json = serde_json::to_string(&report).expect("serialize report");
+        (report_json, symbol_hash, proof_hash, success)
+    }
+
+    #[test]
+    fn e2e_pipeline_reports_are_deterministic() {
+        let encoding = EncodingConfig {
+            symbol_size: 64,
+            max_block_size: 1024,
+            repair_overhead: 1.2,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let decoding_min_overhead = 0usize;
+        let data_len = 1024usize;
+        let data_seed = 0xD1E5_u64;
+        let object_id = ObjectId::new_for_test(9001);
+
+        let scenarios = [
+            Scenario {
+                name: "systematic_only",
+                loss: LossPattern::None,
+                expect_success: true,
+            },
+            Scenario {
+                name: "typical_random_loss",
+                loss: LossPattern::Random {
+                    seed: 0xBEEF_u64,
+                    drop_per_mille: 200,
+                },
+                expect_success: true,
+            },
+            Scenario {
+                name: "burst_loss_late",
+                loss: LossPattern::Burst {
+                    drop_per_mille: 250,
+                    position: BurstPosition::Late,
+                },
+                expect_success: true,
+            },
+            Scenario {
+                name: "insufficient_symbols",
+                loss: LossPattern::Insufficient,
+                expect_success: false,
+            },
+        ];
+
+        for scenario in scenarios {
+            let (report_a, symbols_a, proof_a, success_a) = run_scenario(
+                scenario,
+                &encoding,
+                decoding_min_overhead,
+                data_len,
+                data_seed,
+                object_id,
+            );
+            let (report_b, symbols_b, proof_b, success_b) = run_scenario(
+                scenario,
+                &encoding,
+                decoding_min_overhead,
+                data_len,
+                data_seed,
+                object_id,
+            );
+
+            assert_eq!(symbols_a, symbols_b, "symbol stream hash mismatch");
+            assert_eq!(proof_a, proof_b, "proof hash mismatch");
+            assert_eq!(report_a, report_b, "report JSON mismatch");
+            assert_eq!(success_a, success_b, "success mismatch");
+        }
+    }
+}
