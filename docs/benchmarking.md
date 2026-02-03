@@ -183,7 +183,8 @@ run a smoke capture end-to-end with structured metadata.
 ```
 
 The smoke report is stored as `baselines/criterion/smoke_report_<timestamp>.json` and
-captures env, command, seed, and git SHA.
+captures env, command, seed, git SHA, and a `config` block (criterion dir,
+save dir, comparison settings).
 
 ### Sample Baseline Report (Criterion)
 

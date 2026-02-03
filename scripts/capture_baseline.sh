@@ -260,6 +260,13 @@ report = {
     "baseline_path": "$DEST",
     "latest_path": "${SAVE_DIR}/baseline_latest.json",
     "git_sha": git_sha(),
+    "config": {
+        "criterion_dir": "${CRITERION_DIR}",
+        "save_dir": "${SAVE_DIR}" or None,
+        "compare_path": "${COMPARE_PATH}" or None,
+        "metric": "${METRIC}",
+        "max_regression_pct": float("${MAX_REGRESSION_PCT}"),
+    },
     "env": {
         "CI": os.environ.get("CI"),
         "RUSTFLAGS": os.environ.get("RUSTFLAGS"),
