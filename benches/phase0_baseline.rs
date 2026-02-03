@@ -27,7 +27,7 @@ use asupersync::config::RaptorQConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
-use asupersync::transport::mock::{mock_channel, MockTransportConfig};
+use asupersync::transport::mock::{sim_channel, SimTransportConfig};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObjectId, ObjectParams, Outcome, Time};
 use asupersync::util::Arena;
 use asupersync::Cx;
@@ -437,7 +437,7 @@ fn bench_raptorq_pipeline(c: &mut Criterion) {
 
             b.iter_batched(
                 || {
-                    let (sink, stream) = mock_channel(MockTransportConfig::reliable());
+                    let (sink, stream) = sim_channel(SimTransportConfig::reliable());
                     let sender = RaptorQSenderBuilder::new()
                         .config(config.clone())
                         .transport(sink)

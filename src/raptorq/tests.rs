@@ -15,7 +15,7 @@ use crate::transport::stream::SymbolStream;
 use crate::types::symbol::ObjectId;
 
 // =========================================================================
-// Mock transport
+// In-memory test transport
 // =========================================================================
 
 struct VecSink {

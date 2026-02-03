@@ -314,7 +314,7 @@ fn poll_send_blocking<T: SymbolSink + Unpin>(
             Err(Error::new(ErrorKind::DispatchFailed).with_message(e.to_string()))
         }
         Poll::Pending => {
-            // Phase 0: mock transports are always ready; real async comes later.
+            // Phase 0: sim transports are always ready; real async comes later.
             Err(Error::new(ErrorKind::SinkRejected)
                 .with_message("transport not ready (sync context)"))
         }

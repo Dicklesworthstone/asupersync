@@ -513,13 +513,13 @@ Key points:
 ```ignore
 use asupersync::config::RaptorQConfig;
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
-use asupersync::transport::mock::mock_channel;
+use asupersync::transport::mock::{sim_channel, SimTransportConfig};
 use asupersync::types::symbol::{ObjectId, ObjectParams};
 use asupersync::Cx;
 
 let cx = Cx::for_request();
 let config = RaptorQConfig::default();
-let (mut sink, mut stream) = mock_channel(1024, 64);
+let (mut sink, mut stream) = sim_channel(SimTransportConfig::reliable());
 
 let mut sender = RaptorQSenderBuilder::new()
     .config(config.clone())
@@ -542,7 +542,7 @@ assert_eq!(decoded.data, data);
 
 Notes:
 - `send_object` and `receive_object` use `Cx` for cancellation.
-- For production, replace `mock_channel` with a real `SymbolSink`/`SymbolStream`.
+- For production, replace `sim_channel` with a real `SymbolSink`/`SymbolStream`.
 
 ### 3) Custom Transport: Implement SymbolSink / SymbolStream
 
