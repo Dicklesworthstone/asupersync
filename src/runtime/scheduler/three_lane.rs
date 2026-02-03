@@ -179,6 +179,17 @@ impl Drop for ScopedLocalReady {
     }
 }
 
+/// Scoped setter for the current worker ID (used by `spawn_local` tests).
+pub(crate) struct ScopedWorkerId {
+    _id: usize,
+}
+
+impl ScopedWorkerId {
+    pub(crate) fn new(id: usize) -> Self {
+        Self { _id: id }
+    }
+}
+
 /// Schedules a local (`!Send`) task on the current thread's non-stealable queue.
 ///
 /// Returns `true` if a local-ready queue was available on this thread.
@@ -255,6 +266,12 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
 pub struct ThreeLaneScheduler {
     /// Global injection queue for cross-thread wakeups.
     global: Arc<GlobalInjector>,
+    /// Per-worker local schedulers for routing pinned local tasks.
+    local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>>,
+    /// Per-worker non-stealable queues for local (`!Send`) tasks.
+    local_ready: Vec<Arc<Mutex<Vec<TaskId>>>>,
+    /// Per-worker parkers for targeted wakeups.
+    parkers: Vec<Parker>,
     /// Worker handles for thread spawning.
     workers: Vec<ThreeLaneWorker>,
     /// Shutdown signal.
@@ -305,6 +322,7 @@ impl ThreeLaneScheduler {
         let mut parkers = Vec::with_capacity(worker_count);
         let mut local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>> =
             Vec::with_capacity(worker_count);
+        let mut local_ready: Vec<Arc<Mutex<Vec<TaskId>>>> = Vec::with_capacity(worker_count);
 
         // Get timer driver from runtime state
         let timer_driver = state
@@ -315,6 +333,10 @@ impl ThreeLaneScheduler {
         // Create local schedulers first so we can share references for stealing
         for _ in 0..worker_count {
             local_schedulers.push(Arc::new(Mutex::new(PriorityScheduler::new())));
+        }
+        // Create non-stealable local queues for !Send tasks
+        for _ in 0..worker_count {
+            local_ready.push(Arc::new(Mutex::new(Vec::new())));
         }
 
         // Create parkers first
@@ -354,7 +376,7 @@ impl ThreeLaneScheduler {
                 stealers,
                 fast_queue: fast_queues[id].clone(),
                 fast_stealers,
-                local_ready: Arc::new(Mutex::new(Vec::new())),
+                local_ready: Arc::clone(&local_ready[id]),
                 global: Arc::clone(&global),
                 state: Arc::clone(state),
                 parker,
@@ -379,6 +401,9 @@ impl ThreeLaneScheduler {
 
         Self {
             global,
+            local_schedulers,
+            local_ready,
+            parkers,
             workers,
             shutdown,
             coordinator,
@@ -399,6 +424,39 @@ impl ThreeLaneScheduler {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
+        let (is_local, pinned_worker) = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            match state.tasks.get(task.arena_index()) {
+                Some(record) => {
+                    if record.is_local() {
+                        record.wake_state.notify();
+                    }
+                    (record.is_local(), record.pinned_worker())
+                }
+                None => (false, None),
+            }
+        };
+
+        if is_local {
+            if let Some(worker_id) = pinned_worker {
+                if let Some(local) = self.local_schedulers.get(worker_id) {
+                    if let Some(local_ready) = self.local_ready.get(worker_id) {
+                        let _ = remove_from_local_ready(local_ready, task);
+                    }
+                    let mut guard = local.lock().expect("local scheduler lock poisoned");
+                    guard.move_to_cancel_lane(task, priority);
+                    if let Some(parker) = self.parkers.get(worker_id) {
+                        parker.unpark();
+                    }
+                    return;
+                }
+            }
+            if schedule_cancel_on_current_local(task, priority) {
+                return;
+            }
+            panic!("Attempted to inject_cancel local task {task:?} without owner worker");
+        }
+
         // Cancel is the highest-priority lane.  Always inject so that
         // cancellation preempts ready/timed work even if the task is already
         // scheduled in another lane.  Deduplication happens at poll time
