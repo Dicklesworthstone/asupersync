@@ -22,6 +22,23 @@
 //! - Tie-breaking uses stable event indices (lowest index wins)
 //! - No randomness except explicit seeds
 //! - Iteration order is deterministic (sorted by index)
+//!
+//! # Correctness Sketch
+//!
+//! Let `P` be the trace poset (dependency DAG). Every algorithm constructs a
+//! schedule by repeatedly selecting from the set of *available* events (those
+//! whose predecessors have all been scheduled) and then updating that frontier
+//! by removing the chosen event and decrementing successor indegrees. Thus, the
+//! produced schedule is a linear extension of `P`, which preserves happens-
+//! before: for every edge `u -> v` in `P`, `u` appears before `v` in the
+//! schedule.
+//!
+//! Switch cost is the number of adjacent owner changes. The exact solver uses
+//! A* search over partial schedules with `g` = switches accumulated so far and
+//! `h` = `owner_switch_lower_bound`, an admissible lower bound on remaining
+//! switches. Because the heuristic is admissible and the state space is finite,
+//! A* returns an optimal schedule minimizing total switch count. Greedy and
+//! beam-search variants preserve happens-before but trade optimality for speed.
 
 use crate::trace::event_structure::{OwnerKey, TracePoset};
 use crate::util::DetHashMap;
@@ -1880,6 +1897,33 @@ mod tests {
         })
     }
 
+    fn preserves_happens_before(poset: &TracePoset, schedule: &[usize]) -> bool {
+        let n = poset.len();
+        if schedule.len() != n {
+            return false;
+        }
+
+        let mut seen = vec![false; n];
+        let mut position = vec![0usize; n];
+        for (pos, &idx) in schedule.iter().enumerate() {
+            if idx >= n || seen[idx] {
+                return false;
+            }
+            seen[idx] = true;
+            position[idx] = pos;
+        }
+
+        for i in 0..n {
+            for &pred in poset.preds(i) {
+                if position[pred] >= position[i] {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     // ========================================================================
     // Decision ledger tests
     // ========================================================================
@@ -2109,6 +2153,24 @@ mod tests {
             }
         }
 
+        /// Happens-before preservation: normalized schedules always respect dependencies.
+        #[test]
+        fn prop_happens_before_preserved(events in arb_trace(25, 5)) {
+            let poset = make_poset(&events);
+            for config in &[
+                GeodesicConfig::default(),
+                GeodesicConfig::greedy_only(),
+                GeodesicConfig::high_quality(),
+            ] {
+                let result = normalize(&poset, config);
+                prop_assert!(
+                    preserves_happens_before(&poset, &result.schedule),
+                    "schedule violates happens-before for {} events",
+                    events.len()
+                );
+            }
+        }
+
         /// Equivalence: all algorithms produce schedules that are valid
         /// linear extensions of the same poset, and the exact solver
         /// (optimal) never has higher cost than heuristics.
@@ -2166,6 +2228,19 @@ mod tests {
             prop_assert_eq!(
                 result.switch_count, brute,
                 "exact {} != brute {} for {} events",
+                result.switch_count, brute, events.len(),
+            );
+        }
+
+        /// Default normalization is optimal for small traces (exact solver path).
+        #[test]
+        fn prop_default_min_switches_small(events in arb_trace(8, 3)) {
+            let poset = make_poset(&events);
+            let result = normalize(&poset, &GeodesicConfig::default());
+            let brute = brute_force_min_switches(&poset);
+            prop_assert_eq!(
+                result.switch_count, brute,
+                "default {} != brute {} for {} events",
                 result.switch_count, brute, events.len(),
             );
         }
