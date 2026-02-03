@@ -22,9 +22,7 @@
 #![allow(clippy::semicolon_if_nothing_returned)]
 #![allow(clippy::cast_sign_loss)]
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
@@ -117,8 +115,6 @@ fn verify_golden(scenario: &str, actual_hash: &str) -> bool {
 fn task(id: u32) -> TaskId {
     TaskId::new_for_test(id, 0)
 }
-
-
 
 // =============================================================================
 // SCHEDULER GOLDEN SCENARIOS
@@ -239,12 +235,7 @@ fn scenario_oneshot_send_recv() -> String {
 /// Cancel tree propagation: build a tree of tokens via `.child()`, cancel
 /// root, verify all descendants are cancelled.
 fn scenario_cancel_tree_propagation(depth: u32) -> String {
-    fn build_tree(
-        parent: &SymbolCancelToken,
-        depth: u32,
-        rng: &mut DetRng,
-        count: &mut u32,
-    ) {
+    fn build_tree(parent: &SymbolCancelToken, depth: u32, rng: &mut DetRng, count: &mut u32) {
         if depth == 0 {
             return;
         }
@@ -587,16 +578,12 @@ fn bench_golden_lab(c: &mut Criterion) {
 
     // --- Seed sweep ---
     for &seed in &[0_u64, 1, 42, 1337, 0xDEAD_BEEF] {
-        group.bench_with_input(
-            BenchmarkId::new("seed_sweep", seed),
-            &seed,
-            |b, &seed| {
-                b.iter(|| {
-                    let output = scenario_lab_deterministic(seed);
-                    black_box(&output);
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("seed_sweep", seed), &seed, |b, &seed| {
+            b.iter(|| {
+                let output = scenario_lab_deterministic(seed);
+                black_box(&output);
+            })
+        });
     }
 
     group.finish();

@@ -253,7 +253,30 @@ impl ThreeLaneScheduler {
 
     /// Spawns a task (shorthand for inject_ready).
     pub fn spawn(&self, task: TaskId, priority: u8) {
-        self.inject_ready(task, priority);
+        // Optimistic check for local scheduler
+        let scheduled_locally = CURRENT_LOCAL.with(|cell| {
+            if let Some(local) = cell.borrow().as_ref() {
+                // Determine if we should schedule
+                let should_schedule = {
+                    let state = self.state.lock().expect("runtime state lock poisoned");
+                    state
+                        .tasks
+                        .get(task.arena_index())
+                        .is_none_or(|record| record.wake_state.notify())
+                };
+
+                if should_schedule {
+                    let mut guard = local.lock().expect("local scheduler lock poisoned");
+                    guard.schedule(task, priority);
+                }
+                return true;
+            }
+            false
+        });
+
+        if !scheduled_locally {
+            self.inject_ready(task, priority);
+        }
     }
 
     /// Wakes a task by injecting it into the ready lane.
