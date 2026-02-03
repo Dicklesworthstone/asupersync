@@ -8,7 +8,9 @@
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::systematic::{ConstraintMatrix, RobustSoliton, SystematicEncoder, SystematicParams};
+use asupersync::raptorq::systematic::{
+    ConstraintMatrix, RobustSoliton, SystematicEncoder, SystematicParams,
+};
 use asupersync::util::DetRng;
 
 // ============================================================================
@@ -36,10 +38,7 @@ fn make_patterned_source(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
 
 /// Build received symbols from encoder, optionally dropping some.
 /// Extract non-zero columns and GF(256) coefficients for a constraint matrix row.
-fn constraint_row_equation(
-    constraints: &ConstraintMatrix,
-    row: usize,
-) -> (Vec<usize>, Vec<Gf256>) {
+fn constraint_row_equation(constraints: &ConstraintMatrix, row: usize) -> (Vec<usize>, Vec<Gf256>) {
     let mut columns = Vec::new();
     let mut coefficients = Vec::new();
     for col in 0..constraints.cols {
@@ -139,7 +138,8 @@ fn roundtrip_with_source_loss() {
 
     // Need enough repair to compensate
     let max_repair = (l + dropped_count) as u32;
-    let received = build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair, seed);
+    let received =
+        build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair, seed);
 
     let result = decoder.decode(&received).expect("decode should succeed");
 
@@ -167,7 +167,8 @@ fn roundtrip_repair_only() {
 
     // Need L repair symbols
     let max_repair = (k + l) as u32;
-    let received = build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair, seed);
+    let received =
+        build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair, seed);
 
     let result = decoder.decode(&received).expect("decode should succeed");
 
@@ -556,10 +557,7 @@ fn soliton_distribution_coverage() {
 
         // Degree 2 should have significant mass (robust soliton concentrates
         // probability at degree 2 via the 1/(d*(d-1)) ideal soliton term).
-        assert!(
-            degrees[2] > 0,
-            "k={k}: degree 2 should have nonzero mass"
-        );
+        assert!(degrees[2] > 0, "k={k}: degree 2 should have nonzero mass");
 
         // The top degree (threshold region) should have significant mass
         // from the tau perturbation. Check that degrees aren't all
