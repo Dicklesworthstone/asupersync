@@ -161,8 +161,8 @@ fn greedy(poset: &TracePoset, step_budget: usize) -> GeodesicResult {
             let owner_b = poset.owner(b);
 
             // Prefer events matching current owner
-            let match_a = current_owner.map_or(false, |o| o == owner_a);
-            let match_b = current_owner.map_or(false, |o| o == owner_b);
+            let match_a = current_owner == Some(owner_a);
+            let match_b = current_owner == Some(owner_b);
 
             if match_a != match_b {
                 return match_b.cmp(&match_a); // true before false
@@ -227,46 +227,47 @@ fn count_same_owner_successors(poset: &TracePoset, idx: usize, indeg: &[usize]) 
         .count()
 }
 
+#[derive(Clone)]
+struct BeamState {
+    schedule: Vec<usize>,
+    indeg: Vec<usize>,
+    current_owner: Option<OwnerKey>,
+    switch_count: usize,
+}
+
+impl BeamState {
+    fn available(&self) -> Vec<usize> {
+        self.indeg
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &deg)| {
+                if deg == 0 && !self.schedule.contains(&i) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn key(&self) -> (usize, Reverse<usize>) {
+        // Lower switch count is better, longer schedule breaks ties
+        (self.switch_count, Reverse(self.schedule.len()))
+    }
+}
+
 /// Beam search: explore multiple candidate paths in parallel.
 ///
 /// State = (schedule_so_far, in_degrees, current_owner, switch_count).
 /// At each step, expand top `beam_width` states and keep best `beam_width`.
+#[allow(clippy::too_many_lines)]
 fn beam_search(poset: &TracePoset, beam_width: usize, step_budget: usize) -> GeodesicResult {
     let n = poset.len();
     let init_indeg: Vec<usize> = (0..n).map(|i| poset.preds(i).len()).collect();
 
-    #[derive(Clone)]
-    struct State {
-        schedule: Vec<usize>,
-        indeg: Vec<usize>,
-        current_owner: Option<OwnerKey>,
-        switch_count: usize,
-    }
-
-    impl State {
-        fn available(&self) -> Vec<usize> {
-            self.indeg
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &deg)| {
-                    if deg == 0 && !self.schedule.contains(&i) {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        }
-
-        fn key(&self) -> (usize, Reverse<usize>) {
-            // Lower switch count is better, longer schedule breaks ties
-            (self.switch_count, Reverse(self.schedule.len()))
-        }
-    }
-
-    let init_state = State {
+    let init_state = BeamState {
         schedule: Vec::with_capacity(n),
-        indeg: init_indeg.clone(),
+        indeg: init_indeg,
         current_owner: None,
         switch_count: 0,
     };
@@ -280,7 +281,7 @@ fn beam_search(poset: &TracePoset, beam_width: usize, step_budget: usize) -> Geo
             break;
         }
 
-        let mut candidates: Vec<State> = Vec::new();
+        let mut candidates: Vec<BeamState> = Vec::new();
 
         for state in &beam {
             if state.schedule.len() == n {
@@ -371,7 +372,9 @@ fn beam_search(poset: &TracePoset, beam_width: usize, step_budget: usize) -> Geo
 
 /// Fallback: deterministic topological sort (no optimization).
 fn fallback_topo(poset: &TracePoset) -> GeodesicResult {
-    let schedule = poset.topo_sort().unwrap_or_else(|| (0..poset.len()).collect());
+    let schedule = poset
+        .topo_sort()
+        .unwrap_or_else(|| (0..poset.len()).collect());
     let switch_count = count_switches(poset, &schedule);
 
     GeodesicResult {
@@ -499,17 +502,21 @@ mod tests {
         // Optimal: A1, A2, B1, B2 (1 switch) or B1, B2, A1, A2 (1 switch)
         // Bad: A1, B1, A2, B2 (3 switches)
         let events = [
-            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),      // A1
-            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),      // B1
-            TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)),   // A2
-            TraceEvent::complete(4, Time::ZERO, tid(2), rid(2)),   // B2
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)), // A1
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)), // B1
+            TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)), // A2
+            TraceEvent::complete(4, Time::ZERO, tid(2), rid(2)), // B2
         ];
         let poset = make_poset(&events);
         let result = normalize(&poset, &GeodesicConfig::greedy_only());
 
         assert!(is_valid_linear_extension(&poset, &result.schedule));
         // Greedy should achieve 1 switch (group by owner)
-        assert_eq!(result.switch_count, 1, "Expected 1 switch, got {}", result.switch_count);
+        assert_eq!(
+            result.switch_count, 1,
+            "Expected 1 switch, got {}",
+            result.switch_count
+        );
     }
 
     #[test]
@@ -611,14 +618,7 @@ mod tests {
         // Create a trace larger than beam_threshold
         let n = 150;
         let events: Vec<TraceEvent> = (0..n)
-            .map(|i| {
-                TraceEvent::spawn(
-                    i as u64,
-                    Time::ZERO,
-                    tid(i as u32),
-                    rid(i as u32),
-                )
-            })
+            .map(|i| TraceEvent::spawn(i as u64, Time::ZERO, tid(i as u32), rid(i as u32)))
             .collect();
         let poset = make_poset(&events);
 
