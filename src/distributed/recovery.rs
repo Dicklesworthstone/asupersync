@@ -13,7 +13,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::combinator::retry::RetryPolicy;
-use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
+use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
 use crate::error::{Error, ErrorKind};
 use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
