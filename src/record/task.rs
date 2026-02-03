@@ -237,6 +237,8 @@ pub struct TaskRecord {
     ///
     /// Local tasks must never be stolen by another worker thread.
     pub is_local: bool,
+    /// Owning worker for local tasks (when known).
+    pub pinned_worker: Option<usize>,
     // ── Intrusive queue fields (cache-local queues) ──────────────────────
     /// Next task in the intrusive queue (None if tail or not in queue).
     pub next_in_queue: Option<TaskId>,
@@ -275,6 +277,7 @@ impl TaskRecord {
             cached_cancel_waker: None,
             cancel_epoch: 0,
             is_local: false,
+            pinned_worker: None,
             next_in_queue: None,
             prev_in_queue: None,
             queue_tag: 0,
@@ -743,11 +746,26 @@ impl TaskRecord {
         self.is_local = true;
     }
 
+    /// Marks this task as local and pins it to a specific worker.
+    ///
+    /// This should be used when spawning local tasks on a worker thread.
+    pub fn pin_to_worker(&mut self, worker_id: usize) {
+        self.is_local = true;
+        self.pinned_worker = Some(worker_id);
+    }
+
     /// Returns `true` if this is a local (`!Send`) task.
     #[must_use]
     #[inline]
     pub const fn is_local(&self) -> bool {
         self.is_local
+    }
+
+    /// Returns the owning worker for local tasks, if known.
+    #[must_use]
+    #[inline]
+    pub const fn pinned_worker(&self) -> Option<usize> {
+        self.pinned_worker
     }
 
     // ── Intrusive queue helpers ──────────────────────────────────────────
