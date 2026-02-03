@@ -157,15 +157,15 @@ impl SimNetwork {
             let to = ((i + 1) % n) as NodeId;
             links.insert(
                 (from, to),
-                    SimLink {
-                        config: config.clone(),
-                    },
+                SimLink {
+                    config: config.clone(),
+                },
             );
             links.insert(
                 (to, from),
-                    SimLink {
-                        config: config.clone(),
-                    },
+                SimLink {
+                    config: config.clone(),
+                },
             );
         }
         Self {
@@ -254,7 +254,7 @@ impl Delay {
             return Poll::Ready(());
         }
 
-        let mut state = self.state.lock().expect("mock delay lock poisoned");
+        let mut state = self.state.lock().expect("sim delay lock poisoned");
         state.waker = Some(cx.waker().clone());
 
         if !state.spawned {
@@ -269,7 +269,7 @@ impl Delay {
                 if deadline > now {
                     std::thread::sleep(deadline - now);
                 }
-                let mut state = state_clone.lock().expect("mock delay lock poisoned");
+                let mut state = state_clone.lock().expect("sim delay lock poisoned");
                 if let Some(waker) = state.waker.take() {
                     waker.wake();
                 }
@@ -505,7 +505,7 @@ fn closed_channel(config: SimTransportConfig) -> (SimChannelSink, SimChannelStre
 impl SymbolSink for SimSymbolSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
-        let mut state = this.inner.state.lock().expect("mock queue lock poisoned");
+        let mut state = this.inner.state.lock().expect("sim queue lock poisoned");
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
@@ -568,7 +568,7 @@ impl SymbolSink for SimSymbolSink {
         let op_count = &mut this.operation_count;
 
         if !delay_ready {
-            let mut state = inner.state.lock().expect("mock queue lock poisoned");
+            let mut state = inner.state.lock().expect("sim queue lock poisoned");
             if state.closed {
                 return Poll::Ready(Err(SinkError::Closed));
             }
@@ -594,7 +594,7 @@ impl SymbolSink for SimSymbolSink {
             }
         }
 
-        let mut state = inner.state.lock().expect("mock queue lock poisoned");
+        let mut state = inner.state.lock().expect("sim queue lock poisoned");
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
@@ -677,7 +677,7 @@ impl SymbolStream for SimSymbolStream {
             }
         }
 
-        let mut state = this.inner.state.lock().expect("mock queue lock poisoned");
+        let mut state = this.inner.state.lock().expect("sim queue lock poisoned");
         let symbol = if state.queue.is_empty() {
             None
         } else if this.inner.config.preserve_order {
@@ -758,13 +758,13 @@ impl SymbolStream for SimSymbolStream {
 
     #[allow(clippy::significant_drop_tightening)] // Lock release timing is fine
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let state = self.inner.state.lock().expect("sim queue lock poisoned");
         let len = state.queue.len() + usize::from(self.pending.is_some());
         (len, Some(len))
     }
 
     fn is_exhausted(&self) -> bool {
-        let state = self.inner.state.lock().expect("mock queue lock poisoned");
+        let state = self.inner.state.lock().expect("sim queue lock poisoned");
         self.pending.is_none() && state.closed && state.queue.is_empty()
     }
 }

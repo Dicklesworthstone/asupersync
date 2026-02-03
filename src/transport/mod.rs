@@ -19,8 +19,8 @@ pub use aggregator::{
 };
 pub use error::{SinkError, StreamError};
 pub use mock::{
-    mock_channel, MockChannelSink, MockChannelStream, MockLink, MockNetwork, MockSymbolSink,
-    MockSymbolStream, MockTransportConfig, NodeId,
+    sim_channel, NodeId, SimChannelSink, SimChannelStream, SimLink, SimNetwork, SimSymbolSink,
+    SimSymbolStream, SimTransportConfig,
 };
 pub use router::{
     DispatchConfig, DispatchError, DispatchResult, DispatchStrategy, Endpoint, EndpointId,
