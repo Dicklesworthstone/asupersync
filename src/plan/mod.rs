@@ -86,7 +86,7 @@ pub enum PlanError {
 }
 
 /// Plan DAG builder and container.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PlanDag {
     /// Nodes stored in insertion order.
     pub(super) nodes: Vec<PlanNode>,
@@ -437,7 +437,7 @@ pub use analysis::{
 pub use certificate::{
     CertificateVersion, PlanHash, RewriteCertificate, StepVerifyError, VerifyError,
 };
-pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule};
+pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule, RewriteRuleSchema};
 
 #[cfg(test)]
 mod tests {

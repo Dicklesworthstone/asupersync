@@ -431,9 +431,8 @@ impl InactivationDecoder {
 
         for col in 0..n_cols {
             // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows).find(|&row| {
-                pivot_row.iter().all(|&pr| pr != row) && !a[row][col].is_zero()
-            });
+            let pivot = (0..n_rows)
+                .find(|&row| pivot_row.iter().all(|&pr| pr != row) && !a[row][col].is_zero());
 
             let Some(prow) = pivot else {
                 return Err(DecodeError::SingularMatrix { row: col });
@@ -589,10 +588,7 @@ mod tests {
 
         // Verify source symbols match
         for (i, original) in source.iter().enumerate() {
-            assert_eq!(
-                &result.source[i], original,
-                "source symbol {i} mismatch"
-            );
+            assert_eq!(&result.source[i], original, "source symbol {i} mismatch");
         }
     }
 
@@ -625,10 +621,7 @@ mod tests {
         let result = decoder.decode(&received).expect("decode should succeed");
 
         for (i, original) in source.iter().enumerate() {
-            assert_eq!(
-                &result.source[i], original,
-                "source symbol {i} mismatch"
-            );
+            assert_eq!(&result.source[i], original, "source symbol {i} mismatch");
         }
     }
 
@@ -654,10 +647,7 @@ mod tests {
         let result = decoder.decode(&received).expect("decode should succeed");
 
         for (i, original) in source.iter().enumerate() {
-            assert_eq!(
-                &result.source[i], original,
-                "source symbol {i} mismatch"
-            );
+            assert_eq!(&result.source[i], original, "source symbol {i} mismatch");
         }
     }
 

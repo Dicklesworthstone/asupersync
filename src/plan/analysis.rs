@@ -268,8 +268,10 @@ impl ObligationFlow {
         self.reserves.extend(other.reserves.iter().cloned());
         self.must_resolve.extend(other.must_resolve.iter().cloned());
         // In a race, the loser's obligations may leak unless explicitly drained.
-        self.leak_on_cancel.extend(other.leak_on_cancel.iter().cloned());
-        self.leak_on_cancel.extend(self.must_resolve.iter().cloned());
+        self.leak_on_cancel
+            .extend(other.leak_on_cancel.iter().cloned());
+        self.leak_on_cancel
+            .extend(self.must_resolve.iter().cloned());
         // Conservative: can't guarantee all paths resolve in a race unless
         // both children guarantee it and are properly drained.
         self.all_paths_resolve = self.all_paths_resolve && other.all_paths_resolve;
@@ -568,9 +570,9 @@ impl PlanAnalyzer {
                     .map(|a| a.budget.min_polls)
                     .min()
                     .unwrap_or(0);
-                let max_polls = child_analyses.iter().try_fold(0u32, |acc, a| {
-                    a.budget.max_polls.map(|m| acc.max(m))
-                });
+                let max_polls = child_analyses
+                    .iter()
+                    .try_fold(0u32, |acc, a| a.budget.max_polls.map(|m| acc.max(m)));
                 let has_deadline = child_analyses.iter().any(|a| a.budget.has_deadline);
                 let parallelism = child_analyses
                     .iter()
@@ -605,9 +607,9 @@ impl PlanAnalyzer {
                 // Timeout obligation flow: child's flow with added leak risk.
                 let mut obligation_flow = child_analysis.obligation_flow.clone();
                 // On timeout, child obligations may leak.
-                obligation_flow.leak_on_cancel.extend(
-                    obligation_flow.must_resolve.iter().cloned()
-                );
+                obligation_flow
+                    .leak_on_cancel
+                    .extend(obligation_flow.must_resolve.iter().cloned());
                 ObligationFlow::dedupe_vec(&mut obligation_flow.leak_on_cancel);
 
                 NodeAnalysis {
@@ -676,9 +678,7 @@ impl<'a> SideConditionChecker<'a> {
     /// Check if a node's cancel behavior is safe (losers drained).
     #[must_use]
     pub fn cancel_safe(&self, id: PlanId) -> bool {
-        self.analysis
-            .get(id)
-            .is_some_and(|a| a.cancel.is_safe())
+        self.analysis.get(id).is_some_and(|a| a.cancel.is_safe())
     }
 
     /// Check if two subtrees are independent (no shared mutable state).

@@ -267,11 +267,7 @@ impl PlanDag {
         }
     }
 
-    fn rewrite_join_assoc(
-        &mut self,
-        id: PlanId,
-        policy: RewritePolicy,
-    ) -> Option<RewriteStep> {
+    fn rewrite_join_assoc(&mut self, id: PlanId, policy: RewritePolicy) -> Option<RewriteStep> {
         if !policy.allows_associative() {
             return None;
         }
@@ -293,7 +289,9 @@ impl PlanDag {
             return None;
         }
 
-        let new_join_id = self.push_node(PlanNode::Join { children: flattened });
+        let new_join_id = self.push_node(PlanNode::Join {
+            children: flattened,
+        });
         self.replace_parents(id, new_join_id);
         if self.root == Some(id) {
             self.root = Some(new_join_id);
@@ -306,11 +304,7 @@ impl PlanDag {
         })
     }
 
-    fn rewrite_race_assoc(
-        &mut self,
-        id: PlanId,
-        policy: RewritePolicy,
-    ) -> Option<RewriteStep> {
+    fn rewrite_race_assoc(&mut self, id: PlanId, policy: RewritePolicy) -> Option<RewriteStep> {
         if !policy.allows_associative() {
             return None;
         }
@@ -332,7 +326,9 @@ impl PlanDag {
             return None;
         }
 
-        let new_race_id = self.push_node(PlanNode::Race { children: flattened });
+        let new_race_id = self.push_node(PlanNode::Race {
+            children: flattened,
+        });
         self.replace_parents(id, new_race_id);
         if self.root == Some(id) {
             self.root = Some(new_race_id);
@@ -345,11 +341,7 @@ impl PlanDag {
         })
     }
 
-    fn rewrite_join_commute(
-        &mut self,
-        id: PlanId,
-        policy: RewritePolicy,
-    ) -> Option<RewriteStep> {
+    fn rewrite_join_commute(&mut self, id: PlanId, policy: RewritePolicy) -> Option<RewriteStep> {
         if !policy.allows_commutative() {
             return None;
         }
@@ -377,11 +369,7 @@ impl PlanDag {
         })
     }
 
-    fn rewrite_race_commute(
-        &mut self,
-        id: PlanId,
-        policy: RewritePolicy,
-    ) -> Option<RewriteStep> {
+    fn rewrite_race_commute(&mut self, id: PlanId, policy: RewritePolicy) -> Option<RewriteStep> {
         if !policy.allows_commutative() {
             return None;
         }
@@ -409,11 +397,7 @@ impl PlanDag {
         })
     }
 
-    fn rewrite_timeout_min(
-        &mut self,
-        id: PlanId,
-        _policy: RewritePolicy,
-    ) -> Option<RewriteStep> {
+    fn rewrite_timeout_min(&mut self, id: PlanId, _policy: RewritePolicy) -> Option<RewriteStep> {
         let PlanNode::Timeout { child, duration } = self.node(id)?.clone() else {
             return None;
         };
@@ -593,7 +577,7 @@ impl PlanDag {
     }
 }
 
-fn check_side_conditions(
+pub(crate) fn check_side_conditions(
     rule: RewriteRule,
     policy: RewritePolicy,
     checker: &SideConditionChecker<'_>,
@@ -706,6 +690,7 @@ fn is_sorted_children(children: &[PlanId]) -> bool {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::time::Duration;
 
     fn init_test() {
         init_test_logging();
@@ -869,5 +854,135 @@ mod tests {
         let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
         assert_eq!(dag.root(), Some(race));
+    }
+
+    #[test]
+    fn test_join_assoc_flattens_nested_join() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let inner = dag.join(vec![a, b]);
+        let outer = dag.join(vec![inner, c]);
+        dag.set_root(outer);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::JoinAssoc]);
+        assert_eq!(report.steps().len(), 1);
+        let root = dag.root().expect("root");
+        let PlanNode::Join { children } = dag.node(root).expect("join") else {
+            panic!("expected join root");
+        };
+        assert_eq!(children.len(), 3);
+    }
+
+    #[test]
+    fn test_race_assoc_flattens_nested_race() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let inner = dag.race(vec![a, b]);
+        let outer = dag.race(vec![inner, c]);
+        dag.set_root(outer);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::RaceAssoc]);
+        assert_eq!(report.steps().len(), 1);
+        let root = dag.root().expect("root");
+        let PlanNode::Race { children } = dag.node(root).expect("race") else {
+            panic!("expected race root");
+        };
+        assert_eq!(children.len(), 3);
+    }
+
+    #[test]
+    fn test_join_commute_canonical_order() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let join = dag.join(vec![c, b, a]);
+        dag.set_root(join);
+
+        let report =
+            dag.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &[RewriteRule::JoinCommute]);
+        assert_eq!(report.steps().len(), 1);
+        let root = dag.root().expect("root");
+        let PlanNode::Join { children } = dag.node(root).expect("join") else {
+            panic!("expected join root");
+        };
+        let indices: Vec<_> = children.iter().map(|id| id.index()).collect();
+        assert_eq!(indices, vec![a.index(), b.index(), c.index()]);
+    }
+
+    #[test]
+    fn test_join_commute_rejects_shared_subtree() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let s = dag.leaf("s");
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let j1 = dag.join(vec![s, a]);
+        let j2 = dag.join(vec![s, b]);
+        let join = dag.join(vec![j1, j2]);
+        dag.set_root(join);
+
+        let report =
+            dag.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &[RewriteRule::JoinCommute]);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn test_race_commute_canonical_order() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let race = dag.race(vec![c, b, a]);
+        dag.set_root(race);
+
+        let report =
+            dag.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &[RewriteRule::RaceCommute]);
+        assert_eq!(report.steps().len(), 1);
+        let root = dag.root().expect("root");
+        let PlanNode::Race { children } = dag.node(root).expect("race") else {
+            panic!("expected race root");
+        };
+        let indices: Vec<_> = children.iter().map(|id| id.index()).collect();
+        assert_eq!(indices, vec![a.index(), b.index(), c.index()]);
+    }
+
+    #[test]
+    fn test_timeout_min_collapses_nested_timeouts() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let inner = dag.timeout(a, Duration::from_secs(10));
+        let outer = dag.timeout(inner, Duration::from_secs(5));
+        dag.set_root(outer);
+
+        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::TimeoutMin]);
+        assert_eq!(report.steps().len(), 1);
+        let root = dag.root().expect("root");
+        let PlanNode::Timeout { duration, child } = dag.node(root).expect("timeout") else {
+            panic!("expected timeout root");
+        };
+        assert_eq!(*duration, Duration::from_secs(5));
+        assert_eq!(*child, a);
+    }
+
+    #[test]
+    fn rule_schema_has_explanations() {
+        init_test();
+        for rule in RewriteRule::all() {
+            let schema = rule.schema();
+            assert!(!schema.pattern.is_empty());
+            assert!(!schema.replacement.is_empty());
+            assert!(!schema.explanation.is_empty());
+            assert!(!schema.side_conditions.is_empty());
+        }
     }
 }

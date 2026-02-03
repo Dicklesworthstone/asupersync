@@ -59,9 +59,7 @@ impl DenseRow {
     #[inline]
     #[must_use]
     pub fn zeros(len: usize) -> Self {
-        Self {
-            data: vec![0; len],
-        }
+        Self { data: vec![0; len] }
     }
 
     /// Returns the length of the row.
@@ -131,7 +129,10 @@ impl DenseRow {
     #[inline]
     #[must_use]
     pub fn first_nonzero_from(&self, start: usize) -> Option<usize> {
-        self.data[start..].iter().position(|&b| b != 0).map(|i| start + i)
+        self.data[start..]
+            .iter()
+            .position(|&b| b != 0)
+            .map(|i| start + i)
     }
 
     /// Counts the number of nonzero elements.
@@ -209,10 +210,7 @@ impl SparseRow {
     #[must_use]
     pub fn new(entries: Vec<(usize, Gf256)>, len: usize) -> Self {
         // Filter zeros and ensure sorted
-        let mut filtered: Vec<_> = entries
-            .into_iter()
-            .filter(|(_, v)| !v.is_zero())
-            .collect();
+        let mut filtered: Vec<_> = entries.into_iter().filter(|(_, v)| !v.is_zero()).collect();
         filtered.sort_by_key(|(i, _)| *i);
         Self {
             entries: filtered,
@@ -441,12 +439,7 @@ pub fn row_scale(row: &mut [u8], c: Gf256) {
 /// * `end` - One past the last row to consider
 /// * `col` - Column index to check for nonzero pivot
 #[must_use]
-pub fn select_pivot_basic(
-    matrix: &[&[u8]],
-    start: usize,
-    end: usize,
-    col: usize,
-) -> Option<usize> {
+pub fn select_pivot_basic(matrix: &[&[u8]], start: usize, end: usize, col: usize) -> Option<usize> {
     matrix
         .iter()
         .enumerate()
@@ -614,14 +607,8 @@ mod tests {
 
     #[test]
     fn sparse_row_add() {
-        let a = SparseRow::new(
-            vec![(0, Gf256::new(1)), (2, Gf256::new(3))],
-            5,
-        );
-        let b = SparseRow::new(
-            vec![(1, Gf256::new(2)), (2, Gf256::new(3))],
-            5,
-        );
+        let a = SparseRow::new(vec![(0, Gf256::new(1)), (2, Gf256::new(3))], 5);
+        let b = SparseRow::new(vec![(1, Gf256::new(2)), (2, Gf256::new(3))], 5);
         let sum = a.add(&b);
         // Position 2: 3 + 3 = 0 (XOR in GF256)
         assert_eq!(sum.nonzero_count(), 2);
@@ -696,11 +683,7 @@ mod tests {
 
     #[test]
     fn select_pivot_basic_finds_first() {
-        let rows: Vec<Vec<u8>> = vec![
-            vec![0, 0, 1],
-            vec![0, 0, 0],
-            vec![0, 0, 2],
-        ];
+        let rows: Vec<Vec<u8>> = vec![vec![0, 0, 1], vec![0, 0, 0], vec![0, 0, 2]];
         let matrix: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
 
         // Looking for pivot in column 2

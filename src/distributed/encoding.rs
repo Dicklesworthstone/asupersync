@@ -1,8 +1,11 @@
 //! RaptorQ encoding for region state.
 //!
 //! Transforms region snapshots into erasure-coded symbols for
-//! distribution to replicas.
+//! distribution to replicas using the deterministic RFC-grade pipeline.
 
+use crate::config::EncodingConfig as PipelineEncodingConfig;
+use crate::encoding::{EncodingError as PipelineEncodingError, EncodingPipeline};
+use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::types::Time;
 use crate::util::DetRng;
@@ -82,19 +85,29 @@ impl StateEncoder {
             return Err(EncodingError::EmptyData);
         }
 
-        let symbol_size = self.config.symbol_size as usize;
         let params = self.calculate_params(data.len(), object_id);
+        let pipeline_config = PipelineEncodingConfig {
+            repair_overhead: f64::from(self.config.repair_overhead),
+            max_block_size: data.len(),
+            symbol_size: self.config.symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut pipeline = EncodingPipeline::new(pipeline_config, pool);
+        let repair_override = self.config.min_repair_symbols as usize;
+        let mut symbols = Vec::new();
 
-        // Create source symbols by splitting data into chunks.
-        let source_symbols = Self::create_source_symbols(&data, &params, symbol_size);
-        let source_count = source_symbols.len() as u16;
+        for encoded in pipeline.encode_with_repair(object_id, &data, repair_override) {
+            let symbol = encoded
+                .map_err(EncodingError::from_pipeline)?
+                .into_symbol();
+            symbols.push(symbol);
+        }
 
-        // Generate repair symbols via XOR parity.
-        let repair_symbols = self.create_repair_symbols(&source_symbols, &params, symbol_size);
-        let repair_count = repair_symbols.len() as u16;
-
-        let mut symbols = source_symbols;
-        symbols.extend(repair_symbols);
+        let stats = pipeline.stats();
+        let source_count = stats.source_symbols as u16;
+        let repair_count = stats.repair_symbols as u16;
 
         Ok(EncodedState {
             params,
@@ -112,6 +125,10 @@ impl StateEncoder {
         state: &EncodedState,
         count: u16,
     ) -> Result<Vec<Symbol>, EncodingError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
         let source_symbols: Vec<&Symbol> = state
             .symbols
             .iter()
@@ -120,25 +137,30 @@ impl StateEncoder {
         if source_symbols.is_empty() {
             return Err(EncodingError::NoSourceSymbols);
         }
-
-        let symbol_size = source_symbols[0].len();
-        let base_esi = u32::from(state.source_count) + u32::from(state.repair_count);
+        let data = rebuild_source_bytes(state);
+        let total_repairs = state.repair_count as usize + count as usize;
+        let pipeline_config = PipelineEncodingConfig {
+            repair_overhead: f64::from(self.config.repair_overhead),
+            max_block_size: data.len(),
+            symbol_size: state.params.symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut pipeline = EncodingPipeline::new(pipeline_config, pool);
         let mut repairs = Vec::with_capacity(count as usize);
+        let skip = state.source_count as usize + state.repair_count as usize;
 
-        for i in 0..count {
-            let esi = base_esi + u32::from(i);
-            let mut repair_data = vec![0u8; symbol_size];
-
-            // XOR parity: combine source symbols with a rotation based on esi.
-            for (j, _) in source_symbols.iter().enumerate() {
-                let offset = (esi as usize + j) % source_symbols.len();
-                if offset < source_symbols.len() {
-                    xor_into(&mut repair_data, source_symbols[offset].data());
-                }
+        for (idx, encoded) in pipeline
+            .encode_with_repair(state.params.object_id, &data, total_repairs)
+            .enumerate()
+        {
+            let symbol = encoded
+                .map_err(EncodingError::from_pipeline)?
+                .into_symbol();
+            if idx >= skip {
+                repairs.push(symbol);
             }
-
-            let id = SymbolId::new(state.params.object_id, 0, esi);
-            repairs.push(Symbol::new(id, repair_data, SymbolKind::Repair));
         }
 
         Ok(repairs)

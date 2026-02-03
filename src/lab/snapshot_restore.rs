@@ -130,7 +130,10 @@ impl fmt::Display for RestoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OrphanTask { task_id, region_id } => {
-                write!(f, "task {task_id} references non-existent region {region_id}")
+                write!(
+                    f,
+                    "task {task_id} references non-existent region {region_id}"
+                )
             }
             Self::OrphanObligation {
                 obligation_id,
@@ -288,12 +291,7 @@ impl RestorableSnapshot {
         let mut stats = SnapshotStats::default();
 
         // Build lookup sets
-        let region_ids: HashSet<u32> = self
-            .snapshot
-            .regions
-            .iter()
-            .map(|r| r.id.index)
-            .collect();
+        let region_ids: HashSet<u32> = self.snapshot.regions.iter().map(|r| r.id.index).collect();
         let task_ids: HashSet<u32> = self.snapshot.tasks.iter().map(|t| t.id.index).collect();
 
         stats.region_count = self.snapshot.regions.len();
@@ -583,7 +581,11 @@ mod tests {
         }
     }
 
-    fn make_obligation(id: u32, task_id: u32, state: ObligationStateSnapshot) -> ObligationSnapshot {
+    fn make_obligation(
+        id: u32,
+        task_id: u32,
+        state: ObligationStateSnapshot,
+    ) -> ObligationSnapshot {
         ObligationSnapshot {
             id: IdSnapshot {
                 index: id,
@@ -748,12 +750,7 @@ mod tests {
             .errors
             .iter()
             .any(|e| matches!(e, RestoreError::NonQuiescentClosure { .. }));
-        crate::assert_with_log!(
-            has_error,
-            "has NonQuiescentClosure error",
-            true,
-            has_error
-        );
+        crate::assert_with_log!(has_error, "has NonQuiescentClosure error", true, has_error);
         crate::test_complete!("closed_region_with_live_task_detected");
     }
 
@@ -869,9 +866,10 @@ mod tests {
 
         let not_valid = !result.is_valid;
         crate::assert_with_log!(not_valid, "not valid", true, not_valid);
-        let has_error = result.errors.iter().any(|e| {
-            matches!(e, RestoreError::DuplicateId { kind: "region", .. })
-        });
+        let has_error = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, RestoreError::DuplicateId { kind: "region", .. }));
         crate::assert_with_log!(has_error, "has DuplicateId error", true, has_error);
         crate::test_complete!("duplicate_region_id_detected");
     }

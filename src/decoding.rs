@@ -7,7 +7,9 @@
 //! reconstitutes source symbols deterministically for testing.
 
 use crate::error::{Error, ErrorKind};
-use crate::raptorq::decoder::{DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol};
+use crate::raptorq::decoder::{
+    DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
+};
 use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
@@ -507,11 +509,7 @@ impl DecodingPipeline {
         }
 
         let decoded_symbols =
-            match decode_block(
-                block_plan,
-                &symbols,
-                usize::from(self.config.symbol_size),
-            ) {
+            match decode_block(block_plan, &symbols, usize::from(self.config.symbol_size)) {
                 Ok(symbols) => symbols,
                 Err(
                     DecodingError::MatrixInversionFailed { .. }
@@ -695,11 +693,9 @@ fn decode_block(
                         needed: required,
                     }
                 }
-                RaptorDecodeError::SingularMatrix { row } => {
-                    DecodingError::MatrixInversionFailed {
-                        reason: format!("singular matrix at row {row}"),
-                    }
-                }
+                RaptorDecodeError::SingularMatrix { row } => DecodingError::MatrixInversionFailed {
+                    reason: format!("singular matrix at row {row}"),
+                },
                 RaptorDecodeError::SymbolSizeMismatch { expected, actual } => {
                     DecodingError::SymbolSizeMismatch {
                         expected: expected as u16,
@@ -731,10 +727,7 @@ fn decode_block(
     Ok(decoded_symbols)
 }
 
-fn constraint_row_equation(
-    constraints: &ConstraintMatrix,
-    row: usize,
-) -> (Vec<usize>, Vec<Gf256>) {
+fn constraint_row_equation(constraints: &ConstraintMatrix, row: usize) -> (Vec<usize>, Vec<Gf256>) {
     let mut columns = Vec::new();
     let mut coefficients = Vec::new();
     for col in 0..constraints.cols {
