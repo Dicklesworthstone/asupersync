@@ -103,8 +103,12 @@ impl CrdtObligationEntry {
 
     fn merge_entry(&mut self, other: &Self) {
         self.state = self.state.join(other.state);
-        for (node, &state) in &other.witnesses {
-            self.witnesses.insert(node.clone(), state);
+        for (node, &other_state) in &other.witnesses {
+            let entry = self
+                .witnesses
+                .entry(node.clone())
+                .or_insert(LatticeState::Unknown);
+            *entry = entry.join(other_state);
         }
         if self.kind.is_none() {
             self.kind = other.kind;
@@ -158,14 +162,16 @@ impl CrdtObligationLedger {
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
         entry.kind = Some(kind);
+        if !entry.is_terminal() {
+            *entry
+                .acquire_counts
+                .entry(self.local_node.clone())
+                .or_insert(0) += 1;
+        }
         entry.state = entry.state.join(LatticeState::Reserved);
         entry
             .witnesses
             .insert(self.local_node.clone(), LatticeState::Reserved);
-        *entry
-            .acquire_counts
-            .entry(self.local_node.clone())
-            .or_insert(0) += 1;
         entry.state
     }
 

@@ -12,6 +12,7 @@
 //!
 //! # Algorithms
 //!
+//! - **Exact (A\*)**: Optimal for bounded traces, exponential worst-case
 //! - **Greedy**: O(n²) - pick available events that match current owner first
 //! - **Beam search**: O(n² * beam_width) - explore multiple candidate paths
 //!
@@ -23,7 +24,9 @@
 //! - Iteration order is deterministic (sorted by index)
 
 use crate::trace::event_structure::{OwnerKey, TracePoset};
+use crate::util::DetHashMap;
 use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// Result of geodesic normalization.
 #[derive(Debug, Clone)]
@@ -39,6 +42,8 @@ pub struct GeodesicResult {
 /// Which algorithm produced the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeodesicAlgorithm {
+    /// Exact A* search (bounded traces).
+    ExactAStar,
     /// Greedy "same owner first" heuristic.
     Greedy,
     /// Beam search with specified width.
@@ -53,6 +58,8 @@ pub enum GeodesicAlgorithm {
 /// Configuration for geodesic normalization.
 #[derive(Debug, Clone)]
 pub struct GeodesicConfig {
+    /// Maximum trace size for exact search (larger traces use heuristics).
+    pub exact_threshold: usize,
     /// Maximum trace size for beam search (larger traces use greedy).
     pub beam_threshold: usize,
     /// Beam width for beam search.
@@ -64,6 +71,7 @@ pub struct GeodesicConfig {
 impl Default for GeodesicConfig {
     fn default() -> Self {
         Self {
+            exact_threshold: 30,
             beam_threshold: 100,
             beam_width: 8,
             step_budget: 100_000,
@@ -76,6 +84,7 @@ impl GeodesicConfig {
     #[must_use]
     pub fn greedy_only() -> Self {
         Self {
+            exact_threshold: 0,
             beam_threshold: 0,
             beam_width: 1,
             step_budget: usize::MAX,
@@ -86,6 +95,7 @@ impl GeodesicConfig {
     #[must_use]
     pub fn high_quality() -> Self {
         Self {
+            exact_threshold: 30,
             beam_threshold: 200,
             beam_width: 16,
             step_budget: 1_000_000,
@@ -129,12 +139,209 @@ pub fn normalize(poset: &TracePoset, config: &GeodesicConfig) -> GeodesicResult 
         };
     }
 
+    if n <= config.exact_threshold {
+        if let Some(result) = exact_search(poset, config.step_budget) {
+            return result;
+        }
+    }
+
     // Choose algorithm based on trace size
     if n <= config.beam_threshold && config.beam_width > 1 {
         beam_search(poset, config.beam_width, config.step_budget)
     } else {
         greedy(poset, config.step_budget)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExactState {
+    mask: u64,
+    last_owner: Option<OwnerKey>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExactParent {
+    prev: ExactState,
+    chosen: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExactQueueEntry {
+    f: usize,
+    g: usize,
+    mask: u64,
+    last_owner: Option<OwnerKey>,
+}
+
+impl Ord for ExactQueueEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .f
+            .cmp(&self.f)
+            .then_with(|| other.g.cmp(&self.g))
+            .then_with(|| other.mask.cmp(&self.mask))
+            .then_with(|| other.last_owner.cmp(&self.last_owner))
+    }
+}
+
+impl PartialOrd for ExactQueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn exact_search(poset: &TracePoset, step_budget: usize) -> Option<GeodesicResult> {
+    let n = poset.len();
+    if n == 0 {
+        return Some(GeodesicResult {
+            schedule: vec![],
+            switch_count: 0,
+            algorithm: GeodesicAlgorithm::ExactAStar,
+        });
+    }
+    if n > 63 {
+        return None;
+    }
+
+    let pred_masks = build_pred_masks(poset);
+    let full_mask = (1u64 << n) - 1;
+
+    let start = ExactState {
+        mask: 0,
+        last_owner: None,
+    };
+    let mut open = BinaryHeap::new();
+    let mut best_g: DetHashMap<ExactState, usize> = DetHashMap::default();
+    let mut parent: DetHashMap<ExactState, ExactParent> = DetHashMap::default();
+
+    let start_h = owner_switch_lower_bound(poset, start.mask, start.last_owner);
+    open.push(ExactQueueEntry {
+        f: start_h,
+        g: 0,
+        mask: 0,
+        last_owner: None,
+    });
+    best_g.insert(start, 0);
+
+    let mut steps = 0usize;
+    while let Some(entry) = open.pop() {
+        if steps >= step_budget {
+            return None;
+        }
+        steps += 1;
+
+        let state = ExactState {
+            mask: entry.mask,
+            last_owner: entry.last_owner,
+        };
+
+        if entry.g.ne(best_g.get(&state).unwrap_or(&usize::MAX)) {
+            continue;
+        }
+
+        if state.mask == full_mask {
+            let schedule = reconstruct_exact_schedule(state, &parent, n);
+            return Some(GeodesicResult {
+                schedule,
+                switch_count: entry.g,
+                algorithm: GeodesicAlgorithm::ExactAStar,
+            });
+        }
+
+        for (idx, &pred_mask) in pred_masks.iter().enumerate() {
+            let bit = 1u64 << idx;
+            if state.mask & bit != 0 {
+                continue;
+            }
+            if pred_mask & !state.mask != 0 {
+                continue;
+            }
+
+            let owner = poset.owner(idx);
+            let mut new_g = entry.g;
+            if let Some(prev_owner) = state.last_owner {
+                if prev_owner != owner {
+                    new_g += 1;
+                }
+            }
+            let new_state = ExactState {
+                mask: state.mask | bit,
+                last_owner: Some(owner),
+            };
+
+            let best = best_g.get(&new_state).copied().unwrap_or(usize::MAX);
+            if new_g < best {
+                best_g.insert(new_state, new_g);
+                parent.insert(
+                    new_state,
+                    ExactParent {
+                        prev: state,
+                        chosen: idx,
+                    },
+                );
+
+                let h = owner_switch_lower_bound(poset, new_state.mask, new_state.last_owner);
+                open.push(ExactQueueEntry {
+                    f: new_g + h,
+                    g: new_g,
+                    mask: new_state.mask,
+                    last_owner: new_state.last_owner,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+fn build_pred_masks(poset: &TracePoset) -> Vec<u64> {
+    let n = poset.len();
+    let mut masks = vec![0u64; n];
+    for (i, mask_slot) in masks.iter_mut().enumerate() {
+        let mut mask = 0u64;
+        for &pred in poset.preds(i) {
+            mask |= 1u64 << pred;
+        }
+        *mask_slot = mask;
+    }
+    masks
+}
+
+fn owner_switch_lower_bound(poset: &TracePoset, mask: u64, last_owner: Option<OwnerKey>) -> usize {
+    let mut owners: Vec<OwnerKey> = Vec::new();
+    for i in 0..poset.len() {
+        if mask & (1u64 << i) == 0 {
+            let owner = poset.owner(i);
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+    }
+
+    let k = owners.len();
+    if k == 0 {
+        return 0;
+    }
+
+    last_owner.map_or_else(
+        || k.saturating_sub(1),
+        |owner| if owners.contains(&owner) { k - 1 } else { k },
+    )
+}
+
+fn reconstruct_exact_schedule(
+    goal: ExactState,
+    parent: &DetHashMap<ExactState, ExactParent>,
+    n: usize,
+) -> Vec<usize> {
+    let mut schedule = Vec::with_capacity(n);
+    let mut state = goal;
+    while let Some(p) = parent.get(&state) {
+        schedule.push(p.chosen);
+        state = p.prev;
+    }
+    schedule.reverse();
+    schedule
 }
 
 /// Greedy "same owner first" heuristic.
@@ -603,6 +810,7 @@ mod tests {
 
         // Very low budget should trigger fallback
         let config = GeodesicConfig {
+            exact_threshold: 0,
             beam_threshold: 1000,
             beam_width: 100,
             step_budget: 1, // Very low budget
@@ -623,6 +831,7 @@ mod tests {
         let poset = make_poset(&events);
 
         let config = GeodesicConfig {
+            exact_threshold: 0,
             beam_threshold: 100, // Less than n
             beam_width: 8,
             step_budget: 1_000_000,
@@ -631,5 +840,118 @@ mod tests {
 
         assert_eq!(result.algorithm, GeodesicAlgorithm::Greedy);
         assert!(is_valid_linear_extension(&poset, &result.schedule));
+    }
+
+    fn brute_force_min_switches(poset: &TracePoset) -> usize {
+        fn dfs(
+            poset: &TracePoset,
+            indeg: &mut [usize],
+            available: &mut Vec<usize>,
+            schedule_len: usize,
+            current_owner: Option<OwnerKey>,
+            switches: usize,
+            best: &mut usize,
+        ) {
+            if switches >= *best {
+                return;
+            }
+            if schedule_len == poset.len() {
+                *best = switches;
+                return;
+            }
+
+            available.sort_unstable();
+            let candidates = available.clone();
+
+            for chosen in candidates {
+                let owner = poset.owner(chosen);
+                let mut next_switches = switches;
+                if let Some(prev) = current_owner {
+                    if prev != owner {
+                        next_switches += 1;
+                    }
+                }
+
+                // Apply choice
+                let idx = available
+                    .iter()
+                    .position(|&v| v == chosen)
+                    .expect("chosen must be available");
+                available.remove(idx);
+
+                let mut newly_available = Vec::new();
+                for &succ in poset.succs(chosen) {
+                    indeg[succ] -= 1;
+                    if indeg[succ] == 0 {
+                        newly_available.push(succ);
+                    }
+                }
+                available.extend(newly_available.iter().copied());
+
+                dfs(
+                    poset,
+                    indeg,
+                    available,
+                    schedule_len + 1,
+                    Some(owner),
+                    next_switches,
+                    best,
+                );
+
+                // Undo choice
+                available.retain(|&v| v != chosen);
+                available.push(chosen);
+                for &succ in poset.succs(chosen) {
+                    if indeg[succ] == 0 {
+                        if let Some(pos) = available.iter().position(|&v| v == succ) {
+                            available.remove(pos);
+                        }
+                    }
+                    indeg[succ] += 1;
+                }
+            }
+        }
+
+        let n = poset.len();
+        let mut indeg: Vec<usize> = (0..n).map(|i| poset.preds(i).len()).collect();
+        let mut available: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+        let mut best = usize::MAX;
+        dfs(poset, &mut indeg, &mut available, 0, None, 0, &mut best);
+        best
+    }
+
+    #[test]
+    fn exact_solver_matches_bruteforce_two_chains() {
+        let r = rid(1);
+        let t1 = tid(1);
+        let t2 = tid(2);
+
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, t1, r),
+            TraceEvent::spawn(2, Time::ZERO, t2, r),
+            TraceEvent::schedule(3, Time::ZERO, t1, r),
+            TraceEvent::schedule(4, Time::ZERO, t2, r),
+            TraceEvent::poll(5, Time::ZERO, t1, r),
+            TraceEvent::poll(6, Time::ZERO, t2, r),
+            TraceEvent::yield_task(7, Time::ZERO, t1, r),
+            TraceEvent::yield_task(8, Time::ZERO, t2, r),
+            TraceEvent::complete(9, Time::ZERO, t1, r),
+            TraceEvent::complete(10, Time::ZERO, t2, r),
+        ];
+        let poset = make_poset(&events);
+
+        let config = GeodesicConfig {
+            exact_threshold: 10,
+            beam_threshold: 0,
+            beam_width: 1,
+            step_budget: 200_000,
+        };
+        let result = normalize(&poset, &config);
+
+        assert_eq!(result.algorithm, GeodesicAlgorithm::ExactAStar);
+        assert!(is_valid_linear_extension(&poset, &result.schedule));
+
+        let brute = brute_force_min_switches(&poset);
+        assert_eq!(result.switch_count, brute);
     }
 }

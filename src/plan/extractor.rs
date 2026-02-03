@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 /// Cost components for a plan node.
 ///
 /// All costs are additive and deterministic. Lower is better.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlanCost {
     /// Estimated allocations (heap objects created).
     pub allocations: u64,
@@ -52,8 +52,9 @@ impl PlanCost {
         critical_path: 1,
     };
 
-    /// Add costs together (for joins and sequential composition).
+    /// Add costs together (for parallel/join composition).
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Self) -> Self {
         Self {
             allocations: self.allocations.saturating_add(other.allocations),
@@ -91,6 +92,18 @@ impl PlanCost {
             .saturating_add(self.cancel_checkpoints.saturating_mul(100))
             .saturating_add(self.obligation_pressure.saturating_mul(10))
             .saturating_add(self.allocations)
+    }
+}
+
+impl PartialOrd for PlanCost {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PlanCost {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.total().cmp(&other.total())
     }
 }
 
@@ -168,12 +181,10 @@ impl<'a> Extractor<'a> {
             return cost;
         }
 
-        // Get all nodes in this class
-        let Some(class) = self.egraph.class(canonical) else {
+        // Get all nodes in this class (resolved from arena)
+        let Some(nodes) = self.egraph.class_nodes_cloned(canonical) else {
             return PlanCost::ZERO;
         };
-
-        let nodes: Vec<ENode> = class.nodes.clone();
 
         if nodes.is_empty() {
             self.costs.insert(canonical, PlanCost::ZERO);
@@ -500,7 +511,8 @@ mod tests {
 
         // Two different representations of the same thing
         let j1 = eg.add_join(vec![a, b, c]);
-        let j2 = eg.add_join(vec![eg.add_join(vec![a, b]), c]);
+        let inner_join = eg.add_join(vec![a, b]);
+        let j2 = eg.add_join(vec![inner_join, c]);
 
         // Merge them into the same class
         eg.merge(j1, j2);
@@ -559,7 +571,7 @@ mod tests {
         let mut extractor = Extractor::new(&mut eg);
         let (dag, mut cert) = extractor.extract(a);
 
-        cert.version = CertificateVersion(99);
+        cert.version = CertificateVersion::from_number(99);
         let result = cert.verify(&dag);
         assert!(matches!(
             result,

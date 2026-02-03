@@ -43,7 +43,7 @@ fn regression_throughput_10k_schedule_pop() {
 /// Local queue regression: push+pop 100K items in < 100ms.
 #[test]
 fn regression_local_queue_100k() {
-    let queue = LocalQueue::new();
+    let queue = LocalQueue::new_for_test(99_999);
     let start = Instant::now();
 
     for i in 0..100_000u32 {

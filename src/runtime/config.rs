@@ -73,6 +73,8 @@ pub struct RuntimeConfig {
     pub enable_parking: bool,
     /// Time slice for cooperative yielding (polls).
     pub poll_budget: u32,
+    /// Maximum consecutive cancel-lane dispatches before yielding to other lanes.
+    pub cancel_lane_max_streak: usize,
     /// Logical clock mode used for trace causal ordering.
     ///
     /// When `None`, the runtime chooses a default:
@@ -95,6 +97,17 @@ pub struct RuntimeConfig {
     pub observability: Option<ObservabilityConfig>,
     /// Response policy for obligation leaks detected at runtime.
     pub obligation_leak_response: ObligationLeakResponse,
+    /// Enable the Lyapunov governor for scheduling suggestions.
+    ///
+    /// When enabled, the scheduler periodically snapshots runtime state and
+    /// consults the governor for lane-ordering hints. When disabled (default),
+    /// scheduling behavior is identical to the ungoverned baseline.
+    pub enable_governor: bool,
+    /// Number of scheduling steps between governor snapshots (default: 32).
+    ///
+    /// Lower values increase responsiveness but add snapshot overhead.
+    /// Only relevant when `enable_governor` is true.
+    pub governor_interval: u32,
 }
 
 impl RuntimeConfig {
@@ -111,6 +124,9 @@ impl RuntimeConfig {
         }
         if self.poll_budget == 0 {
             self.poll_budget = 1;
+        }
+        if self.cancel_lane_max_streak == 0 {
+            self.cancel_lane_max_streak = 1;
         }
         if self.thread_name_prefix.is_empty() {
             self.thread_name_prefix = "asupersync-worker".to_string();
@@ -136,6 +152,7 @@ impl Default for RuntimeConfig {
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
+            cancel_lane_max_streak: 16,
             logical_clock_mode: None,
             root_region_limits: None,
             on_thread_start: None,
@@ -145,6 +162,8 @@ impl Default for RuntimeConfig {
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
             obligation_leak_response: ObligationLeakResponse::Log,
+            enable_governor: false,
+            governor_interval: 32,
         }
     }
 }
@@ -187,6 +206,12 @@ mod tests {
             config.poll_budget
         );
         crate::assert_with_log!(
+            config.cancel_lane_max_streak == 16,
+            "cancel_lane_max_streak",
+            16,
+            config.cancel_lane_max_streak
+        );
+        crate::assert_with_log!(
             config.logical_clock_mode.is_none(),
             "logical_clock_mode",
             "None",
@@ -216,6 +241,7 @@ mod tests {
             },
             enable_parking: true,
             poll_budget: 0,
+            cancel_lane_max_streak: 0,
             root_region_limits: None,
             on_thread_start: None,
             on_thread_stop: None,
@@ -225,6 +251,8 @@ mod tests {
             observability: None,
             obligation_leak_response: ObligationLeakResponse::Log,
             logical_clock_mode: None,
+            enable_governor: false,
+            governor_interval: 32,
         };
 
         config.normalize();
@@ -251,6 +279,12 @@ mod tests {
             "poll_budget",
             1,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.cancel_lane_max_streak == 1,
+            "cancel_lane_max_streak",
+            1,
+            config.cancel_lane_max_streak
         );
         crate::assert_with_log!(
             config.thread_name_prefix == "asupersync-worker",
@@ -307,6 +341,7 @@ mod tests {
             },
             enable_parking: false,
             poll_budget: 32,
+            cancel_lane_max_streak: 16,
             root_region_limits: None,
             on_thread_start: None,
             on_thread_stop: None,
@@ -316,6 +351,8 @@ mod tests {
             observability: None,
             obligation_leak_response: ObligationLeakResponse::Silent,
             logical_clock_mode: None,
+            enable_governor: false,
+            governor_interval: 32,
         };
 
         config.normalize();
@@ -348,6 +385,12 @@ mod tests {
             "poll_budget",
             32,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.cancel_lane_max_streak == 16,
+            "cancel_lane_max_streak",
+            16,
+            config.cancel_lane_max_streak
         );
         crate::assert_with_log!(
             config.blocking.max_threads == 4,

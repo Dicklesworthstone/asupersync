@@ -119,6 +119,12 @@ impl CertificateVersion {
     pub const fn number(self) -> u32 {
         self.0
     }
+
+    /// Constructs a version from a raw number (test only).
+    #[cfg(test)]
+    pub(crate) const fn from_number(n: u32) -> Self {
+        Self(n)
+    }
 }
 
 /// A certified rewrite step: captures rule, before/after node ids, and detail.
@@ -195,6 +201,397 @@ impl RewriteCertificate {
             h = fnv_u64(h, step.after.index() as u64);
         }
         h
+    }
+
+    /// Eliminate redundant steps to produce a minimal certificate.
+    ///
+    /// Removes:
+    /// - Consecutive inverse pairs (commute(A→B) followed by commute(B→A))
+    /// - No-op steps where before == after
+    /// - Duplicate consecutive steps on the same node pair with the same rule
+    #[must_use]
+    pub fn minimize(&self) -> Self {
+        let mut minimized: Vec<CertifiedStep> = Vec::with_capacity(self.steps.len());
+
+        for step in &self.steps {
+            // Skip no-ops where before and after are identical.
+            if step.before == step.after {
+                continue;
+            }
+
+            // Check for inverse pair: last step applied the same commutative rule
+            // mapping B→A, and this step maps A→B (or vice versa).
+            let is_inverse = minimized.last().is_some_and(|prev| {
+                prev.rule == step.rule
+                    && is_self_inverse(step.rule)
+                    && prev.before == step.after
+                    && prev.after == step.before
+            });
+            if is_inverse {
+                minimized.pop();
+                continue;
+            }
+
+            // Skip exact duplicate of the immediately preceding step.
+            let is_dup = minimized.last().is_some_and(|prev| {
+                prev.rule == step.rule && prev.before == step.before && prev.after == step.after
+            });
+            if is_dup {
+                continue;
+            }
+
+            minimized.push(step.clone());
+        }
+
+        Self {
+            version: self.version,
+            policy: self.policy,
+            before_hash: self.before_hash,
+            after_hash: self.after_hash,
+            before_node_count: self.before_node_count,
+            after_node_count: self.after_node_count,
+            steps: minimized,
+        }
+    }
+
+    /// Produce a compact representation suitable for serialization.
+    ///
+    /// Strips detail strings and encodes steps as `(rule_discriminant, before, after)`.
+    #[must_use]
+    pub fn compact(&self) -> CompactCertificate {
+        CompactCertificate {
+            version: self.version,
+            policy_bits: pack_policy(self.policy),
+            before_hash: self.before_hash,
+            after_hash: self.after_hash,
+            before_node_count: self.before_node_count as u32,
+            after_node_count: self.after_node_count as u32,
+            steps: self.steps.iter().map(CompactStep::from_certified).collect(),
+        }
+    }
+}
+
+/// Returns true if the rule is its own inverse (applying twice yields identity).
+fn is_self_inverse(rule: RewriteRule) -> bool {
+    matches!(rule, RewriteRule::JoinCommute | RewriteRule::RaceCommute)
+}
+
+fn pack_policy(policy: RewritePolicy) -> u8 {
+    u8::from(policy.associativity)
+        | (u8::from(policy.commutativity) << 1)
+        | (u8::from(policy.distributivity) << 2)
+        | (u8::from(policy.require_binary_joins) << 3)
+}
+
+// ---------------------------------------------------------------------------
+// Compact certificate (detail-free, bounded-size)
+// ---------------------------------------------------------------------------
+
+/// A single rewrite step without the human-readable detail string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactStep {
+    /// Rule discriminant (0..5 for current rules).
+    pub rule: u8,
+    /// Before node index.
+    pub before: u32,
+    /// After node index.
+    pub after: u32,
+}
+
+impl CompactStep {
+    fn from_certified(step: &CertifiedStep) -> Self {
+        Self {
+            rule: step.rule as u8,
+            before: step.before.index() as u32,
+            after: step.after.index() as u32,
+        }
+    }
+
+    /// Wire size of one compact step: 1 (rule) + 4 (before) + 4 (after) = 9 bytes.
+    pub const WIRE_SIZE: usize = 9;
+}
+
+/// Detail-free certificate for serialization and size-bounded storage.
+///
+/// Each step is 9 bytes (1-byte rule discriminant + two 4-byte node indices).
+/// The header is fixed at 37 bytes. Total wire size = 37 + 9 * step_count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactCertificate {
+    /// Schema version.
+    pub version: CertificateVersion,
+    /// Packed policy bits.
+    pub policy_bits: u8,
+    /// Stable hash before rewrites.
+    pub before_hash: PlanHash,
+    /// Stable hash after rewrites.
+    pub after_hash: PlanHash,
+    /// Node count before rewrites.
+    pub before_node_count: u32,
+    /// Node count after rewrites.
+    pub after_node_count: u32,
+    /// Compact rewrite steps.
+    pub steps: Vec<CompactStep>,
+}
+
+impl CompactCertificate {
+    /// Fixed header size: version(4) + policy(1) + 2*hash(16) + 2*node_count(8) = 29 bytes,
+    /// plus step_count(4) = 33 bytes total header.
+    pub const HEADER_SIZE: usize = 33;
+
+    /// Upper bound on wire size in bytes.
+    #[must_use]
+    pub fn byte_size_bound(&self) -> usize {
+        Self::HEADER_SIZE + self.steps.len() * CompactStep::WIRE_SIZE
+    }
+
+    /// Returns true if the certificate size is within the linear bound
+    /// `HEADER_SIZE + 9 * max_steps`. Use `max_steps = after_node_count`
+    /// as a conservative bound (each node touched at most once).
+    #[must_use]
+    pub fn is_within_linear_bound(&self) -> bool {
+        // A well-formed rewrite sequence touches each node at most a constant
+        // number of times. We use after_node_count as the bound since rewrites
+        // can only reduce or maintain the node count.
+        let node_bound = self.after_node_count.max(self.before_node_count) as usize;
+        self.steps.len() <= node_bound
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explanation ledger (deterministic, human-readable rewrite audit)
+// ---------------------------------------------------------------------------
+
+/// Cost snapshot for a single DAG state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DagCostSnapshot {
+    /// Total node count.
+    pub node_count: usize,
+    /// Number of Join nodes.
+    pub joins: usize,
+    /// Number of Race nodes.
+    pub races: usize,
+    /// Number of Timeout nodes.
+    pub timeouts: usize,
+    /// DAG depth (longest root-to-leaf path).
+    pub depth: usize,
+}
+
+impl DagCostSnapshot {
+    /// Compute a cost snapshot from a plan DAG.
+    #[must_use]
+    pub fn of(dag: &PlanDag) -> Self {
+        let mut joins = 0;
+        let mut races = 0;
+        let mut timeouts = 0;
+        for node in &dag.nodes {
+            match node {
+                PlanNode::Join { .. } => joins += 1,
+                PlanNode::Race { .. } => races += 1,
+                PlanNode::Timeout { .. } => timeouts += 1,
+                PlanNode::Leaf { .. } => {}
+            }
+        }
+        Self {
+            node_count: dag.nodes.len(),
+            joins,
+            races,
+            timeouts,
+            depth: dag_depth(dag),
+        }
+    }
+}
+
+fn dag_depth(dag: &PlanDag) -> usize {
+    fn depth_of(dag: &PlanDag, id: PlanId, memo: &mut Vec<Option<usize>>) -> usize {
+        if let Some(d) = memo[id.index()] {
+            return d;
+        }
+        let d = match dag.node(id) {
+            Some(PlanNode::Leaf { .. }) => 1,
+            Some(PlanNode::Join { children } | PlanNode::Race { children }) => {
+                let max_child = children
+                    .iter()
+                    .map(|c| depth_of(dag, *c, memo))
+                    .max()
+                    .unwrap_or(0);
+                max_child + 1
+            }
+            Some(PlanNode::Timeout { child, .. }) => depth_of(dag, *child, memo) + 1,
+            None => 0,
+        };
+        memo[id.index()] = Some(d);
+        d
+    }
+
+    if dag.nodes.is_empty() {
+        return 0;
+    }
+    let mut memo = vec![None; dag.nodes.len()];
+    dag.root.map_or(0, |root| depth_of(dag, root, &mut memo))
+}
+
+/// One entry in the explanation ledger.
+#[derive(Debug, Clone)]
+pub struct ExplanationEntry {
+    /// Step index in the certificate.
+    pub step_index: usize,
+    /// Human-readable law name.
+    pub law: &'static str,
+    /// Human-readable description of what happened.
+    pub description: String,
+    /// Side conditions that were verified (empty if none).
+    pub side_conditions: Vec<&'static str>,
+}
+
+/// Deterministic, human-readable explanation of a plan optimization.
+#[derive(Debug, Clone)]
+pub struct ExplanationLedger {
+    /// Cost snapshot before rewrites.
+    pub before: DagCostSnapshot,
+    /// Cost snapshot after rewrites.
+    pub after: DagCostSnapshot,
+    /// Per-step explanations.
+    pub entries: Vec<ExplanationEntry>,
+}
+
+impl ExplanationLedger {
+    /// Render the ledger as a deterministic multi-line string.
+    #[must_use]
+    pub fn render(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        out.push_str("=== Plan Rewrite Explanation ===\n");
+        let _ = writeln!(
+            out,
+            "Before: {} nodes (J={} R={} T={}, depth={})",
+            self.before.node_count,
+            self.before.joins,
+            self.before.races,
+            self.before.timeouts,
+            self.before.depth,
+        );
+        let _ = writeln!(
+            out,
+            "After:  {} nodes (J={} R={} T={}, depth={})",
+            self.after.node_count,
+            self.after.joins,
+            self.after.races,
+            self.after.timeouts,
+            self.after.depth,
+        );
+        let node_delta = self.after.node_count.cast_signed() - self.before.node_count.cast_signed();
+        let depth_delta = self.after.depth.cast_signed() - self.before.depth.cast_signed();
+        let _ = writeln!(out, "Delta:  nodes={node_delta:+}, depth={depth_delta:+}");
+        let _ = writeln!(out, "Steps:  {}", self.entries.len());
+
+        for entry in &self.entries {
+            let _ = writeln!(
+                out,
+                "\n  [{}] {}: {}",
+                entry.step_index, entry.law, entry.description,
+            );
+            for cond in &entry.side_conditions {
+                let _ = writeln!(out, "       condition: {cond}");
+            }
+        }
+        out
+    }
+}
+
+impl RewriteCertificate {
+    /// Produce a deterministic explanation ledger from a certificate and the
+    /// post-rewrite DAG. The `before_dag` is the DAG before rewrites (used for
+    /// cost comparison).
+    #[must_use]
+    pub fn explain(&self, before_dag: &PlanDag, after_dag: &PlanDag) -> ExplanationLedger {
+        let before = DagCostSnapshot::of(before_dag);
+        let after = DagCostSnapshot::of(after_dag);
+        let entries = self
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| explain_step(i, step, self.policy, after_dag))
+            .collect();
+        ExplanationLedger {
+            before,
+            after,
+            entries,
+        }
+    }
+}
+
+fn rule_law_name(rule: RewriteRule) -> &'static str {
+    match rule {
+        RewriteRule::JoinAssoc => "Join Associativity",
+        RewriteRule::RaceAssoc => "Race Associativity",
+        RewriteRule::JoinCommute => "Join Commutativity",
+        RewriteRule::RaceCommute => "Race Commutativity",
+        RewriteRule::TimeoutMin => "Timeout Minimization",
+        RewriteRule::DedupRaceJoin => "Race-Join Deduplication",
+    }
+}
+
+fn rule_side_conditions(rule: RewriteRule, policy: RewritePolicy) -> Vec<&'static str> {
+    match rule {
+        RewriteRule::JoinAssoc | RewriteRule::RaceAssoc => {
+            if policy.associativity {
+                vec!["associativity enabled"]
+            } else {
+                vec![]
+            }
+        }
+        RewriteRule::JoinCommute | RewriteRule::RaceCommute => {
+            let mut conds = Vec::new();
+            if policy.commutativity {
+                conds.push("commutativity enabled");
+            }
+            conds.push("children are pairwise independent");
+            conds
+        }
+        RewriteRule::TimeoutMin => vec!["nested timeout structure"],
+        RewriteRule::DedupRaceJoin => {
+            let mut conds = vec!["shared child across race branches"];
+            if policy.distributivity {
+                conds.push("distributivity enabled");
+            }
+            if policy.require_binary_joins {
+                conds.push("binary joins required (conservative)");
+            }
+            conds
+        }
+    }
+}
+
+fn describe_node_brief(dag: &PlanDag, id: PlanId) -> String {
+    match dag.node(id) {
+        Some(PlanNode::Leaf { label }) => format!("Leaf({label})"),
+        Some(PlanNode::Join { children }) => format!("Join[{}]", children.len()),
+        Some(PlanNode::Race { children }) => format!("Race[{}]", children.len()),
+        Some(PlanNode::Timeout { duration, .. }) => format!("Timeout({duration:?})"),
+        None => format!("?{}", id.index()),
+    }
+}
+
+fn explain_step(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> ExplanationEntry {
+    let before_desc = describe_node_brief(dag, step.before);
+    let after_desc = describe_node_brief(dag, step.after);
+    let description = format!(
+        "node {} ({}) -> node {} ({})",
+        step.before.index(),
+        before_desc,
+        step.after.index(),
+        after_desc,
+    );
+    ExplanationEntry {
+        step_index: idx,
+        law: rule_law_name(step.rule),
+        description,
+        side_conditions: rule_side_conditions(step.rule, policy),
     }
 }
 
@@ -928,7 +1325,7 @@ mod tests {
 
         let (_, mut cert) = dag
             .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
-        cert.version = CertificateVersion(99);
+        cert.version = CertificateVersion::from_number(99);
 
         let result = verify(&cert, &dag);
         assert!(matches!(result, Err(VerifyError::VersionMismatch { .. })));
@@ -1038,5 +1435,382 @@ mod tests {
 
         assert!(cert.is_identity());
         assert!(verify_steps(&cert, &dag).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Certificate minimization tests (bd-35xx)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn minimize_removes_noop_steps() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        dag.set_root(a);
+
+        let (_, base_cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        // Inject a no-op step (before == after).
+        let mut cert = base_cert;
+        cert.steps.push(CertifiedStep {
+            rule: RewriteRule::JoinAssoc,
+            before: a,
+            after: a,
+            detail: "no-op".to_string(),
+        });
+        assert_eq!(cert.steps.len(), 1);
+
+        let minimized = cert.minimize();
+        assert!(minimized.steps.is_empty());
+    }
+
+    #[test]
+    fn minimize_removes_inverse_commute_pair() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let hash = PlanHash::of(&dag);
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: hash,
+            after_hash: hash,
+            before_node_count: 3,
+            after_node_count: 3,
+            steps: vec![
+                CertifiedStep {
+                    rule: RewriteRule::JoinCommute,
+                    before: PlanId::new(2),
+                    after: PlanId::new(3),
+                    detail: "commute forward".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::JoinCommute,
+                    before: PlanId::new(3),
+                    after: PlanId::new(2),
+                    detail: "commute back".to_string(),
+                },
+            ],
+        };
+
+        let minimized = cert.minimize();
+        assert!(minimized.steps.is_empty());
+    }
+
+    #[test]
+    fn minimize_removes_consecutive_duplicates() {
+        init_test();
+        let hash = PlanHash(0x1234);
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: hash,
+            after_hash: hash,
+            before_node_count: 4,
+            after_node_count: 4,
+            steps: vec![
+                CertifiedStep {
+                    rule: RewriteRule::JoinAssoc,
+                    before: PlanId::new(0),
+                    after: PlanId::new(1),
+                    detail: "assoc".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::JoinAssoc,
+                    before: PlanId::new(0),
+                    after: PlanId::new(1),
+                    detail: "assoc dup".to_string(),
+                },
+            ],
+        };
+
+        let minimized = cert.minimize();
+        assert_eq!(minimized.steps.len(), 1);
+    }
+
+    #[test]
+    fn minimize_preserves_non_redundant_steps() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let (_, cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let minimized = cert.minimize();
+        assert_eq!(minimized.steps.len(), cert.steps.len());
+        assert_eq!(minimized.before_hash, cert.before_hash);
+        assert_eq!(minimized.after_hash, cert.after_hash);
+    }
+
+    #[test]
+    fn compact_certificate_strips_details() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let (_, cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let compact = cert.compact();
+        assert_eq!(compact.steps.len(), cert.steps.len());
+        assert_eq!(compact.version, cert.version);
+        assert_eq!(compact.before_hash, cert.before_hash);
+        assert_eq!(compact.after_hash, cert.after_hash);
+
+        for (cs, fs) in compact.steps.iter().zip(cert.steps.iter()) {
+            assert_eq!(cs.rule, fs.rule as u8);
+            assert_eq!(cs.before, fs.before.index() as u32);
+            assert_eq!(cs.after, fs.after.index() as u32);
+        }
+    }
+
+    #[test]
+    fn compact_byte_size_bound_is_tight() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let (_, cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let compact = cert.compact();
+        let bound = compact.byte_size_bound();
+        // 1 step => 33 + 9 = 42 bytes
+        assert_eq!(
+            bound,
+            CompactCertificate::HEADER_SIZE + CompactStep::WIRE_SIZE
+        );
+        assert_eq!(bound, 42);
+    }
+
+    #[test]
+    fn certificate_within_linear_bound() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let shared = dag.leaf("shared");
+        let left = dag.leaf("left");
+        let right = dag.leaf("right");
+        let join_a = dag.join(vec![shared, left]);
+        let join_b = dag.join(vec![shared, right]);
+        let race = dag.race(vec![join_a, join_b]);
+        dag.set_root(race);
+
+        let (_, cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let compact = cert.compact();
+        assert!(compact.is_within_linear_bound());
+    }
+
+    #[test]
+    fn identity_certificate_compact_is_minimal() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let (_, cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        assert!(cert.is_identity());
+        let compact = cert.compact();
+        assert!(compact.steps.is_empty());
+        assert_eq!(compact.byte_size_bound(), CompactCertificate::HEADER_SIZE);
+        assert!(compact.is_within_linear_bound());
+    }
+
+    #[test]
+    fn minimize_then_compact_reduces_size() {
+        init_test();
+        let hash = PlanHash(0xABCD);
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::conservative(),
+            before_hash: hash,
+            after_hash: hash,
+            before_node_count: 5,
+            after_node_count: 5,
+            steps: vec![
+                CertifiedStep {
+                    rule: RewriteRule::RaceCommute,
+                    before: PlanId::new(0),
+                    after: PlanId::new(1),
+                    detail: "commute".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::RaceCommute,
+                    before: PlanId::new(1),
+                    after: PlanId::new(0),
+                    detail: "un-commute".to_string(),
+                },
+                CertifiedStep {
+                    rule: RewriteRule::JoinAssoc,
+                    before: PlanId::new(2),
+                    after: PlanId::new(3),
+                    detail: "assoc".to_string(),
+                },
+            ],
+        };
+
+        let raw_compact = cert.compact();
+        let minimized_compact = cert.minimize().compact();
+
+        assert_eq!(raw_compact.steps.len(), 3);
+        assert_eq!(minimized_compact.steps.len(), 1);
+        assert!(minimized_compact.byte_size_bound() < raw_compact.byte_size_bound());
+    }
+
+    // -----------------------------------------------------------------------
+    // Explanation ledger tests (bd-1rup)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dag_cost_snapshot_counts_nodes() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        let c = dag.leaf("c");
+        let race = dag.race(vec![join, c]);
+        dag.set_root(race);
+
+        let snap = DagCostSnapshot::of(&dag);
+        assert_eq!(snap.node_count, 5);
+        assert_eq!(snap.joins, 1);
+        assert_eq!(snap.races, 1);
+        assert_eq!(snap.timeouts, 0);
+        assert_eq!(snap.depth, 3); // race -> join -> leaf
+    }
+
+    #[test]
+    fn dag_depth_handles_timeout() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let t = dag.timeout(a, Duration::from_secs(1));
+        dag.set_root(t);
+
+        let snap = DagCostSnapshot::of(&dag);
+        assert_eq!(snap.depth, 2); // timeout -> leaf
+        assert_eq!(snap.timeouts, 1);
+    }
+
+    #[test]
+    fn explain_produces_entries_for_each_step() {
+        init_test();
+        let mut before_dag = PlanDag::new();
+        let shared = before_dag.leaf("shared");
+        let left = before_dag.leaf("left");
+        let right = before_dag.leaf("right");
+        let join_a = before_dag.join(vec![shared, left]);
+        let join_b = before_dag.join(vec![shared, right]);
+        let race = before_dag.race(vec![join_a, join_b]);
+        before_dag.set_root(race);
+
+        let mut after_dag = before_dag.clone();
+        let (_, cert) = after_dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let ledger = cert.explain(&before_dag, &after_dag);
+        assert_eq!(ledger.entries.len(), cert.steps.len());
+        assert_eq!(ledger.entries[0].law, "Race-Join Deduplication");
+        assert!(!ledger.entries[0].side_conditions.is_empty());
+    }
+
+    #[test]
+    fn explain_identity_is_empty() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let before_dag = dag.clone();
+        let (_, cert) = dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let ledger = cert.explain(&before_dag, &dag);
+        assert!(ledger.entries.is_empty());
+        assert_eq!(ledger.before.node_count, ledger.after.node_count);
+    }
+
+    #[test]
+    fn explain_render_is_deterministic() {
+        init_test();
+        let mut before_dag = PlanDag::new();
+        let shared = before_dag.leaf("shared");
+        let left = before_dag.leaf("left");
+        let right = before_dag.leaf("right");
+        let join_a = before_dag.join(vec![shared, left]);
+        let join_b = before_dag.join(vec![shared, right]);
+        let race = before_dag.race(vec![join_a, join_b]);
+        before_dag.set_root(race);
+
+        let mut after_dag = before_dag.clone();
+        let (_, cert) = after_dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let ledger = cert.explain(&before_dag, &after_dag);
+        let r1 = ledger.render();
+        let r2 = ledger.render();
+        assert_eq!(r1, r2);
+        assert!(r1.contains("Plan Rewrite Explanation"));
+        assert!(r1.contains("Race-Join Deduplication"));
+        assert!(r1.contains("Before:"));
+        assert!(r1.contains("After:"));
+        assert!(r1.contains("Delta:"));
+    }
+
+    #[test]
+    fn explain_shows_cost_delta() {
+        init_test();
+        let mut before_dag = PlanDag::new();
+        let shared = before_dag.leaf("shared");
+        let left = before_dag.leaf("left");
+        let right = before_dag.leaf("right");
+        let join_a = before_dag.join(vec![shared, left]);
+        let join_b = before_dag.join(vec![shared, right]);
+        let race = before_dag.race(vec![join_a, join_b]);
+        before_dag.set_root(race);
+
+        let mut after_dag = before_dag.clone();
+        let (_, cert) = after_dag
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
+
+        let ledger = cert.explain(&before_dag, &after_dag);
+        // DedupRaceJoin adds nodes (the new Join+Race structure), so after >= before.
+        assert!(ledger.after.node_count >= ledger.before.node_count);
+        // The render should show the delta.
+        let rendered = ledger.render();
+        assert!(rendered.contains("nodes="));
+        assert!(rendered.contains("depth="));
     }
 }

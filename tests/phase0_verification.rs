@@ -13,11 +13,13 @@ use asupersync::lab::oracle::{
     OracleSuite,
 };
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy, RewriteRule};
+use asupersync::plan::certificate::{verify, verify_steps};
+use asupersync::plan::fixtures::all_fixtures;
+use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::record::task::{TaskPhase, TaskState};
 use asupersync::record::{Finalizer, ObligationKind, ObligationState};
 use asupersync::runtime::{yield_now, JoinError, RuntimeState, TaskHandle};
-use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
+use asupersync::trace::{trace_fingerprint, TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
 use futures_lite::future;
@@ -780,111 +782,70 @@ fn e2e_stress_nested_regions_multiple_children() {
 // ============================================================================
 
 #[test]
-fn plan_rewrite_equivalence_lab_runtime() {
-    init_test("plan_rewrite_equivalence_lab_runtime");
-    test_section!("build plans");
-    let original = build_race_join_plan();
-    let mut rewritten = build_race_join_plan();
-    let rules = [RewriteRule::DedupRaceJoin];
-    let report = rewritten.apply_rewrites(RewritePolicy::conservative(), &rules);
+fn plan_rewrite_equivalence_lab_runtime_fixtures() {
+    init_test("plan_rewrite_equivalence_lab_runtime_fixtures");
+    test_section!("build fixtures");
+    let fixtures = all_fixtures();
     assert_with_log!(
-        report.steps().len() == 1,
-        "rewrite applied",
-        1,
-        report.steps().len()
+        fixtures.len() >= 10,
+        "fixture count >= 10",
+        true,
+        fixtures.len()
     );
 
-    test_section!("determinism");
-    let config = LabConfig::new(123).trace_capacity(4096);
-    assert_deterministic(config.clone(), |runtime| {
-        let _ = run_plan(runtime, &original);
-    });
-    assert_deterministic(config.clone(), |runtime| {
-        let _ = run_plan(runtime, &rewritten);
-    });
+    for (idx, fixture) in fixtures.into_iter().enumerate() {
+        let seed = 10_000 + idx as u64;
+        let policy = if fixture.name == "shared_non_leaf_associative" {
+            RewritePolicy::assume_all()
+        } else {
+            RewritePolicy::conservative()
+        };
 
-    test_section!("compare outcomes");
-    let original_outcome = run_plan(&mut LabRuntime::new(config.clone()), &original);
-    let rewritten_outcome = run_plan(&mut LabRuntime::new(config), &rewritten);
-    assert_with_log!(
-        original_outcome == rewritten_outcome,
-        "rewrite preserves outcomes",
-        &original_outcome,
-        &rewritten_outcome
-    );
-    test_complete!("plan_rewrite_equivalence_lab_runtime");
-}
+        let original = fixture.dag.clone();
+        let mut rewritten = fixture.dag;
+        let (report, cert) =
+            rewritten.apply_rewrites_certified(policy, fixture.expected_rules.as_slice());
 
-#[test]
-fn plan_rewrite_equivalence_lab_runtime_nonbinary() {
-    init_test("plan_rewrite_equivalence_lab_runtime_nonbinary");
-    test_section!("build plans");
-    let original = build_race_join_plan_nonbinary();
-    let mut rewritten = build_race_join_plan_nonbinary();
-    let rules = [RewriteRule::DedupRaceJoin];
-    let report = rewritten.apply_rewrites(RewritePolicy::assume_all(), &rules);
-    assert_with_log!(
-        report.steps().len() == 1,
-        "rewrite applied",
-        1,
-        report.steps().len()
-    );
+        assert_with_log!(
+            report.steps().len() == fixture.expected_step_count,
+            "expected rewrite step count",
+            fixture.expected_step_count,
+            report.steps().len()
+        );
+        let cert_ok = verify(&cert, &rewritten).is_ok();
+        let steps_ok = verify_steps(&cert, &rewritten).is_ok();
+        assert_with_log!(cert_ok, "certificate verifies", true, cert_ok);
+        assert_with_log!(steps_ok, "certificate steps verify", true, steps_ok);
 
-    test_section!("determinism");
-    let config = LabConfig::new(321).trace_capacity(4096);
-    assert_deterministic(config.clone(), |runtime| {
-        let _ = run_plan(runtime, &original);
-    });
-    assert_deterministic(config.clone(), |runtime| {
-        let _ = run_plan(runtime, &rewritten);
-    });
+        test_section!("determinism");
+        let config = LabConfig::new(seed).trace_capacity(8192);
+        assert_deterministic(config.clone(), |runtime| {
+            let _ = run_plan(runtime, &original);
+        });
+        assert_deterministic(config.clone(), |runtime| {
+            let _ = run_plan(runtime, &rewritten);
+        });
 
-    test_section!("compare outcomes");
-    let original_outcome = run_plan(&mut LabRuntime::new(config.clone()), &original);
-    let rewritten_outcome = run_plan(&mut LabRuntime::new(config), &rewritten);
-    assert_with_log!(
-        original_outcome == rewritten_outcome,
-        "rewrite preserves outcomes",
-        &original_outcome,
-        &rewritten_outcome
-    );
-    test_complete!("plan_rewrite_equivalence_lab_runtime_nonbinary");
-}
+        test_section!("compare outcomes + trace class");
+        let (original_outcome, original_fingerprint) = run_plan_with_fingerprint(seed, &original);
+        let (rewritten_outcome, rewritten_fingerprint) =
+            run_plan_with_fingerprint(seed, &rewritten);
 
-#[test]
-fn plan_rewrite_equivalence_lab_runtime_shared_non_leaf() {
-    init_test("plan_rewrite_equivalence_lab_runtime_shared_non_leaf");
-    test_section!("build plans");
-    let original = build_race_join_plan_shared_non_leaf();
-    let mut rewritten = build_race_join_plan_shared_non_leaf();
-    let rules = [RewriteRule::DedupRaceJoin];
-    let report = rewritten.apply_rewrites(RewritePolicy::assume_all(), &rules);
-    assert_with_log!(
-        report.steps().len() == 1,
-        "rewrite applied",
-        1,
-        report.steps().len()
-    );
+        assert_with_log!(
+            original_outcome == rewritten_outcome,
+            "rewrite preserves outcomes",
+            &original_outcome,
+            &rewritten_outcome
+        );
+        assert_with_log!(
+            original_fingerprint == rewritten_fingerprint,
+            "rewrite preserves trace fingerprint class",
+            format!("{:#018x}", original_fingerprint),
+            format!("{:#018x}", rewritten_fingerprint)
+        );
+    }
 
-    test_section!("determinism");
-    let config = LabConfig::new(987).trace_capacity(4096);
-    assert_deterministic(config.clone(), |runtime| {
-        let _ = run_plan(runtime, &original);
-    });
-    assert_deterministic(config.clone(), |runtime| {
-        let _ = run_plan(runtime, &rewritten);
-    });
-
-    test_section!("compare outcomes");
-    let original_outcome = run_plan(&mut LabRuntime::new(config.clone()), &original);
-    let rewritten_outcome = run_plan(&mut LabRuntime::new(config), &rewritten);
-    assert_with_log!(
-        original_outcome == rewritten_outcome,
-        "rewrite preserves outcomes",
-        &original_outcome,
-        &rewritten_outcome
-    );
-    test_complete!("plan_rewrite_equivalence_lab_runtime_shared_non_leaf");
+    test_complete!("plan_rewrite_equivalence_lab_runtime_fixtures");
 }
 
 type NodeValue = BTreeSet<String>;
@@ -986,47 +947,6 @@ struct RaceInfo {
     participants: Vec<TaskId>,
 }
 
-fn build_race_join_plan() -> PlanDag {
-    let mut dag = PlanDag::new();
-    let a = dag.leaf("a");
-    let b = dag.leaf("b");
-    let c = dag.leaf("c");
-    let join1 = dag.join(vec![a, b]);
-    let join2 = dag.join(vec![a, c]);
-    let race = dag.race(vec![join1, join2]);
-    dag.set_root(race);
-    dag
-}
-
-fn build_race_join_plan_nonbinary() -> PlanDag {
-    let mut dag = PlanDag::new();
-    let leaf_a = dag.leaf("a");
-    let leaf_b = dag.leaf("b");
-    let leaf_c = dag.leaf("c");
-    let leaf_d = dag.leaf("d");
-    let leaf_e = dag.leaf("e");
-    let join1 = dag.join(vec![leaf_a, leaf_b, leaf_c]);
-    let join2 = dag.join(vec![leaf_a, leaf_d]);
-    let join3 = dag.join(vec![leaf_a, leaf_e]);
-    let race = dag.race(vec![join1, join2, join3]);
-    dag.set_root(race);
-    dag
-}
-
-fn build_race_join_plan_shared_non_leaf() -> PlanDag {
-    let mut dag = PlanDag::new();
-    let x = dag.leaf("x");
-    let y = dag.leaf("y");
-    let b = dag.leaf("b");
-    let c = dag.leaf("c");
-    let shared = dag.join(vec![x, y]);
-    let join1 = dag.join(vec![shared, b]);
-    let join2 = dag.join(vec![shared, c]);
-    let race = dag.race(vec![join1, join2]);
-    dag.set_root(race);
-    dag
-}
-
 fn plan_node_count(plan: &PlanDag) -> usize {
     let mut count = 0;
     loop {
@@ -1037,6 +957,14 @@ fn plan_node_count(plan: &PlanDag) -> usize {
         }
     }
     count
+}
+
+fn run_plan_with_fingerprint(seed: u64, plan: &PlanDag) -> (NodeValue, u64) {
+    let config = LabConfig::new(seed).trace_capacity(8192);
+    let mut runtime = LabRuntime::new(config);
+    let outcome = run_plan(&mut runtime, plan);
+    let events = runtime.trace().snapshot();
+    (outcome, trace_fingerprint(&events))
 }
 
 #[allow(clippy::too_many_lines)]

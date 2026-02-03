@@ -19,14 +19,24 @@ mod common;
 
 use asupersync::combinator::join2_outcomes;
 use asupersync::combinator::race::{race2_outcomes, RaceWinner};
-use asupersync::lab::oracle::OracleViolation;
+use asupersync::cx::Cx;
+use asupersync::lab::oracle::{LoserDrainOracle, OracleViolation};
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::plan::certificate::{verify, verify_steps};
+use asupersync::plan::fixtures::all_fixtures;
+use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::{yield_now, JoinError, TaskHandle};
 use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
 use asupersync::trace::TraceEvent;
-use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, Severity, Time};
+use asupersync::types::{
+    Budget, CancelKind, CancelReason, Outcome, RegionId, Severity, TaskId, Time,
+};
 use asupersync::util::Arena;
+use futures_lite::future;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 // ============================================================================
 // Checksum helper
@@ -336,6 +346,37 @@ const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
   }
 }"#;
 
+const GOLDEN_PLAN_TRACE_SIMPLE_JOIN_RACE_DEDUP: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_THREE_WAY_RACE_OF_JOINS: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_NESTED_TIMEOUT_JOIN_RACE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_NO_SHARED_CHILD: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_SINGLE_BRANCH_RACE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_DEEP_CHAIN_NO_REWRITE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_CONSERVATIVE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_ASSOCIATIVE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_DIAMOND_JOIN_RACE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_TIMEOUT_WRAPPING_DEDUP: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_INDEPENDENT_SUBTREES: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_RACE_OF_LEAVES: &str = GOLDEN_TRACE_FIXTURE_LAB;
+
+fn golden_plan_trace_fixture_json(name: &str) -> &'static str {
+    match name {
+        "simple_join_race_dedup" => GOLDEN_PLAN_TRACE_SIMPLE_JOIN_RACE_DEDUP,
+        "three_way_race_of_joins" => GOLDEN_PLAN_TRACE_THREE_WAY_RACE_OF_JOINS,
+        "nested_timeout_join_race" => GOLDEN_PLAN_TRACE_NESTED_TIMEOUT_JOIN_RACE,
+        "no_shared_child" => GOLDEN_PLAN_TRACE_NO_SHARED_CHILD,
+        "single_branch_race" => GOLDEN_PLAN_TRACE_SINGLE_BRANCH_RACE,
+        "deep_chain_no_rewrite" => GOLDEN_PLAN_TRACE_DEEP_CHAIN_NO_REWRITE,
+        "shared_non_leaf_conservative" => GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_CONSERVATIVE,
+        "shared_non_leaf_associative" => GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_ASSOCIATIVE,
+        "diamond_join_race" => GOLDEN_PLAN_TRACE_DIAMOND_JOIN_RACE,
+        "timeout_wrapping_dedup" => GOLDEN_PLAN_TRACE_TIMEOUT_WRAPPING_DEDUP,
+        "independent_subtrees" => GOLDEN_PLAN_TRACE_INDEPENDENT_SUBTREES,
+        "race_of_leaves" => GOLDEN_PLAN_TRACE_RACE_OF_LEAVES,
+        _ => panic!("missing golden plan trace fixture for {name}"),
+    }
+}
+
 #[test]
 fn golden_trace_fixture_lab() {
     let fixture = build_golden_trace_fixture(0xBEEF);
@@ -344,6 +385,408 @@ fn golden_trace_fixture_lab() {
         &fixture,
         GOLDEN_TRACE_FIXTURE_LAB,
     );
+}
+
+#[test]
+fn golden_plan_rewrite_trace_fixtures() {
+    let fixtures = all_fixtures();
+    assert!(
+        fixtures.len() >= 10,
+        "expected >= 10 plan fixtures, got {}",
+        fixtures.len()
+    );
+
+    for (idx, fixture) in fixtures.into_iter().enumerate() {
+        let seed = 10_000 + idx as u64;
+        let policy = if fixture.name == "shared_non_leaf_associative" {
+            RewritePolicy::assume_all()
+        } else {
+            RewritePolicy::conservative()
+        };
+
+        let original = fixture.dag.clone();
+        let mut rewritten = fixture.dag;
+        let (report, cert) =
+            rewritten.apply_rewrites_certified(policy, fixture.expected_rules.as_slice());
+
+        assert_eq!(
+            report.steps().len(),
+            fixture.expected_step_count,
+            "fixture {}: expected {} rewrite steps, got {}",
+            fixture.name,
+            fixture.expected_step_count,
+            report.steps().len()
+        );
+        assert!(
+            verify(&cert, &rewritten).is_ok(),
+            "fixture {}: certificate verification failed",
+            fixture.name
+        );
+        assert!(
+            verify_steps(&cert, &rewritten).is_ok(),
+            "fixture {}: certificate step verification failed",
+            fixture.name
+        );
+
+        let original_trace = build_plan_trace_fixture(seed, &original, fixture.name);
+        let rewritten_trace = build_plan_trace_fixture(seed, &rewritten, fixture.name);
+
+        assert_eq!(
+            original_trace.fingerprint, rewritten_trace.fingerprint,
+            "fixture {}: rewrite changed trace fingerprint",
+            fixture.name
+        );
+        assert_eq!(
+            original_trace.canonical_prefix, rewritten_trace.canonical_prefix,
+            "fixture {}: rewrite changed canonical prefix",
+            fixture.name
+        );
+
+        let expected_json = golden_plan_trace_fixture_json(fixture.name);
+        assert_golden_trace_fixture(fixture.name, &original_trace, expected_json);
+    }
+}
+
+type NodeValue = BTreeSet<String>;
+
+#[derive(Clone)]
+struct SharedHandle<T> {
+    inner: Arc<SharedInner<T>>,
+}
+
+struct SharedInner<T> {
+    handle: TaskHandle<T>,
+    state: Mutex<JoinState<T>>,
+}
+
+enum JoinState<T> {
+    Empty,
+    InFlight,
+    Ready(Result<T, JoinError>),
+}
+
+impl<T> SharedHandle<T> {
+    fn new(handle: TaskHandle<T>) -> Self {
+        Self {
+            inner: Arc::new(SharedInner {
+                handle,
+                state: Mutex::new(JoinState::Empty),
+            }),
+        }
+    }
+
+    fn task_id(&self) -> TaskId {
+        self.inner.handle.task_id()
+    }
+
+    fn try_join(&self) -> Option<Result<T, JoinError>>
+    where
+        T: Clone,
+    {
+        let mut state = self.inner.state.lock().expect("join state lock");
+        match &*state {
+            JoinState::Ready(result) => return Some(result.clone()),
+            JoinState::Empty => {
+                *state = JoinState::InFlight;
+            }
+            JoinState::InFlight => {}
+        }
+        drop(state);
+
+        let result = match self.inner.handle.try_join() {
+            Ok(Some(value)) => Some(Ok(value)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        };
+
+        if let Some(result) = result.clone() {
+            let mut state = self.inner.state.lock().expect("join state lock");
+            *state = JoinState::Ready(result);
+        }
+        result
+    }
+
+    async fn join(&self, cx: &Cx) -> Result<T, JoinError>
+    where
+        T: Clone,
+    {
+        loop {
+            if let Some(result) = self.try_join() {
+                return result;
+            }
+            let should_join = {
+                let state = self.inner.state.lock().expect("join state lock");
+                matches!(&*state, JoinState::InFlight)
+            };
+            if should_join {
+                let result = self.inner.handle.join(cx).await;
+                {
+                    let mut state = self.inner.state.lock().expect("join state lock");
+                    *state = JoinState::Ready(result.clone());
+                }
+                return result;
+            }
+            yield_now().await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RaceInfo {
+    race_id: u64,
+    participants: Vec<TaskId>,
+}
+
+fn plan_node_count(plan: &PlanDag) -> usize {
+    let mut count = 0;
+    loop {
+        if plan.node(PlanId::new(count)).is_some() {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+fn build_plan_trace_fixture(seed: u64, plan: &PlanDag, fixture_name: &str) -> GoldenTraceFixture {
+    let config = LabConfig::new(seed).trace_capacity(8192);
+    let mut runtime = LabRuntime::new(config.clone());
+    let _ = run_plan(&mut runtime, plan, fixture_name);
+
+    let events: Vec<TraceEvent> = runtime.trace().snapshot();
+    let violations = runtime.oracles.check_all(runtime.now());
+    let violation_tags = violations.iter().map(oracle_violation_tag);
+
+    let fixture_config = GoldenTraceConfig {
+        seed: config.seed,
+        entropy_seed: config.entropy_seed,
+        worker_count: config.worker_count,
+        trace_capacity: config.trace_capacity,
+        max_steps: config.max_steps,
+        canonical_prefix_layers: 4,
+        canonical_prefix_events: 16,
+    };
+
+    GoldenTraceFixture::from_events(fixture_config, &events, violation_tags)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag, fixture_name: &str) -> NodeValue {
+    let root = plan.root().expect("plan root set");
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let mut handles: Vec<Option<SharedHandle<NodeValue>>> = vec![None; plan_node_count(plan)];
+    let mut oracle = LoserDrainOracle::new();
+    let mut races = Vec::new();
+    let winners: Arc<Mutex<HashMap<u64, TaskId>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let root_handle = build_node(
+        plan,
+        runtime,
+        region,
+        &mut handles,
+        &mut oracle,
+        &mut races,
+        &winners,
+        root,
+    );
+
+    runtime.run_until_quiescent();
+    let mut attempts = 0;
+    while !runtime.is_quiescent() && attempts < 3 {
+        let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+        for (_, record) in runtime.state.tasks.iter() {
+            if record.is_runnable() {
+                let prio = record.cx_inner.as_ref().map_or(0, |inner| {
+                    inner.read().expect("lock poisoned").budget.priority
+                });
+                sched.schedule(record.id, prio);
+            }
+        }
+        drop(sched);
+        runtime.run_until_quiescent();
+        attempts += 1;
+    }
+    assert!(
+        runtime.is_quiescent(),
+        "fixture {fixture_name}: runtime quiescent after reschedule",
+    );
+
+    let completion_time = runtime.now();
+    for race in races {
+        let fallback = *race.participants.first().expect("race participant");
+        let winner = {
+            let winners = winners.lock().expect("winners lock");
+            winners.get(&race.race_id).copied().unwrap_or(fallback)
+        };
+        for participant in &race.participants {
+            oracle.on_task_complete(*participant, completion_time);
+        }
+        oracle.on_race_complete(race.race_id, winner, completion_time);
+    }
+
+    assert!(oracle.check().is_ok(), "loser drain oracle");
+    let violations = runtime.check_invariants();
+    assert!(
+        violations.is_empty(),
+        "lab invariants clean: {violations:?}"
+    );
+
+    let cx: Cx = Cx::for_testing();
+    root_handle
+        .try_join()
+        .unwrap_or_else(|| future::block_on(async { root_handle.join(&cx).await }))
+        .expect("root result ok")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_node(
+    plan: &PlanDag,
+    runtime: &mut LabRuntime,
+    region: RegionId,
+    handles: &mut Vec<Option<SharedHandle<NodeValue>>>,
+    oracle: &mut LoserDrainOracle,
+    races: &mut Vec<RaceInfo>,
+    winners: &Arc<Mutex<HashMap<u64, TaskId>>>,
+    id: PlanId,
+) -> SharedHandle<NodeValue> {
+    if let Some(existing) = handles.get(id.index()).and_then(|entry| entry.as_ref()) {
+        return existing.clone();
+    }
+
+    let node = plan.node(id).expect("plan node").clone();
+    let handle = match node {
+        PlanNode::Leaf { label } => {
+            let delay = leaf_yields(&label);
+            let future = async move {
+                for _ in 0..delay {
+                    yield_now().await;
+                }
+                let mut set = BTreeSet::new();
+                set.insert(label);
+                set
+            };
+            spawn_node(runtime, region, future)
+        }
+        PlanNode::Join { children } => {
+            let child_handles = children
+                .iter()
+                .map(|child| {
+                    build_node(
+                        plan, runtime, region, handles, oracle, races, winners, *child,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let future = async move {
+                let cx: Cx = Cx::for_testing();
+                let mut merged = BTreeSet::new();
+                for handle in child_handles {
+                    let child_set = handle.join(&cx).await.expect("join child");
+                    merged.extend(child_set);
+                }
+                merged
+            };
+            spawn_node(runtime, region, future)
+        }
+        PlanNode::Race { children } => {
+            let child_handles = children
+                .iter()
+                .map(|child| {
+                    build_node(
+                        plan, runtime, region, handles, oracle, races, winners, *child,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let participants: Vec<TaskId> =
+                child_handles.iter().map(SharedHandle::task_id).collect();
+            let race_id = oracle.on_race_start(region, participants.clone(), Time::ZERO);
+            races.push(RaceInfo {
+                race_id,
+                participants,
+            });
+            let winners = Arc::clone(winners);
+            let future = async move {
+                let cx: Cx = Cx::for_testing();
+                let (winner_result, winner_idx) = race_first(&child_handles).await;
+                if let Some(winner_task) = child_handles.get(winner_idx).map(SharedHandle::task_id)
+                {
+                    winners
+                        .lock()
+                        .expect("winners lock")
+                        .insert(race_id, winner_task);
+                }
+                for (idx, handle) in child_handles.iter().enumerate() {
+                    if idx != winner_idx {
+                        let _ = handle.join(&cx).await;
+                    }
+                }
+                winner_result.expect("race winner ok")
+            };
+            spawn_node(runtime, region, future)
+        }
+        PlanNode::Timeout { child, .. } => {
+            let child_handle = build_node(
+                plan, runtime, region, handles, oracle, races, winners, child,
+            );
+            let future = async move {
+                let cx: Cx = Cx::for_testing();
+                child_handle.join(&cx).await.expect("timeout child")
+            };
+            spawn_node(runtime, region, future)
+        }
+    };
+
+    if let Some(slot) = handles.get_mut(id.index()) {
+        *slot = Some(handle.clone());
+    }
+    handle
+}
+
+fn spawn_node<F>(runtime: &mut LabRuntime, region: RegionId, future: F) -> SharedHandle<NodeValue>
+where
+    F: std::future::Future<Output = NodeValue> + Send + 'static,
+{
+    let (task_id, handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, future)
+        .expect("create task");
+    let priority = runtime
+        .state
+        .tasks
+        .iter()
+        .find(|(_, record)| record.id == task_id)
+        .and_then(|(_, record)| record.cx_inner.as_ref())
+        .map_or(0, |inner| {
+            inner.read().expect("lock poisoned").budget.priority
+        });
+    runtime
+        .scheduler
+        .lock()
+        .expect("scheduler lock")
+        .schedule(task_id, priority);
+    SharedHandle::new(handle)
+}
+
+async fn race_first(handles: &[SharedHandle<NodeValue>]) -> (Result<NodeValue, JoinError>, usize) {
+    loop {
+        for (idx, handle) in handles.iter().enumerate() {
+            if let Some(result) = handle.try_join() {
+                return (result, idx);
+            }
+        }
+        yield_now().await;
+    }
+}
+
+fn leaf_yields(label: &str) -> u32 {
+    match label {
+        "a" | "y" => 2,
+        "b" | "x" => 1,
+        "c" => 3,
+        "d" => 4,
+        "e" => 5,
+        _ => 0,
+    }
 }
 
 fn run_deterministic_workload(seed: u64) -> u64 {

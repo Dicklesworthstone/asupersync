@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn test_steal_from_busy_worker_succeeds() {
-        let queue = LocalQueue::new();
+        let queue = LocalQueue::new_for_test(9);
         for i in 0..10 {
             queue.push(task(i));
         }
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn test_steal_from_empty_returns_none() {
-        let queue = LocalQueue::new();
+        let queue = LocalQueue::new_for_test(0);
         let stealers = vec![queue.stealer()];
         let mut rng = DetRng::new(42);
 
@@ -74,9 +74,9 @@ mod tests {
     #[test]
     fn test_steal_skips_empty_queues() {
         // 3 queues: first two empty, third has work
-        let q1 = LocalQueue::new();
-        let q2 = LocalQueue::new();
-        let q3 = LocalQueue::new();
+        let q1 = LocalQueue::new_for_test(0);
+        let q2 = LocalQueue::new_for_test(0);
+        let q3 = LocalQueue::new_for_test(99);
         q3.push(task(99));
 
         let stealers = vec![q1.stealer(), q2.stealer(), q3.stealer()];
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn test_steal_visits_all_queues() {
         // Each queue has a unique task
-        let queues: Vec<_> = (0..5).map(|_| LocalQueue::new()).collect();
+        let queues: Vec<_> = (0..5).map(|_| LocalQueue::new_for_test(4)).collect();
         for (i, q) in queues.iter().enumerate() {
             q.push(task(i as u32));
         }
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_steal_contention_no_deadlock() {
         // Multiple stealers don't deadlock
-        let queue = Arc::new(LocalQueue::new());
+        let queue = Arc::new(LocalQueue::new_for_test(99));
         for i in 0..100 {
             queue.push(task(i));
         }
@@ -164,17 +164,17 @@ mod tests {
     fn test_steal_deterministic_with_same_seed() {
         // Use two separate queue sets so the first steal doesn't mutate
         // the queues used by the second steal.
-        let q1a = LocalQueue::new();
-        let q2a = LocalQueue::new();
-        let q3a = LocalQueue::new();
+        let q1a = LocalQueue::new_for_test(3);
+        let q2a = LocalQueue::new_for_test(3);
+        let q3a = LocalQueue::new_for_test(3);
         q1a.push(task(1));
         q2a.push(task(2));
         q3a.push(task(3));
         let stealers_a = vec![q1a.stealer(), q2a.stealer(), q3a.stealer()];
 
-        let q1b = LocalQueue::new();
-        let q2b = LocalQueue::new();
-        let q3b = LocalQueue::new();
+        let q1b = LocalQueue::new_for_test(3);
+        let q2b = LocalQueue::new_for_test(3);
+        let q3b = LocalQueue::new_for_test(3);
         q1b.push(task(1));
         q2b.push(task(2));
         q3b.push(task(3));

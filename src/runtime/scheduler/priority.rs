@@ -389,25 +389,32 @@ impl Scheduler {
         self.pop_cancel_only()
     }
 
-    /// Pops only from the timed lane.
+    /// Pops only from the timed lane if the earliest deadline is due.
     ///
-    /// Use this for strict lane ordering in multi-worker scenarios.
+    /// Returns `None` if no timed tasks exist or the earliest deadline
+    /// has not yet been reached. This prevents timed tasks from firing
+    /// before their deadline when in the local scheduler.
+    ///
     /// O(log n) pop via binary heap.
     #[must_use]
-    pub fn pop_timed_only(&mut self) -> Option<TaskId> {
-        if let Some(entry) = self.timed_lane.pop() {
-            self.scheduled.remove(&entry.task);
-            return Some(entry.task);
+    pub fn pop_timed_only(&mut self, now: Time) -> Option<TaskId> {
+        if let Some(entry) = self.timed_lane.peek() {
+            if entry.deadline <= now {
+                let entry = self.timed_lane.pop().expect("peeked entry should exist");
+                self.scheduled.remove(&entry.task);
+                return Some(entry.task);
+            }
         }
         None
     }
 
-    /// Pops only from the timed lane with RNG tie-breaking.
+    /// Pops only from the timed lane if the earliest deadline is due,
+    /// with RNG tie-breaking.
     ///
     /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
     #[must_use]
-    pub fn pop_timed_only_with_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
-        self.pop_timed_only()
+    pub fn pop_timed_only_with_hint(&mut self, _rng_hint: u64, now: Time) -> Option<TaskId> {
+        self.pop_timed_only(now)
     }
 
     /// Pops only from the ready lane.
@@ -1030,9 +1037,10 @@ mod tests {
         assert_eq!(sched.pop_cancel_only(), Some(task(2)));
         assert_eq!(sched.pop_cancel_only(), None);
 
-        // pop_timed_only should only get timed task
-        assert_eq!(sched.pop_timed_only(), Some(task(3)));
-        assert_eq!(sched.pop_timed_only(), None);
+        // pop_timed_only should only get timed task (deadline is 1s, so pass now >= 1s)
+        let now = Time::from_secs(1);
+        assert_eq!(sched.pop_timed_only(now), Some(task(3)));
+        assert_eq!(sched.pop_timed_only(now), None);
 
         // pop_ready_only should only get ready task
         assert_eq!(sched.pop_ready_only(), Some(task(1)));

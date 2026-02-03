@@ -34,7 +34,7 @@
 //! |-----------|------|-----|
 //! | `ThreeLaneWorker` | Can use intrusive | Has arena via `state` |
 //! | `PriorityScheduler` | Regular queues | No arena access, needs priority |
-//! | `LocalQueue` | Regular queues | Shared via `Arc<Mutex>` |
+//! | `LocalQueue` | Intrusive stack | Shared via `Arc<Mutex>` + RuntimeState arena |
 //! | `GlobalInjector` | Regular queues | Concurrent access |
 //!
 //! # Safety
@@ -460,9 +460,37 @@ impl IntrusiveStack {
         stolen
     }
 
+    /// Steals up to `max_steal` tasks into the destination stack.
+    ///
+    /// Returns the number of tasks transferred.
+    ///
+    /// # Complexity
+    ///
+    /// O(k) time where k is the number stolen. No allocations.
+    pub fn steal_batch_into(
+        &mut self,
+        max_steal: usize,
+        arena: &mut Arena<TaskRecord>,
+        dest: &mut Self,
+    ) -> usize {
+        let steal_count = (self.len / 2).max(1).min(max_steal);
+        let mut stolen = 0;
+
+        for _ in 0..steal_count {
+            if let Some(task_id) = self.steal_one(arena) {
+                dest.push(task_id, arena);
+                stolen += 1;
+            } else {
+                break;
+            }
+        }
+
+        stolen
+    }
+
     /// Steals one task from the bottom of the stack.
     #[must_use]
-    fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
+    pub(crate) fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         let bottom_id = self.bottom?;
 
         let prev_up = {

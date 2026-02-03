@@ -9,6 +9,7 @@
 //! <https://www.rfc-editor.org/rfc/rfc6330.html>
 
 /// Lookup table V0 from RFC 6330 Section 5.5.
+#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 pub const V0: [u32; 256] = [
     251291136, 3952231631, 3370958628, 4070167936, 123631495, 3351110283, 3218676425, 2011642291,
@@ -46,6 +47,7 @@ pub const V0: [u32; 256] = [
 ];
 
 /// Lookup table V1 from RFC 6330 Section 5.5.
+#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 pub const V1: [u32; 256] = [
     807385413, 2043073223, 3336749796, 1302105833, 2278607931, 541015020, 1684564270, 372709334,
@@ -83,6 +85,7 @@ pub const V1: [u32; 256] = [
 ];
 
 /// Lookup table V2 from RFC 6330 Section 5.5.
+#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 pub const V2: [u32; 256] = [
     1629829892, 282540176, 2794583710, 496504798, 2990494426, 3070701851, 2575963183, 4094823972,
@@ -120,6 +123,7 @@ pub const V2: [u32; 256] = [
 ];
 
 /// Lookup table V3 from RFC 6330 Section 5.5.
+#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 pub const V3: [u32; 256] = [
     1191369816, 744902811, 2539772235, 3213192037, 3286061266, 1200571165, 2463281260, 754888894,
@@ -197,38 +201,41 @@ pub fn rand(y: u32, i: u8, m: u32) -> u32 {
 #[must_use]
 pub fn deg(v: u32, w: usize, l: usize) -> usize {
     // Degree table from RFC 6330 Section 5.3.5.2
-    const DEGREE_TABLE: [(u32, usize); 31] = [
-        (0, 1),
-        (5243, 2),
-        (529531, 3),
-        (704294, 4),
-        (791675, 5),
-        (844104, 6),
-        (879057, 7),
-        (904023, 8),
-        (922747, 9),
-        (937311, 10),
-        (948962, 11),
-        (958494, 12),
-        (966438, 13),
-        (973160, 14),
-        (978921, 15),
-        (983914, 16),
-        (988283, 17),
-        (992138, 18),
-        (995565, 19),
-        (998631, 20),
-        (1001391, 21),
-        (1003887, 22),
-        (1006157, 23),
-        (1008229, 24),
-        (1010129, 25),
-        (1011876, 26),
-        (1013490, 27),
-        (1014983, 28),
-        (1016370, 29),
-        (1017662, 30),
-        (1048576, 0), // Sentinel: W+floor(L/W)
+    // Each entry (threshold, degree): for v < threshold, return degree.
+    // Shifted from original so degree 1 occupies [0, 5243) — the original
+    // (0, 1) entry was unreachable because v is u32 and v < 0 is always false.
+    #[allow(clippy::unreadable_literal)]
+    const DEGREE_TABLE: [(u32, usize); 30] = [
+        (5243, 1),
+        (529531, 2),
+        (704294, 3),
+        (791675, 4),
+        (844104, 5),
+        (879057, 6),
+        (904023, 7),
+        (922747, 8),
+        (937311, 9),
+        (948962, 10),
+        (958494, 11),
+        (966438, 12),
+        (973160, 13),
+        (978921, 14),
+        (983914, 15),
+        (988283, 16),
+        (992138, 17),
+        (995565, 18),
+        (998631, 19),
+        (1001391, 20),
+        (1003887, 21),
+        (1006157, 22),
+        (1008229, 23),
+        (1010129, 24),
+        (1011876, 25),
+        (1013490, 26),
+        (1014983, 27),
+        (1016370, 28),
+        (1017662, 29),
+        (1048576, 30),
     ];
 
     // Find the degree from the table
@@ -257,7 +264,7 @@ mod tests {
     #[test]
     fn rand_in_range() {
         // Output should be in range [0, m)
-        for y in [0, 1, 100, 1000, 65535, 0xFFFFFFFF] {
+        for y in [0, 1, 100, 1000, 65535, 0xFFFF_FFFF] {
             for i in 0..10u8 {
                 for m in [1, 10, 100, 1000, 65536] {
                     let result = rand(y, i, m);

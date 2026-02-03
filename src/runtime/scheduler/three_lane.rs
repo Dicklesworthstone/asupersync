@@ -3,6 +3,9 @@
 //! This scheduler coordinates multiple worker threads while maintaining
 //! strict priority ordering: cancel > timed > ready.
 
+use crate::obligation::lyapunov::{
+    LyapunovGovernor, SchedulingSuggestion, StateSnapshot,
+};
 use crate::runtime::scheduler::global_injector::GlobalInjector;
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
@@ -18,6 +21,8 @@ use std::time::Duration;
 
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
+
+const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
 
 /// A multi-worker scheduler with 3-lane priority support.
 ///
@@ -39,6 +44,8 @@ pub struct ThreeLaneScheduler {
     parkers: Vec<Parker>,
     /// Round-robin index for waking workers.
     next_wake: AtomicUsize,
+    /// Maximum consecutive cancel-lane dispatches before yielding.
+    cancel_streak_limit: usize,
     /// Timer driver for processing timer wakeups.
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
@@ -48,6 +55,33 @@ pub struct ThreeLaneScheduler {
 impl ThreeLaneScheduler {
     /// Creates a new 3-lane scheduler with the given number of workers.
     pub fn new(worker_count: usize, state: &Arc<Mutex<RuntimeState>>) -> Self {
+        Self::new_with_options(worker_count, state, DEFAULT_CANCEL_STREAK_LIMIT, false, 32)
+    }
+
+    /// Creates a new 3-lane scheduler with a configurable cancel streak limit.
+    pub fn new_with_cancel_limit(
+        worker_count: usize,
+        state: &Arc<Mutex<RuntimeState>>,
+        cancel_streak_limit: usize,
+    ) -> Self {
+        Self::new_with_options(worker_count, state, cancel_streak_limit, false, 32)
+    }
+
+    /// Creates a new 3-lane scheduler with full configuration options.
+    ///
+    /// When `enable_governor` is true, each worker maintains a
+    /// [`LyapunovGovernor`] that periodically snapshots runtime state and
+    /// produces scheduling suggestions. When false, behavior is identical
+    /// to the ungoverned baseline.
+    pub fn new_with_options(
+        worker_count: usize,
+        state: &Arc<Mutex<RuntimeState>>,
+        cancel_streak_limit: usize,
+        enable_governor: bool,
+        governor_interval: u32,
+    ) -> Self {
+        let cancel_streak_limit = cancel_streak_limit.max(1);
+        let governor_interval = governor_interval.max(1);
         let global = Arc::new(GlobalInjector::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(worker_count);
@@ -90,6 +124,16 @@ impl ThreeLaneScheduler {
                 shutdown: Arc::clone(&shutdown),
                 timer_driver: timer_driver.clone(),
                 steal_buffer: Vec::with_capacity(8),
+                cancel_streak: 0,
+                cancel_streak_limit,
+                governor: if enable_governor {
+                    Some(LyapunovGovernor::with_defaults())
+                } else {
+                    None
+                },
+                cached_suggestion: SchedulingSuggestion::NoPreference,
+                steps_since_snapshot: 0,
+                governor_interval,
             });
         }
 
@@ -101,6 +145,7 @@ impl ThreeLaneScheduler {
             next_wake: AtomicUsize::new(0),
             timer_driver,
             state: Arc::clone(state),
+            cancel_streak_limit,
         }
     }
 
@@ -250,6 +295,24 @@ pub struct ThreeLaneWorker {
     pub timer_driver: Option<TimerDriverHandle>,
     /// Scratch buffer for stolen tasks (avoid per-steal allocations).
     steal_buffer: Vec<(TaskId, u8)>,
+    /// Number of consecutive cancel-lane dispatches.
+    cancel_streak: usize,
+    /// Maximum consecutive cancel-lane dispatches before yielding.
+    ///
+    /// Fairness guarantee: if timed or ready work is pending, it will be
+    /// dispatched after at most `cancel_streak_limit` cancel dispatches.
+    cancel_streak_limit: usize,
+    /// Lyapunov governor for policy-controlled scheduling suggestions.
+    ///
+    /// When `Some`, the worker periodically snapshots runtime state and
+    /// consults the governor for lane-ordering hints.
+    governor: Option<LyapunovGovernor>,
+    /// Cached scheduling suggestion from the governor.
+    cached_suggestion: SchedulingSuggestion,
+    /// Number of scheduling steps since last governor snapshot.
+    steps_since_snapshot: u32,
+    /// Steps between governor snapshots.
+    governor_interval: u32,
 }
 
 impl ThreeLaneWorker {
@@ -265,48 +328,10 @@ impl ThreeLaneWorker {
     pub fn run_loop(&mut self) {
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
-        // Fairness limit: max consecutive cancel executions before yielding to other lanes.
-        // This prevents cancel work from starving ready work indefinitely.
-        // 16 is a balance between cancel responsiveness and fairness.
-        const MAX_CONSECUTIVE_CANCEL: usize = 16;
-
-        let mut consecutive_cancel = 0usize;
 
         while !self.shutdown.load(Ordering::Relaxed) {
-            // PHASE 0: Process expired timers (fires wakers, which may inject tasks)
-            if let Some(timer) = &self.timer_driver {
-                let _ = timer.process_timers();
-            }
-
-            // PHASE 1: Cancel work (highest priority, with fairness limit)
-            // Cancel work is critical for timely cleanup, but we limit consecutive
-            // executions to prevent starvation of other lanes during cancel cascades.
-            if consecutive_cancel < MAX_CONSECUTIVE_CANCEL {
-                if let Some(task) = self.try_cancel_work() {
-                    self.execute(task);
-                    consecutive_cancel += 1;
-                    continue;
-                }
-            }
-
-            // PHASE 2: Timed work (resets cancel counter)
-            if let Some(task) = self.try_timed_work() {
+            if let Some(task) = self.next_task() {
                 self.execute(task);
-                consecutive_cancel = 0;
-                continue;
-            }
-
-            // PHASE 3: Ready work (resets cancel counter)
-            if let Some(task) = self.try_ready_work() {
-                self.execute(task);
-                consecutive_cancel = 0;
-                continue;
-            }
-
-            // PHASE 4: Steal from other workers (resets cancel counter)
-            if let Some(task) = self.try_steal() {
-                self.execute(task);
-                consecutive_cancel = 0;
                 continue;
             }
 
@@ -365,8 +390,130 @@ impl ThreeLaneWorker {
 
             // After backoff/park, reset the consecutive cancel counter.
             // We've given other work a chance during the backoff period.
-            consecutive_cancel = 0;
+            self.cancel_streak = 0;
         }
+    }
+
+    fn next_task(&mut self) -> Option<TaskId> {
+        // PHASE 0: Process expired timers (fires wakers, which may inject tasks)
+        if let Some(timer) = &self.timer_driver {
+            let _ = timer.process_timers();
+        }
+
+        // Consult the governor for scheduling suggestion (amortized).
+        let suggestion = self.governor_suggest();
+
+        match suggestion {
+            SchedulingSuggestion::MeetDeadlines => {
+                // Deadline pressure dominates: check timed lane first.
+                if let Some(task) = self.try_timed_work() {
+                    self.cancel_streak = 0;
+                    return Some(task);
+                }
+                // Then cancel work with standard fairness.
+                if self.cancel_streak < self.cancel_streak_limit {
+                    if let Some(task) = self.try_cancel_work() {
+                        self.cancel_streak += 1;
+                        return Some(task);
+                    }
+                    self.cancel_streak = 0;
+                }
+            }
+            SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions => {
+                // Obligation/region drain dominates: allow longer cancel streaks
+                // to accelerate cleanup convergence.
+                let boosted_limit = self.cancel_streak_limit.saturating_mul(2);
+                if self.cancel_streak < boosted_limit {
+                    if let Some(task) = self.try_cancel_work() {
+                        self.cancel_streak += 1;
+                        return Some(task);
+                    }
+                    self.cancel_streak = 0;
+                }
+                // Timed work (still respect EDF).
+                if let Some(task) = self.try_timed_work() {
+                    self.cancel_streak = 0;
+                    return Some(task);
+                }
+            }
+            SchedulingSuggestion::NoPreference => {
+                // Default lane ordering: cancel > timed > ready.
+                if self.cancel_streak < self.cancel_streak_limit {
+                    if let Some(task) = self.try_cancel_work() {
+                        self.cancel_streak += 1;
+                        return Some(task);
+                    }
+                    self.cancel_streak = 0;
+                }
+                if let Some(task) = self.try_timed_work() {
+                    self.cancel_streak = 0;
+                    return Some(task);
+                }
+            }
+        }
+
+        // Ready work (always checked regardless of suggestion).
+        if let Some(task) = self.try_ready_work() {
+            self.cancel_streak = 0;
+            return Some(task);
+        }
+
+        // Steal from other workers.
+        if let Some(task) = self.try_steal() {
+            self.cancel_streak = 0;
+            return Some(task);
+        }
+
+        // If we hit the fairness limit but no other lanes had work, allow cancel.
+        let effective_limit = match suggestion {
+            SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions => {
+                self.cancel_streak_limit.saturating_mul(2)
+            }
+            _ => self.cancel_streak_limit,
+        };
+        if self.cancel_streak >= effective_limit {
+            if let Some(task) = self.try_cancel_work() {
+                self.cancel_streak = 1;
+                return Some(task);
+            }
+            self.cancel_streak = 0;
+        }
+
+        None
+    }
+
+    /// Consult the governor for a scheduling suggestion, taking a fresh
+    /// snapshot every `governor_interval` steps. When the governor is
+    /// disabled, always returns `NoPreference`.
+    fn governor_suggest(&mut self) -> SchedulingSuggestion {
+        let Some(governor) = &self.governor else {
+            return SchedulingSuggestion::NoPreference;
+        };
+
+        self.steps_since_snapshot += 1;
+        if self.steps_since_snapshot < self.governor_interval {
+            return self.cached_suggestion;
+        }
+        self.steps_since_snapshot = 0;
+
+        // Take a snapshot under the state lock (bounded work, no allocs).
+        let snapshot = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            StateSnapshot::from_runtime_state(&state)
+        };
+
+        // Enrich with local queue depth.
+        let queue_depth = self
+            .local
+            .lock()
+            .map(|local| local.len())
+            .unwrap_or(0);
+        #[allow(clippy::cast_possible_truncation)]
+        let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
+
+        let suggestion = governor.suggest(&snapshot);
+        self.cached_suggestion = suggestion;
+        suggestion
     }
 
     /// Runs a single scheduling step.
@@ -377,27 +524,7 @@ impl ThreeLaneWorker {
             return false;
         }
 
-        // Process expired timers first
-        if let Some(timer) = &self.timer_driver {
-            let _ = timer.process_timers();
-        }
-
-        if let Some(task) = self.try_cancel_work() {
-            self.execute(task);
-            return true;
-        }
-
-        if let Some(task) = self.try_timed_work() {
-            self.execute(task);
-            return true;
-        }
-
-        if let Some(task) = self.try_ready_work() {
-            self.execute(task);
-            return true;
-        }
-
-        if let Some(task) = self.try_steal() {
+        if let Some(task) = self.next_task() {
             self.execute(task);
             return true;
         }
@@ -437,7 +564,7 @@ impl ThreeLaneWorker {
         // Local timed (already EDF ordered)
         let mut local = self.local.lock().expect("local scheduler lock poisoned");
         let rng_hint = self.rng.next_u64();
-        local.pop_timed_only_with_hint(rng_hint)
+        local.pop_timed_only_with_hint(rng_hint, now)
     }
 
     /// Tries to get ready work from global or local queues.
@@ -836,6 +963,37 @@ mod tests {
         let task2 = worker.try_ready_work();
         assert!(task2.is_some());
         assert_eq!(task2.unwrap(), TaskId::new_for_test(1, 1));
+    }
+
+    #[test]
+    fn test_cancel_lane_fairness_limit() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
+
+        let cancel_tasks = [
+            TaskId::new_for_test(1, 1),
+            TaskId::new_for_test(1, 2),
+            TaskId::new_for_test(1, 3),
+        ];
+        let ready_task = TaskId::new_for_test(1, 4);
+
+        for &task_id in &cancel_tasks {
+            scheduler.inject_cancel(task_id, 100);
+        }
+        scheduler.inject_ready(ready_task, 50);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        let first = worker.next_task().expect("first dispatch");
+        let second = worker.next_task().expect("second dispatch");
+        let third = worker.next_task().expect("third dispatch");
+        let fourth = worker.next_task().expect("fourth dispatch");
+
+        assert!(cancel_tasks.contains(&first));
+        assert!(cancel_tasks.contains(&second));
+        assert_eq!(third, ready_task);
+        assert!(cancel_tasks.contains(&fourth));
     }
 
     #[test]

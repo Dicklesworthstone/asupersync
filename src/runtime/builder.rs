@@ -106,6 +106,7 @@
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//! | [`cancel_lane_max_streak`](RuntimeBuilder::cancel_lane_max_streak) | 16 | Max consecutive cancel dispatches |
 //! | [`root_region_limits`](RuntimeBuilder::root_region_limits) | None | Admission limits for the root region |
 //! | [`observability`](RuntimeBuilder::observability) | None | Attach structured logging collectors |
 //!
@@ -261,6 +262,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn poll_budget(mut self, budget: u32) -> Self {
         self.config.poll_budget = budget;
+        self
+    }
+
+    /// Set the maximum consecutive cancel-lane dispatches before yielding.
+    #[must_use]
+    pub fn cancel_lane_max_streak(mut self, max_streak: usize) -> Self {
+        self.config.cancel_lane_max_streak = max_streak;
         self
     }
 
@@ -940,7 +948,13 @@ impl RuntimeInner {
             root
         };
 
-        let mut scheduler = ThreeLaneScheduler::new(config.worker_threads, &state);
+        let mut scheduler = ThreeLaneScheduler::new_with_options(
+            config.worker_threads,
+            &state,
+            config.cancel_lane_max_streak,
+            config.enable_governor,
+            config.governor_interval,
+        );
 
         let mut worker_threads = Vec::new();
         if config.worker_threads > 0 {

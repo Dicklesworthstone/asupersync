@@ -152,7 +152,7 @@ impl BackgroundContext {
 /// let web_cx: Arc<Cx<WebCaps>> = narrow(&full_cx);
 /// ```
 #[must_use]
-pub fn narrow<From, To>(cx: &Arc<Cx<From>>) -> Arc<Cx<To>> {
+pub fn narrow<From, To: crate::cx::cap::SubsetOf<From>>(cx: &Arc<Cx<From>>) -> Arc<Cx<To>> {
     Arc::new(cx.as_ref().retype::<To>())
 }
 

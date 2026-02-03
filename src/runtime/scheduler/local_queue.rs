@@ -1,11 +1,16 @@
 //! Per-worker local queue.
 //!
-//! Uses a lock-based deque for LIFO push/pop (owner) and FIFO steal (thief).
-//! This stays within the project's `unsafe` prohibition while preserving
-//! correct work-stealing semantics.
+//! Uses a lock-protected intrusive stack for LIFO push/pop (owner) and FIFO steal (thief).
+//! The stack stores links in `TaskRecord` via the runtime state's task arena,
+//! keeping hot-path operations allocation-free.
 
+use super::intrusive::{IntrusiveStack, QUEUE_TAG_READY};
+#[cfg(any(test, feature = "test-internals"))]
+use crate::record::task::TaskRecord;
+use crate::runtime::RuntimeState;
 use crate::types::TaskId;
-use std::collections::VecDeque;
+#[cfg(any(test, feature = "test-internals"))]
+use crate::types::{Budget, RegionId};
 use std::sync::{Arc, Mutex};
 
 /// A local task queue for a worker.
@@ -15,102 +20,108 @@ use std::sync::{Arc, Mutex};
 /// from the other end (FIFO).
 #[derive(Debug)]
 pub struct LocalQueue {
-    inner: Arc<Mutex<VecDeque<TaskId>>>,
+    state: Arc<Mutex<RuntimeState>>,
+    inner: Arc<Mutex<IntrusiveStack>>,
 }
 
 impl LocalQueue {
     /// Creates a new local queue.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(state: Arc<Mutex<RuntimeState>>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::new())),
+            state,
+            inner: Arc::new(Mutex::new(IntrusiveStack::new(QUEUE_TAG_READY))),
         }
+    }
+
+    /// Creates a runtime state with preallocated task records for tests.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn test_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
+        let mut state = RuntimeState::new();
+        for id in 0..=max_task_id {
+            let task_id = TaskId::new_for_test(id, 0);
+            let record = TaskRecord::new(task_id, RegionId::new_for_test(0, 0), Budget::INFINITE);
+            let idx = state.tasks.insert(record);
+            debug_assert_eq!(idx.index(), id);
+        }
+        Arc::new(Mutex::new(state))
+    }
+
+    /// Creates a local queue with an isolated test runtime state.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn new_for_test(max_task_id: u32) -> Self {
+        Self::new(Self::test_state(max_task_id))
     }
 
     /// Pushes a task to the local queue.
     pub fn push(&self, task: TaskId) {
-        let mut queue = self.inner.lock().expect("local queue lock poisoned");
-        queue.push_back(task);
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        let mut stack = self.inner.lock().expect("local queue lock poisoned");
+        stack.push(task, &mut state.tasks);
     }
 
     /// Pops a task from the local queue (LIFO).
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
-        let mut queue = self.inner.lock().expect("local queue lock poisoned");
-        queue.pop_back()
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        let mut stack = self.inner.lock().expect("local queue lock poisoned");
+        stack.pop(&mut state.tasks)
     }
 
     /// Returns true if the local queue is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let queue = self.inner.lock().expect("local queue lock poisoned");
-        queue.is_empty()
+        let stack = self.inner.lock().expect("local queue lock poisoned");
+        stack.is_empty()
     }
 
     /// Creates a stealer for this queue.
     #[must_use]
     pub fn stealer(&self) -> Stealer {
         Stealer {
+            state: Arc::clone(&self.state),
             inner: Arc::clone(&self.inner),
-            scratch: Arc::new(Mutex::new(Vec::with_capacity(32))),
         }
-    }
-}
-
-impl Default for LocalQueue {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 /// A handle to steal tasks from a local queue.
 #[derive(Debug, Clone)]
 pub struct Stealer {
-    inner: Arc<Mutex<VecDeque<TaskId>>>,
-    scratch: Arc<Mutex<Vec<TaskId>>>,
+    state: Arc<Mutex<RuntimeState>>,
+    inner: Arc<Mutex<IntrusiveStack>>,
 }
 
 impl Stealer {
     /// Steals a task from the queue.
     #[must_use]
     pub fn steal(&self) -> Option<TaskId> {
-        let mut queue = self.inner.lock().expect("local queue lock poisoned");
-        queue.pop_front()
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        let mut stack = self.inner.lock().expect("local queue lock poisoned");
+        stack.steal_one(&mut state.tasks)
     }
 
     /// Steals a batch of tasks.
     #[must_use]
     pub fn steal_batch(&self, dest: &LocalQueue) -> bool {
-        let mut scratch = self.scratch.lock().expect("steal scratch lock poisoned");
-        scratch.clear();
-
-        {
-            let mut queue = self.inner.lock().expect("local queue lock poisoned");
-            if queue.is_empty() {
-                return false;
-            }
-
-            let steal_count = (queue.len() / 2).max(1);
-            let current_cap = scratch.capacity();
-            if current_cap < steal_count {
-                scratch.reserve(steal_count - current_cap);
-            }
-
-            for _ in 0..steal_count {
-                if let Some(task) = queue.pop_front() {
-                    scratch.push(task);
-                } else {
-                    break;
-                }
-            }
+        if Arc::ptr_eq(&self.inner, &dest.inner) {
+            return false;
         }
 
-        for task in scratch.drain(..) {
-            dest.push(task);
-        }
+        debug_assert!(
+            Arc::ptr_eq(&self.state, &dest.state),
+            "steal_batch requires a shared RuntimeState"
+        );
 
-        drop(scratch);
-        true
+        let stolen = {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let mut src = self.inner.lock().expect("local queue lock poisoned");
+            let mut dest_stack = dest.inner.lock().expect("local queue lock poisoned");
+            src.steal_batch_into(usize::MAX, &mut state.tasks, &mut dest_stack)
+        };
+        stolen > 0
     }
 }
 
@@ -127,9 +138,13 @@ mod tests {
         TaskId::new_for_test(id, 0)
     }
 
+    fn queue(max_task_id: u32) -> LocalQueue {
+        LocalQueue::new_for_test(max_task_id)
+    }
+
     #[test]
     fn owner_pop_is_lifo() {
-        let queue = LocalQueue::new();
+        let queue = queue(3);
         queue.push(task(1));
         queue.push(task(2));
         queue.push(task(3));
@@ -142,7 +157,7 @@ mod tests {
 
     #[test]
     fn thief_steal_is_fifo() {
-        let queue = LocalQueue::new();
+        let queue = queue(3);
         queue.push(task(1));
         queue.push(task(2));
         queue.push(task(3));
@@ -156,8 +171,9 @@ mod tests {
 
     #[test]
     fn steal_batch_moves_tasks_without_loss_or_dup() {
-        let src = LocalQueue::new();
-        let dest = LocalQueue::new();
+        let state = LocalQueue::test_state(7);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
 
         for id in 0..8 {
             src.push(task(id));
@@ -184,7 +200,7 @@ mod tests {
 
     #[test]
     fn interleaved_owner_thief_operations_preserve_tasks() {
-        let queue = LocalQueue::new();
+        let queue = queue(3);
         let stealer = queue.stealer();
 
         queue.push(task(1));
@@ -199,8 +215,8 @@ mod tests {
 
     #[test]
     fn concurrent_owner_and_stealers_preserve_tasks() {
-        let queue = Arc::new(LocalQueue::new());
         let total: usize = 512;
+        let queue = Arc::new(LocalQueue::new_for_test((total - 1) as u32));
         for id in 0..total {
             queue.push(task(id as u32));
         }
@@ -256,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_local_queue_push_pop() {
-        let queue = LocalQueue::new();
+        let queue = queue(1);
 
         // Push and pop single item
         queue.push(task(1));
@@ -266,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_local_queue_is_empty() {
-        let queue = LocalQueue::new();
+        let queue = queue(1);
         assert!(queue.is_empty());
 
         queue.push(task(1));
@@ -279,7 +295,7 @@ mod tests {
     #[test]
     fn test_local_queue_lifo_optimization() {
         // LIFO ordering benefits cache locality for producer
-        let queue = LocalQueue::new();
+        let queue = queue(5);
 
         // Push tasks in order 1,2,3,4,5
         for i in 1..=5 {
@@ -296,8 +312,9 @@ mod tests {
 
     #[test]
     fn test_steal_batch_steals_half() {
-        let src = LocalQueue::new();
-        let dest = LocalQueue::new();
+        let state = LocalQueue::test_state(9);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
 
         // Push 10 tasks
         for i in 0..10 {
@@ -327,8 +344,9 @@ mod tests {
     #[test]
     fn test_steal_batch_steals_one() {
         // When queue has 1 item, steal batch should take it
-        let src = LocalQueue::new();
-        let dest = LocalQueue::new();
+        let state = LocalQueue::test_state(42);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
 
         src.push(task(42));
         let _ = src.stealer().steal_batch(&dest);
@@ -341,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_local_queue_stealer_clone() {
-        let queue = LocalQueue::new();
+        let queue = queue(2);
         queue.push(task(1));
         queue.push(task(2));
 
@@ -359,8 +377,8 @@ mod tests {
 
     #[test]
     fn test_local_queue_high_volume() {
-        let queue = LocalQueue::new();
         let count = 10_000;
+        let queue = queue(count - 1);
 
         // Push many tasks
         for i in 0..count {
@@ -378,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_local_queue_mixed_push_pop() {
-        let queue = LocalQueue::new();
+        let queue = queue(3);
 
         // Interleaved push and pop
         queue.push(task(1));
@@ -393,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_steal_from_empty_is_idempotent() {
-        let queue = LocalQueue::new();
+        let queue = queue(0);
         let stealer = queue.stealer();
 
         // Multiple steals from empty should all return None
@@ -404,18 +422,13 @@ mod tests {
 
     #[test]
     fn test_steal_batch_from_empty() {
-        let src = LocalQueue::new();
-        let dest = LocalQueue::new();
+        let state = LocalQueue::test_state(0);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
 
         // steal_batch from empty should return false
         let result = src.stealer().steal_batch(&dest);
         assert!(!result, "steal_batch from empty should return false");
         assert!(dest.is_empty());
-    }
-
-    #[test]
-    fn test_default_trait() {
-        let queue = LocalQueue::default();
-        assert!(queue.is_empty());
     }
 }

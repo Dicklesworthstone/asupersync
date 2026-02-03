@@ -109,6 +109,7 @@ pub struct SymbolObligation {
 impl SymbolObligation {
     /// Creates a new symbol transmit obligation.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn transmit(
         id: ObligationId,
         holder: TaskId,
@@ -117,9 +118,10 @@ impl SymbolObligation {
         destination: RegionId,
         deadline: Option<Time>,
         epoch_window: Option<EpochWindow>,
+        now: Time,
     ) -> Self {
         Self {
-            inner: ObligationRecord::new(id, ObligationKind::IoOp, holder, region, Time::ZERO),
+            inner: ObligationRecord::new(id, ObligationKind::IoOp, holder, region, now),
             kind: SymbolObligationKind::SymbolTransmit {
                 symbol_id,
                 destination,
@@ -137,9 +139,10 @@ impl SymbolObligation {
         region: RegionId,
         symbol_id: SymbolId,
         source: RegionId,
+        now: Time,
     ) -> Self {
         Self {
-            inner: ObligationRecord::new(id, ObligationKind::Ack, holder, region, Time::ZERO),
+            inner: ObligationRecord::new(id, ObligationKind::Ack, holder, region, now),
             kind: SymbolObligationKind::SymbolAck { symbol_id, source },
             valid_epoch: None,
             deadline: None,
@@ -155,9 +158,10 @@ impl SymbolObligation {
         object_id: ObjectId,
         symbols_needed: u32,
         epoch_window: EpochWindow,
+        now: Time,
     ) -> Self {
         Self {
-            inner: ObligationRecord::new(id, ObligationKind::IoOp, holder, region, Time::ZERO),
+            inner: ObligationRecord::new(id, ObligationKind::IoOp, holder, region, now),
             kind: SymbolObligationKind::DecodingInProgress {
                 object_id,
                 symbols_received: 0,
@@ -176,9 +180,10 @@ impl SymbolObligation {
         region: RegionId,
         object_id: ObjectId,
         lease_expires: Time,
+        now: Time,
     ) -> Self {
         Self {
-            inner: ObligationRecord::new(id, ObligationKind::Lease, holder, region, Time::ZERO),
+            inner: ObligationRecord::new(id, ObligationKind::Lease, holder, region, now),
             kind: SymbolObligationKind::SymbolLease {
                 object_id,
                 lease_expires,
@@ -338,6 +343,29 @@ impl SymbolObligationTracker {
         now: Time,
     ) -> Option<SymbolObligation> {
         self.obligations.remove(&id).map(|mut ob| {
+            // Clean up index maps to prevent stale ID accumulation
+            match &ob.kind {
+                SymbolObligationKind::SymbolTransmit { symbol_id, .. }
+                | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
+                    if let Some(ids) = self.by_symbol.get_mut(symbol_id) {
+                        ids.retain(|i| *i != id);
+                        if ids.is_empty() {
+                            self.by_symbol.remove(symbol_id);
+                        }
+                    }
+                }
+                SymbolObligationKind::DecodingInProgress { object_id, .. }
+                | SymbolObligationKind::EncodingSession { object_id, .. }
+                | SymbolObligationKind::SymbolLease { object_id, .. } => {
+                    if let Some(ids) = self.by_object.get_mut(object_id) {
+                        ids.retain(|i| *i != id);
+                        if ids.is_empty() {
+                            self.by_object.remove(object_id);
+                        }
+                    }
+                }
+            }
+
             if commit {
                 ob.commit(now);
             } else {
@@ -482,7 +510,8 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let mut ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None);
+        let mut ob =
+            SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::ZERO);
 
         assert!(ob.is_pending());
         ob.commit(Time::from_millis(100));
@@ -497,7 +526,8 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let mut ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None);
+        let mut ob =
+            SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::ZERO);
 
         ob.abort(Time::from_millis(100));
         assert_eq!(ob.state(), ObligationState::Aborted);
@@ -513,7 +543,7 @@ mod tests {
             end: EpochId(20),
         };
 
-        let ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window);
+        let ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window, Time::ZERO);
 
         assert!(!ob.is_epoch_valid(EpochId(5))); // Before window
         assert!(ob.is_epoch_valid(EpochId(10))); // Start of window
@@ -529,7 +559,7 @@ mod tests {
         let object_id = ObjectId::new_for_test(1);
         let deadline = Time::from_millis(1000);
 
-        let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline);
+        let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline, Time::ZERO);
 
         assert!(!ob.is_expired(Time::from_millis(500)));
         assert!(!ob.is_expired(Time::from_millis(1000)));
@@ -546,7 +576,7 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None);
+        let ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::ZERO);
 
         let id = tracker.register(ob);
         assert_eq!(tracker.pending_count(), 1);
@@ -566,7 +596,7 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None);
+        let ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::ZERO);
 
         let id = tracker.register(ob);
         let resolved = tracker.resolve(id, true, Time::from_millis(100));
@@ -587,8 +617,9 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let ob1 = SymbolObligation::transmit(oid1, tid, rid, symbol_id, dest, None, None);
-        let ob2 = SymbolObligation::ack(oid2, tid, rid, symbol_id, dest);
+        let ob1 =
+            SymbolObligation::transmit(oid1, tid, rid, symbol_id, dest, None, None, Time::ZERO);
+        let ob2 = SymbolObligation::ack(oid2, tid, rid, symbol_id, dest, Time::ZERO);
 
         tracker.register(ob1);
         let id2 = tracker.register(ob2);
@@ -613,7 +644,7 @@ mod tests {
             end: EpochId(20),
         };
 
-        let ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window);
+        let ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window, Time::ZERO);
         tracker.register(ob);
 
         // Epoch 15 is valid, nothing aborted
@@ -635,7 +666,7 @@ mod tests {
         let object_id = ObjectId::new_for_test(1);
         let deadline = Time::from_millis(1000);
 
-        let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline);
+        let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline, Time::ZERO);
         tracker.register(ob);
 
         // Before deadline
@@ -657,7 +688,7 @@ mod tests {
             end: EpochId(100),
         };
 
-        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window);
+        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window, Time::ZERO);
 
         // Initial state
         if let SymbolObligationKind::DecodingInProgress {
@@ -686,7 +717,8 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let mut ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None);
+        let mut ob =
+            SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::ZERO);
 
         ob.commit(Time::from_millis(100));
         ob.commit(Time::from_millis(200)); // Should panic
@@ -698,7 +730,7 @@ mod tests {
         let (oid, tid, rid) = test_ids();
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
 
-        let ob = SymbolObligation::ack(oid, tid, rid, symbol_id, rid);
+        let ob = SymbolObligation::ack(oid, tid, rid, symbol_id, rid, Time::ZERO);
 
         assert!(ob.is_epoch_valid(EpochId(0)));
         assert!(ob.is_epoch_valid(EpochId(u64::MAX)));

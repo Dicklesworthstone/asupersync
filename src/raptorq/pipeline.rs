@@ -294,7 +294,7 @@ fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> u
     if symbol_size == 0 {
         return 0;
     }
-    let source_count = (data_len / symbol_size) + 1;
+    let source_count = data_len.div_ceil(symbol_size);
     let total = (source_count as f64 * overhead).ceil() as usize;
     total.saturating_sub(source_count).max(1)
 }

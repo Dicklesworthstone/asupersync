@@ -85,6 +85,10 @@ impl Policy for FailFast {
         &self,
         outcomes: &[Outcome<T, Self::Error>],
     ) -> AggregateDecision<Self::Error> {
+        // Severity lattice: Panicked > Cancelled > Err > Ok.
+        // We must scan all outcomes to find the worst severity, not
+        // short-circuit on Err (which would miss a later Panicked).
+        let mut first_error: Option<Self::Error> = None;
         let mut strongest_cancel: Option<CancelReason> = None;
         for (i, outcome) in outcomes.iter().enumerate() {
             match outcome {
@@ -100,12 +104,19 @@ impl Policy for FailFast {
                         existing.strengthen(r);
                     }
                 },
-                Outcome::Err(e) => return AggregateDecision::FirstError(e.clone()),
+                Outcome::Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e.clone());
+                    }
+                }
                 Outcome::Ok(_) => {}
             }
         }
         if let Some(r) = strongest_cancel {
             return AggregateDecision::Cancelled(r);
+        }
+        if let Some(e) = first_error {
+            return AggregateDecision::FirstError(e);
         }
         AggregateDecision::AllOk
     }

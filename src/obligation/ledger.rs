@@ -193,7 +193,10 @@ impl ObligationLedger {
         description: Option<String>,
     ) -> ObligationToken {
         let gen = self.next_gen;
-        self.next_gen += 1;
+        self.next_gen = self
+            .next_gen
+            .checked_add(1)
+            .expect("obligation ledger generation overflow");
         let idx = ArenaIndex::new(gen, 0);
         let id = ObligationId::from_arena(idx);
 

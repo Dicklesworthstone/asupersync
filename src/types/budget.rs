@@ -360,8 +360,15 @@ impl Budget {
         };
 
         // Trace when budget is tightened (any constraint becomes stricter)
-        let deadline_tightened =
-            combined.deadline < self.deadline || combined.deadline < other.deadline;
+        // For deadline comparison, None means "no constraint" (least restrictive),
+        // so tightening occurs only when a finite deadline replaces None, or when
+        // one finite deadline is earlier than another.
+        let deadline_tightened = match (combined.deadline, self.deadline, other.deadline) {
+            (Some(c), Some(s), _) if c < s => true,
+            (Some(c), _, Some(o)) if c < o => true,
+            (Some(_), None, _) | (Some(_), _, None) => true,
+            _ => false,
+        };
         let poll_tightened =
             combined.poll_quota < self.poll_quota || combined.poll_quota < other.poll_quota;
         let cost_tightened = match (combined.cost_quota, self.cost_quota, other.cost_quota) {
@@ -732,7 +739,7 @@ impl MinPlusCurve {
 
         Self {
             samples,
-            tail_rate: self.tail_rate.min(other.tail_rate),
+            tail_rate: self.tail_rate.saturating_add(other.tail_rate),
         }
     }
 }

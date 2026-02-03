@@ -301,8 +301,11 @@ impl Epoch {
     /// Creates a new epoch.
     #[must_use]
     pub fn new(id: EpochId, started_at: Time, config: EpochConfig) -> Self {
-        let expected_end =
-            Time::from_nanos(started_at.as_nanos() + config.target_duration.as_nanos());
+        let expected_end = Time::from_nanos(
+            started_at
+                .as_nanos()
+                .saturating_add(config.target_duration.as_nanos()),
+        );
         Self {
             id,
             state: EpochState::Active,
@@ -331,16 +334,22 @@ impl Epoch {
     /// Returns true if the epoch has exceeded its maximum duration.
     #[must_use]
     pub fn is_overdue(&self, now: Time) -> bool {
-        let max_end =
-            Time::from_nanos(self.started_at.as_nanos() + self.config.max_duration.as_nanos());
+        let max_end = Time::from_nanos(
+            self.started_at
+                .as_nanos()
+                .saturating_add(self.config.max_duration.as_nanos()),
+        );
         now > max_end
     }
 
     /// Returns true if the epoch can transition (met minimum duration).
     #[must_use]
     pub fn can_transition(&self, now: Time) -> bool {
-        let min_end =
-            Time::from_nanos(self.started_at.as_nanos() + self.config.min_duration.as_nanos());
+        let min_end = Time::from_nanos(
+            self.started_at
+                .as_nanos()
+                .saturating_add(self.config.min_duration.as_nanos()),
+        );
         now >= min_end
     }
 
@@ -676,7 +685,11 @@ impl EpochBarrier {
 
         // Check for timeout
         if let Some(timeout) = self.timeout {
-            let deadline = Time::from_nanos(self.created_at.as_nanos() + timeout.as_nanos());
+            let deadline = Time::from_nanos(
+                self.created_at
+                    .as_nanos()
+                    .saturating_add(timeout.as_nanos()),
+            );
             if now > deadline {
                 let result = BarrierResult {
                     trigger: BarrierTrigger::Timeout,
@@ -818,8 +831,8 @@ impl EpochClock {
     }
 
     /// Initializes the clock with the genesis epoch.
-    pub fn initialize(&self, _started_at: Time) {
-        let epoch = Epoch::genesis(self.config.clone());
+    pub fn initialize(&self, started_at: Time) {
+        let epoch = Epoch::new(EpochId::GENESIS, started_at, self.config.clone());
         *self.active_epoch.write().expect("lock poisoned") = Some(epoch);
     }
 
@@ -864,7 +877,8 @@ impl EpochClock {
         }
 
         // Advance to next epoch
-        let new_id = EpochId(self.current.fetch_add(1, Ordering::SeqCst) + 1);
+        let prev = self.current.fetch_add(1, Ordering::SeqCst);
+        let new_id = EpochId(prev.saturating_add(1));
         let new_epoch = Epoch::new(new_id, now, self.config.clone());
         *active = Some(new_epoch);
         drop(active); // Explicit drop to avoid significant drop warning

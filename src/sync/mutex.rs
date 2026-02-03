@@ -425,8 +425,10 @@ impl<T> OwnedMutexGuard<T> {
                 match self.waiter.as_ref() {
                     Some(waiter) if !waiter.load(Ordering::Acquire) => {
                         // Was dequeued by unlock() but we're still waiting - re-register
+                        // at the FRONT to preserve FIFO fairness (we were already at
+                        // the front when dequeued, so we shouldn't lose our position).
                         waiter.store(true, Ordering::Release);
-                        state.waiters.push_back(Waiter {
+                        state.waiters.push_front(Waiter {
                             waker: context.waker().clone(),
                             queued: Arc::clone(waiter),
                         });

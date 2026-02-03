@@ -25,6 +25,8 @@
 //! `(object_id, sbn, esi)`. For a fixed seed and input, the output
 //! is identical across runs and platforms.
 
+#![allow(clippy::many_single_char_names)]
+
 use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::util::DetRng;
 
@@ -399,6 +401,17 @@ impl ConstraintMatrix {
                 let row_copy = b[row].clone();
                 gf256_addmul_slice(&mut b[other], &row_copy, factor);
             }
+        }
+
+        // Verify all columns have been assigned pivots (non-singular check).
+        let mut col_has_pivot = vec![false; n];
+        for &col in &pivot_col {
+            if col < n {
+                col_has_pivot[col] = true;
+            }
+        }
+        if col_has_pivot.iter().any(|&has| !has) {
+            return None; // Singular matrix: at least one column has no pivot
         }
 
         // Extract solution: intermediate[col] = b[row] where pivot_col[row] == col
@@ -840,9 +853,17 @@ impl SystematicEncoder {
 
         let degree = self.soliton.sample(rng.next_u64() as u32);
 
-        for _ in 0..degree {
-            let idx = rng.next_usize(l);
-            // XOR the intermediate symbol into the repair symbol
+        // Sample distinct intermediate symbol indices (without replacement)
+        // to avoid XOR cancellation of duplicate entries.
+        let capped_degree = degree.min(l);
+        let mut chosen = Vec::with_capacity(capped_degree);
+        for _ in 0..capped_degree {
+            let mut idx = rng.next_usize(l);
+            // Rejection-sample to avoid duplicates.
+            while chosen.contains(&idx) {
+                idx = rng.next_usize(l);
+            }
+            chosen.push(idx);
             for (r, &s) in result.iter_mut().zip(self.intermediate[idx].iter()) {
                 *r ^= s;
             }
@@ -1065,7 +1086,7 @@ mod tests {
 
         // Very unlikely all three are identical for different ESIs
         assert!(
-            r0 != r1 || r1 != r2,
+            r0 != r1 && r1 != r2,
             "repair symbols should generally differ"
         );
     }

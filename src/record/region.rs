@@ -374,11 +374,11 @@ impl RegionRecord {
         self.inner.read().expect("lock poisoned").tasks.clone()
     }
 
-    /// Returns true if the region has any live children or tasks.
+    /// Returns true if the region has any live children, tasks, or pending obligations.
     #[must_use]
     pub fn has_live_work(&self) -> bool {
         let inner = self.inner.read().expect("lock poisoned");
-        !inner.children.is_empty() || !inner.tasks.is_empty()
+        !inner.children.is_empty() || !inner.tasks.is_empty() || inner.pending_obligations > 0
     }
 
     /// Adds a child region.
@@ -612,7 +612,13 @@ impl RegionRecord {
                 cancel_reason = ?reason,
                 "region state transition"
             );
-            inner.cancel_reason = reason;
+            if let Some(new_reason) = reason {
+                if let Some(existing) = &mut inner.cancel_reason {
+                    existing.strengthen(&new_reason);
+                } else {
+                    inner.cancel_reason = Some(new_reason);
+                }
+            }
 
             true
         } else {

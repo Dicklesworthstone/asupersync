@@ -68,7 +68,7 @@ impl Worker {
 
         Self {
             id,
-            local: LocalQueue::new(),
+            local: LocalQueue::new(Arc::clone(&state)),
             stealers,
             global,
             state,
@@ -245,11 +245,11 @@ impl Worker {
 
                 let waiters = state.task_completed(task_id);
                 for waiter in waiters {
-                    state
-                        .tasks
-                        .get(waiter.arena_index())
-                        .is_none_or(|record| record.wake_state.notify())
-                        .then(|| self.global.push(waiter));
+                    if let Some(record) = state.tasks.get(waiter.arena_index()) {
+                        if record.wake_state.notify() {
+                            self.global.push(waiter);
+                        }
+                    }
                 }
                 drop(state);
                 wake_state.clear();
@@ -701,10 +701,10 @@ mod tests {
         use crate::runtime::scheduler::local_queue::LocalQueue;
         use crate::util::DetRng;
 
-        let queue = LocalQueue::new();
-        queue.push(TaskId::new_for_test(1, 1));
-        queue.push(TaskId::new_for_test(1, 2));
-        queue.push(TaskId::new_for_test(1, 3));
+        let queue = LocalQueue::new_for_test(3);
+        queue.push(TaskId::new_for_test(1, 0));
+        queue.push(TaskId::new_for_test(2, 0));
+        queue.push(TaskId::new_for_test(3, 0));
 
         let stealers = vec![queue.stealer()];
         let mut rng = DetRng::new(42);
@@ -712,7 +712,7 @@ mod tests {
         // Steal should succeed
         let stolen = stealing::steal_task(&stealers, &mut rng);
         assert!(stolen.is_some());
-        assert_eq!(stolen.unwrap(), TaskId::new_for_test(1, 1));
+        assert_eq!(stolen.unwrap(), TaskId::new_for_test(1, 0));
     }
 
     #[test]
@@ -720,7 +720,7 @@ mod tests {
         use crate::runtime::scheduler::local_queue::LocalQueue;
         use crate::util::DetRng;
 
-        let queue = LocalQueue::new();
+        let queue = LocalQueue::new_for_test(0);
         let stealers = vec![queue.stealer()];
         let mut rng = DetRng::new(42);
 
@@ -735,13 +735,13 @@ mod tests {
         use crate::util::DetRng;
 
         // Simulate 3 workers, worker 1's view
-        let q0 = LocalQueue::new();
-        let q1 = LocalQueue::new(); // Self
-        let q2 = LocalQueue::new();
+        let q0 = LocalQueue::new_for_test(2);
+        let q1 = LocalQueue::new_for_test(2); // Self
+        let q2 = LocalQueue::new_for_test(2);
 
-        q0.push(TaskId::new_for_test(1, 0));
-        q1.push(TaskId::new_for_test(1, 1)); // Own queue
-        q2.push(TaskId::new_for_test(1, 2));
+        q0.push(TaskId::new_for_test(0, 0));
+        q1.push(TaskId::new_for_test(1, 0)); // Own queue
+        q2.push(TaskId::new_for_test(2, 0));
 
         // Worker 1's stealers exclude q1
         let stealers = vec![q0.stealer(), q2.stealer()];
@@ -758,8 +758,8 @@ mod tests {
         let second_id = second.unwrap();
 
         // Neither should be task 1 (own queue)
-        assert_ne!(first_id, TaskId::new_for_test(1, 1));
-        assert_ne!(second_id, TaskId::new_for_test(1, 1));
+        assert_ne!(first_id, TaskId::new_for_test(1, 0));
+        assert_ne!(second_id, TaskId::new_for_test(1, 0));
     }
 
     #[test]
@@ -768,9 +768,9 @@ mod tests {
         use crate::util::DetRng;
 
         // Create 4 queues with one task each
-        let queues: Vec<_> = (0..4).map(|_| LocalQueue::new()).collect();
+        let queues: Vec<_> = (0..4).map(|_| LocalQueue::new_for_test(4)).collect();
         for (i, q) in queues.iter().enumerate() {
-            q.push(TaskId::new_for_test(1, i as u32));
+            q.push(TaskId::new_for_test(i as u32 + 1, 0));
         }
 
         let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();

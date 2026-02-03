@@ -685,6 +685,7 @@ mod tests {
         ];
 
         let config = GeodesicConfig {
+            exact_threshold: 0,
             beam_threshold: 1,
             beam_width: 4,
             step_budget: 100,

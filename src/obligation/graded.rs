@@ -290,6 +290,12 @@ impl GradedScope {
 
     /// Record a resolution (obligation resolved in this scope).
     pub fn on_resolve(&mut self) {
+        debug_assert!(
+            self.resolved < self.reserved,
+            "on_resolve called more times than on_reserve ({} >= {})",
+            self.resolved,
+            self.reserved,
+        );
         self.resolved += 1;
     }
 

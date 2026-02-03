@@ -23,9 +23,11 @@ use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, Scheduler, QUEUE_TAG_READY,
 };
+use asupersync::runtime::RuntimeState;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, ArenaIndex};
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // =============================================================================
@@ -59,6 +61,21 @@ fn setup_arena(count: u32) -> Arena<TaskRecord> {
     arena
 }
 
+fn setup_runtime_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
+    let mut state = RuntimeState::new();
+    for i in 0..=max_task_id {
+        let id = task(i);
+        let record = TaskRecord::new(id, region(), Budget::INFINITE);
+        let idx = state.tasks.insert(record);
+        assert_eq!(idx.index(), i);
+    }
+    Arc::new(Mutex::new(state))
+}
+
+fn local_queue(max_task_id: u32) -> LocalQueue {
+    LocalQueue::new(setup_runtime_state(max_task_id))
+}
+
 // =============================================================================
 // LOCAL QUEUE BENCHMARKS
 // =============================================================================
@@ -69,7 +86,7 @@ fn bench_local_queue(c: &mut Criterion) {
     // Single push/pop cycle
     group.bench_function("push_pop_single", |b| {
         b.iter_batched(
-            LocalQueue::new,
+            || local_queue(1),
             |queue| {
                 queue.push(task(1));
                 let result = queue.pop();
@@ -87,8 +104,9 @@ fn bench_local_queue(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let task_ids = tasks(count as usize);
+                let max_id = count as u32 - 1;
                 b.iter_batched(
-                    || (LocalQueue::new(), task_ids.clone()),
+                    || (local_queue(max_id), task_ids.clone()),
                     |(queue, tasks)| {
                         for t in &tasks {
                             queue.push(*t);
@@ -106,7 +124,7 @@ fn bench_local_queue(c: &mut Criterion) {
     // Interleaved push/pop (simulates real workload)
     group.bench_function("interleaved_push_pop", |b| {
         b.iter_batched(
-            LocalQueue::new,
+            || local_queue(199),
             |queue| {
                 for i in 0..100u32 {
                     queue.push(task(i * 2));
@@ -386,7 +404,8 @@ fn bench_work_stealing(c: &mut Criterion) {
     group.bench_function("steal_single", |b| {
         b.iter_batched(
             || {
-                let victim = LocalQueue::new();
+                let state = setup_runtime_state(1);
+                let victim = LocalQueue::new(Arc::clone(&state));
                 victim.push(task(1));
                 let stealer = victim.stealer();
                 (victim, stealer)
@@ -407,12 +426,14 @@ fn bench_work_stealing(c: &mut Criterion) {
             |b, &victim_size| {
                 b.iter_batched(
                     || {
-                        let victim = LocalQueue::new();
+                        let max_id = victim_size.saturating_sub(1);
+                        let state = setup_runtime_state(max_id);
+                        let victim = LocalQueue::new(Arc::clone(&state));
                         for i in 0..victim_size {
                             victim.push(task(i));
                         }
                         let stealer = victim.stealer();
-                        let dest = LocalQueue::new();
+                        let dest = LocalQueue::new(Arc::clone(&state));
                         (victim, stealer, dest)
                     },
                     |(_victim, stealer, dest)| {
@@ -429,7 +450,7 @@ fn bench_work_stealing(c: &mut Criterion) {
     group.bench_function("steal_empty", |b| {
         b.iter_batched(
             || {
-                let victim = LocalQueue::new();
+                let victim = LocalQueue::new(setup_runtime_state(0));
                 victim.stealer()
             },
             |stealer| {

@@ -22,6 +22,7 @@
 //! | `ASUPERSYNC_BLOCKING_MAX_THREADS` | `usize` | `blocking.max_threads` |
 //! | `ASUPERSYNC_ENABLE_PARKING` | `bool` | `enable_parking` |
 //! | `ASUPERSYNC_POLL_BUDGET` | `u32` | `poll_budget` |
+//! | `ASUPERSYNC_CANCEL_LANE_MAX_STREAK` | `usize` | `cancel_lane_max_streak` |
 
 use crate::runtime::config::RuntimeConfig;
 use crate::types::builder::BuildError;
@@ -44,6 +45,12 @@ pub const ENV_BLOCKING_MAX_THREADS: &str = "ASUPERSYNC_BLOCKING_MAX_THREADS";
 pub const ENV_ENABLE_PARKING: &str = "ASUPERSYNC_ENABLE_PARKING";
 /// Environment variable name for cooperative poll budget.
 pub const ENV_POLL_BUDGET: &str = "ASUPERSYNC_POLL_BUDGET";
+/// Environment variable name for max consecutive cancel dispatches.
+pub const ENV_CANCEL_LANE_MAX_STREAK: &str = "ASUPERSYNC_CANCEL_LANE_MAX_STREAK";
+/// Environment variable name for enabling the Lyapunov governor.
+pub const ENV_ENABLE_GOVERNOR: &str = "ASUPERSYNC_ENABLE_GOVERNOR";
+/// Environment variable name for governor snapshot interval (scheduling steps).
+pub const ENV_GOVERNOR_INTERVAL: &str = "ASUPERSYNC_GOVERNOR_INTERVAL";
 
 /// Apply environment variable overrides to a [`RuntimeConfig`].
 ///
@@ -76,6 +83,9 @@ pub fn apply_env_overrides(config: &mut RuntimeConfig) -> Result<(), BuildError>
     }
     if let Some(val) = read_env(ENV_POLL_BUDGET) {
         config.poll_budget = parse_u32(ENV_POLL_BUDGET, &val)?;
+    }
+    if let Some(val) = read_env(ENV_CANCEL_LANE_MAX_STREAK) {
+        config.cancel_lane_max_streak = parse_usize(ENV_CANCEL_LANE_MAX_STREAK, &val)?;
     }
     Ok(())
 }
@@ -126,6 +136,7 @@ fn parse_bool(var_name: &str, val: &str) -> Result<bool, BuildError> {
 /// task_queue_depth = 1024
 /// steal_batch_size = 16
 /// poll_budget = 128
+/// cancel_lane_max_streak = 16
 /// enable_parking = true
 /// thread_stack_size = 2097152
 /// thread_name_prefix = "myapp-worker"
@@ -157,6 +168,8 @@ pub struct SchedulerToml {
     pub steal_batch_size: Option<usize>,
     /// Cooperative poll budget.
     pub poll_budget: Option<u32>,
+    /// Maximum consecutive cancel-lane dispatches before yielding.
+    pub cancel_lane_max_streak: Option<usize>,
     /// Enable parking for idle workers.
     pub enable_parking: Option<bool>,
     /// Stack size per worker thread in bytes.
@@ -191,6 +204,9 @@ pub fn apply_toml_config(config: &mut RuntimeConfig, toml: &RuntimeTomlConfig) {
     }
     if let Some(v) = toml.scheduler.poll_budget {
         config.poll_budget = v;
+    }
+    if let Some(v) = toml.scheduler.cancel_lane_max_streak {
+        config.cancel_lane_max_streak = v;
     }
     if let Some(v) = toml.scheduler.enable_parking {
         config.enable_parking = v;

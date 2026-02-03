@@ -294,11 +294,27 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
+    const ADDMUL_TABLE_THRESHOLD: usize = 64;
+
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
     if c.is_zero() {
         return;
     }
+    if c == Gf256::ONE {
+        gf256_add_slice(dst, src);
+        return;
+    }
     let log_c = LOG[c.0 as usize] as usize;
+    if src.len() >= ADDMUL_TABLE_THRESHOLD {
+        let mut table = [0u8; 256];
+        for i in 1..=255usize {
+            table[i] = EXP[LOG[i] as usize + log_c];
+        }
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            *d ^= table[*s as usize];
+        }
+        return;
+    }
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         if *s != 0 {
             *d ^= EXP[LOG[*s as usize] as usize + log_c];
@@ -539,6 +555,17 @@ mod tests {
             .zip(src.iter())
             .map(|(&d, &s)| d ^ (Gf256(s) * c).0)
             .collect();
+        gf256_addmul_slice(&mut dst, &src, c);
+        assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn addmul_slice_large_inputs() {
+        const LEN: usize = 64 + 7;
+        let src: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(37)) as u8).collect();
+        let c = Gf256(13);
+        let mut dst = vec![0u8; LEN];
+        let expected: Vec<u8> = src.iter().map(|&s| (Gf256(s) * c).0).collect();
         gf256_addmul_slice(&mut dst, &src, c);
         assert_eq!(dst, expected);
     }
