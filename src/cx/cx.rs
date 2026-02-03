@@ -159,19 +159,21 @@ pub struct Cx<Caps = cap::All> {
     entropy: Arc<dyn EntropySource>,
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
-    _caps: PhantomData<Caps>,
+    // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
+    _caps: PhantomData<fn() -> Caps>,
 }
 
+// Manual Clone impl to avoid requiring `Caps: Clone` (Caps is just a phantom marker type)
 impl<Caps> Clone for Cx<Caps> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
-            observability: self.observability.clone(),
+            inner: Arc::clone(&self.inner),
+            observability: Arc::clone(&self.observability),
             io_driver: self.io_driver.clone(),
             io_cap: self.io_cap.clone(),
             timer_driver: self.timer_driver.clone(),
             blocking_pool: self.blocking_pool.clone(),
-            entropy: self.entropy.clone(),
+            entropy: Arc::clone(&self.entropy),
             logical_clock: self.logical_clock.clone(),
             remote_cap: self.remote_cap.clone(),
             _caps: PhantomData,
