@@ -57,6 +57,7 @@ fn init_test(test_name: &str) {
 // ============================================================================
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 struct ScenarioReport {
     scenario: &'static str,
     seed: u64,
@@ -456,7 +457,7 @@ fn governed_run_deterministic() {
 
     let seed = 0xE2E0_6000;
     let weights = PotentialWeights::default();
-    let r1 = run_cancel_fanout(seed, 10, 12, true, weights.clone());
+    let r1 = run_cancel_fanout(seed, 10, 12, true, weights);
     let r2 = run_cancel_fanout(seed, 10, 12, true, weights);
 
     tracing::info!("Run 1: {r1}");
@@ -476,7 +477,7 @@ fn cancel_fanout_invariants() {
     let seed = 0xE2E0_CF01;
     let weights = PotentialWeights::default();
 
-    let baseline = run_cancel_fanout(seed, 12, 16, false, weights.clone());
+    let baseline = run_cancel_fanout(seed, 12, 16, false, weights);
     let governed = run_cancel_fanout(seed, 12, 16, true, weights);
 
     tracing::info!("Baseline: {baseline}");
@@ -566,8 +567,8 @@ fn all_scenarios_converge_default_weights() {
     let weights = PotentialWeights::default();
 
     let reports = [
-        run_cancel_fanout(0xE2E0_A001, 10, 12, true, weights.clone()),
-        run_deadline_pressure(0xE2E0_A002, 6, 3, 8, true, weights.clone()),
+        run_cancel_fanout(0xE2E0_A001, 10, 12, true, weights),
+        run_deadline_pressure(0xE2E0_A002, 6, 3, 8, true, weights),
         run_obligation_debt(0xE2E0_A003, 6, 2, 8, true, weights),
     ];
 
@@ -604,7 +605,7 @@ fn all_weight_presets_converge_on_cancel_fanout() {
     ];
 
     for (label, weights) in presets {
-        let report = run_cancel_fanout(seed, 10, 12, true, weights.clone());
+        let report = run_cancel_fanout(seed, 10, 12, true, *weights);
         tracing::info!("[{label}] {report}");
 
         assert!(report.reached_quiescence, "{label}: must reach quiescence");
@@ -624,8 +625,8 @@ fn regression_gate_step_counts() {
     let weights = PotentialWeights::default();
 
     // Run each scenario and record step counts.
-    let fanout = run_cancel_fanout(0xE2E0_EE01, 8, 8, true, weights.clone());
-    let deadline = run_deadline_pressure(0xE2E0_EE02, 6, 3, 8, true, weights.clone());
+    let fanout = run_cancel_fanout(0xE2E0_EE01, 8, 8, true, weights);
+    let deadline = run_deadline_pressure(0xE2E0_EE02, 6, 3, 8, true, weights);
     let debt = run_obligation_debt(0xE2E0_EE03, 6, 2, 8, true, weights);
 
     tracing::info!("Fanout:   {fanout}");

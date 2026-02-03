@@ -1869,7 +1869,7 @@ mod tests {
 
         for (label, weights) in &weight_configs {
             let (governor, is_quiescent) =
-                run_cancel_drain_with_weights(0xBD25_0815, 6, 8, weights.clone());
+                run_cancel_drain_with_weights(0xBD25_0815, 6, 8, *weights);
 
             crate::assert_with_log!(
                 is_quiescent,
@@ -2097,7 +2097,7 @@ mod tests {
         let seed = 0xBD25_DE70;
         let w = PotentialWeights::default();
 
-        let (gov1, q1, l1) = run_cancel_drain_with_obligations(seed, 6, 2, 12, w.clone());
+        let (gov1, q1, l1) = run_cancel_drain_with_obligations(seed, 6, 2, 12, w);
         let (gov2, q2, l2) = run_cancel_drain_with_obligations(seed, 6, 2, 12, w);
 
         crate::assert_with_log!(q1 && q2, "both quiescent", true, q1 && q2);
