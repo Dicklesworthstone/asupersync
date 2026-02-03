@@ -209,7 +209,7 @@ pub fn matmul_gf2(a: &BoundaryMatrix, b: &BoundaryMatrix) -> BoundaryMatrix {
 mod tests {
     use super::*;
     use crate::trace::event_structure::TracePoset;
-    use crate::trace::TraceEvent;
+    use crate::trace::{TraceData, TraceEvent, TraceEventKind};
     use crate::types::{RegionId, TaskId, Time};
 
     /// Single edge: two vertices, one edge, no squares.
@@ -444,6 +444,119 @@ mod tests {
         let d2 = cx.boundary_2();
         let product = matmul_gf2(&d1, &d2);
         assert_eq!(product.cols(), 0);
+    }
+
+    /// Commutation square: two read-only checkpoints commute under a write.
+    ///
+    /// Events:
+    /// 0 = chaos injection (writes GlobalState)
+    /// 1 = checkpoint (reads GlobalState)
+    /// 2 = checkpoint (reads GlobalState)
+    /// 3 = chaos injection (writes GlobalState)
+    ///
+    /// The two checkpoints are independent (read-read), yielding a commuting diamond.
+    #[test]
+    fn toy_trace_commutation_square() {
+        let trace = vec![
+            TraceEvent::new(
+                1,
+                Time::from_nanos(10),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "chaos-a".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(20),
+                TraceEventKind::Checkpoint,
+                TraceData::Checkpoint {
+                    sequence: 1,
+                    active_tasks: 1,
+                    active_regions: 1,
+                },
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(30),
+                TraceEventKind::Checkpoint,
+                TraceData::Checkpoint {
+                    sequence: 2,
+                    active_tasks: 1,
+                    active_regions: 1,
+                },
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(40),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "chaos-b".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+        ];
+
+        let poset = TracePoset::from_trace(&trace);
+        let cx = SquareComplex::from_trace_poset(&poset);
+
+        assert_eq!(cx.squares.len(), 1);
+        assert_eq!(cx.squares[0], (0, 1, 2, 3));
+    }
+
+    /// Dependent actions: repeated writes with reads after do not create a square.
+    #[test]
+    fn toy_trace_dependent_actions_no_square() {
+        let trace = vec![
+            TraceEvent::new(
+                1,
+                Time::from_nanos(10),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "write-a".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(20),
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "write-b".to_string(),
+                    task: None,
+                    detail: "write global state".to_string(),
+                },
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(30),
+                TraceEventKind::Checkpoint,
+                TraceData::Checkpoint {
+                    sequence: 1,
+                    active_tasks: 1,
+                    active_regions: 1,
+                },
+            ),
+            TraceEvent::new(
+                4,
+                Time::from_nanos(40),
+                TraceEventKind::Checkpoint,
+                TraceData::Checkpoint {
+                    sequence: 2,
+                    active_tasks: 1,
+                    active_regions: 1,
+                },
+            ),
+        ];
+
+        let poset = TracePoset::from_trace(&trace);
+        let cx = SquareComplex::from_trace_poset(&poset);
+
+        assert_eq!(cx.squares.len(), 0);
     }
 
     /// End-to-end H1 persistence: a 1-cycle is born and then killed by a 2-cell.
