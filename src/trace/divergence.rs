@@ -21,7 +21,7 @@
 //! println!("{}", report.to_json().unwrap());
 //! ```
 
-use crate::trace::replay::{CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace};
+use crate::trace::replay::{ReplayEvent, ReplayTrace};
 use crate::trace::replayer::DivergenceError;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -222,64 +222,56 @@ impl DivergenceReport {
     /// Render a human-readable text report.
     #[must_use]
     pub fn to_text(&self) -> String {
+        use std::fmt::Write;
         let mut out = String::new();
         out.push_str("=== Replay Divergence Report ===\n\n");
 
-        out.push_str(&format!("Category:   {}\n", self.category));
-        out.push_str(&format!(
-            "Event:      {} of {} ({:.1}% replayed)\n",
+        let _ = writeln!(out, "Category:   {}", self.category);
+        let _ = writeln!(
+            out,
+            "Event:      {} of {} ({:.1}% replayed)",
             self.divergence_index, self.trace_length, self.replay_progress_pct
-        ));
-        out.push_str(&format!("Seed:       0x{:016x}\n", self.seed));
-        out.push_str(&format!(
-            "Min prefix: {} events\n\n",
-            self.minimal_prefix_len
-        ));
+        );
+        let _ = writeln!(out, "Seed:       0x{:016x}", self.seed);
+        let _ = writeln!(out, "Min prefix: {} events\n", self.minimal_prefix_len);
 
-        out.push_str(&format!(
-            "Expected: [{}] {}\n",
+        let _ = writeln!(
+            out,
+            "Expected: [{}] {}",
             self.expected.event_type, self.expected.details
-        ));
-        out.push_str(&format!(
-            "Actual:   [{}] {}\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "Actual:   [{}] {}\n",
             self.actual.event_type, self.actual.details
-        ));
+        );
 
-        out.push_str(&format!("Explanation: {}\n", self.explanation));
-        out.push_str(&format!("Suggestion:  {}\n\n", self.suggestion));
+        let _ = writeln!(out, "Explanation: {}", self.explanation);
+        let _ = writeln!(out, "Suggestion:  {}\n", self.suggestion);
 
         if !self.affected.tasks.is_empty() {
-            out.push_str(&format!("Affected tasks:   {:?}\n", self.affected.tasks));
+            let _ = writeln!(out, "Affected tasks:   {:?}", self.affected.tasks);
         }
         if !self.affected.regions.is_empty() {
-            out.push_str(&format!("Affected regions: {:?}\n", self.affected.regions));
+            let _ = writeln!(out, "Affected regions: {:?}", self.affected.regions);
         }
         if !self.affected.timers.is_empty() {
-            out.push_str(&format!("Affected timers:  {:?}\n", self.affected.timers));
+            let _ = writeln!(out, "Affected timers:  {:?}", self.affected.timers);
         }
 
         if !self.context_before.is_empty() {
             out.push_str("\n--- Context (before) ---\n");
             for ev in &self.context_before {
-                out.push_str(&format!(
-                    "  [{}] {} {}\n",
-                    ev.index, ev.event_type, ev.details
-                ));
+                let _ = writeln!(out, "  [{}] {} {}", ev.index, ev.event_type, ev.details);
             }
         }
 
-        out.push_str(&format!(
-            "  [{}] >>> DIVERGENCE <<<\n",
-            self.divergence_index
-        ));
+        let _ = writeln!(out, "  [{}] >>> DIVERGENCE <<<", self.divergence_index);
 
         if !self.context_after.is_empty() {
             out.push_str("--- Context (expected after) ---\n");
             for ev in &self.context_after {
-                out.push_str(&format!(
-                    "  [{}] {} {}\n",
-                    ev.index, ev.event_type, ev.details
-                ));
+                let _ = writeln!(out, "  [{}] {} {}", ev.index, ev.event_type, ev.details);
             }
         }
 
@@ -702,7 +694,8 @@ fn build_suggestion(category: DivergenceCategory, affected: &AffectedEntities) -
     };
 
     if !affected.tasks.is_empty() {
-        suggestion.push_str(&format!(" Focus on task(s): {:?}.", affected.tasks));
+        use std::fmt::Write;
+        let _ = write!(suggestion, " Focus on task(s): {:?}.", affected.tasks);
     }
 
     suggestion
