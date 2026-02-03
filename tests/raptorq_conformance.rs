@@ -378,7 +378,6 @@ fn insufficient_symbols_fails() {
 
     let source = make_patterned_source(k, symbol_size);
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
-    let l = decoder.params().l;
 
     // Only receive k-1 source symbols (not enough: need at least L total)
     let received: Vec<ReceivedSymbol> = source[..k - 1]

@@ -200,6 +200,7 @@ fn e2e_debugging_workflow_record_save_load_step() {
     let loaded_trace = ReplayTrace {
         metadata: loaded_metadata,
         events: loaded_events,
+        cursor: 0,
     };
     tracing::info!(events = loaded_trace.len(), "Loaded trace from file");
 

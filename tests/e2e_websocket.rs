@@ -10,11 +10,16 @@ use asupersync::net::websocket::{
     compute_accept_key, ClientHandshake, HandshakeError, HttpRequest, HttpResponse,
     ServerHandshake, WsUrl,
 };
+use asupersync::util::DetEntropy;
 use futures_lite::future::block_on;
 use std::io::Cursor;
 use websocket_e2e::util::{
     init_ws_test, read_exact, read_http_headers, write_all, ws_handshake_request_bytes,
 };
+
+fn test_entropy() -> DetEntropy {
+    DetEntropy::new(42)
+}
 
 #[test]
 fn ws_url_parse_basic_ws() {
@@ -60,7 +65,8 @@ fn ws_url_parse_invalid_scheme() {
 #[test]
 fn ws_client_handshake_request_contains_headers() {
     init_ws_test("ws_client_handshake_request_contains_headers");
-    let handshake = ClientHandshake::new("ws://example.com/chat").expect("handshake");
+    let entropy = test_entropy();
+    let handshake = ClientHandshake::new("ws://example.com/chat", &entropy).expect("handshake");
     let request = HttpRequest::parse(&handshake.request_bytes()).expect("parse");
 
     assert_with_log!(request.method == "GET", "method", "GET", request.method);
@@ -85,7 +91,8 @@ fn ws_client_handshake_request_contains_headers() {
 #[test]
 fn ws_client_handshake_request_includes_protocols_and_extensions() {
     init_ws_test("ws_client_handshake_request_includes_protocols_and_extensions");
-    let handshake = ClientHandshake::new("ws://example.com/chat")
+    let entropy = test_entropy();
+    let handshake = ClientHandshake::new("ws://example.com/chat", &entropy)
         .expect("handshake")
         .protocol("chat")
         .extension("permessage-deflate")
@@ -159,7 +166,8 @@ Sec-WebSocket-Version: 13\r\n\
 #[test]
 fn ws_client_handshake_validate_response_ok() {
     init_ws_test("ws_client_handshake_validate_response_ok");
-    let handshake = ClientHandshake::new("ws://example.com/chat").expect("handshake");
+    let entropy = test_entropy();
+    let handshake = ClientHandshake::new("ws://example.com/chat", &entropy).expect("handshake");
     let accept_key = compute_accept_key(handshake.key());
     let response = asupersync::net::websocket::AcceptResponse {
         accept_key,

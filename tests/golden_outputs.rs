@@ -535,20 +535,17 @@ impl<T> SharedHandle<T> {
     where
         T: Clone,
     {
-        let i_am_joiner;
-        {
+        let i_am_joiner = {
             let mut state = self.inner.state.lock().expect("join state lock");
             match &*state {
                 JoinState::Ready(result) => return result.clone(),
-                JoinState::InFlight => {
-                    i_am_joiner = false;
-                }
+                JoinState::InFlight => false,
                 JoinState::Empty => {
                     *state = JoinState::InFlight;
-                    i_am_joiner = true;
+                    true
                 }
             }
-        }
+        };
 
         if i_am_joiner {
             let result = self.inner.handle.join(cx).await;

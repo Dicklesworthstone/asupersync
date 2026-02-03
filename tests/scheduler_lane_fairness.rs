@@ -6,13 +6,236 @@
 
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::runtime::RuntimeState;
+use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
-use asupersync::types::{Budget, Time};
+use asupersync::types::{Budget, TaskId, Time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MAX_CONSECUTIVE_CANCEL: usize = 16;
+
+fn init_test(name: &str) {
+    init_test_logging();
+    asupersync::test_phase!(name);
+}
+
+#[test]
+fn test_cancel_preempts_timed_and_ready_deterministic() {
+    init_test("cancel_preempts_timed_ready_deterministic");
+
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
+    let mut runtime_state = RuntimeState::new();
+    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    let state = Arc::new(Mutex::new(runtime_state));
+
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+    let cancel_task = TaskId::new_for_test(1, 1);
+    let timed_task = TaskId::new_for_test(1, 2);
+    let ready_task = TaskId::new_for_test(1, 3);
+
+    asupersync::test_section!("inject tasks");
+    scheduler.inject_ready(ready_task, 10);
+    scheduler.inject_timed(timed_task, Time::from_nanos(500));
+    scheduler.inject_cancel(cancel_task, 10);
+
+    let mut workers = scheduler.take_workers().into_iter();
+    let mut worker = workers.next().expect("worker");
+
+    asupersync::test_section!("pop in lane order");
+    let first = worker.next_task();
+    let second = worker.next_task();
+    let third = worker.next_task();
+
+    asupersync::assert_with_log!(
+        first == Some(cancel_task),
+        "cancel lane should preempt timed/ready",
+        Some(cancel_task),
+        first
+    );
+    asupersync::assert_with_log!(
+        second == Some(timed_task),
+        "timed lane should preempt ready when due",
+        Some(timed_task),
+        second
+    );
+    asupersync::assert_with_log!(
+        third == Some(ready_task),
+        "ready lane should come last",
+        Some(ready_task),
+        third
+    );
+
+    asupersync::test_complete!("cancel_preempts_timed_ready_deterministic");
+}
+
+#[test]
+fn test_timed_lane_edf_ordering_deterministic() {
+    init_test("timed_lane_edf_ordering_deterministic");
+
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
+    let mut runtime_state = RuntimeState::new();
+    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    let state = Arc::new(Mutex::new(runtime_state));
+
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+    let t1 = TaskId::new_for_test(1, 10);
+    let t2 = TaskId::new_for_test(1, 11);
+    let t3 = TaskId::new_for_test(1, 12);
+
+    asupersync::test_section!("inject timed tasks (all due)");
+    scheduler.inject_timed(t2, Time::from_nanos(750));
+    scheduler.inject_timed(t3, Time::from_nanos(900));
+    scheduler.inject_timed(t1, Time::from_nanos(500));
+
+    let mut workers = scheduler.take_workers().into_iter();
+    let mut worker = workers.next().expect("worker");
+
+    let first = worker.next_task();
+    let second = worker.next_task();
+    let third = worker.next_task();
+
+    asupersync::assert_with_log!(
+        first == Some(t1),
+        "earliest deadline should dispatch first",
+        Some(t1),
+        first
+    );
+    asupersync::assert_with_log!(
+        second == Some(t2),
+        "second earliest deadline should dispatch next",
+        Some(t2),
+        second
+    );
+    asupersync::assert_with_log!(
+        third == Some(t3),
+        "latest deadline should dispatch last",
+        Some(t3),
+        third
+    );
+
+    asupersync::test_complete!("timed_lane_edf_ordering_deterministic");
+}
+
+#[test]
+fn test_timed_not_due_yields_ready_then_due() {
+    init_test("timed_not_due_yields_ready_then_due");
+
+    let clock = Arc::new(VirtualClock::new());
+    let mut runtime_state = RuntimeState::new();
+    runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+    let state = Arc::new(Mutex::new(runtime_state));
+
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+    let timed_task = TaskId::new_for_test(1, 20);
+    let ready_task = TaskId::new_for_test(1, 21);
+
+    asupersync::test_section!("inject ready and future timed");
+    scheduler.inject_ready(ready_task, 10);
+    scheduler.inject_timed(timed_task, Time::from_nanos(1_000));
+
+    let mut workers = scheduler.take_workers().into_iter();
+    let mut worker = workers.next().expect("worker");
+
+    let first = worker.next_task();
+    asupersync::assert_with_log!(
+        first == Some(ready_task),
+        "ready task should dispatch before not-due timed task",
+        Some(ready_task),
+        first
+    );
+
+    asupersync::test_section!("advance time and dispatch timed");
+    clock.advance(2_000);
+    let second = worker.next_task();
+    asupersync::assert_with_log!(
+        second == Some(timed_task),
+        "timed task should dispatch after deadline",
+        Some(timed_task),
+        second
+    );
+
+    asupersync::test_complete!("timed_not_due_yields_ready_then_due");
+}
+
+#[test]
+fn test_cancel_fairness_bound_deterministic() {
+    init_test("cancel_fairness_bound_deterministic");
+
+    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
+
+    let cancel_a = TaskId::new_for_test(1, 30);
+    let cancel_b = TaskId::new_for_test(1, 31);
+    let cancel_c = TaskId::new_for_test(1, 32);
+    let ready_task = TaskId::new_for_test(1, 33);
+
+    asupersync::test_section!("inject cancel flood and one ready");
+    scheduler.inject_cancel(cancel_a, 10);
+    scheduler.inject_cancel(cancel_b, 10);
+    scheduler.inject_cancel(cancel_c, 10);
+    scheduler.inject_ready(ready_task, 10);
+
+    let mut workers = scheduler.take_workers().into_iter();
+    let mut worker = workers.next().expect("worker");
+
+    let first = worker.next_task().expect("first");
+    let second = worker.next_task().expect("second");
+    let third = worker.next_task().expect("third");
+
+    asupersync::assert_with_log!(
+        first != ready_task && second != ready_task,
+        "ready task should not preempt before fairness limit",
+        ready_task,
+        (first, second)
+    );
+    asupersync::assert_with_log!(
+        third == ready_task,
+        "ready task should dispatch within fairness bound",
+        ready_task,
+        third
+    );
+
+    asupersync::test_complete!("cancel_fairness_bound_deterministic");
+}
+
+#[test]
+fn test_steal_only_from_ready_lane_deterministic() {
+    init_test("steal_only_from_ready_lane_deterministic");
+
+    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+    let cancel_task = TaskId::new_for_test(1, 40);
+    let ready_task1 = TaskId::new_for_test(1, 41);
+    let ready_task2 = TaskId::new_for_test(1, 42);
+
+    let mut worker_iter = scheduler.take_workers().into_iter();
+    let worker0 = worker_iter.next().expect("worker0");
+    let mut thief = worker_iter.next().expect("worker1");
+
+    asupersync::test_section!("seed worker0 local queues");
+    {
+        let mut local0 = worker0.local.lock().expect("local0 lock");
+        local0.schedule_cancel(cancel_task, 10);
+        local0.schedule(ready_task1, 10);
+        local0.schedule(ready_task2, 10);
+    }
+
+    asupersync::test_section!("thief steals from ready lane");
+    let stolen = thief.next_task();
+    asupersync::assert_with_log!(
+        stolen == Some(ready_task1) || stolen == Some(ready_task2),
+        "steal should only return ready-lane tasks",
+        (ready_task1, ready_task2),
+        stolen
+    );
+
+    asupersync::test_complete!("steal_only_from_ready_lane_deterministic");
+}
 
 /// Test that ready work completes despite a flood of cancel work.
 /// This verifies the fairness limit prevents cancel starvation.

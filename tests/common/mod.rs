@@ -16,7 +16,7 @@ pub use coverage::{
 };
 
 pub use asupersync::test_logging::{
-    AggregatedReport, TestHarness, TestReportAggregator, TestSummary,
+    AggregatedReport, TestContext, TestHarness, TestReportAggregator, TestSummary,
 };
 
 use asupersync::cx::Cx;
@@ -146,6 +146,24 @@ pub fn test_lab_with_seed(seed: u64) -> LabRuntime {
 #[must_use]
 pub fn test_lab_with_tracing() -> LabRuntime {
     LabRuntime::new(LabConfig::new(DEFAULT_TEST_SEED).trace_capacity(64 * 1024))
+}
+
+/// Create a lab runtime from a [`TestContext`], using the context's seed.
+#[must_use]
+pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
+    LabRuntime::new(LabConfig::new(ctx.seed))
+}
+
+/// Create a [`TestContext`] for an integration test with the default seed.
+#[must_use]
+pub fn test_context(test_id: &str) -> TestContext {
+    TestContext::new(test_id, DEFAULT_TEST_SEED)
+}
+
+/// Create a [`TestContext`] for an integration test with a specific seed.
+#[must_use]
+pub fn test_context_with_seed(test_id: &str, seed: u64) -> TestContext {
+    TestContext::new(test_id, seed)
 }
 
 /// Run async test code using a lightweight current-thread runtime.
