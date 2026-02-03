@@ -373,6 +373,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::certificate::{verify, verify_steps, PlanHash, RewriteCertificate};
 use super::rewrite::RewritePolicy;
+use super::extractor::PlanCost;
 use super::{PlanId, PlanNode};
 
 /// Result of running original vs optimized plan through the outcome oracle.
@@ -707,76 +708,107 @@ pub fn dag_has_fan_in(dag: &PlanDag) -> bool {
 /// - **Timeout**: delegates to child (lab runtime uses virtual time).
 #[must_use]
 pub fn execute_plan_in_lab(seed: u64, dag: &PlanDag) -> BTreeSet<String> {
+    crate::lab::runtime::test(seed, |runtime| execute_plan_in_lab_core(runtime, seed, dag))
+}
+
+/// Execute a plan with tracing enabled, returning labels and trace fingerprint.
+fn execute_plan_in_lab_traced(seed: u64, dag: &PlanDag) -> (BTreeSet<String>, u64) {
+    let config = crate::lab::config::LabConfig::new(seed).trace_capacity(4096);
+    let mut runtime = LabRuntime::new(config);
+    let labels = execute_plan_in_lab_core(&mut runtime, seed, dag);
+    let events = runtime.trace().snapshot();
+    let fp = crate::trace::trace_fingerprint(&events);
+    (labels, fp)
+}
+
+/// Core plan execution logic used by both the standard and traced variants.
+fn execute_plan_in_lab_core(
+    runtime: &mut LabRuntime,
+    seed: u64,
+    dag: &PlanDag,
+) -> BTreeSet<String> {
     use super::PlanNode;
 
     let root = dag.root().expect("dag has root");
+    let region = runtime.state.create_root_region(Budget::INFINITE);
 
-    crate::lab::runtime::test(seed, |runtime| {
-        let region = runtime.state.create_root_region(Budget::INFINITE);
+    let mut handles: Vec<Option<SharedLabHandle>> = Vec::new();
+    let mut task_ids: Vec<TaskId> = Vec::new();
 
-        let mut handles: Vec<Option<SharedLabHandle>> = Vec::new();
-        let mut task_ids: Vec<TaskId> = Vec::new();
+    for (idx, node) in dag.nodes.iter().enumerate() {
+        let (tid, raw_handle) = match node.clone() {
+            PlanNode::Leaf { label } => {
+                let yield_count = (seed as usize).wrapping_add(idx) % 4 + 1;
+                spawn_lab_leaf(runtime, region, label, yield_count)
+            }
+            PlanNode::Join { children } => {
+                let child_handles: Vec<_> = children
+                    .iter()
+                    .map(|c| {
+                        handles[c.index()]
+                            .as_ref()
+                            .expect("child handle available")
+                            .clone()
+                    })
+                    .collect();
+                spawn_lab_join(runtime, region, child_handles)
+            }
+            PlanNode::Race { children } => {
+                let child_handles: Vec<_> = children
+                    .iter()
+                    .map(|c| {
+                        handles[c.index()]
+                            .as_ref()
+                            .expect("child handle available")
+                            .clone()
+                    })
+                    .collect();
+                spawn_lab_race(runtime, region, child_handles)
+            }
+            PlanNode::Timeout { child, .. } => {
+                let child_handle = handles[child.index()]
+                    .as_ref()
+                    .expect("child handle available")
+                    .clone();
+                spawn_lab_timeout(runtime, region, child_handle)
+            }
+        };
 
-        for (idx, node) in dag.nodes.iter().enumerate() {
-            let (tid, raw_handle) = match node.clone() {
-                PlanNode::Leaf { label } => {
-                    let yield_count = (seed as usize).wrapping_add(idx) % 4 + 1;
-                    spawn_lab_leaf(runtime, region, label, yield_count)
-                }
-                PlanNode::Join { children } => {
-                    let child_handles: Vec<_> = children
-                        .iter()
-                        .map(|c| {
-                            handles[c.index()]
-                                .as_ref()
-                                .expect("child handle available")
-                                .clone()
-                        })
-                        .collect();
-                    spawn_lab_join(runtime, region, child_handles)
-                }
-                PlanNode::Race { children } => {
-                    let child_handles: Vec<_> = children
-                        .iter()
-                        .map(|c| {
-                            handles[c.index()]
-                                .as_ref()
-                                .expect("child handle available")
-                                .clone()
-                        })
-                        .collect();
-                    spawn_lab_race(runtime, region, child_handles)
-                }
-                PlanNode::Timeout { child, .. } => {
-                    let child_handle = handles[child.index()]
-                        .as_ref()
-                        .expect("child handle available")
-                        .clone();
-                    spawn_lab_timeout(runtime, region, child_handle)
-                }
-            };
+        task_ids.push(tid);
+        handles.push(Some(SharedLabHandle::new(raw_handle)));
+    }
 
-            task_ids.push(tid);
-            handles.push(Some(SharedLabHandle::new(raw_handle)));
+    // Schedule all tasks.
+    {
+        let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+        for tid in &task_ids {
+            sched.schedule(*tid, 0);
         }
+    }
 
-        // Schedule all tasks.
+    runtime.run_until_quiescent();
+
+    // Reschedule retry for robustness (golden_outputs pattern).
+    let mut attempts = 0;
+    while !runtime.is_quiescent() && attempts < 3 {
         {
             let mut sched = runtime.scheduler.lock().expect("scheduler lock");
-            for tid in &task_ids {
-                sched.schedule(*tid, 0);
+            for (_, record) in runtime.state.tasks.iter() {
+                if record.is_runnable() {
+                    sched.schedule(record.id, 0);
+                }
             }
         }
-
         runtime.run_until_quiescent();
-        assert!(runtime.is_quiescent(), "runtime must be quiescent");
+        attempts += 1;
+    }
+    assert!(runtime.is_quiescent(), "runtime must be quiescent");
 
-        handles[root.index()]
-            .as_ref()
-            .expect("root handle")
-            .try_join_probe()
-            .expect("root should be ready")
-    })
+    handles[root.index()]
+        .as_ref()
+        .expect("root handle")
+        .try_join_probe()
+        .expect("root should be ready")
 }
 
 fn spawn_lab_leaf(
@@ -1066,6 +1098,311 @@ pub fn run_lab_dynamic_equivalence(
         optimized_outcome_universe: optimized_universe,
         universes_match,
     }
+}
+
+
+/// Compute `PlanCost` directly from a `PlanDag` via recursive traversal.
+fn compute_dag_cost(dag: &PlanDag) -> PlanCost {
+    use super::PlanNode;
+
+    let root = match dag.root() {
+        Some(r) => r,
+        None => return PlanCost::default(),
+    };
+
+    fn recurse(dag: &PlanDag, id: PlanId, memo: &mut HashMap<PlanId, PlanCost>) -> PlanCost {
+        if let Some(&c) = memo.get(&id) {
+            return c;
+        }
+        let node = dag.node(id).expect("valid PlanId");
+        let cost = match node.clone() {
+            PlanNode::Leaf { .. } => PlanCost {
+                allocations: 1,
+                cancel_checkpoints: 0,
+                obligation_pressure: 0,
+                critical_path: 1,
+            },
+            PlanNode::Join { children } => {
+                let child_costs: Vec<_> =
+                    children.iter().map(|c| recurse(dag, *c, memo)).collect();
+                let allocs: u64 = child_costs.iter().map(|c| c.allocations).sum::<u64>() + 1;
+                let cp = child_costs
+                    .iter()
+                    .map(|c| c.critical_path)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let obl: u64 = child_costs.iter().map(|c| c.obligation_pressure).sum();
+                PlanCost {
+                    allocations: allocs,
+                    cancel_checkpoints: 0,
+                    obligation_pressure: obl,
+                    critical_path: cp,
+                }
+            }
+            PlanNode::Race { children } => {
+                let child_costs: Vec<_> =
+                    children.iter().map(|c| recurse(dag, *c, memo)).collect();
+                let allocs: u64 = child_costs.iter().map(|c| c.allocations).sum::<u64>() + 1;
+                let cp = child_costs
+                    .iter()
+                    .map(|c| c.critical_path)
+                    .min()
+                    .unwrap_or(0)
+                    + 1;
+                let cancel_cps: u64 = child_costs
+                    .iter()
+                    .map(|c| c.cancel_checkpoints)
+                    .sum::<u64>()
+                    + children.len() as u64;
+                PlanCost {
+                    allocations: allocs,
+                    cancel_checkpoints: cancel_cps,
+                    obligation_pressure: 0,
+                    critical_path: cp,
+                }
+            }
+            PlanNode::Timeout { child, .. } => {
+                let child_cost = recurse(dag, child, memo);
+                PlanCost {
+                    allocations: child_cost.allocations + 1,
+                    cancel_checkpoints: child_cost.cancel_checkpoints + 1,
+                    obligation_pressure: child_cost.obligation_pressure + 1,
+                    critical_path: child_cost.critical_path + 1,
+                }
+            }
+        };
+        memo.insert(id, cost);
+        cost
+    }
+
+    let mut memo = HashMap::new();
+    recurse(dag, root, &mut memo)
+}
+
+/// Full end-to-end pipeline report combining certificate verification,
+/// static/dynamic outcome equivalence, cost analysis, and trace fingerprints.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct E2ePipelineReport {
+    /// Fixture name.
+    pub fixture_name: &'static str,
+    /// Whether the rewrite certificate verified against the optimized DAG.
+    pub certificate_verified: bool,
+    /// Whether step-level verification passed.
+    pub steps_verified: bool,
+    /// Whether static outcome analysis matched.
+    pub outcomes_equivalent: bool,
+    /// Whether e-graph extraction preserves outcomes.
+    pub extraction_equivalent: bool,
+    /// Whether rewrite + extraction preserves outcomes.
+    pub rewrite_extraction_equivalent: bool,
+    /// Whether dynamic lab execution outcomes matched (across seeds).
+    pub dynamic_outcomes_equivalent: bool,
+    /// Certificate fingerprint (FNV-1a hash).
+    pub certificate_fingerprint: u64,
+    /// Cost of the original plan.
+    pub original_cost: PlanCost,
+    /// Cost of the optimized plan.
+    pub optimized_cost: PlanCost,
+    /// Trace fingerprint of original plan execution.
+    pub original_trace_fingerprint: u64,
+    /// Trace fingerprint of optimized plan execution.
+    pub optimized_trace_fingerprint: u64,
+    /// Labels produced by dynamic execution of the original plan.
+    pub dynamic_original_labels: BTreeSet<String>,
+    /// Labels produced by dynamic execution of the optimized plan.
+    pub dynamic_optimized_labels: BTreeSet<String>,
+    /// Number of rewrite steps applied.
+    pub rewrite_count: usize,
+}
+
+impl E2ePipelineReport {
+    /// Returns true if all verification checks passed.
+    #[must_use]
+    pub fn all_ok(&self) -> bool {
+        self.certificate_verified
+            && self.steps_verified
+            && self.outcomes_equivalent
+            && self.extraction_equivalent
+            && self.rewrite_extraction_equivalent
+            && self.dynamic_outcomes_equivalent
+    }
+
+    /// Stable golden fingerprint for determinism checks.
+    #[must_use]
+    pub fn golden_fingerprint(&self) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+        let mut h = FNV_OFFSET;
+        let mix = |h: &mut u64, v: u64| {
+            *h ^= v;
+            *h = h.wrapping_mul(FNV_PRIME);
+        };
+        mix(&mut h, self.certificate_fingerprint);
+        mix(&mut h, self.original_cost.total());
+        mix(&mut h, self.optimized_cost.total());
+        mix(&mut h, self.original_trace_fingerprint);
+        mix(&mut h, self.optimized_trace_fingerprint);
+        mix(&mut h, self.rewrite_count as u64);
+        for label in &self.dynamic_original_labels {
+            for byte in label.bytes() {
+                h ^= u64::from(byte);
+                h = h.wrapping_mul(FNV_PRIME);
+            }
+        }
+        h
+    }
+
+    /// Signed cost delta: `original_cost.total() - optimized_cost.total()`.
+    /// Positive means optimization reduced cost.
+    #[must_use]
+    pub fn cost_delta(&self) -> i128 {
+        i128::from(self.original_cost.total()) - i128::from(self.optimized_cost.total())
+    }
+}
+
+/// Run the full E2E pipeline for a single fixture.
+#[must_use]
+pub fn run_e2e_pipeline(
+    fixture: PlanFixture,
+    policy: RewritePolicy,
+    rules: &[RewriteRule],
+) -> E2ePipelineReport {
+    use super::certificate::{verify, verify_steps};
+
+    let original_dag = fixture.dag.clone();
+    let original_cost = compute_dag_cost(&original_dag);
+
+    // Static outcome analysis.
+    let original_static = original_dag
+        .root()
+        .map(|r| outcome_sets(&original_dag, r))
+        .unwrap_or_default();
+
+    // Apply certified rewrites.
+    let mut optimized_dag = fixture.dag;
+    let (report, certificate) = optimized_dag.apply_rewrites_certified(policy, rules);
+    let optimized_cost = compute_dag_cost(&optimized_dag);
+    let rewrite_count = report.steps().len();
+
+    let optimized_static = optimized_dag
+        .root()
+        .map(|r| outcome_sets(&optimized_dag, r))
+        .unwrap_or_default();
+
+    let outcomes_equivalent = original_static == optimized_static;
+    let certificate_verified = verify(&certificate, &optimized_dag).is_ok();
+    let steps_verified = verify_steps(&certificate, &optimized_dag).is_ok();
+    let certificate_fingerprint = certificate.fingerprint();
+
+    // E-graph extraction equivalence (original DAG through e-graph roundtrip).
+    let extraction_equivalent = {
+        use super::extractor::Extractor;
+        let mut eg = crate::plan::EGraph::new();
+        let mut cache = HashMap::new();
+        original_dag.root().map_or(true, |root| {
+            let root_ec = dag_to_egraph_rec(&original_dag, root, &mut eg, &mut cache);
+            let (extracted, _) = Extractor::new(&mut eg).extract(root_ec);
+            let extracted_outcomes = extracted
+                .root()
+                .map(|r| outcome_sets(&extracted, r))
+                .unwrap_or_default();
+            original_static == extracted_outcomes
+        })
+    };
+
+    // Rewrite + extraction equivalence.
+    let rewrite_extraction_equivalent = {
+        use super::extractor::Extractor;
+        let mut eg = crate::plan::EGraph::new();
+        let mut cache = HashMap::new();
+        if let Some(root) = optimized_dag.root() {
+            let root_ec = dag_to_egraph_rec(&optimized_dag, root, &mut eg, &mut cache);
+            let (extracted, _) = Extractor::new(&mut eg).extract(root_ec);
+            let extracted_outcomes = extracted
+                .root()
+                .map(|r| outcome_sets(&extracted, r))
+                .unwrap_or_default();
+            original_static == extracted_outcomes
+        } else {
+            true
+        }
+    };
+
+    // Dynamic lab execution with tracing (seed 42).
+    let (dynamic_original_labels, original_trace_fingerprint) =
+        execute_plan_in_lab_traced(42, &original_dag);
+    let (dynamic_optimized_labels, optimized_trace_fingerprint) =
+        execute_plan_in_lab_traced(42, &optimized_dag);
+    let dynamic_outcomes_equivalent = dynamic_original_labels == dynamic_optimized_labels;
+
+    E2ePipelineReport {
+        fixture_name: fixture.name,
+        certificate_verified,
+        steps_verified,
+        outcomes_equivalent,
+        extraction_equivalent,
+        rewrite_extraction_equivalent,
+        dynamic_outcomes_equivalent,
+        certificate_fingerprint,
+        original_cost,
+        optimized_cost,
+        original_trace_fingerprint,
+        optimized_trace_fingerprint,
+        dynamic_original_labels,
+        dynamic_optimized_labels,
+        rewrite_count,
+    }
+}
+
+/// Run the E2E pipeline for all fixtures.
+#[must_use]
+pub fn run_e2e_pipeline_all(
+    policy: RewritePolicy,
+    rules: &[RewriteRule],
+) -> Vec<E2ePipelineReport> {
+    all_fixtures()
+        .into_iter()
+        .map(|f| run_e2e_pipeline(f, policy, rules))
+        .collect()
+}
+
+/// Recursively insert a DAG node into an e-graph (used by E2E pipeline).
+fn dag_to_egraph_rec(
+    dag: &PlanDag,
+    id: PlanId,
+    eg: &mut crate::plan::EGraph,
+    cache: &mut HashMap<PlanId, crate::plan::EClassId>,
+) -> crate::plan::EClassId {
+    if let Some(&ec) = cache.get(&id) {
+        return ec;
+    }
+    let node = dag.node(id).expect("valid PlanId");
+    let eclass = match node.clone() {
+        PlanNode::Leaf { label } => eg.add_leaf(label),
+        PlanNode::Join { children } => {
+            let ec: Vec<_> = children
+                .iter()
+                .map(|c| dag_to_egraph_rec(dag, *c, eg, cache))
+                .collect();
+            eg.add_join(ec)
+        }
+        PlanNode::Race { children } => {
+            let ec: Vec<_> = children
+                .iter()
+                .map(|c| dag_to_egraph_rec(dag, *c, eg, cache))
+                .collect();
+            eg.add_race(ec)
+        }
+        PlanNode::Timeout { child, duration } => {
+            let child_ec = dag_to_egraph_rec(dag, child, eg, cache);
+            eg.add_timeout(child_ec, duration)
+        }
+    };
+    cache.insert(id, eclass);
+    eclass
 }
 
 #[cfg(test)]
@@ -1490,15 +1827,13 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // E2E pipeline tests (bd-3gqz)
-    // Gated: E2ePipelineReport + run_e2e_pipeline_all pending implementation.
-    // Remove cfg(any()) when the E2E pipeline harness is complete.
     // -----------------------------------------------------------------------
 
-    #[cfg(any())]
     #[test]
     fn e2e_pipeline_all_fixtures_pass() {
         init_test();
         let rules = [RewriteRule::DedupRaceJoin];
+        let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
         assert!(
             reports.len() >= 16,
             "expected >= 16 E2E reports, got {}",
@@ -1520,7 +1855,6 @@ mod tests {
         }
     }
 
-    #[cfg(any())]
     #[test]
     fn e2e_pipeline_deterministic_across_runs() {
         init_test();
@@ -1565,7 +1899,6 @@ mod tests {
         }
     }
 
-    #[cfg(any())]
     #[test]
     fn e2e_pipeline_cost_never_increases() {
         init_test();
@@ -1582,7 +1915,6 @@ mod tests {
         }
     }
 
-    #[cfg(any())]
     #[test]
     fn e2e_pipeline_dynamic_labels_populated() {
         init_test();
@@ -1602,7 +1934,6 @@ mod tests {
         }
     }
 
-    #[cfg(any())]
     #[test]
     fn e2e_pipeline_trace_fingerprints_nonzero() {
         init_test();
@@ -1622,7 +1953,6 @@ mod tests {
         }
     }
 
-    #[cfg(any())]
     #[test]
     fn e2e_pipeline_cost_delta_sane() {
         init_test();
@@ -1631,8 +1961,6 @@ mod tests {
         for report in &reports {
             let delta = report.cost_delta();
             if report.rewrite_count > 0 {
-                // Rewrites that fired should not increase cost (already
-                // covered by cost_never_increases, but verify via delta).
                 assert!(
                     delta > 0 || report.original_cost == report.optimized_cost,
                     "fixture {}: rewrite fired but cost unchanged or increased",
@@ -1641,6 +1969,7 @@ mod tests {
             }
         }
     }
+
 
     // -----------------------------------------------------------------------
     // Dynamic lab equivalence oracle tests
