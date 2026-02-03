@@ -302,7 +302,7 @@ fn benchmark_deadlock_square_topology_vs_baseline() {
 
     // --- Topology-prioritized exploration ---
     test_section!("topology exploration");
-    
+
     // TopologyExplorer uses the same config but prioritizes by H1 persistence
     // For this benchmark, we measure equivalence class discovery rate
     let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);

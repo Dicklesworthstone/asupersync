@@ -182,6 +182,7 @@ impl DeadlineMicros {
     ///
     /// Sequential work adds deadlines.
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Self) -> Self {
         match (self.0, other.0) {
             (None, _) | (_, None) => Self::UNBOUNDED,
@@ -196,8 +197,8 @@ impl DeadlineMicros {
     #[must_use]
     pub fn is_at_least_as_tight_as(self, other: Self) -> bool {
         match (self.0, other.0) {
-            (_, None) => true,           // anything is as tight as unbounded
-            (None, Some(_)) => false,    // unbounded is looser than any bound
+            (_, None) => true,            // anything is as tight as unbounded
+            (None, Some(_)) => false,     // unbounded is looser than any bound
             (Some(a), Some(b)) => a <= b, // tighter means smaller
         }
     }
@@ -207,9 +208,15 @@ impl fmt::Display for DeadlineMicros {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             None => f.write_str("∞"),
-            Some(us) if us >= 1_000_000 => write!(f, "{}s", us / 1_000_000),
-            Some(us) if us >= 1_000 => write!(f, "{}ms", us / 1_000),
-            Some(us) => write!(f, "{}µs", us),
+            Some(us) if us >= 1_000_000 => {
+                let s = us / 1_000_000;
+                write!(f, "{s}s")
+            }
+            Some(us) if us >= 1_000 => {
+                let ms = us / 1_000;
+                write!(f, "{ms}ms")
+            }
+            Some(us) => write!(f, "{us}µs"),
         }
     }
 }
@@ -326,7 +333,10 @@ impl BudgetEffect {
             }
         }
         // Deadline must be at least as tight
-        if !self.min_deadline.is_at_least_as_tight_as(before.min_deadline) {
+        if !self
+            .min_deadline
+            .is_at_least_as_tight_as(before.min_deadline)
+        {
             return false;
         }
         true
@@ -345,7 +355,8 @@ impl BudgetEffect {
         if !self.has_deadline {
             return false;
         }
-        self.min_deadline.is_at_least_as_tight_as(before.min_deadline)
+        self.min_deadline
+            .is_at_least_as_tight_as(before.min_deadline)
     }
 
     /// Returns the effective deadline for worst-case analysis.
@@ -370,7 +381,11 @@ impl fmt::Display for BudgetEffect {
             None => f.write_str("∞]")?,
         }
         if self.has_deadline {
-            write!(f, " deadline=[{}, {}]", self.min_deadline, self.max_deadline)?;
+            write!(
+                f,
+                " deadline=[{}, {}]",
+                self.min_deadline, self.max_deadline
+            )?;
         }
         if self.parallelism > 1 {
             write!(f, " par={}", self.parallelism)?;
@@ -953,7 +968,9 @@ impl<'a> SideConditionChecker<'a> {
     /// Returns the effective deadline for a node, if any.
     #[must_use]
     pub fn effective_deadline(&self, id: PlanId) -> Option<DeadlineMicros> {
-        self.analysis.get(id).and_then(|a| a.budget.effective_deadline())
+        self.analysis
+            .get(id)
+            .and_then(|a| a.budget.effective_deadline())
     }
 
     /// Check if a rewrite does not worsen the deadline by more than a given amount.
@@ -1203,12 +1220,16 @@ mod tests {
             max_polls: Some(10),
             has_deadline: true,
             parallelism: 2,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
         };
         let after = BudgetEffect {
             min_polls: 1,
             max_polls: None,
             has_deadline: true,
             parallelism: 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
         };
         assert!(!after.is_not_worse_than(before));
     }
@@ -1220,12 +1241,16 @@ mod tests {
             max_polls: Some(10),
             has_deadline: false,
             parallelism: 2,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
         };
         let after = BudgetEffect {
             min_polls: 4,
             max_polls: Some(8),
             has_deadline: true,
             parallelism: 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
         };
         assert!(after.is_not_worse_than(before));
     }
@@ -1257,6 +1282,7 @@ mod tests {
     // ---- Deterministic ordering ----
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn analysis_is_deterministic() {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
@@ -1487,7 +1513,10 @@ mod tests {
         let analysis = PlanAnalyzer::analyze(&dag);
         let node = analysis.get(join).expect("join analyzed");
         assert!(node.budget.has_deadline);
-        assert_eq!(node.budget.min_deadline, DeadlineMicros::from_micros(50_000));
+        assert_eq!(
+            node.budget.min_deadline,
+            DeadlineMicros::from_micros(50_000)
+        );
     }
 
     #[test]
@@ -1503,7 +1532,10 @@ mod tests {
         let analysis = PlanAnalyzer::analyze(&dag);
         let node = analysis.get(race).expect("race analyzed");
         assert!(node.budget.has_deadline);
-        assert_eq!(node.budget.min_deadline, DeadlineMicros::from_micros(50_000));
+        assert_eq!(
+            node.budget.min_deadline,
+            DeadlineMicros::from_micros(50_000)
+        );
     }
 
     // ---- Side condition deadline preservation tests ----
@@ -1512,9 +1544,12 @@ mod tests {
     fn rewrite_preserves_deadline_when_tighter() {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
+        let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100)); // original
-        let t2 = dag.timeout(a, Duration::from_millis(50)); // tighter
-        dag.set_root(t1);
+        let t2 = dag.timeout(b, Duration::from_millis(50)); // tighter (different leaf)
+        // Make both reachable via join at root
+        let root = dag.join(vec![t1, t2]);
+        dag.set_root(root);
 
         let checker = SideConditionChecker::new(&dag);
         assert!(checker.rewrite_preserves_deadline(t1, t2)); // tighter is ok
@@ -1524,9 +1559,12 @@ mod tests {
     fn rewrite_fails_deadline_when_looser() {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
+        let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(50)); // original: tight
-        let t2 = dag.timeout(a, Duration::from_millis(100)); // looser
-        dag.set_root(t1);
+        let t2 = dag.timeout(b, Duration::from_millis(100)); // looser (different leaf)
+        // Make both reachable via join at root
+        let root = dag.join(vec![t1, t2]);
+        dag.set_root(root);
 
         let checker = SideConditionChecker::new(&dag);
         assert!(!checker.rewrite_preserves_deadline(t1, t2)); // looser not ok
@@ -1548,9 +1586,12 @@ mod tests {
     fn deadline_tolerance_check() {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
+        let b = dag.leaf("b");
         let t1 = dag.timeout(a, Duration::from_millis(100));
-        let t2 = dag.timeout(a, Duration::from_millis(110)); // 10ms looser
-        dag.set_root(t1);
+        let t2 = dag.timeout(b, Duration::from_millis(110)); // 10ms looser (different leaf)
+        // Make both reachable via join at root
+        let root = dag.join(vec![t1, t2]);
+        dag.set_root(root);
 
         let checker = SideConditionChecker::new(&dag);
         // 10ms tolerance: 110ms - 100ms = 10ms, should pass
