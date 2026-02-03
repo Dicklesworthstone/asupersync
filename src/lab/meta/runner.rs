@@ -98,18 +98,24 @@ impl MetaHarness {
 /// Result of a single meta mutation run.
 #[derive(Debug, Clone)]
 pub struct MetaResult {
+    /// Name of the mutation applied.
     pub mutation: &'static str,
+    /// Invariant targeted by the mutation.
     pub invariant: &'static str,
+    /// Violations observed under the baseline (unmutated) run.
     pub baseline_violations: Vec<OracleViolation>,
+    /// Violations observed under the mutated run.
     pub mutation_violations: Vec<OracleViolation>,
 }
 
 impl MetaResult {
+    /// Returns true when the baseline run produced no violations.
     #[must_use]
     pub fn baseline_clean(&self) -> bool {
         self.baseline_violations.is_empty()
     }
 
+    /// Returns true when the mutation triggers its target invariant.
     #[must_use]
     pub fn mutation_detected(&self) -> bool {
         self.mutation_violations
@@ -118,19 +124,24 @@ impl MetaResult {
     }
 }
 
+/// Coverage entry for a single invariant.
 #[derive(Debug, Clone)]
 pub struct MetaCoverageEntry {
+    /// Invariant name.
     pub invariant: &'static str,
+    /// Names of tests/mutations that cover the invariant.
     pub tests: Vec<&'static str>,
 }
 
 impl MetaCoverageEntry {
+    /// Returns true when at least one test covers the invariant.
     #[must_use]
     pub fn is_covered(&self) -> bool {
         !self.tests.is_empty()
     }
 }
 
+/// Coverage report across all invariants.
 #[derive(Debug, Clone)]
 pub struct MetaCoverageReport {
     entries: Vec<MetaCoverageEntry>,
@@ -152,11 +163,13 @@ impl MetaCoverageReport {
         Self { entries }
     }
 
+    /// Returns coverage entries for all invariants.
     #[must_use]
     pub fn entries(&self) -> &[MetaCoverageEntry] {
         &self.entries
     }
 
+    /// Returns invariants with no covering tests.
     #[must_use]
     pub fn missing_invariants(&self) -> Vec<&'static str> {
         self.entries
@@ -166,6 +179,7 @@ impl MetaCoverageReport {
             .collect()
     }
 
+    /// Renders a human-readable coverage report.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
@@ -179,6 +193,7 @@ impl MetaCoverageReport {
         out
     }
 
+    /// Renders a JSON coverage report.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         let invariants = self
@@ -190,6 +205,7 @@ impl MetaCoverageReport {
     }
 }
 
+/// Aggregated results and coverage from a meta run.
 #[derive(Debug, Clone)]
 pub struct MetaReport {
     results: Vec<MetaResult>,
@@ -197,15 +213,19 @@ pub struct MetaReport {
 }
 
 impl MetaReport {
+    /// Returns all mutation results.
     #[must_use]
     pub fn results(&self) -> &[MetaResult] {
         &self.results
     }
+
+    /// Returns coverage information for the run.
     #[must_use]
     pub fn coverage(&self) -> &MetaCoverageReport {
         &self.coverage
     }
 
+    /// Returns the subset of results that failed detection.
     #[must_use]
     pub fn failures(&self) -> Vec<&MetaResult> {
         self.results
@@ -214,6 +234,7 @@ impl MetaReport {
             .collect()
     }
 
+    /// Renders a human-readable report.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut out = String::new();
@@ -238,6 +259,7 @@ impl MetaReport {
         out
     }
 
+    /// Renders a JSON report.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         let failures = self.failures().iter().map(|f| json!({
@@ -255,17 +277,20 @@ impl MetaReport {
     }
 }
 
+/// Deterministic runner for the meta mutation suite.
 #[derive(Debug, Clone)]
 pub struct MetaRunner {
     seed: u64,
 }
 
 impl MetaRunner {
+    /// Creates a new meta runner with the given RNG seed.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
         Self { seed }
     }
 
+    /// Runs the provided mutations and returns results and coverage.
     #[must_use]
     pub fn run<I>(&self, mutations: I) -> MetaReport
     where

@@ -401,7 +401,10 @@ impl EProcessMonitor {
     /// Returns results for all tracked invariants.
     #[must_use]
     pub fn results(&self) -> Vec<MonitorResult> {
-        self.processes.iter().map(MonitorResult::from_eprocess).collect()
+        self.processes
+            .iter()
+            .map(MonitorResult::from_eprocess)
+            .collect()
     }
 
     /// Returns the shared configuration.
@@ -433,7 +436,11 @@ impl EProcessMonitor {
         let _ = writeln!(&mut out);
 
         for ep in &self.processes {
-            let status = if ep.rejected { "REJECTED" } else { "monitoring" };
+            let status = if ep.rejected {
+                "REJECTED"
+            } else {
+                "monitoring"
+            };
             let _ = writeln!(
                 &mut out,
                 "  [{status}] {inv}: e={e:.4}, log₁₀(e)={log:.4}, n={n}, violations={v}",
@@ -536,28 +543,43 @@ mod tests {
 
     #[test]
     fn config_invalid_p0() {
-        let mut c = EProcessConfig::default();
-        c.p0 = 0.0;
+        let c = EProcessConfig {
+            p0: 0.0,
+            ..EProcessConfig::default()
+        };
         assert!(c.validate().is_err());
-        c.p0 = 1.0;
+        let c = EProcessConfig {
+            p0: 1.0,
+            ..EProcessConfig::default()
+        };
         assert!(c.validate().is_err());
-        c.p0 = -0.1;
+        let c = EProcessConfig {
+            p0: -0.1,
+            ..EProcessConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn config_invalid_lambda() {
-        let mut c = EProcessConfig::default();
-        c.lambda = -2000.0;
+        let c = EProcessConfig {
+            lambda: -2000.0,
+            ..EProcessConfig::default()
+        };
         assert!(c.validate().is_err());
-        c.lambda = 2000.0;
+        let c = EProcessConfig {
+            lambda: 2000.0,
+            ..EProcessConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn config_invalid_alpha() {
-        let mut c = EProcessConfig::default();
-        c.alpha = 0.0;
+        let c = EProcessConfig {
+            alpha: 0.0,
+            ..EProcessConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
@@ -637,7 +659,10 @@ mod tests {
             ep.observe(false);
         }
         assert!(ep.rejected, "rejection should be sticky");
-        assert_eq!(ep.rejection_time, rejection_time, "rejection time should not change");
+        assert_eq!(
+            ep.rejection_time, rejection_time,
+            "rejection time should not change"
+        );
     }
 
     #[test]
@@ -852,8 +877,8 @@ mod tests {
     fn eprocess_martingale_under_null() {
         // Under H0, the e-process should not grow systematically.
         // Run many trials and check the average final e-value is ≈ 1.
-        let n_trials = 1000;
-        let n_obs = 50;
+        let n_trials: u32 = 1000;
+        let n_obs: u32 = 50;
         let config = EProcessConfig::default();
         let p0 = config.p0;
 
@@ -864,15 +889,17 @@ mod tests {
             let mut ep = EProcess::new_without_history("test", config.clone());
             for _ in 0..n_obs {
                 // Simple PRNG for deterministic test.
-                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let u = (rng_state >> 33) as f64 / (1u64 << 31) as f64;
+                rng_state = rng_state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let u = f64::from((rng_state >> 33) as u32) / f64::from(1_u32 << 31);
                 let violated = u < p0;
                 ep.observe(violated);
             }
             sum_final_e += ep.current;
         }
 
-        let avg_e = sum_final_e / n_trials as f64;
+        let avg_e = sum_final_e / f64::from(n_trials);
         // Under H0, E[E_T] ≤ 1 (supermartingale). Allow slack for finite samples.
         assert!(
             avg_e < 2.0,
@@ -904,22 +931,24 @@ mod tests {
     fn early_stopping_valid() {
         // The key property: stopping when E_t first exceeds 1/α should give
         // type-I error ≤ α. Test over many null trials.
-        let n_trials = 10_000;
-        let n_obs = 100;
+        let n_trials: u32 = 10_000;
+        let n_obs: u32 = 100;
         let config = EProcessConfig {
             alpha: 0.05,
             ..EProcessConfig::default()
         };
         let p0 = config.p0;
 
-        let mut false_rejections = 0;
+        let mut false_rejections: u32 = 0;
         let mut rng_state: u64 = 999;
 
         for _ in 0..n_trials {
             let mut ep = EProcess::new_without_history("test", config.clone());
             for _ in 0..n_obs {
-                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let u = (rng_state >> 33) as f64 / (1u64 << 31) as f64;
+                rng_state = rng_state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let u = f64::from((rng_state >> 33) as u32) / f64::from(1_u32 << 31);
                 let violated = u < p0;
                 ep.observe(violated);
             }
@@ -928,7 +957,7 @@ mod tests {
             }
         }
 
-        let fpr = false_rejections as f64 / n_trials as f64;
+        let fpr = f64::from(false_rejections) / f64::from(n_trials);
         // By Ville's inequality, FPR ≤ α = 0.05. Allow generous slack.
         assert!(
             fpr < 0.10,
@@ -948,10 +977,17 @@ mod tests {
             monitor.observe_report(&report);
         }
 
-        assert!(!monitor.any_rejected(), "clean suite should not trigger rejection");
+        assert!(
+            !monitor.any_rejected(),
+            "clean suite should not trigger rejection"
+        );
         for r in monitor.results() {
             assert!(!r.rejected);
-            assert!(r.e_value < 1.0, "clean: e-value should be < 1 for {}", r.invariant);
+            assert!(
+                r.e_value < 1.0,
+                "clean: e-value should be < 1 for {}",
+                r.invariant
+            );
         }
     }
 }

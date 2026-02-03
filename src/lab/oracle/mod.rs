@@ -231,6 +231,7 @@ impl OracleSuite {
 
     /// Generates a unified oracle report with per-oracle status and statistics.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn report(&self, now: Time) -> OracleReport {
         let entries = vec![
             OracleEntryReport::from_result(

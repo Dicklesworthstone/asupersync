@@ -506,10 +506,18 @@ pub struct DporExplorer {
     violations: Vec<ViolationReport>,
     /// Total races found across all runs.
     total_races: usize,
+    /// Total HB-races across all runs.
+    total_hb_races: usize,
     /// Backtrack points generated.
     total_backtrack_points: usize,
     /// Backtrack points pruned by equivalence class deduplication.
     pruned_backtrack_points: usize,
+    /// Backtrack points pruned by sleep set.
+    sleep_pruned: usize,
+    /// Sleep set for deduplicating backtrack points across runs.
+    sleep_set: crate::trace::dpor::SleepSet,
+    /// Per-run estimated class counts (for coverage trend analysis).
+    per_run_estimated_classes: Vec<usize>,
 }
 
 /// Extended coverage metrics for DPOR exploration.
@@ -517,14 +525,20 @@ pub struct DporExplorer {
 pub struct DporCoverageMetrics {
     /// Base coverage metrics.
     pub base: CoverageMetrics,
-    /// Total races detected across all runs.
+    /// Total races detected across all runs (immediate, O(n³)).
     pub total_races: usize,
+    /// Total HB-races detected across all runs (vector-clock based).
+    pub total_hb_races: usize,
     /// Total backtrack points generated.
     pub total_backtrack_points: usize,
     /// Backtrack points pruned by equivalence deduplication.
     pub pruned_backtrack_points: usize,
+    /// Backtrack points pruned by sleep set.
+    pub sleep_pruned: usize,
     /// Ratio of useful exploration (new classes / total runs).
     pub efficiency: f64,
+    /// Per-run estimated class counts (trend: should plateau at saturation).
+    pub estimated_class_trend: Vec<usize>,
 }
 
 impl DporExplorer {
@@ -542,8 +556,12 @@ impl DporExplorer {
             results: Vec::new(),
             violations: Vec::new(),
             total_races: 0,
+            total_hb_races: 0,
             total_backtrack_points: 0,
             pruned_backtrack_points: 0,
+            sleep_pruned: 0,
+            sleep_set: crate::trace::dpor::SleepSet::new(),
+            per_run_estimated_classes: Vec::new(),
         }
     }
 
@@ -567,16 +585,34 @@ impl DporExplorer {
             let (trace_events, run_result) = self.run_once(seed, &test);
 
             // Detect races and generate backtrack points.
-            if !trace_events.is_empty() {
+            if trace_events.is_empty() {
+                self.per_run_estimated_classes.push(1);
+            } else {
                 let analysis = detect_races(&trace_events);
                 self.total_races += analysis.race_count();
                 self.total_backtrack_points += analysis.backtrack_points.len();
+
+                // Also run HB-race detection for coverage metrics.
+                let hb_report = crate::trace::dpor::detect_hb_races(&trace_events);
+                self.total_hb_races += hb_report.race_count();
+
+                // Record per-run estimated class count.
+                let est = crate::trace::dpor::estimated_classes(&trace_events);
+                self.per_run_estimated_classes.push(est);
 
                 // For each backtrack point, derive a new seed.
                 // We use a deterministic derivation: seed XOR hash of the
                 // divergence index. This ensures the same backtrack point
                 // always generates the same seed.
                 for bp in &analysis.backtrack_points {
+                    // Sleep set optimization: skip backtrack points we've
+                    // already explored (same race structure at same position).
+                    if self.sleep_set.contains(bp, &trace_events) {
+                        self.sleep_pruned += 1;
+                        continue;
+                    }
+                    self.sleep_set.insert(bp, &trace_events);
+
                     let derived_seed =
                         seed ^ (bp.divergence_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
 
@@ -709,13 +745,16 @@ impl DporExplorer {
                 saturation,
             },
             total_races: self.total_races,
+            total_hb_races: self.total_hb_races,
             total_backtrack_points: self.total_backtrack_points,
             pruned_backtrack_points: self.pruned_backtrack_points,
+            sleep_pruned: self.sleep_pruned,
             efficiency: if total == 0 {
                 0.0
             } else {
                 new_class_count as f64 / total as f64
             },
+            estimated_class_trend: self.per_run_estimated_classes.clone(),
         }
     }
 }

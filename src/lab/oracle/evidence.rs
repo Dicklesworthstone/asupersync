@@ -256,7 +256,7 @@ impl DetectionModel {
     /// More entities → higher detection probability.
     #[must_use]
     pub fn p_detection_given_violation(&self, entities_tracked: usize) -> f64 {
-        let n = entities_tracked.max(1) as f64;
+        let n = f64::from(entities_tracked.max(1).min(u32::MAX as usize) as u32);
         1.0 - (1.0 - self.per_entity_detection_rate).powf(n)
     }
 
@@ -273,7 +273,7 @@ impl DetectionModel {
     /// `P(pass | H_violated) = (1 − p)^n`
     #[must_use]
     pub fn p_pass_given_violation(&self, entities_tracked: usize) -> f64 {
-        let n = entities_tracked.max(1) as f64;
+        let n = f64::from(entities_tracked.max(1).min(u32::MAX as usize) as u32);
         (1.0 - self.per_entity_detection_rate).powf(n)
     }
 
@@ -314,10 +314,7 @@ impl DetectionModel {
             let lines = vec![
                 EvidenceLine {
                     equation: "BF_violation = P(pass | violated) / P(pass | holds)".into(),
-                    substitution: format!(
-                        "BF = {:.6} / {:.6} = {:.4}",
-                        p_h1, p_h0, bf_val
-                    ),
+                    substitution: format!("BF = {p_h1:.6} / {p_h0:.6} = {bf_val:.4}"),
                     intuition: format!(
                         "{} evidence that '{invariant}' is violated ({n} entities tracked, oracle saw pass)",
                         bf.strength.label().to_uppercase(),
@@ -366,10 +363,7 @@ impl DetectionModel {
                     equation:
                         "BF_violation = P(violation_observed | violated) / P(violation_observed | holds)"
                             .into(),
-                    substitution: format!(
-                        "BF = {:.6} / {:.6} = {:.1}",
-                        p_h1, p_h0, bf_val,
-                    ),
+                    substitution: format!("BF = {p_h1:.6} / {p_h0:.6} = {bf_val:.1}"),
                     intuition: format!(
                         "{} evidence that '{invariant}' is violated ({n} entities tracked, violation observed)",
                         bf.strength.label().to_uppercase(),
@@ -403,7 +397,8 @@ impl DetectionModel {
 /// More events ⇒ marginally more confident in whatever conclusion was reached.
 /// Uses `log₁₀(1 + events / 100)` as a mild bonus (< 0.1 for typical runs).
 fn structural_contribution(stats: &OracleStats) -> f64 {
-    (1.0 + stats.events_recorded as f64 / 100.0).log10()
+    let events = stats.events_recorded.min(u32::MAX as usize) as u32;
+    (1.0 + f64::from(events) / 100.0).log10()
 }
 
 // ---------------------------------------------------------------------------
