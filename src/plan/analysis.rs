@@ -472,9 +472,8 @@ impl ObligationFlow {
         // Conservative: in a race the loser is cancelled, so its obligations
         // will not resolve.  Only claim all_paths_resolve if there are no
         // must_resolve obligations at all (nothing can leak from either branch).
-        self.all_paths_resolve = self.all_paths_resolve
-            && other_all_paths_resolve
-            && self.must_resolve.is_empty();
+        self.all_paths_resolve =
+            self.all_paths_resolve && other_all_paths_resolve && self.must_resolve.is_empty();
         self.dedupe();
         self
     }

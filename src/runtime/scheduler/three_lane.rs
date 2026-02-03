@@ -153,17 +153,12 @@ impl ThreeLaneScheduler {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        let should_schedule = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .is_none_or(|record| record.wake_state.notify())
-        };
-        if should_schedule {
-            self.global.inject_cancel(task, priority);
-            self.wake_one();
-        }
+        // Cancel is the highest-priority lane.  Always inject so that
+        // cancellation preempts ready/timed work even if the task is already
+        // scheduled in another lane.  Deduplication happens at poll time
+        // (finish_poll routes to cancel lane when a cancel is pending).
+        self.global.inject_cancel(task, priority);
+        self.wake_one();
     }
 
     /// Injects a task into the timed lane for cross-thread wakeup.

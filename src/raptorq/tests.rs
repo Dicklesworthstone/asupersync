@@ -212,11 +212,8 @@ fn sender_with_metrics_increments_counters() {
     // Metrics should have been updated (exact values depend on encoding).
 }
 
-/// NOTE: This test requires the full RaptorQ pipeline, which depends on
-/// the decoder's Gaussian elimination working correctly. Marked #[ignore]
-/// until the decoder is fixed.
+/// Full roundtrip test through the RaptorQ sender/receiver pipeline.
 #[test]
-#[ignore = "decoder Gaussian elimination needs fixing"]
 fn send_receive_roundtrip() {
     let cx: Cx = Cx::for_testing();
 
@@ -410,9 +407,8 @@ mod conformance {
     /// Known vector: medium block (K=32, symbol_size=64, seed=12345)
     /// NOTE: This test requires repair-based recovery. Currently marked #[ignore]
     /// because the decoder's Gaussian elimination phase has a known issue.
-    /// When decoder is fixed, this test should pass.
+    /// Known vector: medium block roundtrip.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing - see bd-3cb2"]
     fn known_vector_medium_block() {
         let k = 32;
         let symbol_size = 64;
@@ -430,12 +426,13 @@ mod conformance {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // Build received symbols: all source + enough repair to reach L
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC)
+        let mut received = decoder.constraint_symbols();
+
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -451,11 +448,8 @@ mod conformance {
         assert_eq!(source_hash, decoded_hash, "decoded data must match source");
     }
 
-    /// Known vector: verify proof artifact determinism
-    /// NOTE: This test requires repair-based recovery. Currently marked #[ignore]
-    /// because the decoder's Gaussian elimination phase has a known issue.
+    /// Known vector: verify proof artifact determinism.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn known_vector_proof_determinism() {
         let k = 8;
         let symbol_size = 32;
@@ -473,11 +467,13 @@ mod conformance {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC)
+        let mut received = decoder.constraint_symbols();
+
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -669,7 +665,6 @@ mod property_tests {
     /// Property: roundtrip with random symbol drops should succeed if ≥ L symbols remain.
     /// NOTE: Requires working decoder Gaussian elimination.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn property_roundtrip_with_drops() {
         let k = 16;
         let symbol_size = 48;
@@ -679,6 +674,7 @@ mod property_tests {
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
+        let constraints = decoder.constraint_symbols();
 
         // Generate excess symbols (2x overhead)
         let total_symbols = l * 2;
@@ -723,7 +719,11 @@ mod property_tests {
             // Truncate to exactly L symbols to stress the decoder
             kept.truncate(l);
 
-            let result = decoder.decode(&kept);
+            // Always include constraint symbols
+            let mut with_constraints = constraints.clone();
+            with_constraints.extend(kept);
+
+            let result = decoder.decode(&with_constraints);
 
             // Decode should succeed with exactly L symbols
             match result {
@@ -839,6 +839,9 @@ mod fuzz {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
+        // Constraint symbols (always included, never dropped)
+        let constraints = decoder.constraint_symbols();
+
         // Generate symbols with overhead
         let total_target = l * (100 + overhead_percent) / 100;
         let mut all_symbols: Vec<ReceivedSymbol> = Vec::with_capacity(total_target);
@@ -876,8 +879,11 @@ mod fuzz {
             }
         }
 
-        // Attempt decode
-        match decoder.decode(&kept) {
+        // Include constraint symbols and decode
+        let mut with_constraints = constraints.clone();
+        with_constraints.extend(kept);
+
+        match decoder.decode(&with_constraints) {
             Ok(result) => {
                 if result.source != source {
                     return Err(format!(
@@ -897,9 +903,7 @@ mod fuzz {
     }
 
     /// Deterministic fuzz with varied parameters.
-    /// NOTE: Requires working decoder Gaussian elimination.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn fuzz_varied_parameters() {
         let mut successes = 0;
         let mut acceptable_failures = 0;
@@ -1034,9 +1038,7 @@ mod fuzz {
     }
 
     /// Deterministic fuzz with random seed sweep (for CI regression).
-    /// NOTE: Requires working decoder Gaussian elimination.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn fuzz_seed_sweep() {
         let k = 16;
         let symbol_size = 32;
@@ -1075,10 +1077,8 @@ mod edge_cases {
     use crate::raptorq::gf256::Gf256;
     use crate::raptorq::systematic::SystematicEncoder;
 
-    /// Edge case: tiny block (K=1)
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Edge case: tiny block (K=1).
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn tiny_block_k1() {
         let k = 1;
         let symbol_size = 16;
@@ -1089,8 +1089,9 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // Build received symbols
-        let mut received = vec![ReceivedSymbol::source(0, source[0].clone())];
+        // Start with constraint symbols, then add source
+        let mut received = decoder.constraint_symbols();
+        received.push(ReceivedSymbol::source(0, source[0].clone()));
 
         for esi in 1u32..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -1105,10 +1106,8 @@ mod edge_cases {
         assert_eq!(result.source[0], source[0]);
     }
 
-    /// Edge case: tiny block (K=2)
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Edge case: tiny block (K=2).
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn tiny_block_k2() {
         let k = 2;
         let symbol_size = 8;
@@ -1119,11 +1118,10 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
-            .collect();
+        let mut received = decoder.constraint_symbols();
+        for (i, d) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, d.clone()));
+        }
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -1137,10 +1135,8 @@ mod edge_cases {
         assert_eq!(result.source, source);
     }
 
-    /// Edge case: tiny symbol size (1 byte)
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Edge case: tiny symbol size (1 byte).
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn tiny_symbol_size() {
         let k = 4;
         let symbol_size = 1;
@@ -1151,11 +1147,10 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
-            .collect();
+        let mut received = decoder.constraint_symbols();
+        for (i, d) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, d.clone()));
+        }
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -1169,10 +1164,8 @@ mod edge_cases {
         assert_eq!(result.source, source);
     }
 
-    /// Edge case: large block (bounded for CI - K=512)
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Edge case: large block (bounded for CI - K=512).
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn large_block_bounded() {
         let k = 512;
         let symbol_size = 64;
@@ -1186,12 +1179,11 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // Only source symbols + minimal repair overhead
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
-            .collect();
+        // Start with constraint symbols, then add source + repair
+        let mut received = decoder.constraint_symbols();
+        for (i, d) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, d.clone()));
+        }
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
@@ -1206,12 +1198,10 @@ mod edge_cases {
         assert_eq!(result.source, source);
     }
 
-    /// Edge case: repair=0 (only source symbols, need L=K+S+H)
+    /// Edge case: repair=0 (only source symbols, need L=K+S+H).
     /// This tests the case where we have all source symbols but still need
-    /// LDPC/HDPC overhead symbols to satisfy L requirements.
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// LDPC/HDPC constraint equations to satisfy the system.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn repair_zero_only_source() {
         let k = 8;
         let symbol_size = 32;
@@ -1229,15 +1219,15 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // All K source symbols
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
-            .collect();
+        // Start with constraint symbols (LDPC + HDPC)
+        let mut received = decoder.constraint_symbols();
 
-        // We need L-K additional equations (for LDPC/HDPC satisfaction)
-        // These are "repair" symbols but with ESI starting at K
+        // Add all K source symbols
+        for (i, d) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, d.clone()));
+        }
+
+        // Add repair symbols to reach L total received
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
@@ -1250,10 +1240,8 @@ mod edge_cases {
         assert_eq!(result.source, source);
     }
 
-    /// Edge case: all repair symbols (no source symbols received)
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Edge case: all repair symbols (no source symbols received).
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn all_repair_no_source() {
         let k = 4;
         let symbol_size = 16;
@@ -1271,8 +1259,8 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        // Only repair symbols (need at least L)
-        let mut received: Vec<ReceivedSymbol> = Vec::new();
+        // Start with constraint symbols, then only repair (no source)
+        let mut received = decoder.constraint_symbols();
         for esi in (k as u32)..((k + l) as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
@@ -1346,10 +1334,8 @@ mod edge_cases {
         );
     }
 
-    /// Edge case: large symbol size
-    /// NOTE: Requires working decoder Gaussian elimination.
+    /// Edge case: large symbol size.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing"]
     fn large_symbol_size() {
         let k = 4;
         let symbol_size = 4096; // 4KB symbols
@@ -1363,11 +1349,10 @@ mod edge_cases {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let mut received: Vec<ReceivedSymbol> = source
-            .iter()
-            .enumerate()
-            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
-            .collect();
+        let mut received = decoder.constraint_symbols();
+        for (i, d) in source.iter().enumerate() {
+            received.push(ReceivedSymbol::source(i as u32, d.clone()));
+        }
 
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
