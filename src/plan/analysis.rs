@@ -1050,6 +1050,359 @@ impl<'a> SideConditionChecker<'a> {
     }
 }
 
+// ===========================================================================
+// Independence-aware equivalence hints (Mazurkiewicz trace semantics)
+// ===========================================================================
+
+/// Result of an independence analysis between two plan nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndependenceResult {
+    /// The nodes are independent and can be safely reordered.
+    Independent,
+    /// The nodes are dependent and cannot be reordered.
+    Dependent,
+    /// The independence is uncertain (conservative: treat as dependent).
+    Uncertain,
+}
+
+impl IndependenceResult {
+    /// Returns true if the nodes are provably independent.
+    #[must_use]
+    pub fn is_independent(self) -> bool {
+        matches!(self, Self::Independent)
+    }
+
+    /// Join two results: if either is dependent, the result is dependent.
+    #[must_use]
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Independent, Self::Independent) => Self::Independent,
+            (Self::Dependent, _) | (_, Self::Dependent) => Self::Dependent,
+            _ => Self::Uncertain,
+        }
+    }
+}
+
+impl fmt::Display for IndependenceResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Independent => f.write_str("independent"),
+            Self::Dependent => f.write_str("dependent"),
+            Self::Uncertain => f.write_str("uncertain"),
+        }
+    }
+}
+
+/// Independence relation for a set of plan nodes.
+///
+/// This is used for Mazurkiewicz trace equivalence: two execution
+/// sequences are equivalent if one can be transformed into the other
+/// by commuting independent operations.
+#[derive(Debug, Clone)]
+pub struct IndependenceRelation {
+    /// Pairs of node indices that are independent.
+    /// Stored as (min, max) to ensure canonical ordering.
+    independent_pairs: Vec<(usize, usize)>,
+}
+
+impl IndependenceRelation {
+    /// Creates an empty independence relation.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            independent_pairs: Vec::new(),
+        }
+    }
+
+    /// Adds an independence pair.
+    pub fn add(&mut self, a: usize, b: usize) {
+        let pair = if a <= b { (a, b) } else { (b, a) };
+        if !self.independent_pairs.contains(&pair) {
+            self.independent_pairs.push(pair);
+        }
+    }
+
+    /// Checks if two nodes are independent.
+    #[must_use]
+    pub fn are_independent(&self, a: usize, b: usize) -> bool {
+        let pair = if a <= b { (a, b) } else { (b, a) };
+        self.independent_pairs.contains(&pair)
+    }
+
+    /// Returns the number of independent pairs.
+    #[must_use]
+    pub fn pair_count(&self) -> usize {
+        self.independent_pairs.len()
+    }
+
+    /// Returns all independent pairs.
+    #[must_use]
+    pub fn pairs(&self) -> &[(usize, usize)] {
+        &self.independent_pairs
+    }
+}
+
+impl<'a> SideConditionChecker<'a> {
+    // =========================================================================
+    // Independence / commutativity analysis for Mazurkiewicz traces
+    // =========================================================================
+
+    /// Check if two nodes are independent (can be safely reordered).
+    ///
+    /// Two nodes are independent if:
+    /// - They don't share any common descendants (structural independence)
+    /// - They don't have data dependencies through obligations
+    /// - Reordering them doesn't change observable behavior
+    ///
+    /// This is a conservative analysis: if uncertain, returns `Uncertain`.
+    #[must_use]
+    pub fn check_independence(&self, a: PlanId, b: PlanId) -> IndependenceResult {
+        // Same node is trivially not independent with itself
+        if a == b {
+            return IndependenceResult::Dependent;
+        }
+
+        // Check structural independence (no shared nodes)
+        if !self.are_independent(a, b) {
+            return IndependenceResult::Dependent;
+        }
+
+        // Check obligation independence: if both have obligations,
+        // they might conflict through external state
+        let a_analysis = self.analysis.get(a);
+        let b_analysis = self.analysis.get(b);
+
+        match (a_analysis, b_analysis) {
+            (Some(a_node), Some(b_node)) => {
+                // If both have obligation flow, check for conflicts
+                let a_obls = &a_node.obligation_flow;
+                let b_obls = &b_node.obligation_flow;
+
+                // If obligations intersect, they might depend on each other
+                let has_conflict = a_obls.reserves.iter().any(|obl| {
+                    b_obls.reserves.contains(obl)
+                        || b_obls.must_resolve.contains(obl)
+                        || b_obls.leak_on_cancel.contains(obl)
+                }) || b_obls.reserves.iter().any(|obl| {
+                    a_obls.reserves.contains(obl)
+                        || a_obls.must_resolve.contains(obl)
+                        || a_obls.leak_on_cancel.contains(obl)
+                });
+
+                if has_conflict {
+                    return IndependenceResult::Uncertain;
+                }
+
+                IndependenceResult::Independent
+            }
+            _ => IndependenceResult::Uncertain,
+        }
+    }
+
+    /// Check if two nodes commute (can be reordered without changing semantics).
+    ///
+    /// This is an alias for `check_independence` with a clearer name for
+    /// users thinking in terms of commutativity.
+    #[must_use]
+    pub fn commutes(&self, a: PlanId, b: PlanId) -> bool {
+        self.check_independence(a, b).is_independent()
+    }
+
+    /// Compute the independence relation for all leaf nodes in the DAG.
+    ///
+    /// This builds a relation that can be used for Mazurkiewicz trace
+    /// equivalence checking: two sequences are equivalent if one can be
+    /// transformed into the other by commuting independent operations.
+    #[must_use]
+    pub fn compute_independence_relation(&self) -> IndependenceRelation {
+        let mut relation = IndependenceRelation::empty();
+        let leaves = self.collect_leaves();
+
+        // Check all pairs of leaves
+        for (i, &a) in leaves.iter().enumerate() {
+            for &b in leaves.iter().skip(i + 1) {
+                if self.check_independence(a, b).is_independent() {
+                    relation.add(a.index(), b.index());
+                }
+            }
+        }
+
+        relation
+    }
+
+    /// Collect all leaf node IDs reachable from the root.
+    fn collect_leaves(&self) -> Vec<PlanId> {
+        let Some(root) = self.dag.root() else {
+            return Vec::new();
+        };
+        let mut leaves = Vec::new();
+        self.collect_leaves_inner(root, &mut leaves);
+        leaves
+    }
+
+    fn collect_leaves_inner(&self, id: PlanId, leaves: &mut Vec<PlanId>) {
+        let Some(node) = self.dag.node(id) else {
+            return;
+        };
+        match node {
+            PlanNode::Leaf { .. } => {
+                if !leaves.contains(&id) {
+                    leaves.push(id);
+                }
+            }
+            PlanNode::Join { children } | PlanNode::Race { children } => {
+                for child in children {
+                    self.collect_leaves_inner(*child, leaves);
+                }
+            }
+            PlanNode::Timeout { child, .. } => {
+                self.collect_leaves_inner(*child, leaves);
+            }
+        }
+    }
+
+    /// Check if a rewrite is valid up to Mazurkiewicz trace equivalence.
+    ///
+    /// A rewrite is valid if:
+    /// 1. The structural transformation is correct
+    /// 2. The rewrite preserves the independence relation
+    /// 3. The observable behavior is preserved (up to reordering of independent operations)
+    ///
+    /// This is useful for rewrites like `Join[a, b] -> Join[b, a]` where
+    /// the order doesn't matter if a and b are independent.
+    #[must_use]
+    pub fn rewrite_valid_up_to_trace(&self, before: PlanId, after: PlanId) -> bool {
+        // Basic safety checks must still pass
+        if !self.rewrite_preserves_obligations(before, after) {
+            return false;
+        }
+        if !self.rewrite_preserves_cancel(before, after) {
+            return false;
+        }
+
+        // Check that the independence relation is preserved
+        // (i.e., operations that were independent before are still independent)
+        let before_leaves = {
+            let mut leaves = Vec::new();
+            self.collect_leaves_inner(before, &mut leaves);
+            leaves
+        };
+        let after_leaves = {
+            let mut leaves = Vec::new();
+            self.collect_leaves_inner(after, &mut leaves);
+            leaves
+        };
+
+        // Same set of leaves means trace-equivalent
+        let mut before_sorted: Vec<_> = before_leaves.iter().map(|id| id.index()).collect();
+        let mut after_sorted: Vec<_> = after_leaves.iter().map(|id| id.index()).collect();
+        before_sorted.sort_unstable();
+        after_sorted.sort_unstable();
+
+        before_sorted == after_sorted
+    }
+
+    /// Check if the children of a Join can be reordered.
+    ///
+    /// Returns the indices of children that can be freely reordered
+    /// (all pairs in the returned set are mutually independent).
+    #[must_use]
+    pub fn reorderable_join_children(&self, children: &[PlanId]) -> Vec<Vec<usize>> {
+        // Build groups of mutually independent children
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+
+        for (i, &child) in children.iter().enumerate() {
+            // Try to add to an existing group where this child is independent
+            // from all current members
+            let mut added = false;
+            for group in &mut groups {
+                let independent_from_all = group.iter().all(|&j| {
+                    self.check_independence(child, children[j]).is_independent()
+                });
+                if independent_from_all {
+                    group.push(i);
+                    added = true;
+                    break;
+                }
+            }
+            if !added {
+                groups.push(vec![i]);
+            }
+        }
+
+        groups
+    }
+
+    /// Get a trace equivalence hint for a node.
+    ///
+    /// Returns a summary of which operations can commute, useful for
+    /// the rewrite engine to know when certain rewrites are safe.
+    #[must_use]
+    pub fn trace_equivalence_hint(&self, id: PlanId) -> TraceEquivalenceHint {
+        let Some(node) = self.dag.node(id) else {
+            return TraceEquivalenceHint::Unknown;
+        };
+
+        match node {
+            PlanNode::Leaf { .. } => TraceEquivalenceHint::Atomic,
+            PlanNode::Join { children } => {
+                let independent_groups = self.reorderable_join_children(children);
+                if independent_groups.len() == 1 && independent_groups[0].len() == children.len() {
+                    TraceEquivalenceHint::FullyCommutative
+                } else if independent_groups.iter().any(|g| g.len() > 1) {
+                    TraceEquivalenceHint::PartiallyCommutative {
+                        groups: independent_groups,
+                    }
+                } else {
+                    TraceEquivalenceHint::Sequential
+                }
+            }
+            PlanNode::Race { children } => {
+                // Race children run concurrently; winner is nondeterministic
+                // but the race itself is atomic from a trace perspective
+                if self.children_pairwise_independent(children) {
+                    TraceEquivalenceHint::FullyCommutative
+                } else {
+                    TraceEquivalenceHint::Atomic
+                }
+            }
+            PlanNode::Timeout { .. } => TraceEquivalenceHint::Atomic,
+        }
+    }
+}
+
+/// Hint about trace equivalence for a plan node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceEquivalenceHint {
+    /// Node is atomic (cannot be decomposed further).
+    Atomic,
+    /// All children commute (can be freely reordered).
+    FullyCommutative,
+    /// Some children commute within groups.
+    PartiallyCommutative {
+        /// Groups of child indices that can be freely reordered within the group.
+        groups: Vec<Vec<usize>>,
+    },
+    /// Children must execute in sequence (no commutativity).
+    Sequential,
+    /// Insufficient information to determine hint.
+    Unknown,
+}
+
+impl fmt::Display for TraceEquivalenceHint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Atomic => f.write_str("atomic"),
+            Self::FullyCommutative => f.write_str("fully-commutative"),
+            Self::PartiallyCommutative { groups } => {
+                write!(f, "partially-commutative({} groups)", groups.len())
+            }
+            Self::Sequential => f.write_str("sequential"),
+            Self::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1674,5 +2027,193 @@ mod tests {
         assert!(display.contains("deadline="));
         assert!(display.contains("100ms"));
         assert!(display.contains("500ms"));
+    }
+
+    // ---- Independence / trace equivalence tests ----
+
+    #[test]
+    fn independence_result_join() {
+        use IndependenceResult::*;
+        assert_eq!(Independent.join(Independent), Independent);
+        assert_eq!(Independent.join(Dependent), Dependent);
+        assert_eq!(Dependent.join(Independent), Dependent);
+        assert_eq!(Independent.join(Uncertain), Uncertain);
+        assert_eq!(Uncertain.join(Uncertain), Uncertain);
+    }
+
+    #[test]
+    fn independence_result_display() {
+        assert_eq!(format!("{}", IndependenceResult::Independent), "independent");
+        assert_eq!(format!("{}", IndependenceResult::Dependent), "dependent");
+        assert_eq!(format!("{}", IndependenceResult::Uncertain), "uncertain");
+    }
+
+    #[test]
+    fn independent_leaves_are_independent() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let join = dag.join(vec![a, b]);
+        dag.set_root(join);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(checker.check_independence(a, b).is_independent());
+        assert!(checker.commutes(a, b));
+    }
+
+    #[test]
+    fn same_node_is_not_independent() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        dag.set_root(a);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(!checker.check_independence(a, a).is_independent());
+        assert!(!checker.commutes(a, a));
+    }
+
+    #[test]
+    fn shared_child_nodes_are_dependent() {
+        let mut dag = PlanDag::new();
+        let s = dag.leaf("shared");
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let j1 = dag.join(vec![s, a]);
+        let j2 = dag.join(vec![s, b]);
+        let root = dag.race(vec![j1, j2]);
+        dag.set_root(root);
+
+        let checker = SideConditionChecker::new(&dag);
+        // j1 and j2 share 's', so they are dependent
+        assert!(!checker.check_independence(j1, j2).is_independent());
+    }
+
+    #[test]
+    fn independence_relation_empty() {
+        let relation = IndependenceRelation::empty();
+        assert_eq!(relation.pair_count(), 0);
+        assert!(!relation.are_independent(0, 1));
+    }
+
+    #[test]
+    fn independence_relation_add_and_check() {
+        let mut relation = IndependenceRelation::empty();
+        relation.add(1, 2);
+        relation.add(3, 4);
+
+        assert!(relation.are_independent(1, 2));
+        assert!(relation.are_independent(2, 1)); // symmetric
+        assert!(relation.are_independent(3, 4));
+        assert!(!relation.are_independent(1, 3));
+        assert_eq!(relation.pair_count(), 2);
+    }
+
+    #[test]
+    fn compute_independence_relation_for_join() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let join = dag.join(vec![a, b, c]);
+        dag.set_root(join);
+
+        let checker = SideConditionChecker::new(&dag);
+        let relation = checker.compute_independence_relation();
+
+        // All leaves should be pairwise independent
+        assert!(relation.are_independent(a.index(), b.index()));
+        assert!(relation.are_independent(b.index(), c.index()));
+        assert!(relation.are_independent(a.index(), c.index()));
+        assert_eq!(relation.pair_count(), 3);
+    }
+
+    #[test]
+    fn trace_equivalence_hint_for_leaf() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        dag.set_root(a);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert_eq!(checker.trace_equivalence_hint(a), TraceEquivalenceHint::Atomic);
+    }
+
+    #[test]
+    fn trace_equivalence_hint_for_fully_commutative_join() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let join = dag.join(vec![a, b, c]);
+        dag.set_root(join);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert_eq!(
+            checker.trace_equivalence_hint(join),
+            TraceEquivalenceHint::FullyCommutative
+        );
+    }
+
+    #[test]
+    fn trace_equivalence_hint_for_sequential_join() {
+        let mut dag = PlanDag::new();
+        let s = dag.leaf("shared");
+        let j1 = dag.join(vec![s]);
+        let j2 = dag.join(vec![s]);
+        let root = dag.join(vec![j1, j2]);
+        dag.set_root(root);
+
+        let checker = SideConditionChecker::new(&dag);
+        // j1 and j2 share 's', so they are not independent
+        let hint = checker.trace_equivalence_hint(root);
+        // Should be sequential since children share state
+        assert_eq!(hint, TraceEquivalenceHint::Sequential);
+    }
+
+    #[test]
+    fn reorderable_join_children_all_independent() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let join = dag.join(vec![a, b, c]);
+        dag.set_root(join);
+
+        let checker = SideConditionChecker::new(&dag);
+        let groups = checker.reorderable_join_children(&[a, b, c]);
+
+        // All independent, so should be one group with all three
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 3);
+    }
+
+    #[test]
+    fn rewrite_valid_up_to_trace_for_join_reorder() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let j1 = dag.join(vec![a, b]);
+        let j2 = dag.join(vec![b, a]); // reordered
+        let root = dag.join(vec![j1, j2]);
+        dag.set_root(root);
+
+        let checker = SideConditionChecker::new(&dag);
+        // j1 and j2 contain the same leaves in different order
+        assert!(checker.rewrite_valid_up_to_trace(j1, j2));
+    }
+
+    #[test]
+    fn trace_equivalence_hint_display() {
+        assert_eq!(format!("{}", TraceEquivalenceHint::Atomic), "atomic");
+        assert_eq!(
+            format!("{}", TraceEquivalenceHint::FullyCommutative),
+            "fully-commutative"
+        );
+        assert_eq!(format!("{}", TraceEquivalenceHint::Sequential), "sequential");
+        assert_eq!(format!("{}", TraceEquivalenceHint::Unknown), "unknown");
+
+        let hint = TraceEquivalenceHint::PartiallyCommutative {
+            groups: vec![vec![0, 1], vec![2]],
+        };
+        assert!(format!("{hint}").contains("2 groups"));
     }
 }

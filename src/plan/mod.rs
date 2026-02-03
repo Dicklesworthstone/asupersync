@@ -469,8 +469,9 @@ pub mod certificate;
 pub mod fixtures;
 pub mod rewrite;
 pub use analysis::{
-    BudgetEffect, CancelSafety, DeadlineMicros, NodeAnalysis, ObligationFlow, ObligationSafety,
-    PlanAnalysis, PlanAnalyzer, SideConditionChecker,
+    BudgetEffect, CancelSafety, DeadlineMicros, IndependenceRelation, IndependenceResult,
+    NodeAnalysis, ObligationFlow, ObligationSafety, PlanAnalysis, PlanAnalyzer,
+    SideConditionChecker, TraceEquivalenceHint,
 };
 pub use certificate::{
     CertificateVersion, PlanHash, RewriteCertificate, StepVerifyError, VerifyError,

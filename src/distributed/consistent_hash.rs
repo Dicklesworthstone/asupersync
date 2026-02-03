@@ -198,10 +198,8 @@ mod tests {
             .zip(after.iter())
             .filter(|(a, b)| a != b)
             .count();
-        #[allow(clippy::cast_precision_loss)]
-        let changed_f = f64::from(u64::try_from(changed).expect("changed fits u64"));
-        #[allow(clippy::cast_precision_loss)]
-        let keys_len_f = f64::from(u64::try_from(keys.len()).expect("keys len fits u64"));
+        let changed_f = f64::from(u32::try_from(changed).expect("changed fits u32"));
+        let keys_len_f = f64::from(u32::try_from(keys.len()).expect("keys len fits u32"));
         let ratio = changed_f / keys_len_f;
 
         // Expected ~1/(n+1) for n=5; allow conservative headroom.

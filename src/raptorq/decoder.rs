@@ -906,56 +906,34 @@ impl InactivationDecoder {
 
     /// Generate equations for all K source symbols.
     ///
-    /// These match the LT constraint rows used by the encoder. Each source
-    /// symbol i maps to intermediate symbol i, plus additional random
-    /// connections based on the robust soliton distribution.
+    /// In systematic encoding, source symbol i maps directly to intermediate
+    /// symbol i with no additional connections. This matches the encoder's
+    /// `build_lt_rows` which simply sets `intermediate[i] = source[i]`.
     ///
     /// Returns a vector of K equations, where index i is the equation for
     /// source ESI i.
     #[must_use]
     pub fn all_source_equations(&self) -> Vec<(Vec<usize>, Vec<Gf256>)> {
         let k = self.params.k;
-        let l = self.params.l;
 
-        // Use the same RNG seed as build_lt_rows in the encoder
-        let mut rng = DetRng::new(self.seed.wrapping_add(0x1700_1700_0000));
-        let soliton = RobustSoliton::new(l, 0.2, 0.05);
-
-        let mut equations = Vec::with_capacity(k);
-
-        for i in 0..k {
-            // Systematic: source symbol i maps to intermediate symbol i
-            let mut cols = vec![i];
-            let mut coefs = vec![Gf256::ONE];
-
-            // Additional LT connections for redundancy
-            let degree = soliton.sample(rng.next_u64() as u32);
-            for _ in 1..degree {
-                let col = rng.next_usize(l);
-                cols.push(col);
-                coefs.push(Gf256::ONE);
-            }
-
-            equations.push((cols, coefs));
-        }
-
-        equations
+        // Systematic encoding: source symbol i maps directly to intermediate[i]
+        // No additional LT connections - the encoder's build_lt_rows just does
+        // matrix.set(row, i, Gf256::ONE) for each source symbol.
+        (0..k).map(|i| (vec![i], vec![Gf256::ONE])).collect()
     }
 
     /// Get the equation for a specific source symbol ESI.
     ///
-    /// Note: This is less efficient than `all_source_equations()` if you need
-    /// multiple source equations, since it must advance the RNG through all
-    /// prior source symbols.
+    /// In systematic encoding, source symbol `esi` maps directly to
+    /// intermediate symbol `esi` with coefficient 1.
     #[must_use]
     pub fn source_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
         assert!(
             (esi as usize) < self.params.k,
             "source ESI must be < K"
         );
-        // Advance RNG through all prior source symbols
-        let all = self.all_source_equations();
-        all.into_iter().nth(esi as usize).unwrap()
+        // Systematic: source[esi] = intermediate[esi]
+        (vec![esi as usize], vec![Gf256::ONE])
     }
 }
 
