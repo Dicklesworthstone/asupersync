@@ -46,3 +46,7 @@ criterion/
 **/.beads/daemon.*
 **/.beads/last-touched
 **/.beads/.local_version
+
+# Agent artifact reports (keep local, don't commit)
+/exploration_report.md
+/final_summary.txt
