@@ -23,6 +23,7 @@ use crate::observability::ObservabilityConfig;
 use crate::record::RegionLimits;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
+use crate::types::CancelAttributionConfig;
 use std::sync::Arc;
 
 /// Configuration for the blocking pool.
@@ -95,6 +96,11 @@ pub struct RuntimeConfig {
     pub metrics_provider: Arc<dyn MetricsProvider>,
     /// Optional runtime observability configuration.
     pub observability: Option<ObservabilityConfig>,
+    /// Limits for cancellation attribution cause chains.
+    ///
+    /// Used to bound memory growth when cancellation cascades across deep
+    /// region trees or large cancellation graphs.
+    pub cancel_attribution: CancelAttributionConfig,
     /// Response policy for obligation leaks detected at runtime.
     pub obligation_leak_response: ObligationLeakResponse,
     /// Enable the Lyapunov governor for scheduling suggestions.
@@ -161,6 +167,7 @@ impl Default for RuntimeConfig {
             deadline_warning_handler: None,
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
+            cancel_attribution: CancelAttributionConfig::default(),
             obligation_leak_response: ObligationLeakResponse::Log,
             enable_governor: false,
             governor_interval: 32,
@@ -223,6 +230,12 @@ mod tests {
             ObligationLeakResponse::Log,
             config.obligation_leak_response
         );
+        crate::assert_with_log!(
+            config.cancel_attribution == CancelAttributionConfig::default(),
+            "cancel_attribution default",
+            CancelAttributionConfig::default(),
+            config.cancel_attribution
+        );
         crate::test_complete!("test_default_config_sane");
     }
 
@@ -249,6 +262,7 @@ mod tests {
             deadline_warning_handler: None,
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
+            cancel_attribution: CancelAttributionConfig::new(1, 256),
             obligation_leak_response: ObligationLeakResponse::Log,
             logical_clock_mode: None,
             enable_governor: false,
@@ -349,6 +363,7 @@ mod tests {
             deadline_warning_handler: None,
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
+            cancel_attribution: CancelAttributionConfig::new(8, 1024),
             obligation_leak_response: ObligationLeakResponse::Silent,
             logical_clock_mode: None,
             enable_governor: false,

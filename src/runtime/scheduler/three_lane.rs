@@ -58,6 +58,7 @@ use crate::time::TimerDriverHandle;
 use crate::tracing_compat::trace;
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::DetRng;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
@@ -67,6 +68,29 @@ use std::time::Duration;
 pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
+
+thread_local! {
+    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = RefCell::new(None);
+}
+
+struct ScopedLocalScheduler {
+    prev: Option<Arc<Mutex<PriorityScheduler>>>,
+}
+
+impl ScopedLocalScheduler {
+    fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
+        let prev = CURRENT_LOCAL.with(|cell| cell.replace(Some(local)));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedLocalScheduler {
+    fn drop(&mut self) {
+        CURRENT_LOCAL.with(|cell| {
+            *cell.borrow_mut() = self.prev.take();
+        });
+    }
+}
 
 /// A multi-worker scheduler with 3-lane priority support.
 ///

@@ -144,7 +144,7 @@ use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
-use crate::types::Budget;
+use crate::types::{Budget, CancelAttributionConfig};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -240,6 +240,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn logical_clock_mode(mut self, mode: LogicalClockMode) -> Self {
         self.config.logical_clock_mode = Some(mode);
+        self
+    }
+
+    /// Set cancellation attribution chain limits.
+    #[must_use]
+    pub fn cancel_attribution_config(mut self, config: CancelAttributionConfig) -> Self {
+        self.config.cancel_attribution = config;
         self
     }
 
@@ -958,6 +965,7 @@ impl RuntimeInner {
             if let Some(mode) = config.logical_clock_mode.clone() {
                 guard.set_logical_clock_mode(mode);
             }
+            guard.set_cancel_attribution_config(config.cancel_attribution);
             guard.set_obligation_leak_response(config.obligation_leak_response);
             if guard.timer_driver().is_none() {
                 guard.set_timer_driver(TimerDriverHandle::with_wall_clock());

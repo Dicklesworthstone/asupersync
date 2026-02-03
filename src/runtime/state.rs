@@ -27,7 +27,8 @@ use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
 use crate::types::policy::PolicyAction;
 use crate::types::{
-    Budget, CancelKind, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
+    Budget, CancelAttributionConfig, CancelKind, CancelReason, ObligationId, Outcome, Policy,
+    RegionId, TaskId, Time,
 };
 use crate::util::{Arena, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
@@ -233,6 +234,8 @@ pub struct RuntimeState {
     blocking_pool: Option<BlockingPoolHandle>,
     /// Response policy when obligation leaks are detected.
     obligation_leak_response: ObligationLeakResponse,
+    /// Cancel attribution configuration for cause-chain limits.
+    cancel_attribution: CancelAttributionConfig,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -249,6 +252,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
             .field("logical_clock_mode", &self.logical_clock_mode)
+            .field("cancel_attribution", &self.cancel_attribution)
             .field("entropy_source", &"<dyn EntropySource>")
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
@@ -282,6 +286,7 @@ impl RuntimeState {
             io_driver: None,
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
+            cancel_attribution: CancelAttributionConfig::default(),
             entropy_source: Arc::new(OsEntropy),
             observability: None,
             blocking_pool: None,
