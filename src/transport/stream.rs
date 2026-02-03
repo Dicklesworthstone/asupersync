@@ -659,7 +659,7 @@ mod tests {
     fn test_next_with_cancel_immediate() {
         init_test("test_next_with_cancel_immediate");
         let (_sink, mut stream) = channel(1);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         future::block_on(async {
@@ -679,7 +679,7 @@ mod tests {
     fn test_next_with_cancel_after_pending() {
         init_test("test_next_with_cancel_after_pending");
         let mut stream = PendingStream;
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);

@@ -105,7 +105,7 @@ impl HashRing {
 
     /// Returns an iterator of node identifiers (ordered).
     pub fn nodes(&self) -> impl Iterator<Item = &str> {
-        self.nodes.iter().map(|s| s.as_str())
+        self.nodes.iter().map(String::as_str)
     }
 }
 
@@ -181,16 +181,22 @@ mod tests {
         let mut ring = build_ring(5, 64);
         let keys: Vec<u64> = (0..10_000).map(|i| i as u64).collect();
 
-        let before: Vec<&str> = keys.iter().map(|k| ring.node_for_key(k).unwrap()).collect();
+        let before: Vec<String> = keys
+            .iter()
+            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .collect();
 
         ring.add_node("node-new");
 
-        let after: Vec<&str> = keys.iter().map(|k| ring.node_for_key(k).unwrap()).collect();
+        let after: Vec<String> = keys
+            .iter()
+            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .collect();
 
         let changed = before
             .iter()
             .zip(after.iter())
-            .filter(|(a, b)| *a != *b)
+            .filter(|(a, b)| a != b)
             .count();
         let ratio = changed as f64 / keys.len() as f64;
 
@@ -203,19 +209,25 @@ mod tests {
         let mut ring = build_ring(4, 64);
         let keys: Vec<u64> = (0..10_000).map(|i| i as u64).collect();
 
-        let before: Vec<&str> = keys.iter().map(|k| ring.node_for_key(k).unwrap()).collect();
+        let before: Vec<String> = keys
+            .iter()
+            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .collect();
 
         let removed = "node-2";
         ring.remove_node(removed);
 
-        let after: Vec<&str> = keys.iter().map(|k| ring.node_for_key(k).unwrap()).collect();
+        let after: Vec<String> = keys
+            .iter()
+            .map(|k| ring.node_for_key(k).unwrap().to_owned())
+            .collect();
 
         let changed = before
             .iter()
             .zip(after.iter())
-            .filter(|(a, b)| *a != *b)
+            .filter(|(a, b)| a != b)
             .count();
-        let removed_count = before.iter().filter(|n| **n == removed).count();
+        let removed_count = before.iter().filter(|n| n.as_str() == removed).count();
         assert_eq!(changed, removed_count);
     }
 

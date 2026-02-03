@@ -154,7 +154,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             let leaders = Arc::clone(&leaders);
             handles.push(std::thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let result = barrier.wait(&cx).expect("wait failed");
                 if result.is_leader() {
                     leaders.fetch_add(1, Ordering::SeqCst);
@@ -162,7 +162,7 @@ mod tests {
             }));
         }
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let result = barrier.wait(&cx).expect("wait failed");
         if result.is_leader() {
             leaders.fetch_add(1, Ordering::SeqCst);
@@ -181,7 +181,7 @@ mod tests {
     fn barrier_cancel_removes_arrival() {
         init_test("barrier_cancel_removes_arrival");
         let barrier = Barrier::new(2);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         let err = barrier.wait(&cx).expect_err("expected cancellation");
@@ -199,14 +199,14 @@ mod tests {
         let barrier_clone = Arc::clone(&barrier);
         let leaders_clone = Arc::clone(&leaders);
         let handle = std::thread::spawn(move || {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let result = barrier_clone.wait(&cx).expect("wait failed");
             if result.is_leader() {
                 leaders_clone.fetch_add(1, Ordering::SeqCst);
             }
         });
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let result = barrier.wait(&cx).expect("wait failed");
         if result.is_leader() {
             leaders.fetch_add(1, Ordering::SeqCst);

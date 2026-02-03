@@ -472,7 +472,7 @@ impl Scheduler {
 /// Controls whether the scheduler uses deterministic or throughput-optimized
 /// scheduling. The deterministic mode is used by the lab runtime for
 /// reproducible testing; the throughput mode is used in production.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchedulerMode {
     /// Deterministic mode: same seed → identical schedule.
     ///
@@ -481,6 +481,7 @@ pub enum SchedulerMode {
     /// - DPOR exploration
     /// - Replay debugging
     /// - Proof-carrying trace generation
+    #[default]
     Deterministic,
 
     /// Throughput mode: optimized for wall-clock performance.
@@ -488,12 +489,6 @@ pub enum SchedulerMode {
     /// May use non-deterministic optimizations (e.g., batch wakeups,
     /// relaxed ordering). Not suitable for DPOR or replay.
     Throughput,
-}
-
-impl Default for SchedulerMode {
-    fn default() -> Self {
-        Self::Deterministic
-    }
 }
 
 /// A schedule certificate: a hash of the sequence of scheduling decisions.

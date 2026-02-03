@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn incoming_body_content_length() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::ContentLength(5));
 
         block_on(writer.push_bytes(&cx, b"hello")).expect("push bytes");
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn incoming_body_chunked_with_trailers() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut writer, mut body) = IncomingBody::channel(&cx, BodyKind::Chunked);
 
         block_on(writer.push_bytes(&cx, b"5\r\nhello\r\n0\r\nX-Trailer: test\r\n\r\n"))
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn incoming_body_chunked_finish_incomplete_errors() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut writer, _body) = IncomingBody::channel(&cx, BodyKind::Chunked);
 
         block_on(writer.push_bytes(&cx, b"5\r\nhello\r\n")).expect("push bytes");
@@ -1088,7 +1088,7 @@ mod tests {
 
     #[test]
     fn outgoing_body_chunked_roundtrip() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello"))).unwrap();
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     fn outgoing_body_content_length_roundtrip() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::ContentLength(11));
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello"))).unwrap();
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn outgoing_body_backpressure_blocks_until_recv() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut sender, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"one"))).unwrap();
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn outgoing_body_send_cancelled() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (mut sender, _body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
         cx.cancel_fast(CancelKind::User);
 
@@ -1217,7 +1217,7 @@ mod tests {
 
     #[test]
     fn streaming_response_chunked() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (resp, _sender) = StreamingResponse::chunked(&cx, 4, 200, "OK");
         assert!(resp
             .head
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn streaming_response_content_length() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (resp, _sender) = StreamingResponse::with_content_length(&cx, 4, 200, "OK", 100);
         assert!(resp
             .head

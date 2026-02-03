@@ -57,9 +57,11 @@
 //! ```
 
 pub mod dialectica;
+pub mod eprocess;
 pub mod graded;
 pub mod guarded;
 mod leak_check;
+pub mod ledger;
 pub mod lyapunov;
 pub mod marking;
 

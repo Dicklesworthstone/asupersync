@@ -2050,7 +2050,7 @@ mod tests {
         init_test("generic_pool_acquire_when_closed_returns_error");
 
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Close the pool
         futures_lite::future::block_on(pool.close());
@@ -2073,7 +2073,7 @@ mod tests {
         init_test("generic_pool_resource_returned_becomes_idle");
 
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Acquire a resource
         let resource = futures_lite::future::block_on(pool.acquire(&cx))
@@ -2110,7 +2110,7 @@ mod tests {
         init_test("generic_pool_discarded_resource_not_returned_to_idle");
 
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Acquire a resource
         let resource = futures_lite::future::block_on(pool.acquire(&cx))
@@ -2158,7 +2158,7 @@ mod tests {
         init_test("load_test_many_acquire_return_cycles");
 
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Run many acquire/return cycles
         for i in 0..100 {
@@ -2215,7 +2215,7 @@ mod tests {
         let pool = GenericPool::new(factory, config)
             .with_health_check(|&(id, _healthy): &(u32, bool)| id != 0);
 
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Acquire resource #0
         let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
@@ -2249,7 +2249,7 @@ mod tests {
         // All resources pass health check
         let pool = GenericPool::new(factory, config).with_health_check(|_id: &u32| true);
 
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Acquire and return resource #0
         let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
@@ -2279,7 +2279,7 @@ mod tests {
         // Health check that rejects everything — but it's disabled
         let pool = GenericPool::new(factory, config).with_health_check(|_id: &u32| false);
 
-        let cx = crate::cx::Cx::for_testing();
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
         assert_eq!(*r0, 0);

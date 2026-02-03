@@ -156,6 +156,132 @@ pub enum CancelKind {
     Shutdown,
 }
 
+// ========================================================================
+// Cancellation Witnesses
+// ========================================================================
+
+/// The cancellation phase witnessed by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CancelPhase {
+    /// Cancellation has been requested but not yet acknowledged.
+    Requested,
+    /// Task has acknowledged cancellation and is draining cleanup.
+    Cancelling,
+    /// Task is running finalizers.
+    Finalizing,
+    /// Task completed with a cancelled outcome.
+    Completed,
+}
+
+impl CancelPhase {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Requested => 0,
+            Self::Cancelling => 1,
+            Self::Finalizing => 2,
+            Self::Completed => 3,
+        }
+    }
+}
+
+/// A proof-of-completion token for cancellation.
+///
+/// This witness is emitted by the cancellation protocol to make completion
+/// verifiable and to detect inconsistent or out-of-order transitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelWitness {
+    /// The task associated with this cancellation.
+    pub task_id: TaskId,
+    /// The owning region.
+    pub region_id: RegionId,
+    /// Cancellation epoch (increments on first request).
+    pub epoch: u64,
+    /// The phase observed.
+    pub phase: CancelPhase,
+    /// The cancellation reason.
+    pub reason: CancelReason,
+}
+
+impl CancelWitness {
+    /// Creates a new cancellation witness.
+    #[must_use]
+    pub fn new(
+        task_id: TaskId,
+        region_id: RegionId,
+        epoch: u64,
+        phase: CancelPhase,
+        reason: CancelReason,
+    ) -> Self {
+        Self {
+            task_id,
+            region_id,
+            epoch,
+            phase,
+            reason,
+        }
+    }
+
+    /// Validates a transition between two witnesses.
+    ///
+    /// Invariants:
+    /// - Same task, region, and epoch
+    /// - Phase must be monotone (no regression)
+    /// - Cancellation severity must not weaken
+    pub fn validate_transition(prev: Option<&Self>, next: &Self) -> Result<(), CancelWitnessError> {
+        let Some(prev) = prev else {
+            return Ok(());
+        };
+
+        if prev.task_id != next.task_id {
+            return Err(CancelWitnessError::TaskMismatch);
+        }
+        if prev.region_id != next.region_id {
+            return Err(CancelWitnessError::RegionMismatch);
+        }
+        if prev.epoch != next.epoch {
+            return Err(CancelWitnessError::EpochMismatch);
+        }
+        if next.phase.rank() < prev.phase.rank() {
+            return Err(CancelWitnessError::PhaseRegression {
+                from: prev.phase,
+                to: next.phase,
+            });
+        }
+        if next.reason.kind() < prev.reason.kind() {
+            return Err(CancelWitnessError::ReasonWeakened {
+                from: prev.reason.kind(),
+                to: next.reason.kind(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Errors when validating cancellation witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelWitnessError {
+    /// Task identifiers do not match.
+    TaskMismatch,
+    /// Region identifiers do not match.
+    RegionMismatch,
+    /// Cancellation epoch differs.
+    EpochMismatch,
+    /// Phase regression detected.
+    PhaseRegression {
+        /// Previous phase observed.
+        from: CancelPhase,
+        /// New phase observed.
+        to: CancelPhase,
+    },
+    /// Cancellation severity weakened.
+    ReasonWeakened {
+        /// Previous cancellation kind.
+        from: CancelKind,
+        /// New cancellation kind.
+        to: CancelKind,
+    },
+}
+
 impl CancelKind {
     /// Returns the severity of this cancellation kind.
     ///

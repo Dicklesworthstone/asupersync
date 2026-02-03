@@ -98,6 +98,10 @@ where
     let pinned_shutdown = Box::pin(shutdown_fut);
 
     // Use our Select combinator.
+    // NOTE: When shutdown wins, `fut` is dropped (not drained). This is
+    // intentional for graceful shutdown: the caller is responsible for
+    // cleanup via scope finalizers. If `fut` holds obligations, those are
+    // resolved by the enclosing region's close protocol.
     match Select::new(pinned_fut, pinned_shutdown).await {
         Either::Left(result) => GracefulOutcome::Completed(result),
         Either::Right(()) => GracefulOutcome::ShutdownSignaled,

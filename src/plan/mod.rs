@@ -3,7 +3,9 @@
 //! This module defines a minimal DAG representation for join/race/timeout
 //! structures. It is intentionally lightweight and uses safe Rust only.
 
+use crate::util::{DetHashMap, DetHashSet};
 use std::collections::HashSet;
+use std::mem;
 use std::time::Duration;
 
 /// Node identifier for a plan DAG.
@@ -202,7 +204,234 @@ impl PlanDag {
     }
 }
 
+// ---------------------------------------------------------------------------
+// E-graph core (deterministic hashcons + union-find)
+// ---------------------------------------------------------------------------
+
+/// Identifier for an equivalence class in the e-graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EClassId(usize);
+
+impl EClassId {
+    /// Creates a new class id from a raw index.
+    #[must_use]
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// Returns the underlying index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// An e-graph node for plan expressions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ENode {
+    /// Leaf computation (opaque).
+    Leaf {
+        /// Human-readable label.
+        label: String,
+    },
+    /// Join of all children.
+    Join {
+        /// Child classes that must all complete.
+        children: Vec<EClassId>,
+    },
+    /// Race among children.
+    Race {
+        /// Child classes that race for first completion.
+        children: Vec<EClassId>,
+    },
+    /// Timeout applied to a child computation.
+    Timeout {
+        /// Child class being timed.
+        child: EClassId,
+        /// Timeout duration.
+        duration: Duration,
+    },
+}
+
+/// An equivalence class of e-nodes.
+#[derive(Debug, Clone)]
+pub struct EClass {
+    id: EClassId,
+    nodes: Vec<ENode>,
+}
+
+impl EClass {
+    /// Returns the class id.
+    #[must_use]
+    pub const fn id(&self) -> EClassId {
+        self.id
+    }
+
+    /// Returns the nodes in this class (in deterministic insertion order).
+    #[must_use]
+    pub fn nodes(&self) -> &[ENode] {
+        &self.nodes
+    }
+}
+
+/// Deterministic e-graph core for plan rewrites.
+///
+/// This structure provides:
+/// - hashconsed node insertion (deduplication)
+/// - union-find for class merging
+/// - deterministic canonical ids (smallest id wins)
+#[derive(Debug, Default)]
+pub struct EGraph {
+    classes: Vec<EClass>,
+    parent: Vec<EClassId>,
+    hashcons: DetHashMap<ENode, EClassId>,
+}
+
+impl EGraph {
+    /// Creates an empty e-graph.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Inserts a leaf node and returns its class id.
+    pub fn add_leaf(&mut self, label: impl Into<String>) -> EClassId {
+        self.add_enode(ENode::Leaf {
+            label: label.into(),
+        })
+    }
+
+    /// Inserts a join node and returns its class id.
+    pub fn add_join(&mut self, children: Vec<EClassId>) -> EClassId {
+        self.add_enode(ENode::Join { children })
+    }
+
+    /// Inserts a race node and returns its class id.
+    pub fn add_race(&mut self, children: Vec<EClassId>) -> EClassId {
+        self.add_enode(ENode::Race { children })
+    }
+
+    /// Inserts a timeout node and returns its class id.
+    pub fn add_timeout(&mut self, child: EClassId, duration: Duration) -> EClassId {
+        self.add_enode(ENode::Timeout { child, duration })
+    }
+
+    /// Inserts an e-node with hashconsing.
+    pub fn add_enode(&mut self, node: ENode) -> EClassId {
+        let canonical = self.canonicalize_enode(node);
+        if let Some(existing) = self.hashcons.get(&canonical) {
+            return self.find(*existing);
+        }
+
+        let id = EClassId::new(self.classes.len());
+        self.classes.push(EClass {
+            id,
+            nodes: vec![canonical.clone()],
+        });
+        self.parent.push(id);
+        self.hashcons.insert(canonical, id);
+        id
+    }
+
+    /// Returns the canonical representative for a class id.
+    pub fn canonical_id(&mut self, id: EClassId) -> EClassId {
+        self.find(id)
+    }
+
+    /// Returns the canonical class for an id, if present.
+    pub fn class(&mut self, id: EClassId) -> Option<&EClass> {
+        let root = self.find(id);
+        self.classes.get(root.index())
+    }
+
+    /// Merges two classes and returns the canonical representative.
+    ///
+    /// Determinism rule: the smallest id always wins.
+    pub fn merge(&mut self, a: EClassId, b: EClassId) -> EClassId {
+        let root_a = self.find(a);
+        let root_b = self.find(b);
+        if root_a == root_b {
+            return root_a;
+        }
+
+        let (winner, loser) = if root_a.index() <= root_b.index() {
+            (root_a, root_b)
+        } else {
+            (root_b, root_a)
+        };
+
+        self.parent[loser.index()] = winner;
+
+        let mut moved = mem::take(&mut self.classes[loser.index()].nodes);
+        self.classes[winner.index()].nodes.append(&mut moved);
+
+        self.rebuild_hashcons();
+        winner
+    }
+
+    fn find(&mut self, id: EClassId) -> EClassId {
+        let mut idx = id.index();
+        let mut root = idx;
+        while self.parent[root].index() != root {
+            root = self.parent[root].index();
+        }
+
+        while self.parent[idx].index() != root {
+            let next = self.parent[idx].index();
+            self.parent[idx] = EClassId::new(root);
+            idx = next;
+        }
+
+        EClassId::new(root)
+    }
+
+    fn canonicalize_enode(&mut self, node: ENode) -> ENode {
+        match node {
+            ENode::Leaf { label } => ENode::Leaf { label },
+            ENode::Join { children } => ENode::Join {
+                children: children.into_iter().map(|id| self.find(id)).collect(),
+            },
+            ENode::Race { children } => ENode::Race {
+                children: children.into_iter().map(|id| self.find(id)).collect(),
+            },
+            ENode::Timeout { child, duration } => ENode::Timeout {
+                child: self.find(child),
+                duration,
+            },
+        }
+    }
+
+    fn rebuild_hashcons(&mut self) {
+        self.hashcons.clear();
+        for idx in 0..self.classes.len() {
+            let id = EClassId::new(idx);
+            if self.find(id) != id {
+                continue;
+            }
+
+            let nodes = mem::take(&mut self.classes[idx].nodes);
+            let mut seen: DetHashSet<ENode> = DetHashSet::default();
+            let mut rebuilt = Vec::new();
+
+            for node in nodes {
+                let canonical = self.canonicalize_enode(node);
+                if seen.insert(canonical.clone()) {
+                    rebuilt.push(canonical.clone());
+                }
+                self.hashcons.insert(canonical, id);
+            }
+
+            self.classes[idx].nodes = rebuilt;
+        }
+    }
+}
+
+pub mod certificate;
+pub mod fixtures;
 pub mod rewrite;
+pub use certificate::{
+    CertificateVersion, PlanHash, RewriteCertificate, StepVerifyError, VerifyError,
+};
 pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule};
 
 #[cfg(test)]
@@ -800,5 +1029,34 @@ mod tests {
             rewritten_seen
         );
         crate::test_complete!("dedup_rewrite_lab_equivalence");
+    }
+
+    #[test]
+    fn egraph_hashcons_dedup() {
+        init_test("egraph_hashcons_dedup");
+        let mut eg = EGraph::new();
+        let a = eg.add_leaf("a");
+        let b = eg.add_leaf("b");
+        let join1 = eg.add_join(vec![a, b]);
+        let join2 = eg.add_join(vec![a, b]);
+        assert_eq!(eg.canonical_id(join1), eg.canonical_id(join2));
+        crate::test_complete!("egraph_hashcons_dedup");
+    }
+
+    #[test]
+    fn egraph_union_find_canonical_is_min() {
+        init_test("egraph_union_find_canonical_is_min");
+        let mut eg = EGraph::new();
+        let a = eg.add_leaf("a"); // smallest id
+        let b = eg.add_leaf("b");
+        let c = eg.add_leaf("c");
+
+        let root1 = eg.merge(b, a);
+        assert_eq!(root1, a);
+        let root2 = eg.merge(c, b);
+        assert_eq!(root2, a);
+        assert_eq!(eg.canonical_id(b), a);
+        assert_eq!(eg.canonical_id(c), a);
+        crate::test_complete!("egraph_union_find_canonical_is_min");
     }
 }

@@ -5,7 +5,9 @@
 
 use crate::cx::Cx;
 use crate::tracing_compat::{debug, trace};
-use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId, Time};
+use crate::types::{
+    Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
+};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -219,6 +221,8 @@ pub struct TaskRecord {
     pub last_polled_step: u64,
     /// Tasks waiting for this task to complete.
     pub waiters: Vec<TaskId>,
+    /// Cancellation epoch (increments on first cancel request).
+    pub cancel_epoch: u64,
 }
 
 impl TaskRecord {
@@ -245,6 +249,7 @@ impl TaskRecord {
             created_instant: Instant::now(),
             last_polled_step: 0,
             waiters: Vec::new(),
+            cancel_epoch: 0,
         }
     }
 
@@ -414,6 +419,11 @@ impl TaskRecord {
             TaskState::Created | TaskState::Running => {
                 let _prev_state = self.state_name();
                 let requested_reason = reason.clone();
+                if self.cancel_epoch == 0 {
+                    self.cancel_epoch = 1;
+                } else {
+                    self.cancel_epoch = self.cancel_epoch.saturating_add(1);
+                }
                 debug!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
@@ -450,6 +460,30 @@ impl TaskRecord {
             }
         }
         result
+    }
+
+    /// Returns a cancellation witness for the current task state, if cancelled.
+    #[must_use]
+    pub fn cancel_witness(&self) -> Option<CancelWitness> {
+        if self.cancel_epoch == 0 {
+            return None;
+        }
+        let (phase, reason) = match &self.state {
+            TaskState::CancelRequested { reason, .. } => (CancelPhase::Requested, reason.clone()),
+            TaskState::Cancelling { reason, .. } => (CancelPhase::Cancelling, reason.clone()),
+            TaskState::Finalizing { reason, .. } => (CancelPhase::Finalizing, reason.clone()),
+            TaskState::Completed(Outcome::Cancelled(reason)) => {
+                (CancelPhase::Completed, reason.clone())
+            }
+            _ => return None,
+        };
+        Some(CancelWitness::new(
+            self.id,
+            self.owner,
+            self.cancel_epoch,
+            phase,
+            reason,
+        ))
     }
 
     /// Marks the task as running (Created → Running).
@@ -608,12 +642,18 @@ impl TaskRecord {
     /// ```
     #[allow(clippy::no_effect_underscore_binding)]
     pub fn finalize_done(&mut self) -> bool {
+        self.finalize_done_with_witness().is_some()
+    }
+
+    /// Transitions from `Finalizing` to `Completed(Cancelled)` and returns a witness.
+    #[allow(clippy::no_effect_underscore_binding)]
+    pub fn finalize_done_with_witness(&mut self) -> Option<CancelWitness> {
         let TaskState::Finalizing {
             reason,
             cleanup_budget,
         } = &self.state
         else {
-            return false;
+            return None;
         };
         let reason = reason.clone();
         let budget = *cleanup_budget;
@@ -633,9 +673,15 @@ impl TaskRecord {
             "task finalization done"
         );
         let _ = budget;
-        self.state = TaskState::Completed(Outcome::Cancelled(reason));
+        self.state = TaskState::Completed(Outcome::Cancelled(reason.clone()));
         self.phase.store(TaskPhase::Completed);
-        true
+        Some(CancelWitness::new(
+            self.id,
+            self.owner,
+            self.cancel_epoch,
+            CancelPhase::Completed,
+            reason,
+        ))
     }
 
     /// Returns the cancel reason if the task is being cancelled.
@@ -1074,6 +1120,64 @@ mod tests {
         let cancelled = matches!(t.state, TaskState::Completed(Outcome::Cancelled(_)));
         crate::assert_with_log!(cancelled, "cancelled", true, cancelled);
         crate::test_complete!("full_cancellation_protocol_flow");
+    }
+
+    #[test]
+    fn cancellation_witness_sequence_is_monotone() {
+        init_test("cancellation_witness_sequence_is_monotone");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        t.start_running();
+
+        let _ = t.request_cancel(CancelReason::timeout());
+        let w1 = t.cancel_witness().expect("requested witness");
+
+        let _ = t.acknowledge_cancel();
+        let w2 = t.cancel_witness().expect("cancelling witness");
+        CancelWitness::validate_transition(Some(&w1), &w2).expect("requested -> cancelling");
+
+        let _ = t.cleanup_done();
+        let w3 = t.cancel_witness().expect("finalizing witness");
+        CancelWitness::validate_transition(Some(&w2), &w3).expect("cancelling -> finalizing");
+
+        let w4 = t.finalize_done_with_witness().expect("completed witness");
+        CancelWitness::validate_transition(Some(&w3), &w4).expect("finalizing -> completed");
+
+        crate::test_complete!("cancellation_witness_sequence_is_monotone");
+    }
+
+    #[test]
+    fn cancellation_witness_idempotent_requests() {
+        init_test("cancellation_witness_idempotent_requests");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        t.start_running();
+
+        let _ = t.request_cancel(CancelReason::timeout());
+        let w1 = t.cancel_witness().expect("first witness");
+
+        let _ = t.request_cancel(CancelReason::shutdown());
+        let w2 = t.cancel_witness().expect("second witness");
+
+        crate::assert_with_log!(w1.epoch == w2.epoch, "epoch stable", w1.epoch, w2.epoch);
+        CancelWitness::validate_transition(Some(&w1), &w2).expect("idempotent request transition");
+
+        crate::test_complete!("cancellation_witness_idempotent_requests");
+    }
+
+    #[test]
+    fn cancellation_witness_rejects_out_of_order() {
+        init_test("cancellation_witness_rejects_out_of_order");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        t.start_running();
+        let _ = t.request_cancel(CancelReason::timeout());
+        let requested = t.cancel_witness().expect("requested witness");
+        let _ = t.acknowledge_cancel();
+        let _ = t.cleanup_done();
+        let completed = t.finalize_done_with_witness().expect("completed witness");
+
+        let err = CancelWitness::validate_transition(Some(&completed), &requested).err();
+        crate::assert_with_log!(err.is_some(), "out of order rejected", true, err.is_some());
+
+        crate::test_complete!("cancellation_witness_rejects_out_of_order");
     }
 
     #[test]

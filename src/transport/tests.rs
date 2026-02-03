@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_stream_cancellation() {
         let (_sink, mut stream) = channel(10);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         future::block_on(async {
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn test_stream_cancellation_after_pending() {
         let (_sink, mut stream) = channel(10);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
@@ -407,7 +407,7 @@ mod tests {
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
             dispatcher.add_sink(endpoint_id, Box::new(sink));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Route 50 symbols through the dispatcher
@@ -685,7 +685,7 @@ mod tests {
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
             dispatcher.add_sink(endpoint_id, Box::new(sink));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Fill the underlying channel
@@ -795,7 +795,7 @@ mod tests {
             dispatcher.add_sink(EndpointId(2), Box::new(sink2));
             dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Symbol 1 maps to target1 via route
@@ -846,7 +846,7 @@ mod tests {
             dispatcher.add_sink(EndpointId(2), Box::new(sink2));
             dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Broadcast to all nodes
@@ -910,7 +910,7 @@ mod tests {
             dispatcher.add_sink(EndpointId(2), Box::new(sink2));
             dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Multicast to 2 endpoints (count=2)
@@ -984,7 +984,7 @@ mod tests {
                 streams.push(stream);
             }
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // QuorumCast with quorum of 3
@@ -1032,7 +1032,7 @@ mod tests {
             let config = MockTransportConfig::reliable();
             let (mut sink, mut stream) = mock_channel(config);
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Send some symbols
@@ -1066,7 +1066,7 @@ mod tests {
 
             let config = MockTransportConfig::reliable();
             let (_sink, mut stream) = mock_channel(config);
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             let waker = noop_waker();
             let mut context = Context::from_waker(&waker);
@@ -1091,7 +1091,7 @@ mod tests {
 
             let config = MockTransportConfig::reliable();
             let (mut sink, mut stream) = mock_channel(config);
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Send batch
@@ -1155,7 +1155,7 @@ mod tests {
             dispatcher.add_sink(EndpointId(1), Box::new(sink_primary));
             dispatcher.add_sink(EndpointId(2), Box::new(sink_backup));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // First 3 should succeed (alternating between primary and backup in round-robin)
@@ -1622,7 +1622,7 @@ mod tests {
             dispatcher.add_sink(EndpointId(2), Box::new(sink2));
             dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
                 // Send 9 symbols (3 per endpoint in round-robin)

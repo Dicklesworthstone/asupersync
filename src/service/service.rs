@@ -1102,7 +1102,7 @@ mod tests {
 
     #[test]
     fn fixed_provider_returns_cx() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let provider = FixedCxProvider::new(cx.clone());
 
         let retrieved = provider.current_cx();

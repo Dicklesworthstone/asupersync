@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn test_random_suffix_format() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let s1 = random_suffix(&cx);
         let s2 = random_suffix(&cx);
         // Verify format is correct (16 hex chars)

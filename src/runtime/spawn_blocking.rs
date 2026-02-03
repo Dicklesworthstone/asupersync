@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn spawn_blocking_inline_when_no_pool() {
         init_test("spawn_blocking_inline_when_no_pool");
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let _guard = Cx::set_current(Some(cx));
         let current_id = std::thread::current().id();
 

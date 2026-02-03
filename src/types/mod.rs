@@ -26,7 +26,10 @@ pub mod typed_symbol;
 
 pub use budget::{backlog_bound, delay_bound, Budget, CurveBudget, CurveError, MinPlusCurve};
 pub use builder::{BuildError, BuildResult};
-pub use cancel::{CancelAttributionConfig, CancelKind, CancelReason};
+pub use cancel::{
+    CancelAttributionConfig, CancelKind, CancelPhase, CancelReason, CancelWitness,
+    CancelWitnessError,
+};
 pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;
