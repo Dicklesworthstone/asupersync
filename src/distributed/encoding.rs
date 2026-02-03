@@ -129,12 +129,7 @@ impl StateEncoder {
             return Ok(Vec::new());
         }
 
-        let source_symbols: Vec<&Symbol> = state
-            .symbols
-            .iter()
-            .filter(|s| s.kind().is_source())
-            .collect();
-        if source_symbols.is_empty() {
+        if !state.symbols.iter().any(|s| s.kind().is_source()) {
             return Err(EncodingError::NoSourceSymbols);
         }
         let data = rebuild_source_bytes(state);

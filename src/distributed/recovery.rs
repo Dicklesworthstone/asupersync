@@ -486,15 +486,14 @@ impl StateDecoder {
         for symbol in &self.symbols {
             let auth =
                 AuthenticatedSymbol::new_verified(symbol.clone(), AuthenticationTag::zero());
-            match pipeline.feed(auth).map_err(Error::from)? {
-                SymbolAcceptResult::Rejected(reason) => {
-                    let message = format!("symbol rejected: {reason:?}");
-                    self.decoder_state = DecoderState::Failed {
-                        reason: message.clone(),
-                    };
-                    return Err(Error::new(ErrorKind::DecodingFailed).with_message(message));
-                }
-                _ => {}
+            if let SymbolAcceptResult::Rejected(reason) =
+                pipeline.feed(auth).map_err(Error::from)?
+            {
+                let message = format!("symbol rejected: {reason:?}");
+                self.decoder_state = DecoderState::Failed {
+                    reason: message.clone(),
+                };
+                return Err(Error::new(ErrorKind::DecodingFailed).with_message(message));
             }
         }
 
