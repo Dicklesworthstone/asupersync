@@ -1899,10 +1899,7 @@ impl DockerFixtureService {
         &self.container_name
     }
 
-    fn run_docker_cmd(
-        &self,
-        args: &[&str],
-    ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    fn run_docker_cmd(args: &[&str]) -> Result<std::process::Output, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("docker").args(args).output()?;
         Ok(output)
     }
@@ -1915,7 +1912,7 @@ impl FixtureService for DockerFixtureService {
 
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Remove any stale container with the same name.
-        let _ = self.run_docker_cmd(&["rm", "-f", &self.container_name]);
+        let _ = Self::run_docker_cmd(&["rm", "-f", &self.container_name]);
 
         let mut args = vec!["run", "-d", "--name", &self.container_name];
 
@@ -1947,7 +1944,7 @@ impl FixtureService for DockerFixtureService {
             "starting docker container"
         );
 
-        let output = self.run_docker_cmd(&args)?;
+        let output = Self::run_docker_cmd(&args)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
@@ -1966,7 +1963,7 @@ impl FixtureService for DockerFixtureService {
             return Ok(());
         }
         tracing::info!(container = %self.container_name, "stopping docker container");
-        let output = self.run_docker_cmd(&["rm", "-f", &self.container_name])?;
+        let output = Self::run_docker_cmd(&["rm", "-f", &self.container_name])?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::warn!(
@@ -1984,29 +1981,32 @@ impl FixtureService for DockerFixtureService {
             return false;
         }
 
-        if let Some(cmd) = &self.health_cmd {
-            let mut args = vec!["exec", &self.container_name];
-            let cmd_refs: Vec<&str> = cmd.iter().map(String::as_str).collect();
-            args.extend(cmd_refs);
-            match self.run_docker_cmd(&args) {
-                Ok(output) => output.status.success(),
-                Err(_) => false,
-            }
-        } else {
-            // Fallback: check container state via docker inspect.
-            match self.run_docker_cmd(&[
-                "inspect",
-                "-f",
-                "{{.State.Running}}",
-                &self.container_name,
-            ]) {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    stdout.trim() == "true"
+        self.health_cmd.as_ref().map_or_else(
+            || {
+                // Fallback: check container state via docker inspect.
+                match Self::run_docker_cmd(&[
+                    "inspect",
+                    "-f",
+                    "{{.State.Running}}",
+                    &self.container_name,
+                ]) {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        stdout.trim() == "true"
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
-            }
-        }
+            },
+            |cmd| {
+                let mut args = vec!["exec", &self.container_name];
+                let cmd_refs: Vec<&str> = cmd.iter().map(String::as_str).collect();
+                args.extend(cmd_refs);
+                match Self::run_docker_cmd(&args) {
+                    Ok(output) => output.status.success(),
+                    Err(_) => false,
+                }
+            },
+        )
     }
 }
 
@@ -2042,7 +2042,7 @@ impl TempDirFixture {
     /// Returns the path if the directory has been created.
     #[must_use]
     pub fn path(&self) -> Option<&std::path::Path> {
-        self.dir.as_ref().map(|d| d.path())
+        self.dir.as_ref().map(tempfile::TempDir::path)
     }
 }
 
@@ -2073,7 +2073,7 @@ impl FixtureService for TempDirFixture {
     }
 
     fn is_healthy(&self) -> bool {
-        self.dir.as_ref().map_or(false, |d| d.path().is_dir())
+        self.dir.as_ref().is_some_and(|d| d.path().is_dir())
     }
 }
 
@@ -2101,12 +2101,18 @@ impl FixtureService for TempDirFixture {
 ///     |state| state.load(Ordering::SeqCst),
 /// );
 /// ```
+type InProcessResult = Result<(), Box<dyn std::error::Error>>;
+type InProcessStartFn<S> = Box<dyn FnMut(&mut S) -> InProcessResult>;
+type InProcessStopFn<S> = Box<dyn FnMut(&mut S) -> InProcessResult>;
+type InProcessHealthFn<S> = Box<dyn Fn(&S) -> bool>;
+
+/// In-process fixture service backed by user-provided start/stop closures.
 pub struct InProcessService<S: std::fmt::Debug + 'static> {
     service_name: String,
     state: S,
-    start_fn: Box<dyn FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>>>,
-    stop_fn: Box<dyn FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>>>,
-    health_fn: Box<dyn Fn(&S) -> bool>,
+    start_fn: InProcessStartFn<S>,
+    stop_fn: InProcessStopFn<S>,
+    health_fn: InProcessHealthFn<S>,
 }
 
 impl<S: std::fmt::Debug + 'static> std::fmt::Debug for InProcessService<S> {
@@ -2114,7 +2120,7 @@ impl<S: std::fmt::Debug + 'static> std::fmt::Debug for InProcessService<S> {
         f.debug_struct("InProcessService")
             .field("service_name", &self.service_name)
             .field("state", &self.state)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -2123,8 +2129,8 @@ impl<S: std::fmt::Debug + 'static> InProcessService<S> {
     pub fn new(
         name: &str,
         state: S,
-        start_fn: impl FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>> + 'static,
-        stop_fn: impl FnMut(&mut S) -> Result<(), Box<dyn std::error::Error>> + 'static,
+        start_fn: impl FnMut(&mut S) -> InProcessResult + 'static,
+        stop_fn: impl FnMut(&mut S) -> InProcessResult + 'static,
         health_fn: impl Fn(&S) -> bool + 'static,
     ) -> Self {
         Self {
@@ -2920,6 +2926,8 @@ macro_rules! assert_with_context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -3531,8 +3539,8 @@ mod tests {
         let mut alloc = PortAllocator::new();
         let ports = alloc.allocate_n("worker", 4).expect("allocate_n");
         assert_eq!(ports.len(), 4);
-        let mut sorted = ports.clone();
-        sorted.sort();
+        let mut sorted = ports;
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 4, "all ports must be unique");
         assert!(alloc.port_for("worker_0").is_some());
@@ -3631,8 +3639,6 @@ mod tests {
     #[test]
     fn test_environment_on_teardown_callbacks() {
         init_test("test_environment_on_teardown_callbacks");
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
         let counter = Arc::new(AtomicUsize::new(0));
         let c1 = counter.clone();
         let c2 = counter.clone();
@@ -3706,8 +3712,7 @@ mod tests {
         assert!(path.is_dir());
         assert!(
             path.to_string_lossy().contains("asupersync-scratch-"),
-            "prefix should match: {:?}",
-            path
+            "prefix should match: {path:?}"
         );
 
         fixture.stop().expect("stop");
@@ -3725,8 +3730,7 @@ mod tests {
         let path = fixture.path().expect("path exists");
         assert!(
             path.to_string_lossy().contains("myprefix-"),
-            "custom prefix should appear: {:?}",
-            path
+            "custom prefix should appear: {path:?}"
         );
         crate::test_complete!("test_temp_dir_fixture_custom_prefix");
     }
@@ -3734,9 +3738,6 @@ mod tests {
     #[test]
     fn test_in_process_service_lifecycle() {
         init_test("test_in_process_service_lifecycle");
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
         let running = Arc::new(AtomicBool::new(false));
         let mut svc = InProcessService::new(
             "echo",
@@ -3809,22 +3810,19 @@ mod tests {
     #[test]
     fn test_environment_with_in_process_service() {
         init_test("test_environment_with_in_process_service");
-        use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
-        use std::sync::Arc;
-
         let flag = Arc::new(AtomicBool::new(false));
         let svc = InProcessService::new(
             "mock_http",
             flag.clone(),
             |s: &mut Arc<AtomicBool>| {
-                s.store(true, AtOrd::SeqCst);
+                s.store(true, Ordering::SeqCst);
                 Ok(())
             },
             |s: &mut Arc<AtomicBool>| {
-                s.store(false, AtOrd::SeqCst);
+                s.store(false, Ordering::SeqCst);
                 Ok(())
             },
-            |s: &Arc<AtomicBool>| s.load(AtOrd::SeqCst),
+            |s: &Arc<AtomicBool>| s.load(Ordering::SeqCst),
         );
 
         let ctx = TestContext::new("env_inproc", 42);
@@ -3834,10 +3832,10 @@ mod tests {
 
         let health = env.health_check();
         assert!(health[0].1, "in-process service should be healthy");
-        assert!(flag.load(AtOrd::SeqCst));
+        assert!(flag.load(Ordering::SeqCst));
 
         env.teardown();
-        assert!(!flag.load(AtOrd::SeqCst), "stopped after teardown");
+        assert!(!flag.load(Ordering::SeqCst), "stopped after teardown");
         crate::test_complete!("test_environment_with_in_process_service");
     }
 }
