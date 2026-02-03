@@ -438,8 +438,8 @@ impl DporExplorer {
                 // divergence index. This ensures the same backtrack point
                 // always generates the same seed.
                 for bp in &analysis.backtrack_points {
-                    let derived_seed = seed
-                        ^ (bp.divergence_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    let derived_seed =
+                        seed ^ (bp.divergence_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
 
                     if self.explored_seeds.contains(&derived_seed) {
                         self.pruned_backtrack_points += 1;
@@ -526,11 +526,7 @@ impl DporExplorer {
             coverage: CoverageMetrics {
                 equivalence_classes: self.known_classes.len(),
                 total_runs: self.results.len(),
-                new_class_discoveries: self
-                    .results
-                    .iter()
-                    .filter(|r| r.is_new_class)
-                    .count(),
+                new_class_discoveries: self.results.iter().filter(|r| r.is_new_class).count(),
                 class_run_counts: self.class_counts.clone(),
             },
             runs: Vec::new(),

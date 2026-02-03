@@ -11,12 +11,14 @@
 //! - [`snapshot`]: Serializable region state snapshots
 //! - [`encoding`]: RaptorQ encoding pipeline for snapshots
 //! - [`assignment`]: Symbol-to-replica assignment strategies
+//! - [`consistent_hash`]: Deterministic consistent hash ring
 //! - [`distribution`]: Quorum-based symbol distribution
 //! - [`recovery`]: Region recovery protocol
 //! - [`bridge`]: Local-to-distributed region bridge
 
 pub mod assignment;
 pub mod bridge;
+pub mod consistent_hash;
 pub mod distribution;
 pub mod encoding;
 pub mod recovery;
@@ -27,6 +29,7 @@ pub use bridge::{
     BridgeConfig, CloseResult, ConflictResolution, DistributedToLocal, EffectiveState,
     LocalToDistributed, RegionBridge, RegionMode, SyncMode, SyncResult, SyncState, UpgradeResult,
 };
+pub use consistent_hash::HashRing;
 pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,

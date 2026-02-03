@@ -674,6 +674,62 @@ TaskComplete(t) ∧ Held(t) ≠ ∅  ⇒  ObligationLeak(o) for each o ∈ Held(
 This is the runtime witness for the linearity invariant and is the test-level
 assertion that "no obligation leaks" holds for any execution.
 
+#### 3.4.4 Obligation lifecycle state machine
+
+Obligations are **one-shot** resources with a simple state machine:
+
+```
+Reserved  ──commit──▶  Committed
+    │
+    ├─abort─────────▶  Aborted
+    │
+    └─(task completes holding)──▶  Leaked   // error
+```
+
+Legal transitions:
+
+```
+Reserved → Committed | Aborted | Leaked
+Committed / Aborted / Leaked are absorbing
+```
+
+Only the **holder task** may commit/abort:
+
+```
+O[o].holder = t  ⇒  only t may trigger commit(o) or abort(o)
+```
+
+Cancellation does **not** resolve obligations; it only changes task states.
+Therefore, cancellation correctness depends on draining tasks to points where
+they can commit or abort any held obligations.
+
+#### 3.4.5 Ledger view (region close precondition)
+
+Define the region obligation ledger:
+
+```
+ledger(r) = { o | O[o].region = r ∧ O[o].state = Reserved }
+```
+
+Then a necessary precondition for `CLOSE-COMPLETE` is:
+
+```
+ledger(r) = ∅
+```
+
+This is the operational form of “no obligation leaks” at the region boundary:
+region close implies all obligations have been resolved.
+
+Lemma (sketch):
+
+If all tasks in region `r` complete **without leak transitions**, then
+`ledger(r) = ∅`. (Because every `Reserved` obligation is linearly consumed
+by `commit` or `abort`, and leaks are the only way for a `Reserved` obligation
+to survive task completion.)
+
+This lemma underpins the lab-runtime oracle: when the oracle reports no leaks,
+region close is safe w.r.t. obligations.
+
 ---
 
 ### 3.5 Joining and Waiting
@@ -817,6 +873,15 @@ These must hold in all reachable states:
 ```
 
 Equivalently: once an obligation is resolved, it cannot be “resolved again” by any transition.
+
+### INV-LEDGER-EMPTY-ON-CLOSE: Closed regions have no reserved obligations
+
+```
+∀r ∈ dom(R):
+  R[r].state = Closed(_) ⟹ ledger(r) = ∅
+```
+
+This follows from linearity plus the `CLOSE-COMPLETE` precondition.
 
 ### INV-MASK-BOUNDED: Masking is finite and monotone
 

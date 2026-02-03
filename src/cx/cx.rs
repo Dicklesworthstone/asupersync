@@ -148,7 +148,7 @@ fn noop_waker() -> Waker {
 /// While `Cx` can be cloned and moved, it semantically belongs to a specific
 /// task within a specific region. The runtime ensures proper cleanup when
 /// tasks complete.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Cx<Caps = cap::All> {
     pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
     observability: Arc<std::sync::RwLock<ObservabilityState>>,
@@ -160,6 +160,23 @@ pub struct Cx<Caps = cap::All> {
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
     _caps: PhantomData<Caps>,
+}
+
+impl<Caps> Clone for Cx<Caps> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            observability: self.observability.clone(),
+            io_driver: self.io_driver.clone(),
+            io_cap: self.io_cap.clone(),
+            timer_driver: self.timer_driver.clone(),
+            blocking_pool: self.blocking_pool.clone(),
+            entropy: self.entropy.clone(),
+            logical_clock: self.logical_clock.clone(),
+            remote_cap: self.remote_cap.clone(),
+            _caps: PhantomData,
+        }
+    }
 }
 
 /// Internal observability state shared by `Cx` clones.
@@ -1242,7 +1259,10 @@ impl<Caps> Cx<Caps> {
         let child = prev.fork().with_custom("span.name", name);
         self.set_diagnostic_context(child);
         self.log(LogEntry::debug(format!("span enter: {name}")).with_target("tracing"));
-        SpanGuard { cx: self.clone(), prev }
+        SpanGuard {
+            cx: self.clone(),
+            prev,
+        }
     }
 
     /// Sets a request correlation ID on the diagnostic context.
@@ -1934,6 +1954,29 @@ impl<Caps> Cx<Caps> {
             "scope budget set"
         );
         crate::cx::Scope::new(self.region_id(), budget)
+    }
+}
+
+impl Cx<cap::All> {
+    /// Returns the current task context, if one is set.
+    ///
+    /// This is set by the runtime while polling a task.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        CURRENT_CX.with(|slot| slot.borrow().clone())
+    }
+
+    /// Sets the current task context for the duration of the guard.
+    #[must_use]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
+        let prev = CURRENT_CX.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            let prev = guard.take();
+            *guard = cx;
+            prev
+        });
+        CurrentCxGuard { prev }
     }
 }
 

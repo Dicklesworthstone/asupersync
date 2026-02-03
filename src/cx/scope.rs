@@ -291,7 +291,7 @@ impl<P: Policy> Scope<'_, P> {
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        Caps: cap::HasSpawn,
+        Caps: cap::HasSpawn + Send + Sync,
         F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
@@ -452,7 +452,7 @@ impl<P: Policy> Scope<'_, P> {
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        Caps: cap::HasSpawn,
+        Caps: cap::HasSpawn + Send + Sync,
         F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
@@ -493,7 +493,7 @@ impl<P: Policy> Scope<'_, P> {
         f: F,
     ) -> Result<TaskHandle<Fut::Output>, SpawnError>
     where
-        Caps: cap::HasSpawn,
+        Caps: cap::HasSpawn + Send + Sync,
         F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
@@ -549,7 +549,7 @@ impl<P: Policy> Scope<'_, P> {
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        Caps: cap::HasSpawn,
+        Caps: cap::HasSpawn + Send + Sync,
         F: FnOnce(Cx<Caps>) -> Fut + 'static,
         Fut: Future + 'static,
         Fut::Output: Send + 'static,
@@ -694,7 +694,7 @@ impl<P: Policy> Scope<'_, P> {
         f: F,
     ) -> Result<(TaskHandle<R>, StoredTask), SpawnError>
     where
-        Caps: cap::HasSpawn,
+        Caps: cap::HasSpawn + Send + Sync,
         F: FnOnce(Cx<Caps>) -> R + Send + 'static,
         R: Send + 'static,
     {
