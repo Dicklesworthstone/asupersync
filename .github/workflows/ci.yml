@@ -157,6 +157,57 @@ jobs:
           path: target/criterion/
           retention-days: 30
 
+  phase6-e2e:
+    name: Phase 6 E2E Suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-phase6-e2e-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: GEO – Geodesic normalization E2E
+        run: cargo test --test e2e_geodesic_normalization --all-features -- --nocapture
+
+      - name: HOMO – Topology-guided exploration E2E
+        run: cargo test --test topology_benchmark --all-features -- --nocapture
+
+      - name: LYAP – Governor vs baseline E2E
+        run: cargo test --test e2e_governor_vs_baseline --all-features -- --nocapture
+
+      - name: RAPTORQ – Encode/decode conformance E2E
+        run: cargo test --test raptorq_conformance --all-features -- --nocapture
+
+      - name: PLAN – Certified rewrite pipeline E2E
+        run: cargo test --test golden_outputs --all-features -- --nocapture
+
+      - name: Generate E2E report artifacts
+        if: always()
+        run: |
+          mkdir -p phase6-artifacts
+          echo '{"ci_run": "${{ github.run_id }}", "commit": "${{ github.sha }}"}' > phase6-artifacts/metadata.json
+          for suite in e2e_geodesic_normalization topology_benchmark e2e_governor_vs_baseline raptorq_conformance golden_outputs; do
+            cargo test --test "$suite" --all-features -- --format json 2>&1 \
+              | tee "phase6-artifacts/${suite}.json" || true
+          done
+
+      - name: Upload Phase 6 E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-e2e-artifacts
+          path: phase6-artifacts/
+          retention-days: 30
+
   proof-checks:
     name: Formal Proof Verification
     runs-on: ubuntu-latest
