@@ -19,7 +19,9 @@ pub mod worker;
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
 pub use local_queue::LocalQueue;
-pub use priority::Scheduler as PriorityScheduler;
+pub use priority::{
+    DispatchLane, ScheduleCertificate, Scheduler as PriorityScheduler, SchedulerMode,
+};
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use worker::{Parker, Worker};
 
