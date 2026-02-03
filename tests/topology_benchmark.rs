@@ -980,12 +980,16 @@ fn format_coverage_report(label: &str, report: &ExplorationReport) -> String {
         .top_unexplored
         .iter()
         .take(5)
-        .map(|entry| match entry.score {
-            Some(score) => format!(
-                "{}@n{}:p{}",
-                entry.seed, score.novelty, score.persistence_sum
-            ),
-            None => format!("{}", entry.seed),
+        .map(|entry| {
+            entry.score.map_or_else(
+                || format!("{}", entry.seed),
+                |score| {
+                    format!(
+                        "{}@n{}:p{}",
+                        entry.seed, score.novelty, score.persistence_sum
+                    )
+                },
+            )
         })
         .collect::<Vec<_>>()
         .join(",");

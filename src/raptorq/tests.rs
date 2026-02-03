@@ -630,7 +630,9 @@ mod property_tests {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder.decode(&received).expect("decode with overhead should succeed");
+        let result = decoder
+            .decode(&received)
+            .expect("decode with overhead should succeed");
         assert_eq!(result.source, source);
     }
 
