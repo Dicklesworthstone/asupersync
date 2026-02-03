@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c5ffb26988c414841f9f2846b6637d571e645ee3f7d4e8b8421648fe098a89b6 # shrinks to events = [TraceEvent { version: 1, seq: 1, time: Time(0ns), logical_time: None, kind: Spawn, data: Task { task: TaskId(1:0), region: RegionId(1:0) } }]
