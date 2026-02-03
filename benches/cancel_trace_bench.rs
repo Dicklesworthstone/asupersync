@@ -24,7 +24,7 @@ use asupersync::trace::dpor::{detect_hb_races, detect_races, HappensBeforeGraph,
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::event_structure::TracePoset;
 use asupersync::trace::scoring::{score_persistence, seed_fingerprint};
-use asupersync::transport::mock::{mock_channel, MockTransportConfig};
+use asupersync::transport::mock::{sim_channel, SimTransportConfig};
 use asupersync::types::{
     Budget, CancelKind, CancelReason, ObjectId, ObjectParams, RegionId, TaskId, Time,
 };
@@ -467,7 +467,7 @@ fn bench_raptorq_encode_decode(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("encode", size), &size, |b, _| {
             b.iter_batched(
                 || {
-                    let (sink, _stream) = mock_channel(MockTransportConfig::reliable());
+                    let (sink, _stream) = sim_channel(SimTransportConfig::reliable());
                     RaptorQSenderBuilder::new()
                         .config(config.clone())
                         .transport(sink)
@@ -487,7 +487,7 @@ fn bench_raptorq_encode_decode(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("decode", size), &size, |b, _| {
             b.iter_batched(
                 || {
-                    let (sink, stream) = mock_channel(MockTransportConfig::reliable());
+                    let (sink, stream) = sim_channel(SimTransportConfig::reliable());
                     let mut sender = RaptorQSenderBuilder::new()
                         .config(config.clone())
                         .transport(sink)

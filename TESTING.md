@@ -135,11 +135,11 @@ These oracles verify the core invariants during lab runtime execution:
 
 Files using mocks or fakes (candidates for `bd-1z5u` remediation):
 
-**Source (17 files):** `src/transport/mock.rs` (dedicated mock transport), `src/runtime/reactor/lab.rs` (lab reactor — acceptable), `src/lab/runtime.rs` (lab runtime — acceptable), `src/runtime/builder.rs`, `src/runtime/state.rs`, `src/cx/cap.rs`, `src/test_utils.rs`, and others where "mock" refers to lab-based deterministic substitutes rather than external mock libraries.
+**Source (17 files):** `src/transport/mock.rs` (deterministic transport simulator; legacy module name), `src/runtime/reactor/lab.rs` (lab reactor — acceptable), `src/lab/runtime.rs` (lab runtime — acceptable), `src/runtime/builder.rs`, `src/runtime/state.rs`, `src/cx/cap.rs`, `src/test_utils.rs`, and others where "mock" refers to lab-based deterministic substitutes rather than external mock libraries.
 
 **Tests (8 files):** `tests/pool_tests.rs`, `tests/e2e_database.rs`, `tests/lab_determinism.rs`, `tests/property_region_ops.rs`, `tests/e2e/combinator/cancel_correctness/obligation_cleanup.rs`, `tests/e2e/console/diagnostics/explain_task.rs`, `tests/e2e/console/diagnostics/explain_region.rs`, `tests/common/mod.rs`.
 
-**Assessment:** Most "mock" usage is lab-based deterministic substitutes (acceptable). The `src/transport/mock.rs` dedicated mock transport and `tests/pool_tests.rs` mock pool are the primary candidates for replacement with deterministic lab components.
+**Assessment:** Most "mock" usage is lab-based deterministic substitutes (acceptable). The transport simulator in `src/transport/mock.rs` is now explicitly deterministic and policy‑compliant; remaining occurrences should be reviewed for naming clarity only.
 
 ### Property Tests
 
@@ -153,7 +153,7 @@ Only 6 files use proptest: `tests/algebraic_laws.rs`, `tests/property_region_ops
 4. `bd-rpsc` **IO/reactor/time unit gaps:** Add deterministic tests for cancellation + deadline interactions across drivers. io_uring tests need CI-compatible stubbing.
 5. `bd-2hvn` **Net/HTTP/H2/WebSocket unit gaps:** H3 error module has 1 test. QUIC has stubbed paths. Bolster edge-case unit tests (protocol errors, shutdown paths).
 6. `bd-lefk` **RaptorQ unit/perf gaps:** Expand invariant tests around decode failure modes and perf regressions.
-7. `bd-1z5u` **No-mock policy violations:** `tests/pool_tests.rs`, `tests/e2e_database.rs`, and `src/transport/mock.rs` use mocks. Replace with lab-based deterministic substitutes.
+7. `bd-1z5u` **No-mock policy violations:** resolved in tests (`tests/pool_tests.rs`, `tests/e2e_database.rs`) and transport simulator (`src/transport/mock.rs` now deterministic; legacy module name).
 8. `bd-3q6f` **Distributed/trace/remote gaps:** Kafka/NATS/QUIC integrations are stubbed. Decide scope for Phase 0.
 9. **Property test expansion:** Only 6 files use proptest. Extend to obligation invariants, channel semantics, and budget arithmetic.
 10. **Security unit expansion:** Only 26 unit tests across 5 files for security/capability module.

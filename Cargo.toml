@@ -97,6 +97,8 @@ conformance = { package = "asupersync-conformance", path = "conformance", option
 lz4_flex = { version = "0.11", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
+# Tempfile helper for test-internals and test logging utilities.
+tempfile = "3.17"
 # TLS support via rustls
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
 rustls-pki-types = { version = "1.12", optional = true }
