@@ -16,7 +16,9 @@ use common::*;
 use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer, TopologyExplorer};
 use asupersync::lab::ExplorationReport;
 use asupersync::lab::LabRuntime;
+use asupersync::trace::EvidenceLedger;
 use asupersync::types::Budget;
+use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -1050,4 +1052,123 @@ fn e2e_topology_coverage_report() {
         baseline = baseline_summary,
         topology = topo_summary
     );
+}
+
+// ---------------------------------------------------------------------------
+// E2E Report Harness (bd-32n6)
+// ---------------------------------------------------------------------------
+
+fn top_k_ledgers(ledgers: &[EvidenceLedger], k: usize) -> Vec<EvidenceLedger> {
+    let mut sorted: Vec<EvidenceLedger> = ledgers.to_vec();
+    sorted.sort_by(|a, b| {
+        b.score
+            .novelty
+            .cmp(&a.score.novelty)
+            .then_with(|| b.score.persistence_sum.cmp(&a.score.persistence_sum))
+            .then_with(|| b.score.fingerprint.cmp(&a.score.fingerprint))
+    });
+    sorted.truncate(k);
+    sorted
+}
+
+fn scoring_work_units(ledgers: &[EvidenceLedger]) -> u64 {
+    ledgers
+        .iter()
+        .map(|ledger| ledger.entries.len() as u64)
+        .sum()
+}
+
+fn execution_steps(results: &[asupersync::lab::explorer::RunResult]) -> u64 {
+    results.iter().map(|run| run.steps).sum()
+}
+
+fn run_scenario_report<F>(
+    suite: &str,
+    scenario: &str,
+    base_seed: u64,
+    max_runs: usize,
+    test: F,
+) -> serde_json::Value
+where
+    F: Fn(&mut LabRuntime),
+{
+    let baseline_config = ExplorerConfig::new(base_seed, max_runs).worker_count(1);
+    let mut baseline_explorer = ScheduleExplorer::new(baseline_config);
+    let baseline_report = baseline_explorer.explore(&test);
+
+    let topo_config = ExplorerConfig::new(base_seed, max_runs).worker_count(1);
+    let mut topo_explorer = TopologyExplorer::new(topo_config);
+    let topo_report = topo_explorer.explore(&test);
+
+    let top_ledgers = top_k_ledgers(topo_explorer.ledgers(), 3);
+    let report_json = topology_report_json(
+        suite,
+        scenario,
+        &baseline_report,
+        &topo_report,
+        &top_ledgers,
+        None,
+        scoring_work_units(topo_explorer.ledgers()),
+        execution_steps(topo_explorer.results()),
+    );
+    write_topology_report(scenario, &report_json);
+    report_json
+}
+
+#[test]
+fn e2e_topology_exploration_report() {
+    init_test_logging();
+    test_phase!("e2e_topology_exploration_report");
+
+    let suite = "topology_e2e";
+    let mut scenario_reports = Vec::new();
+
+    scenario_reports.push(run_scenario_report(
+        suite,
+        "deadlock_square",
+        0,
+        100,
+        |runtime| {
+            run_deadlock_square(runtime);
+        },
+    ));
+
+    scenario_reports.push(run_scenario_report(
+        suite,
+        "lost_wakeup",
+        1000,
+        50,
+        |runtime| {
+            run_lost_wakeup_scenario(runtime);
+        },
+    ));
+
+    scenario_reports.push(run_scenario_report(
+        suite,
+        "dining_philosophers",
+        5000,
+        80,
+        |runtime| {
+            run_dining_philosophers(runtime, 4);
+        },
+    ));
+
+    scenario_reports.push(run_scenario_report(
+        suite,
+        "producer_consumer",
+        8000,
+        60,
+        |runtime| {
+            run_producer_consumer(runtime, 3, 3, 5);
+        },
+    ));
+
+    let summary = json!({
+        "suite": suite,
+        "scenario_count": scenario_reports.len(),
+        "scenarios": scenario_reports,
+    });
+    write_topology_report("topology_e2e_summary", &summary);
+
+    test_complete!("e2e_topology_exploration_report");
 }

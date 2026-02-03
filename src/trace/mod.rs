@@ -227,9 +227,7 @@ mod normalize_tests {
         // Original order has more switches than normalized
         assert!(
             normalized_cost <= original_cost,
-            "normalized ({}) should be <= original ({})",
-            normalized_cost,
-            original_cost
+            "normalized ({normalized_cost}) should be <= original ({original_cost})"
         );
         assert_eq!(result.switch_count, normalized_cost);
     }

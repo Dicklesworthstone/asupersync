@@ -204,6 +204,60 @@ RaptorQSender / RaptorQReceiver
             -> SymbolSink / SymbolStream (transport)
 ```
 
+### RaptorQ configuration surface
+
+`RaptorQConfig` is the top-level configuration for the RaptorQ pipeline. It
+groups all tuning knobs and is validated via `RaptorQConfig::validate()` before
+construction.
+
+Key knobs by component:
+
+- `EncodingConfig` (`RaptorQConfig::encoding`)
+  - `repair_overhead`: repair factor (e.g., `1.05` = 5% extra symbols)
+  - `max_block_size`: max bytes per source block
+  - `symbol_size`: symbol size in bytes (typically 64–1024)
+  - `encoding_parallelism` / `decoding_parallelism`
+- `TransportConfig` (`RaptorQConfig::transport`)
+  - `max_paths`, `health_check_interval`, `max_symbols_in_flight`
+  - `path_strategy`: `RoundRobin | LatencyWeighted | Adaptive | Random`
+- `ResourceConfig` (`RaptorQConfig::resources`)
+  - `max_symbol_buffer_memory`, `symbol_pool_size`
+  - `max_encoding_ops`, `max_decoding_ops`
+- `TimeoutConfig` (`RaptorQConfig::timeouts`)
+  - `default_timeout`, `encoding_timeout`, `decoding_timeout`
+  - `path_timeout`, `quorum_timeout`
+- `SecurityConfig` (`RaptorQConfig::security`)
+  - `auth_mode`, `auth_key_seed`, `reject_unauthenticated`
+
+`RuntimeProfile::to_config()` provides baseline presets (`Development`,
+`Testing`, `Staging`, `Production`, `HighThroughput`, `LowLatency`).
+
+Note: `RaptorQReceiver` derives a `DecodingConfig` from `RaptorQConfig::encoding`
+and uses defaults for the remaining decode knobs (`min_overhead`,
+`max_buffered_symbols`, `block_timeout`). For fine-grained decode tuning, use
+`DecodingPipeline` directly.
+
+### RaptorQ builder example
+
+```ignore
+use asupersync::config::{RaptorQConfig, RuntimeProfile};
+use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
+
+let mut config = RuntimeProfile::Testing.to_config();
+config.encoding.symbol_size = 512;
+config.encoding.repair_overhead = 1.10;
+
+let sender = RaptorQSenderBuilder::new()
+    .config(config.clone())
+    .transport(sink)
+    .build()?;
+
+let receiver = RaptorQReceiverBuilder::new()
+    .config(config)
+    .source(stream)
+    .build()?;
+```
+
 ### RaptorQ RFC-6330-grade scope + determinism contract (spec)
 
 This section is the internal spec for the RaptorQ pipeline. It replaces the
@@ -318,6 +372,13 @@ Schema versioning:
 
 Canonical serialization (for hashing):
 - `DecodeProof::content_hash()` must use a deterministic hasher (`util::DetHasher`) and a fixed field order.
+
+#### Proof artifact API surface
+
+- `InactivationDecoder::decode_with_proof(...) -> Result<DecodeResultWithProof, (DecodeError, DecodeProof)>`
+  returns a decode result plus a proof artifact (or a failure + proof).
+- `DecodeProof::replay_and_verify(symbols)` replays and validates the artifact.
+- `DecodeProof::content_hash()` provides a stable fingerprint for deduplication.
 - Integer fields are serialized in little-endian fixed-width form.
 - Vectors are serialized in recorded order with a length prefix.
 

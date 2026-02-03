@@ -616,9 +616,9 @@ mod tests {
     #[test]
     fn large_trace_uses_greedy() {
         // Create a trace larger than beam_threshold
-        let n = 150;
+        let n: u32 = 150;
         let events: Vec<TraceEvent> = (0..n)
-            .map(|i| TraceEvent::spawn(i as u64, Time::ZERO, tid(i as u32), rid(i as u32)))
+            .map(|i| TraceEvent::spawn(u64::from(i), Time::ZERO, tid(i), rid(i)))
             .collect();
         let poset = make_poset(&events);
 
