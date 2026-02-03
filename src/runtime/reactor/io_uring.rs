@@ -533,7 +533,7 @@ mod imp {
         #[cfg(unix)]
         #[test]
         fn test_register_modify_deregister_unsupported() {
-            let reactor = IoUringReactor::default();
+            let reactor = IoUringReactor;
             let (left, _right) = UnixStream::pair().expect("unix stream pair");
 
             let err = reactor
@@ -554,7 +554,7 @@ mod imp {
 
         #[test]
         fn test_poll_and_wake_unsupported() {
-            let reactor = IoUringReactor::default();
+            let reactor = IoUringReactor;
             let mut events = Events::with_capacity(4);
 
             let err = reactor
@@ -568,7 +568,7 @@ mod imp {
 
         #[test]
         fn test_registration_count_zero() {
-            let reactor = IoUringReactor::default();
+            let reactor = IoUringReactor;
             assert_eq!(reactor.registration_count(), 0);
         }
     }
