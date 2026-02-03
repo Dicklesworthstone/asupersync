@@ -406,6 +406,17 @@ impl RuntimeState {
         self.logical_clock_mode = mode;
     }
 
+    /// Returns the cancel attribution configuration for this runtime.
+    #[must_use]
+    pub fn cancel_attribution_config(&self) -> CancelAttributionConfig {
+        self.cancel_attribution
+    }
+
+    /// Sets the cancel attribution configuration for this runtime.
+    pub fn set_cancel_attribution_config(&mut self, config: CancelAttributionConfig) {
+        self.cancel_attribution = config;
+    }
+
     /// Returns the entropy source for this runtime.
     #[must_use]
     pub fn entropy_source(&self) -> Arc<dyn EntropySource> {
