@@ -942,7 +942,8 @@ mod tests {
         let config = encoding_config();
         let mut encoder = EncodingPipeline::new(config.clone(), pool());
         let object_id = ObjectId::new_for_test(30);
-        let data = vec![9u8; 64];
+        // Ensure K > 1 so the first symbol cannot complete the block decode.
+        let data = vec![9u8; 512];
 
         let symbol = encoder
             .encode_with_repair(object_id, &data, 0)
@@ -961,9 +962,7 @@ mod tests {
             .expect("feed");
         let accepted = matches!(
             first,
-            SymbolAcceptResult::Accepted { .. }
-                | SymbolAcceptResult::DecodingStarted { .. }
-                | SymbolAcceptResult::BlockComplete { .. }
+            SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. }
         );
         crate::assert_with_log!(accepted, "first accepted", true, accepted);
 

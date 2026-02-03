@@ -20,7 +20,7 @@ pub async fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        return uring_mkdirat(&path, 0o755);
+        uring_mkdirat(&path, 0o755)
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -50,7 +50,7 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        return uring_unlinkat_dir(&path);
+        uring_unlinkat_dir(&path)
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -72,13 +72,13 @@ pub async fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 #[allow(unsafe_code)]
-fn uring_submit_one(entry: io_uring::squeue::Entry) -> io::Result<()> {
+fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
     use io_uring::IoUring;
 
     let mut ring = IoUring::new(2)?;
     unsafe {
         ring.submission()
-            .push(&entry)
+            .push(entry)
             .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "submission queue full"))?;
     }
     ring.submit_and_wait(1)?;
@@ -86,7 +86,7 @@ fn uring_submit_one(entry: io_uring::squeue::Entry) -> io::Result<()> {
         .completion()
         .next()
         .map(|cqe| cqe.result())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no completion received"))?;
+        .ok_or_else(|| io::Error::other("no completion received"))?;
     if result < 0 {
         Err(io::Error::from_raw_os_error(-result))
     } else {
@@ -111,7 +111,7 @@ fn uring_unlinkat_dir(path: &std::path::Path) -> io::Result<()> {
     let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .flags(libc::AT_REMOVEDIR)
         .build();
-    uring_submit_one(entry)
+    uring_submit_one(&entry)
 }
 
 /// Uses io_uring's MKDIRAT opcode for directory creation.
@@ -122,7 +122,7 @@ fn uring_mkdirat(path: &std::path::Path, mode: libc::mode_t) -> io::Result<()> {
     let entry = opcode::MkDirAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .mode(mode)
         .build();
-    uring_submit_one(entry)
+    uring_submit_one(&entry)
 }
 
 #[cfg(test)]

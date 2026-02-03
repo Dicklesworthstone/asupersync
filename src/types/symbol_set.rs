@@ -360,6 +360,10 @@ impl SymbolSet {
 
     fn calculate_threshold(progress: &BlockProgress, config: &ThresholdConfig) -> bool {
         progress.k.is_some_and(|k| {
+            let k_usize = k as usize;
+            if progress.source_symbols >= k_usize {
+                return true;
+            }
             let total = progress.total();
             let raw = (f64::from(k) * config.overhead_factor).ceil();
             if raw.is_sign_negative() {

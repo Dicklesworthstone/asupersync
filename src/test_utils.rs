@@ -14,7 +14,7 @@
 //!
 //! fn my_async_test() {
 //!     init_test_logging();
-//!     run_test(async {
+//!     run_test(|| async {
 //!         // async test code
 //!     });
 //! }
@@ -121,19 +121,15 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T> + Unpin,
 {
-    timeout(Time::ZERO, timeout_duration, f())
-        .await
-        .map_or_else(
-            |_| panic!("operation '{description}' did not complete within {timeout_duration:?}"),
-            |value| {
-                tracing::debug!(
-                    description = %description,
-                    timeout_ms = timeout_duration.as_millis(),
-                    "operation completed within timeout"
-                );
-                value
-            },
-        )
+    let Ok(value) = timeout(Time::ZERO, timeout_duration, f()).await else {
+        unreachable!("operation '{description}' did not complete within {timeout_duration:?}");
+    };
+    tracing::debug!(
+        description = %description,
+        timeout_ms = timeout_duration.as_millis(),
+        "operation completed within timeout"
+    );
+    value
 }
 
 /// Log a test phase transition with a visual separator.
@@ -190,7 +186,7 @@ macro_rules! assert_outcome_ok {
     ($outcome:expr, $expected:expr) => {
         match $outcome {
             $crate::types::Outcome::Ok(v) => assert_eq!(v, $expected),
-            other => panic!("expected Outcome::Ok({:?}), got {:?}", $expected, other),
+            other => unreachable!("expected Outcome::Ok({:?}), got {:?}", $expected, other),
         }
     };
 }
@@ -201,7 +197,7 @@ macro_rules! assert_outcome_cancelled {
     ($outcome:expr) => {
         match $outcome {
             $crate::types::Outcome::Cancelled(_) => {}
-            other => panic!("expected Outcome::Cancelled, got {:?}", other),
+            other => unreachable!("expected Outcome::Cancelled, got {:?}", other),
         }
     };
 }
@@ -212,7 +208,7 @@ macro_rules! assert_outcome_err {
     ($outcome:expr) => {
         match $outcome {
             $crate::types::Outcome::Err(_) => {}
-            other => panic!("expected Outcome::Err, got {:?}", other),
+            other => unreachable!("expected Outcome::Err, got {:?}", other),
         }
     };
 }
@@ -223,7 +219,7 @@ macro_rules! assert_outcome_panicked {
     ($outcome:expr) => {
         match $outcome {
             $crate::types::Outcome::Panicked(_) => {}
-            other => panic!("expected Outcome::Panicked, got {:?}", other),
+            other => unreachable!("expected Outcome::Panicked, got {:?}", other),
         }
     };
 }

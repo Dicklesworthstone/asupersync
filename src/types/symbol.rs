@@ -448,12 +448,18 @@ impl ObjectParams {
     #[doc(hidden)]
     #[must_use]
     pub const fn new_for_test(object_value: u64, size: u64) -> Self {
+        let symbol_size = DEFAULT_SYMBOL_SIZE as u64;
+        let symbols_per_block = if size == 0 {
+            0
+        } else {
+            (size - 1) / symbol_size + 1
+        };
         Self {
             object_id: ObjectId::new_for_test(object_value),
             object_size: size,
             symbol_size: DEFAULT_SYMBOL_SIZE as u16,
             source_blocks: 1,
-            symbols_per_block: ((size / DEFAULT_SYMBOL_SIZE as u64) + 1) as u16,
+            symbols_per_block: symbols_per_block as u16,
         }
     }
 }

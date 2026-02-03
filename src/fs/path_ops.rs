@@ -56,7 +56,7 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
     let to = to.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        return uring_renameat(&from, &to);
+        uring_renameat(&from, &to)
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -71,7 +71,7 @@ pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        return uring_unlinkat(&path);
+        uring_unlinkat(&path)
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -95,7 +95,7 @@ pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::
     let link = link.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        return uring_symlinkat(&original, &link);
+        uring_symlinkat(&original, &link)
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -142,13 +142,13 @@ pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Re
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 #[allow(unsafe_code)]
-fn uring_submit_one(entry: io_uring::squeue::Entry) -> io::Result<()> {
+fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
     use io_uring::IoUring;
 
     let mut ring = IoUring::new(2)?;
     unsafe {
         ring.submission()
-            .push(&entry)
+            .push(entry)
             .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "submission queue full"))?;
     }
     ring.submit_and_wait(1)?;
@@ -156,7 +156,7 @@ fn uring_submit_one(entry: io_uring::squeue::Entry) -> io::Result<()> {
         .completion()
         .next()
         .map(|cqe| cqe.result())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no completion received"))?;
+        .ok_or_else(|| io::Error::other("no completion received"))?;
     if result < 0 {
         Err(io::Error::from_raw_os_error(-result))
     } else {
@@ -180,7 +180,7 @@ fn uring_unlinkat(path: &Path) -> io::Result<()> {
     let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .flags(0)
         .build();
-    uring_submit_one(entry)
+    uring_submit_one(&entry)
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -195,7 +195,7 @@ fn uring_renameat(from: &Path, to: &Path) -> io::Result<()> {
         c_to.as_ptr(),
     )
     .build();
-    uring_submit_one(entry)
+    uring_submit_one(&entry)
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -209,7 +209,7 @@ fn uring_symlinkat(target: &Path, linkpath: &Path) -> io::Result<()> {
         c_link.as_ptr(),
     )
     .build();
-    uring_submit_one(entry)
+    uring_submit_one(&entry)
 }
 
 #[cfg(test)]

@@ -181,15 +181,76 @@ impl Scheduler {
 
     /// Pops the next task to run, using `rng_hint` for tie-breaking among equal-priority tasks.
     ///
-    /// Note: With the heap-based implementation, ties are broken by generation (FIFO order)
-    /// rather than RNG. The `rng_hint` parameter is kept for API compatibility but is not used.
-    /// This provides deterministic FIFO ordering within each priority level.
-    ///
     /// Order: cancel lane > timed lane > ready lane.
     /// O(log n) pop via binary heap.
-    pub fn pop_with_rng_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
-        // With heap + generation, ordering is deterministic FIFO within priority
-        self.pop()
+    pub fn pop_with_rng_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        // For lab determinism, we want tie-breaking to vary with a seed while still being fully
+        // deterministic for a given `rng_hint` sequence. We do this by selecting uniformly among
+        // the set of max-priority (or earliest-deadline) tasks in the chosen lane.
+
+        fn pop_entry_with_rng(
+            lane: &mut BinaryHeap<SchedulerEntry>,
+            rng_hint: u64,
+        ) -> Option<SchedulerEntry> {
+            let first = lane.pop()?;
+            let priority = first.priority;
+            let mut candidates = vec![first];
+
+            while let Some(peek) = lane.peek() {
+                if peek.priority != priority {
+                    break;
+                }
+                // `peek` guarantees the next `pop` is `Some`.
+                candidates.push(lane.pop().expect("popped after peek"));
+            }
+
+            let idx = (rng_hint as usize) % candidates.len();
+            let chosen = candidates.swap_remove(idx);
+            for entry in candidates {
+                lane.push(entry);
+            }
+            Some(chosen)
+        }
+
+        fn pop_timed_with_rng(
+            lane: &mut BinaryHeap<TimedEntry>,
+            rng_hint: u64,
+        ) -> Option<TimedEntry> {
+            let first = lane.pop()?;
+            let deadline = first.deadline;
+            let mut candidates = vec![first];
+
+            while let Some(peek) = lane.peek() {
+                if peek.deadline != deadline {
+                    break;
+                }
+                candidates.push(lane.pop().expect("popped after peek"));
+            }
+
+            let idx = (rng_hint as usize) % candidates.len();
+            let chosen = candidates.swap_remove(idx);
+            for entry in candidates {
+                lane.push(entry);
+            }
+            Some(chosen)
+        }
+
+        if let Some(entry) = pop_entry_with_rng(&mut self.cancel_lane, rng_hint) {
+            self.scheduled.remove(&entry.task);
+            return Some(entry.task);
+        }
+
+        if let Some(entry) = pop_timed_with_rng(&mut self.timed_lane, rng_hint) {
+            self.scheduled.remove(&entry.task);
+            return Some(entry.task);
+        }
+
+        if let Some(entry) = pop_entry_with_rng(&mut self.ready_lane, rng_hint) {
+            self.scheduled.remove(&entry.task);
+            return Some(entry.task);
+        }
+
+        None
     }
 
     /// Removes a specific task from the scheduler.

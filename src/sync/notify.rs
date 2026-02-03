@@ -584,8 +584,7 @@ mod tests {
 
         // Check that the Vec hasn't grown unboundedly: entries should be <= 3
         {
-            let waiters = notify.waiters.lock().unwrap();
-            let entries_len = waiters.entries.len();
+            let entries_len = notify.waiters.lock().unwrap().entries.len();
             crate::assert_with_log!(entries_len <= 3, "entries bounded", true, entries_len <= 3);
         }
 
@@ -598,8 +597,7 @@ mod tests {
 
         // Vec should be empty after all waiters gone
         {
-            let waiters = notify.waiters.lock().unwrap();
-            let entries_len = waiters.entries.len();
+            let entries_len = notify.waiters.lock().unwrap().entries.len();
             crate::assert_with_log!(entries_len == 0, "entries empty", 0usize, entries_len);
         }
 
@@ -607,8 +605,7 @@ mod tests {
         let mut fut_a = notify.notified();
         assert!(poll_once(&mut fut_a).is_pending());
         {
-            let waiters = notify.waiters.lock().unwrap();
-            let entries_len = waiters.entries.len();
+            let entries_len = notify.waiters.lock().unwrap().entries.len();
             crate::assert_with_log!(entries_len == 1, "reused slot", 1usize, entries_len);
         }
         drop(fut_a);
@@ -630,8 +627,7 @@ mod tests {
 
         // After all cancellations, the slab should be empty
         {
-            let waiters = notify.waiters.lock().unwrap();
-            let entries_len = waiters.entries.len();
+            let entries_len = notify.waiters.lock().unwrap().entries.len();
             crate::assert_with_log!(entries_len == 0, "no growth", 0usize, entries_len);
         }
 

@@ -102,6 +102,61 @@ pub struct IoUringFile {
     inner: Arc<IoUringFileInner>,
 }
 
+fn any_ops_pending(inner: &IoUringFileInner) -> bool {
+    matches!(&*inner.read_state.lock(), OpState::Pending { .. })
+        || matches!(&*inner.write_state.lock(), OpState::Pending { .. })
+        || matches!(&*inner.sync_state.lock(), OpState::Pending { .. })
+}
+
+fn mark_op_complete(state: &Mutex<OpState>, result: i32) {
+    let mut guard = state.lock();
+    if let OpState::Pending { waker } = &mut *guard {
+        if let Some(w) = waker.take() {
+            w.wake();
+        }
+        *guard = OpState::Complete(result);
+    }
+}
+
+impl Drop for IoUringFile {
+    fn drop(&mut self) {
+        // Best-effort safety: if any ops are in flight on this ring, make sure we
+        // drain completions before the `IoUring` mapping is dropped.
+        //
+        // We only do this on the last strong ref so intermediate clones don't
+        // introduce surprise blocking in Drop.
+        if Arc::strong_count(&self.inner) != 1 {
+            return;
+        }
+
+        while any_ops_pending(&self.inner) {
+            let completions = {
+                let mut ring = self.inner.ring.lock();
+
+                // Wait for at least one completion. If this fails, we can't reliably
+                // drain, so we bail out (best effort).
+                if ring.submit_and_wait(1).is_err() {
+                    return;
+                }
+
+                ring.completion()
+                    .map(|cqe| (cqe.user_data(), cqe.result()))
+                    .collect::<Vec<_>>()
+            };
+
+            for (user_data, result) in completions {
+                match user_data {
+                    OP_READ => mark_op_complete(&self.inner.read_state, result),
+                    OP_WRITE => mark_op_complete(&self.inner.write_state, result),
+                    OP_FSYNC | OP_FDATASYNC => mark_op_complete(&self.inner.sync_state, result),
+                    // Unknown operations are ignored here; they're not tracked by OpState.
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 impl IoUringFile {
     /// Opens a file in read-only mode using io_uring.
     ///
@@ -175,6 +230,7 @@ impl IoUringFile {
     /// Reads bytes from the file at the current position.
     ///
     /// This uses `IORING_OP_READ` for true async read.
+    #[must_use]
     pub fn read<'a>(&'a self, buf: &'a mut [u8]) -> ReadFuture<'a> {
         let offset = self.inner.position.load(Ordering::Relaxed);
         ReadFuture {
@@ -188,6 +244,7 @@ impl IoUringFile {
     /// Reads bytes from the file at a specific offset.
     ///
     /// This does not modify the file's current position.
+    #[must_use]
     pub fn read_at<'a>(&'a self, buf: &'a mut [u8], offset: u64) -> ReadFuture<'a> {
         ReadFuture {
             file: self,
@@ -200,6 +257,7 @@ impl IoUringFile {
     /// Writes bytes to the file at the current position.
     ///
     /// This uses `IORING_OP_WRITE` for true async write.
+    #[must_use]
     pub fn write<'a>(&'a self, buf: &'a [u8]) -> WriteFuture<'a> {
         let offset = self.inner.position.load(Ordering::Relaxed);
         WriteFuture {
@@ -213,6 +271,7 @@ impl IoUringFile {
     /// Writes bytes to the file at a specific offset.
     ///
     /// This does not modify the file's current position.
+    #[must_use]
     pub fn write_at<'a>(&'a self, buf: &'a [u8], offset: u64) -> WriteFuture<'a> {
         WriteFuture {
             file: self,
@@ -225,6 +284,7 @@ impl IoUringFile {
     /// Syncs file data to disk (equivalent to fdatasync).
     ///
     /// This uses `IORING_OP_FSYNC` with `IORING_FSYNC_DATASYNC`.
+    #[must_use]
     pub fn sync_data(&self) -> SyncFuture<'_> {
         SyncFuture {
             file: self,
@@ -235,6 +295,7 @@ impl IoUringFile {
     /// Syncs all file data and metadata to disk (equivalent to fsync).
     ///
     /// This uses `IORING_OP_FSYNC`.
+    #[must_use]
     pub fn sync_all(&self) -> SyncFuture<'_> {
         SyncFuture {
             file: self,
@@ -252,7 +313,12 @@ impl IoUringFile {
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
         let fd = self.inner.fd.as_raw_fd();
         let (whence, offset) = match pos {
-            SeekFrom::Start(n) => (libc::SEEK_SET, n as i64),
+            SeekFrom::Start(n) => {
+                let offset = i64::try_from(n).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range")
+                })?;
+                (libc::SEEK_SET, offset)
+            }
             SeekFrom::End(n) => (libc::SEEK_END, n),
             SeekFrom::Current(n) => (libc::SEEK_CUR, n),
         };
@@ -263,7 +329,8 @@ impl IoUringFile {
             return Err(io::Error::last_os_error());
         }
 
-        let new_pos = result as u64;
+        let new_pos =
+            u64::try_from(result).map_err(|_| io::Error::other("seek result out of range"))?;
         self.inner.position.store(new_pos, Ordering::Relaxed);
         Ok(new_pos)
     }
@@ -273,8 +340,10 @@ impl IoUringFile {
     /// Uses `ftruncate` syscall (no io_uring opcode for truncate).
     pub fn set_len(&self, size: u64) -> io::Result<()> {
         let fd = self.inner.fd.as_raw_fd();
+        let size_off = libc::off_t::try_from(size)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "size out of range"))?;
         // SAFETY: ftruncate is safe with a valid fd.
-        let result = unsafe { libc::ftruncate(fd, size as libc::off_t) };
+        let result = unsafe { libc::ftruncate(fd, size_off) };
         if result < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -313,25 +382,32 @@ impl IoUringFile {
     }
 
     /// Helper to submit an SQE and collect completion.
-    fn submit_and_wait(&self, entry: io_uring::squeue::Entry) -> io::Result<i32> {
-        let mut ring = self.inner.ring.lock();
-
-        // SAFETY: The entry is valid for the duration of the operation.
-        unsafe {
-            ring.submission()
-                .push(&entry)
-                .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "submission queue full"))?;
-        }
-
-        ring.submit_and_wait(1)?;
-
-        // Get the completion - extract result before dropping the iterator
+    fn submit_and_wait(&self, entry: &io_uring::squeue::Entry) -> io::Result<i32> {
         let result = {
-            let mut cq = ring.completion();
-            cq.next().map(|cqe| cqe.result())
+            let mut ring = self.inner.ring.lock();
+
+            // SAFETY: The entry is valid for the duration of the operation.
+            unsafe {
+                ring.submission().push(entry).map_err(|_| {
+                    io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
+                })?;
+            }
+
+            ring.submit_and_wait(1)?;
+
+            // Get the completion - extract result before dropping the iterator.
+            let result = {
+                let mut cq = ring.completion();
+                cq.next().map(|cqe| cqe.result())
+            };
+
+            // Release the ring lock before returning (keeps contention low when io-uring is used
+            // concurrently by multiple filesystem helpers).
+            drop(ring);
+            result
         };
 
-        result.ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no completion received"))
+        result.ok_or_else(|| io::Error::other("no completion received"))
     }
 
     /// Blocking read using io_uring (for poll-based async trait).
@@ -342,11 +418,11 @@ impl IoUringFile {
             .build()
             .user_data(OP_READ);
 
-        let result = self.submit_and_wait(entry)?;
+        let result = self.submit_and_wait(&entry)?;
         if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else {
-            Ok(result as usize)
+            usize::try_from(result).map_err(|_| io::Error::other("read result out of range"))
         }
     }
 
@@ -358,11 +434,11 @@ impl IoUringFile {
             .build()
             .user_data(OP_WRITE);
 
-        let result = self.submit_and_wait(entry)?;
+        let result = self.submit_and_wait(&entry)?;
         if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else {
-            Ok(result as usize)
+            usize::try_from(result).map_err(|_| io::Error::other("write result out of range"))
         }
     }
 
@@ -377,7 +453,7 @@ impl IoUringFile {
             .build()
             .user_data(if datasync { OP_FDATASYNC } else { OP_FSYNC });
 
-        let result = self.submit_and_wait(entry)?;
+        let result = self.submit_and_wait(&entry)?;
         if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else {
@@ -400,7 +476,7 @@ pub struct ReadFuture<'a> {
     update_position: bool,
 }
 
-impl<'a> std::future::Future for ReadFuture<'a> {
+impl std::future::Future for ReadFuture<'_> {
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -428,7 +504,7 @@ pub struct WriteFuture<'a> {
     update_position: bool,
 }
 
-impl<'a> std::future::Future for WriteFuture<'a> {
+impl std::future::Future for WriteFuture<'_> {
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -452,7 +528,7 @@ pub struct SyncFuture<'a> {
     datasync: bool,
 }
 
-impl<'a> std::future::Future for SyncFuture<'a> {
+impl std::future::Future for SyncFuture<'_> {
     type Output = io::Result<()>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -548,6 +624,48 @@ mod tests {
             );
         });
         crate::test_complete!("test_uring_file_create_write_read");
+    }
+
+    #[test]
+    fn test_uring_file_drop_drains_pending_read() {
+        init_test("test_uring_file_drop_drains_pending_read");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_drop_pending_read.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = IoUringFile::open(&path).unwrap();
+        let mut buf = vec![0u8; 5];
+
+        // Submit a read without waiting for it in user code, then rely on Drop to
+        // drain the CQE before tearing down the ring mapping.
+        *file.inner.read_state.lock() = OpState::Pending { waker: None };
+        {
+            let fd = file.inner.fd.as_raw_fd();
+            let entry = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
+                .offset(0)
+                .build()
+                .user_data(OP_READ);
+
+            let mut ring = file.inner.ring.lock();
+            // SAFETY: `buf` lives until after `file` is dropped, and Drop will
+            // wait for completion before releasing the ring mapping.
+            unsafe {
+                ring.submission()
+                    .push(&entry)
+                    .expect("submission queue full");
+            }
+            ring.submit().unwrap();
+        }
+
+        drop(file);
+
+        crate::assert_with_log!(
+            &buf == b"hello",
+            "drop drained read",
+            "hello",
+            String::from_utf8_lossy(&buf)
+        );
+        crate::test_complete!("test_uring_file_drop_drains_pending_read");
     }
 
     #[test]

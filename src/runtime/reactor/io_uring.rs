@@ -226,7 +226,7 @@ mod imp {
                     continue;
                 }
 
-                let token = Token::new(user_data as usize);
+                let key = Token::new(user_data as usize);
                 let interest = if res >= 0 {
                     poll_mask_to_interest(res as u32)
                 } else {
@@ -234,11 +234,11 @@ mod imp {
                 };
 
                 if !interest.is_empty() {
-                    events.push(Event::new(token, interest));
+                    events.push(Event::new(key, interest));
                 }
 
-                if let Some(info) = self.registrations.lock().get(&token).copied() {
-                    let _ = self.rearm_poll(token, info);
+                if let Some(info) = self.registrations.lock().get(&key).copied() {
+                    let _ = self.rearm_poll(key, info);
                 }
             }
 
@@ -394,20 +394,18 @@ mod imp {
             };
 
             let (left, _right) = UnixStream::pair().expect("unix stream pair");
-            let token = Token::new(7);
+            let key = Token::new(7);
 
             reactor
-                .register(&left, token, Interest::READABLE)
+                .register(&left, key, Interest::READABLE)
                 .expect("register should succeed");
             assert_eq!(reactor.registration_count(), 1);
 
             reactor
-                .modify(token, Interest::WRITABLE)
+                .modify(key, Interest::WRITABLE)
                 .expect("modify should succeed");
 
-            reactor
-                .deregister(token)
-                .expect("deregister should succeed");
+            reactor.deregister(key).expect("deregister should succeed");
             assert_eq!(reactor.registration_count(), 0);
         }
 
@@ -418,18 +416,16 @@ mod imp {
             };
 
             let (left, _right) = UnixStream::pair().expect("unix stream pair");
-            let token = Token::new(1);
+            let key = Token::new(1);
             reactor
-                .register(&left, token, Interest::READABLE)
+                .register(&left, key, Interest::READABLE)
                 .expect("register should succeed");
             let err = reactor
-                .register(&left, token, Interest::READABLE)
+                .register(&left, key, Interest::READABLE)
                 .expect_err("duplicate token should error");
             assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
-            reactor
-                .deregister(token)
-                .expect("deregister should succeed");
+            reactor.deregister(key).expect("deregister should succeed");
         }
 
         #[test]

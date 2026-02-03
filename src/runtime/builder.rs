@@ -867,13 +867,30 @@ impl<T> Future for JoinHandle<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut guard = lock_state(&self.state);
-        guard.result.take().map_or_else(
-            || {
+        match guard.result.take() {
+            None => {
                 guard.waker = Some(cx.waker().clone());
                 Poll::Pending
-            },
-            Poll::Ready,
-        )
+            }
+            Some(Ok(output)) => Poll::Ready(output),
+            Some(Err(payload)) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+        match result {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
     }
 }
 
@@ -991,8 +1008,10 @@ impl RuntimeInner {
         let join_state_for_task = Arc::clone(&join_state);
 
         let wrapped = async move {
-            let output = future.await;
-            complete_task(&join_state_for_task, output);
+            // Ensure panics in the spawned task don't take down a worker thread. If the join
+            // handle is awaited, we re-raise the original panic payload on the awaiter.
+            let result = CatchUnwind(Box::pin(future)).await;
+            complete_task(&join_state_for_task, result);
         };
 
         let task_id = {
@@ -1031,7 +1050,7 @@ impl Drop for RuntimeInner {
 }
 
 struct JoinState<T> {
-    result: Option<T>,
+    result: Option<std::thread::Result<T>>,
     waker: Option<Waker>,
 }
 
@@ -1076,10 +1095,10 @@ fn run_task<F, T>(
         callback();
     }
 
-    complete_task(state, output);
+    complete_task(state, Ok(output));
 }
 
-fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: T) {
+fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: std::thread::Result<T>) {
     let waker = {
         let mut guard = lock_state(state);
         guard.result = Some(output);
@@ -1273,7 +1292,7 @@ mod tests {
             }
             std::thread::yield_now();
         }
-        panic!("runtime failed to reach quiescence after waiting");
+        unreachable!("runtime failed to reach quiescence after waiting");
     }
 
     #[cfg(unix)]
@@ -1463,9 +1482,9 @@ mod tests {
         let registration = handle
             .register(&MockSource, Interest::READABLE, noop_waker())
             .expect("lab register source");
-        let token = registration.token();
+        let io_key = registration.token();
         lab.lab_reactor()
-            .inject_event(token, Event::readable(token), Duration::ZERO);
+            .inject_event(io_key, Event::readable(io_key), Duration::ZERO);
         lab.step_for_test();
         let lab_counts = parity_counts(lab.trace().snapshot());
         assert!(
@@ -1484,20 +1503,20 @@ mod tests {
         let registration = driver
             .register(&MockSource, Interest::READABLE, noop_waker())
             .expect("runtime state register source");
-        let token = registration.token();
-        reactor.inject_event(token, Event::readable(token), Duration::ZERO);
+        let io_key = registration.token();
+        reactor.inject_event(io_key, Event::readable(io_key), Duration::ZERO);
         let trace = state.trace_handle();
         let now = Time::ZERO;
         let mut seen = HashSet::new();
         let _ = driver.turn_with(Some(Duration::ZERO), |event, interest| {
-            let token = event.token.0 as u64;
+            let io_key = event.token.0 as u64;
             let interest_bits = interest.unwrap_or(event.ready).bits();
-            if seen.insert(token) {
+            if seen.insert(io_key) {
                 let seq = trace.next_seq();
-                trace.push_event(TraceEvent::io_requested(seq, now, token, interest_bits));
+                trace.push_event(TraceEvent::io_requested(seq, now, io_key, interest_bits));
             }
             let seq = trace.next_seq();
-            trace.push_event(TraceEvent::io_ready(seq, now, token, event.ready.bits()));
+            trace.push_event(TraceEvent::io_ready(seq, now, io_key, event.ready.bits()));
         });
 
         let runtime_counts = parity_counts(state.trace.snapshot());

@@ -274,6 +274,7 @@ mod tests {
     fn test_builder_is_clone() {
         let builder = ServiceBuilder::new().timeout(Duration::from_secs(1));
         let clone = builder.clone();
+        let _ = builder.layer_ref();
         let _ = clone.layer_ref();
     }
 
