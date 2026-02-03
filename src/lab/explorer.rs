@@ -1237,8 +1237,8 @@ mod tests {
 
         // With two tasks and different seeds, the scheduling order may differ.
         // Collect several seeds and check we see at least 1 unique hash.
-        let hashes: HashSet<u64> = (0..10).map(|s| run(s)).collect();
-        assert!(hashes.len() >= 1);
+        let hashes: HashSet<u64> = (0..10).map(run).collect();
+        assert!(!hashes.is_empty());
     }
 
     #[test]

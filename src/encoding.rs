@@ -660,7 +660,7 @@ mod tests {
         let symbol_size = 8usize;
         let max_block_size = 64usize;
         let repair_count = 3usize;
-        let data: Vec<u8> = (0..37).map(|i| (i * 7 % 256) as u8).collect();
+        let data: Vec<u8> = (0u8..37).map(|i| i.wrapping_mul(7)).collect();
         let object_id = ObjectId::new_for_test(10);
 
         let mut pipeline = EncodingPipeline::new(

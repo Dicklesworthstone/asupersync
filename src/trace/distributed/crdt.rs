@@ -931,10 +931,9 @@ mod tests {
     fn lww_merge_chain_converges() {
         let mut a = LWWRegister::new("a".to_string(), 1, node("n1"));
         let b = LWWRegister::new("b".to_string(), 3, node("n2"));
-        let c = LWWRegister::new("c".to_string(), 2, node("n3"));
+        let mut c2 = LWWRegister::new("c".to_string(), 2, node("n3"));
 
         a.merge(&b);
-        let mut c2 = c.clone();
         c2.merge(&a);
         // Both should have "b" (highest timestamp).
         assert_eq!(a.value(), "b");

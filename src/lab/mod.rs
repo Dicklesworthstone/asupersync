@@ -68,7 +68,7 @@ pub use crate::util::{
 pub use config::LabConfig;
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
-    RunResult, ScheduleExplorer, ViolationReport,
+    RunResult, ScheduleExplorer, TopologyExplorer, ViolationReport,
 };
 pub use fuzz::{fuzz_quick, FuzzConfig, FuzzFinding, FuzzHarness, FuzzReport};
 pub use http::{

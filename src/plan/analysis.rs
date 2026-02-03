@@ -898,9 +898,9 @@ impl<'a> SideConditionChecker<'a> {
     /// Check if a node's children are obligation-safe (no cancel leaks).
     #[must_use]
     pub fn obligations_safe(&self, id: PlanId) -> bool {
-        self.analysis.get(id).is_some_and(|a| {
-            a.obligation.is_safe() && a.obligation_flow.leak_on_cancel.is_empty()
-        })
+        self.analysis
+            .get(id)
+            .is_some_and(|a| a.obligation.is_safe() && a.obligation_flow.leak_on_cancel.is_empty())
     }
 
     /// Check if a node's cancel behavior is safe (losers drained).

@@ -719,6 +719,21 @@ Evidence ledger (debug-only, trace-backed):
 
 `plan` module builds DAG nodes, applies rewrites, dedupes shared work, schedules locally or remotely.
 
+#### 11.6.1 Rule inventory (Plan IR)
+
+Patterns use the Plan IR node names: `Join[...]`, `Race[...]`, `Timeout(duration, child)`.
+All rules require **explicit policy enablement** plus side-condition checks
+(obligation/cancellation safety, budget monotonicity, deterministic ordering).
+
+| Rule | Pattern → Replacement | Required law | Rationale |
+| --- | --- | --- | --- |
+| `JoinAssoc` | `Join[a, Join[b, c]] → Join[a, b, c]` | Join associativity | Flatten join trees for simpler scheduling and downstream dedup. |
+| `RaceAssoc` | `Race[a, Race[b, c]] → Race[a, b, c]` | Race associativity | Flatten race trees to reduce depth and canonicalize structure. |
+| `JoinCommute` | `Join[a, b] → Join[b, a]` | Join commutativity + independence | Canonical ordering when children are independent; enables stable certs. |
+| `RaceCommute` | `Race[a, b] → Race[b, a]` | Race commutativity + independence | Canonical ordering for deterministic certificates and replay. |
+| `DedupRaceJoin` | `Race[Join[s, a], Join[s, b]] → Join[s, Race[a, b]]` | Join/Race laws + shared-leaf safety | Deduplicate shared work while preserving loser-drain semantics. |
+| `TimeoutMin` | `Timeout(t1, Timeout(t2, x)) → Timeout(min(t1, t2), x)` | Timeout idempotence | Tightest timeout dominates; avoids redundant timers. |
+
 ---
 
 ## 12. Derived combinators

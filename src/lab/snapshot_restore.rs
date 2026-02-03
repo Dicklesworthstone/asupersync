@@ -843,7 +843,7 @@ mod tests {
         crate::assert_with_log!(valid, "integrity valid", true, valid);
 
         // Tamper with hash
-        let mut tampered = snapshot.clone();
+        let mut tampered = snapshot;
         tampered.content_hash ^= 1;
         let invalid = !tampered.verify_integrity();
         crate::assert_with_log!(invalid, "tampered invalid", true, invalid);

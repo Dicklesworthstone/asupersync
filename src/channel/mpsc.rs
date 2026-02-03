@@ -1050,10 +1050,15 @@ mod tests {
         drop(rx);
         permit.send(5);
 
-        let inner = tx.shared.inner.lock().expect("channel lock poisoned");
-        let queue_empty = inner.queue.is_empty();
+        let (queue_empty, reserved) = {
+            let inner = tx.shared.inner.lock().expect("channel lock poisoned");
+            let queue_empty = inner.queue.is_empty();
+            let reserved = inner.reserved;
+            drop(inner);
+            (queue_empty, reserved)
+        };
         crate::assert_with_log!(queue_empty, "queue empty", true, queue_empty);
-        crate::assert_with_log!(inner.reserved == 0, "reserved cleared", 0, inner.reserved);
+        crate::assert_with_log!(reserved == 0, "reserved cleared", 0, reserved);
         crate::test_complete!("permit_send_after_receiver_drop_does_not_enqueue");
     }
 
