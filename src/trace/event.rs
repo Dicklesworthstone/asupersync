@@ -77,7 +77,7 @@ pub enum TraceEventKind {
 }
 
 /// Additional data carried by a trace event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceData {
     /// No additional data.
     None,
@@ -214,7 +214,7 @@ pub enum TraceData {
 }
 
 /// A trace event in the runtime.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceEvent {
     /// Event schema version.
     pub version: u32,

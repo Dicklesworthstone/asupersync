@@ -77,8 +77,10 @@ pub fn find_divergence(a: &[TraceEvent], b: &[TraceEvent]) -> Option<TraceDiverg
 
 /// Checks if two events match (ignoring sequence numbers).
 fn events_match(a: &TraceEvent, b: &TraceEvent) -> bool {
-    a.kind == b.kind && a.time == b.time
-    // In a full implementation, we'd also compare data
+    a.kind == b.kind
+        && a.time == b.time
+        && a.logical_time == b.logical_time
+        && a.data == b.data
 }
 
 /// A divergence between two traces.
@@ -428,6 +430,30 @@ mod tests {
         let pos = div.expect("divergence").position;
         crate::assert_with_log!(pos == 0, "position", 0, pos);
         crate::test_complete!("different_traces_find_divergence");
+    }
+
+    #[test]
+    fn different_traces_find_divergence_data() {
+        init_test("different_traces_find_divergence_data");
+        let a = vec![TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::Message("a".to_string()),
+        )];
+        let b = vec![TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::Message("b".to_string()),
+        )];
+
+        let div = find_divergence(&a, &b);
+        let some = div.is_some();
+        crate::assert_with_log!(some, "divergence", true, some);
+        let pos = div.expect("divergence").position;
+        crate::assert_with_log!(pos == 0, "position", 0, pos);
+        crate::test_complete!("different_traces_find_divergence_data");
     }
 
     // ── Replay validation tests ─────────────────────────────────────────
