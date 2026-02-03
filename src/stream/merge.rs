@@ -296,10 +296,8 @@ mod tests {
     #[test]
     fn merge_size_hint_unknown_upper() {
         init_test("merge_size_hint_unknown_upper");
-        let streams: Vec<Box<dyn Stream<Item = i32> + Unpin>> = vec![
-            Box::new(UnknownUpper::new(3)),
-            Box::new(iter(vec![1, 2])),
-        ];
+        let streams: Vec<Box<dyn Stream<Item = i32> + Unpin>> =
+            vec![Box::new(UnknownUpper::new(3)), Box::new(iter(vec![1, 2]))];
         let stream = merge(streams);
         let hint = stream.size_hint();
         let ok = hint == (2, None);
