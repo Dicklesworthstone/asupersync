@@ -35,9 +35,6 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-#[cfg(feature = "tls")]
-use crate::tls::{TlsConnector, TlsStream};
-
 /// WebSocket message types.
 #[derive(Debug, Clone)]
 pub enum Message {
