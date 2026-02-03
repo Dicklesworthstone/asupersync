@@ -11,7 +11,7 @@
 //! 4. **Replayable**: Sufficient info to reproduce decoder state transitions
 
 use crate::raptorq::decoder::DecodeError;
-use crate::types::{ObjectId, SymbolId};
+use crate::types::ObjectId;
 
 /// Maximum number of pivot events to record before truncation.
 pub const MAX_PIVOT_EVENTS: usize = 256;
