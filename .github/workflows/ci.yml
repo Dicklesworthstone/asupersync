@@ -23,6 +23,30 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: No-mock policy (allowlist)
+        run: |
+          allowed=$(cat <<'EOF'
+          src/cx/cap.rs
+          src/net/unix/ancillary.rs
+          src/plan/certificate.rs
+          src/runtime/state.rs
+          src/test_logging.rs
+          src/transport/mod.rs
+          src/transport/stream.rs
+          src/transport/tests.rs
+          tests/e2e/console/diagnostics/explain_region.rs
+          tests/e2e/console/diagnostics/explain_task.rs
+          tests/property_region_ops.rs
+          EOF
+          )
+          found=$(rg -l "(?i)mock|fake" src tests | sort)
+          diff=$(comm -13 <(echo "$allowed" | rg -v '^$' | sort) <(echo "$found"))
+          if [ -n "$diff" ]; then
+            echo "No-mock policy violation. New mock/fake references found in:"
+            echo "$diff"
+            exit 1
+          fi
+
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -68,6 +92,49 @@ jobs:
 
       - name: Run doc tests
         run: cargo test --doc --all-features
+
+  coverage:
+    name: Coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install llvm-tools-preview
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run coverage
+        env:
+          COVERAGE_MIN_LINES: 1
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --all-features \
+            --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+            --fail-under-lines "$COVERAGE_MIN_LINES" \
+            --text --output-path coverage/coverage.txt
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-cov-report
+          path: coverage/
+          retention-days: 30
 
   conformance:
     name: Conformance Tests
