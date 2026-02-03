@@ -148,7 +148,7 @@ impl TestCluster {
             ring.add_node(replica.id.clone());
         }
         let leader = ring.node_for_key(&self.election_term).map(str::to_string);
-        self.leader_id = leader.clone();
+        self.leader_id.clone_from(&leader);
         self.election_term = self.election_term.wrapping_add(1);
         leader
     }
@@ -198,7 +198,7 @@ impl TestCluster {
         self.healthy_count() >= required
     }
 
-    fn write_snapshot(&mut self, snapshot: &RegionSnapshot, now: Time) -> DistributionResult {
+    fn write_snapshot(&self, snapshot: &RegionSnapshot, now: Time) -> DistributionResult {
         let config = EncodingConfig {
             symbol_size: 128,
             min_repair_symbols: 4,

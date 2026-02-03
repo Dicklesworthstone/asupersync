@@ -37,9 +37,8 @@ use asupersync::Cx;
 fn generate_trace(n: usize) -> Vec<TraceEvent> {
     let region = RegionId::new_for_test(0, 0);
     let mut events = Vec::with_capacity(n);
-    let mut seq = 0u64;
 
-    for i in 0..n {
+    for (seq, i) in (0..n).enumerate() {
         let task = TaskId::new_for_test(i as u32, 0);
         let time = Time::from_nanos(i as u64 * 1000);
         let kind = match i % 5 {
@@ -50,12 +49,11 @@ fn generate_trace(n: usize) -> Vec<TraceEvent> {
             _ => TraceEventKind::Complete,
         };
         events.push(TraceEvent::new(
-            seq,
+            seq as u64,
             time,
             kind,
             TraceData::Task { task, region },
         ));
-        seq += 1;
     }
     events
 }
@@ -92,6 +90,7 @@ fn generate_racy_trace(tasks: usize, ops_per_task: usize) -> Vec<TraceEvent> {
 // CANCELLATION PROTOCOL BENCHMARKS
 // =============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn bench_cancel_protocol(c: &mut Criterion) {
     let mut group = c.benchmark_group("cancel/protocol");
 
@@ -398,7 +397,7 @@ fn bench_raptorq_encode_decode(c: &mut Criterion) {
                         .source(stream)
                         .build()
                         .expect("build receiver");
-                    (receiver, params.clone())
+                    (receiver, params)
                 },
                 |(mut receiver, params)| {
                     let result = receiver.receive_object(&cx, &params);
