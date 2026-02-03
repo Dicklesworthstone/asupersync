@@ -17,6 +17,7 @@ pub enum RewritePolicy {
 }
 
 impl RewritePolicy {
+    #[allow(clippy::unused_self)]
     fn allows_associative(self) -> bool {
         true
     }
@@ -69,7 +70,7 @@ impl RewriteRule {
     #[must_use]
     pub fn schema(self) -> RewriteRuleSchema {
         match self {
-            RewriteRule::JoinAssoc => RewriteRuleSchema {
+            Self::JoinAssoc => RewriteRuleSchema {
                 pattern: "Join[Join[a,b], c]",
                 replacement: "Join[a,b,c]",
                 side_conditions: &[
@@ -80,7 +81,7 @@ impl RewriteRule {
                 ],
                 explanation: "Associativity of join: regrouping does not change outcomes.",
             },
-            RewriteRule::RaceAssoc => RewriteRuleSchema {
+            Self::RaceAssoc => RewriteRuleSchema {
                 pattern: "Race[Race[a,b], c]",
                 replacement: "Race[a,b,c]",
                 side_conditions: &[
@@ -91,7 +92,7 @@ impl RewriteRule {
                 ],
                 explanation: "Associativity of race: regrouping preserves winner set.",
             },
-            RewriteRule::JoinCommute => RewriteRuleSchema {
+            Self::JoinCommute => RewriteRuleSchema {
                 pattern: "Join[a,b]",
                 replacement: "Join[b,a] (canonical order)",
                 side_conditions: &[
@@ -104,7 +105,7 @@ impl RewriteRule {
                 ],
                 explanation: "Commutativity of join when children are independent.",
             },
-            RewriteRule::RaceCommute => RewriteRuleSchema {
+            Self::RaceCommute => RewriteRuleSchema {
                 pattern: "Race[a,b]",
                 replacement: "Race[b,a] (canonical order)",
                 side_conditions: &[
@@ -117,7 +118,7 @@ impl RewriteRule {
                 ],
                 explanation: "Commutativity of race when children are independent.",
             },
-            RewriteRule::TimeoutMin => RewriteRuleSchema {
+            Self::TimeoutMin => RewriteRuleSchema {
                 pattern: "Timeout(d1, Timeout(d2, f))",
                 replacement: "Timeout(min(d1,d2), f)",
                 side_conditions: &[
@@ -127,7 +128,7 @@ impl RewriteRule {
                 ],
                 explanation: "Nested timeouts reduce to the tighter deadline.",
             },
-            RewriteRule::DedupRaceJoin => RewriteRuleSchema {
+            Self::DedupRaceJoin => RewriteRuleSchema {
                 pattern: "Race[Join[s,a], Join[s,b]]",
                 replacement: "Join[s, Race[a,b]]",
                 side_conditions: &[
@@ -145,14 +146,14 @@ impl RewriteRule {
 
     /// Returns all known rules in a stable order.
     #[must_use]
-    pub fn all() -> &'static [RewriteRule] {
-        const RULES: &[RewriteRule] = &[
-            RewriteRule::JoinAssoc,
-            RewriteRule::RaceAssoc,
-            RewriteRule::JoinCommute,
-            RewriteRule::RaceCommute,
-            RewriteRule::TimeoutMin,
-            RewriteRule::DedupRaceJoin,
+    pub fn all() -> &'static [Self] {
+        const RULES: &[Self] = &[
+            Self::JoinAssoc,
+            Self::RaceAssoc,
+            Self::JoinCommute,
+            Self::RaceCommute,
+            Self::TimeoutMin,
+            Self::DedupRaceJoin,
         ];
         RULES
     }

@@ -1007,4 +1007,101 @@ mod tests {
             assert_eq!(v1.cancel, v2.cancel);
         }
     }
+
+    // ---- ObligationFlow tests ----
+
+    #[test]
+    fn obligation_flow_empty_is_clean() {
+        let flow = ObligationFlow::empty();
+        assert!(flow.reserves.is_empty());
+        assert!(flow.must_resolve.is_empty());
+        assert!(flow.leak_on_cancel.is_empty());
+        assert!(flow.all_paths_resolve);
+        assert!(flow.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn obligation_flow_leaf_with_obligation_tracks_it() {
+        let flow = ObligationFlow::leaf_with_obligation("obl:permit".to_string());
+        assert_eq!(flow.reserves, vec!["obl:permit"]);
+        assert_eq!(flow.must_resolve, vec!["obl:permit"]);
+        assert_eq!(flow.leak_on_cancel, vec!["obl:permit"]);
+        assert!(flow.all_paths_resolve);
+    }
+
+    #[test]
+    fn obligation_flow_join_combines_children() {
+        let f1 = ObligationFlow::leaf_with_obligation("obl:a".to_string());
+        let f2 = ObligationFlow::leaf_with_obligation("obl:b".to_string());
+        let joined = f1.join(f2);
+        assert_eq!(joined.reserves.len(), 2);
+        assert!(joined.reserves.contains(&"obl:a".to_string()));
+        assert!(joined.reserves.contains(&"obl:b".to_string()));
+    }
+
+    #[test]
+    fn obligation_flow_race_adds_leak_risk() {
+        let f1 = ObligationFlow::leaf_with_obligation("obl:a".to_string());
+        let f2 = ObligationFlow::leaf_with_obligation("obl:b".to_string());
+        let raced = f1.race(f2);
+        // Both are started, loser may leak.
+        assert!(!raced.leak_on_cancel.is_empty());
+        assert!(raced.leak_on_cancel.contains(&"obl:a".to_string()));
+        assert!(raced.leak_on_cancel.contains(&"obl:b".to_string()));
+    }
+
+    #[test]
+    fn analyzer_tracks_obligation_flow_for_annotated_leaves() {
+        let mut dag = PlanDag::new();
+        let obl = dag.leaf("obl:permit");
+        let plain = dag.leaf("compute");
+        let join = dag.join(vec![obl, plain]);
+        dag.set_root(join);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let join_node = analysis.get(join).expect("join analyzed");
+        // The join should track the obligation from the obl: leaf.
+        assert!(join_node.obligation_flow.reserves.contains(&"obl:permit".to_string()));
+    }
+
+    #[test]
+    fn analyzer_detects_race_obligation_leak_risk() {
+        let mut dag = PlanDag::new();
+        let obl_a = dag.leaf("obl:a");
+        let obl_b = dag.leaf("obl:b");
+        let race = dag.race(vec![obl_a, obl_b]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let race_node = analysis.get(race).expect("race analyzed");
+        // In a race, the loser's obligations may leak.
+        assert!(!race_node.obligation_flow.leak_on_cancel.is_empty());
+    }
+
+    #[test]
+    fn obligation_flow_display() {
+        let flow = ObligationFlow {
+            reserves: vec!["obl:x".to_string()],
+            must_resolve: vec!["obl:x".to_string()],
+            leak_on_cancel: vec![],
+            all_paths_resolve: true,
+        };
+        let display = format!("{flow}");
+        assert!(display.contains("reserves="));
+        assert!(display.contains("[all-paths-ok]"));
+    }
+
+    #[test]
+    fn obligation_flow_diagnostics_reports_issues() {
+        let flow = ObligationFlow {
+            reserves: vec!["obl:x".to_string()],
+            must_resolve: vec!["obl:x".to_string()],
+            leak_on_cancel: vec!["obl:x".to_string()],
+            all_paths_resolve: false,
+        };
+        let diags = flow.diagnostics();
+        assert!(!diags.is_empty());
+        assert!(diags.iter().any(|d| d.contains("not all paths")));
+        assert!(diags.iter().any(|d| d.contains("leak on cancel")));
+    }
 }
