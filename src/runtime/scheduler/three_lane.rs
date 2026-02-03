@@ -3,9 +3,7 @@
 //! This scheduler coordinates multiple worker threads while maintaining
 //! strict priority ordering: cancel > timed > ready.
 
-use crate::obligation::lyapunov::{
-    LyapunovGovernor, SchedulingSuggestion, StateSnapshot,
-};
+use crate::obligation::lyapunov::{LyapunovGovernor, SchedulingSuggestion, StateSnapshot};
 use crate::runtime::scheduler::global_injector::GlobalInjector;
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
@@ -503,11 +501,7 @@ impl ThreeLaneWorker {
         };
 
         // Enrich with local queue depth.
-        let queue_depth = self
-            .local
-            .lock()
-            .map(|local| local.len())
-            .unwrap_or(0);
+        let queue_depth = self.local.lock().map(|local| local.len()).unwrap_or(0);
         #[allow(clippy::cast_possible_truncation)]
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
@@ -1962,5 +1956,218 @@ mod tests {
         // Verify round-robin distribution: 8 wakes across 4 workers = 2 per worker
         // (We can't directly verify which parker was woken, but the modulo math
         // guarantees even distribution over time)
+    }
+
+    // ========== Governor Integration Tests (bd-2spm) ==========
+
+    #[test]
+    fn test_governor_disabled_returns_no_preference() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        assert!(worker.governor.is_none(), "default has no governor");
+        let suggestion = worker.governor_suggest();
+        assert_eq!(suggestion, SchedulingSuggestion::NoPreference);
+    }
+
+    #[test]
+    fn test_governor_enabled_quiescent_returns_no_preference() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        assert!(worker.governor.is_some(), "governor enabled");
+        let suggestion = worker.governor_suggest();
+        assert_eq!(suggestion, SchedulingSuggestion::NoPreference);
+    }
+
+    #[test]
+    fn test_governor_meet_deadlines_dispatches_timed_first() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // State at t=999ms with a task having a 1s deadline.
+        // Deadline pressure ≈ 0.999, dominating all other components.
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        state.now = Time::from_nanos(999_000_000);
+        let root = state.create_root_region(Budget::unlimited());
+        let (_task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .expect("create task");
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+
+        // Inject a cancel task and an already-due timed task.
+        let cancel_task = TaskId::new_for_test(1, 10);
+        let timed_task = TaskId::new_for_test(1, 11);
+        scheduler.inject_cancel(cancel_task, 100);
+        scheduler.inject_timed(timed_task, Time::from_nanos(500_000_000));
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Under MeetDeadlines, timed work is dispatched before cancel.
+        let first = worker.next_task();
+        assert_eq!(
+            first,
+            Some(timed_task),
+            "timed should be dispatched first under MeetDeadlines"
+        );
+
+        let second = worker.next_task();
+        assert_eq!(
+            second,
+            Some(cancel_task),
+            "cancel follows timed under MeetDeadlines"
+        );
+    }
+
+    #[test]
+    fn test_governor_drain_obligations_boosts_cancel_streak() {
+        use crate::record::ObligationKind;
+
+        // State with a pending obligation aged 1 second (high obligation component).
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task");
+        let _obl = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+        state.now = Time::from_nanos(1_000_000_000); // 1s age
+        let state = Arc::new(Mutex::new(state));
+
+        // Governor enabled, cancel_streak_limit=2, interval=1.
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 2, true, 1);
+
+        // Inject 4 cancel tasks and 1 ready task.
+        let c1 = TaskId::new_for_test(1, 20);
+        let c2 = TaskId::new_for_test(1, 21);
+        let c3 = TaskId::new_for_test(1, 22);
+        let c4 = TaskId::new_for_test(1, 23);
+        let ready = TaskId::new_for_test(1, 24);
+        scheduler.inject_cancel(c1, 100);
+        scheduler.inject_cancel(c2, 100);
+        scheduler.inject_cancel(c3, 100);
+        scheduler.inject_cancel(c4, 100);
+        scheduler.inject_ready(ready, 50);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Under DrainObligations, cancel_streak_limit boosted to 4 (2×2).
+        // All 4 cancel tasks should dispatch before ready.
+        let dispatched: Vec<_> = (0..5).filter_map(|_| worker.next_task()).collect();
+        assert_eq!(dispatched.len(), 5, "should dispatch all 5 tasks");
+
+        let cancel_tasks = [c1, c2, c3, c4];
+        for (i, &task) in dispatched.iter().take(4).enumerate() {
+            assert!(
+                cancel_tasks.contains(&task),
+                "task {i} should be a cancel task, got {task:?}"
+            );
+        }
+        assert_eq!(
+            dispatched[4], ready,
+            "ready task should come after all cancel tasks"
+        );
+    }
+
+    #[test]
+    fn test_governor_interval_caches_suggestion() {
+        // With interval=4, governor snapshots every 4th call.
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 4);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        assert_eq!(worker.steps_since_snapshot, 0);
+        assert_eq!(worker.cached_suggestion, SchedulingSuggestion::NoPreference);
+
+        // Calls 1–3 return cached suggestion without snapshotting.
+        for i in 1..=3u32 {
+            let s = worker.governor_suggest();
+            assert_eq!(s, SchedulingSuggestion::NoPreference);
+            assert_eq!(worker.steps_since_snapshot, i);
+        }
+
+        // Call 4 takes a snapshot and resets counter.
+        let s = worker.governor_suggest();
+        assert_eq!(s, SchedulingSuggestion::NoPreference); // quiescent
+        assert_eq!(worker.steps_since_snapshot, 0);
+    }
+
+    #[test]
+    fn test_governor_deterministic_across_workers() {
+        use crate::record::ObligationKind;
+
+        // All workers should produce the same suggestion for identical state.
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task");
+        let _obl = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+        state.now = Time::from_nanos(2_000_000_000);
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(4, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+
+        let suggestions: Vec<_> = workers.iter_mut().map(|w| w.governor_suggest()).collect();
+
+        for s in &suggestions {
+            assert_eq!(
+                *s, suggestions[0],
+                "all workers must agree on scheduling suggestion"
+            );
+        }
+        // With old obligations and no deadlines/draining, should suggest DrainObligations.
+        assert_eq!(suggestions[0], SchedulingSuggestion::DrainObligations);
+    }
+
+    #[test]
+    fn test_governor_backward_compatible_dispatch() {
+        // Verify that with governor disabled (default), the dispatch order
+        // matches the baseline: cancel > timed > ready (existing tests cover
+        // this, but here we explicitly compare against governor-disabled).
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+
+        // Build two schedulers: one with governor, one without.
+        let mut sched_off = ThreeLaneScheduler::new(1, &state);
+        let mut sched_on = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+
+        // Inject identical workloads.
+        let cancel = TaskId::new_for_test(1, 30);
+        let ready = TaskId::new_for_test(1, 31);
+
+        sched_off.inject_cancel(cancel, 100);
+        sched_off.inject_ready(ready, 50);
+        sched_on.inject_cancel(cancel, 100);
+        sched_on.inject_ready(ready, 50);
+
+        let mut workers_off = sched_off.take_workers();
+        let w_off = &mut workers_off[0];
+        let mut workers_on = sched_on.take_workers();
+        let w_on = &mut workers_on[0];
+
+        // Quiescent state → NoPreference → same order as baseline.
+        let off_1 = w_off.next_task();
+        let on_1 = w_on.next_task();
+        assert_eq!(off_1, on_1, "first dispatch should match");
+        assert_eq!(off_1, Some(cancel));
+
+        let off_2 = w_off.next_task();
+        let on_2 = w_on.next_task();
+        assert_eq!(off_2, on_2, "second dispatch should match");
+        assert_eq!(off_2, Some(ready));
     }
 }
