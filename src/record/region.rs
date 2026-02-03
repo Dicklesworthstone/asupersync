@@ -96,6 +96,40 @@ impl RegionState {
 }
 
 /// Admission limits for a region.
+///
+/// # Concurrency-Safety Argument
+///
+/// Every admission path (`add_task`, `add_child`, `try_reserve_obligation`,
+/// `heap_alloc`) follows an **optimistic double-check locking** pattern:
+///
+/// 1. **Fast-path reject** — atomic `state.load(Acquire)` checks
+///    `can_accept_work()`.  If false, return `Closed` without locking.
+/// 2. **Acquire write lock** — `inner.write()` serialises all mutations.
+/// 3. **Re-check state** — a second `state.load(Acquire)` under the lock
+///    guards against a concurrent `begin_close` that landed between steps
+///    1 and 2.  Because `begin_close` transitions the atomic *before*
+///    acquiring the inner lock, the re-check is linearisable.
+/// 4. **Check limit** — under the same write guard, compare the live count
+///    against the configured `Option<usize>` limit.
+/// 5. **Commit** — push/increment within the write guard, then drop the
+///    lock.
+///
+/// This means:
+///
+/// - **No over-admission**: the live count and the limit are compared
+///   inside the same write-lock critical section, so two concurrent
+///   `add_task` calls cannot both see `len < limit` and both succeed
+///   when only one slot remains.
+/// - **No lost removes**: `remove_task`/`remove_child`/`resolve_obligation`
+///   acquire the write lock before mutating, so removes are sequenced
+///   with respect to additions.
+/// - **No stale-close admission**: the double-check on `can_accept_work()`
+///   prevents a task from being added to a region that has already
+///   begun closing, even if the optimistic read passed before the
+///   state transition.
+/// - **`resolve_obligation` uses `saturating_sub`**: so an unpaired
+///   resolve (e.g. from a double-drop) bottoms out at zero rather
+///   than wrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionLimits {
     /// Maximum number of live child regions.
@@ -1063,5 +1097,402 @@ mod tests {
         region.add_finalizer(Finalizer::Sync(Box::new(|| {})));
         assert!(region.pop_finalizer().is_some());
         assert!(region.pop_finalizer().is_none());
+    }
+
+    // =========================================================================
+    // Admission Control Correctness (bd-ecp8u)
+    //
+    // Formalises admission semantics for tasks, children, obligations, and
+    // heap bytes.  Each test documents why the property matters for the
+    // runtime's resource accounting invariants.
+    //
+    // Concurrency safety arguments are documented on `RegionLimits`.
+    // =========================================================================
+
+    // --- Closed-region rejection ---
+    // Admission must fail with `AdmissionError::Closed` for every non-Open
+    // state except Finalizing (which is allowed by `can_accept_work`).
+
+    #[test]
+    fn admission_rejected_when_closing() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.begin_close(None);
+        assert_eq!(region.state(), RegionState::Closing);
+
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(region.add_task(task), Err(AdmissionError::Closed));
+
+        let child = RegionId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(region.add_child(child), Err(AdmissionError::Closed));
+
+        assert_eq!(
+            region.try_reserve_obligation(),
+            Err(AdmissionError::Closed)
+        );
+    }
+
+    #[test]
+    fn admission_rejected_when_draining() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.begin_close(None);
+        region.begin_drain();
+        assert_eq!(region.state(), RegionState::Draining);
+
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(region.add_task(task), Err(AdmissionError::Closed));
+    }
+
+    #[test]
+    fn admission_allowed_when_finalizing() {
+        // Finalizing regions accept work (cleanup tasks spawned by finalizers).
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.begin_close(None);
+        assert!(region.begin_finalize()); // skip Draining
+        assert_eq!(region.state(), RegionState::Finalizing);
+
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert!(region.add_task(task).is_ok());
+    }
+
+    #[test]
+    fn admission_rejected_when_closed() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.begin_close(None);
+        region.begin_finalize();
+        region.complete_close();
+        assert_eq!(region.state(), RegionState::Closed);
+
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(region.add_task(task), Err(AdmissionError::Closed));
+    }
+
+    // --- Idempotent add (deduplication) ---
+    // Adding the same entity twice must succeed without consuming an
+    // admission slot.  This protects against double-registration bugs
+    // without requiring callers to track whether they already called add.
+
+    #[test]
+    fn add_task_idempotent() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert!(region.add_task(task).is_ok());
+        // Second add of same task succeeds (dedup) and does NOT consume a slot.
+        assert!(region.add_task(task).is_ok());
+        assert_eq!(region.task_ids().len(), 1);
+    }
+
+    #[test]
+    fn add_child_idempotent() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_children: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        let child = RegionId::from_arena(ArenaIndex::new(1, 0));
+        assert!(region.add_child(child).is_ok());
+        assert!(region.add_child(child).is_ok());
+        assert_eq!(region.child_ids().len(), 1);
+    }
+
+    // --- Remove + re-admit ---
+    // After removing a task/child, the slot should be available again.
+    // This confirms the live count tracks actual membership, not a
+    // monotonically increasing counter.
+
+    #[test]
+    fn remove_task_frees_slot() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        let task1 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let task2 = TaskId::from_arena(ArenaIndex::new(2, 0));
+
+        assert!(region.add_task(task1).is_ok());
+        assert!(region.add_task(task2).is_err());
+
+        region.remove_task(task1);
+        // Slot freed — task2 can now be admitted.
+        assert!(region.add_task(task2).is_ok());
+    }
+
+    #[test]
+    fn remove_child_frees_slot() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_children: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        let child1 = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let child2 = RegionId::from_arena(ArenaIndex::new(2, 0));
+
+        assert!(region.add_child(child1).is_ok());
+        assert!(region.add_child(child2).is_err());
+
+        region.remove_child(child1);
+        assert!(region.add_child(child2).is_ok());
+    }
+
+    // --- Unlimited (None) limits ---
+    // When a limit is None, admission is unbounded.  This is the default
+    // for `RegionLimits::UNLIMITED` and must not panic or reject.
+
+    #[test]
+    fn unlimited_admits_many_tasks() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        assert_eq!(region.limits(), RegionLimits::UNLIMITED);
+
+        for i in 0..100 {
+            let task = TaskId::from_arena(ArenaIndex::new(i, 0));
+            assert!(region.add_task(task).is_ok());
+        }
+        assert_eq!(region.task_ids().len(), 100);
+    }
+
+    #[test]
+    fn unlimited_admits_many_obligations() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        for _ in 0..100 {
+            assert!(region.try_reserve_obligation().is_ok());
+        }
+        assert_eq!(region.pending_obligations(), 100);
+    }
+
+    // --- resolve_obligation saturating_sub ---
+    // An unpaired resolve (more resolves than reserves) must not wrap
+    // around or panic.  It should bottom out at zero.
+
+    #[test]
+    fn resolve_obligation_saturates_at_zero() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        assert_eq!(region.pending_obligations(), 0);
+
+        // Resolve without any reserve — should stay at 0, not underflow.
+        region.resolve_obligation();
+        assert_eq!(region.pending_obligations(), 0);
+
+        // Reserve one, resolve two — should be 0.
+        assert!(region.try_reserve_obligation().is_ok());
+        assert_eq!(region.pending_obligations(), 1);
+        region.resolve_obligation();
+        assert_eq!(region.pending_obligations(), 0);
+        region.resolve_obligation();
+        assert_eq!(region.pending_obligations(), 0);
+    }
+
+    // --- AdmissionError fields ---
+    // The error must carry the exact limit and live count at the point
+    // of rejection so callers can produce actionable diagnostics.
+
+    #[test]
+    fn admission_error_carries_exact_counts() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(3),
+            ..RegionLimits::unlimited()
+        });
+
+        for i in 0..3 {
+            let task = TaskId::from_arena(ArenaIndex::new(i, 0));
+            assert!(region.add_task(task).is_ok());
+        }
+
+        let overflow_task = TaskId::from_arena(ArenaIndex::new(99, 0));
+        match region.add_task(overflow_task) {
+            Err(AdmissionError::LimitReached { kind, limit, live }) => {
+                assert_eq!(kind, AdmissionKind::Task);
+                assert_eq!(limit, 3);
+                assert_eq!(live, 3);
+            }
+            other => panic!("expected LimitReached, got {other:?}"),
+        }
+    }
+
+    // --- has_live_work integration ---
+    // The region should report live work whenever tasks, children, or
+    // obligations are present.
+
+    #[test]
+    fn has_live_work_tracks_all_categories() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        assert!(!region.has_live_work());
+
+        // Tasks
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert!(region.add_task(task).is_ok());
+        assert!(region.has_live_work());
+        region.remove_task(task);
+        assert!(!region.has_live_work());
+
+        // Children
+        let child = RegionId::from_arena(ArenaIndex::new(1, 0));
+        assert!(region.add_child(child).is_ok());
+        assert!(region.has_live_work());
+        region.remove_child(child);
+        assert!(!region.has_live_work());
+
+        // Obligations
+        assert!(region.try_reserve_obligation().is_ok());
+        assert!(region.has_live_work());
+        region.resolve_obligation();
+        assert!(!region.has_live_work());
+    }
+
+    // --- Heap admission boundary ---
+    // Heap admission must account for existing live bytes accurately and
+    // reject allocations that would push total bytes above the limit.
+
+    #[test]
+    fn heap_admits_up_to_exact_limit() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let u32_size = std::mem::size_of::<u32>();
+        // Set limit to exactly 2 u32s.
+        region.set_limits(RegionLimits {
+            max_heap_bytes: Some(u32_size * 2),
+            ..RegionLimits::unlimited()
+        });
+
+        assert!(region.heap_alloc(1u32).is_ok());
+        assert!(region.heap_alloc(2u32).is_ok());
+        // Third allocation pushes beyond limit.
+        let err = region.heap_alloc(3u32).expect_err("heap limit");
+        assert!(matches!(err, AdmissionError::LimitReached { kind: AdmissionKind::HeapBytes, .. }));
+    }
+
+    // --- Concurrent admission (single-threaded simulation) ---
+    // While true concurrency requires thread-based tests, we can
+    // verify the double-check logic by simulating a close between
+    // the optimistic check and the lock acquisition.  In this
+    // single-threaded test, we verify the sequenced case: close,
+    // then admit.
+
+    #[test]
+    fn close_prevents_subsequent_admission() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        let task1 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert!(region.add_task(task1).is_ok());
+
+        region.begin_close(None);
+
+        // All admission paths must fail.
+        let task2 = TaskId::from_arena(ArenaIndex::new(2, 0));
+        assert_eq!(region.add_task(task2), Err(AdmissionError::Closed));
+
+        let child = RegionId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(region.add_child(child), Err(AdmissionError::Closed));
+
+        assert_eq!(
+            region.try_reserve_obligation(),
+            Err(AdmissionError::Closed)
+        );
+    }
+
+    // --- Sequential double-check locking verification ---
+    //
+    // RegionRecord is !Sync (Finalizer contains non-Sync futures), so
+    // Arc-based thread tests are not possible at the type level.  The
+    // runtime uses RegionRecord behind its own synchronisation (arena +
+    // RwLock<State>), so thread safety is enforced at a higher layer.
+    //
+    // Here we verify the sequential invariants that the double-check
+    // pattern relies on:
+    //
+    // (a) After begin_close(), all admission returns Closed.
+    // (b) Limit check and push are atomic (single write-lock section).
+    // (c) No over-admission when limit == live (saturated).
+
+    #[test]
+    fn saturated_limit_rejects_all_types() {
+        // When every limit is exactly at capacity, all admission paths
+        // must fail — verifying limit check is inside the lock.
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(2),
+            max_children: Some(2),
+            max_obligations: Some(2),
+            max_heap_bytes: Some(std::mem::size_of::<u64>()),
+            curve_budget: None,
+        });
+
+        // Fill to capacity.
+        let t1 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let t2 = TaskId::from_arena(ArenaIndex::new(2, 0));
+        assert!(region.add_task(t1).is_ok());
+        assert!(region.add_task(t2).is_ok());
+
+        let c1 = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let c2 = RegionId::from_arena(ArenaIndex::new(2, 0));
+        assert!(region.add_child(c1).is_ok());
+        assert!(region.add_child(c2).is_ok());
+
+        assert!(region.try_reserve_obligation().is_ok());
+        assert!(region.try_reserve_obligation().is_ok());
+
+        assert!(region.heap_alloc(42u64).is_ok());
+
+        // All types are now at capacity — verify rejection.
+        let t3 = TaskId::from_arena(ArenaIndex::new(3, 0));
+        assert!(matches!(
+            region.add_task(t3),
+            Err(AdmissionError::LimitReached { kind: AdmissionKind::Task, .. })
+        ));
+
+        let c3 = RegionId::from_arena(ArenaIndex::new(3, 0));
+        assert!(matches!(
+            region.add_child(c3),
+            Err(AdmissionError::LimitReached { kind: AdmissionKind::Child, .. })
+        ));
+
+        assert!(matches!(
+            region.try_reserve_obligation(),
+            Err(AdmissionError::LimitReached { kind: AdmissionKind::Obligation, .. })
+        ));
+
+        assert!(matches!(
+            region.heap_alloc(1u8),
+            Err(AdmissionError::LimitReached { kind: AdmissionKind::HeapBytes, .. })
+        ));
+    }
+
+    #[test]
+    fn interleaved_add_remove_never_over_admits() {
+        // Simulate rapid add/remove cycles and verify the live count
+        // never exceeds the limit, even with interleaving.
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(3),
+            ..RegionLimits::unlimited()
+        });
+
+        for round in 0..10u32 {
+            let base = round * 3;
+            let a = TaskId::from_arena(ArenaIndex::new(base, 0));
+            let b = TaskId::from_arena(ArenaIndex::new(base + 1, 0));
+            let c = TaskId::from_arena(ArenaIndex::new(base + 2, 0));
+
+            assert!(region.add_task(a).is_ok());
+            assert!(region.add_task(b).is_ok());
+            assert!(region.add_task(c).is_ok());
+
+            // At capacity — next must fail.
+            let overflow = TaskId::from_arena(ArenaIndex::new(base + 3, 0));
+            assert!(region.add_task(overflow).is_err());
+
+            // Remove all and start over.
+            region.remove_task(a);
+            region.remove_task(b);
+            region.remove_task(c);
+            assert_eq!(region.task_ids().len(), 0);
+        }
     }
 }
