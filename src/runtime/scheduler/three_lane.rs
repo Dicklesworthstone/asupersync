@@ -1121,10 +1121,12 @@ impl ThreeLaneWorker {
                 record.wake_state.notify();
             }
         }
+        let _ = remove_from_local_ready(&self.local_ready, task);
         {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
             local.move_to_cancel_lane(task, priority);
         }
+        self.parker.unpark();
     }
 
     /// Schedules a timed task locally.

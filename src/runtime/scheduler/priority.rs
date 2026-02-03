@@ -470,6 +470,9 @@ impl Scheduler {
         out: &mut Vec<(TaskId, u8)>,
     ) -> usize {
         out.clear();
+        if max_steal == 0 || self.ready_lane.is_empty() {
+            return 0;
+        }
         let steal_count = (self.ready_lane.len() / 2).min(max_steal).max(1);
         if out.capacity() < steal_count {
             out.reserve(steal_count - out.capacity());
@@ -1380,6 +1383,28 @@ mod tests {
             sched.has_timed_work()
         );
         crate::test_complete!("steal_ready_batch_into_does_not_steal_cancel_or_timed");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_respects_zero_max() {
+        init_test("steal_ready_batch_into_respects_zero_max");
+        let mut sched = Scheduler::new();
+        for i in 0..4 {
+            sched.schedule(task(i), 50);
+        }
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(0, &mut buf);
+
+        crate::assert_with_log!(count == 0, "zero max_steal returns zero", 0usize, count);
+        crate::assert_with_log!(
+            buf.is_empty(),
+            "buffer cleared when max_steal is zero",
+            true,
+            buf.is_empty()
+        );
+        crate::assert_with_log!(sched.len() == 4, "no tasks removed", 4usize, sched.len());
+        crate::test_complete!("steal_ready_batch_into_respects_zero_max");
     }
 
     #[test]
