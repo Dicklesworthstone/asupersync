@@ -441,13 +441,19 @@ pub fn row_scale(row: &mut [u8], c: Gf256) {
 /// * `end` - One past the last row to consider
 /// * `col` - Column index to check for nonzero pivot
 #[must_use]
-pub fn select_pivot_basic<'a>(
-    matrix: &[&'a [u8]],
+pub fn select_pivot_basic(
+    matrix: &[&[u8]],
     start: usize,
     end: usize,
     col: usize,
 ) -> Option<usize> {
-    (start..end).find(|&row| matrix[row][col] != 0)
+    matrix
+        .iter()
+        .enumerate()
+        .take(end)
+        .skip(start)
+        .find(|(_, row_data)| row_data[col] != 0)
+        .map(|(row, _)| row)
 }
 
 /// Selects a pivot row preferring rows with fewer nonzeros (Markowitz).
@@ -464,19 +470,19 @@ pub fn select_pivot_basic<'a>(
 /// * `end` - One past the last row to consider
 /// * `col` - Column index to check for nonzero pivot
 #[must_use]
-pub fn select_pivot_markowitz<'a>(
-    matrix: &[&'a [u8]],
+pub fn select_pivot_markowitz(
+    matrix: &[&[u8]],
     start: usize,
     end: usize,
     col: usize,
 ) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize)> = None;
 
-    for row in start..end {
-        if matrix[row][col] == 0 {
+    for (row, row_data) in matrix.iter().enumerate().take(end).skip(start) {
+        if row_data[col] == 0 {
             continue;
         }
-        let nnz = matrix[row].iter().filter(|&&b| b != 0).count();
+        let nnz = row_data.iter().filter(|&&b| b != 0).count();
         match &best {
             None => best = Some((row, nnz)),
             Some((_, best_nnz)) if nnz < *best_nnz => best = Some((row, nnz)),

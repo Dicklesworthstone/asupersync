@@ -171,8 +171,8 @@ impl Equation {
         let mut j = 0;
 
         while i < self.terms.len() || j < pivot_terms.len() {
-            let self_col = self.terms.get(i).map(|(c, _)| *c).unwrap_or(usize::MAX);
-            let pivot_col = pivot_terms.get(j).map(|(c, _)| *c).unwrap_or(usize::MAX);
+            let self_col = self.terms.get(i).map_or(usize::MAX, |(c, _)| *c);
+            let pivot_col = pivot_terms.get(j).map_or(usize::MAX, |(c, _)| *c);
 
             match self_col.cmp(&pivot_col) {
                 std::cmp::Ordering::Less => {
@@ -264,7 +264,7 @@ impl InactivationDecoder {
         let mut state = self.build_state(symbols);
 
         // Phase 1: Peeling
-        self.peel(&mut state);
+        Self::peel(&mut state);
 
         // Phase 2: Inactivation + Gaussian elimination
         self.inactivate_and_solve(&mut state)?;
@@ -315,7 +315,7 @@ impl InactivationDecoder {
     ///
     /// Find degree-1 equations and solve them, propagating the solution
     /// to other equations.
-    fn peel(&self, state: &mut DecoderState) {
+    fn peel(state: &mut DecoderState) {
         loop {
             // Find an unused degree-1 equation with an active column
             let deg1_idx = state.equations.iter().enumerate().find_map(|(idx, eq)| {
@@ -445,8 +445,8 @@ impl InactivationDecoder {
             // Scale pivot row so a[prow][col] = 1
             let pivot_coef = a[prow][col];
             let inv = pivot_coef.inv();
-            for c in 0..n_cols {
-                a[prow][c] *= inv;
+            for value in &mut a[prow] {
+                *value *= inv;
             }
             crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
