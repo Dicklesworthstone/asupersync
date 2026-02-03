@@ -3,6 +3,59 @@
 //! Cancellation in Asupersync is a first-class protocol, not a silent drop.
 //! This module defines the types that describe why and how cancellation occurred.
 //!
+//! # Cleanup Budget Policy
+//!
+//! Every cancellation carries a **cleanup budget** that bounds the resources
+//! available for cleanup code (drop glue, finalizers, obligation discharge).
+//! The policy is **severity-scaled**: more urgent cancellations get tighter
+//! budgets but higher scheduling priority.
+//!
+//! | CancelKind | Poll Quota | Priority | Rationale |
+//! |------------|-----------|----------|-----------|
+//! | User | 1000 | 200 | Graceful; user expects orderly shutdown |
+//! | Timeout/Deadline | 500 | 210 | Time-driven; moderate cleanup window |
+//! | PollQuota/CostBudget | 300 | 215 | Budget violation; tight but fair |
+//! | FailFast/RaceLost/Parent/Resource | 200 | 220 | Cascading; fast teardown needed |
+//! | Shutdown | 50 | 255 | Urgent; minimal cleanup, max priority |
+//!
+//! ## Min-Plus Rules (Budget Interaction)
+//!
+//! When a task receives multiple cancellation requests, the cleanup budgets
+//! are **combined** via the meet (∧) operation from the budget algebra
+//! (see `Budget::combine`). This means:
+//!
+//! - Poll quotas: min (tighter quota wins)
+//! - Priority: max (higher urgency wins)
+//!
+//! This ensures that strengthening a cancellation never *increases* the
+//! cleanup budget — the monotone-narrowing property from the budget
+//! semilattice is preserved.
+//!
+//! ## Bounded Completion Guarantee
+//!
+//! Because cleanup budgets have finite poll quotas:
+//!
+//! 1. Each `consume_poll()` call strictly decreases the remaining quota
+//!    (Lemma 7 in `types::budget::tests`)
+//! 2. After exactly `poll_quota` polls, the budget is exhausted
+//!    (Lemma 10 in `types::budget::tests`)
+//! 3. An exhausted budget causes the scheduler to stop polling the task
+//!
+//! Therefore cleanup terminates within `poll_quota` poll cycles, which
+//! is the **sufficient-budget termination** property.
+//!
+//! ## Calibration Guidelines
+//!
+//! - **Production**: Use default quotas. If cleanup routines need more
+//!   polls (e.g., flushing large buffers), increase the User/Timeout
+//!   quotas proportionally but keep Shutdown ≤ 100.
+//! - **Lab/Testing**: Use `Budget::MINIMAL` (100 polls) for fast
+//!   deterministic runs. Set `ASUPERSYNC_CLEANUP_BUDGET_OVERRIDE` env
+//!   var to override all cleanup quotas for calibration experiments.
+//! - **Backpressure**: Priority elevation (200–255) ensures cancelled
+//!   tasks get scheduled promptly even under load, preventing
+//!   indefinite queueing of cleanup work.
+//!
 //! # Attribution
 //!
 //! Each cancellation reason includes full attribution information:
@@ -1238,6 +1291,206 @@ mod tests {
             fail_fast_budget.priority < shutdown_budget.priority
         );
         crate::test_complete!("cleanup_budget_scales_with_severity");
+    }
+
+    // ========================================================================
+    // Bounded Cleanup Completion Tests (bd-3cq88)
+    //
+    // These tests verify the sufficient-budget termination property:
+    // cleanup budgets have finite poll quotas, so cleanup always
+    // terminates within a bounded number of polls.
+    // ========================================================================
+
+    /// Verifies that every CancelKind produces a cleanup budget with
+    /// finite, positive poll quota — the precondition for bounded completion.
+    #[test]
+    fn cleanup_budget_always_finite_and_positive() {
+        init_test("cleanup_budget_always_finite_and_positive");
+
+        let kinds = [
+            CancelKind::User,
+            CancelKind::Timeout,
+            CancelKind::Deadline,
+            CancelKind::PollQuota,
+            CancelKind::CostBudget,
+            CancelKind::FailFast,
+            CancelKind::RaceLost,
+            CancelKind::ParentCancelled,
+            CancelKind::ResourceUnavailable,
+            CancelKind::Shutdown,
+        ];
+
+        for kind in kinds {
+            let reason =
+                CancelReason::with_origin(kind, RegionId::new_for_test(1, 0), Time::from_secs(0));
+            let budget = reason.cleanup_budget();
+            crate::assert_with_log!(
+                budget.poll_quota > 0 && budget.poll_quota < u32::MAX,
+                "cleanup budget must be finite and positive",
+                true,
+                budget.poll_quota
+            );
+        }
+
+        crate::test_complete!("cleanup_budget_always_finite_and_positive");
+    }
+
+    /// Verifies that consuming exactly poll_quota polls exhausts the cleanup
+    /// budget — the termination bound.
+    #[test]
+    fn cleanup_budget_terminates_after_quota_polls() {
+        init_test("cleanup_budget_terminates_after_quota_polls");
+
+        let reason = CancelReason::timeout();
+        let mut budget = reason.cleanup_budget();
+        let quota = budget.poll_quota;
+
+        // Consume exactly quota polls
+        for i in 0..quota {
+            let result = budget.consume_poll();
+            crate::assert_with_log!(
+                result.is_some(),
+                "poll should succeed within budget",
+                true,
+                i
+            );
+        }
+
+        // Now exhausted
+        crate::assert_with_log!(
+            budget.is_exhausted(),
+            "budget exhausted after quota polls",
+            true,
+            budget.poll_quota
+        );
+
+        // No further progress possible
+        let result = budget.consume_poll();
+        crate::assert_with_log!(
+            result.is_none(),
+            "poll fails after exhaustion",
+            true,
+            result.is_none()
+        );
+
+        crate::test_complete!("cleanup_budget_terminates_after_quota_polls");
+    }
+
+    /// Verifies that combining (strengthening) cleanup budgets never
+    /// increases the poll quota — monotone narrowing.
+    #[test]
+    fn cleanup_budget_combine_never_widens() {
+        init_test("cleanup_budget_combine_never_widens");
+
+        let user_budget = CancelReason::user("stop").cleanup_budget();
+        let timeout_budget = CancelReason::timeout().cleanup_budget();
+        let shutdown_budget = CancelReason::shutdown().cleanup_budget();
+
+        // Combining user + timeout takes the tighter quota
+        let combined = user_budget.combine(timeout_budget);
+        crate::assert_with_log!(
+            combined.poll_quota <= user_budget.poll_quota,
+            "combined ≤ user",
+            user_budget.poll_quota,
+            combined.poll_quota
+        );
+        crate::assert_with_log!(
+            combined.poll_quota <= timeout_budget.poll_quota,
+            "combined ≤ timeout",
+            timeout_budget.poll_quota,
+            combined.poll_quota
+        );
+
+        // Priority should be max (more urgent wins)
+        crate::assert_with_log!(
+            combined.priority >= user_budget.priority,
+            "combined priority ≥ user",
+            user_budget.priority,
+            combined.priority
+        );
+
+        // Combining with shutdown (tightest) always tightens
+        let with_shutdown = combined.combine(shutdown_budget);
+        crate::assert_with_log!(
+            with_shutdown.poll_quota <= combined.poll_quota,
+            "shutdown tightens further",
+            combined.poll_quota,
+            with_shutdown.poll_quota
+        );
+        crate::assert_with_log!(
+            with_shutdown.priority == 255,
+            "shutdown priority wins",
+            255u8,
+            with_shutdown.priority
+        );
+
+        crate::test_complete!("cleanup_budget_combine_never_widens");
+    }
+
+    /// Verifies severity ordering: more severe → fewer polls, higher priority.
+    #[test]
+    fn cleanup_budget_severity_monotone() {
+        init_test("cleanup_budget_severity_monotone");
+
+        let user = CancelReason::user("stop");
+        let timeout = CancelReason::timeout();
+        let quota = CancelReason::poll_quota();
+        let fail_fast = CancelReason::sibling_failed();
+        let shutdown = CancelReason::shutdown();
+
+        let budgets = [
+            user.cleanup_budget(),
+            timeout.cleanup_budget(),
+            quota.cleanup_budget(),
+            fail_fast.cleanup_budget(),
+            shutdown.cleanup_budget(),
+        ];
+
+        // Poll quotas should be non-increasing (more severe → tighter)
+        for i in 1..budgets.len() {
+            crate::assert_with_log!(
+                budgets[i].poll_quota <= budgets[i - 1].poll_quota,
+                "poll quota non-increasing with severity",
+                budgets[i - 1].poll_quota,
+                budgets[i].poll_quota
+            );
+        }
+
+        // Priorities should be non-decreasing (more severe → higher priority)
+        for i in 1..budgets.len() {
+            crate::assert_with_log!(
+                budgets[i].priority >= budgets[i - 1].priority,
+                "priority non-decreasing with severity",
+                budgets[i - 1].priority,
+                budgets[i].priority
+            );
+        }
+
+        crate::test_complete!("cleanup_budget_severity_monotone");
+    }
+
+    /// Verifies that cleanup budgets have no deadline — cleanup should not
+    /// be time-bounded, only poll-bounded, so the scheduler can always
+    /// make progress regardless of clock skew.
+    #[test]
+    fn cleanup_budget_has_no_deadline() {
+        init_test("cleanup_budget_has_no_deadline");
+
+        let kinds = [CancelKind::User, CancelKind::Timeout, CancelKind::Shutdown];
+
+        for kind in kinds {
+            let reason =
+                CancelReason::with_origin(kind, RegionId::new_for_test(1, 0), Time::from_secs(0));
+            let budget = reason.cleanup_budget();
+            crate::assert_with_log!(
+                budget.deadline.is_none(),
+                "cleanup budget should have no deadline",
+                true,
+                budget.deadline.is_none()
+            );
+        }
+
+        crate::test_complete!("cleanup_budget_has_no_deadline");
     }
 
     // ========================================================================
