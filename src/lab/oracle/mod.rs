@@ -228,7 +228,10 @@ impl OracleSuite {
         let entries = vec![
             OracleEntryReport::from_result(
                 "task_leak",
-                self.task_leak.check(now).err().map(OracleViolation::TaskLeak),
+                self.task_leak
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::TaskLeak),
                 OracleStats {
                     entities_tracked: self.task_leak.task_count(),
                     events_recorded: self.task_leak.task_count()
@@ -238,7 +241,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "obligation_leak",
-                self.obligation_leak.check(now).err().map(OracleViolation::ObligationLeak),
+                self.obligation_leak
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::ObligationLeak),
                 OracleStats {
                     entities_tracked: self.obligation_leak.obligation_count(),
                     events_recorded: self.obligation_leak.obligation_count()
@@ -247,7 +253,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "quiescence",
-                self.quiescence.check().err().map(OracleViolation::Quiescence),
+                self.quiescence
+                    .check()
+                    .err()
+                    .map(OracleViolation::Quiescence),
                 OracleStats {
                     entities_tracked: self.quiescence.region_count(),
                     events_recorded: self.quiescence.region_count()
@@ -256,7 +265,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "loser_drain",
-                self.loser_drain.check().err().map(OracleViolation::LoserDrain),
+                self.loser_drain
+                    .check()
+                    .err()
+                    .map(OracleViolation::LoserDrain),
                 OracleStats {
                     entities_tracked: self.loser_drain.race_count(),
                     events_recorded: self.loser_drain.race_count()
@@ -275,7 +287,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "region_tree",
-                self.region_tree.check().err().map(OracleViolation::RegionTree),
+                self.region_tree
+                    .check()
+                    .err()
+                    .map(OracleViolation::RegionTree),
                 OracleStats {
                     entities_tracked: self.region_tree.region_count(),
                     events_recorded: self.region_tree.region_count(),
@@ -283,7 +298,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "ambient_authority",
-                self.ambient_authority.check().err().map(OracleViolation::AmbientAuthority),
+                self.ambient_authority
+                    .check()
+                    .err()
+                    .map(OracleViolation::AmbientAuthority),
                 OracleStats {
                     entities_tracked: self.ambient_authority.task_count(),
                     events_recorded: self.ambient_authority.task_count()
@@ -292,7 +310,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "deadline_monotone",
-                self.deadline_monotone.check().err().map(OracleViolation::DeadlineMonotone),
+                self.deadline_monotone
+                    .check()
+                    .err()
+                    .map(OracleViolation::DeadlineMonotone),
                 OracleStats {
                     entities_tracked: self.deadline_monotone.region_count(),
                     events_recorded: self.deadline_monotone.region_count(),
@@ -300,7 +321,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "cancellation_protocol",
-                self.cancellation_protocol.check().err().map(OracleViolation::CancellationProtocol),
+                self.cancellation_protocol
+                    .check()
+                    .err()
+                    .map(OracleViolation::CancellationProtocol),
                 OracleStats {
                     entities_tracked: self.cancellation_protocol.region_count(),
                     events_recorded: self.cancellation_protocol.region_count()
@@ -309,7 +333,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "actor_leak",
-                self.actor_leak.check(now).err().map(OracleViolation::ActorLeak),
+                self.actor_leak
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::ActorLeak),
                 OracleStats {
                     entities_tracked: self.actor_leak.actor_count(),
                     events_recorded: self.actor_leak.actor_count()
@@ -319,7 +346,10 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "supervision",
-                self.supervision.check(now).err().map(OracleViolation::Supervision),
+                self.supervision
+                    .check(now)
+                    .err()
+                    .map(OracleViolation::Supervision),
                 OracleStats {
                     entities_tracked: self.supervision.failure_count()
                         + self.supervision.restart_count(),
@@ -424,7 +454,9 @@ impl OracleReport {
     /// Returns the entry for a specific invariant.
     #[must_use]
     pub fn entry(&self, invariant: &str) -> Option<&OracleEntryReport> {
-        self.entries.iter().find(|e| e.invariant.as_str() == invariant)
+        self.entries
+            .iter()
+            .find(|e| e.invariant.as_str() == invariant)
     }
 
     /// Serializes the report to JSON.

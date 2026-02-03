@@ -3,14 +3,14 @@
 
 mod common;
 
+use asupersync::time::{TimerWheel, TimerWheelConfig};
 use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::outcome::{join_outcomes, Outcome, PanicPayload, Severity};
 use asupersync::types::Time;
-use asupersync::time::{TimerWheel, TimerWheelConfig};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
-use std::task::{Wake, Waker};
 use std::sync::Arc;
+use std::task::{Wake, Waker};
 use std::time::Duration;
 
 // ============================================================================

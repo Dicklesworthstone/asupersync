@@ -2589,7 +2589,10 @@ mod tests {
         }
 
         // Global queue should be empty (because it went to local)
-        assert!(!scheduler.global.has_ready_work(), "Global queue should be empty");
+        assert!(
+            !scheduler.global.has_ready_work(),
+            "Global queue should be empty"
+        );
 
         // Local queue should have the task
         let count = {
@@ -2616,6 +2619,9 @@ mod tests {
         // Now spawn WITHOUT guard (should go to global)
         scheduler.spawn(TaskId::new_for_test(1, 3), 100);
 
-        assert!(scheduler.global.has_ready_work(), "Global queue should have task");
+        assert!(
+            scheduler.global.has_ready_work(),
+            "Global queue should have task"
+        );
     }
 }

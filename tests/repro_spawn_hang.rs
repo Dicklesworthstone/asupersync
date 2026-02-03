@@ -43,7 +43,11 @@ mod tests {
                 42
             })
         }; // Lock dropped here
-        let _handle = res.expect("spawn failed");
+        let handle = res.expect("spawn failed");
+
+        // `spawn_registered` stores the future in `RuntimeState`, but scheduling is explicit.
+        // Inject the task into the scheduler so the worker can poll it.
+        scheduler.spawn(handle.task_id(), 0);
 
         // 5. Run the worker to drive the task
         let mut worker = scheduler.take_workers().pop().unwrap();
