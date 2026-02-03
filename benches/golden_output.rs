@@ -61,22 +61,52 @@ fn golden_registry() -> BTreeMap<&'static str, &'static str> {
     let mut m = BTreeMap::new();
 
     // Scheduler scenarios
-    m.insert("scheduler/priority_lane_ordering_100", "GENERATE");
-    m.insert("scheduler/mixed_cancel_ready_timed_200", "GENERATE");
-    m.insert("scheduler/global_inject_then_pop_50", "GENERATE");
+    m.insert(
+        "scheduler/priority_lane_ordering_100",
+        "aa41a308bff0297fa0dd9d902d1263a9e19cacd3e03b1423bd0876e021904fa3",
+    );
+    m.insert(
+        "scheduler/mixed_cancel_ready_timed_200",
+        "ebc8100fd3915f8c0c9f782e7b38cf383ec14c9d1298075d1931fbe812b9db1b",
+    );
+    m.insert(
+        "scheduler/global_inject_then_pop_50",
+        "077ba6995d23b61f3de629ba45496763d3229769c03737a291904f7220f6e5e0",
+    );
 
     // Channel scenarios
-    m.insert("channel/mpsc_try_send_recv_1000", "GENERATE");
-    m.insert("channel/mpsc_multi_producer_interleave", "GENERATE");
-    m.insert("channel/oneshot_send_recv_sequence", "GENERATE");
+    m.insert(
+        "channel/mpsc_try_send_recv_1000",
+        "c76dd6f3c17103439dfb85094b25f725c8a46fabf6288b0b9e6743774739eb3e",
+    );
+    m.insert(
+        "channel/mpsc_multi_producer_interleave",
+        "7862b3c6abc43c253abb6269df13c023654ee8d3dc209bef3c7cc68865fe59f6",
+    );
+    m.insert(
+        "channel/oneshot_send_recv_sequence",
+        "305d9faa182a3fa58209faf4d462a3bf7cb25180c75e12f779a47e32899f67b4",
+    );
 
     // Cancellation scenarios
-    m.insert("cancel/tree_propagation_depth_5", "GENERATE");
-    m.insert("cancel/cancel_budgets", "GENERATE");
+    m.insert(
+        "cancel/tree_propagation_depth_5",
+        "85dfafed6b9ae886eda10bb758ebdd425a90e3829cee064585577874ae3caa1b",
+    );
+    m.insert(
+        "cancel/cancel_budgets",
+        "880088a12dbaabbd5481703bdc88075a967f1696e64e7110398bc5179da52f82",
+    );
 
     // Lab runtime scenarios
-    m.insert("lab/deterministic_schedule_seed_42", "GENERATE");
-    m.insert("lab/deterministic_schedule_seed_1337", "GENERATE");
+    m.insert(
+        "lab/deterministic_schedule_seed_42",
+        "0b0f3192274d644f0658c30b60a6e1acfabfa6df88207c43067b2ff70ca63945",
+    );
+    m.insert(
+        "lab/deterministic_schedule_seed_1337",
+        "27d627326b5b6304467eba5515a5fc0596b14063a1c52a03012ea3a1af9543be",
+    );
 
     m
 }
