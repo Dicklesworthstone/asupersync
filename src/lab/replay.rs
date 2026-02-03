@@ -77,10 +77,7 @@ pub fn find_divergence(a: &[TraceEvent], b: &[TraceEvent]) -> Option<TraceDiverg
 
 /// Checks if two events match (ignoring sequence numbers).
 fn events_match(a: &TraceEvent, b: &TraceEvent) -> bool {
-    a.kind == b.kind
-        && a.time == b.time
-        && a.logical_time == b.logical_time
-        && a.data == b.data
+    a.kind == b.kind && a.time == b.time && a.logical_time == b.logical_time && a.data == b.data
 }
 
 /// A divergence between two traces.
