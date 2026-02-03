@@ -836,6 +836,7 @@ fn bench_intrusive_vs_vecdeque(c: &mut Criterion) {
 /// an IntrusiveRing. For the common case (all tasks at priority 0), BinaryHeap
 /// performs O(log n) comparisons per push/pop with no ordering benefit, while
 /// IntrusiveRing performs O(1) with better cache locality.
+#[allow(clippy::items_after_statements)]
 fn bench_intrusive_vs_binaryheap(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/intrusive_vs_binaryheap");
     group.sample_size(100);
@@ -948,6 +949,7 @@ fn bench_intrusive_vs_binaryheap(c: &mut Criterion) {
 // CANCEL-LANE PREEMPTION BENCHMARKS (bd-17uu)
 // =============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn bench_cancel_preemption(c: &mut Criterion) {
     use asupersync::runtime::scheduler::ThreeLaneScheduler;
 

@@ -256,14 +256,12 @@ fn build_combined_filtration(n: usize) -> BoundaryMatrix {
     // Square columns: ∂₂(square) = sum of 4 bounding edges (edge rows)
     for (col_offset, &(a, b, c, dd)) in cx.squares.iter().enumerate() {
         let col = num_verts + num_edges + col_offset;
-        let e_ab = cx.edges.binary_search(&(a, b)).unwrap();
-        let e_ac = cx.edges.binary_search(&(a, c)).unwrap();
-        let e_bd = cx.edges.binary_search(&(b, dd)).unwrap();
-        let e_cd = cx.edges.binary_search(&(c, dd)).unwrap();
-        d.set(num_verts + e_ab, col);
-        d.set(num_verts + e_ac, col);
-        d.set(num_verts + e_bd, col);
-        d.set(num_verts + e_cd, col);
+        let edge_indices = [(a, b), (a, c), (b, dd), (c, dd)]
+            .map(|(u, v)| cx.edges.binary_search(&(u, v)).unwrap());
+        d.set(num_verts + edge_indices[0], col);
+        d.set(num_verts + edge_indices[1], col);
+        d.set(num_verts + edge_indices[2], col);
+        d.set(num_verts + edge_indices[3], col);
     }
 
     d
@@ -328,7 +326,7 @@ fn bench_scoring(c: &mut Criterion) {
             &pairs,
             |b, pairs| {
                 b.iter_batched(
-                    || HashSet::new(),
+                    HashSet::new,
                     |mut seen| black_box(score_persistence(pairs, &mut seen, 42)),
                     BatchSize::SmallInput,
                 )
@@ -361,7 +359,7 @@ fn bench_scoring(c: &mut Criterion) {
             &d,
             |b, d| {
                 b.iter_batched(
-                    || HashSet::new(),
+                    HashSet::new,
                     |mut seen| black_box(score_boundary_matrix(d, &mut seen, 42)),
                     BatchSize::SmallInput,
                 )
@@ -411,9 +409,9 @@ fn bench_end_to_end(c: &mut Criterion) {
     for &n in &[4u32, 8, 16] {
         let n_usize = n as usize;
 
-        group.bench_function(&format!("full_pipeline/{n}x{n}"), |b| {
+        group.bench_function(format!("full_pipeline/{n}x{n}"), |b| {
             b.iter_batched(
-                || HashSet::<ClassId>::new(),
+                HashSet::<ClassId>::new,
                 |mut seen| {
                     let d = build_combined_filtration(n_usize);
                     let reduced = d.reduce();

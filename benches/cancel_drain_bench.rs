@@ -438,7 +438,7 @@ fn bench_governor_overhead(c: &mut Criterion) {
     // compute_potential() loop (records to history + convergence check)
     group.bench_function("potential_loop_100_steps", |b| {
         b.iter_batched(
-            || LyapunovGovernor::with_defaults(),
+            LyapunovGovernor::with_defaults,
             |mut governor| {
                 for _ in 0..100 {
                     governor.compute_potential(&busy_snapshot);
