@@ -6,29 +6,7 @@
 
 <div align="center">
 
-```
-    ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║     ┌─────────────────────────────────────────────────────┐   ║
-    ║     │  REGION                                             │   ║
-    ║     │    ┌───────┐  ┌───────┐  ┌───────┐                 │   ║
-    ║     │    │ Task  │──│ Task  │──│ Task  │  ← owned        │   ║
-    ║     │    └───┬───┘  └───┬───┘  └───────┘                 │   ║
-    ║     │        │          │                                 │   ║
-    ║     │        ▼          ▼                                 │   ║
-    ║     │    ┌───────┐  ┌───────┐                            │   ║
-    ║     │    │ SUB   │  │ SUB   │  ← nested                  │   ║
-    ║     │    │REGION │  │REGION │                            │   ║
-    ║     │    └───────┘  └───────┘                            │   ║
-    ║     └─────────────────────────────────────────────────────┘   ║
-    ║                         │                                     ║
-    ║                         ▼ close                               ║
-    ║                   ┌───────────┐                               ║
-    ║                   │QUIESCENCE │  ← guaranteed                 ║
-    ║                   └───────────┘                               ║
-    ║                                                               ║
-    ╚═══════════════════════════════════════════════════════════════╝
-```
+<img src="asupersync_diagram.webp" alt="Asupersync Architecture - Regions, Tasks, and Quiescence" width="700">
 
 [![CI](https://github.com/Dicklesworthstone/asupersync/actions/workflows/ci.yml/badge.svg)](https://github.com/Dicklesworthstone/asupersync/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
