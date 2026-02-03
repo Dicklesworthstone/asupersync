@@ -399,7 +399,7 @@ fn cancel_kind_eq_and_hash() {
 fn cx_cancel_with_stores_reason() {
     init_test("cx_cancel_with_stores_reason");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     assert!(cx.cancel_reason().is_none());
 
     test_section!("cancel with message");
@@ -425,7 +425,7 @@ fn cx_cancel_with_stores_reason() {
 fn cx_cancel_with_no_message() {
     init_test("cx_cancel_with_no_message");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     cx.cancel_with(CancelKind::Timeout, None);
 
     let reason = cx.cancel_reason().expect("should have reason");
@@ -442,7 +442,7 @@ fn cx_cancel_with_no_message() {
 fn cx_cancel_chain_api() {
     init_test("cx_cancel_chain_api");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     test_section!("empty chain when not cancelled");
     assert!(cx.cancel_chain().next().is_none());
@@ -480,14 +480,14 @@ fn cx_cancel_chain_api() {
 fn cx_root_cancel_cause_api() {
     init_test("cx_root_cancel_cause_api");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     test_section!("none when not cancelled");
     assert!(cx.root_cancel_cause().is_none());
     tracing::info!("No root cause when not cancelled");
 
     test_section!("single reason is its own root");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     cx.cancel_with(CancelKind::Shutdown, Some("graceful shutdown"));
 
     let root = cx.root_cancel_cause().expect("should have root");
@@ -496,7 +496,7 @@ fn cx_root_cancel_cause_api() {
     tracing::info!(root_kind = ?root.kind, "Single reason is its own root");
 
     test_section!("deep chain root cause");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let deep_root = CancelReason::cost_budget().with_message("cost limit exceeded");
     let level1 = CancelReason::parent_cancelled().with_cause(deep_root);
     let level2 = CancelReason::parent_cancelled().with_cause(level1);
@@ -521,7 +521,7 @@ fn cx_root_cancel_cause_api() {
 fn cx_cancelled_by_api() {
     init_test("cx_cancelled_by_api");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     test_section!("false when not cancelled");
     assert!(!cx.cancelled_by(CancelKind::User));
@@ -553,7 +553,7 @@ fn cx_cancelled_by_api() {
 fn cx_any_cause_is_api() {
     init_test("cx_any_cause_is_api");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     test_section!("false when not cancelled");
     assert!(!cx.any_cause_is(CancelKind::Timeout));
@@ -586,7 +586,7 @@ fn cx_any_cause_is_api() {
 fn cx_cancel_fast_api() {
     init_test("cx_cancel_fast_api");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     assert!(!cx.is_cancel_requested());
 
     test_section!("cancel_fast sets flag and reason");
@@ -647,7 +647,7 @@ fn e2e_debugging_workflow() {
         .with_cause(handler_cancelled);
 
     // Now simulate the debugging workflow
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     cx.set_cancel_reason(service_cancelled);
 
     test_section!("Debugging investigation");
@@ -920,7 +920,7 @@ fn integration_realistic_handler_usage() {
     // 2. Child task receives ParentCancelled
     // 3. Handler inspects the cause chain to log appropriately
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     // Simulate what the runtime would set up
     let timeout_reason = CancelReason::timeout()

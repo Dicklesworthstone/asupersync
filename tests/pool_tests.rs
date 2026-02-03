@@ -39,7 +39,7 @@ where
         + Sync
         + 'static,
 {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed")
 }
 
@@ -141,7 +141,7 @@ fn pool_respects_max_size() {
     test_section!("Acquiring up to max");
 
     // Acquire 3 resources (should succeed)
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let r1 = futures_lite::future::block_on(pool.acquire(&cx));
     let r2 = futures_lite::future::block_on(pool.acquire(&cx));
     let r3 = futures_lite::future::block_on(pool.acquire(&cx));
@@ -368,7 +368,7 @@ fn pool_stats_track_acquisitions() {
 
     test_section!("Multiple acquisitions");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let r1 = futures_lite::future::block_on(pool.acquire(&cx));
     let r2 = futures_lite::future::block_on(pool.acquire(&cx));
     let r3 = futures_lite::future::block_on(pool.acquire(&cx));
@@ -449,7 +449,7 @@ fn pool_close_rejects_new_acquisitions() {
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(3));
 
     // Acquire a resource before close
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let r1 = futures_lite::future::block_on(pool.acquire(&cx));
     assert!(r1.is_ok(), "Should acquire before close");
 
@@ -488,7 +488,7 @@ fn pool_concurrent_access_is_safe() {
     // Pre-populate the pool with resources using acquire()
     test_section!("Pre-populating pool with resources");
     {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let mut resources = Vec::new();
         for _ in 0..10 {
             let r = futures_lite::future::block_on(pool.acquire(&cx))
@@ -604,7 +604,7 @@ fn e2e_pool_under_load() {
     // Pre-populate the pool with resources using acquire()
     test_section!("Pre-populating pool");
     {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let mut resources = Vec::new();
         for _ in 0..5 {
             let r = futures_lite::future::block_on(pool.acquire(&cx))
@@ -768,7 +768,7 @@ fn pool_cancel_while_holding_resource_returns_via_drop() {
     let pool_clone: Arc<TestPool> = Arc::clone(&pool);
     let handle = std::thread::spawn(move || {
         let resource = {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             futures_lite::future::block_on(pool_clone.acquire(&cx)).expect("acquire")
         };
         tracing::info!(id = %resource.id(), "Task holding resource before cancel");
@@ -827,7 +827,7 @@ fn pool_min_size_configuration_respected() {
 
     // Pre-populate the pool to min_size by acquiring and returning
     test_section!("Pre-populate to min_size");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let mut resources = Vec::new();
     for _ in 0..3 {
         let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire for min_size");

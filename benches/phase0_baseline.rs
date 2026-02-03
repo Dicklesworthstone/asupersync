@@ -425,7 +425,7 @@ fn bench_raptorq_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq/pipeline");
 
     let sizes = [64_usize * 1024, 256 * 1024, 1024 * 1024];
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     for &size in &sizes {
         group.throughput(Throughput::Bytes(size as u64));

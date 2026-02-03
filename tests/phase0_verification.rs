@@ -201,7 +201,7 @@ fn e2e_deadline_monotone_oracle() {
 fn e2e_two_phase_channel_abort_releases_capacity() {
     init_test("e2e_two_phase_channel_abort_releases_capacity");
     let (tx, rx) = mpsc::channel::<u32>(1);
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     // Reserve a slot and drop the permit (cancel/abort), then send again.
     let value = future::block_on(async {
@@ -281,7 +281,7 @@ fn e2e_finalizer_lifo_async_masked_execution() {
     let region = state.create_root_region(Budget::INFINITE);
     let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     cx.set_cancel_reason(CancelReason::timeout());
     let unmasked = cx.checkpoint().is_err();
     assert_with_log!(unmasked, "cancel observed when unmasked", true, unmasked);
@@ -1176,7 +1176,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         violations
     );
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     root_handle
         .try_join()
         .unwrap_or_else(|| futures_lite::future::block_on(async { root_handle.join(&cx).await }))
@@ -1222,7 +1222,7 @@ fn build_node(
                 })
                 .collect::<Vec<_>>();
             let future = async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let mut merged = BTreeSet::new();
                 for handle in child_handles {
                     let child_set = handle.join(&cx).await.expect("join child");
@@ -1250,7 +1250,7 @@ fn build_node(
             });
             let winners = Arc::clone(winners);
             let future = async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let (winner_result, winner_idx) = race_first(&child_handles).await;
                 if let Some(winner_task) = child_handles.get(winner_idx).map(SharedHandle::task_id)
                 {
@@ -1273,7 +1273,7 @@ fn build_node(
                 plan, runtime, region, handles, oracle, races, winners, child,
             );
             let future = async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 child_handle.join(&cx).await.expect("timeout child")
             };
             spawn_node(runtime, region, future)

@@ -416,7 +416,7 @@ fn test_receiver_stream_basic() {
     init_test("test_receiver_stream_basic");
     tracing::info!("Testing ReceiverStream with mpsc channel");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let (tx, rx) = mpsc::channel(10);
     let stream = ReceiverStream::new(cx, rx);
 
@@ -442,7 +442,7 @@ fn test_watch_stream_updates() {
     init_test("test_watch_stream_updates");
     tracing::info!("Testing WatchStream receives updates");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let (tx, rx) = watch::channel(0);
     let mut stream = WatchStream::new(cx, rx);
 
@@ -480,7 +480,7 @@ fn test_broadcast_stream_multiple_items() {
     init_test("test_broadcast_stream_multiple_items");
     tracing::info!("Testing BroadcastStream with multiple items");
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let (tx, rx) = broadcast::channel(10);
     let mut stream = BroadcastStream::new(cx.clone(), rx);
 

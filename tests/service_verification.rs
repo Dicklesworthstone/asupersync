@@ -274,7 +274,7 @@ fn svc_verify_003_asupersync_service() {
     }
 
     let svc = DoubleService;
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let result = futures_lite::future::block_on(svc.call(&cx, 21));
     assert_eq!(result.unwrap(), 42);
 
@@ -987,7 +987,7 @@ mod tower_adapter_tests {
         let mut adapter = AddOneService.into_tower();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let request_cx = Cx::for_testing();
+        let request_cx: Cx = Cx::for_testing();
 
         let future = adapter.call((request_cx, 41));
         let mut pinned = Box::pin(future);
@@ -1024,7 +1024,7 @@ mod tower_adapter_tests {
     fn tower_adapter_with_provider_uses_current_cx() {
         init_test("tower_adapter_with_provider_uses_current_cx");
 
-        let request_cx = Cx::for_testing();
+        let request_cx: Cx = Cx::for_testing();
         let _guard = Cx::set_current(Some(request_cx));
 
         let mut adapter = AddOneService.into_tower_with_provider();
@@ -1090,7 +1090,7 @@ mod tower_adapter_tests {
     fn tower_adapter_overloaded_on_low_budget() {
         init_test("tower_adapter_overloaded_on_low_budget");
 
-        let cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+        let cx: Cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
         let adapter = AsupersyncAdapter::new(TowerAddOne);
 
         run_test_with_cx(|_| async move {
@@ -1190,7 +1190,7 @@ mod tower_adapter_tests {
     fn tower_adapter_e2e_middleware_stack() {
         init_test("tower_adapter_e2e_middleware_stack");
 
-        let request_cx = Cx::for_testing();
+        let request_cx: Cx = Cx::for_testing();
         let _guard = Cx::set_current(Some(request_cx));
 
         let service = AddOneService.into_tower_with_provider();

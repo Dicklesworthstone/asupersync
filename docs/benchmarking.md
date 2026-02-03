@@ -101,6 +101,55 @@ After an intentional behavioral change:
 4. Update with recorded values
 5. Document why behavior changed in the commit message
 
+## Isomorphism Proof Template (required for perf changes)
+
+Any performance-focused change must include a **proof-of-equivalence** block.
+This is the policy gate to ensure speedups do not silently change semantics.
+
+Where to include it:
+- PR description (preferred), or
+- an appended section in the relevant benchmark PR notes
+
+### Template
+
+```
+Isomorphism Proof (required)
+
+Change summary:
+- What changed and why it should be behavior-preserving.
+
+Semantic invariants (check all):
+- [ ] Outcomes unchanged (Ok/Err/Cancelled/Panicked)
+- [ ] Cancellation protocol unchanged (request -> drain -> finalize)
+- [ ] No task leaks / obligation leaks
+- [ ] Losers drained after races
+- [ ] Region close implies quiescence
+
+Determinism + ordering:
+- RNG: seed source unchanged / updated (explain)
+- Tie-breaks: unchanged / updated (explain)
+- Floating point: ordering + rounding unchanged / updated (explain)
+- Iteration order: deterministic and stable
+
+Trace equivalence:
+- Trace equivalence class unchanged or justified (describe)
+- Schedule certificate consistency checked (if applicable)
+
+Golden outputs:
+- `cargo test --test golden_outputs` run? [yes/no]
+- Any checksum changes? [no / yes -> list + rationale]
+
+Perf evidence:
+- Benchmarks run (commands + baseline)
+- p50/p95/p99 deltas (attach numbers)
+```
+
+### Policy
+
+- A perf PR without this template is considered incomplete.
+- If golden outputs change, the PR must explain why behavior changed and why it is acceptable.
+- If determinism-related behavior changes (RNG, ordering, tie-breaks), the PR must document it explicitly.
+
 ## Baseline Capture
 
 ```bash
@@ -113,6 +162,9 @@ After an intentional behavioral change:
 
 Reads `target/criterion/*/new/estimates.json` and produces a single JSON with `{name, mean_ns, median_ns, std_dev_ns}` per benchmark. Baselines are saved as `baselines/baseline_<timestamp>.json` and `baselines/baseline_latest.json`.
 
+The baseline JSON also includes `p95_ns` and `p99_ns`, computed from `sample.json`
+as per-iteration latencies.
+
 ## CI Integration
 
 Recommended CI workflow:
@@ -124,6 +176,18 @@ Recommended CI workflow:
 ```
 
 The conformance bench runner (`conformance/src/bench/`) also supports regression checking with configurable thresholds (default: 10% mean, 15% p95, 25% p99, 10% allocation count).
+
+### Regression Gates (benchmarks)
+
+CI should compare the current benchmark run against `baselines/baseline_latest.json` and fail on
+threshold regressions:
+
+- mean: 1.10x
+- p95: 1.15x
+- p99: 1.25x
+
+This is enforced in `.github/workflows/benchmarks.yml` using the baseline JSON produced by
+`scripts/capture_baseline.sh`.
 
 ## Measurement Methodology
 

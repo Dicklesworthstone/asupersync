@@ -16,7 +16,7 @@ fn ws_conformance_handshake_accepts_rfc_key_and_negotiates_protocol() {
         let (mut client, server) = VirtualTcpStream::pair(client_addr, server_addr);
 
         let acceptor = WebSocketAcceptor::new().protocol("chat");
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         // RFC 6455 sample key.
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -73,7 +73,7 @@ fn ws_conformance_handshake_rejects_invalid_key() {
         let (_client, server) = VirtualTcpStream::pair(client_addr, server_addr);
 
         let acceptor = WebSocketAcceptor::new();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         // Not base64(16 bytes).
         let bad_key = "not-a-valid-key";

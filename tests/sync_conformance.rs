@@ -38,7 +38,7 @@ fn init_test(test_name: &str) {
 #[test]
 fn sync_001_mutex_basic_lock_unlock() {
     init_test("sync_001_mutex_basic_lock_unlock");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let mutex = Mutex::new(42);
 
     // Lock the mutex
@@ -123,7 +123,7 @@ fn sync_002_mutex_contention_correctness() {
         .map(|_| {
             let mutex = Arc::clone(&mutex);
             thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 for _ in 0..iterations {
                     let mut guard = block_on(mutex.lock(&cx)).expect("lock should succeed");
                     *guard += 1;
@@ -136,7 +136,7 @@ fn sync_002_mutex_contention_correctness() {
         handle.join().expect("thread should complete");
     }
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let final_value = *block_on(mutex.lock(&cx)).expect("final lock should succeed");
     let expected = i64::from(num_threads * iterations);
     assert_with_log!(
@@ -156,7 +156,7 @@ fn sync_002b_mutex_cancellation() {
     init_test("sync_002b_mutex_cancellation");
 
     let mutex = Arc::new(Mutex::new(0));
-    let cx_main = Cx::for_testing();
+    let cx_main: Cx = Cx::for_testing();
 
     // Hold the lock
     let _guard = block_on(mutex.lock(&cx_main)).expect("lock should succeed");
@@ -164,7 +164,7 @@ fn sync_002b_mutex_cancellation() {
     // Spawn a thread that will try to lock with a cancelled context
     let mutex_clone = Arc::clone(&mutex);
     let handle = thread::spawn(move || {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
         // Return whether the lock was cancelled (don't return the guard)
         matches!(block_on(mutex_clone.lock(&cx)), Err(LockError::Cancelled))
@@ -190,7 +190,7 @@ fn sync_002b_mutex_cancellation() {
 #[test]
 fn sync_003_rwlock_reader_writer_priority() {
     init_test("sync_003_rwlock_reader_writer_priority");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let rwlock = RwLock::new(42);
 
     // Multiple readers can hold the lock simultaneously (same thread)
@@ -247,7 +247,7 @@ fn sync_003_rwlock_reader_writer_priority() {
             let rwlock = Arc::clone(&rwlock);
             let active_readers = Arc::clone(&active_readers);
             thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let _guard = rwlock.read(&cx).expect("read should succeed");
                 active_readers.fetch_add(1, Ordering::SeqCst);
                 // Spin until all readers have acquired the lock
@@ -279,7 +279,7 @@ fn sync_003_rwlock_reader_writer_priority() {
         .map(|_| {
             let rwlock = Arc::clone(&rwlock);
             thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 for _ in 0..iterations {
                     let mut guard = rwlock.write(&cx).expect("write should succeed");
                     *guard += 1;
@@ -327,7 +327,7 @@ fn sync_004_barrier_synchronization() {
             let after_barrier = Arc::clone(&after_barrier);
             let leader_count = Arc::clone(&leader_count);
             thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 arrived.fetch_add(1, Ordering::SeqCst);
                 let result = barrier.wait(&cx).expect("barrier wait should succeed");
                 if result.is_leader() {
@@ -375,7 +375,7 @@ fn sync_004_barrier_synchronization() {
             let barrier = Arc::clone(&barrier);
             let round2_count = Arc::clone(&round2_count);
             thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 barrier.wait(&cx).expect("round 2 wait should succeed");
                 round2_count.fetch_add(1, Ordering::SeqCst);
             })
@@ -404,7 +404,7 @@ fn sync_004_barrier_synchronization() {
 #[test]
 fn sync_005_semaphore_permit_limiting() {
     init_test("sync_005_semaphore_permit_limiting");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sem = Semaphore::new(3);
 
     assert_with_log!(
@@ -497,7 +497,7 @@ fn sync_005b_semaphore_concurrent_access() {
             let max_concurrent = Arc::clone(&max_concurrent);
             let current = Arc::clone(&current);
             thread::spawn(move || {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let _permit = block_on(sem.acquire(&cx, 1)).expect("acquire should succeed");
 
                 // Track concurrent access

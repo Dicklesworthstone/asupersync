@@ -17,7 +17,7 @@ fn ws_cancel_client_send_when_cancelled_initiates_close_and_errors() {
         let (mut client_io, server_io) = VirtualTcpStream::pair(client_addr, server_addr);
 
         let acceptor = WebSocketAcceptor::new();
-        let server_cx = Cx::for_testing();
+        let server_cx: Cx = Cx::for_testing();
 
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
         let req = ws_handshake_request_bytes("/", "127.0.0.1:40402", key, None);
@@ -30,7 +30,7 @@ fn ws_cancel_client_send_when_cancelled_initiates_close_and_errors() {
         let mut client_ws = WebSocket::from_upgraded(client_io, WebSocketConfig::default());
 
         // Cancel client side before attempting to send.
-        let client_cx = Cx::for_testing();
+        let client_cx: Cx = Cx::for_testing();
         client_cx.cancel_fast(CancelKind::User);
 
         let err = client_ws

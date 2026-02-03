@@ -14,7 +14,7 @@ fn ws_cancel_server_accept_when_cancelled_returns_cancelled() {
         let (_client_io, server_io) = VirtualTcpStream::pair(client_addr, server_addr);
 
         let acceptor = WebSocketAcceptor::new();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         let key = "dGhlIHNhbXBsZSBub25jZQ==";

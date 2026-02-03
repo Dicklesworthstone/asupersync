@@ -18,7 +18,7 @@ fn test_race_empty_is_never() {
     test_phase!("test_race_empty_is_never");
 
     run_test(|| async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         // An empty race should be "never" (pending forever).
         let futures: Vec<Pin<Box<dyn Future<Output = i32> + Send>>> = vec![];
@@ -42,7 +42,7 @@ fn test_race_identity_law_violation() {
     test_phase!("test_race_identity_law_violation");
 
     run_test(|| async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         // Law: race(a, never) ≃ a
         // If race([]) is never, then race(async { 42 }, race([])) should be 42.

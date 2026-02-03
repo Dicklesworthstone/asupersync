@@ -160,6 +160,111 @@ RaptorQSender / RaptorQReceiver
             -> SymbolSink / SymbolStream (transport)
 ```
 
+### RaptorQ RFC-6330-grade scope + determinism contract (spec)
+
+This section is the internal spec for the RaptorQ pipeline. It replaces the
+current Phase 0 LT/XOR shortcut and defines what "RFC-6330-grade" means for
+Asupersync. Implementations should not require constant re-reading of external
+standards; where we diverge, we must document it explicitly.
+
+Scope (non-negotiable in full mode):
+- Systematic transmission (source symbols first).
+- Robust soliton LT layer for repair symbols.
+- Deterministic precode (LDPC/HDPC-style constraints or equivalent).
+- Deterministic inactivation decoding (peeling + sparse elimination).
+- Proof-carrying decode trace artifact (bounded, deterministic).
+
+Divergence ledger (explicit design decisions):
+- Determinism is stricter than RFC 6330: all randomness is derived from explicit
+  seeds and stable hashing; no ambient RNG or wall-clock.
+- Proof artifact emission is required (additional constraint, not in RFC 6330).
+- Phase 0 may allow XOR-only test mode, but full mode must use GF(256).
+
+#### Determinism contract
+
+Given:
+- input bytes
+- `ObjectId`
+- `EncodingConfig` / `DecodingConfig`
+- explicit seed(s) and policy knobs
+
+Then the following are deterministic and reproducible:
+- emitted `SymbolId` and symbol bytes
+- degree selection and neighbor sets for repair symbols
+- decoding decisions (pivot selection, inactivation set, row-op order)
+- proof artifact bytes and final outcome
+
+No ambient randomness and no time-based choices.
+
+#### Seed derivation (canonical)
+
+All pseudo-random decisions are derived from a stable hash of:
+
+```
+seed = H(config_hash || object_id || sbn || esi || purpose_tag)
+```
+
+Where:
+- `config_hash` is a stable hash of the encoding/decoding config
+- `object_id`, `sbn`, `esi` are from `SymbolId`
+- `purpose_tag` distinguishes degree selection vs neighbor selection vs pivoting
+
+`H` is a fixed, documented hash function; changing it is a protocol-breaking change.
+
+#### Encoder contract (per source block)
+
+1. Segmentation + padding
+   - Split bytes into `symbol_size` chunks.
+   - Pad deterministically (zero pad + pad length recorded in `ObjectParams`).
+   - Partition into source blocks with deterministic `K` per block.
+
+2. Precode / intermediate symbols
+   - Map `K` source symbols to `N >= K` intermediate symbols.
+   - Precode structure is sparse, stable, and deterministic.
+   - Precode parameters are explicit in config and recorded in proof metadata.
+
+3. Systematic emission
+   - Emit source symbols first (`ESI < K`), in deterministic order.
+
+4. Repair symbol generation
+   - Choose degree `d` via robust soliton distribution (configurable `c`, `delta`).
+   - Select `d` neighbors deterministically using the derived seed.
+   - Compute repair symbol as a linear combination over GF(256) (full mode).
+
+Neighbor selection and equation construction must be reproducible given
+`(object_id, sbn, esi, config_hash, seed)`.
+
+#### Decoder contract (per source block)
+
+1. Ingest
+   - Track received symbols and IDs.
+   - Reject duplicates deterministically with a precise `RejectReason`.
+
+2. Peeling / belief propagation
+   - Repeatedly solve degree-1 equations and substitute into others.
+   - Deterministic processing order for the degree-1 queue.
+
+3. Inactivation decoding
+   - When peeling stalls, pick an inactivation set deterministically.
+   - Perform deterministic elimination (stable row order + stable pivot choice).
+
+4. Completion
+   - Recover intermediate symbols, then source symbols.
+   - Reassemble bytes and validate padding rule.
+
+#### Proof-carrying decode trace artifact
+
+For each decoded block, emit a compact artifact that allows offline verification:
+- config hash + seeds + block sizing metadata
+- equation inventory: symbol IDs + neighbor sets used
+- elimination trace: pivots, inactivation choices, row ops (bounded)
+- final outcome: success or `RejectReason`
+
+The artifact must be:
+- deterministic
+- bounded in size (explicit caps)
+- sufficient to reproduce decoder state transitions and explain failures
+
 ### Formal Semantics (v4.0.0)
 
 The canonical small-step semantics live in `docs/asupersync_v4_formal_semantics.md`
@@ -313,6 +418,51 @@ cx.trace("request_done");
 
 Use `Cx::trace` for deterministic lab traces and runtime logs. Avoid direct
 stdout/stderr printing in core logic.
+
+### Evidence Ledger (Galaxy-Brain Mode)
+
+For explainability, the runtime can emit an **evidence ledger**: a compact,
+deterministic record of *why* a cancellation/race/scheduler decision occurred.
+This is trace-backed and safe for audit/debugging.
+
+Conceptual schema (stable, deterministic):
+
+```
+EvidenceEntry = {
+  decision_id: u64,
+  kind: "cancel" | "race" | "scheduler",
+  context: {
+    task_id: TaskId,
+    region_id: RegionId,
+    lane: DispatchLane
+  },
+  candidates: [Candidate],
+  constraints: [Constraint],
+  chosen: CandidateId,
+  rationale: [Reason],
+  witnesses: [TraceEventId]
+}
+
+Candidate = {
+  id: CandidateId,
+  score: i64,
+  delta_v: i64,
+  invariants: [InvariantCheck]
+}
+```
+
+Renderer guidelines:
+- One-line summary (decision + top reason).
+- Optional expanded view: candidate table + constraint violations.
+- Deterministic ordering of fields and candidates.
+
+Runtime hooks (non-exhaustive):
+- Cancellation: record why a task was cancelled vs drained.
+- Race: record winner selection and loser-drain reasoning.
+- Scheduler: record why task X was chosen over task Y (lane + score).
+
+This ledger should be bounded in size and emitted via tracing/trace events,
+never stdout/stderr.
 
 ### 5) Distributed Regions (conceptual)
 

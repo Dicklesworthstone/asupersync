@@ -54,7 +54,7 @@ fn ws_conformance_ping_triggers_pong_and_is_not_exposed_as_message() {
         let server_addr: SocketAddr = "127.0.0.1:40302".parse().unwrap();
         let (client_io, mut server_io) = VirtualTcpStream::pair(client_addr, server_addr);
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let mut client_ws = WebSocket::from_upgraded(client_io, WebSocketConfig::default());
 
         // Server (manually) writes a ping followed by a text message.

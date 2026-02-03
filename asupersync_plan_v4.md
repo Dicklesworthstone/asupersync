@@ -187,13 +187,43 @@ There is an even deeper view (useful later, not required day‑1): the space of 
 * cancellation points (to identify truncated regions)
 * schedule prefix lengths (for filtration)
 
-**Heuristic sketch:**
+**Concrete proxy + filtration + scoring (spec):**
 
-1. Build a directed cubical complex from the event structure: a k-cell exists when k independent actions commute.
-2. Define a filtration by schedule prefix (or by "commutation depth" / context switch budget).
-3. Compute persistent homology (start with H1) on this filtration.
-4. Rank schedules by **novelty** (new homology classes) and **persistence** (long-lived classes).
-5. Prefer schedules that increase persistence score or reveal a new class.
+**Proxy complex (local commutation square complex):**
+
+- 0-cells are events in the prefix, indexed by sequence number.
+- 1-cells are dependency edges from the trace poset (event structure) restricted to the prefix.
+- 2-cells are commuting diamonds: `a→b`, `a→c`, `b→d`, `c→d` with `b < c` and `a < b,c < d`.
+- This is the same local commutation proxy used by `src/trace/boundary.rs`.
+
+**Filtration (exact):**
+
+- Parameter `t` is prefix length (`t = 1..n`).
+- `K_t` is the square complex built from the trace poset restricted to the first `t` events.
+- Monotone: `K_t ⊆ K_{t+1}` by construction (we only add events/edges/squares as `t` grows).
+
+**Scoring (exact):**
+
+- Compute H1 persistence pairs over GF(2) for the filtered complexes `K_1..K_n`.
+- Let each pair be `(birth, death)` with `death = n+1` if unpaired.
+- Define `persistence = death - birth`.
+- Score is a deterministic lexicographic tuple:
+- `(long_lived, total_persistence, beta1_final, -n, fingerprint)`
+- Rank by lexicographic descending order (higher is better).
+- `long_lived` = count of pairs with `persistence ≥ P_min` (default `P_min = 3`).
+- `total_persistence` = sum of `persistence` for all pairs.
+- `beta1_final` = H1 Betti number of `K_n`.
+- `fingerprint` = trace fingerprint (Foata/trace hash) as stable tie-break.
+
+**Performance bounds + fallback:**
+
+- Proxy size: `|V| = O(n)`, `|E| = O(n·d)`, `|S| = O(n²·d)` where `d` is max out-degree.
+- Persistence reduction is cubic in matrix size; cap by fixed limits:
+- `MAX_VERTICES = 512`, `MAX_EDGES = 20_000`, `MAX_SQUARES = 200_000`, `MAX_MATRIX_BYTES = 64 MiB`.
+- If any cap is exceeded, skip persistence and use fallback score:
+- `fallback_score = (beta1_final, indep_density, -n, fingerprint)`
+- Rank fallback score lexicographically descending.
+- `indep_density = (# independent pairs in prefix) / (t·(t-1)/2)` from the trace poset.
 
 **Toy example (classic deadlock shape):**
 
@@ -657,6 +687,33 @@ Then require the governor/scheduler to choose steps that (in expectation or unde
 Under standard assumptions (cooperative checkpoints, bounded masking, fairness), LaSalle‑style arguments give: **cancellation converges to quiescence** rather than "we hope it drains."
 
 *Implementation note:* The intuition here is sufficient for design; formal `V(Σ)` transition rules can be added to the operational semantics when the scheduler is actually built and needs verification.
+
+#### Policy seam + determinism rules
+
+The governor must plug into the scheduler through a **narrow policy seam** so the
+core scheduler remains correct-by-construction. The policy can *influence*, not
+override, the schedule.
+
+Allowed influence surface (explicit):
+* deterministic tie-breaking among runnable tasks **within the same lane**,
+* selection among multiple ready queues when semantics permit,
+* optional bounded promotion (e.g., run cancel-debt tasks earlier) **only if** cancel-lane strictness is preserved.
+
+Hard invariants (non-negotiable):
+* **Cancel lane strictness** unless a formal proof allows relaxation.
+* **Determinism**: no wall-clock, no ambient RNG, stable iteration order.
+* **Bounded fairness**: a runnable task cannot be starved indefinitely.
+* **No semantic changes**: only reordering of runnable work, never skipping required protocol steps.
+
+Policy interface (conceptual):
+* Input: immutable `RuntimeSnapshot` (no hot-path allocs).
+* Output: a **deterministic** ranking or choice among eligible tasks.
+* Tie-break rule is fixed and stable (e.g., by TaskId then insertion order).
+
+Evidence ledger (debug-only, trace-backed):
+* record `V` decomposition for each decision,
+* record candidate comparisons (why X beat Y),
+* record policy constraints that forced suboptimal choices.
 
 ### 11.6 DAG builder + lawful rewrites (optional)
 

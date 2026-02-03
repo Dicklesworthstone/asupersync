@@ -15,7 +15,7 @@ fn repro_mpsc_cancel_returns_disconnected() {
     test_phase!("repro_mpsc_cancel_returns_disconnected");
     test_section!("setup");
     let (tx, _rx) = mpsc::channel::<i32>(1);
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     // Fill channel
     block_on(async {

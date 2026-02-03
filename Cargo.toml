@@ -107,7 +107,7 @@ webpki-roots = { version = "0.26", optional = true }
 # PEM file parsing for TLS certificates
 rustls-pemfile = { version = "2.2", optional = true }
 # Base64 encoding for WebSocket handshake and certificate pins
-base64 = "0.22"
+base64 = "0.22.1"
 # SHA-1 hashing for WebSocket Sec-WebSocket-Accept calculation (RFC 6455)
 sha1 = "0.10"
 # X.509 certificate parsing for SPKI extraction
@@ -128,7 +128,7 @@ h3-quinn = { version = "0.0.10", optional = true }
 # External HTTP types for HTTP/3 integration
 http = { version = "1.1", optional = true }
 # External bytes crate for HTTP/3 integration
-bytes = { version = "1.7", optional = true }
+bytes = { version = "1.11", optional = true }
 # Kafka client integration via rdkafka (optional, requires librdkafka on the system).
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
@@ -178,6 +178,10 @@ harness = false
 
 [[bench]]
 name = "scheduler_benchmark"
+harness = false
+
+[[bench]]
+name = "cancel_trace_bench"
 harness = false
 
 [lints.rust]

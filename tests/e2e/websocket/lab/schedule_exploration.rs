@@ -21,7 +21,7 @@ fn run_smoke(seed: u64) {
     let (server_task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let mut ws = acceptor.accept(&cx, &req, server_io).await.expect("accept");
             if let Some(Message::Text(t)) = ws.recv(&cx).await.expect("recv") {
                 ws.send(&cx, Message::text(t)).await.expect("send");
@@ -37,7 +37,7 @@ fn run_smoke(seed: u64) {
     let (client_task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let _ = read_http_headers(&mut client_io).await.expect("read 101");
             let mut ws = WebSocket::from_upgraded(client_io, WebSocketConfig::default());
             ws.send(&cx, Message::text("hello")).await.expect("send");

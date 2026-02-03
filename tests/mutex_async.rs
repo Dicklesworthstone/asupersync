@@ -59,7 +59,7 @@ fn test_mutex_contention_async() {
         .state
         .create_task(region, Budget::INFINITE, async move {
             // Now using await!
-            let cx = asupersync::Cx::for_testing();
+            let cx: asupersync::Cx = asupersync::Cx::for_testing();
             let _guard = m1.lock(&cx).await.unwrap();
             // Hold lock and yield
             yield_now().await;
@@ -76,7 +76,7 @@ fn test_mutex_contention_async() {
         .state
         .create_task(region, Budget::INFINITE, async move {
             // This should await (yield) if locked, not block the thread
-            let cx = asupersync::Cx::for_testing();
+            let cx: asupersync::Cx = asupersync::Cx::for_testing();
             let _guard = m2.lock(&cx).await.unwrap();
             f2.store(true, Ordering::SeqCst);
         })

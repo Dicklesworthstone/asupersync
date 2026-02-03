@@ -157,6 +157,66 @@ jobs:
           path: target/criterion/
           retention-days: 30
 
+  proof-checks:
+    name: Formal Proof Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-proofs-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Certificate verification tests
+        run: cargo test --lib plan::certificate --all-features -- --nocapture
+
+      - name: Obligation formal checks (dialectica, graded, marking, guarded)
+        run: cargo test --lib obligation --all-features -- --nocapture
+
+      - name: Lab oracle invariant checks
+        run: cargo test --lib lab::oracle --all-features -- --nocapture
+
+      - name: Cancellation protocol formalization tests
+        run: cargo test --lib types::cancel --all-features -- --nocapture
+
+      - name: Combinator algebraic law tests
+        run: cargo test --lib combinator::laws --all-features -- --nocapture
+
+      - name: DPOR exploration tests
+        run: cargo test --test dpor_exploration --all-features -- --nocapture
+        continue-on-error: true
+
+      - name: TLA+ export smoke test
+        run: cargo test --lib trace::tla_export --all-features -- --nocapture
+
+      - name: Trace canonicalization tests
+        run: cargo test --lib trace::canonicalize --all-features -- --nocapture
+
+      - name: Generate proof artifacts report
+        if: always()
+        run: |
+          mkdir -p proof-artifacts
+          echo '{"ci_run": "${{ github.run_id }}", "commit": "${{ github.sha }}"}' > proof-artifacts/metadata.json
+          cargo test --lib plan::certificate --all-features -- --format json 2>&1 | tee proof-artifacts/certificate-tests.json || true
+          cargo test --lib obligation --all-features -- --format json 2>&1 | tee proof-artifacts/obligation-tests.json || true
+          cargo test --lib lab::oracle --all-features -- --format json 2>&1 | tee proof-artifacts/oracle-tests.json || true
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-artifacts
+          path: proof-artifacts/
+          retention-days: 90
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

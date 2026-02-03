@@ -22,7 +22,7 @@ fn ws_integration_echo_server_roundtrip() {
 
     let server_thread = thread::spawn(move || {
         futures_lite::future::block_on(async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let acceptor = WebSocketAcceptor::new();
 
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -46,7 +46,7 @@ fn ws_integration_echo_server_roundtrip() {
     let addr = addr_rx.recv().expect("addr from server");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let url = format!("ws://{}:{}/", addr.ip(), addr.port());
 
         let mut ws = WebSocket::connect(&cx, &url).await.expect("connect");

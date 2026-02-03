@@ -35,7 +35,7 @@ fn redis_e2e_get_set_incr_and_pipeline() {
     };
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
 
         let key = "asupersync:e2e:redis:key";

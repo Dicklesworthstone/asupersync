@@ -1,5 +1,58 @@
 # Dependency Upgrade Log
 
+## 2026-02-03 (in progress)
+
+**Project:** asupersync  
+**Language:** Rust  
+**Manifest:** `Cargo.toml`
+
+### Summary
+
+| Metric | Count |
+|--------|-------|
+| **Total dependencies** | 48 |
+| **Updated** | 1 |
+| **Skipped** | 0 |
+| **Failed (rolled back)** | 0 |
+| **Requires attention** | 1 |
+
+### Successfully Updated
+
+#### base64: 0.22 → 0.22.1
+
+**Changelog:** https://docs.rs/crate/base64/latest
+
+**Breaking changes:** None (patch update)
+
+**Tests:** Failed due to pre-existing compile errors in `src/lab/replay.rs`
+```
+error[E0308]: arguments to this function are incorrect
+   --> src/lab/replay.rs:263:19
+    |
+263 |         let div = find_divergence(&a, &b);
+    |                   ^^^^^^^^^^^^^^^ --  -- expected `&TraceBufferHandle`, found `&TraceBuffer`
+```
+
+### Requires Attention
+
+#### bincode: 1.3.3 → 2.0.1 (latest usable) / 3.0.0 (tombstone)
+
+**Breaking changes (2.0 migration):**
+- `Options` trait replaced by mandatory `Configuration` struct; calls must use `config::legacy()` or `config::standard()` and updated encode/decode APIs. citeturn0search2
+- Several config methods renamed or removed (e.g., `with_varint_encoding` → `with_variable_int_encoding`, `with_native_endian` removed). citeturn0search2
+
+**Maintenance status:**
+- RustSec notes bincode is unmaintained and considers 1.3.3 “complete.” citeturn0search1
+- A 3.0.0 release exists on crates.io but is a tombstone that intentionally fails to compile (docs.rs build failure). citeturn0search8
+
+**Impact:** Migrating to 2.0.1 is a major API change and likely >10 file refactor. Needs explicit user approval before proceeding.
+
+### Notes
+- Proceeding with upgrades despite existing build failures (per user instruction).
+- Per-dependency tests will be run and logged; failures attributed to pre-existing errors when applicable.
+
+---
+
 **Date:** 2026-01-18 (updated)
 **Project:** asupersync
 **Language:** Rust

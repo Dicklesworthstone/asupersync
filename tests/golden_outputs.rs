@@ -19,8 +19,11 @@ mod common;
 
 use asupersync::combinator::join2_outcomes;
 use asupersync::combinator::race::{race2_outcomes, RaceWinner};
+use asupersync::lab::oracle::OracleViolation;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::RuntimeState;
+use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
+use asupersync::trace::TraceEvent;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, Severity, Time};
 use asupersync::util::Arena;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -36,6 +39,73 @@ fn checksum(values: &[u64]) -> u64 {
         v.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn oracle_violation_tag(violation: &OracleViolation) -> &'static str {
+    match violation {
+        OracleViolation::TaskLeak(_) => "TaskLeak",
+        OracleViolation::ObligationLeak(_) => "ObligationLeak",
+        OracleViolation::Quiescence(_) => "Quiescence",
+        OracleViolation::LoserDrain(_) => "LoserDrain",
+        OracleViolation::Finalizer(_) => "Finalizer",
+        OracleViolation::RegionTree(_) => "RegionTree",
+        OracleViolation::AmbientAuthority(_) => "AmbientAuthority",
+        OracleViolation::DeadlineMonotone(_) => "DeadlineMonotone",
+        OracleViolation::CancellationProtocol(_) => "CancellationProtocol",
+        OracleViolation::ActorLeak(_) => "ActorLeak",
+        OracleViolation::Supervision(_) => "Supervision",
+        OracleViolation::Mailbox(_) => "Mailbox",
+    }
+}
+
+fn assert_golden_trace_fixture(name: &str, actual: &GoldenTraceFixture, expected_json: &str) {
+    let expected: GoldenTraceFixture = serde_json::from_str(expected_json)
+        .unwrap_or_else(|e| panic!("invalid golden fixture JSON for {name}: {e}"));
+
+    if let Err(diff) = expected.verify(actual) {
+        eprintln!("GOLDEN TRACE MISMATCH: {name}");
+        eprintln!("{diff}");
+        let actual_json =
+            serde_json::to_string_pretty(actual).expect("serialize actual golden fixture");
+        eprintln!("--- Actual fixture JSON (update expected) ---\n{actual_json}");
+        panic!("Golden trace fixture mismatch for {name}");
+    }
+}
+
+fn build_golden_trace_fixture(seed: u64) -> GoldenTraceFixture {
+    let config = LabConfig::new(seed)
+        .worker_count(2)
+        .trace_capacity(2048)
+        .max_steps(5000);
+    let mut runtime = LabRuntime::new(config.clone());
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let (t1, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("t1");
+    let (t2, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("t2");
+    runtime.scheduler.lock().unwrap().schedule(t1, 0);
+    runtime.scheduler.lock().unwrap().schedule(t2, 0);
+    runtime.run_until_quiescent();
+
+    let events: Vec<TraceEvent> = runtime.trace().snapshot();
+    let violations = runtime.oracles.check_all(runtime.now());
+    let violation_tags = violations.iter().map(oracle_violation_tag);
+
+    let fixture_config = GoldenTraceConfig {
+        seed: config.seed,
+        entropy_seed: config.entropy_seed,
+        worker_count: config.worker_count,
+        trace_capacity: config.trace_capacity,
+        max_steps: config.max_steps,
+        canonical_prefix_layers: 4,
+        canonical_prefix_events: 16,
+    };
+
+    GoldenTraceFixture::from_events(fixture_config, &events, violation_tags)
 }
 
 /// First-run sentinel: when expected == 0, record and don't fail.
@@ -196,6 +266,84 @@ fn golden_lab_runtime_deterministic_scheduling() {
     assert_ne!(trace1, trace3, "Different seeds produced same trace");
 
     assert_golden("lab_runtime_deterministic", trace1, 0xE37F_54B1_1550_2E85);
+}
+
+const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
+  "schema_version": 1,
+  "config": {
+    "seed": 48879,
+    "entropy_seed": 48879,
+    "worker_count": 2,
+    "trace_capacity": 2048,
+    "max_steps": 5000,
+    "canonical_prefix_layers": 4,
+    "canonical_prefix_events": 16
+  },
+  "fingerprint": 13498101483502120188,
+  "event_count": 7,
+  "canonical_prefix": [
+    [
+      {
+        "kind": 10,
+        "primary": 0,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 29,
+        "primary": 1358076884962059318,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 29,
+        "primary": 1358076884962059318,
+        "secondary": 0,
+        "tertiary": 0
+      }
+    ],
+    [
+      {
+        "kind": 0,
+        "primary": 0,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 0,
+        "primary": 4294967296,
+        "secondary": 0,
+        "tertiary": 0
+      }
+    ],
+    [
+      {
+        "kind": 5,
+        "primary": 0,
+        "secondary": 0,
+        "tertiary": 0
+      },
+      {
+        "kind": 5,
+        "primary": 4294967296,
+        "secondary": 0,
+        "tertiary": 0
+      }
+    ]
+  ],
+  "oracle_summary": {
+    "violations": []
+  }
+}"#;
+
+#[test]
+fn golden_trace_fixture_lab() {
+    let fixture = build_golden_trace_fixture(0xBEEF);
+    assert_golden_trace_fixture(
+        "golden_trace_fixture_lab",
+        &fixture,
+        GOLDEN_TRACE_FIXTURE_LAB,
+    );
 }
 
 fn run_deterministic_workload(seed: u64) -> u64 {

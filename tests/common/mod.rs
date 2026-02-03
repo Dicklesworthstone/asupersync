@@ -167,7 +167,7 @@ where
     Fut: Future<Output = ()>,
 {
     init_test_logging();
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let runtime = RuntimeBuilder::current_thread()
         .build()
         .expect("failed to build test runtime");

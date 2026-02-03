@@ -258,6 +258,56 @@ match replayer.verify_event(&actual_event) {
 }
 ```
 
+### Divergence Diagnostics Protocol (spec)
+
+When a replay diverges, the diagnostics should pinpoint **where** and **why**
+with minimal noise. The engine should emit a structured report that includes:
+
+- First divergence index (event number).
+- Expected vs actual event (compact form, redacted payloads if large).
+- Schedule certificate prefix hash (determinism witness).
+- Trace equivalence fingerprint at the divergence point.
+- Minimal context window (last N events + next M expected events).
+- Involved task/region IDs and scheduler lane.
+
+#### Certificate-based divergence (recommended)
+
+The runtime already maintains a schedule certificate (hash of scheduling
+decisions). A replay should recompute this certificate and compare at every
+step. If the certificate diverges before the event stream diverges, report that
+earlier certificate mismatch to avoid chasing the wrong symptom.
+
+Conceptual report:
+
+```
+DivergenceReport = {
+  index: u64,
+  expected: EventSummary,
+  actual: EventSummary,
+  schedule_cert_expected: Hash,
+  schedule_cert_actual: Hash,
+  trace_fingerprint: Hash,
+  lane: DispatchLane,
+  task_id: TaskId,
+  region_id: RegionId,
+  context: [EventSummary; N]
+}
+```
+
+#### Minimal context payloads
+
+To keep diagnostics lightweight:
+- Event summaries include IDs, kinds, and hashes, but avoid large buffers.
+- Context window is capped (e.g., last 16 events).
+- Divergence payloads are deterministic and stable across replays.
+
+#### Replay workflow with diagnostics
+
+1. Recompute schedule certificate hash per step.
+2. Compare expected vs actual event, plus certificate hashes.
+3. On first mismatch, emit `DivergenceReport` and stop.
+4. If replay finishes but certificates differ, emit a certificate-only mismatch.
+
 ---
 
 ## Real-World Examples

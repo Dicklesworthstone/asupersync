@@ -7,7 +7,7 @@ fn main() {
     let deadline = Time::from_secs(1);
     let _ = (budget, deadline);
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let _ = cx.is_cancel_requested();
 
     let outcome: Outcome<(), &'static str> = Outcome::ok(());

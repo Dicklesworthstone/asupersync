@@ -42,7 +42,7 @@ fn redis_e2e_ping_returns_pong() {
     };
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let resp = client.cmd(&cx, &["PING"]).await.expect("PING");
         assert_with_log!(
@@ -65,7 +65,7 @@ fn redis_e2e_cmd_echo_returns_bulk_string() {
     };
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let resp = client.cmd(&cx, &["ECHO", "hello"]).await.expect("ECHO");
         assert_with_log!(
@@ -89,7 +89,7 @@ fn redis_e2e_set_get_roundtrip() {
     let key = key_for(name, "value");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         client.set(&cx, &key, b"hello", None).await.expect("SET");
         let got = client.get(&cx, &key).await.expect("GET");
@@ -110,7 +110,7 @@ fn redis_e2e_get_missing_returns_none() {
     let key = key_for(name, "missing");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let got = client.get(&cx, &key).await.expect("GET");
         assert_with_log!(got.is_none(), "missing key", true, got.is_none());
@@ -129,7 +129,7 @@ fn redis_e2e_incr_increments_from_zero() {
     let key = key_for(name, "counter");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         client.set(&cx, &key, b"0", None).await.expect("SET");
         let value = client.incr(&cx, &key).await.expect("INCR");
@@ -151,7 +151,7 @@ fn redis_e2e_del_removes_multiple_keys() {
     let key2 = key_for(name, "two");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         client.set(&cx, &key1, b"a", None).await.expect("SET1");
         client.set(&cx, &key2, b"b", None).await.expect("SET2");
@@ -172,7 +172,7 @@ fn redis_e2e_expire_existing_and_missing() {
     let key = key_for(name, "expire");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         client.set(&cx, &key, b"expires", None).await.expect("SET");
         let ok = client
@@ -202,7 +202,7 @@ fn redis_e2e_hash_roundtrip_and_delete() {
     let field = "field";
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let inserted = client.hset(&cx, &key, field, b"v1").await.expect("HSET");
         assert_with_log!(inserted, "hset insert", true, inserted);
@@ -225,7 +225,7 @@ fn redis_e2e_pipeline_executes_multiple() {
     };
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let mut pipe = client.pipeline();
         pipe.cmd(&["PING"]);
@@ -258,7 +258,7 @@ fn redis_e2e_cmd_bytes_binary_echo() {
     };
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let payload = b"hi\x00there";
         let resp = client

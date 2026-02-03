@@ -198,6 +198,60 @@ Failures:
 
 **Symptom**: Spawned tasks were not joined after the parent was cancelled.
 
+---
+
+## Conformal Bounds on Cancellation Latency (spec)
+
+We want **distribution-free** guarantees on how long cancellation/drain takes.
+Conformal prediction gives a simple, deterministic bound that holds under
+minimal assumptions.
+
+### Definitions
+
+- `T_request`: time (or tick) when cancellation is requested
+- `T_complete`: time (or tick) when the task reaches `Completed(Cancelled)`
+- `L = T_complete - T_request`: observed drain latency
+
+### Calibration (per workload or policy)
+
+Collect a calibration set of latencies `L_1..L_n` from lab runs (or production
+traces with deterministic replay). For a target coverage `1 - alpha`, compute:
+
+```
+k = ceil((n + 1) * (1 - alpha))
+bound = kth_order_statistic(L_1..L_n, k)
+```
+
+This `bound` is a **distribution-free** upper bound: future latencies exceed it
+with probability at most `alpha`, assuming exchangeability.
+
+### Reporting format (diagnostics)
+
+Report the bound alongside the target coverage:
+
+```
+CancelLatencyBound {
+  coverage: 0.99,
+  bound_ticks: 1234,
+  sample_count: 512,
+  scope: "task" | "region" | "workload"
+}
+```
+
+### Integration points
+
+- Lab runtime: compute bounds from deterministic test suites and emit in reports.
+- Production traces: compute bounds from replayable traces, tagged by workload.
+- CI: verify coverage on synthetic schedules (below).
+
+### Synthetic coverage tests (acceptance)
+
+1. Generate a known distribution of drain latencies in the lab runtime.
+2. Calibrate on a subset; evaluate on a held-out subset.
+3. Assert empirical coverage `>= 1 - alpha` within tolerance.
+
+This provides an automated check that the conformal bound is correctly computed.
+
 **Common causes**:
 - Spawning without storing the join handle
 - Not cancelling child tasks when parent is cancelled

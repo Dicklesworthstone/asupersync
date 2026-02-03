@@ -73,7 +73,7 @@ fn repro_race_leak() {
     run_test(|| async {
         // Setup manual runtime state for testing
         let mut state = RuntimeState::new();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let region = state.create_root_region(Budget::INFINITE);
         let scope = cx.scope();
         assert_eq!(scope.region_id(), region, "test scope region mismatch");

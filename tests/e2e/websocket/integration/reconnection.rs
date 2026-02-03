@@ -21,7 +21,7 @@ fn ws_integration_client_can_reconnect_after_server_closes() {
 
     let server_thread = thread::spawn(move || {
         futures_lite::future::block_on(async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let acceptor = WebSocketAcceptor::new();
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("local_addr");
@@ -44,7 +44,7 @@ fn ws_integration_client_can_reconnect_after_server_closes() {
     let addr = addr_rx.recv().expect("addr");
 
     futures_lite::future::block_on(async move {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let url = format!("ws://{}:{}/", addr.ip(), addr.port());
 
         for round in 0..2 {

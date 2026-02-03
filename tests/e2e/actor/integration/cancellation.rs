@@ -22,7 +22,7 @@ fn actor_respects_cancellation() {
     let (task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             events_task.lock().unwrap().push("started".into());
 

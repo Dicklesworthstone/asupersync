@@ -83,7 +83,7 @@ fn run_lab(runtime: &mut LabRuntime, task_id: asupersync::types::TaskId) {
 fn test_actor_counter_logs_start_and_stop() {
     init_test("test_actor_counter_logs_start_and_stop");
     let mut runtime = LabRuntime::new(LabConfig::new(1).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -104,7 +104,7 @@ fn test_actor_counter_logs_start_and_stop() {
 fn test_actor_counter_increments_accumulate() {
     init_test("test_actor_counter_increments_accumulate");
     let mut runtime = LabRuntime::new(LabConfig::new(2).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -128,7 +128,7 @@ fn test_actor_counter_increments_accumulate() {
 fn test_actor_counter_reset_clears_count() {
     init_test("test_actor_counter_reset_clears_count");
     let mut runtime = LabRuntime::new(LabConfig::new(3).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -153,7 +153,7 @@ fn test_actor_counter_reset_clears_count() {
 fn test_actor_counter_get_count_after_increment() {
     init_test("test_actor_counter_get_count_after_increment");
     let mut runtime = LabRuntime::new(LabConfig::new(4).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -174,7 +174,7 @@ fn test_actor_counter_get_count_after_increment() {
 fn test_actor_echo_records_messages() {
     init_test("test_actor_echo_records_messages");
     let mut runtime = LabRuntime::new(LabConfig::new(5).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = EchoActor::new(Arc::clone(&events));
@@ -198,7 +198,7 @@ fn test_actor_echo_records_messages() {
 fn test_actor_echo_stop_reports_count() {
     init_test("test_actor_echo_stop_reports_count");
     let mut runtime = LabRuntime::new(LabConfig::new(6).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = EchoActor::new(Arc::clone(&events));
@@ -220,7 +220,7 @@ fn test_actor_echo_stop_reports_count() {
 fn test_actor_try_send_full_returns_error() {
     init_test("test_actor_try_send_full_returns_error");
     let mut runtime = LabRuntime::new(LabConfig::new(7).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -239,7 +239,7 @@ fn test_actor_try_send_full_returns_error() {
 fn test_actor_ref_clone_sends_messages() {
     init_test("test_actor_ref_clone_sends_messages");
     let mut runtime = LabRuntime::new(LabConfig::new(8).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -264,7 +264,7 @@ fn test_actor_ref_clone_sends_messages() {
 fn test_actor_id_matches_ref() {
     init_test("test_actor_id_matches_ref");
     let mut runtime = LabRuntime::new(LabConfig::new(9).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));
@@ -283,7 +283,7 @@ fn test_actor_id_matches_ref() {
 fn test_actor_stop_marks_finished() {
     init_test("test_actor_stop_marks_finished");
     let mut runtime = LabRuntime::new(LabConfig::new(10).max_steps(10_000));
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let actor = CounterActor::new(Arc::clone(&events));

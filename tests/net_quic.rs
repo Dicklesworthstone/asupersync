@@ -69,7 +69,7 @@ fn quic_stream_open_bi() {
     // Spawn server in background thread
     let server_handle = std::thread::spawn(move || {
         block_on(async {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let server = QuicEndpoint::server(&cx, server_addr, &server_config())
                 .expect("server creation failed");
 
@@ -99,7 +99,7 @@ fn quic_stream_open_bi() {
 
     // Client connects and sends data
     block_on(async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = QuicEndpoint::client(&cx, &client_config()).expect("client creation failed");
 
         let conn = client
@@ -133,7 +133,7 @@ fn quic_stream_open_uni() {
 
     let server_handle = std::thread::spawn(move || {
         block_on(async {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let server = QuicEndpoint::server(&cx, server_addr, &server_config())
                 .expect("server creation failed");
 
@@ -153,7 +153,7 @@ fn quic_stream_open_uni() {
     std::thread::sleep(Duration::from_millis(50));
 
     block_on(async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = QuicEndpoint::client(&cx, &client_config()).expect("client creation failed");
 
         let conn = client
@@ -191,7 +191,7 @@ fn quic_stream_large_data() {
 
     let server_handle = std::thread::spawn(move || {
         block_on(async {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let server = QuicEndpoint::server(&cx, server_addr, &server_config())
                 .expect("server creation failed");
 
@@ -218,7 +218,7 @@ fn quic_stream_large_data() {
     std::thread::sleep(Duration::from_millis(50));
 
     block_on(async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = QuicEndpoint::client(&cx, &client_config()).expect("client creation failed");
 
         let conn = client
@@ -255,7 +255,7 @@ fn quic_stream_finish() {
 
     let server_handle = std::thread::spawn(move || {
         block_on(async {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let server = QuicEndpoint::server(&cx, server_addr, &server_config())
                 .expect("server creation failed");
 
@@ -285,7 +285,7 @@ fn quic_stream_finish() {
     std::thread::sleep(Duration::from_millis(50));
 
     block_on(async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = QuicEndpoint::client(&cx, &client_config()).expect("client creation failed");
 
         let conn = client
@@ -320,7 +320,7 @@ fn quic_stream_reset() {
 
     let server_handle = std::thread::spawn(move || {
         block_on(async {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let server = QuicEndpoint::server(&cx, server_addr, &server_config())
                 .expect("server creation failed");
 
@@ -340,7 +340,7 @@ fn quic_stream_reset() {
     std::thread::sleep(Duration::from_millis(50));
 
     block_on(async {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let client = QuicEndpoint::client(&cx, &client_config()).expect("client creation failed");
 
         let conn = client

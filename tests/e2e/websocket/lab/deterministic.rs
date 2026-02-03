@@ -27,7 +27,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
     let (server_task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             events_server.lock().unwrap().push("server:accept".into());
             let mut ws = acceptor.accept(&cx, &req, server_io).await.expect("accept");
             events_server.lock().unwrap().push("server:accepted".into());
@@ -52,7 +52,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
     let (client_task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             events_client
                 .lock()
                 .unwrap()

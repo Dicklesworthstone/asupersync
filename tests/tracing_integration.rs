@@ -13,7 +13,7 @@ mod cx_tracing_tests {
     fn make_cx_with_collector() -> (Cx, LogCollector) {
         let config = ObservabilityConfig::testing();
         let collector = config.create_collector();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_log_collector(collector.clone());
         (cx, collector)
     }

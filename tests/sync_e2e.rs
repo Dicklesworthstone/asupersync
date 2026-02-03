@@ -73,7 +73,7 @@ fn run_sync_determinism_with_seed(seed: u64) -> Vec<usize> {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let _guard = m.lock(&cx).await.expect("lock should succeed");
                 r.lock().unwrap().push(i);
             })
@@ -115,7 +115,7 @@ fn e2e_sync_001_mutex_fair_queuing() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let mut guard = m.lock(&cx).await.expect("lock should succeed");
                 guard.push(i);
                 // Yield while holding lock to allow others to queue
@@ -139,7 +139,7 @@ fn e2e_sync_001_mutex_fair_queuing() {
         completed
     );
 
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let guard = futures_lite::future::block_on(mutex.lock(&cx)).unwrap();
     let order_len = guard.len();
     assert_with_log!(
@@ -161,13 +161,13 @@ fn e2e_sync_002_mutex_cancel_during_wait() {
     test_section!("setup");
 
     let mutex = Arc::new(Mutex::new(42));
-    let cx_holder = Cx::for_testing();
+    let cx_holder: Cx = Cx::for_testing();
 
     // Hold the lock
     let guard = futures_lite::future::block_on(mutex.lock(&cx_holder)).unwrap();
 
     // Try to acquire with a cancelled context
-    let cx_waiter = Cx::for_testing();
+    let cx_waiter: Cx = Cx::for_testing();
     cx_waiter.set_cancel_requested(true);
 
     let result = futures_lite::future::block_on(mutex.lock(&cx_waiter));
@@ -216,7 +216,7 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
 
                 // Scope guards so they're dropped before yield_now
                 // (RwLockReadGuard is not Send across await points)
@@ -276,7 +276,7 @@ fn e2e_sync_011_rwlock_writer_exclusivity() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 for _ in 0..increments_per_writer {
                     let mut guard = rw.write(&cx).expect("write should succeed");
                     *guard += 1;
@@ -291,7 +291,7 @@ fn e2e_sync_011_rwlock_writer_exclusivity() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let guard = rwlock.read(&cx).unwrap();
     let expected = num_writers * increments_per_writer;
     let actual = *guard;
@@ -333,7 +333,7 @@ fn e2e_sync_020_semaphore_permit_limiting() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
                 let _permit = s.acquire(&cx, 1).await.expect("acquire should succeed");
 
                 // Track concurrent holders
@@ -383,7 +383,7 @@ fn e2e_sync_021_semaphore_two_phase() {
     test_section!("setup");
 
     let sem = Semaphore::new(2);
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     // Acquire permits via normal path (simulating reserve/commit)
     let permit1 = futures_lite::future::block_on(sem.acquire(&cx, 1)).unwrap();
@@ -448,7 +448,7 @@ fn e2e_sync_030_barrier_synchronization() {
         let leaders = leader_count.clone();
 
         handles.push(std::thread::spawn(move || {
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
 
             // Signal arrival
             pre.fetch_add(1, Ordering::SeqCst);
@@ -716,7 +716,7 @@ fn e2e_sync_100_stress_mixed_primitives() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
 
                 for _ in 0..ops_per_task {
                     // Acquire semaphore permit
@@ -750,7 +750,7 @@ fn e2e_sync_100_stress_mixed_primitives() {
     );
 
     // Verify final count
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let guard = futures_lite::future::block_on(mutex.lock(&cx)).unwrap();
     let expected = num_tasks * ops_per_task;
     let actual = *guard;
@@ -784,7 +784,7 @@ fn e2e_sync_101_semaphore_cancel_no_leak() {
     let sem = Arc::new(Semaphore::new(1));
 
     // Hold the only permit
-    let cx_holder = Cx::for_testing();
+    let cx_holder: Cx = Cx::for_testing();
     let permit = futures_lite::future::block_on(sem.acquire(&cx_holder, 1)).unwrap();
 
     assert_with_log!(
@@ -796,7 +796,7 @@ fn e2e_sync_101_semaphore_cancel_no_leak() {
 
     test_section!("cancel_waiting_acquire");
     // Try to acquire with cancelled context
-    let cx_waiter = Cx::for_testing();
+    let cx_waiter: Cx = Cx::for_testing();
     cx_waiter.set_cancel_requested(true);
 
     let result = futures_lite::future::block_on(sem.acquire(&cx_waiter, 1));
@@ -873,7 +873,7 @@ fn e2e_sync_300_no_deadlock_proper_ordering() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx: Cx = Cx::for_testing();
 
                 // Always acquire A first, then B
                 let _guard_a = ma.lock(&cx).await.expect("lock A should succeed");

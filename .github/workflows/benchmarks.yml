@@ -90,43 +90,118 @@ jobs:
 
       - name: Run baseline benchmarks
         run: |
-          cargo bench --all-features -- --noplot --save-baseline baseline
+          cargo bench --all-features -- --noplot
 
       # Switch back and compare
       - name: Checkout PR branch
         run: git checkout ${{ github.head_ref }}
 
-      - name: Run PR benchmarks and compare
-        id: bench
+      - name: Capture baseline (using PR script)
         run: |
-          # Run current benchmarks
-          cargo bench --all-features -- --noplot --baseline baseline 2>&1 | tee bench-output.txt
+          ./scripts/capture_baseline.sh --save /tmp/bench_baseline
 
-          # Extract any regressions (lines with "regressed")
-          if grep -q "regressed" bench-output.txt; then
-            echo "REGRESSIONS DETECTED:"
-            grep "regressed" bench-output.txt
-            echo "regression_detected=true" >> $GITHUB_OUTPUT
-          else
-            echo "No regressions detected"
-            echo "regression_detected=false" >> $GITHUB_OUTPUT
-          fi
+      - name: Run PR benchmarks
+        run: |
+          cargo bench --all-features -- --noplot
+          ./scripts/capture_baseline.sh --save /tmp/bench_current
+
+      - name: Compare benchmarks against baseline
+        run: |
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          import sys
+
+          baseline_path = "/tmp/bench_baseline/baseline_latest.json"
+          current_path = "/tmp/bench_current/baseline_latest.json"
+
+          with open(baseline_path, "r") as fh:
+              baseline = json.load(fh)
+          with open(current_path, "r") as fh:
+              current = json.load(fh)
+
+          base_map = {b["name"]: b for b in baseline.get("benchmarks", [])}
+          cur_map = {b["name"]: b for b in current.get("benchmarks", [])}
+
+          thresholds = {
+              "mean_ns": 1.10,
+              "p95_ns": 1.15,
+              "p99_ns": 1.25,
+          }
+
+          results = []
+          failures = []
+          missing_current = []
+
+          for name, base in base_map.items():
+              cur = cur_map.get(name)
+              if cur is None:
+                  missing_current.append(name)
+                  results.append({"name": name, "status": "missing_current"})
+                  continue
+
+              entry = {"name": name, "status": "ok", "metrics": {}}
+              for metric, threshold in thresholds.items():
+                  base_v = base.get(metric)
+                  cur_v = cur.get(metric)
+                  if base_v is None or cur_v is None:
+                      entry["metrics"][metric] = {"status": "missing"}
+                      continue
+
+                  if base_v == 0:
+                      ratio = float("inf") if cur_v > 0 else 1.0
+                  else:
+                      ratio = cur_v / base_v
+
+                  passed = ratio <= threshold
+                  entry["metrics"][metric] = {
+                      "baseline": base_v,
+                      "current": cur_v,
+                      "ratio": ratio,
+                      "threshold": threshold,
+                      "passed": passed,
+                  }
+                  if not passed:
+                      entry["status"] = "failed"
+
+              if entry["status"] == "failed":
+                  failures.append(entry)
+              results.append(entry)
+
+          extras = [name for name in cur_map.keys() if name not in base_map]
+          summary = {
+              "failures": len(failures),
+              "missing_current": missing_current,
+              "extra_current": extras,
+          }
+
+          with open("/tmp/bench_compare.json", "w") as fh:
+              json.dump({"summary": summary, "results": results}, fh, indent=2)
+
+          if failures:
+              print("Performance regressions detected:")
+              for f in failures[:10]:
+                  print(f"  - {f['name']}")
+              sys.exit(1)
+
+          if missing_current:
+              print(f"Warning: {len(missing_current)} benchmarks missing in current run")
+          if extras:
+              print(f"Note: {len(extras)} new benchmarks in current run")
+          print("No threshold regressions detected")
+          PY
 
       - name: Upload comparison results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-comparison-${{ github.sha }}
           path: |
-            bench-output.txt
+            /tmp/bench_baseline/
+            /tmp/bench_current/
+            /tmp/bench_compare.json
             target/criterion/
           retention-days: 30
-
-      # Warn on regression but don't fail (yet)
-      - name: Regression warning
-        if: steps.bench.outputs.regression_detected == 'true'
-        run: |
-          echo "::warning::Performance regressions detected. Please review the benchmark comparison."
-          echo "Full output available in artifacts."
 
   # Scheduler-specific benchmarks with thresholds
   scheduler-perf:
@@ -196,21 +271,4 @@ jobs:
 
       - name: Run protocol benchmarks
         run: |
-          cargo bench --all-features --bench protocol_benchmark -- --noplot 2>&1 | tee protocol-bench.txt
-
-      - name: Check protocol thresholds
-        run: |
-          # Performance targets from benchmark file:
-          # HTTP/1 request parsing: < 500ns for typical GET request
-          # HPACK header decoding: < 1μs for typical header block
-          # WebSocket frame parsing: < 100ns for data frames
-
-          echo "Protocol benchmark results:"
-          cat protocol-bench.txt
-
-      - name: Upload protocol results
-        uses: actions/upload-artifact@v4
-        with:
-          name: protocol-benchmark-${{ github.sha }}
-          path: protocol-bench.txt
-          retention-days: 30
+          cargo bench --all-fe

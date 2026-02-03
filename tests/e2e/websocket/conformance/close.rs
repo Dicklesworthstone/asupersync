@@ -16,7 +16,7 @@ fn ws_conformance_close_handshake_client_initiated() {
         let (mut client_io, server_io) = VirtualTcpStream::pair(client_addr, server_addr);
 
         let acceptor = WebSocketAcceptor::new();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
         let req = ws_handshake_request_bytes("/", "127.0.0.1:40202", key, None);

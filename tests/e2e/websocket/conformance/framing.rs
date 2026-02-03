@@ -20,7 +20,7 @@ fn ws_conformance_client_frames_are_masked_on_wire() {
         let server_addr: SocketAddr = "127.0.0.1:40102".parse().unwrap();
         let (client_io, mut server_io) = VirtualTcpStream::pair(client_addr, server_addr);
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let mut ws = WebSocket::from_upgraded(
             client_io,
             asupersync::net::websocket::WebSocketConfig::default(),
@@ -45,7 +45,7 @@ fn ws_conformance_server_frames_are_not_masked_on_wire() {
         let (mut client_io, server_io) = VirtualTcpStream::pair(client_addr, server_addr);
 
         let acceptor = WebSocketAcceptor::new();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
         let req = ws_handshake_request_bytes("/", "127.0.0.1:40112", key, None);
