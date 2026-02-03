@@ -303,6 +303,148 @@ fn bench_full_workflow(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Benchmarks: plan DAG rewrite engine (bd-123x)
+// ---------------------------------------------------------------------------
+
+use asupersync::plan::{PlanDag, RewritePolicy, RewriteRule};
+
+/// Build a nested join tree: Join(Join(Join(...), leaf), leaf).
+fn build_nested_join_plan(depth: usize) -> PlanDag {
+    let mut dag = PlanDag::new();
+    let mut current = dag.leaf("leaf_0");
+    for i in 1..depth {
+        let leaf = dag.leaf(format!("leaf_{i}"));
+        current = dag.join(vec![current, leaf]);
+    }
+    dag.set_root(current);
+    dag
+}
+
+/// Build a race-of-joins structure for DedupRaceJoin benchmarking.
+fn build_race_of_joins_plan(branches: usize) -> PlanDag {
+    let mut dag = PlanDag::new();
+    let shared = dag.leaf("shared");
+    let joins: Vec<_> = (0..branches)
+        .map(|i| {
+            let branch = dag.leaf(format!("branch_{i}"));
+            dag.join(vec![shared, branch])
+        })
+        .collect();
+    let race = dag.race(joins);
+    dag.set_root(race);
+    dag
+}
+
+fn bench_rewrite_assoc(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plan_rewrite_assoc");
+    for depth in [5, 10, 20, 50, 100] {
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
+            b.iter_batched(
+                || build_nested_join_plan(depth),
+                |mut dag| {
+                    let report =
+                        dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::JoinAssoc]);
+                    black_box(report);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_rewrite_commute(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plan_rewrite_commute");
+    for depth in [5, 10, 20, 50] {
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
+            b.iter_batched(
+                || build_nested_join_plan(depth),
+                |mut dag| {
+                    let report = dag
+                        .apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::JoinCommute]);
+                    black_box(report);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_rewrite_dedup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plan_rewrite_dedup");
+    for branches in [2, 5, 10, 20] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(branches),
+            &branches,
+            |b, &branches| {
+                b.iter_batched(
+                    || build_race_of_joins_plan(branches),
+                    |mut dag| {
+                        let report = dag.apply_rewrites(
+                            RewritePolicy::conservative(),
+                            &[RewriteRule::DedupRaceJoin],
+                        );
+                        black_box(report);
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_rewrite_all_rules(c: &mut Criterion) {
+    let all_rules = &[
+        RewriteRule::JoinAssoc,
+        RewriteRule::RaceAssoc,
+        RewriteRule::JoinCommute,
+        RewriteRule::RaceCommute,
+        RewriteRule::TimeoutMin,
+        RewriteRule::DedupRaceJoin,
+    ];
+    let mut group = c.benchmark_group("plan_rewrite_all_rules");
+    for depth in [5, 10, 20, 50] {
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
+            b.iter_batched(
+                || build_nested_join_plan(depth),
+                |mut dag| {
+                    let report = dag.apply_rewrites(RewritePolicy::assume_all(), all_rules);
+                    black_box(report);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_certified_rewrite(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plan_certified_rewrite");
+    for branches in [2, 5, 10] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(branches),
+            &branches,
+            |b, &branches| {
+                b.iter_batched(
+                    || build_race_of_joins_plan(branches),
+                    |mut dag| {
+                        let (report, cert) = dag.apply_rewrites_certified(
+                            RewritePolicy::conservative(),
+                            &[RewriteRule::DedupRaceJoin],
+                        );
+                        black_box((report, cert));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Criterion configuration
 // ---------------------------------------------------------------------------
 
@@ -318,5 +460,10 @@ criterion_group!(
     bench_extract_balanced_tree,
     bench_extract_after_merge,
     bench_full_workflow,
+    bench_rewrite_assoc,
+    bench_rewrite_commute,
+    bench_rewrite_dedup,
+    bench_rewrite_all_rules,
+    bench_certified_rewrite,
 );
 criterion_main!(benches);

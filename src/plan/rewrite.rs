@@ -1607,10 +1607,8 @@ mod tests {
         for branches in [2, 5, 10] {
             let mut dag = build_race_of_joins_dag(branches);
             let node_count = dag.nodes.len();
-            let report = dag.apply_rewrites(
-                RewritePolicy::conservative(),
-                &[RewriteRule::DedupRaceJoin],
-            );
+            let report =
+                dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
             assert!(
                 report.steps().len() <= node_count,
                 "Too many DedupRaceJoin steps ({}) for {} nodes",
@@ -1625,10 +1623,7 @@ mod tests {
         init_test();
         for n in [3, 5, 10] {
             let dag = build_nested_join_dag(n);
-            let all_rules = &[
-                RewriteRule::JoinAssoc,
-                RewriteRule::JoinCommute,
-            ];
+            let all_rules = &[RewriteRule::JoinAssoc, RewriteRule::JoinCommute];
 
             let mut dag1 = dag.clone();
             let report1 = dag1.apply_rewrites(RewritePolicy::assume_all(), all_rules);
