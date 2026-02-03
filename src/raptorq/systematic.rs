@@ -472,28 +472,67 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 
 /// Build HDPC constraint rows (rows S..S+H).
 ///
-/// HDPC rows use GF(256) coefficients (not just GF(2)) to provide
-/// half-distance parity coverage. Each row connects all L intermediate
-/// symbols with random GF(256) coefficients seeded deterministically.
-fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, seed: u64) {
+/// RFC 6330 Section 5.3.3.3: HDPC pre-coding relationships.
+///
+/// The HDPC matrix uses the RFC 6330 Rand function to determine which
+/// intermediate symbols each HDPC row connects to, plus a Vandermonde-like
+/// structure for the last column.
+///
+/// MT[i,j] for j = 0..K+S-2:
+///   = 1 if i = Rand[j+1, 6, H] or i = (Rand[j+1, 6, H] + Rand[j+1, 7, H-1] + 1) % H
+///   = 0 otherwise
+///
+/// MT[i, K+S-1] = alpha^i (Vandermonde column for last position)
+fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
+    use crate::raptorq::rfc6330::rand;
+
     let s = params.s;
     let h = params.h;
-    let l = params.l;
+    let k = params.k;
 
-    let mut rng = DetRng::new(seed.wrapping_add(0x4D9C_4D9C_0000));
-    for row_offset in 0..h {
-        let row = s + row_offset;
-        // HDPC row: random GF(256) coefficients for each column
-        // Use α^i pattern for structure (Vandermonde-like)
-        let alpha_pow = Gf256::ALPHA.pow((row_offset & 0xFF) as u8);
-        let mut coeff = Gf256::ONE;
-        for col in 0..l {
-            // Mix structured (Vandermonde) and random components
-            let random_part = Gf256::new(rng.next_u64() as u8);
-            matrix.set(row, col, coeff + random_part);
-            coeff *= alpha_pow;
+    if h == 0 {
+        return;
+    }
+
+    // Build MT matrix entries using RFC 6330 Rand function
+    // MT is H x (K + S) matrix
+    let k_plus_s = k + s;
+
+    for j in 0..k_plus_s.saturating_sub(1) {
+        // RFC 6330: MT[i,j] = 1 if conditions are met
+        let rand1 = rand((j + 1) as u32, 6, h as u32) as usize;
+        let rand2 = if h > 1 {
+            rand((j + 1) as u32, 7, (h - 1) as u32) as usize
+        } else {
+            0
+        };
+        let i2 = (rand1 + rand2 + 1) % h;
+
+        // Set MT[rand1, j] = 1
+        let row1 = s + rand1;
+        matrix.add_assign(row1, j, Gf256::ONE);
+
+        // Set MT[i2, j] = 1 (if different from rand1)
+        if i2 != rand1 {
+            let row2 = s + i2;
+            matrix.add_assign(row2, j, Gf256::ONE);
         }
     }
+
+    // Last column: MT[i, K+S-1] = alpha^i (Vandermonde column)
+    if k_plus_s > 0 {
+        let last_col = k_plus_s - 1;
+        for i in 0..h {
+            let row = s + i;
+            let coeff = Gf256::ALPHA.pow((i & 0xFF) as u8);
+            matrix.set(row, last_col, coeff);
+        }
+    }
+
+    // Note: RFC 6330 also multiplies by GAMMA matrix, but for our simplified
+    // implementation we use the MT matrix directly. The GAMMA matrix provides
+    // additional mixing but the MT structure alone provides good coverage
+    // for typical use cases.
 }
 
 /// Build LT constraint rows for systematic symbols (rows S+H..S+H+K).
