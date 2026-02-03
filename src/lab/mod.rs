@@ -65,8 +65,8 @@ pub use crate::util::{
 };
 pub use config::LabConfig;
 pub use explorer::{
-    CoverageMetrics, ExplorationReport, ExplorerConfig, RunResult, ScheduleExplorer,
-    ViolationReport,
+    CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
+    RunResult, ScheduleExplorer, ViolationReport,
 };
 pub use http::{
     RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer,
