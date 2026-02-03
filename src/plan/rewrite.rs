@@ -908,8 +908,10 @@ mod tests {
         let join = dag.join(vec![c, b, a]);
         dag.set_root(join);
 
-        let report =
-            dag.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &[RewriteRule::JoinCommute]);
+        let report = dag.apply_rewrites(
+            RewritePolicy::AssumeAssociativeComm,
+            &[RewriteRule::JoinCommute],
+        );
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Join { children } = dag.node(root).expect("join") else {
@@ -931,8 +933,10 @@ mod tests {
         let join = dag.join(vec![j1, j2]);
         dag.set_root(join);
 
-        let report =
-            dag.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &[RewriteRule::JoinCommute]);
+        let report = dag.apply_rewrites(
+            RewritePolicy::AssumeAssociativeComm,
+            &[RewriteRule::JoinCommute],
+        );
         assert!(report.is_empty());
     }
 
@@ -946,8 +950,10 @@ mod tests {
         let race = dag.race(vec![c, b, a]);
         dag.set_root(race);
 
-        let report =
-            dag.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &[RewriteRule::RaceCommute]);
+        let report = dag.apply_rewrites(
+            RewritePolicy::AssumeAssociativeComm,
+            &[RewriteRule::RaceCommute],
+        );
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Race { children } = dag.node(root).expect("race") else {

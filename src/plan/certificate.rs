@@ -5,7 +5,9 @@
 //! across Rust versions (FNV-1a, not `DefaultHasher`).
 
 use super::analysis::SideConditionChecker;
-use super::rewrite::{check_side_conditions, RewritePolicy, RewriteReport, RewriteRule, RewriteStep};
+use super::rewrite::{
+    check_side_conditions, RewritePolicy, RewriteReport, RewriteRule, RewriteStep,
+};
 use super::{PlanDag, PlanId, PlanNode};
 
 // ---------------------------------------------------------------------------
@@ -286,15 +288,13 @@ fn verify_side_conditions(
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
     let checker = SideConditionChecker::new(dag);
-    if let Err(condition) = check_side_conditions(
-        step.rule,
-        policy,
-        &checker,
-        dag,
-        step.before,
-        step.after,
-    ) {
-        return Err(StepVerifyError::SideConditionViolated { step: idx, condition });
+    if let Err(condition) =
+        check_side_conditions(step.rule, policy, &checker, dag, step.before, step.after)
+    {
+        return Err(StepVerifyError::SideConditionViolated {
+            step: idx,
+            condition,
+        });
     }
     Ok(())
 }
@@ -305,10 +305,12 @@ fn verify_join_assoc_result(
     policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
-    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
-        step: idx,
-        node: step.before,
-    })?;
+    let before = dag
+        .node(step.before)
+        .ok_or(StepVerifyError::MissingBeforeNode {
+            step: idx,
+            node: step.before,
+        })?;
     let PlanNode::Join { children } = before else {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
@@ -339,10 +341,12 @@ fn verify_join_assoc_result(
         });
     }
 
-    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
-        step: idx,
-        node: step.after,
-    })?;
+    let after = dag
+        .node(step.after)
+        .ok_or(StepVerifyError::MissingAfterNode {
+            step: idx,
+            node: step.after,
+        })?;
     let PlanNode::Join {
         children: after_children,
     } = after
@@ -368,10 +372,12 @@ fn verify_race_assoc_result(
     policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
-    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
-        step: idx,
-        node: step.before,
-    })?;
+    let before = dag
+        .node(step.before)
+        .ok_or(StepVerifyError::MissingBeforeNode {
+            step: idx,
+            node: step.before,
+        })?;
     let PlanNode::Race { children } = before else {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
@@ -402,10 +408,12 @@ fn verify_race_assoc_result(
         });
     }
 
-    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
-        step: idx,
-        node: step.after,
-    })?;
+    let after = dag
+        .node(step.after)
+        .ok_or(StepVerifyError::MissingAfterNode {
+            step: idx,
+            node: step.after,
+        })?;
     let PlanNode::Race {
         children: after_children,
     } = after
@@ -431,20 +439,24 @@ fn verify_join_commute_result(
     policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
-    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
-        step: idx,
-        node: step.before,
-    })?;
+    let before = dag
+        .node(step.before)
+        .ok_or(StepVerifyError::MissingBeforeNode {
+            step: idx,
+            node: step.before,
+        })?;
     if !matches!(before, PlanNode::Join { .. }) {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
             expected: "Join before JoinCommute",
         });
     }
-    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
-        step: idx,
-        node: step.after,
-    })?;
+    let after = dag
+        .node(step.after)
+        .ok_or(StepVerifyError::MissingAfterNode {
+            step: idx,
+            node: step.after,
+        })?;
     if !matches!(after, PlanNode::Join { .. }) {
         return Err(StepVerifyError::InvalidAfterShape {
             step: idx,
@@ -460,20 +472,24 @@ fn verify_race_commute_result(
     policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
-    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
-        step: idx,
-        node: step.before,
-    })?;
+    let before = dag
+        .node(step.before)
+        .ok_or(StepVerifyError::MissingBeforeNode {
+            step: idx,
+            node: step.before,
+        })?;
     if !matches!(before, PlanNode::Race { .. }) {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
             expected: "Race before RaceCommute",
         });
     }
-    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
-        step: idx,
-        node: step.after,
-    })?;
+    let after = dag
+        .node(step.after)
+        .ok_or(StepVerifyError::MissingAfterNode {
+            step: idx,
+            node: step.after,
+        })?;
     if !matches!(after, PlanNode::Race { .. }) {
         return Err(StepVerifyError::InvalidAfterShape {
             step: idx,
@@ -489,10 +505,12 @@ fn verify_timeout_min_result(
     policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
-    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
-        step: idx,
-        node: step.before,
-    })?;
+    let before = dag
+        .node(step.before)
+        .ok_or(StepVerifyError::MissingBeforeNode {
+            step: idx,
+            node: step.before,
+        })?;
     let PlanNode::Timeout { child, duration } = before else {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
@@ -502,10 +520,12 @@ fn verify_timeout_min_result(
     let PlanNode::Timeout {
         child: inner_child,
         duration: inner_duration,
-    } = dag.node(*child).ok_or(StepVerifyError::InvalidBeforeShape {
-        step: idx,
-        expected: "Timeout wrapping a Timeout child",
-    })?
+    } = dag
+        .node(*child)
+        .ok_or(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Timeout wrapping a Timeout child",
+        })?
     else {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
@@ -518,10 +538,12 @@ fn verify_timeout_min_result(
         *inner_duration
     };
 
-    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
-        step: idx,
-        node: step.after,
-    })?;
+    let after = dag
+        .node(step.after)
+        .ok_or(StepVerifyError::MissingAfterNode {
+            step: idx,
+            node: step.after,
+        })?;
     let PlanNode::Timeout {
         child: after_child,
         duration: after_duration,
