@@ -14,10 +14,16 @@ set -euo pipefail
 
 CRITERION_DIR="${CRITERION_DIR:-target/criterion}"
 SAVE_DIR=""
+COMPARE_PATH=""
+MAX_REGRESSION_PCT="10"
+METRIC="median_ns"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save) SAVE_DIR="$2"; shift 2 ;;
+        --compare) COMPARE_PATH="$2"; shift 2 ;;
+        --max-regression-pct) MAX_REGRESSION_PCT="$2"; shift 2 ;;
+        --metric) METRIC="$2"; shift 2 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -103,6 +109,63 @@ done | jq -s '{
     generated_at: (now | todate),
     benchmarks: .
 }' > /tmp/asupersync_baseline.json
+
+if [[ -n "$COMPARE_PATH" ]]; then
+    python3 - "$COMPARE_PATH" "$METRIC" "$MAX_REGRESSION_PCT" <<'PY'
+import json
+import sys
+
+baseline_path = sys.argv[1]
+metric = sys.argv[2]
+max_regression_pct = float(sys.argv[3])
+
+with open("/tmp/asupersync_baseline.json", "r") as fh:
+    current = json.load(fh)
+with open(baseline_path, "r") as fh:
+    baseline = json.load(fh)
+
+def index_by_name(payload):
+    return {entry["name"]: entry for entry in payload.get("benchmarks", [])}
+
+current_map = index_by_name(current)
+baseline_map = index_by_name(baseline)
+
+regressions = []
+warnings = []
+
+for name, cur in current_map.items():
+    base = baseline_map.get(name)
+    if base is None:
+        warnings.append(f"missing_baseline:{name}")
+        continue
+    cur_val = cur.get(metric)
+    base_val = base.get(metric)
+    if not isinstance(cur_val, (int, float)) or not isinstance(base_val, (int, float)) or base_val <= 0:
+        warnings.append(f"invalid_metric:{name}")
+        continue
+    ratio = cur_val / base_val
+    delta_pct = (ratio - 1.0) * 100.0
+    if delta_pct > max_regression_pct:
+        regressions.append((name, base_val, cur_val, delta_pct))
+
+for name in baseline_map:
+    if name not in current_map:
+        warnings.append(f"missing_current:{name}")
+
+if warnings:
+    print("Warnings:")
+    for w in sorted(set(warnings)):
+        print(f"  - {w}")
+
+if regressions:
+    print(f"Regressions (>{max_regression_pct:.2f}% on {metric}):")
+    for name, base_val, cur_val, delta_pct in sorted(regressions, key=lambda x: x[3], reverse=True):
+        print(f"  - {name}: {base_val:.2f} -> {cur_val:.2f} (+{delta_pct:.2f}%)")
+    sys.exit(2)
+
+print("No regressions detected.")
+PY
+fi
 
 if [[ -n "$SAVE_DIR" ]]; then
     mkdir -p "$SAVE_DIR"
