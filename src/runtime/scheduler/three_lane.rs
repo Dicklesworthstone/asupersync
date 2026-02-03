@@ -52,6 +52,7 @@ use crate::obligation::lyapunov::{LyapunovGovernor, SchedulingSuggestion, StateS
 use crate::runtime::scheduler::global_injector::GlobalInjector;
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
+use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::trace;
