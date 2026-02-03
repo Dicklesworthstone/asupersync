@@ -235,6 +235,11 @@ impl AnyStoredTask {
         }
     }
 
+    /// Returns `true` when this is a `!Send` local task.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+
     /// Sets budget info on the inner task.
     pub fn set_polls_remaining(&mut self, remaining: u32) {
         match self {
@@ -310,5 +315,41 @@ mod tests {
             contains
         );
         crate::test_complete!("stored_task_debug");
+    }
+
+    #[test]
+    fn any_stored_task_is_local_global() {
+        init_test("any_stored_task_is_local_global");
+        let task = AnyStoredTask::Global(StoredTask::new(async { Outcome::Ok(()) }));
+        let local = task.is_local();
+        crate::assert_with_log!(!local, "Global variant must not be local", false, local);
+        crate::test_complete!("any_stored_task_is_local_global");
+    }
+
+    #[test]
+    fn any_stored_task_is_local_local() {
+        init_test("any_stored_task_is_local_local");
+        let task = AnyStoredTask::Local(LocalStoredTask::new(async { Outcome::Ok(()) }));
+        let local = task.is_local();
+        crate::assert_with_log!(local, "Local variant must be local", true, local);
+        crate::test_complete!("any_stored_task_is_local_local");
+    }
+
+    #[test]
+    fn any_stored_task_is_local_stable_after_poll() {
+        init_test("any_stored_task_is_local_stable_after_poll");
+        let mut task = AnyStoredTask::Local(LocalStoredTask::new(async { Outcome::Ok(()) }));
+        let before = task.is_local();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = task.poll(&mut cx);
+        let after = task.is_local();
+        crate::assert_with_log!(
+            before == after,
+            "is_local must be stable across poll",
+            true,
+            before == after
+        );
+        crate::test_complete!("any_stored_task_is_local_stable_after_poll");
     }
 }

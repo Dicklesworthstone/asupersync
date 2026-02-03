@@ -866,7 +866,7 @@ impl ThreeLaneWorker {
             )
         };
 
-        let is_local = matches!(stored, AnyStoredTask::Local(_));
+        let is_local = stored.is_local();
 
         // Reuse cached waker if priority hasn't changed, otherwise allocate new one
         let waker = match cached_waker {
