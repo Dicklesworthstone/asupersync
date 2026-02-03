@@ -244,6 +244,18 @@ fn xor_into(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+/// Rebuild source data bytes from an encoded state by concatenating source symbols.
+fn rebuild_source_bytes(encoded: &EncodedState) -> Vec<u8> {
+    let mut sources: Vec<&Symbol> = encoded.source_symbols().collect();
+    sources.sort_by_key(|symbol| symbol.id().esi());
+    let mut data = Vec::with_capacity(encoded.original_size);
+    for symbol in sources {
+        data.extend_from_slice(symbol.data());
+    }
+    data.truncate(encoded.original_size);
+    data
+}
+
 // ---------------------------------------------------------------------------
 // EncodedState
 // ---------------------------------------------------------------------------
