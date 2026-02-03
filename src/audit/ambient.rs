@@ -467,7 +467,7 @@ mod tests {
 
     fn format_violations(vs: &[Violation]) -> String {
         vs.iter()
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
     }

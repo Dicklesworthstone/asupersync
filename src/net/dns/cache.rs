@@ -112,6 +112,7 @@ impl DnsCache {
                             refreshed = Some(entry.data.clone());
                         }
                     }
+                    drop(cache);
                 }
 
                 let mut stats = self.stats.write().expect("stats lock poisoned");

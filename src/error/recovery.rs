@@ -148,10 +148,8 @@ impl CircuitBreaker {
             CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
                 let last = Time::from_nanos(self.last_failure_time.load(Ordering::Relaxed));
-                let timeout_nanos = self
-                    .recovery_timeout
-                    .as_nanos()
-                    .min(u128::from(u64::MAX)) as u64;
+                let timeout_nanos =
+                    self.recovery_timeout.as_nanos().min(u128::from(u64::MAX)) as u64;
                 if now >= last.saturating_add_nanos(timeout_nanos) {
                     // Try to transition to HalfOpen
                     if self.transition(CircuitState::Open, CircuitState::HalfOpen) {

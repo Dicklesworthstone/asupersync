@@ -204,6 +204,7 @@ pub struct TrackedOneshotSender<T> {
 
 impl<T> TrackedOneshotSender<T> {
     /// Wraps an existing [`oneshot::Sender`].
+    #[must_use]
     pub fn new(inner: oneshot::Sender<T>) -> Self {
         Self { inner }
     }
@@ -356,9 +357,9 @@ mod tests {
         let proof = permit.send(42);
 
         crate::assert_with_log!(
-            proof.kind() == crate::obligation::graded::ObligationKind::SendPermit,
+            proof.kind() == crate::record::ObligationKind::SendPermit,
             "proof kind",
-            crate::obligation::graded::ObligationKind::SendPermit,
+            crate::record::ObligationKind::SendPermit,
             proof.kind()
         );
 
@@ -379,15 +380,15 @@ mod tests {
         let proof = permit.abort();
 
         crate::assert_with_log!(
-            proof.kind() == crate::obligation::graded::ObligationKind::SendPermit,
+            proof.kind() == crate::record::ObligationKind::SendPermit,
             "aborted proof kind",
-            crate::obligation::graded::ObligationKind::SendPermit,
+            crate::record::ObligationKind::SendPermit,
             proof.kind()
         );
 
         // Slot was released — we can reserve again.
         let permit2 = block_on(tx.reserve(&cx)).expect("second reserve failed");
-        permit2.send(99);
+        let _ = permit2.send(99);
 
         let value = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(value == 99, "recv value after abort", 99, value);
@@ -418,9 +419,9 @@ mod tests {
         let proof = permit.send(7);
 
         crate::assert_with_log!(
-            proof.kind() == crate::obligation::graded::ObligationKind::SendPermit,
+            proof.kind() == crate::record::ObligationKind::SendPermit,
             "try_reserve proof kind",
-            crate::obligation::graded::ObligationKind::SendPermit,
+            crate::record::ObligationKind::SendPermit,
             proof.kind()
         );
 
@@ -441,9 +442,9 @@ mod tests {
         let proof = permit.send(100).expect("oneshot send failed");
 
         crate::assert_with_log!(
-            proof.kind() == crate::obligation::graded::ObligationKind::SendPermit,
+            proof.kind() == crate::record::ObligationKind::SendPermit,
             "oneshot proof kind",
-            crate::obligation::graded::ObligationKind::SendPermit,
+            crate::record::ObligationKind::SendPermit,
             proof.kind()
         );
 
@@ -464,15 +465,20 @@ mod tests {
         let proof = permit.abort();
 
         crate::assert_with_log!(
-            proof.kind() == crate::obligation::graded::ObligationKind::SendPermit,
+            proof.kind() == crate::record::ObligationKind::SendPermit,
             "oneshot aborted proof kind",
-            crate::obligation::graded::ObligationKind::SendPermit,
+            crate::record::ObligationKind::SendPermit,
             proof.kind()
         );
 
         // Receiver should see Closed
         let result = block_on(rx.recv(&cx));
-        crate::assert_with_log!(result.is_err(), "oneshot recv after abort", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "oneshot recv after abort",
+            true,
+            result.is_err()
+        );
 
         crate::test_complete!("tracked_oneshot_abort");
     }
@@ -499,9 +505,9 @@ mod tests {
         let proof = tx.send(&cx, 55).expect("convenience send failed");
 
         crate::assert_with_log!(
-            proof.kind() == crate::obligation::graded::ObligationKind::SendPermit,
+            proof.kind() == crate::record::ObligationKind::SendPermit,
             "convenience proof kind",
-            crate::obligation::graded::ObligationKind::SendPermit,
+            crate::record::ObligationKind::SendPermit,
             proof.kind()
         );
 

@@ -632,7 +632,12 @@ impl<P: Policy> Scope<'_, P> {
         // (inject_ready panic, try_steal debug_assert) can detect accidental
         // cross-thread migration of !Send futures.
         if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
-            record.mark_local();
+            if let Some(worker_id) = crate::runtime::scheduler::three_lane::current_worker_id() {
+                record.pin_to_worker(worker_id);
+            } else {
+                record.mark_local();
+            }
+            record.wake_state.notify();
         }
 
         // Schedule the task on the current worker's NON-STEALABLE local scheduler.
@@ -647,7 +652,7 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         // No local scheduler available: rollback to avoid a permanently parked task.
-        crate::runtime::local::remove_local_task(task_id);
+        let _ = crate::runtime::local::remove_local_task(task_id);
         if let Some(region) = state.regions.get(self.region.arena_index()) {
             region.remove_task(task_id);
         }

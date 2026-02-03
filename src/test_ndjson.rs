@@ -525,7 +525,10 @@ mod tests {
         assert_eq!(ndjson.seed, Some(0xDEAD_BEEF));
         assert_eq!(ndjson.subsystem.as_deref(), Some("scheduler"));
         assert_eq!(
-            ndjson.data.get("task_id").and_then(|v| v.as_u64()),
+            ndjson
+                .data
+                .get("task_id")
+                .and_then(serde_json::Value::as_u64),
             Some(42)
         );
         assert_eq!(
@@ -685,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_all_event_types_produce_valid_ndjson() {
         init_test("test_all_event_types_produce_valid_ndjson");
         let events = vec![

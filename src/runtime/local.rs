@@ -21,18 +21,19 @@ thread_local! {
 pub fn store_local_task(task_id: TaskId, task: LocalStoredTask) {
     LOCAL_TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
-        if tasks.insert(task_id, task).is_some() {
-            panic!("duplicate local task ID: {:?}", task_id);
-        }
+        let prev = tasks.insert(task_id, task);
+        assert!(prev.is_none(), "duplicate local task ID: {task_id:?}");
     });
 }
 
 /// Removes and returns a local task from the current thread's storage.
+#[must_use]
 pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
     LOCAL_TASKS.with(|tasks| tasks.borrow_mut().remove(&task_id))
 }
 
 /// Returns the number of local tasks on this thread.
+#[must_use]
 pub fn local_task_count() -> usize {
     LOCAL_TASKS.with(|tasks| tasks.borrow().len())
 }

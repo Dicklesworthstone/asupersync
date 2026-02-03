@@ -1134,17 +1134,19 @@ impl ThreeLaneWorker {
                     // Safety invariant: verify no local tasks were stolen.
                     #[cfg(debug_assertions)]
                     {
-                        let state = self.state.lock().expect("runtime state lock poisoned");
                         for &(task, _) in &self.steal_buffer[..stolen_count] {
+                            let is_local = self
+                                .state
+                                .lock()
+                                .expect("runtime state lock poisoned")
+                                .tasks
+                                .get(task.arena_index())
+                                .is_some_and(crate::record::task::TaskRecord::is_local);
                             debug_assert!(
-                                !state
-                                    .tasks
-                                    .get(task.arena_index())
-                                    .is_some_and(crate::record::task::TaskRecord::is_local),
+                                !is_local,
                                 "BUG: stole a local (!Send) task {task:?} from PriorityScheduler"
                             );
                         }
-                        drop(state);
                     }
 
                     // Take the first task to execute
@@ -2116,7 +2118,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker.clone()]));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker]));
         let waker = Waker::from(Arc::new(CancelLaneWaker {
             task_id,
             default_priority: Budget::INFINITE.priority,
@@ -2248,9 +2250,9 @@ mod tests {
         let state = Arc::new(Mutex::new(RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
-        let mut workers = scheduler.take_workers();
-        let local_ready_0 = Arc::clone(&workers[0].local_ready);
-        let mut worker1 = workers.pop().unwrap(); // worker 1 as mutable for try_steal
+        let mut worker_pool = scheduler.take_workers();
+        let local_ready_0 = Arc::clone(&worker_pool[0].local_ready);
+        let mut stealer_worker = worker_pool.pop().unwrap(); // worker 1 as mutable for try_steal
 
         let task_id = TaskId::new_for_test(1, 0);
 
@@ -2268,11 +2270,12 @@ mod tests {
             let queue = local_ready_0.lock().unwrap();
             assert_eq!(queue.len(), 1);
             assert_eq!(queue[0], task_id);
+            drop(queue);
         }
 
         // Worker 1 tries to steal. It should NOT find the task because
         // it only steals from PriorityScheduler and fast_queue, not local_ready.
-        let stolen = worker1.try_steal();
+        let stolen = stealer_worker.try_steal();
         assert!(stolen.is_none(), "Local task should not be stolen");
     }
 
@@ -2312,9 +2315,11 @@ mod tests {
         );
         drop(queue);
 
-        let local_guard = local.lock().expect("local scheduler lock poisoned");
         assert!(
-            local_guard.is_in_cancel_lane(task_id),
+            local
+                .lock()
+                .expect("local scheduler lock poisoned")
+                .is_in_cancel_lane(task_id),
             "task should be promoted to cancel lane"
         );
     }
@@ -2398,7 +2403,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker.clone()]));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker]));
 
         // Create multiple wakers (simulating cloned wakers)
         let wakers: Vec<_> = (0..10)
@@ -3472,7 +3477,7 @@ mod tests {
             wake_state: Arc::clone(&wake_state),
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
-            parker: parker.clone(),
+            parker,
         }));
 
         // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
@@ -3481,9 +3486,12 @@ mod tests {
         waker.wake_by_ref();
 
         // Task should be in local_ready, not PriorityScheduler.
-        let queue = local_ready.lock().unwrap();
-        assert_eq!(queue.len(), 1, "local_ready should have 1 task");
-        assert_eq!(queue[0], task_id);
+        {
+            let queue = local_ready.lock().unwrap();
+            assert_eq!(queue.len(), 1, "local_ready should have 1 task");
+            assert_eq!(queue[0], task_id);
+            drop(queue);
+        }
         assert_eq!(
             priority_sched.lock().unwrap().len(),
             0,
@@ -3508,15 +3516,18 @@ mod tests {
             wake_state: Arc::clone(&wake_state),
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
-            parker: parker.clone(),
+            parker,
         }));
 
         waker.wake_by_ref();
 
         // Task should be in local_ready (cross-thread fallback).
-        let queue = local_ready.lock().unwrap();
-        assert_eq!(queue.len(), 1, "local_ready should have 1 task");
-        assert_eq!(queue[0], task_id);
+        {
+            let queue = local_ready.lock().unwrap();
+            assert_eq!(queue.len(), 1, "local_ready should have 1 task");
+            assert_eq!(queue[0], task_id);
+            drop(queue);
+        }
     }
 
     #[test]
@@ -3724,6 +3735,7 @@ mod tests {
         let tasks = queue.lock().expect("lock");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0], task);
+        drop(tasks);
     }
 
     #[test]
@@ -3758,6 +3770,7 @@ mod tests {
             if let Some(record) = guard.tasks.get_mut(id.arena_index()) {
                 record.mark_local();
             }
+            drop(guard);
             id
         };
 
@@ -3811,6 +3824,7 @@ mod tests {
             if let Some(record) = guard.tasks.get_mut(id.arena_index()) {
                 record.pin_to_worker(1);
             }
+            drop(guard);
             id
         };
 
@@ -3822,11 +3836,11 @@ mod tests {
         }
 
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
-        let workers = scheduler.take_workers();
-        let worker0 = &workers[0];
-        let worker1_local_ready = Arc::clone(&workers[1].local_ready);
+        let worker_pool = scheduler.take_workers();
+        let primary_worker = &worker_pool[0];
+        let worker1_local_ready = Arc::clone(&worker_pool[1].local_ready);
 
-        worker0.execute(task_id);
+        primary_worker.execute(task_id);
 
         let queued: Vec<TaskId> = worker1_local_ready.lock().unwrap().drain(..).collect();
         assert!(
@@ -3834,11 +3848,15 @@ mod tests {
             "local waiter should be routed to owner worker 1, got {queued:?}"
         );
         assert!(
-            !worker0.local_ready.lock().unwrap().contains(&waiter_id),
+            !primary_worker
+                .local_ready
+                .lock()
+                .unwrap()
+                .contains(&waiter_id),
             "local waiter should NOT be in worker 0's local_ready"
         );
         assert!(
-            worker0.global.pop_ready().is_none(),
+            primary_worker.global.pop_ready().is_none(),
             "local waiter should not be in the global injector"
         );
     }

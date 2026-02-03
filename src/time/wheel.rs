@@ -1597,7 +1597,7 @@ mod tests {
         // Register timers across multiple levels
         wheel.register(Time::from_millis(5), counter_waker(counter.clone()));
         wheel.register(Time::from_millis(100), counter_waker(counter.clone()));
-        wheel.register(Time::from_secs(10), counter_waker(counter.clone()));
+        wheel.register(Time::from_secs(10), counter_waker(counter));
 
         // Verify some bits are set
         let any_set = wheel

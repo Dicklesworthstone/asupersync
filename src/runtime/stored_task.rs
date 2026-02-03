@@ -236,6 +236,7 @@ impl AnyStoredTask {
     }
 
     /// Returns `true` when this is a `!Send` local task.
+    #[must_use]
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local(_))
     }
