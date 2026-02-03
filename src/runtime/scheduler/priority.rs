@@ -1192,4 +1192,559 @@ mod tests {
     fn scheduler_mode_default_is_deterministic() {
         assert_eq!(SchedulerMode::default(), SchedulerMode::Deterministic);
     }
+
+    // ── pop_with_lane tests ───────────────────────────────────────────────
+
+    #[test]
+    fn pop_with_lane_returns_cancel_lane() {
+        init_test("pop_with_lane_returns_cancel_lane");
+        let mut sched = Scheduler::new();
+        sched.schedule_cancel(task(1), 100);
+
+        let result = sched.pop_with_lane(0);
+        crate::assert_with_log!(
+            result == Some((task(1), DispatchLane::Cancel)),
+            "cancel task dispatches from Cancel lane",
+            Some((task(1), DispatchLane::Cancel)),
+            result
+        );
+        crate::test_complete!("pop_with_lane_returns_cancel_lane");
+    }
+
+    #[test]
+    fn pop_with_lane_returns_timed_lane() {
+        init_test("pop_with_lane_returns_timed_lane");
+        let mut sched = Scheduler::new();
+        sched.schedule_timed(task(1), Time::from_secs(10));
+
+        let result = sched.pop_with_lane(0);
+        crate::assert_with_log!(
+            result == Some((task(1), DispatchLane::Timed)),
+            "timed task dispatches from Timed lane",
+            Some((task(1), DispatchLane::Timed)),
+            result
+        );
+        crate::test_complete!("pop_with_lane_returns_timed_lane");
+    }
+
+    #[test]
+    fn pop_with_lane_returns_ready_lane() {
+        init_test("pop_with_lane_returns_ready_lane");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+
+        let result = sched.pop_with_lane(0);
+        crate::assert_with_log!(
+            result == Some((task(1), DispatchLane::Ready)),
+            "ready task dispatches from Ready lane",
+            Some((task(1), DispatchLane::Ready)),
+            result
+        );
+        crate::test_complete!("pop_with_lane_returns_ready_lane");
+    }
+
+    #[test]
+    fn pop_with_lane_respects_lane_ordering() {
+        init_test("pop_with_lane_respects_lane_ordering");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_timed(task(2), Time::from_secs(10));
+        sched.schedule_cancel(task(3), 10);
+
+        let first = sched.pop_with_lane(0);
+        let second = sched.pop_with_lane(0);
+        let third = sched.pop_with_lane(0);
+        let fourth = sched.pop_with_lane(0);
+
+        crate::assert_with_log!(
+            first.map(|(_, l)| l) == Some(DispatchLane::Cancel),
+            "cancel dispatches first",
+            Some(DispatchLane::Cancel),
+            first.map(|(_, l)| l)
+        );
+        crate::assert_with_log!(
+            second.map(|(_, l)| l) == Some(DispatchLane::Timed),
+            "timed dispatches second",
+            Some(DispatchLane::Timed),
+            second.map(|(_, l)| l)
+        );
+        crate::assert_with_log!(
+            third.map(|(_, l)| l) == Some(DispatchLane::Ready),
+            "ready dispatches third",
+            Some(DispatchLane::Ready),
+            third.map(|(_, l)| l)
+        );
+        crate::assert_with_log!(
+            fourth.is_none(),
+            "empty scheduler returns None",
+            Option::<(TaskId, DispatchLane)>::None,
+            fourth
+        );
+        crate::test_complete!("pop_with_lane_respects_lane_ordering");
+    }
+
+    #[test]
+    fn pop_with_lane_rng_tiebreak_among_equal_priority() {
+        init_test("pop_with_lane_rng_tiebreak_among_equal_priority");
+        let mut sched = Scheduler::new();
+
+        // Schedule 4 tasks all at priority 50
+        for i in 0..4 {
+            sched.schedule(task(i), 50);
+        }
+
+        // With different rng_hints, we should get different ordering
+        // (since all have equal priority, rng selects among them)
+        let mut results_hint_0 = Vec::new();
+        let mut sched_copy = Scheduler::new();
+        for i in 0..4 {
+            sched_copy.schedule(task(i), 50);
+        }
+
+        for step in 0..4 {
+            if let Some((t, _)) = sched.pop_with_lane(step) {
+                results_hint_0.push(t);
+            }
+        }
+
+        for step in 0..4 {
+            if let Some((t, _)) = sched_copy.pop_with_lane(step + 42) {
+                results_hint_0.push(t);
+            }
+        }
+
+        // All 8 pops should succeed (4 from each scheduler)
+        crate::assert_with_log!(
+            results_hint_0.len() == 8,
+            "all tasks dispatched from both schedulers",
+            8usize,
+            results_hint_0.len()
+        );
+        crate::test_complete!("pop_with_lane_rng_tiebreak_among_equal_priority");
+    }
+
+    // ── steal_ready_batch_into tests ──────────────────────────────────────
+
+    #[test]
+    fn steal_ready_batch_into_fills_buffer() {
+        init_test("steal_ready_batch_into_fills_buffer");
+        let mut sched = Scheduler::new();
+        for i in 0..10 {
+            sched.schedule(task(i), 50);
+        }
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(5, &mut buf);
+
+        crate::assert_with_log!(
+            count == buf.len(),
+            "returned count matches buffer length",
+            count,
+            buf.len()
+        );
+        crate::assert_with_log!(count <= 5, "does not exceed max_steal", true, count <= 5);
+        crate::assert_with_log!(count > 0, "steals at least one task", true, count > 0);
+        crate::test_complete!("steal_ready_batch_into_fills_buffer");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_does_not_steal_cancel_or_timed() {
+        init_test("steal_ready_batch_into_does_not_steal_cancel_or_timed");
+        let mut sched = Scheduler::new();
+        sched.schedule_cancel(task(1), 100);
+        sched.schedule_timed(task(2), Time::from_secs(10));
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(10, &mut buf);
+
+        crate::assert_with_log!(
+            count == 0,
+            "nothing stolen when ready lane is empty",
+            0usize,
+            count
+        );
+        // Cancel and timed tasks should still be present
+        crate::assert_with_log!(
+            sched.has_cancel_work(),
+            "cancel task preserved",
+            true,
+            sched.has_cancel_work()
+        );
+        crate::assert_with_log!(
+            sched.has_timed_work(),
+            "timed task preserved",
+            true,
+            sched.has_timed_work()
+        );
+        crate::test_complete!("steal_ready_batch_into_does_not_steal_cancel_or_timed");
+    }
+
+    #[test]
+    fn steal_ready_batch_into_clears_buffer() {
+        init_test("steal_ready_batch_into_clears_buffer");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+
+        let mut buf = vec![(task(99), 255)]; // Pre-existing junk
+        let count = sched.steal_ready_batch_into(10, &mut buf);
+
+        crate::assert_with_log!(count == 1, "stole exactly one task", 1usize, count);
+        crate::assert_with_log!(
+            buf.len() == 1,
+            "buffer cleared before filling",
+            1usize,
+            buf.len()
+        );
+        crate::assert_with_log!(
+            buf[0].0 == task(1),
+            "correct task in buffer",
+            task(1),
+            buf[0].0
+        );
+        crate::test_complete!("steal_ready_batch_into_clears_buffer");
+    }
+
+    // ── pop_timed_only edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn pop_timed_only_respects_deadline_boundary() {
+        init_test("pop_timed_only_respects_deadline_boundary");
+        let mut sched = Scheduler::new();
+        sched.schedule_timed(task(1), Time::from_secs(100));
+
+        // Before deadline: should not dispatch
+        let before = sched.pop_timed_only(Time::from_secs(99));
+        crate::assert_with_log!(
+            before.is_none(),
+            "timed task not due before deadline",
+            Option::<TaskId>::None,
+            before
+        );
+
+        // Exactly at deadline: should dispatch
+        let at = sched.pop_timed_only(Time::from_secs(100));
+        crate::assert_with_log!(
+            at == Some(task(1)),
+            "timed task dispatches at deadline",
+            Some(task(1)),
+            at
+        );
+        crate::test_complete!("pop_timed_only_respects_deadline_boundary");
+    }
+
+    #[test]
+    fn pop_timed_only_edf_with_mixed_due_status() {
+        init_test("pop_timed_only_edf_with_mixed_due_status");
+        let mut sched = Scheduler::new();
+        sched.schedule_timed(task(1), Time::from_secs(50)); // due
+        sched.schedule_timed(task(2), Time::from_secs(200)); // not due
+        sched.schedule_timed(task(3), Time::from_secs(75)); // due
+
+        let now = Time::from_secs(100);
+
+        // Should return earliest deadline first
+        let first = sched.pop_timed_only(now);
+        crate::assert_with_log!(
+            first == Some(task(1)),
+            "earliest deadline dispatches first",
+            Some(task(1)),
+            first
+        );
+
+        let second = sched.pop_timed_only(now);
+        crate::assert_with_log!(
+            second == Some(task(3)),
+            "second earliest deadline dispatches next",
+            Some(task(3)),
+            second
+        );
+
+        // Task 2 is not due (deadline 200 > now 100)
+        let third = sched.pop_timed_only(now);
+        crate::assert_with_log!(
+            third.is_none(),
+            "not-due task is not dispatched",
+            Option::<TaskId>::None,
+            third
+        );
+        crate::test_complete!("pop_timed_only_edf_with_mixed_due_status");
+    }
+
+    // ---- Cancel preemption: cancel drains before any timed/ready --------
+
+    #[test]
+    fn cancel_drains_completely_before_timed_and_ready() {
+        init_test("cancel_drains_completely_before_timed_and_ready");
+        let mut sched = Scheduler::new();
+
+        // Schedule ready, timed, and cancel tasks in mixed order.
+        sched.schedule(task(1), 100);
+        sched.schedule_timed(task(2), Time::from_secs(1));
+        sched.schedule_cancel(task(3), 50);
+        sched.schedule(task(4), 200);
+        sched.schedule_cancel(task(5), 100);
+        sched.schedule_timed(task(6), Time::from_secs(2));
+
+        // First two pops must be from cancel lane.
+        let (_first, lane1) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane1, DispatchLane::Cancel),
+            "first from cancel",
+            true,
+            true
+        );
+
+        let (_second, lane2) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane2, DispatchLane::Cancel),
+            "second from cancel",
+            true,
+            true
+        );
+
+        // Now timed lane should drain (EDF order).
+        let (_third, lane3) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane3, DispatchLane::Timed),
+            "third from timed",
+            true,
+            true
+        );
+
+        let (_fourth, lane4) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane4, DispatchLane::Timed),
+            "fourth from timed",
+            true,
+            true
+        );
+
+        // Finally ready lane.
+        let (_fifth, lane5) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane5, DispatchLane::Ready),
+            "fifth from ready",
+            true,
+            true
+        );
+
+        let (_sixth, lane6) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane6, DispatchLane::Ready),
+            "sixth from ready",
+            true,
+            true
+        );
+
+        // Scheduler should now be empty.
+        crate::assert_with_log!(
+            sched.is_empty(),
+            "empty after drain",
+            true,
+            sched.is_empty()
+        );
+        crate::test_complete!("cancel_drains_completely_before_timed_and_ready");
+    }
+
+    // ---- Move to cancel preserves other ready work ----------------------
+
+    #[test]
+    fn move_to_cancel_preserves_ready_work() {
+        init_test("move_to_cancel_preserves_ready_work");
+        let mut sched = Scheduler::new();
+
+        // Schedule three ready tasks.
+        sched.schedule(task(1), 100);
+        sched.schedule(task(2), 100);
+        sched.schedule(task(3), 100);
+        let len_before = sched.len();
+        crate::assert_with_log!(len_before == 3, "before move", 3, len_before);
+
+        // Move task(2) to cancel lane.
+        sched.move_to_cancel_lane(task(2), 200);
+
+        // Total count should remain 3.
+        let len_after = sched.len();
+        crate::assert_with_log!(len_after == 3, "after move", 3, len_after);
+
+        // First pop should be task(2) from cancel lane.
+        let (first, lane) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(first == task(2), "cancel first", task(2), first);
+        crate::assert_with_log!(
+            matches!(lane, DispatchLane::Cancel),
+            "from cancel lane",
+            true,
+            true
+        );
+
+        // Remaining two should be from ready lane.
+        let (_, lane2) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane2, DispatchLane::Ready),
+            "second from ready",
+            true,
+            true
+        );
+
+        let (_, lane3) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(
+            matches!(lane3, DispatchLane::Ready),
+            "third from ready",
+            true,
+            true
+        );
+
+        crate::assert_with_log!(sched.is_empty(), "empty", true, sched.is_empty());
+        crate::test_complete!("move_to_cancel_preserves_ready_work");
+    }
+
+    // ---- Interleaved schedule/pop maintains invariants -------------------
+
+    #[test]
+    fn interleaved_schedule_pop_correct() {
+        init_test("interleaved_schedule_pop_correct");
+        let mut sched = Scheduler::new();
+
+        // Schedule and pop interleaved — scheduler should always return
+        // highest priority lane first.
+        sched.schedule(task(1), 50);
+        let first = sched.pop();
+        crate::assert_with_log!(first == Some(task(1)), "pop ready", Some(task(1)), first);
+
+        sched.schedule_cancel(task(2), 100);
+        sched.schedule(task(3), 200); // higher ready priority but cancel wins
+
+        let second = sched.pop();
+        crate::assert_with_log!(
+            second == Some(task(2)),
+            "cancel preempts",
+            Some(task(2)),
+            second
+        );
+
+        let third = sched.pop();
+        crate::assert_with_log!(
+            third == Some(task(3)),
+            "ready dispatches after cancel drain",
+            Some(task(3)),
+            third
+        );
+
+        crate::assert_with_log!(sched.is_empty(), "empty", true, sched.is_empty());
+        crate::test_complete!("interleaved_schedule_pop_correct");
+    }
+
+    // ---- EDF with many same-deadline tasks is stable --------------------
+
+    #[test]
+    fn edf_same_deadline_fifo_stable() {
+        init_test("edf_same_deadline_fifo_stable");
+        let mut sched = Scheduler::new();
+        let deadline = Time::from_secs(100);
+
+        // Schedule 10 tasks with the same deadline — should dispatch in FIFO order
+        // (by generation) when using basic pop.
+        for i in 0..10 {
+            sched.schedule_timed(task(i), deadline);
+        }
+
+        let mut order = Vec::new();
+        while let Some(t) = sched.pop() {
+            order.push(t);
+        }
+
+        crate::assert_with_log!(order.len() == 10, "all dispatched", 10, order.len());
+
+        // Verify FIFO ordering (earlier index = lower task number).
+        for window in order.windows(2) {
+            let a_idx = window[0].arena_index().index();
+            let b_idx = window[1].arena_index().index();
+            crate::assert_with_log!(a_idx < b_idx, "FIFO order", true, true);
+        }
+        crate::test_complete!("edf_same_deadline_fifo_stable");
+    }
+
+    // ---- Remove from specific lane doesn't corrupt other lanes ----------
+
+    #[test]
+    fn remove_does_not_corrupt_other_lanes() {
+        init_test("remove_does_not_corrupt_other_lanes");
+        let mut sched = Scheduler::new();
+
+        sched.schedule(task(1), 100);
+        sched.schedule_timed(task(2), Time::from_secs(10));
+        sched.schedule_cancel(task(3), 200);
+
+        // Remove timed task.
+        sched.remove(task(2));
+        let len = sched.len();
+        crate::assert_with_log!(len == 2, "after remove", 2, len);
+
+        // Cancel and ready should still work.
+        let (first, lane1) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(first == task(3), "cancel intact", task(3), first);
+        crate::assert_with_log!(
+            matches!(lane1, DispatchLane::Cancel),
+            "cancel lane",
+            true,
+            true
+        );
+
+        let (second, lane2) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(second == task(1), "ready intact", task(1), second);
+        crate::assert_with_log!(
+            matches!(lane2, DispatchLane::Ready),
+            "ready lane",
+            true,
+            true
+        );
+
+        crate::assert_with_log!(sched.is_empty(), "empty", true, sched.is_empty());
+        crate::test_complete!("remove_does_not_corrupt_other_lanes");
+    }
+
+    // ---- High-volume cancel/ready interleaving --------------------------
+
+    #[test]
+    fn high_volume_cancel_ready_interleaving() {
+        init_test("high_volume_cancel_ready_interleaving");
+        let mut sched = Scheduler::new();
+
+        // Schedule 50 cancel + 50 ready tasks.
+        for i in 0..50 {
+            sched.schedule_cancel(task(i), 100);
+        }
+        for i in 50..100 {
+            sched.schedule(task(i), 100);
+        }
+
+        let total = sched.len();
+        crate::assert_with_log!(total == 100, "total", 100, total);
+
+        // All cancel tasks must dispatch before any ready task.
+        let mut cancel_count = 0;
+        let mut ready_seen = false;
+        while let Some((_, lane)) = sched.pop_with_lane(0) {
+            match lane {
+                DispatchLane::Cancel => {
+                    crate::assert_with_log!(
+                        !ready_seen,
+                        "no ready before cancel drains",
+                        true,
+                        true
+                    );
+                    cancel_count += 1;
+                }
+                DispatchLane::Ready => {
+                    ready_seen = true;
+                }
+                DispatchLane::Timed | DispatchLane::Stolen => {}
+            }
+        }
+
+        crate::assert_with_log!(cancel_count == 50, "cancel count", 50, cancel_count);
+        crate::assert_with_log!(ready_seen, "ready seen", true, ready_seen);
+        crate::assert_with_log!(sched.is_empty(), "empty", true, sched.is_empty());
+        crate::test_complete!("high_volume_cancel_ready_interleaving");
+    }
 }
