@@ -484,8 +484,7 @@ impl StateDecoder {
         }
 
         for symbol in &self.symbols {
-            let auth =
-                AuthenticatedSymbol::new_verified(symbol.clone(), AuthenticationTag::zero());
+            let auth = AuthenticatedSymbol::new_verified(symbol.clone(), AuthenticationTag::zero());
             if let SymbolAcceptResult::Rejected(reason) =
                 pipeline.feed(auth).map_err(Error::from)?
             {
