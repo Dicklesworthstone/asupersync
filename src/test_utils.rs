@@ -26,8 +26,8 @@ use crate::runtime::RuntimeBuilder;
 pub use crate::test_logging::{
     derive_component_seed, derive_entropy_seed, derive_scenario_seed, wait_until_healthy,
     AllocatedPort, DockerFixtureService, EnvironmentMetadata, FixtureService, InProcessService,
-    NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext,
-    TestEnvironment, ARTIFACT_SCHEMA_VERSION,
+    NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext, TestEnvironment,
+    ARTIFACT_SCHEMA_VERSION,
 };
 use crate::time::timeout;
 use crate::types::Time;

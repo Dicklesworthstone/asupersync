@@ -831,7 +831,7 @@ mod tests {
             });
         }
 
-        let _bytes = trace.to_bytes().expect("serialize");
+        let bytes = trace.to_bytes().expect("serialize");
         let avg_size = bytes.len() / 100;
 
         // Verify average event size is reasonable (should be well under 64 bytes)

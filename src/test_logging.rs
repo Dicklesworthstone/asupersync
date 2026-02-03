@@ -1859,11 +1859,7 @@ impl DockerFixtureService {
     /// ID to avoid collisions between parallel test runs.
     #[must_use]
     pub fn new(service_name: &str, image: &str) -> Self {
-        let container_name = format!(
-            "asupersync-test-{}-{}",
-            service_name,
-            std::process::id()
-        );
+        let container_name = format!("asupersync-test-{}-{}", service_name, std::process::id());
         Self {
             service_name: service_name.to_string(),
             image: image.to_string(),
@@ -1903,10 +1899,11 @@ impl DockerFixtureService {
         &self.container_name
     }
 
-    fn run_docker_cmd(&self, args: &[&str]) -> Result<std::process::Output, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new("docker")
-            .args(args)
-            .output()?;
+    fn run_docker_cmd(
+        &self,
+        args: &[&str],
+    ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new("docker").args(args).output()?;
         Ok(output)
     }
 }
@@ -2076,9 +2073,7 @@ impl FixtureService for TempDirFixture {
     }
 
     fn is_healthy(&self) -> bool {
-        self.dir
-            .as_ref()
-            .map_or(false, |d| d.path().is_dir())
+        self.dir.as_ref().map_or(false, |d| d.path().is_dir())
     }
 }
 
@@ -3821,8 +3816,14 @@ mod tests {
         let svc = InProcessService::new(
             "mock_http",
             flag.clone(),
-            |s: &mut Arc<AtomicBool>| { s.store(true, AtOrd::SeqCst); Ok(()) },
-            |s: &mut Arc<AtomicBool>| { s.store(false, AtOrd::SeqCst); Ok(()) },
+            |s: &mut Arc<AtomicBool>| {
+                s.store(true, AtOrd::SeqCst);
+                Ok(())
+            },
+            |s: &mut Arc<AtomicBool>| {
+                s.store(false, AtOrd::SeqCst);
+                Ok(())
+            },
             |s: &Arc<AtomicBool>| s.load(AtOrd::SeqCst),
         );
 

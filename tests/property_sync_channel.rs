@@ -66,19 +66,9 @@ fn arb_capacity() -> impl Strategy<Value = usize> {
     1_usize..=256
 }
 
-/// Generate a message count that fits within a capacity.
-fn arb_message_count(max: usize) -> impl Strategy<Value = usize> {
-    0_usize..=max
-}
-
 /// Generate a bounded sequence of distinct i64 values for FIFO testing.
 fn arb_message_sequence(max_len: usize) -> impl Strategy<Value = Vec<i64>> {
     proptest::collection::vec(any::<i64>(), 0..=max_len)
-}
-
-/// Generate a semaphore permit count (1..=max).
-fn arb_permit_count(max: usize) -> impl Strategy<Value = usize> {
-    1_usize..=max
 }
 
 /// Generate a sequence of acquire/release operations for semaphore testing.
@@ -237,7 +227,8 @@ proptest! {
         let empty_result = rx.try_recv();
         prop_assert!(
             matches!(empty_result, Err(mpsc::RecvError::Empty)),
-            "channel should be empty after abort, got: {empty_result:?}"
+            "channel should be empty after abort, got: {:?}",
+            empty_result
         );
 
         // Should be able to reserve again
@@ -314,7 +305,8 @@ proptest! {
         let result = rx.try_recv();
         prop_assert!(
             matches!(result, Err(mpsc::RecvError::Disconnected)),
-            "expected Disconnected after sender drop, got: {result:?}"
+            "expected Disconnected after sender drop, got: {:?}",
+            result
         );
     }
 
@@ -327,7 +319,8 @@ proptest! {
         let result = tx.try_send(42);
         prop_assert!(
             matches!(result, Err(mpsc::SendError::Disconnected(_))),
-            "expected Disconnected after receiver drop, got: {result:?}"
+            "expected Disconnected after receiver drop, got: {:?}",
+            result
         );
     }
 }
@@ -602,7 +595,11 @@ proptest! {
                 if let Some(dc) = combined.deadline {
                     prop_assert!(
                         dc <= expected,
-                        "combined deadline {dc:?} > min({da:?}, {db:?}) = {expected:?}"
+                        "combined deadline {:?} > min({:?}, {:?}) = {:?}",
+                        dc,
+                        da,
+                        db,
+                        expected
                     );
                 }
                 // combined must have a deadline
@@ -717,39 +714,39 @@ fn property_sync_channel_coverage() {
     init_test_logging();
     test_phase!("property_sync_channel_coverage");
 
-    let mut tracker = InvariantTracker::new("sync_channel_properties");
+    let mut tracker = InvariantTracker::new();
 
     // Channel invariants
-    tracker.record("mpsc_fifo_ordering", true);
-    tracker.record("mpsc_two_phase_fifo", true);
-    tracker.record("mpsc_permit_abort_frees_slot", true);
-    tracker.record("mpsc_capacity_accounting", true);
-    tracker.record("mpsc_sender_drop_disconnects", true);
-    tracker.record("mpsc_receiver_drop_disconnects", true);
+    tracker.check("mpsc_fifo_ordering", true);
+    tracker.check("mpsc_two_phase_fifo", true);
+    tracker.check("mpsc_permit_abort_frees_slot", true);
+    tracker.check("mpsc_capacity_accounting", true);
+    tracker.check("mpsc_sender_drop_disconnects", true);
+    tracker.check("mpsc_receiver_drop_disconnects", true);
 
     // Broadcast invariants
-    tracker.record("broadcast_fanout_correctness", true);
-    tracker.record("broadcast_close_on_sender_drop", true);
+    tracker.check("broadcast_fanout_correctness", true);
+    tracker.check("broadcast_close_on_sender_drop", true);
 
     // Semaphore invariants
-    tracker.record("semaphore_conservation", true);
-    tracker.record("semaphore_acquire_reduces_by_count", true);
-    tracker.record("semaphore_close_prevents_acquire", true);
-    tracker.record("semaphore_mixed_ops_consistency", true);
+    tracker.check("semaphore_conservation", true);
+    tracker.check("semaphore_acquire_reduces_by_count", true);
+    tracker.check("semaphore_close_prevents_acquire", true);
+    tracker.check("semaphore_mixed_ops_consistency", true);
 
     // Budget invariants
-    tracker.record("budget_deadline_tightens", true);
-    tracker.record("budget_poll_quota_tightens", true);
-    tracker.record("budget_cost_quota_tightens", true);
-    tracker.record("budget_priority_is_max", true);
-    tracker.record("budget_zero_quota_is_exhausted", true);
+    tracker.check("budget_deadline_tightens", true);
+    tracker.check("budget_poll_quota_tightens", true);
+    tracker.check("budget_cost_quota_tightens", true);
+    tracker.check("budget_priority_is_max", true);
+    tracker.check("budget_zero_quota_is_exhausted", true);
 
     let report = tracker.report();
-    assert_coverage_threshold(&report, 100.0, "all sync/channel property tests must pass");
+    assert_coverage_threshold(&tracker, 100.0);
 
     test_complete!(
         "property_sync_channel_coverage",
-        total_invariants = report.total,
-        covered = report.covered
+        total_invariants = report.total_invariants(),
+        covered = report.checked_invariants()
     );
 }
