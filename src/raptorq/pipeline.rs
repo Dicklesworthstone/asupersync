@@ -610,7 +610,9 @@ mod tests {
         let mut sender =
             RaptorQSender::new(RaptorQConfig::default(), sink, Some(security.clone()), None);
 
-        let data = vec![0x11u8; 128];
+        // Use larger data to ensure k > L overhead requirements
+        // With symbol_size=256, 1KB gives k=4, which has enough margin
+        let data = vec![0x11u8; 1024];
         let object_id = ObjectId::new_for_test(10);
         let outcome = sender.send_object(&cx, object_id, &data).unwrap();
         let params = params_for(

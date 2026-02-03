@@ -180,7 +180,12 @@ impl RewriteCertificate {
     pub fn fingerprint(&self) -> u64 {
         let mut h = FNV_OFFSET;
         h = fnv_u64(h, u64::from(self.version.number()));
-        h = fnv_u8(h, self.policy as u8);
+        // Hash policy as packed bits: assoc|comm|dist|require_binary_joins
+        let policy_bits: u8 = u8::from(self.policy.associativity)
+            | (u8::from(self.policy.commutativity) << 1)
+            | (u8::from(self.policy.distributivity) << 2)
+            | (u8::from(self.policy.require_binary_joins) << 3);
+        h = fnv_u8(h, policy_bits);
         h = fnv_u64(h, self.before_hash.value());
         h = fnv_u64(h, self.after_hash.value());
         h = fnv_u64(h, self.steps.len() as u64);
@@ -592,8 +597,8 @@ fn verify_dedup_race_join_result(
         });
     }
 
-    let requires_binary_joins = matches!(policy, RewritePolicy::Conservative);
-    let allows_shared_non_leaf = matches!(policy, RewritePolicy::AssumeAssociativeComm);
+    let requires_binary_joins = policy.requires_binary_joins();
+    let allows_shared_non_leaf = policy.allows_shared_non_leaf();
 
     if requires_binary_joins && children.len() != 2 {
         return Err(StepVerifyError::InvalidBeforeShape {
