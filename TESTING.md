@@ -138,12 +138,19 @@ unit tests: units validate local invariants, E2E validates the full pipeline.
 ### Single command (local)
 
 ```bash
+# Via runner script (produces summary + per-suite logs in target/phase6-e2e/):
+./scripts/run_phase6_e2e.sh
+
+# Or via cargo directly:
 cargo test --test e2e_geodesic_normalization \
            --test topology_benchmark \
            --test e2e_governor_vs_baseline \
            --test raptorq_conformance \
-           --test phase0_verification \
-           -- --nocapture
+           --test golden_outputs \
+           --all-features -- --nocapture
+
+# Run a single suite:
+./scripts/run_phase6_e2e.sh --suite geo
 ```
 
 ### Suite breakdown
@@ -154,7 +161,7 @@ cargo test --test e2e_geodesic_normalization \
 | HOMO | `topology_benchmark.rs` | Topology-guided exploration | Coverage reports, detection rates, topology vs baseline |
 | LYAP | `e2e_governor_vs_baseline.rs` | Lyapunov governance | V(Σ) convergence, cancel/drain latency, deterministic fingerprints |
 | RAPTORQ | `raptorq_conformance.rs` | RaptorQ FEC codec | Roundtrip correctness, proof artifacts, erasure patterns |
-| PLAN | `phase0_verification.rs` | Certified rewrite engine | Certificate verification, lab equivalence, golden hashes |
+| PLAN | `golden_outputs.rs` | Certified rewrite engine | Certificate verification, lab equivalence, golden hashes |
 
 ### What these tests catch
 
