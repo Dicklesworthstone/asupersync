@@ -41,6 +41,103 @@ Deterministic replay only works when the environment is fully controlled. The co
 
 If any precondition is violated, replay should fail fast with explicit diagnostics rather than “best-effort.”
 
+---
+
+## Deterministic Seed Registry + Artifact Schema (bd-30pc)
+
+This section standardizes how seeds are chosen, propagated, logged, and stored in
+repro artifacts. The goal is: **given a test_id + seed + inputs, anyone can
+reproduce the exact run without guessing**.
+
+### Seed Taxonomy
+
+We use one **primary test seed** and derive all secondary seeds deterministically.
+
+**Primary**
+- `test_seed` (u64): The root seed for a test/E2E run.
+
+**Derived (stable)**
+- `schedule_seed`: scheduling RNG
+- `entropy_seed`: capability RNG (Cx::random_*)
+- `fault_seed`: chaos/fault injection
+- `fuzz_seed`: property/fuzz generators
+
+**Derivation rule (canonical):**
+```
+derived = H(test_seed || purpose_tag || scope_id)
+```
+Where `H` is a stable 64-bit hash (e.g., SplitMix64 or xxhash64) and
+`purpose_tag` is a short ASCII tag (`"schedule"`, `"entropy"`, `"fault"`, `"fuzz"`).
+
+### Seed Selection + Propagation (Required)
+
+1. **Explicit seed wins**: if a test specifies a seed, use it.
+2. **Environment override**: `ASUPERSYNC_SEED` (preferred) or `CI_SEED`.
+3. **Fallback**: a constant seed (e.g., `0x_1234_5678_9abc_def0`) for local runs.
+
+**Logging requirement** (unit + integration + E2E):
+- Always log `test_id`, `test_seed`, and all derived seeds used.
+- Emit these fields at test start **and** on failure.
+
+### Artifact Schema (Repro Manifest)
+
+Artifacts are emitted **only on failure** unless explicitly enabled.
+Artifacts live under `target/test-artifacts/` to keep the repo clean.
+
+**Directory layout (deterministic):**
+```
+target/test-artifacts/{test_id}/{seed_hash}/
+  repro.json
+  trace.async
+  stdout.log
+  stderr.log
+  inputs.bin
+```
+
+**Naming rules:**
+- `seed_hash = H(test_seed || test_id)` (stable, no timestamps)
+- `trace.async` is the replay trace file
+- `inputs.bin` (optional) is the failing input payload
+
+**`repro.json` schema (minimum):**
+```json
+{
+  "schema_version": 1,
+  "test_id": "cancel_request_drain_finalize",
+  "test_seed": 42,
+  "derived_seeds": {
+    "schedule_seed": 123,
+    "entropy_seed": 456,
+    "fault_seed": 789,
+    "fuzz_seed": 321
+  },
+  "config_hash": "sha256:...",
+  "git": { "commit": "abc123", "dirty": false },
+  "runtime": { "lab": true, "trace_schema": 3 },
+  "artifacts": {
+    "trace_file": "trace.async",
+    "stdout_log": "stdout.log",
+    "stderr_log": "stderr.log",
+    "inputs": "inputs.bin"
+  },
+  "repro_command": "ASUPERSYNC_SEED=42 cargo test cancel_request_drain_finalize",
+  "notes": "Failure at event 1042 (see trace)"
+}
+```
+
+### Replay Workflow (Required)
+
+1. Load `repro.json`.
+2. Verify `schema_version`, `config_hash`, and `trace_schema`.
+3. Re-run with `ASUPERSYNC_SEED` and same inputs (or load `trace.async` directly).
+4. If divergence happens, emit a **divergence artifact** with the first mismatched event.
+
+### Deterministic Logging Rules (Reference)
+
+- Avoid wall-clock timestamps; use lab time or event indices.
+- All logs must include `test_id`, `seed`, `subsystem`, `phase`, and `outcome`.
+- For multi-phase protocols, log phase transitions explicitly.
+
 ### When to Use Replay Debugging
 
 | Scenario | Use Replay? |
