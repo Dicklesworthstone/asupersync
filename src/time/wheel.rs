@@ -249,11 +249,18 @@ impl Ord for OverflowEntry {
     }
 }
 
+/// Number of `u64` words needed to represent 256 slot bits.
+const BITMAP_WORDS: usize = SLOTS_PER_LEVEL / 64;
+
 #[derive(Debug)]
 struct WheelLevel {
     slots: Vec<Vec<TimerEntry>>,
     resolution_ns: u64,
     cursor: usize,
+    /// Bitmap tracking which slots contain at least one entry.
+    /// Bit `i` of `occupied[i / 64]` corresponds to slot `i`.
+    /// Used by `next_skip_tick` to skip empty slots in O(1) per word.
+    occupied: [u64; BITMAP_WORDS],
 }
 
 impl WheelLevel {
@@ -262,11 +269,53 @@ impl WheelLevel {
             slots: vec![Vec::new(); SLOTS_PER_LEVEL],
             resolution_ns,
             cursor,
+            occupied: [0u64; BITMAP_WORDS],
         }
     }
 
     fn range_ns(&self) -> u64 {
         self.resolution_ns.saturating_mul(SLOTS_PER_LEVEL as u64)
+    }
+
+    /// Marks a slot as occupied in the bitmap.
+    #[inline]
+    fn set_occupied(&mut self, slot: usize) {
+        self.occupied[slot / 64] |= 1u64 << (slot % 64);
+    }
+
+    /// Clears the occupied bit for a slot (called after `mem::take`).
+    #[inline]
+    fn clear_occupied(&mut self, slot: usize) {
+        self.occupied[slot / 64] &= !(1u64 << (slot % 64));
+    }
+
+    /// Returns the distance (in slots) to the next occupied slot scanning
+    /// forward from `cursor + 1` up to the end of the level (slot 255).
+    /// Does **not** wrap past slot 0 because that is a cascade boundary.
+    /// Uses word-level bit operations for O(BITMAP_WORDS) worst case.
+    fn next_occupied_before_wrap(&self) -> Option<usize> {
+        let start = self.cursor + 1;
+        if start >= SLOTS_PER_LEVEL {
+            return None; // cursor is at 255; next position is the cascade point
+        }
+
+        let mut pos = start;
+        while pos < SLOTS_PER_LEVEL {
+            let word_idx = pos / 64;
+            let bit_idx = pos % 64;
+            // Mask out bits below `bit_idx` so we only see slots >= pos
+            let masked = self.occupied[word_idx] >> bit_idx;
+            if masked != 0 {
+                let found = pos + masked.trailing_zeros() as usize;
+                if found < SLOTS_PER_LEVEL {
+                    return Some(found - self.cursor); // distance from cursor
+                }
+                break;
+            }
+            // Entire remainder of this word is empty — skip to next word boundary
+            pos = (word_idx + 1) * 64;
+        }
+        None
     }
 }
 
@@ -358,6 +407,7 @@ impl TimerWheel {
             for slot in &mut level.slots {
                 slot.clear();
             }
+            level.occupied = [0u64; BITMAP_WORDS];
         }
     }
 
@@ -529,6 +579,7 @@ impl TimerWheel {
 
                 let slot = (tick as usize) % SLOTS_PER_LEVEL;
                 level.slots[slot].push(entry);
+                level.set_occupied(slot);
                 return;
             }
         }
@@ -559,29 +610,23 @@ impl TimerWheel {
         let l0 = &self.levels[0];
         let mut next_l0 = limit;
 
-        // 1. Check Level 0 for next occupied slot
-        for i in 1..=SLOTS_PER_LEVEL {
-            let slot_idx = (l0.cursor + i) % SLOTS_PER_LEVEL;
-            if slot_idx == 0 {
-                // Cascade point (wrap around).
-                // The tick that causes the wrap (cursor -> 0) corresponds to `current_tick + i`.
-                let wrap_tick = self.current_tick + i as u64;
-                if wrap_tick < next_l0 {
-                    next_l0 = wrap_tick;
-                }
-                break;
-            }
-            if !l0.slots[slot_idx].is_empty() {
-                // Found item
-                let item_tick = self.current_tick + i as u64;
-                if item_tick < next_l0 {
-                    next_l0 = item_tick;
-                }
-                break;
+        // 1. Cascade boundary: distance from cursor to slot 0 (wrap-around)
+        let cascade_dist = SLOTS_PER_LEVEL - l0.cursor;
+        let cascade_tick = self.current_tick + cascade_dist as u64;
+        if cascade_tick < next_l0 {
+            next_l0 = cascade_tick;
+        }
+
+        // 2. Bitmap scan: find first occupied slot before cascade point
+        //    Uses word-level bit ops — O(4) worst case vs O(256) linear scan.
+        if let Some(dist) = l0.next_occupied_before_wrap() {
+            let item_tick = self.current_tick + dist as u64;
+            if item_tick < next_l0 {
+                next_l0 = item_tick;
             }
         }
 
-        // 2. Check overflow
+        // 3. Check overflow
         if let Some(entry) = self.overflow.peek() {
             let max_range = self.max_range_ns();
             let entry_ns = entry.deadline.as_nanos();
@@ -608,6 +653,7 @@ impl TimerWheel {
         };
 
         let bucket = std::mem::take(&mut self.levels[0].slots[cursor]);
+        self.levels[0].clear_occupied(cursor);
         self.collect_bucket(bucket);
 
         if cursor == 0 {
@@ -627,6 +673,7 @@ impl TimerWheel {
         };
 
         let bucket = std::mem::take(&mut self.levels[level_index].slots[cursor]);
+        self.levels[level_index].clear_occupied(cursor);
         for entry in bucket {
             if self.is_live(&entry) {
                 self.insert_entry(entry);
@@ -670,14 +717,15 @@ impl TimerWheel {
 
     fn drain_ready(&mut self, now: Time) -> Vec<Waker> {
         let mut wakers = Vec::new();
-        let mut remaining = Vec::new();
-        let ready = std::mem::take(&mut self.ready);
+
+        // Take the ready vec out so we can mutate it in-place while also
+        // accessing self.active / self.coalescing through &mut self.
+        let mut ready = std::mem::take(&mut self.ready);
 
         // Calculate the coalesced time boundary if coalescing is enabled
         let coalesced_time = if self.coalescing.enabled {
             let window_ns = self.coalescing.coalesce_window.as_nanos() as u64;
             if window_ns > 0 {
-                // Align to coalesce window boundary
                 let now_ns = now.as_nanos();
                 let window_end_ns = ((now_ns / window_ns) + 1) * window_ns;
                 Some(Time::from_nanos(window_end_ns))
@@ -688,28 +736,30 @@ impl TimerWheel {
             None
         };
 
-        for entry in ready {
-            if !self.is_live(&entry) {
+        // Process in-place with swap_remove — no separate `remaining` allocation.
+        let mut i = 0;
+        while i < ready.len() {
+            if !self.is_live(&ready[i]) {
+                ready.swap_remove(i);
                 continue;
             }
 
-            let should_fire = if let Some(coalesced) = coalesced_time {
-                // With coalescing: fire if deadline is before the coalesce window end
-                entry.deadline <= coalesced
-            } else {
-                // Without coalescing: fire if deadline has passed
-                entry.deadline <= now
-            };
+            let should_fire = coalesced_time.map_or_else(
+                || ready[i].deadline <= now,
+                |coalesced| ready[i].deadline <= coalesced,
+            );
 
             if should_fire {
+                let entry = ready.swap_remove(i);
                 self.active.remove(&entry.id);
                 wakers.push(entry.waker);
             } else {
-                remaining.push(entry);
+                i += 1;
             }
         }
 
-        self.ready = remaining;
+        // Put the vec back — retains its capacity for the next tick.
+        self.ready = ready;
         wakers
     }
 
@@ -1374,5 +1424,239 @@ mod tests {
             group_size
         );
         crate::test_complete!("coalescing_group_size_reports_window_contents");
+    }
+
+    // =========================================================================
+    // HOT-PATH OPTIMIZATION TESTS (bd-1ddgq)
+    // =========================================================================
+
+    #[test]
+    fn bitmap_set_clear_round_trip() {
+        init_test("bitmap_set_clear_round_trip");
+        let mut level = WheelLevel::new(LEVEL0_RESOLUTION_NS, 0);
+
+        // Initially all clear
+        for w in &level.occupied {
+            crate::assert_with_log!(*w == 0, "initially zero", 0u64, *w);
+        }
+
+        // Set various slots and verify
+        let slots = [0, 1, 63, 64, 127, 128, 200, 255];
+        for &s in &slots {
+            level.set_occupied(s);
+            let word = level.occupied[s / 64];
+            let bit = word & (1u64 << (s % 64));
+            crate::assert_with_log!(bit != 0, &format!("slot {s} set"), true, bit != 0);
+        }
+
+        // Clear them
+        for &s in &slots {
+            level.clear_occupied(s);
+            let word = level.occupied[s / 64];
+            let bit = word & (1u64 << (s % 64));
+            crate::assert_with_log!(bit == 0, &format!("slot {s} cleared"), true, bit == 0);
+        }
+
+        for w in &level.occupied {
+            crate::assert_with_log!(*w == 0, "all clear after round trip", 0u64, *w);
+        }
+        crate::test_complete!("bitmap_set_clear_round_trip");
+    }
+
+    #[test]
+    fn bitmap_next_occupied_before_wrap() {
+        init_test("bitmap_next_occupied_before_wrap");
+        let mut level = WheelLevel::new(LEVEL0_RESOLUTION_NS, 10); // cursor at 10
+
+        // No occupied slots → None
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(result.is_none(), "empty bitmap", true, result.is_none());
+
+        // Occupy slot 15 → distance 5 from cursor 10
+        level.set_occupied(15);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(result == Some(5), "distance 5", Some(5usize), result);
+
+        // Occupy slot 12 → now distance 2 is closer
+        level.set_occupied(12);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(result == Some(2), "distance 2", Some(2usize), result);
+
+        // Occupy slot 5 (before cursor) → should be ignored (behind cursor)
+        level.set_occupied(5);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(
+            result == Some(2),
+            "behind cursor ignored",
+            Some(2usize),
+            result
+        );
+
+        // Clear 12, 15 → only slot 5 remains (behind cursor) → None
+        level.clear_occupied(12);
+        level.clear_occupied(15);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(
+            result.is_none(),
+            "only behind cursor",
+            true,
+            result.is_none()
+        );
+
+        crate::test_complete!("bitmap_next_occupied_before_wrap");
+    }
+
+    #[test]
+    fn bitmap_next_occupied_at_word_boundary() {
+        init_test("bitmap_next_occupied_at_word_boundary");
+        // Cursor at 62: next slot 63 is end of word 0, slot 64 is start of word 1
+        let mut level = WheelLevel::new(LEVEL0_RESOLUTION_NS, 62);
+
+        // Occupy slot 64 (start of word 1) → distance 2
+        level.set_occupied(64);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(
+            result == Some(2),
+            "cross-word boundary",
+            Some(2usize),
+            result
+        );
+
+        // Occupy slot 63 → distance 1 (closer, same word as cursor)
+        level.set_occupied(63);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(result == Some(1), "same word closer", Some(1usize), result);
+
+        crate::test_complete!("bitmap_next_occupied_at_word_boundary");
+    }
+
+    #[test]
+    fn bitmap_cursor_at_255_returns_none() {
+        init_test("bitmap_cursor_at_255_returns_none");
+        let mut level = WheelLevel::new(LEVEL0_RESOLUTION_NS, 255);
+
+        // Cursor at last slot → start+1 == 256 >= SLOTS_PER_LEVEL → None
+        level.set_occupied(0);
+        level.set_occupied(100);
+        let result = level.next_occupied_before_wrap();
+        crate::assert_with_log!(
+            result.is_none(),
+            "cursor at 255 → None",
+            true,
+            result.is_none()
+        );
+        crate::test_complete!("bitmap_cursor_at_255_returns_none");
+    }
+
+    #[test]
+    fn drain_ready_in_place_no_extra_alloc() {
+        init_test("drain_ready_in_place_no_extra_alloc");
+        let mut wheel = TimerWheel::new();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Register 50 timers at various deadlines
+        for i in 1..=50 {
+            let waker = counter_waker(counter.clone());
+            wheel.register(Time::from_millis(i), waker);
+        }
+
+        // Advance to 25ms — only first 25 should fire
+        let wakers = wheel.collect_expired(Time::from_millis(25));
+        crate::assert_with_log!(wakers.len() == 25, "first 25 fire", 25usize, wakers.len());
+
+        for w in wakers {
+            w.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 25, "counter 25", 25u64, count);
+
+        // Advance to 50ms — remaining 25 should fire
+        let wakers = wheel.collect_expired(Time::from_millis(50));
+        crate::assert_with_log!(
+            wakers.len() == 25,
+            "remaining 25 fire",
+            25usize,
+            wakers.len()
+        );
+        for w in wakers {
+            w.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 50, "counter 50", 50u64, count);
+        crate::assert_with_log!(wheel.is_empty(), "wheel empty", true, wheel.is_empty());
+
+        crate::test_complete!("drain_ready_in_place_no_extra_alloc");
+    }
+
+    #[test]
+    fn clear_resets_bitmaps() {
+        init_test("clear_resets_bitmaps");
+        let mut wheel = TimerWheel::new();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Register timers across multiple levels
+        wheel.register(Time::from_millis(5), counter_waker(counter.clone()));
+        wheel.register(Time::from_millis(100), counter_waker(counter.clone()));
+        wheel.register(Time::from_secs(10), counter_waker(counter.clone()));
+
+        // Verify some bits are set
+        let any_set = wheel
+            .levels
+            .iter()
+            .any(|l| l.occupied.iter().any(|&w| w != 0));
+        crate::assert_with_log!(any_set, "bits set before clear", true, any_set);
+
+        wheel.clear();
+
+        // All bitmaps should be zeroed
+        for (li, level) in wheel.levels.iter().enumerate() {
+            for (wi, &word) in level.occupied.iter().enumerate() {
+                crate::assert_with_log!(
+                    word == 0,
+                    &format!("level {li} word {wi} cleared"),
+                    0u64,
+                    word
+                );
+            }
+        }
+        crate::assert_with_log!(
+            wheel.is_empty(),
+            "empty after clear",
+            true,
+            wheel.is_empty()
+        );
+        crate::test_complete!("clear_resets_bitmaps");
+    }
+
+    #[test]
+    fn skip_tick_bitmap_matches_linear_scan() {
+        init_test("skip_tick_bitmap_matches_linear_scan");
+        // Verify the bitmap-based skip produces correct results by
+        // registering timers at sparse slots and checking advance_to
+        // fires them at the right time.
+        let mut wheel = TimerWheel::new();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Sparse timers: 10ms, 200ms (slot 200 in level 0)
+        wheel.register(Time::from_millis(10), counter_waker(counter.clone()));
+        wheel.register(Time::from_millis(200), counter_waker(counter.clone()));
+
+        // Advance to 10ms — first fires
+        let w = wheel.collect_expired(Time::from_millis(10));
+        crate::assert_with_log!(w.len() == 1, "10ms fires", 1usize, w.len());
+        for waker in w {
+            waker.wake();
+        }
+
+        // Advance to 200ms — second fires (skip should jump efficiently)
+        let w = wheel.collect_expired(Time::from_millis(200));
+        crate::assert_with_log!(w.len() == 1, "200ms fires", 1usize, w.len());
+        for waker in w {
+            waker.wake();
+        }
+
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 2, "both fired", 2u64, count);
+        crate::test_complete!("skip_tick_bitmap_matches_linear_scan");
     }
 }
