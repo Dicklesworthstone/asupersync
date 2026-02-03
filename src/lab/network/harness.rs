@@ -1037,4 +1037,159 @@ mod tests {
         assert_eq!(spawn_count, 1);
         assert_eq!(dedup_count, 1);
     }
+
+    #[test]
+    fn partition_heal_recovers_delivery() {
+        let (mut harness, a, b) = setup_harness();
+        let host_a = harness.node(&a).unwrap().host_id;
+        let host_b = harness.node(&b).unwrap().host_id;
+
+        harness.execute_fault(&HarnessFault::Network(Fault::Partition {
+            hosts_a: vec![host_a],
+            hosts_b: vec![host_b],
+        }));
+
+        let dropped_task = RemoteTaskId::next();
+        harness.inject_spawn(&a, &b, dropped_task);
+        harness.run_for(Duration::from_millis(100));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(!node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::SpawnReceived { task_id, .. } if *task_id == dropped_task)
+        ));
+
+        harness.execute_fault(&HarnessFault::Network(Fault::Heal {
+            hosts_a: vec![host_a],
+            hosts_b: vec![host_b],
+        }));
+
+        let recovered_task = RemoteTaskId::next();
+        harness.inject_spawn(&a, &b, recovered_task);
+        harness.run_for(Duration::from_millis(250));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::SpawnReceived { task_id, .. } if *task_id == recovered_task)
+        ));
+        assert!(node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == recovered_task)
+        ));
+        assert_eq!(node_b.running_task_count(), 0);
+    }
+
+    #[test]
+    fn crash_restart_recovers_new_tasks() {
+        let (mut harness, a, b) = setup_harness();
+        let initial_task = RemoteTaskId::next();
+
+        harness.inject_spawn(&a, &b, initial_task);
+        harness.run_for(Duration::from_millis(10));
+
+        harness.execute_fault(&HarnessFault::CrashNode(b.clone()));
+        let node_b = harness.node(&b).unwrap();
+        assert!(node_b.crashed);
+        assert_eq!(node_b.running_task_count(), 0);
+
+        harness.execute_fault(&HarnessFault::RestartNode(b.clone()));
+
+        let recovered_task = RemoteTaskId::next();
+        harness.inject_spawn(&a, &b, recovered_task);
+        harness.run_for(Duration::from_millis(250));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(!node_b.crashed);
+        assert!(node_b
+            .events()
+            .iter()
+            .any(|e| matches!(e, NodeEvent::Restarted)));
+        assert!(node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == recovered_task)
+        ));
+        assert_eq!(node_b.running_task_count(), 0);
+    }
+
+    #[test]
+    fn message_loss_then_recovery_delivers_new_work() {
+        let (mut harness, a, b) = setup_harness();
+        let host_a = harness.node(&a).unwrap().host_id;
+        let host_b = harness.node(&b).unwrap().host_id;
+
+        let mut loss = crate::lab::network::NetworkConditions::local();
+        loss.packet_loss = 1.0;
+        harness
+            .network
+            .set_link_conditions(host_a, host_b, loss.clone());
+        harness.network.set_link_conditions(host_b, host_a, loss);
+
+        let dropped_task = RemoteTaskId::next();
+        harness.inject_spawn(&a, &b, dropped_task);
+        harness.run_for(Duration::from_millis(100));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(!node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::SpawnReceived { task_id, .. } if *task_id == dropped_task)
+        ));
+        assert!(harness.network_metrics().packets_dropped > 0);
+
+        let recovered = crate::lab::network::NetworkConditions::local();
+        harness
+            .network
+            .set_link_conditions(host_a, host_b, recovered.clone());
+        harness
+            .network
+            .set_link_conditions(host_b, host_a, recovered);
+
+        let recovered_task = RemoteTaskId::next();
+        harness.inject_spawn(&a, &b, recovered_task);
+        harness.run_for(Duration::from_millis(250));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == recovered_task)
+        ));
+        assert_eq!(node_b.running_task_count(), 0);
+    }
+
+    #[test]
+    fn clock_skew_advances_causal_clock() {
+        let (mut harness, a, b) = setup_harness();
+        let host_a = harness.node(&a).unwrap().host_id;
+        let host_b = harness.node(&b).unwrap().host_id;
+
+        let task_id = RemoteTaskId::next();
+        let req = SpawnRequest {
+            remote_task_id: task_id,
+            computation: crate::remote::ComputationName::new("test-computation"),
+            input: crate::remote::RemoteInput::new(vec![]),
+            lease: Duration::from_secs(30),
+            idempotency_key: IdempotencyKey::from_raw(u128::from(task_id.raw())),
+            budget: None,
+            origin_node: a.clone(),
+            origin_region: crate::types::RegionId::new_for_test(0, 0),
+            origin_task: crate::types::TaskId::new_for_test(0, 0),
+        };
+
+        let mut skewed = VectorClock::new();
+        skewed.set(&a, 100);
+        let envelope = MessageEnvelope::new(
+            a.clone(),
+            LogicalTime::Vector(skewed.clone()),
+            RemoteMessage::SpawnRequest(req),
+        );
+        let encoded = encode_message(&envelope);
+        harness.network.send(host_a, host_b, Bytes::from(encoded));
+
+        harness.run_for(Duration::from_millis(250));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(node_b.events().iter().any(
+            |e| matches!(e, NodeEvent::SpawnReceived { task_id: seen, .. } if *seen == task_id)
+        ));
+        let clock = node_b.causal_tracker().current_clock();
+        assert!(
+            clock.get(&a) >= 100,
+            "expected skewed clock to merge into receiver"
+        );
+        assert_eq!(node_b.running_task_count(), 0);
+    }
 }

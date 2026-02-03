@@ -185,6 +185,124 @@ After an intentional behavioral change:
 4. Update with recorded values
 5. Document why behavior changed in the commit message
 
+## Opportunity Matrix (Scoring Performance Work)
+
+Before implementing a performance optimization, score it to ensure the work is worthwhile.
+Only pursue opportunities with **Score >= 2.0**.
+
+### Opportunity Scoring Formula
+
+```
+Score = (Impact × Confidence) / Effort
+```
+
+Where:
+- **Impact** (1-5): How much improvement is expected?
+  - 1 = Micro-optimization (<5% improvement)
+  - 2 = Minor improvement (5-15%)
+  - 3 = Moderate improvement (15-30%)
+  - 4 = Significant improvement (30-50%)
+  - 5 = Major improvement (>50% or unlocks new capability)
+
+- **Confidence** (0.2-1.0): How certain are we this will work?
+  - 0.2 = Speculative (no profiling data)
+  - 0.4 = Low (indirect evidence, similar patterns worked elsewhere)
+  - 0.6 = Medium (profiling shows hotspot, approach is standard)
+  - 0.8 = High (profiling + prototype confirms improvement)
+  - 1.0 = Certain (direct measurement, trivial change)
+
+- **Effort** (1-5): How much work is required?
+  - 1 = Trivial (config change, one-line fix)
+  - 2 = Small (localized change, <100 lines)
+  - 3 = Medium (multiple files, <500 lines)
+  - 4 = Large (architectural change, new module)
+  - 5 = Major (cross-cutting, affects many subsystems)
+
+### Scoring Examples
+
+| Opportunity | Impact | Confidence | Effort | Score | Decision |
+|-------------|--------|------------|--------|-------|----------|
+| Pre-size BinaryHeap lanes | 3 | 0.8 | 1 | 2.4 | Implement |
+| Arena-backed task nodes | 4 | 0.6 | 3 | 0.8 | Needs more evidence |
+| Intrusive queues | 4 | 0.6 | 4 | 0.6 | Not yet worthwhile |
+| Reuse steal_batch Vec | 2 | 1.0 | 1 | 2.0 | Implement |
+| SIMD for RaptorQ GF ops | 5 | 0.4 | 3 | 0.67 | Profile first |
+
+### Opportunity Template
+
+Use this template when proposing a performance optimization:
+
+```markdown
+## Opportunity: [Short description]
+
+**Bead ID:** bd-XXXX (if applicable)
+
+### Scoring
+
+| Factor | Value | Rationale |
+|--------|-------|-----------|
+| Impact | X | [Why this score] |
+| Confidence | X.X | [Evidence: profile data, prototype, literature] |
+| Effort | X | [Scope of change] |
+| **Score** | **X.X** | Impact × Confidence / Effort |
+
+### Baseline Metrics
+
+| Metric | Current | Target | Measurement |
+|--------|---------|--------|-------------|
+| p50 latency | X ns | Y ns | `cargo bench --bench <name>` |
+| p99 latency | X ns | Y ns | |
+| Allocations/op | X | Y | heaptrack or alloc_census |
+| Throughput | X/s | Y/s | |
+
+### Profile Evidence
+
+[Paste flamegraph highlights, massif summary, or code review notes]
+
+### Approach
+
+[1-2 paragraphs describing the change]
+
+### Risks
+
+- [ ] Determinism: [How ordering/RNG/tie-breaks are preserved]
+- [ ] Correctness: [What invariants could be affected]
+- [ ] Complexity: [Maintenance burden]
+
+### One Lever Rule
+
+This change touches exactly one lever:
+- [ ] Allocation reduction
+- [ ] Cache locality
+- [ ] Algorithm complexity
+- [ ] Parallelism
+- [ ] Lock contention
+- [ ] Other: [specify]
+```
+
+### Policy: One Lever Per Commit
+
+Each perf commit should touch **exactly one optimization lever**:
+- Allocation reduction
+- Cache locality improvement
+- Algorithm complexity reduction
+- Parallelism increase
+- Lock contention reduction
+
+This makes regressions bisectable and improvements attributable. If a change requires
+multiple levers, split into separate commits with independent measurements.
+
+### Opportunity Tracking
+
+Track scored opportunities in the beads system with labels:
+- `perf-scored`: Has been scored using this framework
+- `perf-approved`: Score >= 2.0, ready to implement
+- `perf-needs-evidence`: Score < 2.0 but promising; needs profiling
+
+Use `br list --label=perf-approved` to find ready perf work.
+
+---
+
 ## Isomorphism Proof Template (required for perf changes)
 
 Any performance-focused change must include a **proof-of-equivalence** block.
@@ -288,25 +406,32 @@ Notes:
 
 ### Scheduler Hot-Path Allocation Audit (bd-1p8g)
 
-Measurement attempt (valgrind/massif):
-
-- Wrapping `cargo bench` via `alloc_census.sh` did not emit a Massif output file.
-- Running Massif directly on the bench binary succeeded:
+Measurement (valgrind/massif, 2026-02-03):
 
 ```bash
 valgrind --tool=massif \
-  --massif-out-file=/tmp/alloc_census/massif_direct.out \
+  --massif-out-file=/tmp/alloc_census/massif_scheduler.out \
   target/release/deps/scheduler_benchmark-<hash> \
   --warm-up-time 1 --measurement-time 5 --sample-size 10
 
-ms_print /tmp/alloc_census/massif_direct.out
+ms_print /tmp/alloc_census/massif_scheduler.out
 ```
 
-Observed summary:
+Observed summary (snapshot 55, peak):
 
-- Peak heap usage ~ **571 KB** (Massif graph peak).
-- Massif attribution is dominated by Criterion harness overhead (reporting/template data).
-- Scheduler hot-path allocations are present but below Massif’s default threshold.
+- Peak heap usage: **584,632 B** total (useful heap **582,235 B**).
+- **67.26% (393,216 B)**: `alloc::raw_vec::RawVec::grow_one` via
+  `asupersync::runtime::scheduler::priority::Scheduler::schedule`.
+- **25.78% (150,704 B)**: `hashbrown::raw::RawTable::reserve_rehash` via
+  `asupersync::runtime::scheduler::priority::Scheduler::schedule`.
+- **3.81% (22,272 B)**: Criterion HTML template initialization.
+- Remaining allocations fall below Massif’s 1% threshold.
+
+Interpretation:
+
+- Hot-path allocations in `Scheduler::schedule` are dominated by `Vec` growth
+  and `HashMap` rehashing, not by the local/global queue mechanics.
+- Capacity hints or index-based dedup should remove these peaks.
 
 Static allocation census (code review):
 

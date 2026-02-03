@@ -2,10 +2,13 @@
 //!
 //! This module provides a deterministic, block-oriented decoding pipeline that
 //! reconstructs original data from a set of received symbols. The current
-//! implementation matches the simplified LT-style XOR encoding used by
-//! `EncodingPipeline` and is designed for deterministic testing.
+//! implementation mirrors the systematic RaptorQ encoder: it solves for
+//! intermediate symbols using the precode constraints and LT repair rows, then
+//! reconstitutes source symbols deterministically for testing.
 
 use crate::error::{Error, ErrorKind};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::systematic::{ConstraintMatrix, RobustSoliton, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -503,7 +506,11 @@ impl DecodingPipeline {
             return None;
         }
 
-        let decoded_symbols = match decode_block(block_plan, &symbols) {
+        let decoded_symbols = match decode_block(
+            block_plan,
+            &symbols,
+            usize::from(self.config.symbol_size),
+        ) {
             Ok(symbols) => symbols,
             Err(
                 DecodingError::MatrixInversionFailed { .. }
