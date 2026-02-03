@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 76bde9d67b2bce9d0d1148f695b221635feba8aad7d02a7d914d7564ae5f4bd7 # shrinks to (phase1, phase2) = (Requested, Requested), kind1 = ResourceUnavailable, kind2 = ParentCancelled, epoch = 0
