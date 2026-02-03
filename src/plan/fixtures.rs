@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use super::rewrite::RewriteRule;
-use super::{PlanDag, PlanId};
+use super::PlanDag;
 
 /// A named plan fixture with metadata.
 #[derive(Debug)]

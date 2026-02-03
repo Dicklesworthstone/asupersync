@@ -19,8 +19,8 @@
 //! The `CertificateVerifier` replays a certificate against a trace buffer
 //! and checks that all invariant claims hold.
 
-use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use std::collections::{HashMap, HashSet};
+use crate::trace::event::{TraceEvent, TraceEventKind};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// A proof-carrying trace certificate.
