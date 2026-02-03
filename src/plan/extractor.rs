@@ -36,6 +36,14 @@ impl PlanCost {
         critical_path: 0,
     };
 
+    /// Sentinel cost for unknown nodes.
+    pub const UNKNOWN: Self = Self {
+        allocations: u64::MAX,
+        cancel_checkpoints: u64::MAX,
+        obligation_pressure: u64::MAX,
+        critical_path: u64::MAX,
+    };
+
     /// Cost of a leaf node.
     pub const LEAF: Self = Self {
         allocations: 1, // One task allocation
@@ -146,7 +154,7 @@ impl<'a> Extractor<'a> {
             root_class: root,
             cost,
             plan_hash: PlanHash::of(&dag),
-            node_count: dag.node_count(),
+            node_count: dag.nodes.len(),
         };
 
         (dag, cert)
@@ -326,10 +334,10 @@ impl ExtractionCertificate {
             });
         }
 
-        if self.node_count != dag.node_count() {
+        if self.node_count != dag.nodes.len() {
             return Err(ExtractionVerifyError::NodeCountMismatch {
                 expected: self.node_count,
-                actual: dag.node_count(),
+                actual: dag.nodes.len(),
             });
         }
 
@@ -371,6 +379,7 @@ pub enum ExtractionVerifyError {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::time::Duration;
 
     fn init_test() {
         init_test_logging();
@@ -385,7 +394,7 @@ mod tests {
         let mut extractor = Extractor::new(&mut eg);
         let (dag, cert) = extractor.extract(a);
 
-        assert_eq!(dag.node_count(), 1);
+        assert_eq!(dag.nodes.len(), 1);
         assert!(cert.verify(&dag).is_ok());
         assert_eq!(cert.cost.allocations, 1);
         assert_eq!(cert.cost.critical_path, 1);
@@ -402,7 +411,7 @@ mod tests {
         let mut extractor = Extractor::new(&mut eg);
         let (dag, cert) = extractor.extract(join);
 
-        assert_eq!(dag.node_count(), 3);
+        assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
         // 2 leaves + 1 join = 3 allocations
         assert_eq!(cert.cost.allocations, 3);
@@ -421,7 +430,7 @@ mod tests {
         let mut extractor = Extractor::new(&mut eg);
         let (dag, cert) = extractor.extract(race);
 
-        assert_eq!(dag.node_count(), 3);
+        assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
         assert_eq!(cert.cost.cancel_checkpoints, 1);
     }
@@ -437,7 +446,7 @@ mod tests {
         let mut extractor = Extractor::new(&mut eg);
         let (dag, cert) = extractor.extract(join);
 
-        assert_eq!(dag.node_count(), 3);
+        assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
         assert_eq!(cert.cost.obligation_pressure, 1);
     }
@@ -453,7 +462,7 @@ mod tests {
         let mut extractor = Extractor::new(&mut eg);
         let (dag, cert) = extractor.extract(t2);
 
-        assert_eq!(dag.node_count(), 3);
+        assert_eq!(dag.nodes.len(), 3);
         assert!(cert.verify(&dag).is_ok());
         // Leaf (1) + timeout (1) + timeout (1) = 3
         assert_eq!(cert.cost.critical_path, 3);
@@ -478,7 +487,7 @@ mod tests {
 
         assert_eq!(cert1.plan_hash, cert2.plan_hash);
         assert_eq!(cert1.cost, cert2.cost);
-        assert_eq!(dag1.node_count(), dag2.node_count());
+        assert_eq!(dag1.nodes.len(), dag2.nodes.len());
     }
 
     #[test]

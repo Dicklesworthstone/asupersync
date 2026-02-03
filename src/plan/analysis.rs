@@ -10,7 +10,7 @@
 //! All results are deterministic and conservative: the analysis never claims
 //! a property unless it is guaranteed by the plan structure.
 
-use super::{PlanDag, PlanId, PlanNode};
+use super::{PlanCost, PlanDag, PlanId, PlanNode};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -527,58 +527,21 @@ impl fmt::Display for ObligationFlow {
     }
 }
 
-// ===========================================================================
-// Plan cost model (for deterministic extraction)
-// ===========================================================================
-
-/// Deterministic cost summary for a plan node.
-///
-/// Lower values are preferred; comparison is lexicographic in field order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PlanCost {
-    /// Estimated allocations (node count proxy).
-    pub allocations: u32,
-    /// Cancel checkpoints (poll count proxy).
-    pub cancel_checkpoints: u32,
-    /// Obligation pressure (number of obligations that must resolve).
-    pub obligation_pressure: u32,
-    /// Critical-path depth (Foata depth proxy).
-    pub critical_path: u32,
-}
-
-impl PlanCost {
-    /// Zero cost (used for empty aggregations).
-    pub const ZERO: Self = Self {
-        allocations: 0,
-        cancel_checkpoints: 0,
-        obligation_pressure: 0,
-        critical_path: 0,
-    };
-
-    /// Worst-case/unknown cost (conservative default).
-    pub const UNKNOWN: Self = Self {
-        allocations: u32::MAX,
-        cancel_checkpoints: u32::MAX,
-        obligation_pressure: u32::MAX,
-        critical_path: u32::MAX,
-    };
-}
-
-fn obligation_pressure(flow: &ObligationFlow) -> u32 {
+fn obligation_pressure(flow: &ObligationFlow) -> u64 {
     flow.must_resolve
         .len()
-        .saturating_add(flow.leak_on_cancel.len()) as u32
+        .saturating_add(flow.leak_on_cancel.len()) as u64
 }
 
-fn sum_costs(costs: impl Iterator<Item = u32>) -> u32 {
-    costs.fold(0u32, |acc, v| acc.saturating_add(v))
+fn sum_costs(costs: impl Iterator<Item = u64>) -> u64 {
+    costs.fold(0u64, |acc, v| acc.saturating_add(v))
 }
 
-fn max_cost(costs: impl Iterator<Item = u32>) -> u32 {
+fn max_cost(costs: impl Iterator<Item = u64>) -> u64 {
     costs.max().unwrap_or(0)
 }
 
-fn min_cost(costs: impl Iterator<Item = u32>) -> u32 {
+fn min_cost(costs: impl Iterator<Item = u64>) -> u64 {
     costs.min().unwrap_or(0)
 }
 
@@ -734,7 +697,7 @@ impl PlanAnalyzer {
                 };
                 let cost = PlanCost {
                     allocations: 1,
-                    cancel_checkpoints: BudgetEffect::LEAF.min_polls,
+                    cancel_checkpoints: u64::from(BudgetEffect::LEAF.min_polls),
                     obligation_pressure: obligation_pressure(&obligation_flow),
                     critical_path: 1,
                 };
@@ -800,7 +763,7 @@ impl PlanAnalyzer {
                 let cost = PlanCost {
                     allocations: sum_costs(child_analyses.iter().map(|a| a.cost.allocations))
                         .saturating_add(1),
-                    cancel_checkpoints: min_polls,
+                    cancel_checkpoints: u64::from(min_polls),
                     obligation_pressure: obligation_pressure(&obligation_flow),
                     critical_path: max_cost(child_analyses.iter().map(|a| a.cost.critical_path))
                         .saturating_add(1),
@@ -896,7 +859,7 @@ impl PlanAnalyzer {
                 let cost = PlanCost {
                     allocations: sum_costs(child_analyses.iter().map(|a| a.cost.allocations))
                         .saturating_add(1),
-                    cancel_checkpoints: min_polls,
+                    cancel_checkpoints: u64::from(min_polls),
                     obligation_pressure: obligation_pressure(&obligation_flow),
                     critical_path: min_cost(child_analyses.iter().map(|a| a.cost.critical_path))
                         .saturating_add(1),
@@ -935,7 +898,7 @@ impl PlanAnalyzer {
 
                 let cost = PlanCost {
                     allocations: child_analysis.cost.allocations.saturating_add(1),
-                    cancel_checkpoints: child_analysis.budget.min_polls,
+                    cancel_checkpoints: u64::from(child_analysis.budget.min_polls),
                     obligation_pressure: obligation_pressure(&obligation_flow),
                     critical_path: child_analysis.cost.critical_path.saturating_add(1),
                 };
@@ -1537,10 +1500,10 @@ mod tests {
         let (dag, root) = leaf_dag("a");
         let analysis = PlanAnalyzer::analyze(&dag);
         let cost = analysis.get(root).expect("root analyzed").cost;
-        assert_eq!(cost.allocations, 1);
-        assert_eq!(cost.cancel_checkpoints, 1);
-        assert_eq!(cost.obligation_pressure, 0);
-        assert_eq!(cost.critical_path, 1);
+        assert_eq!(cost.allocations, 1_u64);
+        assert_eq!(cost.cancel_checkpoints, 1_u64);
+        assert_eq!(cost.obligation_pressure, 0_u64);
+        assert_eq!(cost.critical_path, 1_u64);
     }
 
     #[test]
@@ -1548,7 +1511,7 @@ mod tests {
         let (dag, root) = leaf_dag("obl:permit");
         let analysis = PlanAnalyzer::analyze(&dag);
         let cost = analysis.get(root).expect("root analyzed").cost;
-        assert_eq!(cost.obligation_pressure, 1);
+        assert_eq!(cost.obligation_pressure, 1_u64);
     }
 
     // ---- Join analysis ----
@@ -1579,9 +1542,9 @@ mod tests {
 
         let analysis = PlanAnalyzer::analyze(&dag);
         let cost = analysis.get(join).expect("join analyzed").cost;
-        assert_eq!(cost.allocations, 3);
-        assert_eq!(cost.cancel_checkpoints, 2);
-        assert_eq!(cost.critical_path, 2);
+        assert_eq!(cost.allocations, 3_u64);
+        assert_eq!(cost.cancel_checkpoints, 2_u64);
+        assert_eq!(cost.critical_path, 2_u64);
     }
 
     // ---- Race analysis ----
@@ -1611,9 +1574,9 @@ mod tests {
 
         let analysis = PlanAnalyzer::analyze(&dag);
         let cost = analysis.get(race).expect("race analyzed").cost;
-        assert_eq!(cost.allocations, 3);
-        assert_eq!(cost.cancel_checkpoints, 1);
-        assert_eq!(cost.critical_path, 2);
+        assert_eq!(cost.allocations, 3_u64);
+        assert_eq!(cost.cancel_checkpoints, 1_u64);
+        assert_eq!(cost.critical_path, 2_u64);
     }
 
     // ---- Timeout analysis ----
@@ -1640,9 +1603,9 @@ mod tests {
 
         let analysis = PlanAnalyzer::analyze(&dag);
         let cost = analysis.get(t).expect("timeout analyzed").cost;
-        assert_eq!(cost.allocations, 2);
-        assert_eq!(cost.cancel_checkpoints, 1);
-        assert_eq!(cost.critical_path, 2);
+        assert_eq!(cost.allocations, 2_u64);
+        assert_eq!(cost.cancel_checkpoints, 1_u64);
+        assert_eq!(cost.critical_path, 2_u64);
     }
 
     // ---- Composite: Race[Join[s,a], Join[s,b]] (the DedupRaceJoin pattern) ----
