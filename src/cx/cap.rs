@@ -108,6 +108,13 @@ impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> Ha
 /// ```
 pub trait SubsetOf<Super>: sealed::Sealed {}
 
-// All is a superset of everything — `None ⊆ All` and `All ⊆ All`.
-impl SubsetOf<Self> for All {}
-impl SubsetOf<All> for None {}
+// All is a superset of everything — allow narrowing from `All` to any `CapSet`.
+impl<
+        const SPAWN: bool,
+        const TIME: bool,
+        const RANDOM: bool,
+        const IO: bool,
+        const REMOTE: bool,
+    > SubsetOf<All> for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
+{
+}

@@ -23,6 +23,7 @@
 
 use crate::trace::gf2::{BoundaryMatrix, PersistencePairs};
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// A deterministic priority score for an exploration node.
@@ -118,31 +119,31 @@ impl EvidenceLedger {
     pub fn summary(&self) -> String {
         let novel_count = self.entries.iter().filter(|e| e.is_novel).count();
         let total = self.entries.len();
-        let finite: Vec<_> = self.entries.iter().filter_map(|e| e.persistence).collect();
+        let finite_count = self.entries.iter().filter_map(|e| e.persistence).count();
 
         let mut s = format!(
             "score: novelty={}, persistence_sum={}, fingerprint={:#018x}\n",
             self.score.novelty, self.score.persistence_sum, self.score.fingerprint
         );
-        s.push_str(&format!(
-            "classes: {total} total, {novel_count} novel, {} finite\n",
-            finite.len()
-        ));
+        let _ = writeln!(
+            &mut s,
+            "classes: {total} total, {novel_count} novel, {finite_count} finite"
+        );
         for e in &self.entries {
             let tag = if e.is_novel { "NEW" } else { "old" };
-            let pers = match e.persistence {
-                Some(p) => format!("pers={p}"),
-                None => "pers=∞".to_string(),
-            };
-            s.push_str(&format!(
-                "  [{tag}] birth={}, death={}, {pers}\n",
+            let pers = e
+                .persistence
+                .map_or_else(|| "pers=∞".to_string(), |p| format!("pers={p}"));
+            let _ = writeln!(
+                &mut s,
+                "  [{tag}] birth={}, death={}, {pers}",
                 e.class.birth,
                 if e.class.death == usize::MAX {
                     "∞".to_string()
                 } else {
                     e.class.death.to_string()
                 },
-            ));
+            );
         }
         s
     }
@@ -161,9 +162,9 @@ impl EvidenceLedger {
 ///
 /// An [`EvidenceLedger`] containing the score and per-class evidence.
 #[must_use]
-pub fn score_persistence(
+pub fn score_persistence<S: std::hash::BuildHasher>(
     pairs: &PersistencePairs,
-    seen_classes: &mut HashSet<ClassId>,
+    seen_classes: &mut HashSet<ClassId, S>,
     fingerprint: u64,
 ) -> EvidenceLedger {
     let mut entries = Vec::new();
@@ -232,9 +233,9 @@ pub fn seed_fingerprint(seed: u64) -> u64 {
 ///
 /// Reduces the matrix, extracts persistence pairs, and scores them.
 #[must_use]
-pub fn score_boundary_matrix(
+pub fn score_boundary_matrix<S: std::hash::BuildHasher>(
     matrix: &BoundaryMatrix,
-    seen_classes: &mut HashSet<ClassId>,
+    seen_classes: &mut HashSet<ClassId, S>,
     fingerprint: u64,
 ) -> EvidenceLedger {
     let reduced = matrix.reduce();
@@ -245,7 +246,6 @@ pub fn score_boundary_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::boundary::{matmul_gf2, SquareComplex};
     use crate::trace::gf2::BoundaryMatrix;
 
     #[test]

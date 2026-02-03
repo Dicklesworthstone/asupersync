@@ -595,7 +595,7 @@ mod tests {
         assert!(r1.action_count() > 0);
 
         // After timeout: stale obligation gets aborted
-        let r2 = gov.tick(&mut ledger, 2000);
+        let _r2 = gov.tick(&mut ledger, 2000);
 
         // Should converge: no more pending, conflicts, or violations
         let r3 = gov.tick(&mut ledger, 3000);
@@ -708,7 +708,7 @@ mod tests {
 
         // Node B runs recovery: oid(1) appears stale on B
         gov.tick(&mut b, 0);
-        let result = gov.tick(&mut b, 2000);
+        let _result = gov.tick(&mut b, 2000);
         // B aborts it (stale)
         assert_eq!(b.get(&oid(1)), LatticeState::Aborted);
 

@@ -61,7 +61,9 @@ pub use interceptor::{
     LoggingInterceptor, MetadataPropagator, RateLimitInterceptor, TimeoutInterceptor,
     TracingInterceptor,
 };
-pub use server::{CallContext, Interceptor, Server, ServerBuilder, ServerConfig};
+pub use server::{
+    CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,
+};
 pub use service::{
     BidiStreamingMethod, ClientStreamingMethod, MethodDescriptor, NamedService,
     ServerStreamingMethod, ServiceDescriptor, ServiceHandler, UnaryMethod,

@@ -52,6 +52,7 @@ impl LocalQueue {
     pub fn stealer(&self) -> Stealer {
         Stealer {
             inner: Arc::clone(&self.inner),
+            scratch: Arc::new(Mutex::new(Vec::with_capacity(32))),
         }
     }
 }
@@ -66,6 +67,7 @@ impl Default for LocalQueue {
 #[derive(Debug, Clone)]
 pub struct Stealer {
     inner: Arc<Mutex<VecDeque<TaskId>>>,
+    scratch: Arc<Mutex<Vec<TaskId>>>,
 }
 
 impl Stealer {
@@ -79,26 +81,35 @@ impl Stealer {
     /// Steals a batch of tasks.
     #[must_use]
     pub fn steal_batch(&self, dest: &LocalQueue) -> bool {
-        let mut stolen = Vec::new();
+        let mut scratch = self.scratch.lock().expect("steal scratch lock poisoned");
+        scratch.clear();
+
         {
             let mut queue = self.inner.lock().expect("local queue lock poisoned");
             if queue.is_empty() {
                 return false;
             }
+
             let steal_count = (queue.len() / 2).max(1);
+            let current_cap = scratch.capacity();
+            if current_cap < steal_count {
+                scratch.reserve(steal_count - current_cap);
+            }
+
             for _ in 0..steal_count {
                 if let Some(task) = queue.pop_front() {
-                    stolen.push(task);
+                    scratch.push(task);
                 } else {
                     break;
                 }
             }
         }
 
-        for task in stolen {
+        for task in scratch.drain(..) {
             dest.push(task);
         }
 
+        drop(scratch);
         true
     }
 }

@@ -426,9 +426,14 @@ impl EGraph {
     }
 }
 
+pub mod analysis;
 pub mod certificate;
 pub mod fixtures;
 pub mod rewrite;
+pub use analysis::{
+    BudgetEffect, CancelSafety, NodeAnalysis, ObligationSafety, PlanAnalysis, PlanAnalyzer,
+    SideConditionChecker,
+};
 pub use certificate::{
     CertificateVersion, PlanHash, RewriteCertificate, StepVerifyError, VerifyError,
 };

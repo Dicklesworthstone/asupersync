@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::bytes::Bytes;
+use crate::cx::{cap, Cx};
 
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status};
@@ -210,6 +211,9 @@ impl Server {
 }
 
 /// A gRPC call context.
+///
+/// Use [`CallContext::with_cx`] to attach a capability context for
+/// effect-safe handlers.
 #[derive(Debug)]
 pub struct CallContext {
     /// Request metadata.
@@ -254,11 +258,76 @@ impl CallContext {
     pub fn is_expired(&self) -> bool {
         self.deadline.is_some_and(|d| std::time::Instant::now() > d)
     }
+
+    /// Attach a capability context to this call.
+    ///
+    /// This is a lightweight wrapper that exposes `Cx` access without
+    /// granting additional authority beyond what the caller provides.
+    #[must_use]
+    pub fn with_cx<'a>(&'a self, cx: &'a Cx) -> CallContextWithCx<'a> {
+        CallContextWithCx { call: self, cx }
+    }
 }
 
 impl Default for CallContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Call context with an attached capability context.
+///
+/// This wrapper is intended for framework integrations that need to thread
+/// `Cx` through gRPC handlers while retaining the base call metadata.
+pub struct CallContextWithCx<'a> {
+    call: &'a CallContext,
+    cx: &'a Cx,
+}
+
+impl CallContextWithCx<'_> {
+    /// Returns the underlying call metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &Metadata {
+        self.call.metadata()
+    }
+
+    /// Returns the call deadline, if set.
+    #[must_use]
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        self.call.deadline()
+    }
+
+    /// Returns the peer address, if available.
+    #[must_use]
+    pub fn peer_addr(&self) -> Option<&str> {
+        self.call.peer_addr()
+    }
+
+    /// Returns true if the call deadline has expired.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.call.is_expired()
+    }
+
+    /// Returns the full capability context.
+    #[must_use]
+    pub fn cx(&self) -> &Cx {
+        self.cx
+    }
+
+    /// Returns a narrowed capability context (least privilege).
+    #[must_use]
+    pub fn cx_narrow<Caps>(&self) -> Cx<Caps>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+    {
+        self.cx.restrict::<Caps>()
+    }
+
+    /// Returns a fully restricted context (no capabilities).
+    #[must_use]
+    pub fn cx_readonly(&self) -> Cx<cap::None> {
+        self.cx.restrict::<cap::None>()
     }
 }
 
@@ -402,6 +471,11 @@ mod tests {
         crate::assert_with_log!(peer_none, "peer none", true, peer_none);
         let expired = ctx.is_expired();
         crate::assert_with_log!(!expired, "not expired", false, expired);
+
+        let cx = Cx::for_testing();
+        let wrapped = ctx.with_cx(&cx);
+        let _readonly = wrapped.cx_readonly();
+        let _narrow = wrapped.cx_narrow::<cap::CapSet<true, true, false, false, false>>();
         crate::test_complete!("test_call_context");
     }
 

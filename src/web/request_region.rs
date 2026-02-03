@@ -15,10 +15,15 @@
 //! # Example
 //!
 //! ```ignore
+//! use asupersync::cx::cap;
 //! use asupersync::web::request_region::{RequestRegion, RequestContext};
 //! use asupersync::Cx;
 //!
 //! async fn handler(ctx: &RequestContext<'_>) -> Response {
+//!     // Narrow capabilities for least-privilege handlers.
+//!     let cx = ctx.cx_narrow::<cap::CapSet<true, true, false, false, false>>();
+//!     cx.checkpoint().ok();
+//!
 //!     // Spawn a background task — owned by this request's region.
 //!     ctx.cx().spawn_task(audit_log(ctx.request()));
 //!
@@ -30,7 +35,7 @@
 
 use std::fmt;
 
-use crate::cx::Cx;
+use crate::cx::{cap, Cx};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -186,6 +191,34 @@ impl RequestContext<'_> {
     #[must_use]
     pub fn cx(&self) -> &Cx {
         self.cx
+    }
+
+    /// Returns a narrowed capability context (least privilege).
+    ///
+    /// This is a zero-cost type-level restriction that removes access to gated
+    /// APIs at compile time. Only available when the underlying context has
+    /// full capabilities.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::cx::cap::CapSet;
+    ///
+    /// type RequestCaps = CapSet<true, true, false, false, false>;
+    /// let limited = ctx.cx_narrow::<RequestCaps>();
+    /// ```
+    #[must_use]
+    pub fn cx_narrow<Caps>(&self) -> Cx<Caps>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+    {
+        self.cx.restrict::<Caps>()
+    }
+
+    /// Returns a fully restricted context (no capabilities).
+    #[must_use]
+    pub fn cx_readonly(&self) -> Cx<cap::None> {
+        self.cx.restrict::<cap::None>()
     }
 
     /// Returns the HTTP method of the request.
@@ -505,6 +538,8 @@ mod tests {
             assert_eq!(ctx.path_param("missing"), None);
             assert_eq!(ctx.header("Authorization"), Some("Bearer token"));
             assert_eq!(ctx.header("Missing"), None);
+            let _readonly = ctx.cx_readonly();
+            let _narrow = ctx.cx_narrow::<cap::CapSet<true, true, false, false, false>>();
             Response::empty(StatusCode::NO_CONTENT)
         });
 

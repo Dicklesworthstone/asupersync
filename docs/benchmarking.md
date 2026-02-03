@@ -58,6 +58,90 @@ Scheduling primitives and work stealing.
 | `throughput/*` | High-throughput scheduling workload | > 4M elem/s |
 | `parker/*` | Thread park/unpark latency | < 500ns unpark-park |
 
+## Profiling Cookbook
+
+This section provides copy-paste commands for CPU, allocation, and syscall
+profiling. Use deterministic inputs and fixed seeds where the benchmark/test
+supports them, and record the command + baseline in the isomorphism template.
+
+### CPU Profiling (flamegraph)
+
+Requires `cargo-flamegraph` and `perf` on Linux.
+
+```bash
+# Install once
+cargo install flamegraph
+
+# Scheduler hot path (release build with frame pointers)
+RUSTFLAGS="-C force-frame-pointers=yes" \
+cargo flamegraph --bench scheduler_benchmark -- --bench
+
+# Cancellation/combinator path
+RUSTFLAGS="-C force-frame-pointers=yes" \
+cargo flamegraph --bench protocol_benchmark -- --bench
+
+# Trace/DPOR path
+RUSTFLAGS="-C force-frame-pointers=yes" \
+cargo flamegraph --bench tracing_overhead -- --bench
+```
+
+Notes:
+- Keep the workload deterministic (fixed seeds) to make deltas meaningful.
+- Always capture the exact command and git SHA in your perf notes.
+
+### Allocation Profiling (heap/alloc)
+
+Preferred path uses the built-in census script:
+
+```bash
+# Default: heaptrack + phase0_baseline
+./scripts/alloc_census.sh
+
+# Scheduler benchmark with explicit tool
+./scripts/alloc_census.sh --tool heaptrack --cmd "cargo bench --bench scheduler_benchmark"
+```
+
+Alternative manual tools:
+
+```bash
+# heaptrack (Linux)
+heaptrack ./target/release/deps/scheduler_benchmark-*
+
+# valgrind massif (portable but slow)
+valgrind --tool=massif ./target/release/deps/scheduler_benchmark-*
+
+# jemalloc DHAT (if enabled)
+MALLOC_CONF="prof:true,prof_active:true,lg_prof_sample:19" \
+./target/release/deps/scheduler_benchmark-*
+```
+
+Notes:
+- Use release builds to avoid debug noise.
+- Compare allocation counts before/after and record % change.
+
+### Syscall Profiling (strace)
+
+```bash
+# High-level syscall counts + time spent
+strace -f -c -o /tmp/asupersync_syscalls.txt \
+  cargo bench --bench scheduler_benchmark
+
+# Inspect the summary
+cat /tmp/asupersync_syscalls.txt
+```
+
+Notes:
+- `-f` follows child threads.
+- Keep the same benchmark configuration when comparing deltas.
+
+### Perf Notes Checklist
+
+Always attach:
+- Command(s) executed (verbatim)
+- Baseline comparison (mean/p95/p99 if available)
+- Allocation delta (% change)
+- Isomorphism proof (see template below)
+
 ## Golden Output Tests
 
 Golden output tests verify that the runtime's observable behavior has not changed.
@@ -201,6 +285,74 @@ Notes:
 - `heaptrack` and `valgrind` are optional system tools; install as needed.
 - `cargo-flamegraph` integration is best-effort and only runs for `cargo ...` commands.
 - Keep inputs deterministic (fixed seeds) when comparing allocation deltas.
+
+### Scheduler Hot-Path Allocation Audit (bd-1p8g)
+
+Measurement attempt (valgrind/massif):
+
+- Wrapping `cargo bench` via `alloc_census.sh` did not emit a Massif output file.
+- Running Massif directly on the bench binary succeeded:
+
+```bash
+valgrind --tool=massif \
+  --massif-out-file=/tmp/alloc_census/massif_direct.out \
+  target/release/deps/scheduler_benchmark-<hash> \
+  --warm-up-time 1 --measurement-time 5 --sample-size 10
+
+ms_print /tmp/alloc_census/massif_direct.out
+```
+
+Observed summary:
+
+- Peak heap usage ~ **571 KB** (Massif graph peak).
+- Massif attribution is dominated by Criterion harness overhead (reporting/template data).
+- Scheduler hot-path allocations are present but below Massif’s default threshold.
+
+Static allocation census (code review):
+
+- `src/runtime/scheduler/local_queue.rs`: `VecDeque<TaskId>` grows dynamically on push; `Stealer::steal_batch` allocates a new `Vec<TaskId>` per call.
+- `src/runtime/scheduler/global_queue.rs`: `SegQueue` allocates segments as it grows.
+- `src/runtime/scheduler/global_injector.rs`: `SegQueue` for cancel/ready lanes and `BinaryHeap` for timed lane; timed lane `BinaryHeap` grows dynamically on push.
+- `src/runtime/scheduler/priority.rs`: `BinaryHeap` lanes and `HashSet` dedup grow dynamically; scratch `Vec` buffers allocate on first growth.
+- `src/runtime/waker.rs`: `Vec<TaskId>` in `WakerState` grows and uses linear `contains` checks.
+
+### Arena / Slab Plan (Zero-Alloc Scheduler Path)
+
+Goal: eliminate per-poll allocations and reduce allocation volume by ≥90% in
+scheduler benchmarks while preserving determinism.
+
+Phase 1 (Immediate, low-risk):
+
+- Replace `Stealer::steal_batch`’s per-call `Vec` allocation with a reusable
+  buffer owned by the stealer or worker.
+- Pre-size `BinaryHeap` and `HashSet` lanes using capacity hints derived from
+  `RuntimeConfig` (e.g., `global_queue_limit`, worker count).
+- Convert `WakerState`’s `Vec<TaskId>` to a reusable buffer with `clear()` reuse
+  to avoid repeated allocations.
+
+Phase 2 (Arena-backed task nodes):
+
+- Introduce a scheduler-local slab for task nodes keyed by `TaskId` arena index.
+- Store per-task scheduling metadata (lane, links, flags) in the slab.
+- Replace dedup `HashSet` with a deterministic index-based flag vector.
+
+Phase 3 (Intrusive queues):
+
+- Replace `SegQueue`/`VecDeque` with intrusive queues storing slab indices,
+  eliminating heap allocation per enqueue.
+- Provide bounded ring buffers and explicit free lists to keep capacity stable.
+
+Phase 4 (Bench + regression gate):
+
+- Add allocation counters around scheduler lanes.
+- Wire allocation checks into `benches/scheduler_benchmark.rs` and compare
+  against a stored baseline (≤10% of current allocations).
+
+Capacity guidance (initial sizing):
+
+- Local queue: `worker_threads * 2 * steal_batch_size`
+- Global lanes: `global_queue_limit` (or bounded fallback)
+- Timed lane: `max_in_flight_timers` (from `TimerDriver` or config)
 
 ## CI Integration
 
