@@ -628,6 +628,19 @@ impl<P: Policy> Scope<'_, P> {
         // Store in thread-local storage
         crate::runtime::local::store_local_task(task_id, stored);
 
+        // Schedule the task on the current worker's local queue.
+        // If we are not on a worker thread (e.g. Phase 0 main thread without worker loop),
+        // this might fail. But spawn_local is intended for worker threads.
+        // In Phase 0 main thread, there is no LocalQueue.
+        // However, Phase 0 implies we are running synchronously or via a simple loop.
+        // If we use Runtime::current_thread(), it starts a worker.
+        // If we are in a pure test environment (manual RuntimeState), we might not have a worker.
+        // But spawn_local requires a runtime environment to be useful (otherwise who polls?).
+        // We'll ignore the error if schedule_local fails (assuming manual polling or Phase 0 compat).
+        // TODO: LocalQueue::schedule_local does not exist yet; task is stored in TLS above.
+        // When a worker-local scheduling API is added, wire it here.
+        let _ = task_id;
+
         // Return a placeholder StoredTask because the API signature expects it.
         // This allows existing callers (if any) to continue working, although
         // they shouldn't try to store this placeholder in RuntimeState.

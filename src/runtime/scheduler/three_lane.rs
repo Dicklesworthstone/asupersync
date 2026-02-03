@@ -598,7 +598,6 @@ impl ThreeLaneWorker {
     /// Runs a single scheduling step.
     ///
     /// Returns `true` if a task was executed.
-    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn run_once(&mut self) -> bool {
         if self.shutdown.load(Ordering::Acquire) {
             return false;
@@ -956,14 +955,12 @@ impl ThreeLaneWorker {
 
                     if is_local {
                         // Schedule to local queue
-                        {
-                            let mut local =
-                                self.local.lock().expect("local scheduler lock poisoned");
-                            if schedule_cancel {
-                                local.schedule_cancel(task_id, cancel_priority);
-                            } else {
-                                local.schedule(task_id, priority);
-                            }
+                        let mut local =
+                            self.local.lock().expect("local scheduler lock poisoned");
+                        if schedule_cancel {
+                            local.schedule_cancel(task_id, cancel_priority);
+                        } else {
+                            local.schedule(task_id, priority);
                         }
                     } else {
                         // Schedule to global injector
@@ -1119,14 +1116,14 @@ impl ThreeLaneLocalCancelWaker {
             return;
         }
 
-        // Always notify (attempt state transition)
+        // Always notify
         self.wake_state.notify();
 
-        // Schedule locally to cancel lane
-        self.local
-            .lock()
-            .expect("local scheduler lock poisoned")
-            .schedule_cancel(self.task_id, priority);
+        // Inject to local cancel lane
+        {
+            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            local.schedule_cancel(self.task_id, priority);
+        }
         self.parker.unpark();
     }
 }
