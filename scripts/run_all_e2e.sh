@@ -32,6 +32,7 @@ E2E_TIMEOUT="${E2E_TIMEOUT:-300}"
 # Suite definitions: name -> script path
 declare -A SUITES=(
     [websocket]="test_websocket_e2e.sh"
+    [http]="test_http_e2e.sh"
     [messaging]="test_messaging_e2e.sh"
     [transport]="test_transport_e2e.sh"
     [database]="test_database_e2e.sh"
@@ -47,7 +48,7 @@ declare -A SUITES=(
 
 # Ordered suite list (core subsystems first, then extended)
 SUITE_ORDER=(
-    websocket messaging transport database distributed
+    websocket http messaging transport database distributed
     h2-security net-hardening redis
     combinators cancel-attribution scheduler
     phase6
