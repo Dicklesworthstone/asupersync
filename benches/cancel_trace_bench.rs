@@ -18,14 +18,18 @@ use criterion::{
 use asupersync::config::RaptorQConfig;
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
+use asupersync::trace::boundary::SquareComplex;
 use asupersync::trace::canonicalize::{trace_fingerprint, TraceMonoid};
 use asupersync::trace::dpor::{detect_hb_races, detect_races, HappensBeforeGraph, RaceDetector};
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
+use asupersync::trace::event_structure::TracePoset;
+use asupersync::trace::scoring::{score_persistence, seed_fingerprint};
 use asupersync::transport::mock::{mock_channel, MockTransportConfig};
 use asupersync::types::{
     Budget, CancelKind, CancelReason, ObjectId, ObjectParams, RegionId, TaskId, Time,
 };
 use asupersync::Cx;
+use std::collections::HashSet;
 
 // =============================================================================
 // DETERMINISTIC TRACE GENERATORS
@@ -82,6 +86,56 @@ fn generate_racy_trace(tasks: usize, ops_per_task: usize) -> Vec<TraceEvent> {
             ));
             seq += 1;
         }
+    }
+    events
+}
+
+/// Generate traces that contain commuting diamonds for homology scoring.
+fn generate_commutation_trace(blocks: usize) -> Vec<TraceEvent> {
+    let mut events = Vec::with_capacity(blocks * 4);
+    for i in 0..blocks {
+        let base = (i * 4) as u64;
+        let time = i as u64 * 1000;
+        events.push(TraceEvent::new(
+            base,
+            Time::from_nanos(time),
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "chaos-a".to_string(),
+                task: None,
+                detail: "write global state".to_string(),
+            },
+        ));
+        events.push(TraceEvent::new(
+            base + 1,
+            Time::from_nanos(time + 10),
+            TraceEventKind::Checkpoint,
+            TraceData::Checkpoint {
+                sequence: base + 1,
+                active_tasks: 1,
+                active_regions: 1,
+            },
+        ));
+        events.push(TraceEvent::new(
+            base + 2,
+            Time::from_nanos(time + 20),
+            TraceEventKind::Checkpoint,
+            TraceData::Checkpoint {
+                sequence: base + 2,
+                active_tasks: 1,
+                active_regions: 1,
+            },
+        ));
+        events.push(TraceEvent::new(
+            base + 3,
+            Time::from_nanos(time + 30),
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "chaos-b".to_string(),
+                task: None,
+                detail: "write global state".to_string(),
+            },
+        ));
     }
     events
 }
@@ -343,6 +397,56 @@ fn bench_dpor_analysis(c: &mut Criterion) {
 }
 
 // =============================================================================
+// HOMOLOGY SCORING BENCHMARKS
+// =============================================================================
+
+fn bench_homology_scoring(c: &mut Criterion) {
+    let mut group = c.benchmark_group("trace/homology");
+
+    for &blocks in &[10, 50, 200] {
+        let events = generate_commutation_trace(blocks);
+        group.throughput(Throughput::Elements(events.len() as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("square_complex", events.len()),
+            &events,
+            |b, events| {
+                b.iter(|| {
+                    let poset = TracePoset::from_trace(events);
+                    let complex = SquareComplex::from_trace_poset(&poset);
+                    black_box(complex.boundary_2())
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("score_persistence", events.len()),
+            &events,
+            |b, events| {
+                b.iter_batched(
+                    HashSet::new,
+                    |mut seen| {
+                        let poset = TracePoset::from_trace(events);
+                        let complex = SquareComplex::from_trace_poset(&poset);
+                        let d2 = complex.boundary_2();
+                        let reduced = d2.reduce();
+                        let pairs = reduced.persistence_pairs();
+                        black_box(score_persistence(
+                            &pairs,
+                            &mut seen,
+                            seed_fingerprint(events.len() as u64),
+                        ));
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // RAPTORQ ENCODE/DECODE BENCHMARKS (standalone)
 // =============================================================================
 
@@ -439,6 +543,7 @@ criterion_group!(
     benches,
     bench_cancel_protocol,
     bench_trace_canonicalize,
+    bench_homology_scoring,
     bench_dpor_analysis,
     bench_raptorq_encode_decode,
 );

@@ -184,6 +184,10 @@ harness = false
 name = "cancel_trace_bench"
 harness = false
 
+[[bench]]
+name = "raptorq_benchmark"
+harness = false
+
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations
