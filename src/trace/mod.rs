@@ -48,11 +48,13 @@ pub mod tla_export;
 
 pub use boundary::{matmul_gf2, SquareComplex};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
-pub use certificate::{CertificateVerifier, TraceCertificate, VerificationResult};
 pub use canonicalize::{
     canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
 };
 pub use causality::{CausalOrderVerifier, CausalityViolation, CausalityViolationKind};
+pub use certificate::{
+    CertificateVerifier, TraceCertificate, VerificationResult as CertificateVerificationResult,
+};
 pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,

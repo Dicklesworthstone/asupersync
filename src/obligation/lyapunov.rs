@@ -184,6 +184,85 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
+    /// Constructs a snapshot from a live [`RuntimeState`](crate::runtime::RuntimeState).
+    ///
+    /// Design goals:
+    /// - deterministic: only depends on `state` (no ambient time / RNG)
+    /// - bounded + allocation-free: scans arenas; does not allocate
+    /// - resilient: if a task's `CxInner` lock is poisoned, deadline contribution is skipped
+    #[must_use]
+    pub fn from_runtime_state(state: &crate::runtime::RuntimeState) -> Self {
+        // Deadline pressure normalization constant D₀ (see module docs).
+        // 1s is an intentionally "coarse" knob: pressure reflects tasks that are
+        // within ~1s of their deadline (or overdue), not far-future deadlines.
+        const DEADLINE_PRESSURE_D0_NS: u64 = 1_000_000_000;
+
+        let now = state.now;
+
+        let mut live_tasks: u32 = 0;
+        let mut deadline_pressure = 0.0_f64;
+
+        for (_, task) in state.tasks.iter() {
+            if task.state.is_terminal() {
+                continue;
+            }
+            live_tasks = live_tasks.saturating_add(1);
+
+            let Some(cx_inner) = task.cx_inner.as_ref() else {
+                continue;
+            };
+            let Ok(inner) = cx_inner.read() else {
+                continue;
+            };
+            let Some(deadline) = inner.budget.deadline else {
+                continue;
+            };
+
+            let slack_ns = deadline.duration_since(now);
+            #[allow(clippy::cast_precision_loss)]
+            let slack = slack_ns as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let d0 = DEADLINE_PRESSURE_D0_NS as f64;
+
+            let term = 1.0 - (slack / d0);
+            if term > 0.0 {
+                deadline_pressure += term;
+            }
+        }
+
+        let mut pending_obligations: u32 = 0;
+        let mut obligation_age_sum_ns: u64 = 0;
+
+        for (_, obligation) in state.obligations.iter() {
+            if !obligation.is_pending() {
+                continue;
+            }
+            pending_obligations = pending_obligations.saturating_add(1);
+            obligation_age_sum_ns = obligation_age_sum_ns
+                .saturating_add(now.duration_since(obligation.reserved_at));
+        }
+
+        let mut draining_regions: u32 = 0;
+        for (_, region) in state.regions.iter() {
+            match region.state() {
+                crate::record::region::RegionState::Draining
+                | crate::record::region::RegionState::Finalizing => {
+                    draining_regions = draining_regions.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            time: now,
+            live_tasks,
+            pending_obligations,
+            obligation_age_sum_ns,
+            draining_regions,
+            deadline_pressure,
+        }
+    }
+
     /// Returns true if the snapshot represents quiescent state.
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
@@ -547,6 +626,121 @@ mod tests {
             draining_regions: draining,
             deadline_pressure: 0.0,
         }
+    }
+
+    // ---- RuntimeState snapshot extraction ----------------------------------
+
+    #[test]
+    fn snapshot_from_runtime_counts_tasks_obligations_and_regions() {
+        init_test("snapshot_from_runtime_counts_tasks_obligations_and_regions");
+
+        use crate::record::ObligationKind;
+        use crate::runtime::RuntimeState;
+        use crate::types::Budget;
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+
+        let (task_id, _handle) = state
+            .create_task(root, Budget::unlimited(), async { () })
+            .expect("create_task must succeed");
+
+        let obligation_id = state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create_obligation must succeed");
+
+        // Advance time so the obligation has a non-zero age.
+        state.now = Time::from_nanos(100);
+
+        let snap = StateSnapshot::from_runtime_state(&state);
+        crate::assert_with_log!(snap.time == state.now, "time", state.now, snap.time);
+        crate::assert_with_log!(snap.live_tasks == 1, "live_tasks", 1, snap.live_tasks);
+        crate::assert_with_log!(
+            snap.pending_obligations == 1,
+            "pending_obligations",
+            1,
+            snap.pending_obligations
+        );
+        crate::assert_with_log!(
+            snap.obligation_age_sum_ns == 100,
+            "obligation_age_sum_ns",
+            100,
+            snap.obligation_age_sum_ns
+        );
+        crate::assert_with_log!(
+            snap.draining_regions == 0,
+            "draining_regions",
+            0,
+            snap.draining_regions
+        );
+
+        // Transition region into Draining and verify it contributes.
+        {
+            let region = state.region(root).expect("root region exists");
+            let ok = region.begin_close(None);
+            crate::assert_with_log!(ok, "begin_close", true, ok);
+            let ok = region.begin_drain();
+            crate::assert_with_log!(ok, "begin_drain", true, ok);
+        }
+
+        let snap2 = StateSnapshot::from_runtime_state(&state);
+        crate::assert_with_log!(
+            snap2.draining_regions == 1,
+            "draining_regions after begin_drain",
+            1,
+            snap2.draining_regions
+        );
+
+        // Commit the obligation and verify it no longer contributes.
+        state
+            .commit_obligation(obligation_id)
+            .expect("commit_obligation must succeed");
+
+        let snap3 = StateSnapshot::from_runtime_state(&state);
+        crate::assert_with_log!(
+            snap3.pending_obligations == 0,
+            "pending_obligations after commit",
+            0,
+            snap3.pending_obligations
+        );
+
+        crate::test_complete!("snapshot_from_runtime_counts_tasks_obligations_and_regions");
+    }
+
+    #[test]
+    fn snapshot_from_runtime_computes_deadline_pressure() {
+        init_test("snapshot_from_runtime_computes_deadline_pressure");
+
+        use crate::runtime::RuntimeState;
+        use crate::types::Budget;
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+
+        // With D₀ = 1s (see StateSnapshot::from_runtime_state), a task with
+        // 500ms slack contributes 0.5 pressure.
+        let (_task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_ns(500_000_000), async { () })
+            .expect("create_task must succeed");
+
+        state.now = Time::ZERO;
+        let snap = StateSnapshot::from_runtime_state(&state);
+        let expected = 0.5_f64;
+        let ok = (snap.deadline_pressure - expected).abs() < 1e-9;
+        crate::assert_with_log!(
+            ok,
+            "deadline_pressure at t=0",
+            expected,
+            snap.deadline_pressure
+        );
+
+        // Past the deadline, slack saturates to 0 => contribution saturates to 1.0.
+        state.now = Time::from_nanos(600_000_000);
+        let snap2 = StateSnapshot::from_runtime_state(&state);
+        let ok2 = (snap2.deadline_pressure - 1.0).abs() < 1e-9;
+        crate::assert_with_log!(ok2, "deadline_pressure overdue", 1.0, snap2.deadline_pressure);
+
+        crate::test_complete!("snapshot_from_runtime_computes_deadline_pressure");
     }
 
     // ---- Potential function properties --------------------------------------
