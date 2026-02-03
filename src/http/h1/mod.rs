@@ -17,7 +17,7 @@ pub mod server;
 pub mod stream;
 pub mod types;
 
-pub use client::{Http1Client, Http1ClientCodec};
+pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};
 pub use codec::{Http1Codec, HttpError};
 pub use http_client::{ClientError, HttpClient, HttpClientConfig, ParsedUrl, RedirectPolicy};
 pub use listener::{Http1Listener, Http1ListenerConfig};

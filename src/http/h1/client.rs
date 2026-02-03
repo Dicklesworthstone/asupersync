@@ -2,17 +2,20 @@
 //!
 //! [`Http1Client`] sends a single HTTP/1.1 request and reads the response.
 
-use crate::bytes::BytesMut;
-use crate::codec::Framed;
+use crate::bytes::{BytesCursor, BytesMut};
+use crate::codec::{Encoder, Framed};
+use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
     parse_header_line, require_transfer_encoding_chunked, unique_header_value,
     validate_header_field, ChunkedBodyDecoder, HttpError,
 };
-use crate::http::h1::types::{Request, Response, Version};
-use crate::io::{AsyncRead, AsyncWrite};
+use crate::http::h1::types::{Method, Request, Response, Version};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::stream::Stream;
 use std::fmt::Write;
+use std::future::poll_fn;
 use std::pin::Pin;
+use std::task::Poll;
 
 /// Maximum allowed header block size (64 KiB).
 const DEFAULT_MAX_HEADERS_SIZE: usize = 64 * 1024;
@@ -466,13 +469,490 @@ impl Http1Client {
             ))),
         }
     }
+
+    /// Send a request and return a streaming response body.
+    ///
+    /// This returns the response head immediately, and a [`Body`] implementation
+    /// that reads the response body incrementally as it is polled.
+    ///
+    /// Supported body framing:
+    /// - `Content-Length`
+    /// - `Transfer-Encoding: chunked` (including trailers)
+    /// - EOF-delimited bodies (no length headers)
+    pub async fn request_streaming<T>(
+        mut io: T,
+        req: Request,
+    ) -> Result<ClientStreamingResponse<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let request_method = req.method.clone();
+
+        // Encode request to bytes (reuse the existing validated encoder).
+        let mut codec = Http1ClientCodec::new();
+        let mut write_buf = BytesMut::with_capacity(1024);
+        codec.encode(req, &mut write_buf)?;
+
+        // Write request bytes.
+        io.write_all(write_buf.as_ref()).await?;
+
+        // Read response head (status line + headers).
+        let mut read_buf = BytesMut::with_capacity(8192);
+        let mut scratch = [0u8; 8192];
+        loop {
+            if let Some(end) = find_headers_end(read_buf.as_ref()) {
+                if end > DEFAULT_MAX_HEADERS_SIZE {
+                    return Err(HttpError::HeadersTooLarge);
+                }
+
+                let head_bytes = read_buf.split_to(end);
+                let head_str = std::str::from_utf8(head_bytes.as_ref())
+                    .map_err(|_| HttpError::BadRequestLine)?;
+
+                let mut lines = head_str.split("\r\n");
+                let status_line = lines.next().ok_or(HttpError::BadRequestLine)?;
+                let (version, status, reason) = parse_status_line(status_line)?;
+
+                let mut headers = Vec::new();
+                for line in lines {
+                    if line.is_empty() {
+                        break;
+                    }
+                    headers.push(parse_header_line(line)?);
+                    if headers.len() > MAX_HEADERS {
+                        return Err(HttpError::TooManyHeaders);
+                    }
+                }
+
+                // RFC 7230/9110: responses with these status codes have no body.
+                let no_body_status = matches!(status, 100..=199 | 204 | 304);
+                let kind = if no_body_status || request_method == Method::Head {
+                    ClientBodyKind::Empty
+                } else {
+                    let te = unique_header_value(&headers, "Transfer-Encoding")?;
+                    let cl = unique_header_value(&headers, "Content-Length")?;
+
+                    // RFC 7230 3.3.3: Reject responses with both Transfer-Encoding
+                    // and Content-Length to prevent response smuggling.
+                    if te.is_some() && cl.is_some() {
+                        return Err(HttpError::AmbiguousBodyLength);
+                    }
+
+                    if let Some(te) = te {
+                        require_transfer_encoding_chunked(te)?;
+                        ClientBodyKind::Chunked {
+                            state: ChunkedReadState::SizeLine,
+                            trailers: HeaderMap::new(),
+                            trailers_bytes: 0,
+                        }
+                    } else if let Some(cl) = cl {
+                        let content_length: u64 =
+                            cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+
+                        if content_length == 0 {
+                            ClientBodyKind::Empty
+                        } else {
+                            let max_body_size =
+                                u64::try_from(DEFAULT_MAX_BODY_SIZE).unwrap_or(u64::MAX);
+                            if content_length > max_body_size {
+                                return Err(HttpError::BodyTooLarge);
+                            }
+
+                            ClientBodyKind::ContentLength {
+                                remaining: content_length,
+                            }
+                        }
+                    } else {
+                        ClientBodyKind::Eof
+                    }
+                };
+
+                let head = crate::http::h1::stream::ResponseHead {
+                    version,
+                    status,
+                    reason,
+                    headers,
+                };
+
+                // If no body, drop any already-buffered bytes.
+                let body_buf = if matches!(kind, ClientBodyKind::Empty) {
+                    BytesMut::new()
+                } else {
+                    read_buf
+                };
+
+                let body = ClientIncomingBody::new(io, kind, body_buf);
+                return Ok(ClientStreamingResponse { head, body });
+            }
+
+            if read_buf.len() > DEFAULT_MAX_HEADERS_SIZE {
+                return Err(HttpError::HeadersTooLarge);
+            }
+
+            let n = poll_fn(|cx| {
+                let mut rb = ReadBuf::new(&mut scratch);
+                match Pin::new(&mut io).poll_read(cx, &mut rb) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
+                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                }
+            })
+            .await?;
+
+            if n == 0 {
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before response headers",
+                )));
+            }
+
+            read_buf.extend_from_slice(&scratch[..n]);
+        }
+    }
+}
+
+/// A streaming HTTP/1 response (head + body).
+#[derive(Debug)]
+pub struct ClientStreamingResponse<T> {
+    /// Response head (status line + headers).
+    pub head: crate::http::h1::stream::ResponseHead,
+    /// Streaming response body.
+    pub body: ClientIncomingBody<T>,
+}
+
+#[derive(Debug, Clone)]
+enum ClientBodyKind {
+    Empty,
+    ContentLength { remaining: u64 },
+    Chunked {
+        state: ChunkedReadState,
+        trailers: HeaderMap,
+        trailers_bytes: usize,
+    },
+    Eof,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ChunkedReadState {
+    SizeLine,
+    Data { remaining: usize },
+    DataCrlf,
+    Trailers,
+    Done,
+}
+
+/// A streaming HTTP/1 response body that reads from the underlying transport.
+#[derive(Debug)]
+pub struct ClientIncomingBody<T> {
+    io: T,
+    buffer: BytesMut,
+    kind: ClientBodyKind,
+    done: bool,
+    received: u64,
+    size_hint: SizeHint,
+    max_chunk_size: usize,
+    max_body_size: u64,
+    max_trailers_size: usize,
+    max_buffered_bytes: usize,
+}
+
+impl<T> ClientIncomingBody<T> {
+    const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
+    const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
+    const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
+
+    fn new(io: T, kind: ClientBodyKind, buffer: BytesMut) -> Self {
+        let size_hint = match &kind {
+            ClientBodyKind::Empty => SizeHint::with_exact(0),
+            ClientBodyKind::ContentLength { remaining } => SizeHint::with_exact(*remaining),
+            ClientBodyKind::Chunked { .. } | ClientBodyKind::Eof => SizeHint::default(),
+        };
+
+        Self {
+            io,
+            buffer,
+            done: matches!(kind, ClientBodyKind::Empty),
+            kind,
+            received: 0,
+            size_hint,
+            max_chunk_size: Self::DEFAULT_MAX_CHUNK_SIZE,
+            max_body_size: u64::try_from(DEFAULT_MAX_BODY_SIZE).unwrap_or(u64::MAX),
+            max_trailers_size: Self::DEFAULT_MAX_TRAILERS_SIZE,
+            max_buffered_bytes: Self::DEFAULT_MAX_BUFFERED_BYTES,
+        }
+    }
+
+    fn try_decode_frame(&mut self) -> Result<Option<Frame<BytesCursor>>, HttpError> {
+        if self.done {
+            return Ok(None);
+        }
+
+        // Temporarily move `kind` out to avoid borrowing `self.kind` across
+        // calls that also mutably borrow `self`.
+        let mut kind = std::mem::replace(&mut self.kind, ClientBodyKind::Empty);
+        let result = match &mut kind {
+            ClientBodyKind::Empty => {
+                self.done = true;
+                Ok(None)
+            }
+            ClientBodyKind::ContentLength { remaining } => self.try_decode_content_length_frame(remaining),
+            ClientBodyKind::Eof => self.try_decode_eof_frame(),
+            ClientBodyKind::Chunked {
+                state,
+                trailers,
+                trailers_bytes,
+            } => self.try_decode_chunked_frame(state, trailers, trailers_bytes),
+        };
+        self.kind = kind;
+        result
+    }
+
+    fn try_decode_content_length_frame(
+        &mut self,
+        remaining: &mut u64,
+    ) -> Result<Option<Frame<BytesCursor>>, HttpError> {
+        if *remaining == 0 {
+            self.done = true;
+            return Ok(None);
+        }
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let max = usize::try_from(*remaining).unwrap_or(usize::MAX);
+        let to_yield = self.buffer.len().min(max).min(self.max_chunk_size);
+        let chunk = self.buffer.split_to(to_yield);
+
+        *remaining = remaining.saturating_sub(to_yield as u64);
+        self.received = self.received.saturating_add(to_yield as u64);
+        if self.received > self.max_body_size {
+            return Err(HttpError::BodyTooLarge);
+        }
+
+        if *remaining == 0 {
+            self.done = true;
+        }
+
+        Ok(Some(Frame::Data(BytesCursor::new(chunk.freeze()))))
+    }
+
+    fn try_decode_eof_frame(&mut self) -> Result<Option<Frame<BytesCursor>>, HttpError> {
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let to_yield = self.buffer.len().min(self.max_chunk_size);
+        let chunk = self.buffer.split_to(to_yield);
+
+        self.received = self.received.saturating_add(to_yield as u64);
+        if self.received > self.max_body_size {
+            return Err(HttpError::BodyTooLarge);
+        }
+
+        Ok(Some(Frame::Data(BytesCursor::new(chunk.freeze()))))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn try_decode_chunked_frame(
+        &mut self,
+        state: &mut ChunkedReadState,
+        trailers: &mut HeaderMap,
+        trailers_bytes: &mut usize,
+    ) -> Result<Option<Frame<BytesCursor>>, HttpError> {
+        loop {
+            match *state {
+                ChunkedReadState::SizeLine => {
+                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
+                    let Some(line_end) = line_end else {
+                        return Ok(None);
+                    };
+
+                    let line = &self.buffer.as_ref()[..line_end];
+                    let line_str =
+                        std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
+                    let size_part = line_str.split(';').next().unwrap_or("").trim();
+                    if size_part.is_empty() {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
+
+                    let chunk_size = usize::from_str_radix(size_part, 16)
+                        .map_err(|_| HttpError::BadChunkedEncoding)?;
+
+                    let _ = self.buffer.split_to(line_end + 2);
+
+                    if chunk_size == 0 {
+                        *state = ChunkedReadState::Trailers;
+                        *trailers = HeaderMap::new();
+                        *trailers_bytes = 0;
+                    } else {
+                        *state = ChunkedReadState::Data {
+                            remaining: chunk_size,
+                        };
+                    }
+                }
+
+                ChunkedReadState::Data { remaining } => {
+                    if self.buffer.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let to_yield = self.buffer.len().min(remaining).min(self.max_chunk_size);
+                    let chunk = self.buffer.split_to(to_yield);
+
+                    let next = remaining.saturating_sub(to_yield);
+                    *state = if next == 0 {
+                        ChunkedReadState::DataCrlf
+                    } else {
+                        ChunkedReadState::Data { remaining: next }
+                    };
+
+                    self.received = self.received.saturating_add(to_yield as u64);
+                    if self.received > self.max_body_size {
+                        return Err(HttpError::BodyTooLarge);
+                    }
+
+                    return Ok(Some(Frame::Data(BytesCursor::new(chunk.freeze()))));
+                }
+
+                ChunkedReadState::DataCrlf => {
+                    if self.buffer.len() < 2 {
+                        return Ok(None);
+                    }
+                    if self.buffer.as_ref()[0] != b'\r' || self.buffer.as_ref()[1] != b'\n' {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
+                    let _ = self.buffer.split_to(2);
+                    *state = ChunkedReadState::SizeLine;
+                }
+
+                ChunkedReadState::Trailers => {
+                    if *trailers_bytes + self.buffer.len() > self.max_trailers_size {
+                        return Err(HttpError::HeadersTooLarge);
+                    }
+
+                    let line_end = self.buffer.as_ref().windows(2).position(|w| w == b"\r\n");
+                    let Some(line_end) = line_end else {
+                        return Ok(None);
+                    };
+
+                    let line = self.buffer.split_to(line_end);
+                    let _ = self.buffer.split_to(2);
+
+                    if line.is_empty() {
+                        self.done = true;
+                        *state = ChunkedReadState::Done;
+                        if !trailers.is_empty() {
+                            return Ok(Some(Frame::Trailers(std::mem::take(trailers))));
+                        }
+                        return Ok(None);
+                    }
+
+                    *trailers_bytes = trailers_bytes.saturating_add(line.len() + 2);
+                    if *trailers_bytes > self.max_trailers_size {
+                        return Err(HttpError::HeadersTooLarge);
+                    }
+
+                    let line_str =
+                        std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
+                    let Some(colon) = line_str.find(':') else {
+                        return Err(HttpError::BadHeader);
+                    };
+
+                    let name = line_str[..colon].trim();
+                    let value = line_str[colon + 1..].trim();
+                    trailers.append(
+                        HeaderName::from_string(name),
+                        HeaderValue::from_bytes(value.as_bytes()),
+                    );
+                }
+
+                ChunkedReadState::Done => return Ok(None),
+            }
+        }
+    }
+}
+
+impl<T> Body for ClientIncomingBody<T>
+where
+    T: AsyncRead + Unpin,
+{
+    type Data = BytesCursor;
+    type Error = HttpError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        loop {
+            // Decode any already-buffered frames first.
+            match self.try_decode_frame() {
+                Ok(Some(frame)) => return Poll::Ready(Some(Ok(frame))),
+                Ok(None) => {}
+                Err(e) => {
+                    self.done = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
+            }
+
+            if self.done {
+                return Poll::Ready(None);
+            }
+
+            // Need more bytes.
+            let mut scratch = [0u8; 8192];
+            let mut rb = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut self.io).poll_read(cx, &mut rb) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(())) => {
+                    let n = rb.filled().len();
+                    if n == 0 {
+                        // EOF: validate based on framing mode.
+                        match &self.kind {
+                            ClientBodyKind::ContentLength { remaining } if *remaining != 0 => {
+                                self.done = true;
+                                return Poll::Ready(Some(Err(HttpError::BadContentLength)));
+                            }
+                            ClientBodyKind::Chunked { .. } => {
+                                self.done = true;
+                                return Poll::Ready(Some(Err(HttpError::BadChunkedEncoding)));
+                            }
+                            _ => {
+                                self.done = true;
+                                return Poll::Ready(None);
+                            }
+                        }
+                    }
+
+                    self.buffer.extend_from_slice(&scratch[..n]);
+                    if self.buffer.len() > self.max_buffered_bytes {
+                        self.done = true;
+                        return Poll::Ready(Some(Err(HttpError::BodyTooLarge)));
+                    }
+                }
+                Poll::Ready(Err(e)) => {
+                    self.done = true;
+                    return Poll::Ready(Some(Err(HttpError::Io(e))));
+                }
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.size_hint
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::BytesMut;
+    use crate::bytes::{Buf, BytesMut};
     use crate::codec::Decoder;
+    use std::pin::Pin;
+    use std::task::{Context, Wake, Waker};
 
     #[test]
     fn decode_simple_response() {
@@ -484,6 +964,169 @@ mod tests {
         assert_eq!(resp.version, Version::Http11);
         assert_eq!(resp.body, b"hello");
         assert!(resp.trailers.is_empty());
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: std::sync::Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(std::sync::Arc::new(NoopWaker))
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = std::pin::pin!(f);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn poll_body<B: Body + Unpin>(body: &mut B) -> Option<Result<Frame<B::Data>, B::Error>> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            match Pin::new(&mut *body).poll_frame(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestIo {
+        read: std::io::Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl TestIo {
+        fn new(read_bytes: &[u8]) -> Self {
+            Self {
+                read: std::io::Cursor::new(read_bytes.to_vec()),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for TestIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let dst = buf.unfilled();
+            let n = std::io::Read::read(&mut self.read, dst)?;
+            buf.advance(n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for TestIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            src: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.written.extend_from_slice(src);
+            Poll::Ready(Ok(src.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn request_streaming_content_length() {
+        let response_bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+
+        let mut resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
+        assert_eq!(resp.head.status, 200);
+
+        let mut collected = Vec::new();
+        while let Some(frame) = poll_body(&mut resp.body) {
+            let frame = frame.expect("frame ok");
+            match frame {
+                Frame::Data(mut buf) => {
+                    while buf.has_remaining() {
+                        let chunk = buf.chunk();
+                        collected.extend_from_slice(chunk);
+                        buf.advance(chunk.len());
+                    }
+                }
+                Frame::Trailers(_) => {}
+            }
+        }
+
+        assert_eq!(collected, b"hello");
+    }
+
+    #[test]
+    fn request_streaming_chunked_with_trailers() {
+        let response_bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nFoo: Bar\r\n\r\n";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+
+        let mut resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
+        assert_eq!(resp.head.status, 200);
+
+        let mut data = Vec::new();
+        let mut saw_trailers = false;
+
+        while let Some(frame) = poll_body(&mut resp.body) {
+            let frame = frame.expect("frame ok");
+            match frame {
+                Frame::Data(mut buf) => {
+                    while buf.has_remaining() {
+                        let chunk = buf.chunk();
+                        data.extend_from_slice(chunk);
+                        buf.advance(chunk.len());
+                    }
+                }
+                Frame::Trailers(trailers) => {
+                    saw_trailers = true;
+                    let foo = trailers.get(&HeaderName::from_static("foo")).unwrap();
+                    assert_eq!(foo.as_bytes(), b"Bar");
+                }
+            }
+        }
+
+        assert_eq!(data, b"hello");
+        assert!(saw_trailers);
     }
 
     #[test]

@@ -12,11 +12,17 @@
 //! assert_eq!(resp.status, 200);
 //! ```
 
-use crate::http::h1::client::Http1Client;
+use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::http::pool::{Pool, PoolConfig, PoolKey};
+use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::net::tcp::stream::TcpStream;
+#[cfg(feature = "tls")]
+use crate::tls::{TlsConnectorBuilder, TlsStream};
 use std::io;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 /// Errors that can occur during HTTP client operations.
 #[derive(Debug)]
@@ -100,6 +106,60 @@ pub enum Scheme {
     Http,
     /// HTTPS (TLS).
     Https,
+}
+
+/// HTTP client transport stream (plain TCP or TLS).
+#[derive(Debug)]
+pub enum ClientIo {
+    /// Plain TCP stream.
+    Plain(TcpStream),
+    /// TLS-wrapped TCP stream.
+    #[cfg(feature = "tls")]
+    Tls(TlsStream<TcpStream>),
+}
+
+impl AsyncRead for ClientIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ClientIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut *self {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, data),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_write(cx, data),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
 }
 
 impl ParsedUrl {
@@ -271,6 +331,16 @@ impl HttpClient {
         self.request(Method::Post, url, Vec::new(), body).await
     }
 
+    /// Send a POST request and stream the response body.
+    pub async fn post_streaming(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        self.request_streaming(Method::Post, url, Vec::new(), body)
+            .await
+    }
+
     /// Send a PUT request to the given URL with a body.
     pub async fn put(&self, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
         self.request(Method::Put, url, Vec::new(), body).await
@@ -292,6 +362,19 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         let parsed = ParsedUrl::parse(url)?;
         self.execute_with_redirects(method, parsed, extra_headers, body, 0)
+            .await
+    }
+
+    /// Send a request and stream the response body.
+    pub async fn request_streaming(
+        &self,
+        method: Method,
+        url: &str,
+        extra_headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        let parsed = ParsedUrl::parse(url)?;
+        self.execute_with_redirects_streaming(method, parsed, extra_headers, body, 0)
             .await
     }
 
@@ -354,6 +437,69 @@ impl HttpClient {
         })
     }
 
+    /// Execute a request (streaming), following redirects as configured.
+    fn execute_with_redirects_streaming(
+        &self,
+        method: Method,
+        parsed: ParsedUrl,
+        extra_headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        redirect_count: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ClientStreamingResponse<ClientIo>, ClientError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let resp = self
+                .execute_single_streaming(&method, &parsed, &extra_headers, &body)
+                .await?;
+
+            // Check for redirect
+            if is_redirect(resp.head.status) {
+                match &self.config.redirect_policy {
+                    RedirectPolicy::None => return Ok(resp),
+                    RedirectPolicy::Limited(max) => {
+                        if redirect_count >= *max {
+                            return Err(ClientError::TooManyRedirects {
+                                count: redirect_count + 1,
+                                max: *max,
+                            });
+                        }
+
+                        if let Some(location) = get_header(&resp.head.headers, "Location") {
+                            let status = resp.head.status;
+                            // Drop streaming response (closes connection) before following.
+                            drop(resp);
+
+                            let next_url = resolve_redirect(&parsed, &location);
+                            let next_parsed = ParsedUrl::parse(&next_url)?;
+
+                            // 303 See Other always converts to GET
+                            // 301/302 traditionally convert to GET for POST
+                            let next_method = redirect_method(status, &method);
+                            let next_body = if next_method == Method::Get {
+                                Vec::new()
+                            } else {
+                                body
+                            };
+
+                            return self
+                                .execute_with_redirects_streaming(
+                                    next_method,
+                                    next_parsed,
+                                    extra_headers,
+                                    next_body,
+                                    redirect_count + 1,
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+
+            Ok(resp)
+        })
+    }
+
     /// Execute a single request (no redirect handling).
     async fn execute_single(
         &self,
@@ -384,13 +530,84 @@ impl HttpClient {
         };
 
         // Connect and send
-        let addr = format!("{}:{}", parsed.host, parsed.port);
-        let stream = crate::net::tcp::stream::TcpStream::connect(addr)
-            .await
-            .map_err(ClientError::ConnectError)?;
-
+        let stream = self.connect_io(parsed).await?;
         let resp = Http1Client::request(stream, req).await?;
         Ok(resp)
+    }
+
+    /// Execute a single request (streaming; no redirect handling).
+    async fn execute_single_streaming(
+        &self,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        // Build the request
+        let mut headers = Vec::new();
+        headers.push(("Host".to_owned(), parsed.authority()));
+
+        if let Some(ref ua) = self.config.user_agent {
+            headers.push(("User-Agent".to_owned(), ua.clone()));
+        }
+
+        for (name, value) in extra_headers {
+            headers.push((name.clone(), value.clone()));
+        }
+
+        let req = Request {
+            method: method.clone(),
+            uri: parsed.path.clone(),
+            version: Version::Http11,
+            headers,
+            body: body.to_vec(),
+            trailers: Vec::new(),
+        };
+
+        let stream = self.connect_io(parsed).await?;
+        let resp = Http1Client::request_streaming(stream, req).await?;
+        Ok(resp)
+    }
+
+    async fn connect_io(&self, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
+        let addr = format!("{}:{}", parsed.host, parsed.port);
+        let stream = TcpStream::connect(addr).await.map_err(ClientError::ConnectError)?;
+
+        match parsed.scheme {
+            Scheme::Http => Ok(ClientIo::Plain(stream)),
+            Scheme::Https => {
+                #[cfg(feature = "tls")]
+                {
+                    let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
+
+                    let builder = TlsConnectorBuilder::new().alpn_http();
+
+                    #[cfg(feature = "tls-native-roots")]
+                    let builder = builder
+                        .with_native_roots()
+                        .map_err(|e| ClientError::TlsError(e.to_string()))?;
+
+                    #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
+                    let builder = builder.with_webpki_roots();
+
+                    let connector = builder.build().map_err(|e| ClientError::TlsError(e.to_string()))?;
+
+                    let tls = connector
+                        .connect(domain, stream)
+                        .await
+                        .map_err(|e| ClientError::TlsError(e.to_string()))?;
+
+                    Ok(ClientIo::Tls(tls))
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    let _ = stream;
+                    Err(ClientError::TlsError(
+                        "TLS support is disabled (enable asupersync feature \"tls\")".into(),
+                    ))
+                }
+            }
+        }
     }
 
     /// Returns current pool statistics.
