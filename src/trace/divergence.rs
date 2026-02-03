@@ -905,6 +905,7 @@ fn event_type_name(event: &ReplayEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::{CompactRegionId, CompactTaskId};
     use crate::trace::replay::TraceMetadata;
     use crate::trace::{CompactRegionId, CompactTaskId};
 

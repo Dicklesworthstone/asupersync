@@ -2193,6 +2193,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker.clone()]));
 
         // Create multiple wakers (simulating cloned wakers)
         let wakers: Vec<_> = (0..10)
@@ -2202,7 +2203,7 @@ mod tests {
                     priority: 100,
                     wake_state: Arc::clone(&wake_state),
                     global: Arc::clone(&global),
-                    parker: parker.clone(),
+                    coordinator: Arc::clone(&coordinator),
                 }))
             })
             .collect();
@@ -2570,18 +2571,18 @@ mod tests {
         // etc.
 
         // Verify the next_wake counter increments correctly
-        let initial = scheduler.next_wake.load(Ordering::Relaxed);
+        let initial = scheduler.coordinator.next_wake.load(Ordering::Relaxed);
         assert_eq!(initial, 0, "next_wake should start at 0");
 
         // Wake multiple times and verify counter advances
         for i in 0..8 {
             scheduler.wake_one();
-            let current = scheduler.next_wake.load(Ordering::Relaxed);
+            let current = scheduler.coordinator.next_wake.load(Ordering::Relaxed);
             assert_eq!(current, i + 1, "next_wake should increment on each wake");
         }
 
         // Final counter should be 8
-        let final_val = scheduler.next_wake.load(Ordering::Relaxed);
+        let final_val = scheduler.coordinator.next_wake.load(Ordering::Relaxed);
         assert_eq!(final_val, 8, "next_wake should be 8 after 8 wakes");
 
         // Verify round-robin distribution: 8 wakes across 4 workers = 2 per worker
