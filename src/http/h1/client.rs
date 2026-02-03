@@ -623,7 +623,9 @@ pub struct ClientStreamingResponse<T> {
 #[derive(Debug, Clone)]
 enum ClientBodyKind {
     Empty,
-    ContentLength { remaining: u64 },
+    ContentLength {
+        remaining: u64,
+    },
     Chunked {
         state: ChunkedReadState,
         trailers: HeaderMap,
@@ -695,7 +697,9 @@ impl<T> ClientIncomingBody<T> {
                 self.done = true;
                 Ok(None)
             }
-            ClientBodyKind::ContentLength { remaining } => self.try_decode_content_length_frame(remaining),
+            ClientBodyKind::ContentLength { remaining } => {
+                self.try_decode_content_length_frame(remaining)
+            }
             ClientBodyKind::Eof => self.try_decode_eof_frame(),
             ClientBodyKind::Chunked {
                 state,
@@ -1037,17 +1041,11 @@ mod tests {
             Poll::Ready(Ok(src.len()))
         }
 
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
     }

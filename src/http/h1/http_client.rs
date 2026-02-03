@@ -446,7 +446,11 @@ impl HttpClient {
         body: Vec<u8>,
         redirect_count: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<ClientStreamingResponse<ClientIo>, ClientError>> + Send + '_>,
+        Box<
+            dyn std::future::Future<Output = Result<ClientStreamingResponse<ClientIo>, ClientError>>
+                + Send
+                + '_,
+        >,
     > {
         Box::pin(async move {
             let resp = self
@@ -571,7 +575,9 @@ impl HttpClient {
 
     async fn connect_io(&self, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
         let addr = format!("{}:{}", parsed.host, parsed.port);
-        let stream = TcpStream::connect(addr).await.map_err(ClientError::ConnectError)?;
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(ClientError::ConnectError)?;
 
         match parsed.scheme {
             Scheme::Http => Ok(ClientIo::Plain(stream)),
@@ -590,7 +596,9 @@ impl HttpClient {
                     #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
                     let builder = builder.with_webpki_roots();
 
-                    let connector = builder.build().map_err(|e| ClientError::TlsError(e.to_string()))?;
+                    let connector = builder
+                        .build()
+                        .map_err(|e| ClientError::TlsError(e.to_string()))?;
 
                     let tls = connector
                         .connect(domain, stream)

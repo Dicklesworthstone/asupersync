@@ -586,4 +586,49 @@ mod tests {
         let err = WsAcceptError::InvalidRequest("bad header".into());
         assert!(err.to_string().contains("invalid request"));
     }
+
+    #[test]
+    fn acceptor_protocol_and_extension_builder() {
+        let acceptor = WebSocketAcceptor::new()
+            .protocol("graphql-ws")
+            .protocol("graphql-transport-ws")
+            .extension("permessage-deflate");
+
+        // Protocols should be tracked in config.
+        assert_eq!(acceptor.config.protocols.len(), 2);
+        assert_eq!(acceptor.config.protocols[0], "graphql-ws");
+        assert_eq!(acceptor.config.protocols[1], "graphql-transport-ws");
+    }
+
+    #[test]
+    fn acceptor_default() {
+        let acceptor = WebSocketAcceptor::default();
+        assert_eq!(acceptor.config.max_frame_size, 16 * 1024 * 1024);
+        assert!(acceptor.config.protocols.is_empty());
+    }
+
+    #[test]
+    fn acceptor_max_message_size_builder() {
+        let acceptor = WebSocketAcceptor::new().max_message_size(1024);
+        assert_eq!(acceptor.config.max_message_size, 1024);
+    }
+
+    #[test]
+    fn ws_accept_error_source() {
+        use std::error::Error;
+
+        let err = WsAcceptError::Cancelled;
+        assert!(err.source().is_none());
+
+        let io_err = WsAcceptError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "broken"));
+        assert!(io_err.source().is_some());
+    }
+
+    #[test]
+    fn ws_accept_error_from_io() {
+        let io_err = io::Error::new(io::ErrorKind::ConnectionReset, "reset");
+        let ws_err = WsAcceptError::from(io_err);
+        assert!(matches!(ws_err, WsAcceptError::Io(_)));
+        assert!(ws_err.to_string().contains("I/O error"));
+    }
 }

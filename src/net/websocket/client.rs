@@ -957,4 +957,140 @@ mod tests {
             Err(WsError::PayloadTooLarge { max: 4, .. })
         ));
     }
+
+    #[test]
+    fn message_assembler_rejects_double_data_frame() {
+        // Starting a new data frame while a fragmented message is in progress
+        // is a protocol violation (must send continuation).
+        let mut assembler = MessageAssembler::new(1024);
+
+        // Start a fragmented message (fin=false).
+        let frame1 = Frame {
+            fin: false,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Text,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"part1"),
+        };
+        assert!(assembler.push_frame(frame1).unwrap().is_none());
+
+        // Send another data frame (not continuation) — protocol violation.
+        let frame2 = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"wrong"),
+        };
+        let result = assembler.push_frame(frame2);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn message_assembler_continuation_exceeds_max_size() {
+        // Individual fragments are small, but total exceeds limit.
+        let mut assembler = MessageAssembler::new(8);
+
+        let frame1 = Frame {
+            fin: false,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"12345"), // 5 bytes
+        };
+        assert!(assembler.push_frame(frame1).unwrap().is_none());
+
+        let frame2 = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Continuation,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(b"6789A"), // 5 more = 10 > 8
+        };
+        let result = assembler.push_frame(frame2);
+        assert!(matches!(
+            result,
+            Err(WsError::PayloadTooLarge { max: 8, .. })
+        ));
+    }
+
+    #[test]
+    fn config_defaults() {
+        let config = WebSocketConfig::default();
+        assert_eq!(config.max_frame_size, 16 * 1024 * 1024);
+        assert_eq!(config.max_message_size, 64 * 1024 * 1024);
+        assert_eq!(config.ping_interval, Some(Duration::from_secs(30)));
+        assert!(config.protocols.is_empty());
+        assert_eq!(config.connect_timeout, Some(Duration::from_secs(30)));
+        assert!(config.nodelay);
+    }
+
+    #[test]
+    fn config_connect_timeout_builder() {
+        let config = WebSocketConfig::new().connect_timeout(None);
+        assert_eq!(config.connect_timeout, None);
+
+        let config = WebSocketConfig::new().connect_timeout(Some(Duration::from_secs(5)));
+        assert_eq!(config.connect_timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn ws_connect_error_display() {
+        let err = WsConnectError::TlsRequired;
+        assert!(err.to_string().contains("TLS"));
+
+        let err = WsConnectError::Cancelled;
+        assert!(err.to_string().contains("cancelled"));
+
+        let err = WsConnectError::Io(io::Error::new(io::ErrorKind::TimedOut, "timeout"));
+        assert!(err.to_string().contains("I/O error"));
+    }
+
+    #[test]
+    fn message_constructors() {
+        let msg = Message::text("hello");
+        assert!(matches!(msg, Message::Text(s) if s == "hello"));
+
+        let msg = Message::binary(vec![1, 2]);
+        assert!(matches!(msg, Message::Binary(_)));
+
+        let msg = Message::ping(vec![3]);
+        assert!(matches!(msg, Message::Ping(_)));
+
+        let msg = Message::pong(vec![4]);
+        assert!(matches!(msg, Message::Pong(_)));
+
+        let reason = CloseReason::normal();
+        let msg = Message::close(reason);
+        assert!(matches!(msg, Message::Close(Some(_))));
+    }
+
+    #[test]
+    fn message_assembler_binary_single_frame() {
+        let mut assembler = MessageAssembler::new(1024);
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
+        };
+        let msg = assembler.push_frame(frame).unwrap().unwrap();
+        assert!(matches!(msg, Message::Binary(b) if b.as_ref() == [0xDE, 0xAD, 0xBE, 0xEF]));
+    }
 }

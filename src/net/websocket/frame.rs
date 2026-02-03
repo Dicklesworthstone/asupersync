@@ -996,4 +996,99 @@ mod tests {
         assert!(!CloseCode::Abnormal.is_sendable());
         assert!(!CloseCode::TlsHandshake.is_sendable());
     }
+
+    #[test]
+    fn test_invalid_opcode_from_u8() {
+        // Reserved non-control opcodes.
+        for &op in &[0x03, 0x04, 0x05, 0x06, 0x07] {
+            let result = Opcode::from_u8(op);
+            assert!(matches!(result, Err(WsError::InvalidOpcode(v)) if v == op));
+        }
+        // Reserved control opcodes.
+        for &op in &[0x0B, 0x0C, 0x0D, 0x0E, 0x0F] {
+            let result = Opcode::from_u8(op);
+            assert!(matches!(result, Err(WsError::InvalidOpcode(v)) if v == op));
+        }
+    }
+
+    #[test]
+    fn test_opcode_is_data() {
+        assert!(Opcode::Text.is_data());
+        assert!(Opcode::Binary.is_data());
+        assert!(Opcode::Continuation.is_data());
+        assert!(!Opcode::Close.is_data());
+        assert!(!Opcode::Ping.is_data());
+        assert!(!Opcode::Pong.is_data());
+    }
+
+    #[test]
+    fn test_close_frame_with_code_and_reason() {
+        let frame = Frame::close(Some(1000), Some("goodbye"));
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.fin);
+        // Payload: 2 bytes (u16 code) + "goodbye" (7 bytes) = 9
+        assert_eq!(frame.payload.len(), 9);
+        assert_eq!(&frame.payload[..2], &1000u16.to_be_bytes());
+        assert_eq!(&frame.payload[2..], b"goodbye");
+    }
+
+    #[test]
+    fn test_close_frame_code_only() {
+        let frame = Frame::close(Some(1001), None);
+        assert_eq!(frame.payload.len(), 2);
+        assert_eq!(&frame.payload[..], &1001u16.to_be_bytes());
+    }
+
+    #[test]
+    fn test_close_frame_no_payload() {
+        let frame = Frame::close(None, None);
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn test_ws_error_display_variants() {
+        let err = WsError::InvalidOpcode(0x0F);
+        assert!(err.to_string().contains("0xF"));
+
+        let err = WsError::ReservedBitsSet;
+        assert!(err.to_string().contains("reserved bits"));
+
+        let err = WsError::PayloadTooLarge {
+            size: 10_000,
+            max: 1024,
+        };
+        assert!(err.to_string().contains("10000"));
+        assert!(err.to_string().contains("1024"));
+
+        let err = WsError::ControlFrameTooLarge(200);
+        assert!(err.to_string().contains("200"));
+
+        let err = WsError::FragmentedControlFrame;
+        assert!(err.to_string().contains("fragmented"));
+
+        let err = WsError::UnmaskedClientFrame;
+        assert!(err.to_string().contains("masked"));
+
+        let err = WsError::InvalidUtf8;
+        assert!(err.to_string().contains("UTF-8"));
+
+        let err = WsError::InvalidClosePayload;
+        assert!(err.to_string().contains("close"));
+    }
+
+    #[test]
+    fn test_roundtrip_server_to_client() {
+        // Server sends unmasked; client decodes unmasked frames.
+        let mut encoder = FrameCodec::server();
+        let mut decoder = FrameCodec::client();
+        let frame = Frame::text("server says hi");
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.opcode, Opcode::Text);
+        assert!(!parsed.masked);
+        assert_eq!(parsed.payload.as_ref(), b"server says hi");
+    }
 }
