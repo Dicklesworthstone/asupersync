@@ -15,6 +15,7 @@ mod common;
 #[cfg(feature = "tls")]
 mod tls_tests {
     use crate::common::init_test_logging;
+    use asupersync::io::{AsyncReadExt, AsyncWriteExt};
     use asupersync::net::tcp::VirtualTcpStream;
     use asupersync::tls::{
         Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
@@ -340,8 +341,6 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn close_notify_shutdowns_streams() {
-        use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
-
         init_test_logging();
         test_phase!("tls_close_notify_shutdowns_streams");
         test_section!("handshake");
@@ -360,11 +359,11 @@ W7n9v0wIyo4e/O0DO2fczXZD
             assert_eq!(&buf, b"ping");
 
             test_section!("client close");
-            client.close().await.unwrap();
+            client.shutdown().await.unwrap();
             assert!(client.is_closed());
 
             test_section!("server close");
-            server.close().await.unwrap();
+            server.shutdown().await.unwrap();
             assert!(server.is_closed());
         });
 

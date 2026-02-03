@@ -811,7 +811,7 @@ mod tests {
             outcome: 0,
         });
 
-        let _bytes = trace.to_bytes().expect("serialize");
+        let bytes = trace.to_bytes().expect("serialize");
         let loaded = ReplayTrace::from_bytes(&bytes).expect("deserialize");
 
         assert_eq!(loaded.metadata.seed, 42);
@@ -1039,7 +1039,7 @@ mod tests {
         let mut trace = ReplayTrace::new(TraceMetadata::new(42));
         trace.push(ReplayEvent::RngSeed { seed: 42 });
 
-        let bytes = trace.to_bytes().expect("serialize");
+        let _bytes = trace.to_bytes().expect("serialize");
 
         // Manually tamper with the version in the serialized bytes
         // TraceMetadata is serialized via msgpack, version is the first field
@@ -1162,8 +1162,7 @@ mod tests {
         trace.push(ReplayEvent::RngSeed { seed: 2 });
         trace.push(ReplayEvent::RngSeed { seed: 3 });
 
-        let collected: Vec<_> = trace.iter().collect();
-        assert_eq!(collected.len(), 3);
+        assert_eq!(trace.iter().count(), 3);
     }
 
     #[test]
