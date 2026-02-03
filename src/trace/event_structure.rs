@@ -98,8 +98,8 @@ impl OwnerKey {
             TraceData::Task { task, .. }
             | TraceData::Cancel { task, .. }
             | TraceData::Obligation { task, .. }
-            | TraceData::Futurelock { task, .. } => Self::Task(*task),
-            TraceData::Chaos {
+            | TraceData::Futurelock { task, .. }
+            | TraceData::Chaos {
                 task: Some(task), ..
             } => Self::Task(*task),
             TraceData::Region { region, .. } | TraceData::RegionCancel { region, .. } => {
@@ -199,11 +199,11 @@ impl TracePoset {
     /// derived from a single trace with edges `i -> j` for `i < j`).
     #[must_use]
     pub fn topo_sort(&self) -> Option<Vec<usize>> {
-        let mut indeg: Vec<usize> = self.preds.iter().map(|p| p.len()).collect();
+        let mut indeg: Vec<usize> = self.preds.iter().map(Vec::len).collect();
         let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
 
-        for i in 0..self.n {
-            if indeg[i] == 0 {
+        for (i, &deg) in indeg.iter().enumerate().take(self.n) {
+            if deg == 0 {
                 heap.push(Reverse(i));
             }
         }

@@ -11,7 +11,7 @@
 | Metric | Count |
 |--------|-------|
 | **Total dependencies** | 48 |
-| **Updated** | 2 |
+| **Updated** | 3 |
 | **Skipped** | 4 |
 | **Failed (rolled back)** | 0 |
 | **Requires attention** | 1 |
@@ -45,6 +45,28 @@ error[E0252]: the name `VerificationResult` is defined multiple times
   --> src/trace/mod.rs:77:26
 ```
 
+#### getrandom: 0.2 → 0.3
+
+**Changelog / docs:** https://docs.rs/getrandom/latest/getrandom/ citeturn8open0
+
+**Breaking changes:** Updated API usage to `getrandom::fill` (docs show `fill` as the primary API in 0.3). citeturn8open0
+
+**Migration applied:**
+```diff
+- getrandom::getrandom(&mut key)
++ getrandom::fill(&mut key)
+```
+
+**Files modified:** 3
+- `src/net/websocket/frame.rs`
+- `src/net/websocket/handshake.rs`
+- `src/util/entropy.rs`
+
+**Tests:** Failed due to pre-existing compile errors in `src/trace/certificate.rs`
+```
+error[E0599]: no variant or associated item named `ObligationAcquire` found for enum `trace::event::TraceEventKind`
+```
+
 ### Skipped
 
 #### clap: 4.5.56 → 4.5.56
@@ -58,6 +80,10 @@ error[E0252]: the name `VerificationResult` is defined multiple times
 #### crossbeam-queue: 0.3.12 → 0.3.12
 
 **Reason:** Already on the latest 0.3.x release (Cargo.toml allows ^0.3; Cargo.lock shows 0.3.12). citeturn6open0
+
+#### futures-lite: 2.6.1 → 2.6.1
+
+**Reason:** Already on the latest 2.x release (Cargo.toml allows ^2.6; Cargo.lock shows 2.6.1). citeturn7open0
 
 ### Requires Attention
 

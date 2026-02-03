@@ -224,6 +224,7 @@ impl ObligationLedger {
     /// # Panics
     ///
     /// Panics if the obligation was already resolved or does not exist.
+    #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn commit(&mut self, token: ObligationToken, now: Time) -> u64 {
         let record = self
             .obligations
@@ -242,6 +243,7 @@ impl ObligationLedger {
     /// # Panics
     ///
     /// Panics if the obligation was already resolved or does not exist.
+    #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn abort(
         &mut self,
         token: ObligationToken,

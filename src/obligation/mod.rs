@@ -56,6 +56,7 @@
 //! ob.resolve(Resolution::Commit); // Must resolve before scope exit
 //! ```
 
+pub mod crdt;
 pub mod dialectica;
 pub mod eprocess;
 pub mod graded;

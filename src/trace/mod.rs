@@ -30,6 +30,7 @@ pub mod canonicalize;
 pub mod causality;
 pub mod certificate;
 pub mod compat;
+pub mod compression;
 pub mod distributed;
 pub mod dpor;
 pub mod event;
@@ -43,6 +44,7 @@ pub mod integrity;
 pub mod recorder;
 pub mod replay;
 pub mod replayer;
+pub mod scoring;
 pub mod streaming;
 pub mod tla_export;
 
@@ -59,6 +61,7 @@ pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
 };
+pub use compression::{compress as compress_trace, CompressedTrace, Level as CompressionLevel};
 pub use dpor::{
     detect_hb_races, detect_races, estimated_classes, racing_events, BacktrackPoint, DetectedRace,
     HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind, RaceReport,
@@ -87,6 +90,10 @@ pub use replay::{
     REPLAY_SCHEMA_VERSION,
 };
 pub use replayer::{Breakpoint, DivergenceError, ReplayError, ReplayMode, TraceReplayer};
+pub use scoring::{
+    score_boundary_matrix, score_persistence, seed_fingerprint, ClassId, EvidenceEntry,
+    EvidenceLedger, TopologicalScore,
+};
 pub use streaming::{
     ReplayCheckpoint, ReplayProgress, StreamingReplayError, StreamingReplayResult,
     StreamingReplayer,

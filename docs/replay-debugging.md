@@ -29,6 +29,18 @@ Asupersync's Lab runtime is designed for determinism:
 
 This means: Same seed + same inputs = same execution, every time.
 
+### Determinism Contract (Replay Preconditions)
+
+Deterministic replay only works when the environment is fully controlled. The contract:
+
+- **Same runtime + trace schema**: replays must use a compatible build and trace version.
+- **Same Lab config**: seed, scheduler mode, and recording options must match the original run.
+- **No ambient nondeterminism**: wall-clock, OS RNG, and global mutable state are forbidden inputs.
+- **All effects through `Cx`**: I/O, timers, randomness, and cancellation must be intercepted.
+- **Verify certificates when present**: if a trace includes proof/cert data, verify it before replay.
+
+If any precondition is violated, replay should fail fast with explicit diagnostics rather than “best-effort.”
+
 ### When to Use Replay Debugging
 
 | Scenario | Use Replay? |

@@ -354,7 +354,7 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         // Capture child_cx for result sending
-        let cx_for_send = child_cx_full.clone();
+        let cx_for_send = child_cx_full;
 
         // Instantiate the future with the child context.
         // We use a guard to rollback task creation if the factory panics.
@@ -564,7 +564,7 @@ impl<P: Policy> Scope<'_, P> {
         let child_cx = child_cx_full.retype::<Caps>();
 
         // Capture child_cx for result sending
-        let cx_for_send = child_cx_full.clone();
+        let cx_for_send = child_cx_full;
 
         // Instantiate the future with the child context.
         // We use a guard to rollback task creation if the factory panics.
@@ -739,7 +739,7 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         // Capture child_cx for result sending
-        let cx_for_send = child_cx_full.clone();
+        let cx_for_send = child_cx_full;
 
         // For Phase 0, we run blocking code as an async task
         // In Phase 1+, this would spawn on a blocking thread pool

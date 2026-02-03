@@ -58,7 +58,7 @@ pub fn compute_accept_key(client_key: &str) -> String {
 /// Generate a random 16-byte key for the client handshake.
 fn generate_client_key() -> String {
     let mut key = [0u8; 16];
-    getrandom::getrandom(&mut key).expect("failed to generate random key");
+    getrandom::fill(&mut key).expect("failed to generate random key");
     base64::engine::general_purpose::STANDARD.encode(key)
 }
 

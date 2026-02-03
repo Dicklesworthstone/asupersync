@@ -24,6 +24,7 @@
 pub mod builder;
 pub mod gf256;
 pub mod pipeline;
+pub mod systematic;
 
 pub use builder::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 pub use pipeline::{RaptorQReceiver, RaptorQSender, ReceiveOutcome, SendOutcome, SendProgress};

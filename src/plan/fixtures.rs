@@ -283,6 +283,178 @@ fn race_of_leaves() -> PlanFixture {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Lab equivalence harness
+// ---------------------------------------------------------------------------
+
+use std::collections::{BTreeSet, HashMap};
+
+use super::certificate::{verify, verify_steps, PlanHash, RewriteCertificate};
+use super::rewrite::RewritePolicy;
+use super::PlanNode;
+
+/// Result of running original vs optimized plan through the outcome oracle.
+#[derive(Debug, Clone)]
+pub struct LabEquivalenceReport {
+    /// Fixture name.
+    pub fixture_name: &'static str,
+    /// Hash of the original plan DAG.
+    pub original_hash: PlanHash,
+    /// Hash of the optimized plan DAG.
+    pub optimized_hash: PlanHash,
+    /// Rewrite certificate (if rewrites fired).
+    pub certificate: RewriteCertificate,
+    /// Outcome sets from the original plan.
+    pub original_outcomes: BTreeSet<Vec<String>>,
+    /// Outcome sets from the optimized plan.
+    pub optimized_outcomes: BTreeSet<Vec<String>>,
+    /// Whether outcome sets match.
+    pub outcomes_equivalent: bool,
+    /// Whether the certificate verified against the optimized DAG.
+    pub certificate_verified: bool,
+    /// Whether step-level verification passed.
+    pub steps_verified: bool,
+}
+
+impl LabEquivalenceReport {
+    /// Returns true if all checks passed.
+    #[must_use]
+    pub fn all_ok(&self) -> bool {
+        self.outcomes_equivalent && self.certificate_verified && self.steps_verified
+    }
+
+    /// Returns a diff summary for failing cases.
+    #[must_use]
+    pub fn diff_summary(&self) -> Option<String> {
+        if self.all_ok() {
+            return None;
+        }
+        let mut out = format!("Fixture: {}\n", self.fixture_name);
+        if !self.outcomes_equivalent {
+            out.push_str(&format!(
+                "  OUTCOME MISMATCH:\n    original:  {:?}\n    optimized: {:?}\n",
+                self.original_outcomes, self.optimized_outcomes
+            ));
+        }
+        if !self.certificate_verified {
+            out.push_str("  CERTIFICATE HASH MISMATCH\n");
+        }
+        if !self.steps_verified {
+            out.push_str("  STEP VERIFICATION FAILED\n");
+        }
+        Some(out)
+    }
+}
+
+/// Compute the set of possible outcome label-sets for a plan node.
+///
+/// For Join: cartesian product of children.
+/// For Race: union of children.
+/// For Timeout: same as child.
+/// For Leaf: singleton set containing the label.
+pub fn outcome_sets(dag: &PlanDag, id: PlanId) -> BTreeSet<Vec<String>> {
+    let mut memo = HashMap::new();
+    outcome_sets_inner(dag, id, &mut memo)
+}
+
+fn outcome_sets_inner(
+    dag: &PlanDag,
+    id: PlanId,
+    memo: &mut HashMap<PlanId, BTreeSet<Vec<String>>>,
+) -> BTreeSet<Vec<String>> {
+    if let Some(cached) = memo.get(&id) {
+        return cached.clone();
+    }
+
+    let Some(node) = dag.node(id) else {
+        return BTreeSet::new();
+    };
+
+    let result = match node {
+        PlanNode::Leaf { label } => {
+            let mut set = BTreeSet::new();
+            set.insert(vec![label.clone()]);
+            set
+        }
+        PlanNode::Join { children } => {
+            let mut acc = BTreeSet::new();
+            acc.insert(Vec::new());
+            for child in children {
+                let child_sets = outcome_sets_inner(dag, *child, memo);
+                let mut next = BTreeSet::new();
+                for base in &acc {
+                    for child_set in &child_sets {
+                        let mut merged = base.clone();
+                        merged.extend(child_set.iter().cloned());
+                        merged.sort();
+                        merged.dedup();
+                        next.insert(merged);
+                    }
+                }
+                acc = next;
+            }
+            acc
+        }
+        PlanNode::Race { children } => {
+            let mut acc = BTreeSet::new();
+            for child in children {
+                let child_sets = outcome_sets_inner(dag, *child, memo);
+                acc.extend(child_sets);
+            }
+            acc
+        }
+        PlanNode::Timeout { child, .. } => outcome_sets_inner(dag, *child, memo),
+    };
+
+    memo.insert(id, result.clone());
+    result
+}
+
+/// Run the full equivalence harness for a fixture: compute original
+/// outcomes, apply certified rewrites, compute optimized outcomes,
+/// verify certificate, and compare.
+pub fn run_equivalence_harness(
+    mut fixture: PlanFixture,
+    policy: RewritePolicy,
+    rules: &[RewriteRule],
+) -> LabEquivalenceReport {
+    let original_hash = PlanHash::of(&fixture.dag);
+
+    // Compute original outcomes.
+    let original_outcomes = fixture
+        .dag
+        .root()
+        .map(|root| outcome_sets(&fixture.dag, root))
+        .unwrap_or_default();
+
+    // Apply certified rewrites.
+    let (_, certificate) = fixture.dag.apply_rewrites_certified(policy, rules);
+    let optimized_hash = PlanHash::of(&fixture.dag);
+
+    // Compute optimized outcomes.
+    let optimized_outcomes = fixture
+        .dag
+        .root()
+        .map(|root| outcome_sets(&fixture.dag, root))
+        .unwrap_or_default();
+
+    let outcomes_equivalent = original_outcomes == optimized_outcomes;
+    let certificate_verified = verify(&certificate, &fixture.dag).is_ok();
+    let steps_verified = verify_steps(&certificate, &fixture.dag).is_ok();
+
+    LabEquivalenceReport {
+        fixture_name: fixture.name,
+        original_hash,
+        optimized_hash,
+        certificate,
+        original_outcomes,
+        optimized_outcomes,
+        outcomes_equivalent,
+        certificate_verified,
+        steps_verified,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +547,57 @@ mod tests {
             dag.apply_rewrites_certified(RewritePolicy::AssumeAssociativeComm, &rules);
         assert_eq!(report.steps().len(), fixture.expected_step_count);
         assert!(verify(&cert, &dag).is_ok());
+    }
+
+    #[test]
+    fn lab_equivalence_all_fixtures_conservative() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        for fixture in all_fixtures() {
+            if fixture.name == "shared_non_leaf_associative" {
+                continue;
+            }
+            let report = run_equivalence_harness(fixture, RewritePolicy::Conservative, &rules);
+            if let Some(diff) = report.diff_summary() {
+                panic!("equivalence failure:\n{diff}");
+            }
+            assert!(report.all_ok());
+        }
+    }
+
+    #[test]
+    fn lab_equivalence_deterministic_across_runs() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        // Run twice and compare hashes.
+        let reports1: Vec<_> = all_fixtures()
+            .into_iter()
+            .filter(|f| f.name != "shared_non_leaf_associative")
+            .map(|f| run_equivalence_harness(f, RewritePolicy::Conservative, &rules))
+            .collect();
+        let reports2: Vec<_> = all_fixtures()
+            .into_iter()
+            .filter(|f| f.name != "shared_non_leaf_associative")
+            .map(|f| run_equivalence_harness(f, RewritePolicy::Conservative, &rules))
+            .collect();
+
+        assert_eq!(reports1.len(), reports2.len());
+        for (r1, r2) in reports1.iter().zip(reports2.iter()) {
+            assert_eq!(
+                r1.original_hash, r2.original_hash,
+                "{}: original hash mismatch across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.optimized_hash, r2.optimized_hash,
+                "{}: optimized hash mismatch across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.original_outcomes, r2.original_outcomes,
+                "{}: outcomes differ across runs",
+                r1.fixture_name
+            );
+        }
     }
 }
