@@ -7,6 +7,7 @@
 //!
 //! Note: these tests require --release for meaningful numbers.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Parker, Scheduler};
@@ -168,6 +169,10 @@ fn baseline_report_format_parses() {
     let report: BaselineReport = serde_json::from_str(sample).expect("parse baseline report");
     assert!(!report.generated_at.is_empty());
     assert_eq!(report.benchmarks.len(), 1);
+    assert_eq!(
+        report.benchmarks[0].name,
+        "scheduler/priority_lane_ordering_100"
+    );
     assert!(report.benchmarks[0].mean_ns > 0.0);
     assert!(report.benchmarks[0].median_ns > 0.0);
 
@@ -191,4 +196,94 @@ fn baseline_report_format_parses() {
     assert_eq!(report.benchmarks[0].p95_ns, None);
     assert_eq!(report.benchmarks[0].p99_ns, None);
     assert_eq!(report.benchmarks[0].std_dev_ns, None);
+}
+
+#[derive(Debug, Deserialize)]
+struct SmokeReport {
+    generated_at: String,
+    command: String,
+    seed: Option<String>,
+    criterion_dir: String,
+    baseline_path: String,
+    latest_path: String,
+    git_sha: Option<String>,
+    config: SmokeConfig,
+    env: BTreeMap<String, Option<String>>,
+    system: SmokeSystem,
+}
+
+#[derive(Debug, Deserialize)]
+struct SmokeConfig {
+    criterion_dir: String,
+    save_dir: Option<String>,
+    compare_path: Option<String>,
+    metric: String,
+    max_regression_pct: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SmokeSystem {
+    os: String,
+    arch: String,
+    platform: String,
+}
+
+#[test]
+fn smoke_report_format_parses() {
+    let sample = r#"{
+        "generated_at": "2026-02-03T19:00:00Z",
+        "command": "cargo bench --bench phase0_baseline",
+        "seed": "3735928559",
+        "criterion_dir": "target/criterion",
+        "baseline_path": "baselines/criterion/baseline_20260203_190000.json",
+        "latest_path": "baselines/criterion/baseline_latest.json",
+        "git_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "config": {
+            "criterion_dir": "target/criterion",
+            "save_dir": "baselines/criterion",
+            "compare_path": null,
+            "metric": "median_ns",
+            "max_regression_pct": 10.0
+        },
+        "env": {
+            "CI": "true",
+            "RUSTFLAGS": "-C force-frame-pointers=yes"
+        },
+        "system": {
+            "os": "linux",
+            "arch": "x86_64",
+            "platform": "Linux-6.x-x86_64"
+        }
+    }"#;
+
+    let report: SmokeReport = serde_json::from_str(sample).expect("parse smoke report");
+    assert!(!report.generated_at.is_empty());
+    assert!(!report.command.is_empty());
+    assert_eq!(report.criterion_dir, "target/criterion");
+    assert_eq!(
+        report.baseline_path,
+        "baselines/criterion/baseline_20260203_190000.json"
+    );
+    assert_eq!(
+        report.latest_path,
+        "baselines/criterion/baseline_latest.json"
+    );
+    assert_eq!(report.system.os, "linux");
+    assert_eq!(report.system.arch, "x86_64");
+    assert!(!report.system.platform.is_empty());
+    assert!(report.env.contains_key("CI"));
+    assert!(report.env.contains_key("RUSTFLAGS"));
+    assert_eq!(report.config.criterion_dir, "target/criterion");
+    assert_eq!(
+        report.config.save_dir.as_deref(),
+        Some("baselines/criterion")
+    );
+    assert!(report.config.compare_path.is_none());
+    assert_eq!(report.config.metric, "median_ns");
+    assert_eq!(report.config.max_regression_pct, 10.0);
+    assert_eq!(report.seed.as_deref(), Some("3735928559"));
+    assert_eq!(
+        report.git_sha.as_deref(),
+        Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    );
 }
