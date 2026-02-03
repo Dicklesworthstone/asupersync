@@ -540,6 +540,380 @@ pub fn run_equivalence_harness(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic lab execution harness
+// ---------------------------------------------------------------------------
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use crate::lab::runtime::LabRuntime;
+use crate::runtime::TaskHandle;
+use crate::types::{Budget, CancelReason, TaskId};
+
+/// A future that yields once to the scheduler before completing.
+struct LabYieldOnce {
+    yielded: bool,
+}
+
+impl Future for LabYieldOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded {
+            Poll::Ready(())
+        } else {
+            self.yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+fn lab_yield_once() -> LabYieldOnce {
+    LabYieldOnce { yielded: false }
+}
+
+async fn lab_yield_n(count: usize) {
+    for _ in 0..count {
+        lab_yield_once().await;
+    }
+}
+
+/// Execute a [`PlanDag`] dynamically in the lab runtime under a deterministic
+/// seed. Returns the set of leaf labels that completed successfully.
+///
+/// Each node in the DAG becomes a task:
+/// - **Leaf**: yields a deterministic number of times, then returns its label.
+/// - **Join**: waits for all children and unions their labels.
+/// - **Race**: polls children for first completion, cancels and drains losers.
+/// - **Timeout**: delegates to child (lab runtime uses virtual time).
+#[must_use]
+pub fn execute_plan_in_lab(seed: u64, dag: &PlanDag) -> BTreeSet<String> {
+    use super::PlanNode;
+
+    let root = dag.root().expect("dag has root");
+
+    crate::lab::runtime::test(seed, |runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+
+        let mut handles: Vec<Option<TaskHandle<BTreeSet<String>>>> = Vec::new();
+        let mut task_ids: Vec<TaskId> = Vec::new();
+
+        for (idx, node) in dag.nodes.iter().enumerate() {
+            let (tid, handle) = match node.clone() {
+                PlanNode::Leaf { label } => {
+                    let yield_count = (seed as usize).wrapping_add(idx) % 4 + 1;
+                    spawn_lab_leaf(runtime, region, label, yield_count)
+                }
+                PlanNode::Join { children } => {
+                    let child_handles: Vec<_> = children
+                        .iter()
+                        .map(|c| {
+                            handles[c.index()]
+                                .take()
+                                .expect("child handle consumed once")
+                        })
+                        .collect();
+                    spawn_lab_join(runtime, region, child_handles)
+                }
+                PlanNode::Race { children } => {
+                    let child_handles: Vec<_> = children
+                        .iter()
+                        .map(|c| {
+                            handles[c.index()]
+                                .take()
+                                .expect("child handle consumed once")
+                        })
+                        .collect();
+                    spawn_lab_race(runtime, region, child_handles)
+                }
+                PlanNode::Timeout { child, .. } => {
+                    let child_handle = handles[child.index()]
+                        .take()
+                        .expect("child handle consumed once");
+                    spawn_lab_timeout(runtime, region, child_handle)
+                }
+            };
+
+            task_ids.push(tid);
+            handles.push(Some(handle));
+        }
+
+        // Schedule all tasks.
+        {
+            let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+            for tid in &task_ids {
+                sched.schedule(*tid, 0);
+            }
+        }
+
+        runtime.run_until_quiescent();
+        assert!(runtime.is_quiescent(), "runtime must be quiescent");
+
+        handles[root.index()]
+            .take()
+            .expect("root handle")
+            .try_join()
+            .expect("root join ok")
+            .expect("root should be ready")
+    })
+}
+
+fn spawn_lab_leaf(
+    runtime: &mut LabRuntime,
+    region: crate::types::RegionId,
+    label: String,
+    yield_count: usize,
+) -> (TaskId, TaskHandle<BTreeSet<String>>) {
+    let future = async move {
+        lab_yield_n(yield_count).await;
+        let mut set = BTreeSet::new();
+        set.insert(label);
+        set
+    };
+    runtime
+        .state
+        .create_task(region, Budget::INFINITE, future)
+        .expect("spawn leaf")
+}
+
+fn spawn_lab_join(
+    runtime: &mut LabRuntime,
+    region: crate::types::RegionId,
+    child_handles: Vec<TaskHandle<BTreeSet<String>>>,
+) -> (TaskId, TaskHandle<BTreeSet<String>>) {
+    let future = async move {
+        let cx = crate::cx::Cx::current().expect("cx set");
+        let mut all_labels = BTreeSet::new();
+        for handle in &child_handles {
+            if let Ok(labels) = handle.join(&cx).await {
+                all_labels.extend(labels);
+            }
+        }
+        all_labels
+    };
+    runtime
+        .state
+        .create_task(region, Budget::INFINITE, future)
+        .expect("spawn join driver")
+}
+
+fn spawn_lab_race(
+    runtime: &mut LabRuntime,
+    region: crate::types::RegionId,
+    child_handles: Vec<TaskHandle<BTreeSet<String>>>,
+) -> (TaskId, TaskHandle<BTreeSet<String>>) {
+    let future = async move {
+        let cx = crate::cx::Cx::current().expect("cx set");
+
+        if child_handles.is_empty() {
+            return BTreeSet::new();
+        }
+        if child_handles.len() == 1 {
+            return child_handles[0].join(&cx).await.unwrap_or_default();
+        }
+
+        // Poll children until one completes.
+        let winner_idx;
+        let winner_result;
+        loop {
+            let mut found = None;
+            for (i, handle) in child_handles.iter().enumerate() {
+                if let Ok(Some(result)) = handle.try_join() {
+                    found = Some((i, result));
+                    break;
+                }
+            }
+            if let Some((idx, result)) = found {
+                winner_idx = idx;
+                winner_result = result;
+                break;
+            }
+            // Yield to let children make progress.
+            lab_yield_once().await;
+        }
+
+        // Cancel and drain losers.
+        for (j, handle) in child_handles.iter().enumerate() {
+            if j != winner_idx {
+                handle.abort_with_reason(CancelReason::race_loser());
+            }
+        }
+        for (j, handle) in child_handles.iter().enumerate() {
+            if j != winner_idx {
+                let _ = handle.join(&cx).await;
+            }
+        }
+
+        winner_result
+    };
+    runtime
+        .state
+        .create_task(region, Budget::INFINITE, future)
+        .expect("spawn race driver")
+}
+
+fn spawn_lab_timeout(
+    runtime: &mut LabRuntime,
+    region: crate::types::RegionId,
+    child_handle: TaskHandle<BTreeSet<String>>,
+) -> (TaskId, TaskHandle<BTreeSet<String>>) {
+    let future = async move {
+        let cx = crate::cx::Cx::current().expect("cx set");
+        child_handle.join(&cx).await.unwrap_or_default()
+    };
+    runtime
+        .state
+        .create_task(region, Budget::INFINITE, future)
+        .expect("spawn timeout driver")
+}
+
+/// Result of running original vs optimized plans through the dynamic lab
+/// oracle across multiple seeds.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct LabDynamicEquivalenceReport {
+    /// Fixture name.
+    pub fixture_name: &'static str,
+    /// Rewrite certificate.
+    pub certificate: RewriteCertificate,
+    /// Whether the certificate verified against the optimized DAG.
+    pub certificate_verified: bool,
+    /// Whether step-level verification passed.
+    pub steps_verified: bool,
+    /// Whether the static outcome analysis matched.
+    pub static_outcomes_equivalent: bool,
+    /// Seeds used for dynamic execution.
+    pub seeds: Vec<u64>,
+    /// Per-seed results: (original_labels, optimized_labels, match).
+    pub per_seed_results: Vec<(BTreeSet<String>, BTreeSet<String>, bool)>,
+    /// Whether all per-seed dynamic runs matched.
+    pub dynamic_outcomes_equivalent: bool,
+    /// Observed original outcome sets across all seeds.
+    pub original_outcome_universe: BTreeSet<Vec<String>>,
+    /// Observed optimized outcome sets across all seeds.
+    pub optimized_outcome_universe: BTreeSet<Vec<String>>,
+    /// Whether the observed universes match (same set of possible outcomes).
+    pub universes_match: bool,
+}
+
+impl LabDynamicEquivalenceReport {
+    /// Returns true if all checks passed.
+    #[must_use]
+    pub fn all_ok(&self) -> bool {
+        self.certificate_verified
+            && self.steps_verified
+            && self.static_outcomes_equivalent
+            && self.dynamic_outcomes_equivalent
+            && self.universes_match
+    }
+
+    /// Returns a summary of failures, if any.
+    #[must_use]
+    pub fn failure_summary(&self) -> Option<String> {
+        if self.all_ok() {
+            return None;
+        }
+        let mut out = format!("Fixture: {}\n", self.fixture_name);
+        if !self.certificate_verified {
+            out.push_str("  CERTIFICATE HASH MISMATCH\n");
+        }
+        if !self.steps_verified {
+            out.push_str("  STEP VERIFICATION FAILED\n");
+        }
+        if !self.static_outcomes_equivalent {
+            out.push_str("  STATIC OUTCOME MISMATCH\n");
+        }
+        if !self.dynamic_outcomes_equivalent {
+            out.push_str("  DYNAMIC OUTCOME MISMATCH (per-seed):\n");
+            for (i, (orig, opt, ok)) in self.per_seed_results.iter().enumerate() {
+                if !ok {
+                    let _ = writeln!(
+                        &mut out,
+                        "    seed {}: original={:?}  optimized={:?}",
+                        self.seeds[i], orig, opt
+                    );
+                }
+            }
+        }
+        if !self.universes_match {
+            let _ = write!(
+                &mut out,
+                "  UNIVERSE MISMATCH:\n    original:  {:?}\n    optimized: {:?}\n",
+                self.original_outcome_universe, self.optimized_outcome_universe
+            );
+        }
+        Some(out)
+    }
+}
+
+/// Run the full dynamic lab equivalence oracle for a fixture.
+///
+/// Applies certified rewrites, verifies certificate, then executes both
+/// original and optimized plans under each seed in the lab runtime and
+/// compares outcomes.
+#[must_use]
+pub fn run_lab_dynamic_equivalence(
+    fixture: PlanFixture,
+    policy: RewritePolicy,
+    rules: &[RewriteRule],
+    seeds: &[u64],
+) -> LabDynamicEquivalenceReport {
+    let original_dag = fixture.dag.clone();
+
+    let original_static = original_dag
+        .root()
+        .map(|r| outcome_sets(&original_dag, r))
+        .unwrap_or_default();
+
+    let mut optimized_dag = fixture.dag;
+    let (_, certificate) = optimized_dag.apply_rewrites_certified(policy, rules);
+
+    let optimized_static = optimized_dag
+        .root()
+        .map(|r| outcome_sets(&optimized_dag, r))
+        .unwrap_or_default();
+
+    let static_outcomes_equivalent = original_static == optimized_static;
+    let certificate_verified = verify(&certificate, &optimized_dag).is_ok();
+    let steps_verified = verify_steps(&certificate, &optimized_dag).is_ok();
+
+    let mut per_seed_results = Vec::with_capacity(seeds.len());
+    let mut original_universe = BTreeSet::new();
+    let mut optimized_universe = BTreeSet::new();
+    let mut all_dynamic_ok = true;
+
+    for &seed in seeds {
+        let orig_labels = execute_plan_in_lab(seed, &original_dag);
+        let opt_labels = execute_plan_in_lab(seed, &optimized_dag);
+        let ok = orig_labels == opt_labels;
+        if !ok {
+            all_dynamic_ok = false;
+        }
+        original_universe.insert(orig_labels.iter().cloned().collect::<Vec<_>>());
+        optimized_universe.insert(opt_labels.iter().cloned().collect::<Vec<_>>());
+        per_seed_results.push((orig_labels, opt_labels, ok));
+    }
+
+    let universes_match = original_universe == optimized_universe;
+
+    LabDynamicEquivalenceReport {
+        fixture_name: fixture.name,
+        certificate,
+        certificate_verified,
+        steps_verified,
+        static_outcomes_equivalent,
+        seeds: seeds.to_vec(),
+        per_seed_results,
+        dynamic_outcomes_equivalent: all_dynamic_ok,
+        original_outcome_universe: original_universe,
+        optimized_outcome_universe: optimized_universe,
+        universes_match,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,5 +1332,181 @@ mod tests {
                 r1.fixture_name
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic lab equivalence oracle tests
+    // -----------------------------------------------------------------------
+
+    const ORACLE_SEEDS: [u64; 8] = [0, 1, 2, 3, 42, 99, 1000, u64::MAX];
+
+    #[test]
+    fn dynamic_lab_equivalence_all_fixtures_conservative() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        for fixture in all_fixtures() {
+            if fixture.name == "shared_non_leaf_associative" {
+                continue;
+            }
+            let report = run_lab_dynamic_equivalence(
+                fixture,
+                RewritePolicy::conservative(),
+                &rules,
+                &ORACLE_SEEDS,
+            );
+            assert!(
+                report.all_ok(),
+                "{}",
+                report
+                    .failure_summary()
+                    .unwrap_or_else(|| "unknown failure".into())
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_lab_equivalence_associative_policy() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let fixtures = all_fixtures();
+        let fixture = fixtures
+            .into_iter()
+            .find(|f| f.name == "shared_non_leaf_associative")
+            .expect("fixture exists");
+        let report = run_lab_dynamic_equivalence(
+            fixture,
+            RewritePolicy::assume_all(),
+            &rules,
+            &ORACLE_SEEDS,
+        );
+        assert!(
+            report.all_ok(),
+            "{}",
+            report
+                .failure_summary()
+                .unwrap_or_else(|| "unknown failure".into())
+        );
+    }
+
+    #[test]
+    fn dynamic_lab_single_leaf_execution() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("alpha");
+        dag.set_root(a);
+
+        let result = execute_plan_in_lab(42, &dag);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("alpha"));
+    }
+
+    #[test]
+    fn dynamic_lab_join_collects_all_leaves() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let j = dag.join(vec![a, b, c]);
+        dag.set_root(j);
+
+        let result = execute_plan_in_lab(0, &dag);
+        assert_eq!(result.len(), 3);
+        assert!(result.contains("a"));
+        assert!(result.contains("b"));
+        assert!(result.contains("c"));
+    }
+
+    #[test]
+    fn dynamic_lab_race_returns_subset() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let r = dag.race(vec![a, b]);
+        dag.set_root(r);
+
+        for seed in &ORACLE_SEEDS {
+            let result = execute_plan_in_lab(*seed, &dag);
+            assert_eq!(
+                result.len(),
+                1,
+                "seed {seed}: race should yield exactly one winner"
+            );
+            assert!(
+                result.contains("a") || result.contains("b"),
+                "seed {seed}: winner must be a or b"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_lab_deterministic_same_seed() {
+        init_test();
+        for fixture in all_fixtures() {
+            let r1 = execute_plan_in_lab(42, &fixture.dag);
+            let r2 = execute_plan_in_lab(42, &fixture.dag);
+            assert_eq!(
+                r1, r2,
+                "fixture {}: same seed must produce identical results",
+                fixture.name
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_lab_timeout_passes_through() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("inner");
+        let t = dag.timeout(a, Duration::from_secs(10));
+        dag.set_root(t);
+
+        let result = execute_plan_in_lab(7, &dag);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("inner"));
+    }
+
+    #[test]
+    fn dynamic_lab_nested_join_race() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let j_ab = dag.join(vec![a, b]);
+        let r = dag.race(vec![j_ab, c]);
+        dag.set_root(r);
+
+        for seed in &ORACLE_SEEDS {
+            let result = execute_plan_in_lab(*seed, &dag);
+            let is_join_winner = result.len() == 2
+                && result.contains("a")
+                && result.contains("b");
+            let is_leaf_winner = result.len() == 1 && result.contains("c");
+            assert!(
+                is_join_winner || is_leaf_winner,
+                "seed {seed}: unexpected result {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_lab_report_fields_populated() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let fixture = simple_join_race_dedup();
+        let report = run_lab_dynamic_equivalence(
+            fixture,
+            RewritePolicy::conservative(),
+            &rules,
+            &ORACLE_SEEDS,
+        );
+
+        assert_eq!(report.fixture_name, "simple_join_race_dedup");
+        assert_eq!(report.seeds.len(), ORACLE_SEEDS.len());
+        assert_eq!(report.per_seed_results.len(), ORACLE_SEEDS.len());
+        assert!(!report.original_outcome_universe.is_empty());
+        assert!(!report.optimized_outcome_universe.is_empty());
     }
 }
