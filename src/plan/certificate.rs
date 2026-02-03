@@ -512,10 +512,10 @@ fn verify_timeout_min_result(
             expected: "Timeout wrapping a Timeout child",
         });
     };
-    let expected_duration = if *duration <= inner_duration {
+    let expected_duration = if *duration <= *inner_duration {
         *duration
     } else {
-        inner_duration
+        *inner_duration
     };
 
     let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
@@ -532,7 +532,7 @@ fn verify_timeout_min_result(
             expected: "Timeout after TimeoutMin",
         });
     };
-    if *after_child != inner_child || *after_duration != expected_duration {
+    if *after_child != *inner_child || *after_duration != expected_duration {
         return Err(StepVerifyError::InvalidAfterShape {
             step: idx,
             expected: "Timeout with min(d1,d2) over inner child",

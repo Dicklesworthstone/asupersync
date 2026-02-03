@@ -535,14 +535,6 @@ impl std::fmt::Debug for StateDecoder {
     }
 }
 
-/// XORs `src` into `dst` in place.
-fn xor_into(dst: &mut [u8], src: &[u8]) {
-    let len = std::cmp::min(dst.len(), src.len());
-    for i in 0..len {
-        dst[i] ^= src[i];
-    }
-}
-
 // ---------------------------------------------------------------------------
 // RecoveryOrchestrator
 // ---------------------------------------------------------------------------
