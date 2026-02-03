@@ -32,7 +32,7 @@ pub struct OsEntropy;
 impl EntropySource for OsEntropy {
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("os");
-        getrandom::getrandom(dest).expect("OS entropy failed");
+        getrandom::fill(dest).expect("OS entropy failed");
     }
 
     fn next_u64(&self) -> u64 {

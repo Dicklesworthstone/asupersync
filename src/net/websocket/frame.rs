@@ -714,7 +714,7 @@ pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
 /// entropy to prevent cross-protocol attacks via intermediary cache poisoning.
 fn generate_mask_key() -> [u8; 4] {
     let mut key = [0u8; 4];
-    getrandom::getrandom(&mut key).expect("OS RNG unavailable");
+    getrandom::fill(&mut key).expect("OS RNG unavailable");
     key
 }
 

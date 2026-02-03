@@ -446,6 +446,73 @@ mod tests {
         assert_eq!(product.cols(), 0);
     }
 
+    /// End-to-end H1 persistence: a 1-cycle is born and then killed by a 2-cell.
+    ///
+    /// Complex: a square with a "tail" edge.
+    /// Vertices: 0,1,2,3,4
+    /// Edges: 0→1, 0→2, 1→3, 2→3, 3→4
+    /// Squares: (0,1,2,3)
+    ///
+    /// Without the square, the cycle 0→1→3 vs 0→2→3 would be a persistent
+    /// 1-cycle. The square (0,1,2,3) kills it, giving a finite persistence pair.
+    #[test]
+    fn h1_cycle_born_and_killed() {
+        use crate::trace::gf2::BoundaryMatrix;
+
+        // Build combined boundary matrix for the full filtration.
+        // Filtration order: v0, v1, v2, v3, v4, e01, e02, e13, e23, e34, sq0123
+        // Indices:           0   1   2   3   4    5    6    7    8    9    10
+        //
+        // We build the single big boundary matrix D where:
+        // - columns 0..5 are vertices (zero boundary)
+        // - columns 5..10 are edges (boundary = sum of endpoints)
+        // - column 10 is the square (boundary = sum of 4 edges)
+        let n = 11; // total simplices
+        let mut d = BoundaryMatrix::zeros(n, n);
+
+        // Edge boundaries (column index → which vertex rows are set)
+        // e01 (col 5): v0 + v1
+        d.set(0, 5);
+        d.set(1, 5);
+        // e02 (col 6): v0 + v2
+        d.set(0, 6);
+        d.set(2, 6);
+        // e13 (col 7): v1 + v3
+        d.set(1, 7);
+        d.set(3, 7);
+        // e23 (col 8): v2 + v3
+        d.set(2, 8);
+        d.set(3, 8);
+        // e34 (col 9): v3 + v4
+        d.set(3, 9);
+        d.set(4, 9);
+
+        // Square boundary (col 10): e01 + e02 + e13 + e23
+        d.set(5, 10);
+        d.set(6, 10);
+        d.set(7, 10);
+        d.set(8, 10);
+
+        let reduced = d.reduce();
+        let pairs = reduced.persistence_pairs();
+
+        // The square should kill the 1-cycle.
+        // We expect a pair where a 1-cycle (born at some edge) dies at the square (col 10).
+        let square_pair = pairs.pairs.iter().find(|&&(_, death)| death == 10);
+        assert!(
+            square_pair.is_some(),
+            "expected 1-cycle killed by square at column 10, pairs: {:?}",
+            pairs.pairs
+        );
+
+        // The birth should be one of the edges forming the cycle
+        let (birth, _) = square_pair.unwrap();
+        assert!(
+            (5..=8).contains(birth),
+            "birth {birth} should be an edge in the cycle (cols 5..=8)"
+        );
+    }
+
     /// Verify that `from_trace_poset` produces the same result as manually
     /// extracting edges from the poset and calling `from_edges`.
     #[test]

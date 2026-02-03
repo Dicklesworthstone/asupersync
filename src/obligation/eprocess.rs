@@ -172,6 +172,7 @@ impl LeakMonitor {
     pub fn observe(&mut self, age_ns: u64) {
         self.observations += 1;
 
+        #[allow(clippy::cast_precision_loss)]
         let ratio = age_ns as f64 / self.config.expected_lifetime_ns as f64;
 
         // Likelihood ratio: evidence grows when age exceeds expected.

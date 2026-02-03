@@ -165,6 +165,43 @@ Reads `target/criterion/*/new/estimates.json` and produces a single JSON with `{
 The baseline JSON also includes `p95_ns` and `p99_ns`, computed from `sample.json`
 as per-iteration latencies.
 
+## Allocation Census
+
+Use the allocation census script to capture allocation-heavy hot paths without
+modifying code or outputs.
+
+```bash
+# Default: heaptrack + phase0_baseline
+./scripts/alloc_census.sh
+
+# Explicit tool + benchmark
+./scripts/alloc_census.sh --tool valgrind --cmd "cargo bench --bench scheduler_benchmark"
+
+# Optional flamegraph capture (requires cargo-flamegraph)
+./scripts/alloc_census.sh --flamegraph
+```
+
+The script writes a report JSON to `baselines/alloc_census/` with the raw tool
+artifacts and summaries. Example schema:
+
+```json
+{
+  "generated_at": "2026-02-03T03:21:00Z",
+  "tool": "heaptrack",
+  "command": "cargo bench --bench phase0_baseline",
+  "artifacts": {
+    "raw": "baselines/alloc_census/heaptrack_20260203_032100.1234.gz",
+    "summary": "baselines/alloc_census/heaptrack_20260203_032100.txt",
+    "flamegraph": "baselines/alloc_census/flamegraph_20260203_032100.svg"
+  }
+}
+```
+
+Notes:
+- `heaptrack` and `valgrind` are optional system tools; install as needed.
+- `cargo-flamegraph` integration is best-effort and only runs for `cargo ...` commands.
+- Keep inputs deterministic (fixed seeds) when comparing allocation deltas.
+
 ## CI Integration
 
 Recommended CI workflow:

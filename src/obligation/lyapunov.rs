@@ -238,8 +238,8 @@ impl StateSnapshot {
                 continue;
             }
             pending_obligations = pending_obligations.saturating_add(1);
-            obligation_age_sum_ns = obligation_age_sum_ns
-                .saturating_add(now.duration_since(obligation.reserved_at));
+            obligation_age_sum_ns =
+                obligation_age_sum_ns.saturating_add(now.duration_since(obligation.reserved_at));
         }
 
         let mut draining_regions: u32 = 0;
@@ -738,7 +738,12 @@ mod tests {
         state.now = Time::from_nanos(600_000_000);
         let snap2 = StateSnapshot::from_runtime_state(&state);
         let ok2 = (snap2.deadline_pressure - 1.0).abs() < 1e-9;
-        crate::assert_with_log!(ok2, "deadline_pressure overdue", 1.0, snap2.deadline_pressure);
+        crate::assert_with_log!(
+            ok2,
+            "deadline_pressure overdue",
+            1.0,
+            snap2.deadline_pressure
+        );
 
         crate::test_complete!("snapshot_from_runtime_computes_deadline_pressure");
     }

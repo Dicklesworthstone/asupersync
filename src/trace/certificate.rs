@@ -139,6 +139,7 @@ impl TraceCertificate {
     /// Obligation balance: acquires minus releases.
     /// Should be zero at quiescence.
     #[must_use]
+    #[allow(clippy::cast_possible_wrap)]
     pub fn obligation_balance(&self) -> i64 {
         self.obligation_acquires as i64 - self.obligation_releases as i64
     }
@@ -146,6 +147,7 @@ impl TraceCertificate {
     /// Cancel balance: requests minus acks.
     /// Should be zero at quiescence (all cancels acknowledged).
     #[must_use]
+    #[allow(clippy::cast_possible_wrap)]
     pub fn cancel_balance(&self) -> i64 {
         self.cancel_requests as i64 - self.cancel_acks as i64
     }
@@ -153,6 +155,7 @@ impl TraceCertificate {
     /// Task balance: spawns minus completes.
     /// Should be zero at quiescence.
     #[must_use]
+    #[allow(clippy::cast_possible_wrap)]
     pub fn task_balance(&self) -> i64 {
         self.spawns as i64 - self.completes as i64
     }
@@ -192,6 +195,7 @@ pub struct VerificationCheck {
 
 impl CertificateVerifier {
     /// Verify a certificate against trace events.
+    #[must_use]
     pub fn verify(certificate: &TraceCertificate, events: &[TraceEvent]) -> VerificationResult {
         let mut checks = Vec::new();
 
@@ -470,7 +474,7 @@ mod tests {
     #[test]
     fn obligation_balance_at_quiescence() {
         let mut cert = TraceCertificate::new();
-        cert.record_event(&make_event(1, TraceEventKind::ObligationAcquire));
+        cert.record_event(&make_event(1, TraceEventKind::ObligationReserve));
         cert.record_event(&make_event(2, TraceEventKind::ObligationCommit));
         assert_eq!(cert.obligation_balance(), 0);
     }

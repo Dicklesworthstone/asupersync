@@ -70,5 +70,5 @@ impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> Ha
 pub trait SubsetOf<Super> {}
 
 // All is a superset of everything — `None ⊆ All` and `All ⊆ All`.
-impl SubsetOf<All> for All {}
+impl SubsetOf<Self> for All {}
 impl SubsetOf<All> for None {}

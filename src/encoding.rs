@@ -2,15 +2,14 @@
 //!
 //! This module provides a deterministic, streaming encoder that splits input
 //! bytes into source symbols and produces a configurable number of repair
-//! symbols per block. The current implementation uses a simplified LT-style
-//! XOR construction for repair symbols while maintaining deterministic output
-//! for a given input and configuration.
+//! symbols per block. Repair symbols are generated via the systematic
+//! RaptorQ encoder (precode + LT) for deterministic RFC-6330-style behavior.
 
 use crate::config::EncodingConfig;
 use crate::error::{Error, ErrorKind};
+use crate::raptorq::systematic::SystematicEncoder;
 use crate::types::resource::{PoolExhausted, SymbolPool};
 use crate::types::{ObjectId, Symbol, SymbolId, SymbolKind};
-use crate::util::DetRng;
 use std::cmp::min;
 
 /// Errors produced by the encoding pipeline.
@@ -192,6 +191,8 @@ impl EncodingPipeline {
             symbol_size,
             repair_override,
             plan_error,
+            systematic_encoder: None,
+            systematic_block_index: None,
         }
     }
 
@@ -293,6 +294,8 @@ pub struct EncodingIterator<'a> {
     symbol_size: usize,
     repair_override: Option<usize>,
     plan_error: Option<EncodingError>,
+    systematic_encoder: Option<SystematicEncoder>,
+    systematic_block_index: Option<usize>,
 }
 
 impl Iterator for EncodingIterator<'_> {
@@ -309,6 +312,8 @@ impl Iterator for EncodingIterator<'_> {
             if k == 0 {
                 self.block_index += 1;
                 self.esi = 0;
+                self.systematic_encoder = None;
+                self.systematic_block_index = None;
                 continue;
             }
 
@@ -320,6 +325,8 @@ impl Iterator for EncodingIterator<'_> {
             if self.esi >= total {
                 self.block_index += 1;
                 self.esi = 0;
+                self.systematic_encoder = None;
+                self.systematic_block_index = None;
                 continue;
             }
 
@@ -362,14 +369,18 @@ impl EncodingIterator<'_> {
         let mut buffer = self.pipeline.allocate_buffer(self.symbol_size)?;
         buffer.fill(0);
 
-        let seed = seed_for(self.object_id, block.sbn, esi);
-        let mut rng = DetRng::new(seed);
-
-        let degree = 1 + rng.next_usize(block.k);
-        for _ in 0..degree {
-            let source_idx = rng.next_usize(block.k);
-            xor_source_symbol(&mut buffer, self.data, block, self.symbol_size, source_idx);
+        let encoder = self.systematic_encoder_for(block)?;
+        let repair = encoder.repair_symbol(esi);
+        if repair.len() != self.symbol_size {
+            return Err(EncodingError::ComputationFailed {
+                details: format!(
+                    "systematic repair symbol size mismatch: expected {}, got {}",
+                    self.symbol_size,
+                    repair.len()
+                ),
+            });
         }
+        buffer.copy_from_slice(&repair);
 
         self.pipeline.stats.repair_symbols += 1;
         Ok(Symbol::new(
@@ -377,6 +388,31 @@ impl EncodingIterator<'_> {
             buffer,
             SymbolKind::Repair,
         ))
+    }
+
+    fn systematic_encoder_for(
+        &mut self,
+        block: &BlockPlan,
+    ) -> Result<&SystematicEncoder, EncodingError> {
+        let needs_rebuild = self.systematic_block_index != Some(self.block_index);
+        if needs_rebuild {
+            let source_symbols = build_source_symbols(self.data, block, self.symbol_size);
+            let seed = seed_for_block(self.object_id, block.sbn);
+            let encoder =
+                SystematicEncoder::new(&source_symbols, self.symbol_size, seed).ok_or(
+                    EncodingError::ComputationFailed {
+                        details: "systematic encoder failed: singular constraint matrix"
+                            .to_string(),
+                    },
+                )?;
+            self.systematic_encoder = Some(encoder);
+            self.systematic_block_index = Some(self.block_index);
+        }
+
+        Ok(self
+            .systematic_encoder
+            .as_ref()
+            .expect("systematic encoder must be initialized"))
     }
 }
 
@@ -400,6 +436,10 @@ fn compute_repair_count(k: usize, overhead: f64) -> usize {
     desired.saturating_sub(k)
 }
 
+fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
+    seed_for(object_id, sbn, 0)
+}
+
 fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
     let obj = object_id.as_u128();
     let hi = (obj >> 64) as u64;
@@ -414,24 +454,23 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
     }
 }
 
-fn xor_source_symbol(
-    target: &mut [u8],
+fn build_source_symbols(
     data: &[u8],
     block: &BlockPlan,
     symbol_size: usize,
-    source_idx: usize,
-) {
-    let start = block.start + source_idx * symbol_size;
-    let end = min(start + symbol_size, block.end());
-
-    if start >= end {
-        return;
+) -> Vec<Vec<u8>> {
+    let mut symbols = Vec::with_capacity(block.k);
+    for idx in 0..block.k {
+        let mut buffer = vec![0u8; symbol_size];
+        let start = block.start + idx * symbol_size;
+        let end = min(start + symbol_size, block.end());
+        if start < end {
+            let slice = &data[start..end];
+            buffer[..slice.len()].copy_from_slice(slice);
+        }
+        symbols.push(buffer);
     }
-
-    let slice = &data[start..end];
-    for (idx, byte) in slice.iter().enumerate() {
-        target[idx] ^= byte;
-    }
+    symbols
 }
 
 #[cfg(test)]
@@ -621,5 +660,41 @@ mod tests {
             .collect();
 
         assert_eq!(bytes_a, bytes_b);
+    }
+
+    #[test]
+    fn test_repair_symbols_match_systematic_encoder() {
+        let symbol_size = 8usize;
+        let max_block_size = 64usize;
+        let repair_count = 3usize;
+        let data: Vec<u8> = (0..37).map(|i| (i * 7 % 256) as u8).collect();
+        let object_id = ObjectId::new_for_test(10);
+
+        let mut pipeline = EncodingPipeline::new(
+            test_config(symbol_size as u16, max_block_size, 1.0),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let symbols: Vec<_> = pipeline
+            .encode_with_repair(object_id, &data, repair_count)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let k = data.len().div_ceil(symbol_size);
+        let block = BlockPlan {
+            sbn: 0,
+            start: 0,
+            len: data.len(),
+            k,
+        };
+        let source_symbols = build_source_symbols(&data, &block, symbol_size);
+        let seed = seed_for_block(object_id, block.sbn);
+        let encoder =
+            SystematicEncoder::new(&source_symbols, symbol_size, seed).expect("encoder");
+
+        for sym in symbols.iter().filter(|s| s.kind() == SymbolKind::Repair) {
+            let esi = sym.id().esi();
+            let expected = encoder.repair_symbol(esi);
+            assert_eq!(sym.symbol().data(), expected.as_slice());
+        }
     }
 }

@@ -831,8 +831,8 @@ where
                 if let Some(timeout_duration) = self.config.fallback_timeout {
                     if let Some(timer) = cx.timer_driver() {
                         let now = timer.now();
-                        match crate::time::timeout(now, timeout_duration, future).await {
-                            Ok(output) => Ok(output),
+                        match crate::time::timeout(now, timeout_duration, Box::pin(future)).await {
+                            Ok(output) => output.map_err(TowerAdapterError::Service),
                             Err(_) => Err(TowerAdapterError::Timeout),
                         }
                     } else {

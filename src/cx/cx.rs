@@ -273,14 +273,14 @@ impl FullCx {
     ///
     /// This is set by the runtime while polling a task.
     #[must_use]
-    pub fn current() -> Option<FullCx> {
+    pub fn current() -> Option<Self> {
         CURRENT_CX.with(|slot| slot.borrow().clone())
     }
 
     /// Sets the current task context for the duration of the guard.
     #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
-    pub(crate) fn set_current(cx: Option<FullCx>) -> CurrentCxGuard {
+    pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
         let prev = CURRENT_CX.with(|slot| {
             let mut guard = slot.borrow_mut();
             let prev = guard.take();
