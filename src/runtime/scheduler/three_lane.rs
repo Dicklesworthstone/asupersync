@@ -70,22 +70,13 @@ pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
 
-<<<<<<< HEAD
 /// Coordination for waking workers.
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {
     parkers: Vec<Parker>,
     next_wake: AtomicUsize,
-||||||| 8c20dbb
-thread_local! {
-    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = RefCell::new(None);
-=======
-thread_local! {
-    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = const { RefCell::new(None) };
->>>>>>> origin/main
 }
 
-<<<<<<< HEAD
 impl WorkerCoordinator {
     pub(crate) fn new(parkers: Vec<Parker>) -> Self {
         Self {
@@ -121,31 +112,18 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-pub(crate) struct ScopedLocalScheduler {
-||||||| 8c20dbb
-struct ScopedLocalScheduler {
-=======
 /// Scoped setter for the thread-local scheduler pointer.
 ///
 /// When active, [`ThreeLaneScheduler::spawn`] will schedule onto this local
 /// scheduler instead of injecting into the global ready queue.
 #[derive(Debug)]
-struct ScopedLocalScheduler {
->>>>>>> origin/main
+pub(crate) struct ScopedLocalScheduler {
     prev: Option<Arc<Mutex<PriorityScheduler>>>,
 }
 
 impl ScopedLocalScheduler {
-<<<<<<< HEAD
     pub(crate) fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
         let prev = CURRENT_LOCAL.with(|cell| cell.replace(Some(local)));
-||||||| 8c20dbb
-    fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
-        let prev = CURRENT_LOCAL.with(|cell| cell.replace(Some(local)));
-=======
-    fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
-        let prev = CURRENT_LOCAL.with(|cell| cell.borrow_mut().replace(local));
->>>>>>> origin/main
         Self { prev }
     }
 }

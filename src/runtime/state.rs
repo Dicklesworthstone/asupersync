@@ -236,8 +236,6 @@ pub struct RuntimeState {
     blocking_pool: Option<BlockingPoolHandle>,
     /// Response policy when obligation leaks are detected.
     obligation_leak_response: ObligationLeakResponse,
-    /// Cancel attribution configuration for cause-chain limits.
-    cancel_attribution: CancelAttributionConfig,
 }
 
 impl std::fmt::Debug for RuntimeState {

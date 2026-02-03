@@ -132,10 +132,11 @@ impl Scheduler {
         }
     }
 
-    /// Schedules a task in the cancel lane.
+    /// Schedules or promotes a task into the cancel lane.
     ///
-    /// Does nothing if the task is already scheduled.
-    /// O(log n) insertion via binary heap.
+    /// If the task is already scheduled, it is moved to the cancel lane to
+    /// ensure cancellation preempts timed/ready work.
+    /// O(log n) insertion for new tasks; O(n) for promotions.
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
             let generation = self.next_gen();
@@ -144,7 +145,9 @@ impl Scheduler {
                 priority,
                 generation,
             });
+            return;
         }
+        self.move_to_cancel_lane(task, priority);
     }
 
     /// Schedules a task in the timed lane.
@@ -1855,32 +1858,23 @@ mod tests {
     }
 
     #[test]
-    fn schedule_cancel_silently_drops_when_in_ready() {
-        init_test("schedule_cancel_silently_drops_when_in_ready");
+    fn schedule_cancel_promotes_from_ready() {
+        init_test("schedule_cancel_promotes_from_ready");
         let mut sched = Scheduler::new();
         let task = TaskId::new_for_test(4, 0);
 
         // Schedule in ready lane
         sched.schedule(task, 50);
 
-        // schedule_cancel is a no-op because task is already in scheduled set
+        // schedule_cancel should promote to cancel lane when already scheduled
         sched.schedule_cancel(task, 100);
         crate::assert_with_log!(
-            !sched.is_in_cancel_lane(task),
-            "schedule_cancel does NOT promote from ready (pre-fix behavior)",
-            true,
-            true
-        );
-
-        // But move_to_cancel_lane does promote
-        sched.move_to_cancel_lane(task, 100);
-        crate::assert_with_log!(
             sched.is_in_cancel_lane(task),
-            "move_to_cancel_lane DOES promote from ready",
+            "schedule_cancel promotes from ready",
             true,
             true
         );
-        crate::test_complete!("schedule_cancel_silently_drops_when_in_ready");
+        crate::test_complete!("schedule_cancel_promotes_from_ready");
     }
 
     #[test]

@@ -501,27 +501,6 @@ fn mutation_supervision_restart(harness: &mut MetaHarness) {
     harness.oracles.supervision.on_restart(actor(201), 3, now);
 }
 
-fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
-    let now = harness.now();
-    harness
-        .oracles
-        .mailbox
-        .configure_mailbox(actor(300), 2, false);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    harness.oracles.mailbox.on_send(actor(300), now);
-}
-
-fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
-    let now = harness.now();
-    harness
-        .oracles
-        .mailbox
-        .configure_mailbox(actor(300), 2, false);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    harness.oracles.mailbox.on_send(actor(300), now);
-}
-
 fn baseline_actor_leak(harness: &mut MetaHarness) {
     let now = harness.now();
     let region = harness.next_region();
@@ -543,94 +522,6 @@ fn mutation_actor_leak(harness: &mut MetaHarness) {
 
 fn baseline_supervision_restart(harness: &mut MetaHarness) {
     let now = harness.now();
-    let supervisor = actor(1);
-    let child = actor(2);
-
-    harness.oracles.supervision.register_supervisor(
-        supervisor,
-        RestartPolicy::OneForOne,
-        2,
-        EscalationPolicy::Escalate,
-    );
-    harness
-        .oracles
-        .supervision
-        .register_child(supervisor, child);
-    harness
-        .oracles
-        .supervision
-        .on_child_failed(supervisor, child, now, "child failed".to_string());
-
-    // Within restart budget: no escalation required.
-    harness.oracles.supervision.on_restart(child, 2, now);
-}
-
-fn mutation_supervision_restart(harness: &mut MetaHarness) {
-    let now = harness.now();
-    let supervisor = actor(1);
-    let child = actor(2);
-
-    harness.oracles.supervision.register_supervisor(
-        supervisor,
-        RestartPolicy::OneForOne,
-        2,
-        EscalationPolicy::Escalate,
-    );
-    harness
-        .oracles
-        .supervision
-        .register_child(supervisor, child);
-    harness
-        .oracles
-        .supervision
-        .on_child_failed(supervisor, child, now, "child failed".to_string());
-
-    // Exceeds restart budget without escalation: should violate supervision invariant.
-    harness.oracles.supervision.on_restart(child, 3, now);
-}
-
-fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
-    let now = harness.now();
-    let actor_id = actor(1);
-
-    harness.oracles.mailbox.configure_mailbox(actor_id, 2, true);
-    harness.oracles.mailbox.on_send(actor_id, now);
-    harness.oracles.mailbox.on_send(actor_id, now);
-    harness.oracles.mailbox.on_receive(actor_id, now);
-    harness.oracles.mailbox.on_receive(actor_id, now);
-}
-
-fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
-    let now = harness.now();
-    let actor_id = actor(1);
-
-    harness.oracles.mailbox.configure_mailbox(actor_id, 2, true);
-    harness.oracles.mailbox.on_send(actor_id, now);
-    harness.oracles.mailbox.on_send(actor_id, now);
-    harness.oracles.mailbox.on_send(actor_id, now);
-}
-
-/// Maps an oracle violation to its invariant name.
-#[must_use]
-pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
-    match violation {
-        OracleViolation::TaskLeak(_) => INVARIANT_TASK_LEAK,
-        OracleViolation::ObligationLeak(_) => INVARIANT_OBLIGATION_LEAK,
-        OracleViolation::Quiescence(_) => INVARIANT_QUIESCENCE,
-        OracleViolation::LoserDrain(_) => INVARIANT_LOSER_DRAIN,
-        OracleViolation::Finalizer(_) => INVARIANT_FINALIZER,
-        OracleViolation::RegionTree(_) => INVARIANT_REGION_TREE,
-        OracleViolation::AmbientAuthority(_) => INVARIANT_AMBIENT_AUTHORITY,
-        OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
-        OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,
-        OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,
-        OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
-        OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
-    }
-}
-
-#[cfg(test)]
-mod tests {
     use super::*;
     use std::collections::HashSet;
 
