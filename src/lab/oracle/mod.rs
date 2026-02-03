@@ -30,6 +30,7 @@ pub mod ambient_authority;
 pub mod cancellation_protocol;
 pub mod deadline_monotone;
 pub mod determinism;
+pub mod eprocess;
 pub mod evidence;
 pub mod finalizer;
 pub mod loser_drain;
@@ -53,6 +54,7 @@ pub use determinism::{
     assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,
     TraceEventSummary,
 };
+pub use eprocess::{EProcess, EProcessConfig, EProcessMonitor, EValue, MonitorResult};
 pub use evidence::{
     BayesFactor, DetectionModel, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
     EvidenceSummary, LogLikelihoodContributions,
