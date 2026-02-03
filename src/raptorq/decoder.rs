@@ -394,12 +394,36 @@ impl InactivationDecoder {
     }
 
     /// Build initial decoder state from received symbols.
+    ///
+    /// Includes LDPC and HDPC constraint equations (with zero RHS) in addition
+    /// to the received symbol equations. These constraints tie together the
+    /// intermediate symbols and are essential for successful decoding.
     fn build_state(&self, symbols: &[ReceivedSymbol]) -> DecoderState {
         let l = self.params.l;
+        let s = self.params.s;
+        let h = self.params.h;
+        let symbol_size = self.params.symbol_size;
 
-        let mut equations = Vec::with_capacity(symbols.len());
-        let mut rhs = Vec::with_capacity(symbols.len());
+        // Capacity: LDPC (S) + HDPC (H) + received symbols
+        let total_eqs = s + h + symbols.len();
+        let mut equations = Vec::with_capacity(total_eqs);
+        let mut rhs = Vec::with_capacity(total_eqs);
 
+        // Add LDPC constraint equations (S equations with zero RHS)
+        let ldpc_eqs = self.build_ldpc_constraints();
+        for eq in ldpc_eqs {
+            equations.push(eq);
+            rhs.push(vec![0u8; symbol_size]);
+        }
+
+        // Add HDPC constraint equations (H equations with zero RHS)
+        let hdpc_eqs = self.build_hdpc_constraints();
+        for eq in hdpc_eqs {
+            equations.push(eq);
+            rhs.push(vec![0u8; symbol_size]);
+        }
+
+        // Add received symbol equations
         for sym in symbols {
             let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
             equations.push(eq);
@@ -417,6 +441,83 @@ impl InactivationDecoder {
             inactive_cols: BTreeSet::new(),
             stats: DecodeStats::default(),
         }
+    }
+
+    /// Build LDPC constraint equations.
+    ///
+    /// These are the same constraints used by the encoder in `build_ldpc_rows`.
+    /// Each LDPC row connects a few intermediate symbols with XOR (GF(2)).
+    fn build_ldpc_constraints(&self) -> Vec<Equation> {
+        let s = self.params.s;
+        let l = self.params.l;
+
+        // Build sparse representation for each LDPC row
+        let mut row_terms: Vec<Vec<(usize, Gf256)>> = vec![Vec::new(); s];
+
+        // Each intermediate symbol i participates in LDPC rows
+        // (i % S), ((i / S) % S)
+        for i in 0..l {
+            let r0 = i % s;
+            let r1 = (i / s.max(1)) % s;
+            row_terms[r0].push((i, Gf256::ONE));
+            if r0 != r1 {
+                row_terms[r1].push((i, Gf256::ONE));
+            }
+        }
+
+        // Additional LDPC connections using seed-derived pattern
+        let mut rng = DetRng::new(self.seed.wrapping_add(0x1D9C_1D9C_0000));
+        for row in 0..s {
+            let extra = 1 + rng.next_usize(2); // 1-2 additional connections
+            for _ in 0..extra {
+                let col = rng.next_usize(l);
+                row_terms[row].push((col, Gf256::ONE));
+            }
+        }
+
+        // Convert to Equations
+        row_terms
+            .into_iter()
+            .map(|terms| {
+                let (cols, coefs): (Vec<_>, Vec<_>) = terms.into_iter().unzip();
+                Equation::new(cols, coefs)
+            })
+            .collect()
+    }
+
+    /// Build HDPC constraint equations.
+    ///
+    /// These are the same constraints used by the encoder in `build_hdpc_rows`.
+    /// HDPC rows use GF(256) coefficients (not just GF(2)) to provide
+    /// half-distance parity coverage.
+    fn build_hdpc_constraints(&self) -> Vec<Equation> {
+        let h = self.params.h;
+        let l = self.params.l;
+
+        let mut equations = Vec::with_capacity(h);
+        let mut rng = DetRng::new(self.seed.wrapping_add(0x4D9C_4D9C_0000));
+
+        for row_offset in 0..h {
+            let alpha_pow = Gf256::ALPHA.pow((row_offset & 0xFF) as u8);
+            let mut coeff_acc = Gf256::ONE;
+            let mut cols = Vec::with_capacity(l);
+            let mut coefficients = Vec::with_capacity(l);
+
+            for col in 0..l {
+                // Mix structured (Vandermonde) and random components
+                let random_part = Gf256::new(rng.next_u64() as u8);
+                let c = coeff_acc + random_part;
+                if !c.is_zero() {
+                    cols.push(col);
+                    coefficients.push(c);
+                }
+                coeff_acc *= alpha_pow;
+            }
+
+            equations.push(Equation::new(cols, coefficients));
+        }
+
+        equations
     }
 
     /// Phase 1: Peeling (belief propagation).

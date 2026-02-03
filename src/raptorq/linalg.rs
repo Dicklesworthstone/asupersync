@@ -507,6 +507,269 @@ pub fn row_first_nonzero_from(row: &[u8], start_col: usize) -> Option<usize> {
 }
 
 // ============================================================================
+// Gaussian Elimination Engine
+// ============================================================================
+
+/// Result of Gaussian elimination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GaussianResult {
+    /// System solved successfully. Contains solution vector.
+    Solved(Vec<DenseRow>),
+    /// Matrix is singular at the given row (no valid pivot found).
+    Singular {
+        /// The row index where elimination failed to find a pivot.
+        row: usize,
+    },
+}
+
+/// Statistics from Gaussian elimination.
+#[derive(Debug, Clone, Default)]
+pub struct GaussianStats {
+    /// Number of row swaps performed.
+    pub swaps: usize,
+    /// Number of row scale-add operations.
+    pub scale_adds: usize,
+    /// Number of pivot selections.
+    pub pivot_selections: usize,
+}
+
+/// Gaussian elimination solver over GF(256).
+///
+/// Solves the linear system `A * x = b` where `A` is an m x n matrix
+/// and `b` is the right-hand side (represented as row data).
+///
+/// # Features
+///
+/// - **Deterministic**: Same input always produces same output
+/// - **Buffer-reusing**: Modifies matrix in-place, avoids allocations in inner loops
+/// - **Pivoting**: Uses Markowitz heuristic for sparse matrices
+pub struct GaussianSolver {
+    /// Number of rows.
+    rows: usize,
+    /// Number of columns in coefficient matrix.
+    cols: usize,
+    /// Coefficient matrix (row-major, rows x cols).
+    matrix: Vec<Vec<u8>>,
+    /// Right-hand side data for each row.
+    rhs: Vec<DenseRow>,
+    /// Statistics.
+    stats: GaussianStats,
+}
+
+impl GaussianSolver {
+    /// Create a new solver for an m x n system.
+    #[must_use]
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Self {
+            rows,
+            cols,
+            matrix: vec![vec![0; cols]; rows],
+            rhs: (0..rows).map(|_| DenseRow::zeros(0)).collect(),
+            stats: GaussianStats::default(),
+        }
+    }
+
+    /// Set a row's coefficients and RHS data.
+    ///
+    /// `coefficients` should have length `cols`.
+    pub fn set_row(&mut self, row: usize, coefficients: &[u8], rhs: DenseRow) {
+        assert!(row < self.rows, "row out of bounds");
+        assert_eq!(coefficients.len(), self.cols, "coefficient length mismatch");
+        self.matrix[row].copy_from_slice(coefficients);
+        self.rhs[row] = rhs;
+    }
+
+    /// Set a single coefficient.
+    pub fn set_coefficient(&mut self, row: usize, col: usize, value: Gf256) {
+        self.matrix[row][col] = value.raw();
+    }
+
+    /// Set RHS for a row.
+    pub fn set_rhs(&mut self, row: usize, rhs: DenseRow) {
+        self.rhs[row] = rhs;
+    }
+
+    /// Returns the current statistics.
+    #[must_use]
+    pub fn stats(&self) -> &GaussianStats {
+        &self.stats
+    }
+
+    /// Solve the system using Gaussian elimination with partial pivoting.
+    ///
+    /// Returns `GaussianResult::Solved` with the solution if successful,
+    /// or `GaussianResult::Singular` if the matrix is singular.
+    pub fn solve(&mut self) -> GaussianResult {
+        let n = self.rows.min(self.cols);
+
+        // Forward elimination
+        for pivot_col in 0..n {
+            self.stats.pivot_selections += 1;
+
+            // Find pivot row (first nonzero in column, starting from pivot_col)
+            let pivot_row = match self.find_pivot(pivot_col, pivot_col) {
+                Some(row) => row,
+                None => return GaussianResult::Singular { row: pivot_col },
+            };
+
+            // Swap if needed
+            if pivot_row != pivot_col {
+                self.swap_rows(pivot_col, pivot_row);
+            }
+
+            // Eliminate below
+            let pivot_val = Gf256::new(self.matrix[pivot_col][pivot_col]);
+            let pivot_inv = pivot_val.inv();
+
+            // Scale pivot row so pivot element becomes 1
+            row_scale(&mut self.matrix[pivot_col], pivot_inv);
+            row_scale(self.rhs[pivot_col].as_mut_slice(), pivot_inv);
+
+            // Eliminate in rows below pivot
+            for row in (pivot_col + 1)..self.rows {
+                let factor = Gf256::new(self.matrix[row][pivot_col]);
+                if !factor.is_zero() {
+                    self.eliminate_row(row, pivot_col, factor);
+                }
+            }
+        }
+
+        // Back substitution
+        for pivot_col in (0..n).rev() {
+            for row in 0..pivot_col {
+                let factor = Gf256::new(self.matrix[row][pivot_col]);
+                if !factor.is_zero() {
+                    self.eliminate_row(row, pivot_col, factor);
+                }
+            }
+        }
+
+        // Extract solution (RHS values after elimination)
+        GaussianResult::Solved(self.rhs.clone())
+    }
+
+    /// Solve with Markowitz pivot selection (better for sparse matrices).
+    pub fn solve_markowitz(&mut self) -> GaussianResult {
+        let n = self.rows.min(self.cols);
+
+        // Forward elimination with Markowitz pivoting
+        for pivot_col in 0..n {
+            self.stats.pivot_selections += 1;
+
+            // Find best pivot (sparsest row with nonzero in column)
+            let pivot_row = match self.find_pivot_markowitz(pivot_col, pivot_col) {
+                Some((row, _nnz)) => row,
+                None => return GaussianResult::Singular { row: pivot_col },
+            };
+
+            // Swap if needed
+            if pivot_row != pivot_col {
+                self.swap_rows(pivot_col, pivot_row);
+            }
+
+            // Scale and eliminate
+            let pivot_val = Gf256::new(self.matrix[pivot_col][pivot_col]);
+            let pivot_inv = pivot_val.inv();
+
+            row_scale(&mut self.matrix[pivot_col], pivot_inv);
+            row_scale(self.rhs[pivot_col].as_mut_slice(), pivot_inv);
+
+            for row in (pivot_col + 1)..self.rows {
+                let factor = Gf256::new(self.matrix[row][pivot_col]);
+                if !factor.is_zero() {
+                    self.eliminate_row(row, pivot_col, factor);
+                }
+            }
+        }
+
+        // Back substitution
+        for pivot_col in (0..n).rev() {
+            for row in 0..pivot_col {
+                let factor = Gf256::new(self.matrix[row][pivot_col]);
+                if !factor.is_zero() {
+                    self.eliminate_row(row, pivot_col, factor);
+                }
+            }
+        }
+
+        GaussianResult::Solved(self.rhs.clone())
+    }
+
+    /// Find first nonzero pivot in column starting from given row.
+    fn find_pivot(&self, col: usize, start_row: usize) -> Option<usize> {
+        (start_row..self.rows).find(|&row| self.matrix[row][col] != 0)
+    }
+
+    /// Find best pivot using Markowitz heuristic.
+    fn find_pivot_markowitz(&self, col: usize, start_row: usize) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+
+        for row in start_row..self.rows {
+            if self.matrix[row][col] == 0 {
+                continue;
+            }
+            let nnz = self.matrix[row].iter().filter(|&&b| b != 0).count();
+            match &best {
+                None => best = Some((row, nnz)),
+                Some((_, best_nnz)) if nnz < *best_nnz => best = Some((row, nnz)),
+                Some((best_row, best_nnz)) if nnz == *best_nnz && row < *best_row => {
+                    best = Some((row, nnz));
+                }
+                _ => {}
+            }
+        }
+
+        best
+    }
+
+    /// Swap two rows.
+    fn swap_rows(&mut self, a: usize, b: usize) {
+        self.stats.swaps += 1;
+        self.matrix.swap(a, b);
+        self.rhs.swap(a, b);
+    }
+
+    /// Eliminate: row[target] -= factor * row[pivot].
+    fn eliminate_row(&mut self, target: usize, pivot: usize, factor: Gf256) {
+        self.stats.scale_adds += 1;
+        if target == pivot {
+            return;
+        }
+
+        // Eliminate in coefficient matrix
+        for col in 0..self.cols {
+            let pivot_val = self.matrix[pivot][col];
+            if pivot_val != 0 {
+                self.matrix[target][col] ^= (Gf256::new(pivot_val) * factor).raw();
+            }
+        }
+
+        // Eliminate in RHS - use split_at_mut to satisfy borrow checker
+        let rhs_len = self.rhs[pivot].len();
+        if rhs_len > 0 {
+            if self.rhs[target].len() < rhs_len {
+                self.rhs[target].data.resize(rhs_len, 0);
+            }
+
+            // Split to get separate mutable references
+            let (lower, upper) = if target < pivot {
+                let (lo, hi) = self.rhs.split_at_mut(pivot);
+                (&mut lo[target], &hi[0])
+            } else {
+                let (lo, hi) = self.rhs.split_at_mut(target);
+                (&mut hi[0], &lo[pivot])
+            };
+
+            row_scale_add(
+                &mut lower.as_mut_slice()[..rhs_len],
+                &upper.as_slice()[..rhs_len],
+                factor,
+            );
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -722,5 +985,143 @@ mod tests {
         assert_eq!(row_first_nonzero_from(&row, 0), Some(2));
         assert_eq!(row_first_nonzero_from(&row, 3), Some(4));
         assert_eq!(row_first_nonzero_from(&row, 5), None);
+    }
+
+    // -- Gaussian Solver tests --
+
+    #[test]
+    fn gaussian_identity_2x2() {
+        // Identity matrix: I * x = b => x = b
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1, 0], DenseRow::new(vec![5]));
+        solver.set_row(1, &[0, 1], DenseRow::new(vec![7]));
+
+        match solver.solve() {
+            GaussianResult::Solved(solution) => {
+                assert_eq!(solution[0].as_slice(), &[5]);
+                assert_eq!(solution[1].as_slice(), &[7]);
+            }
+            GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+        }
+    }
+
+    #[test]
+    fn gaussian_simple_2x2() {
+        // System: [1, 1] * [x0, x1] = [3], [1, 2] * [x0, x1] = [5]
+        // In GF(256): subtraction is XOR
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1, 1], DenseRow::new(vec![3]));
+        solver.set_row(1, &[1, 2], DenseRow::new(vec![5]));
+
+        match solver.solve() {
+            GaussianResult::Solved(solution) => {
+                let x0 = Gf256::new(solution[0].as_slice()[0]);
+                let x1 = Gf256::new(solution[1].as_slice()[0]);
+                // Verify the solution satisfies original equations
+                let r0 = x0 + x1;
+                let r1 = x0 + (Gf256::new(2) * x1);
+                assert_eq!(r0.raw(), 3, "row 0 check");
+                assert_eq!(r1.raw(), 5, "row 1 check");
+            }
+            GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+        }
+    }
+
+    #[test]
+    fn gaussian_singular_matrix() {
+        // Two identical rows => singular
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1, 2], DenseRow::new(vec![3]));
+        solver.set_row(1, &[1, 2], DenseRow::new(vec![3]));
+
+        match solver.solve() {
+            GaussianResult::Singular { row } => {
+                assert_eq!(row, 1, "singular detected at row 1");
+            }
+            GaussianResult::Solved(_) => panic!("expected singular matrix"),
+        }
+    }
+
+    #[test]
+    fn gaussian_3x3_diagonal() {
+        // 3x3 diagonal matrix (easy)
+        let mut solver = GaussianSolver::new(3, 3);
+        solver.set_row(0, &[2, 0, 0], DenseRow::new(vec![10]));
+        solver.set_row(1, &[0, 3, 0], DenseRow::new(vec![15]));
+        solver.set_row(2, &[0, 0, 5], DenseRow::new(vec![25]));
+
+        match solver.solve() {
+            GaussianResult::Solved(solution) => {
+                // Solution: x0 = 10/2, x1 = 15/3, x2 = 25/5 (in GF256)
+                let x0 = solution[0].get(0);
+                let x1 = solution[1].get(0);
+                let x2 = solution[2].get(0);
+
+                // Verify
+                assert_eq!(Gf256::new(2) * x0, Gf256::new(10));
+                assert_eq!(Gf256::new(3) * x1, Gf256::new(15));
+                assert_eq!(Gf256::new(5) * x2, Gf256::new(25));
+            }
+            GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+        }
+    }
+
+    #[test]
+    fn gaussian_markowitz_same_result() {
+        // Verify Markowitz gives same answer as basic for non-singular system
+        let mut solver1 = GaussianSolver::new(3, 3);
+        solver1.set_row(0, &[1, 2, 3], DenseRow::new(vec![6]));
+        solver1.set_row(1, &[4, 5, 6], DenseRow::new(vec![15]));
+        solver1.set_row(2, &[7, 8, 10], DenseRow::new(vec![25]));
+
+        let mut solver2 = GaussianSolver::new(3, 3);
+        solver2.set_row(0, &[1, 2, 3], DenseRow::new(vec![6]));
+        solver2.set_row(1, &[4, 5, 6], DenseRow::new(vec![15]));
+        solver2.set_row(2, &[7, 8, 10], DenseRow::new(vec![25]));
+
+        let result1 = solver1.solve();
+        let result2 = solver2.solve_markowitz();
+
+        // Both should solve (or both singular at same row)
+        match (&result1, &result2) {
+            (GaussianResult::Solved(s1), GaussianResult::Solved(s2)) => {
+                // Solutions should be equivalent
+                for i in 0..3 {
+                    assert_eq!(s1[i], s2[i], "solution row {i} mismatch");
+                }
+            }
+            (GaussianResult::Singular { row: r1 }, GaussianResult::Singular { row: r2 }) => {
+                assert_eq!(r1, r2, "singular at different rows");
+            }
+            _ => panic!("different result types"),
+        }
+    }
+
+    #[test]
+    fn gaussian_stats_tracked() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[0, 1], DenseRow::new(vec![5])); // Needs swap
+        solver.set_row(1, &[1, 0], DenseRow::new(vec![7]));
+
+        let _ = solver.solve();
+        let stats = solver.stats();
+        assert!(stats.pivot_selections > 0, "pivot selections tracked");
+        assert!(stats.swaps > 0, "swaps tracked (row 0 needs swap)");
+    }
+
+    #[test]
+    fn gaussian_empty_rhs() {
+        // System with empty RHS (just checking coefficients)
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1, 0], DenseRow::zeros(0));
+        solver.set_row(1, &[0, 1], DenseRow::zeros(0));
+
+        match solver.solve() {
+            GaussianResult::Solved(solution) => {
+                assert_eq!(solution[0].len(), 0);
+                assert_eq!(solution[1].len(), 0);
+            }
+            GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+        }
     }
 }
