@@ -1235,15 +1235,12 @@ impl<Caps> Cx<Caps> {
     /// } // span ends here
     /// ```
     #[must_use]
-    pub fn enter_span(&self, name: &str) -> SpanGuard {
+    pub fn enter_span(&self, name: &str) -> SpanGuard<Caps> {
         let prev = self.diagnostic_context();
         let child = prev.fork().with_custom("span.name", name);
         self.set_diagnostic_context(child);
         self.log(LogEntry::debug(format!("span enter: {name}")).with_target("tracing"));
-        SpanGuard {
-            cx: self.clone(),
-            prev,
-        }
+        SpanGuard { cx: self.clone(), prev }
     }
 
     /// Sets a request correlation ID on the diagnostic context.

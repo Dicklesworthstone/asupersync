@@ -605,6 +605,75 @@ Then:
 
 This provides simple linear invariants and fast trace checks for “no leaks.”
 
+#### 3.4.1 Linear logic view (affine, single-use tokens)
+
+We model obligations as **linear resources** in a judgmental style:
+
+```
+Γ; Δ ⊢ e ⇓ v; Δ'
+```
+
+Where:
+
+- `Γ` is the unrestricted context (regular values),
+- `Δ` is the linear context (obligation tokens),
+- `Δ'` is the linear context after evaluation.
+
+Define a linear token type `Obl(k, o)` meaning “obligation `o` of kind `k` is held”.
+
+Rules (informal):
+
+```
+RESERVE:
+  Γ; Δ ⊢ reserve(k) ⇓ o; Δ, Obl(k, o)
+
+COMMIT:
+  Γ; Δ, Obl(k, o) ⊢ commit(o) ⇓ (); Δ
+
+ABORT:
+  Γ; Δ, Obl(k, o) ⊢ abort(o) ⇓ (); Δ
+```
+
+Linearity means **no rule duplicates or discards** `Obl(k, o)` except `COMMIT` or `ABORT`.
+The system is **affine** only in the sense that *leaks are explicit errors*:
+attempting to terminate with a non-empty linear context triggers the `LEAK` transition.
+
+```
+LEAK:
+  Γ; Δ, Obl(k, o) ⊢ return v  ⇓  error(ObligationLeak(o))
+```
+
+This matches the runtime behavior: uncommitted obligations are detected and reported
+when a task completes.
+
+#### 3.4.2 Mapping to runtime state
+
+The linear context `Δ` is *represented concretely* by the obligation registry `O`:
+
+```
+Obl(k, o) ∈ Δ   ⟺   O[o] = { kind: k, state: Reserved, holder: t, ... }
+```
+
+Transitions in §3.4 correspond directly to mutations of `O`:
+
+- `reserve` adds a `Reserved` record,
+- `commit/abort` set the record state to `Committed` or `Aborted`,
+- `leak` sets `Leaked` (error state) when a task completes while still holding.
+
+This is the concrete embedding of linear logic into the runtime’s operational state.
+
+#### 3.4.3 Mapping to oracles and tests
+
+The lab runtime’s **ObligationLeakOracle** and trace checks implement the same rule:
+
+```
+Held(t) = { o | O[o].holder = t ∧ O[o].state = Reserved }
+TaskComplete(t) ∧ Held(t) ≠ ∅  ⇒  ObligationLeak(o) for each o ∈ Held(t)
+```
+
+This is the runtime witness for the linearity invariant and is the test-level
+assertion that "no obligation leaks" holds for any execution.
+
 ---
 
 ### 3.5 Joining and Waiting
