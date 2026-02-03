@@ -4,7 +4,7 @@
 //! distribution to replicas using the deterministic RFC-grade pipeline.
 
 use crate::config::EncodingConfig as PipelineEncodingConfig;
-use crate::encoding::{EncodingError as PipelineEncodingError, EncodingPipeline};
+use crate::encoding::EncodingPipeline;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::types::Time;
@@ -100,7 +100,7 @@ impl StateEncoder {
 
         for encoded in pipeline.encode_with_repair(object_id, &data, repair_override) {
             let symbol = encoded
-                .map_err(EncodingError::from_pipeline)?
+                .map_err(|err| EncodingError::Pipeline(err.to_string()))?
                 .into_symbol();
             symbols.push(symbol);
         }
@@ -156,7 +156,7 @@ impl StateEncoder {
             .enumerate()
         {
             let symbol = encoded
-                .map_err(EncodingError::from_pipeline)?
+                .map_err(|err| EncodingError::Pipeline(err.to_string()))?
                 .into_symbol();
             if idx >= skip {
                 repairs.push(symbol);
@@ -317,14 +317,6 @@ pub enum EncodingError {
     NoSourceSymbols,
     /// Error from the underlying encoding pipeline.
     Pipeline(String),
-}
-
-impl EncodingError {
-    /// Convert a pipeline encoding error into this error type.
-    #[must_use]
-    pub fn from_pipeline(err: PipelineEncodingError) -> Self {
-        Self::Pipeline(err.to_string())
-    }
 }
 
 impl std::fmt::Display for EncodingError {
