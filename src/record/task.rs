@@ -90,7 +90,11 @@ impl TaskPhaseCell {
             2 => TaskPhase::CancelRequested,
             3 => TaskPhase::Cancelling,
             4 => TaskPhase::Finalizing,
-            _ => TaskPhase::Completed,
+            5 => TaskPhase::Completed,
+            v => {
+                debug_assert!(false, "invalid TaskPhase value: {v}");
+                TaskPhase::Completed
+            }
         }
     }
 

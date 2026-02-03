@@ -1060,6 +1060,124 @@ pub struct PhaseNode {
     pub children: Vec<Self>,
 }
 
+// ============================================================================
+// TestContext — Standardized metadata for structured test logging
+// ============================================================================
+
+/// Standardized metadata carried through a test for structured logging.
+///
+/// Every test should create a `TestContext` to ensure consistent, machine-parseable
+/// log fields across all unit, integration, and E2E tests.
+///
+/// # Standard Fields
+///
+/// | Field | Purpose | Example |
+/// |-------|---------|---------|
+/// | `test_id` | Unique identifier for the test run | `"cancel_drain_001"` |
+/// | `seed` | Deterministic RNG seed for reproducibility | `0xDEAD_BEEF` |
+/// | `subsystem` | Runtime subsystem under test | `"scheduler"`, `"raptorq"` |
+/// | `invariant` | Core invariant being verified | `"no_obligation_leaks"` |
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::test_logging::TestContext;
+///
+/// let ctx = TestContext::new("cancel_drain_001", 0xDEAD_BEEF)
+///     .with_subsystem("cancellation")
+///     .with_invariant("losers_drained");
+///
+/// // Use with TestHarness
+/// let harness = TestHarness::with_context("my_test", ctx);
+/// ```
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestContext {
+    /// Unique test identifier for log correlation.
+    pub test_id: String,
+    /// Deterministic seed for reproducibility.
+    pub seed: u64,
+    /// Runtime subsystem under test (e.g., "scheduler", "raptorq", "obligation").
+    pub subsystem: Option<String>,
+    /// Core invariant being verified (e.g., "no_obligation_leaks", "quiescence").
+    pub invariant: Option<String>,
+}
+
+impl TestContext {
+    /// Create a new context with required fields.
+    #[must_use]
+    pub fn new(test_id: &str, seed: u64) -> Self {
+        Self {
+            test_id: test_id.to_string(),
+            seed,
+            subsystem: None,
+            invariant: None,
+        }
+    }
+
+    /// Set the subsystem under test.
+    #[must_use]
+    pub fn with_subsystem(mut self, subsystem: &str) -> Self {
+        self.subsystem = Some(subsystem.to_string());
+        self
+    }
+
+    /// Set the invariant being verified.
+    #[must_use]
+    pub fn with_invariant(mut self, invariant: &str) -> Self {
+        self.invariant = Some(invariant.to_string());
+        self
+    }
+
+    /// Emit a tracing info event with all context fields.
+    pub fn log_start(&self) {
+        tracing::info!(
+            test_id = %self.test_id,
+            seed = %format_args!("0x{:X}", self.seed),
+            subsystem = self.subsystem.as_deref().unwrap_or("-"),
+            invariant = self.invariant.as_deref().unwrap_or("-"),
+            "TEST START"
+        );
+    }
+
+    /// Emit a tracing info event for test completion with all context fields.
+    pub fn log_end(&self, passed: bool) {
+        tracing::info!(
+            test_id = %self.test_id,
+            seed = %format_args!("0x{:X}", self.seed),
+            subsystem = self.subsystem.as_deref().unwrap_or("-"),
+            invariant = self.invariant.as_deref().unwrap_or("-"),
+            passed = passed,
+            "TEST END"
+        );
+    }
+
+    /// Emit a structured error dump with full context for failure triage.
+    pub fn log_failure(&self, reason: &str) {
+        tracing::error!(
+            test_id = %self.test_id,
+            seed = %format_args!("0x{:X}", self.seed),
+            subsystem = self.subsystem.as_deref().unwrap_or("-"),
+            invariant = self.invariant.as_deref().unwrap_or("-"),
+            reason = %reason,
+            "TEST FAILURE — reproduce with seed 0x{:X}",
+            self.seed
+        );
+    }
+}
+
+impl std::fmt::Display for TestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "test_id={} seed=0x{:X} subsystem={} invariant={}",
+            self.test_id,
+            self.seed,
+            self.subsystem.as_deref().unwrap_or("-"),
+            self.invariant.as_deref().unwrap_or("-"),
+        )
+    }
+}
+
 /// Per-test JSON summary produced by [`TestHarness`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TestSummary {
@@ -1081,6 +1199,9 @@ pub struct TestSummary {
     pub failure_artifacts: Vec<String>,
     /// Event log statistics.
     pub event_stats: EventStats,
+    /// Structured test context (if provided).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<TestContext>,
 }
 
 /// Summary statistics from the event log.
@@ -1140,6 +1261,8 @@ pub struct TestHarness {
     artifacts: Vec<String>,
     /// Start instant.
     start: Instant,
+    /// Structured test context for standardized logging.
+    context: Option<TestContext>,
 }
 
 impl TestHarness {
@@ -1155,6 +1278,7 @@ impl TestHarness {
             artifact_dir: artifact_dir_from_env(),
             artifacts: Vec::new(),
             start: Instant::now(),
+            context: None,
         }
     }
 
@@ -1170,7 +1294,34 @@ impl TestHarness {
             artifact_dir: artifact_dir_from_env(),
             artifacts: Vec::new(),
             start: Instant::now(),
+            context: None,
         }
+    }
+
+    /// Create a harness with a structured [`TestContext`] for standardized logging.
+    ///
+    /// The context fields (test_id, seed, subsystem, invariant) are included in
+    /// the test summary and emitted in tracing events.
+    #[must_use]
+    pub fn with_context(test_name: &str, ctx: TestContext) -> Self {
+        ctx.log_start();
+        Self {
+            test_name: test_name.to_string(),
+            logger: TestLogger::new(TestLogLevel::from_env()),
+            phase_stack: Vec::new(),
+            phases: Vec::new(),
+            assertions: Vec::new(),
+            artifact_dir: artifact_dir_from_env(),
+            artifacts: Vec::new(),
+            start: Instant::now(),
+            context: Some(ctx),
+        }
+    }
+
+    /// Returns the test context, if one was provided.
+    #[must_use]
+    pub fn context(&self) -> Option<&TestContext> {
+        self.context.as_ref()
     }
 
     /// Access the underlying [`TestLogger`].
@@ -1450,6 +1601,7 @@ impl TestHarness {
             phases,
             failure_artifacts: self.artifacts.clone(),
             event_stats,
+            context: self.context.clone(),
         };
 
         // Write JSON summary if artifact dir is configured.
@@ -1459,6 +1611,14 @@ impl TestHarness {
             if let Ok(json) = serde_json::to_string_pretty(&summary) {
                 let _ = std::fs::create_dir_all(dir);
                 let _ = std::fs::write(&summary_path, json);
+            }
+        }
+
+        // Emit structured end event with context fields if available.
+        if let Some(ref ctx) = self.context {
+            ctx.log_end(overall_passed);
+            if !overall_passed {
+                ctx.log_failure("one or more assertions failed");
             }
         }
 
@@ -1675,6 +1835,97 @@ macro_rules! harness_assert {
     ($harness:expr, $desc:expr, $cond:expr) => {
         if !$harness.assert_true($desc, $cond) {
             panic!("harness assertion failed: {}", $desc);
+        }
+    };
+}
+
+// ============================================================================
+// Structured Context Macros
+// ============================================================================
+
+/// Emit a structured tracing event with standard test context fields.
+///
+/// Includes `test_id`, `seed`, `subsystem`, and `invariant` from a [`TestContext`].
+///
+/// ```ignore
+/// let ctx = TestContext::new("my_test", 0xDEAD_BEEF).with_subsystem("scheduler");
+/// test_structured!(ctx, "task spawned", task_count = 5);
+/// ```
+#[macro_export]
+macro_rules! test_structured {
+    ($ctx:expr, $msg:expr) => {
+        tracing::info!(
+            test_id = %$ctx.test_id,
+            seed = %format_args!("0x{:X}", $ctx.seed),
+            subsystem = $ctx.subsystem.as_deref().unwrap_or("-"),
+            invariant = $ctx.invariant.as_deref().unwrap_or("-"),
+            $msg
+        );
+    };
+    ($ctx:expr, $msg:expr, $($key:ident = $value:expr),+ $(,)?) => {
+        tracing::info!(
+            test_id = %$ctx.test_id,
+            seed = %format_args!("0x{:X}", $ctx.seed),
+            subsystem = $ctx.subsystem.as_deref().unwrap_or("-"),
+            invariant = $ctx.invariant.as_deref().unwrap_or("-"),
+            $($key = %$value,)+
+            $msg
+        );
+    };
+}
+
+/// Emit a structured error dump with full context for failure triage.
+///
+/// Includes all context fields plus a reason string. Designed for use in
+/// test failure paths to maximize reproducibility information.
+///
+/// ```ignore
+/// let ctx = TestContext::new("my_test", 42).with_subsystem("obligation");
+/// dump_test_failure!(ctx, "obligation leak detected", leaked_count = 3);
+/// ```
+#[macro_export]
+macro_rules! dump_test_failure {
+    ($ctx:expr, $reason:expr) => {
+        tracing::error!(
+            test_id = %$ctx.test_id,
+            seed = %format_args!("0x{:X}", $ctx.seed),
+            subsystem = $ctx.subsystem.as_deref().unwrap_or("-"),
+            invariant = $ctx.invariant.as_deref().unwrap_or("-"),
+            reason = %$reason,
+            "TEST FAILURE — reproduce with seed 0x{:X}", $ctx.seed
+        );
+    };
+    ($ctx:expr, $reason:expr, $($key:ident = $value:expr),+ $(,)?) => {
+        tracing::error!(
+            test_id = %$ctx.test_id,
+            seed = %format_args!("0x{:X}", $ctx.seed),
+            subsystem = $ctx.subsystem.as_deref().unwrap_or("-"),
+            invariant = $ctx.invariant.as_deref().unwrap_or("-"),
+            reason = %$reason,
+            $($key = %$value,)+
+            "TEST FAILURE — reproduce with seed 0x{:X}", $ctx.seed
+        );
+    };
+}
+
+/// Assert a condition and, on failure, emit a structured dump with full context.
+///
+/// ```ignore
+/// let ctx = TestContext::new("my_test", 42).with_subsystem("scheduler");
+/// assert_with_context!(ctx, task_count > 0, "expected at least one task");
+/// ```
+#[macro_export]
+macro_rules! assert_with_context {
+    ($ctx:expr, $cond:expr, $msg:expr) => {
+        if !$cond {
+            $crate::dump_test_failure!($ctx, $msg);
+            panic!("assertion failed [{}]: {}", $ctx.test_id, $msg);
+        }
+    };
+    ($ctx:expr, $cond:expr, $msg:expr, $($key:ident = $value:expr),+ $(,)?) => {
+        if !$cond {
+            $crate::dump_test_failure!($ctx, $msg, $($key = $value),+);
+            panic!("assertion failed [{}]: {}", $ctx.test_id, $msg);
         }
     };
 }
@@ -2040,5 +2291,97 @@ mod tests {
         assert!(summary.passed);
         assert_eq!(summary.total_assertions, 2);
         crate::test_complete!("test_harness_macros");
+    }
+
+    // ====================================================================
+    // TestContext tests
+    // ====================================================================
+
+    #[test]
+    fn test_context_creation() {
+        init_test("test_context_creation");
+        let ctx = TestContext::new("ctx_test", 0xCAFE)
+            .with_subsystem("scheduler")
+            .with_invariant("no_leaks");
+
+        assert_eq!(ctx.test_id, "ctx_test");
+        assert_eq!(ctx.seed, 0xCAFE);
+        assert_eq!(ctx.subsystem.as_deref(), Some("scheduler"));
+        assert_eq!(ctx.invariant.as_deref(), Some("no_leaks"));
+        crate::test_complete!("test_context_creation");
+    }
+
+    #[test]
+    fn test_context_display() {
+        init_test("test_context_display");
+        let ctx = TestContext::new("disp_test", 42).with_subsystem("raptorq");
+        let rendered = format!("{ctx}");
+        assert!(rendered.contains("test_id=disp_test"));
+        assert!(rendered.contains("seed=0x2A"));
+        assert!(rendered.contains("subsystem=raptorq"));
+        crate::test_complete!("test_context_display");
+    }
+
+    #[test]
+    fn test_context_serialization() {
+        init_test("test_context_serialization");
+        let ctx = TestContext::new("ser_test", 0xDEAD)
+            .with_subsystem("obligation")
+            .with_invariant("committed_or_aborted");
+
+        let json = serde_json::to_string(&ctx).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["test_id"], "ser_test");
+        assert_eq!(parsed["seed"], 0xDEAD);
+        assert_eq!(parsed["subsystem"], "obligation");
+        assert_eq!(parsed["invariant"], "committed_or_aborted");
+        crate::test_complete!("test_context_serialization");
+    }
+
+    #[test]
+    fn test_harness_with_context() {
+        init_test("test_harness_with_context");
+        let ctx = TestContext::new("harness_ctx", 0xBEEF)
+            .with_subsystem("cancellation")
+            .with_invariant("losers_drained");
+
+        let mut harness = TestHarness::with_context("ctx_harness", ctx);
+        assert!(harness.context().is_some());
+        assert_eq!(harness.context().unwrap().test_id, "harness_ctx");
+
+        harness.enter_phase("verify");
+        harness.assert_true("context present", harness.context().is_some());
+        harness.exit_phase();
+
+        let summary = harness.finish();
+        assert!(summary.passed);
+        assert!(summary.context.is_some());
+        assert_eq!(summary.context.unwrap().seed, 0xBEEF);
+        crate::test_complete!("test_harness_with_context");
+    }
+
+    #[test]
+    fn test_harness_without_context() {
+        init_test("test_harness_without_context");
+        let harness = TestHarness::new("no_ctx");
+        assert!(harness.context().is_none());
+
+        let summary = harness.finish();
+        assert!(summary.context.is_none());
+        crate::test_complete!("test_harness_without_context");
+    }
+
+    #[test]
+    fn test_structured_macros() {
+        init_test("test_structured_macros");
+        let ctx = TestContext::new("macro_ctx", 0x42)
+            .with_subsystem("sync")
+            .with_invariant("no_deadlock");
+
+        // These should compile and not panic.
+        test_structured!(ctx, "simple message");
+        test_structured!(ctx, "with fields", count = 5);
+        test_structured!(ctx, "multi fields", count = 5, label = "test");
+        crate::test_complete!("test_structured_macros");
     }
 }

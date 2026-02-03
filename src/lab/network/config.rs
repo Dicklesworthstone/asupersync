@@ -18,7 +18,8 @@ pub struct NetworkConfig {
     pub tick_resolution: Duration,
     /// Enable bandwidth simulation.
     pub enable_bandwidth: bool,
-    /// Default bandwidth per link (bytes/second).
+    /// Default bandwidth per link (bytes/second) when bandwidth simulation is enabled
+    /// and a link does not provide an explicit bandwidth.
     pub default_bandwidth: u64,
 }
 
@@ -49,7 +50,11 @@ pub struct NetworkConditions {
     pub packet_reorder: f64,
     /// Maximum packets in flight.
     pub max_in_flight: usize,
-    /// Bandwidth limit (bytes/second), None = unlimited.
+    /// Bandwidth limit (bytes/second).
+    ///
+    /// When bandwidth simulation is enabled:
+    /// - `None` uses `NetworkConfig::default_bandwidth`
+    /// - `Some(0)` disables bandwidth limiting for this link
     pub bandwidth: Option<u64>,
     /// Jitter model for variable latency.
     pub jitter: Option<JitterModel>,

@@ -486,6 +486,10 @@ pub fn join_all_to_result<T, E: Clone>(
             // Find the first error index (the first index gap in successes).
             // Since successes is sorted by index (populated in iteration order),
             // we can just find the first missing sequence number.
+            debug_assert!(
+                result.successes.windows(2).all(|w| w[0].0 < w[1].0),
+                "successes must be sorted by index for gap detection"
+            );
             let mut first_error_index = 0;
             for (idx, _) in &result.successes {
                 if *idx == first_error_index {
