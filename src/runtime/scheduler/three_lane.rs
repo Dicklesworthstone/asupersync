@@ -50,6 +50,7 @@
 
 use crate::obligation::lyapunov::{LyapunovGovernor, SchedulingSuggestion, StateSnapshot};
 use crate::runtime::scheduler::global_injector::GlobalInjector;
+use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::stored_task::AnyStoredTask;
@@ -71,14 +72,19 @@ const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
 
 thread_local! {
     static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = RefCell::new(None);
+    /// Non-stealable queue for local (`!Send`) tasks.
+    ///
+    /// Local tasks must never be stolen across workers. This queue is only
+    /// drained by the owner worker, never exposed to stealers.
+    static CURRENT_LOCAL_READY: RefCell<Option<Arc<Mutex<Vec<TaskId>>>>> = RefCell::new(None);
 }
 
-struct ScopedLocalScheduler {
+pub(crate) struct ScopedLocalScheduler {
     prev: Option<Arc<Mutex<PriorityScheduler>>>,
 }
 
 impl ScopedLocalScheduler {
-    fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
+    pub(crate) fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
         let prev = CURRENT_LOCAL.with(|cell| cell.replace(Some(local)));
         Self { prev }
     }
@@ -90,6 +96,53 @@ impl Drop for ScopedLocalScheduler {
             *cell.borrow_mut() = self.prev.take();
         });
     }
+}
+
+pub(crate) struct ScopedLocalReady {
+    prev: Option<Arc<Mutex<Vec<TaskId>>>>,
+}
+
+impl ScopedLocalReady {
+    pub(crate) fn new(queue: Arc<Mutex<Vec<TaskId>>>) -> Self {
+        let prev = CURRENT_LOCAL_READY.with(|cell| cell.replace(Some(queue)));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedLocalReady {
+    fn drop(&mut self) {
+        CURRENT_LOCAL_READY.with(|cell| {
+            *cell.borrow_mut() = self.prev.take();
+        });
+    }
+}
+
+/// Schedules a local (`!Send`) task on the current thread's non-stealable queue.
+///
+/// Returns `true` if a local-ready queue was available on this thread.
+pub(crate) fn schedule_local_task(task: TaskId) -> bool {
+    CURRENT_LOCAL_READY.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|queue| {
+            queue.lock().expect("local_ready lock poisoned").push(task);
+            true
+        })
+    })
+}
+
+pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
+    // Fast path: O(1) push to LocalQueue IntrusiveStack
+    if LocalQueue::schedule_local(task) {
+        return true;
+    }
+    // Slow path: O(log n) push to PriorityScheduler BinaryHeap
+    CURRENT_LOCAL.with(|cell| {
+        if let Some(local) = cell.borrow().as_ref() {
+            let mut guard = local.lock().expect("local scheduler lock poisoned");
+            guard.schedule(task, priority);
+            return true;
+        }
+        false
+    })
 }
 
 /// A multi-worker scheduler with 3-lane priority support.
@@ -168,6 +221,11 @@ impl ThreeLaneScheduler {
             local_schedulers.push(Arc::new(Mutex::new(PriorityScheduler::new())));
         }
 
+        // Create fast queues (O(1) IntrusiveStack) for ready-lane fast path
+        let fast_queues: Vec<LocalQueue> = (0..worker_count)
+            .map(|_| LocalQueue::new(Arc::clone(state)))
+            .collect();
+
         // Create workers with references to all other workers' schedulers
         for id in 0..worker_count {
             let parker = Parker::new();
@@ -181,10 +239,21 @@ impl ThreeLaneScheduler {
                 .map(|(_, sched)| Arc::clone(sched))
                 .collect();
 
+            // Fast stealers: O(1) steal from other workers' LocalQueues
+            let fast_stealers: Vec<_> = fast_queues
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != id)
+                .map(|(_, q)| q.stealer())
+                .collect();
+
             workers.push(ThreeLaneWorker {
                 id,
                 local: Arc::clone(&local_schedulers[id]),
                 stealers,
+                fast_queue: fast_queues[id].clone(),
+                fast_stealers,
+                local_ready: Arc::new(Mutex::new(Vec::new())),
                 global: Arc::clone(&global),
                 state: Arc::clone(state),
                 parker,
@@ -261,14 +330,26 @@ impl ThreeLaneScheduler {
     /// Uses `wake_state.notify()` for centralized deduplication.
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the task is a local (`!Send`) task. Local tasks must be
+    /// scheduled via their `Waker` (which knows the owner) or `spawn` on the
+    /// owner thread. Injecting them globally would allow them to be stolen
+    /// by the wrong worker, causing data loss.
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        let should_schedule = {
+        let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .is_none_or(|record| record.wake_state.notify())
+            match state.tasks.get(task.arena_index()) {
+                Some(record) => (record.wake_state.notify(), record.is_local()),
+                None => (true, false),
+            }
         };
+
+        if is_local {
+            panic!("Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread.");
+        }
+
         if should_schedule {
             self.global.inject_ready(task, priority);
             self.wake_one();
@@ -276,38 +357,116 @@ impl ThreeLaneScheduler {
     }
 
     /// Spawns a task (shorthand for inject_ready).
+    ///
+    /// Fast path: when called on a worker thread, pushes to the worker's
+    /// `LocalQueue` (O(1) IntrusiveStack) instead of the global injector
+    /// or the PriorityScheduler heap.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the task is local (`!Send`) and we are not on the owner thread
+    /// (i.e. `schedule_local_task` fails). Local tasks cannot be spawned
+    /// remotely via this method.
     pub fn spawn(&self, task: TaskId, priority: u8) {
-        // Optimistic check for local scheduler
-        let scheduled_locally = CURRENT_LOCAL.with(|cell| {
-            if let Some(local) = cell.borrow().as_ref() {
-                // Determine if we should schedule
-                let should_schedule = {
-                    let state = self.state.lock().expect("runtime state lock poisoned");
-                    state
-                        .tasks
-                        .get(task.arena_index())
-                        .is_none_or(|record| record.wake_state.notify())
-                };
+        // Dedup: check wake_state before scheduling anywhere.
+        let (should_schedule, is_local) = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            match state.tasks.get(task.arena_index()) {
+                Some(record) => (record.wake_state.notify(), record.is_local()),
+                None => (true, false),
+            }
+        };
 
-                if should_schedule {
-                    let mut guard = local.lock().expect("local scheduler lock poisoned");
-                    guard.schedule(task, priority);
-                }
+        if !should_schedule {
+            return;
+        }
+
+        if is_local {
+            // Local tasks MUST go to the non-stealable local_ready queue.
+            // They can only be spawned from the owner thread (because the future is !Send).
+            if schedule_local_task(task) {
+                return;
+            }
+            panic!("Attempted to spawn local task {task:?} from non-owner thread or outside worker context");
+        }
+
+        // Fast path 1: O(1) push to worker's LocalQueue via TLS.
+        if LocalQueue::schedule_local(task) {
+            return;
+        }
+
+        // Fast path 2: O(log n) push to PriorityScheduler via TLS.
+        let scheduled = CURRENT_LOCAL.with(|cell| {
+            if let Some(local) = cell.borrow().as_ref() {
+                let mut guard = local.lock().expect("local scheduler lock poisoned");
+                guard.schedule(task, priority);
                 return true;
             }
             false
         });
-
-        if !scheduled_locally {
-            self.inject_ready(task, priority);
+        if scheduled {
+            return;
         }
+
+        // Slow path: global injector (off worker thread).
+        self.global.inject_ready(task, priority);
+        self.wake_one();
     }
 
     /// Wakes a task by injecting it into the ready lane.
     ///
-    /// For cancel wakeups, use `inject_cancel` instead.
+    /// Fast path: when called on a worker thread, pushes to the worker's
+    /// `LocalQueue` (O(1)) or `PriorityScheduler` instead of the global
+    /// injector. For cancel wakeups, use `inject_cancel` instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the task is local (`!Send`) and we are not on the owner thread.
+    /// Local tasks must be woken via their `Waker` (which handles remote wakes)
+    /// or on the owner thread.
     pub fn wake(&self, task: TaskId, priority: u8) {
-        self.inject_ready(task, priority);
+        // Dedup check.
+        let (should_schedule, is_local) = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            match state.tasks.get(task.arena_index()) {
+                Some(record) => (record.wake_state.notify(), record.is_local()),
+                None => (true, false),
+            }
+        };
+
+        if !should_schedule {
+            return;
+        }
+
+        if is_local {
+            // Local tasks MUST go to the non-stealable local_ready queue.
+            if schedule_local_task(task) {
+                return;
+            }
+            panic!("Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead.");
+        }
+
+        // Fast path 1: O(1) push to worker's LocalQueue via TLS.
+        if LocalQueue::schedule_local(task) {
+            return;
+        }
+
+        // Fast path 2: O(log n) push to PriorityScheduler via TLS.
+        let scheduled = CURRENT_LOCAL.with(|cell| {
+            if let Some(local) = cell.borrow().as_ref() {
+                let mut guard = local.lock().expect("local scheduler lock poisoned");
+                guard.schedule(task, priority);
+                return true;
+            }
+            false
+        });
+        if scheduled {
+            return;
+        }
+
+        // Slow path: global injector (off worker thread).
+        self.global.inject_ready(task, priority);
+        self.wake_one();
     }
 
     /// Wakes one idle worker.
@@ -355,6 +514,19 @@ pub struct ThreeLaneWorker {
     pub local: Arc<Mutex<PriorityScheduler>>,
     /// References to other workers' local schedulers for stealing.
     pub stealers: Vec<Arc<Mutex<PriorityScheduler>>>,
+    /// O(1) local queue for ready tasks (work-stealing fast path).
+    ///
+    /// Ready tasks spawned/woken on the worker thread are pushed here
+    /// (IntrusiveStack, O(1)) instead of the PriorityScheduler (BinaryHeap,
+    /// O(log n)). Stealers use FIFO ordering for cache-friendliness.
+    pub fast_queue: LocalQueue,
+    /// Stealers for other workers' fast queues (O(1) steal).
+    fast_stealers: Vec<local_queue::Stealer>,
+    /// Non-stealable queue for local (`!Send`) tasks.
+    ///
+    /// Local tasks are pinned to their owner worker and must never be stolen.
+    /// This queue is only drained by the owner worker during `try_ready_work()`.
+    local_ready: Arc<Mutex<Vec<TaskId>>>,
     /// Global injection queue.
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
@@ -427,6 +599,10 @@ impl ThreeLaneWorker {
     pub fn run_loop(&mut self) {
         // Set thread-local scheduler for this worker thread.
         let _guard = ScopedLocalScheduler::new(Arc::clone(&self.local));
+        // Set thread-local fast queue for O(1) ready-lane operations.
+        let _queue_guard = LocalQueue::set_current(self.fast_queue.clone());
+        // Set thread-local non-stealable queue for local (!Send) tasks.
+        let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&self.local_ready));
 
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
@@ -446,15 +622,22 @@ impl ThreeLaneWorker {
                     break;
                 }
 
-                // Quick check for new work in both global and local queues.
-                // Previously only checked global, causing unnecessary spinning when
-                // local queue had work.
+                // Quick check for new work in global, fast, and local queues.
                 let local_has_work = self
                     .local
                     .lock()
                     .map(|local| !local.is_empty())
                     .unwrap_or(false);
-                if !self.global.is_empty() || local_has_work {
+                let local_ready_has_work = self
+                    .local_ready
+                    .lock()
+                    .map(|q| !q.is_empty())
+                    .unwrap_or(false);
+                if !self.global.is_empty()
+                    || !self.fast_queue.is_empty()
+                    || local_has_work
+                    || local_ready_has_work
+                {
                     break;
                 }
 
@@ -696,14 +879,27 @@ impl ThreeLaneWorker {
         local.pop_timed_only_with_hint(rng_hint, now)
     }
 
-    /// Tries to get ready work from global or local queues.
+    /// Tries to get ready work from fast queue, global, or local queues.
     pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {
+        // Highest priority: drain non-stealable local (!Send) tasks first.
+        // These tasks are pinned to this worker and cannot run elsewhere.
+        if let Ok(mut queue) = self.local_ready.try_lock() {
+            if let Some(task) = queue.pop() {
+                return Some(task);
+            }
+        }
+
+        // Fast path: O(1) pop from local IntrusiveStack (LIFO, cache-friendly).
+        if let Some(task) = self.fast_queue.pop() {
+            return Some(task);
+        }
+
         // Global ready
         if let Some(pt) = self.global.pop_ready() {
             return Some(pt.task);
         }
 
-        // Local ready
+        // Local ready (PriorityScheduler, O(log n) pop)
         let mut local = self.local.lock().expect("local scheduler lock poisoned");
         let rng_hint = self.rng.next_u64();
         local.pop_ready_only_with_hint(rng_hint)
@@ -711,8 +907,42 @@ impl ThreeLaneWorker {
 
     /// Tries to steal work from other workers.
     ///
+    /// Fast path: O(1) steal from other workers' `LocalQueue` IntrusiveStacks.
+    /// Slow path: O(k log n) steal from PriorityScheduler heaps.
     /// Only steals from ready lanes to preserve cancel/timed priority semantics.
+    ///
+    /// # Invariant
+    ///
+    /// Local (`!Send`) tasks are never returned from this method. They are
+    /// enqueued exclusively in the non-stealable `local_ready` queue and
+    /// never enter stealable structures (fast_queue or PriorityScheduler
+    /// ready lane). The `debug_assert!` guards below verify this at runtime
+    /// in debug builds.
     pub(crate) fn try_steal(&mut self) -> Option<TaskId> {
+        // Fast path: steal from other workers' LocalQueues (O(1) per task).
+        if !self.fast_stealers.is_empty() {
+            let len = self.fast_stealers.len();
+            let start = self.rng.next_usize(len);
+            for i in 0..len {
+                let idx = (start + i) % len;
+                if let Some(task) = self.fast_stealers[idx].steal() {
+                    // Safety invariant: local tasks must never be in stealable queues.
+                    debug_assert!(
+                        !self
+                            .state
+                            .lock()
+                            .expect("runtime state lock poisoned")
+                            .tasks
+                            .get(task.arena_index())
+                            .is_some_and(|r| r.is_local()),
+                        "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
+                    );
+                    return Some(task);
+                }
+            }
+        }
+
+        // Slow path: steal from PriorityScheduler heaps (O(k log n)).
         if self.stealers.is_empty() {
             return None;
         }
@@ -728,14 +958,28 @@ impl ThreeLaneWorker {
             if let Ok(mut victim) = stealer.try_lock() {
                 let stolen_count = victim.steal_ready_batch_into(4, &mut self.steal_buffer);
                 if stolen_count > 0 {
+                    // Safety invariant: verify no local tasks were stolen.
+                    #[cfg(debug_assertions)]
+                    {
+                        let state = self.state.lock().expect("runtime state lock poisoned");
+                        for &(task, _) in &self.steal_buffer[..stolen_count] {
+                            debug_assert!(
+                                !state
+                                    .tasks
+                                    .get(task.arena_index())
+                                    .is_some_and(|r| r.is_local()),
+                                "BUG: stole a local (!Send) task {task:?} from PriorityScheduler"
+                            );
+                        }
+                    }
+
                     // Take the first task to execute
                     let (first_task, _) = self.steal_buffer[0];
 
-                    // Push remaining stolen tasks to our local queue
+                    // Push remaining stolen tasks to our fast queue
                     if stolen_count > 1 {
-                        let mut local = self.local.lock().expect("local scheduler lock poisoned");
-                        for &(task, priority) in self.steal_buffer.iter().skip(1) {
-                            local.schedule(task, priority);
+                        for &(task, _priority) in self.steal_buffer.iter().skip(1) {
+                            self.fast_queue.push(task);
                         }
                     }
 
@@ -766,22 +1010,25 @@ impl ThreeLaneWorker {
         }
     }
 
-    /// Schedules a cancelled task locally.
+    /// Promotes a local task to the cancel lane, matching global cancel semantics.
     ///
-    /// Uses `wake_state.notify()` for centralized deduplication.
-    /// If the task is already scheduled, this is a no-op.
-    /// If the task record doesn't exist (e.g., in tests), allows scheduling.
+    /// Uses `move_to_cancel_lane` so that a task already in the ready or timed
+    /// lane is relocated to the cancel lane.  This mirrors the global path where
+    /// `inject_cancel` always injects (allowing duplicates for priority promotion).
+    ///
+    /// `wake_state.notify()` is still called for coordination with `finish_poll`,
+    /// but the promotion itself is unconditional: a cancel must not be silently
+    /// dropped just because the task was already scheduled in a lower-priority lane.
     pub fn schedule_local_cancel(&self, task: TaskId, priority: u8) {
-        let should_schedule = {
+        {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .is_none_or(|record| record.wake_state.notify())
-        };
-        if should_schedule {
+            if let Some(record) = state.tasks.get(task.arena_index()) {
+                record.wake_state.notify();
+            }
+        }
+        {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
-            local.schedule_cancel(task, priority);
+            local.move_to_cancel_lane(task, priority);
         }
     }
 
@@ -878,6 +1125,7 @@ impl ThreeLaneWorker {
                         priority,
                         wake_state: Arc::clone(&wake_state),
                         local: Arc::clone(&self.local),
+                        local_ready: Arc::clone(&self.local_ready),
                         parker: self.parker.clone(),
                     }))
                 } else {
@@ -1004,12 +1252,19 @@ impl ThreeLaneWorker {
                     }
 
                     if is_local {
-                        // Schedule to local queue
-                        let mut local = self.local.lock().expect("local scheduler lock poisoned");
                         if schedule_cancel {
+                            // Cancel still goes to PriorityScheduler for ordering.
+                            // Cancel lane is not stolen by steal_ready_batch_into.
+                            let mut local =
+                                self.local.lock().expect("local scheduler lock poisoned");
                             local.schedule_cancel(task_id, cancel_priority);
                         } else {
-                            local.schedule(task_id, priority);
+                            // Push to non-stealable local_ready queue.
+                            // Local (!Send) tasks must never enter stealable structures.
+                            self.local_ready
+                                .lock()
+                                .expect("local_ready lock poisoned")
+                                .push(task_id);
                         }
                     } else {
                         // Schedule to global injector
@@ -1058,15 +1313,21 @@ struct ThreeLaneLocalWaker {
     priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     local: Arc<Mutex<PriorityScheduler>>,
+    local_ready: Arc<Mutex<Vec<TaskId>>>,
     parker: Parker,
 }
 
 impl ThreeLaneLocalWaker {
     fn schedule(&self) {
         if self.wake_state.notify() {
-            {
-                let mut local = self.local.lock().expect("local scheduler lock poisoned");
-                local.schedule(self.task_id, self.priority);
+            // Fast path: push to non-stealable local_ready queue via TLS.
+            if !schedule_local_task(self.task_id) {
+                // Cross-thread wake: push to the owner's non-stealable local_ready queue.
+                // Local tasks must never enter stealable structures.
+                self.local_ready
+                    .lock()
+                    .expect("local_ready lock poisoned")
+                    .push(self.task_id);
             }
             self.parker.unpark();
         }
@@ -1168,10 +1429,11 @@ impl ThreeLaneLocalCancelWaker {
         // Always notify
         self.wake_state.notify();
 
-        // Inject to local cancel lane
+        // Promote to local cancel lane, matching global inject_cancel semantics.
+        // move_to_cancel_lane relocates from ready/timed if already scheduled.
         {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
-            local.schedule_cancel(self.task_id, priority);
+            local.move_to_cancel_lane(self.task_id, priority);
         }
         self.parker.unpark();
     }
@@ -2647,5 +2909,550 @@ mod tests {
             scheduler.global.has_ready_work(),
             "Global queue should have task"
         );
+    }
+
+    // ========================================================================
+    // Work-stealing LocalQueue fast path tests (bd-3p8oa)
+    // ========================================================================
+
+    #[test]
+    fn fast_queue_spawn_prefers_local_queue_tls() {
+        // When both LocalQueue TLS and PriorityScheduler TLS are set,
+        // spawn() should prefer the O(1) LocalQueue path.
+        let state = LocalQueue::test_state(10);
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+        let fast_queue = scheduler.workers[0].fast_queue.clone();
+        let priority_sched = scheduler.workers[0].local.clone();
+
+        {
+            let _sched_guard = ScopedLocalScheduler::new(priority_sched.clone());
+            let _queue_guard = LocalQueue::set_current(fast_queue.clone());
+
+            scheduler.spawn(TaskId::new_for_test(1, 0), 100);
+        }
+
+        // Task should be in the fast queue, NOT the PriorityScheduler.
+        assert!(!fast_queue.is_empty(), "task should be in fast_queue");
+        let priority_len = priority_sched.lock().unwrap().len();
+        assert_eq!(priority_len, 0, "PriorityScheduler should be empty");
+        assert!(!scheduler.global.has_ready_work(), "global should be empty");
+    }
+
+    #[test]
+    fn fast_queue_wake_prefers_local_queue_tls() {
+        // wake() with LocalQueue TLS should use the O(1) path.
+        let state = LocalQueue::test_state(10);
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+        let fast_queue = scheduler.workers[0].fast_queue.clone();
+        let priority_sched = scheduler.workers[0].local.clone();
+
+        {
+            let _sched_guard = ScopedLocalScheduler::new(priority_sched.clone());
+            let _queue_guard = LocalQueue::set_current(fast_queue.clone());
+
+            scheduler.wake(TaskId::new_for_test(1, 0), 100);
+        }
+
+        assert!(!fast_queue.is_empty(), "task should be in fast_queue");
+        let priority_len = priority_sched.lock().unwrap().len();
+        assert_eq!(priority_len, 0, "PriorityScheduler should be empty");
+    }
+
+    #[test]
+    fn try_ready_work_drains_fast_queue_first() {
+        // When both fast_queue and PriorityScheduler have ready tasks,
+        // try_ready_work() should pop from fast_queue first.
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Push task A to fast_queue.
+        worker.fast_queue.push(TaskId::new_for_test(1, 0));
+        // Push task B to PriorityScheduler ready lane.
+        worker
+            .local
+            .lock()
+            .unwrap()
+            .schedule(TaskId::new_for_test(2, 0), 50);
+
+        // First pop should come from fast_queue (task A).
+        let first = worker.try_ready_work();
+        assert_eq!(
+            first,
+            Some(TaskId::new_for_test(1, 0)),
+            "fast_queue task should come first"
+        );
+
+        // Second pop should come from PriorityScheduler (task B).
+        let second = worker.try_ready_work();
+        assert_eq!(
+            second,
+            Some(TaskId::new_for_test(2, 0)),
+            "PriorityScheduler task should come second"
+        );
+
+        // No more work.
+        assert!(worker.try_ready_work().is_none());
+    }
+
+    #[test]
+    fn try_steal_tries_fast_stealers_first() {
+        // Worker 1 should steal from worker 0's fast_queue before
+        // falling back to PriorityScheduler heaps.
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+        // Push tasks into worker 0's fast_queue.
+        let fast_task = TaskId::new_for_test(1, 0);
+        scheduler.workers[0].fast_queue.push(fast_task);
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[1];
+
+        let stolen = thief.try_steal();
+        assert_eq!(stolen, Some(fast_task), "should steal from fast_queue");
+    }
+
+    #[test]
+    fn try_steal_falls_back_to_priority_scheduler() {
+        // When fast queues are empty, steal should fall back to
+        // PriorityScheduler heaps.
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+        // Push task only into worker 0's PriorityScheduler.
+        let heap_task = TaskId::new_for_test(1, 1);
+        scheduler.workers[0]
+            .local
+            .lock()
+            .unwrap()
+            .schedule(heap_task, 50);
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[1];
+
+        let stolen = thief.try_steal();
+        assert_eq!(
+            stolen,
+            Some(heap_task),
+            "should fall back to PriorityScheduler steal"
+        );
+    }
+
+    #[test]
+    fn fast_queue_no_loss_no_dup_single_worker() {
+        // All tasks pushed to fast_queue are popped exactly once.
+        let state = LocalQueue::test_state(255);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let count = 256u32;
+        for i in 0..count {
+            worker.fast_queue.push(TaskId::new_for_test(i, 0));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        while let Some(task) = worker.try_ready_work() {
+            assert!(seen.insert(task), "duplicate task: {task:?}");
+        }
+        assert_eq!(seen.len(), count as usize, "all tasks should be popped");
+    }
+
+    #[test]
+    fn fast_queue_no_loss_no_dup_two_workers_stealing() {
+        // Tasks pushed to worker 0's fast_queue are consumed exactly
+        // once across worker 0 (pop) and worker 1 (steal).
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
+        use std::sync::{Arc as StdArc, Barrier};
+        use std::thread;
+
+        let total = 512usize;
+        let state = LocalQueue::test_state((total - 1) as u32);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+        // Push all tasks to worker 0's fast queue.
+        for i in 0..total {
+            scheduler.workers[0]
+                .fast_queue
+                .push(TaskId::new_for_test(i as u32, 0));
+        }
+
+        let mut workers = scheduler.take_workers();
+        let mut w0 = workers.remove(0);
+        let mut w1 = workers.remove(0);
+
+        let counts: StdArc<Vec<AtomicUsize>> =
+            StdArc::new((0..total).map(|_| AtomicUsize::new(0)).collect());
+        let barrier = StdArc::new(Barrier::new(2));
+
+        let c0 = StdArc::clone(&counts);
+        let b0 = StdArc::clone(&barrier);
+        let t0 = thread::spawn(move || {
+            b0.wait();
+            // Owner pops from fast_queue.
+            while let Some(task) = w0.fast_queue.pop() {
+                let idx = task.0.index() as usize;
+                c0[idx].fetch_add(1, AtomicOrd::SeqCst);
+                thread::yield_now();
+            }
+        });
+
+        let c1 = StdArc::clone(&counts);
+        let b1 = StdArc::clone(&barrier);
+        let t1 = thread::spawn(move || {
+            b1.wait();
+            // Thief steals from worker 0's fast_queue.
+            loop {
+                let stolen = w1.try_steal();
+                if let Some(task) = stolen {
+                    let idx = task.0.index() as usize;
+                    c1[idx].fetch_add(1, AtomicOrd::SeqCst);
+                    thread::yield_now();
+                } else {
+                    break;
+                }
+            }
+        });
+
+        t0.join().expect("owner join");
+        t1.join().expect("thief join");
+
+        let mut total_seen = 0usize;
+        for (idx, count) in counts.iter().enumerate() {
+            let v = count.load(AtomicOrd::SeqCst);
+            assert_eq!(v, 1, "task {idx} seen {v} times (expected 1)");
+            total_seen += v;
+        }
+        assert_eq!(total_seen, total);
+    }
+
+    #[test]
+    fn fast_queue_schedule_on_current_local_prefers_fast() {
+        // schedule_on_current_local should prefer LocalQueue when TLS is set.
+        let state = LocalQueue::test_state(10);
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+        let fast_queue = scheduler.workers[0].fast_queue.clone();
+        let priority_sched = scheduler.workers[0].local.clone();
+
+        {
+            let _sched_guard = ScopedLocalScheduler::new(priority_sched.clone());
+            let _queue_guard = LocalQueue::set_current(fast_queue.clone());
+
+            let ok = schedule_on_current_local(TaskId::new_for_test(1, 0), 100);
+            assert!(ok);
+        }
+
+        assert!(!fast_queue.is_empty(), "should be in fast_queue");
+        assert_eq!(
+            priority_sched.lock().unwrap().len(),
+            0,
+            "PriorityScheduler should be empty"
+        );
+    }
+
+    #[test]
+    fn fast_queue_cancel_timed_bypass_fast_path() {
+        // Cancel and timed tasks should NOT go through the fast queue.
+        // They must use PriorityScheduler for priority/deadline ordering.
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let cancel_task = TaskId::new_for_test(1, 1);
+        let timed_task = TaskId::new_for_test(1, 2);
+
+        scheduler.inject_cancel(cancel_task, 100);
+        scheduler.inject_timed(timed_task, Time::from_nanos(500));
+
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // Fast queue should be empty.
+        assert!(
+            worker.fast_queue.is_empty(),
+            "fast_queue should not have cancel/timed tasks"
+        );
+
+        // Tasks should be in global injector.
+        assert!(scheduler.global.has_cancel_work());
+    }
+
+    #[test]
+    fn fast_queue_waker_uses_local_ready_on_same_thread() {
+        // ThreeLaneLocalWaker should push to local_ready TLS when available.
+        let task_id = TaskId::new_for_test(1, 0);
+        let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
+        let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
+        let parker = Parker::new();
+
+        let local_ready = Arc::new(Mutex::new(Vec::new()));
+
+        let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
+            task_id,
+            priority: 100,
+            wake_state: Arc::clone(&wake_state),
+            local: Arc::clone(&priority_sched),
+            local_ready: Arc::clone(&local_ready),
+            parker: parker.clone(),
+        }));
+
+        // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
+        let _ready_guard = ScopedLocalReady::new(Arc::clone(&local_ready));
+
+        waker.wake_by_ref();
+
+        // Task should be in local_ready, not PriorityScheduler.
+        let queue = local_ready.lock().unwrap();
+        assert_eq!(queue.len(), 1, "local_ready should have 1 task");
+        assert_eq!(queue[0], task_id);
+        assert_eq!(
+            priority_sched.lock().unwrap().len(),
+            0,
+            "PriorityScheduler should be empty"
+        );
+    }
+
+    #[test]
+    fn fast_queue_waker_falls_back_to_local_ready_cross_thread() {
+        // Without local_ready TLS, ThreeLaneLocalWaker falls back to
+        // the owner's local_ready Arc directly.
+        let task_id = TaskId::new_for_test(1, 1);
+        let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
+        let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
+        let parker = Parker::new();
+
+        let local_ready = Arc::new(Mutex::new(Vec::new()));
+
+        let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
+            task_id,
+            priority: 100,
+            wake_state: Arc::clone(&wake_state),
+            local: Arc::clone(&priority_sched),
+            local_ready: Arc::clone(&local_ready),
+            parker: parker.clone(),
+        }));
+
+        waker.wake_by_ref();
+
+        // Task should be in local_ready (cross-thread fallback).
+        let queue = local_ready.lock().unwrap();
+        assert_eq!(queue.len(), 1, "local_ready should have 1 task");
+        assert_eq!(queue[0], task_id);
+    }
+
+    #[test]
+    fn fast_queue_stolen_tasks_go_to_thief_fast_queue() {
+        // When stealing from PriorityScheduler, remaining batch tasks
+        // should go to the thief's fast_queue (not PriorityScheduler).
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+        // Push 8 tasks to worker 0's PriorityScheduler ready lane.
+        for i in 0..8u32 {
+            scheduler.workers[0]
+                .local
+                .lock()
+                .unwrap()
+                .schedule(TaskId::new_for_test(i, 0), 50);
+        }
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[1];
+
+        // Steal should get first task + push remainder to thief's fast_queue.
+        let stolen = thief.try_steal();
+        assert!(stolen.is_some(), "should steal at least one task");
+
+        // Thief's fast_queue should have the batch remainder.
+        // (steal_ready_batch_into steals up to 4, returns first, pushes rest)
+        let fast_count = {
+            let mut count = 0;
+            while thief.fast_queue.pop().is_some() {
+                count += 1;
+            }
+            count
+        };
+        assert!(
+            fast_count > 0,
+            "thief's fast_queue should have batch remainder, got {fast_count}"
+        );
+    }
+
+    // ── Non-stealable local task tests (bd-1s3c0) ────────────────────────
+
+    #[test]
+    fn local_ready_queue_drains_before_fast_queue() {
+        // Use test_state to preallocate TaskRecords needed by fast_queue (IntrusiveStack).
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let local_task = TaskId::new_for_test(1, 0);
+        let fast_task = TaskId::new_for_test(2, 0);
+
+        worker.local_ready.lock().expect("lock").push(local_task);
+        worker.fast_queue.push(fast_task);
+
+        let first = worker.try_ready_work();
+        assert_eq!(first, Some(local_task), "local_ready should drain first");
+
+        let second = worker.try_ready_work();
+        assert_eq!(second, Some(fast_task), "fast_queue should drain second");
+
+        assert!(
+            worker.try_ready_work().is_none(),
+            "no more ready work expected"
+        );
+    }
+
+    #[test]
+    fn local_ready_queue_not_visible_to_fast_stealers() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        let mut workers = scheduler.take_workers();
+
+        let local_task = TaskId::new_for_test(1, 1);
+
+        workers[0]
+            .local_ready
+            .lock()
+            .expect("lock")
+            .push(local_task);
+
+        let stolen = workers[1].try_steal();
+        assert!(
+            stolen.is_none(),
+            "local_ready tasks must not be stealable, but got {stolen:?}"
+        );
+
+        let drained = workers[0].try_ready_work();
+        assert_eq!(
+            drained,
+            Some(local_task),
+            "local task should remain on owner worker"
+        );
+    }
+
+    #[test]
+    fn local_ready_queue_not_visible_to_priority_stealers() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        let mut workers = scheduler.take_workers();
+
+        let local_task = TaskId::new_for_test(1, 1);
+
+        workers[0]
+            .local_ready
+            .lock()
+            .expect("lock")
+            .push(local_task);
+
+        let stolen = workers[1].try_steal();
+        assert!(
+            stolen.is_none(),
+            "local_ready tasks must not be stealable via PriorityScheduler"
+        );
+    }
+
+    #[test]
+    fn local_ready_survives_concurrent_steal_pressure() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        let mut workers = scheduler.take_workers();
+
+        let local_tasks: Vec<TaskId> = (1..=10).map(|i| TaskId::new_for_test(1, i)).collect();
+
+        {
+            let mut queue = workers[0].local_ready.lock().expect("lock");
+            for &task in &local_tasks {
+                queue.push(task);
+            }
+        }
+
+        for _ in 0..10 {
+            assert!(
+                workers[1].try_steal().is_none(),
+                "steal should fail for local_ready tasks"
+            );
+        }
+
+        let mut drained = Vec::new();
+        while let Some(task) = workers[0].try_ready_work() {
+            drained.push(task);
+        }
+
+        assert_eq!(
+            drained.len(),
+            local_tasks.len(),
+            "all local tasks should be drained by owner"
+        );
+        for task in &local_tasks {
+            assert!(
+                drained.contains(task),
+                "local task {task:?} should be in drained set"
+            );
+        }
+    }
+
+    #[test]
+    fn task_record_is_local_default_false() {
+        use crate::record::task::TaskRecord;
+        let record = TaskRecord::new(
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(0, 0),
+            Budget::INFINITE,
+        );
+        assert!(!record.is_local(), "default should be false");
+    }
+
+    #[test]
+    fn task_record_mark_local() {
+        use crate::record::task::TaskRecord;
+        let mut record = TaskRecord::new(
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(0, 0),
+            Budget::INFINITE,
+        );
+        assert!(!record.is_local());
+        record.mark_local();
+        assert!(record.is_local(), "mark_local should set is_local");
+    }
+
+    #[test]
+    fn backoff_loop_wakes_for_local_ready() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let task = TaskId::new_for_test(1, 1);
+        worker.local_ready.lock().expect("lock").push(task);
+
+        let found = worker.next_task();
+        assert_eq!(found, Some(task), "next_task should find local_ready task");
+    }
+
+    #[test]
+    fn schedule_local_task_uses_tls() {
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        let _guard = ScopedLocalReady::new(Arc::clone(&queue));
+
+        let task = TaskId::new_for_test(1, 1);
+        let scheduled = schedule_local_task(task);
+        assert!(scheduled, "should succeed when TLS is set");
+
+        let tasks = queue.lock().expect("lock");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0], task);
+    }
+
+    #[test]
+    fn schedule_local_task_fails_without_tls() {
+        let task = TaskId::new_for_test(1, 1);
+        let scheduled = schedule_local_task(task);
+        assert!(!scheduled, "should fail without TLS");
     }
 }

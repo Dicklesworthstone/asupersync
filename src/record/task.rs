@@ -233,6 +233,10 @@ pub struct TaskRecord {
     pub cached_cancel_waker: Option<(Waker, u8)>,
     /// Cancellation epoch (increments on first cancel request).
     pub cancel_epoch: u64,
+    /// Whether this task is a local (`!Send`) task pinned to its owner worker.
+    ///
+    /// Local tasks must never be stolen by another worker thread.
+    pub is_local: bool,
     // ── Intrusive queue fields (cache-local queues) ──────────────────────
     /// Next task in the intrusive queue (None if tail or not in queue).
     pub next_in_queue: Option<TaskId>,
@@ -270,6 +274,7 @@ impl TaskRecord {
             cached_waker: None,
             cached_cancel_waker: None,
             cancel_epoch: 0,
+            is_local: false,
             next_in_queue: None,
             prev_in_queue: None,
             queue_tag: 0,
@@ -729,6 +734,20 @@ impl TaskRecord {
             | TaskState::Finalizing { cleanup_budget, .. } => Some(*cleanup_budget),
             _ => None,
         }
+    }
+
+    /// Marks this task as a local (`!Send`) task pinned to its owner worker.
+    ///
+    /// Once set, the scheduler must never steal this task across threads.
+    pub fn mark_local(&mut self) {
+        self.is_local = true;
+    }
+
+    /// Returns `true` if this is a local (`!Send`) task.
+    #[must_use]
+    #[inline]
+    pub const fn is_local(&self) -> bool {
+        self.is_local
     }
 
     // ── Intrusive queue helpers ──────────────────────────────────────────
