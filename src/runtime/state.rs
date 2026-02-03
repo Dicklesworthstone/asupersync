@@ -4289,6 +4289,764 @@ mod tests {
         crate::test_complete!("is_quiescent_without_io_driver_ignores_io");
     }
 
+    // =========================================================================
+    // Cancellation + Obligations Lifecycle Tests (bd-38kk)
+    // =========================================================================
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cancel_drain_finalize_full_lifecycle() {
+        init_test("cancel_drain_finalize_full_lifecycle");
+        let metrics = Arc::new(TestMetrics::default());
+        let mut state = RuntimeState::new_with_metrics(metrics.clone());
+        let root = state.create_root_region(Budget::INFINITE);
+
+        // Spawn tasks in the region
+        let task1 = insert_task(&mut state, root);
+        let task2 = insert_task(&mut state, root);
+
+        // Register a sync finalizer while region is open
+        let finalizer_called = Arc::new(AtomicBool::new(false));
+        let finalizer_flag = finalizer_called.clone();
+        state.register_sync_finalizer(root, move || {
+            finalizer_flag.store(true, Ordering::SeqCst);
+        });
+
+        // Phase 1: Cancel request → region enters Closing
+        let tasks_to_schedule = state.cancel_request(root, &CancelReason::timeout(), None);
+        crate::assert_with_log!(
+            tasks_to_schedule.len() == 2,
+            "both tasks scheduled for cancel",
+            2usize,
+            tasks_to_schedule.len()
+        );
+        let region_state = state
+            .regions
+            .get(root.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closing,
+            "region closing after cancel request",
+            crate::record::region::RegionState::Closing,
+            region_state
+        );
+
+        // Phase 2: First task completes with Cancelled outcome → still draining
+        state
+            .tasks
+            .get_mut(task1.arena_index())
+            .expect("task1")
+            .complete(Outcome::Cancelled(CancelReason::timeout()));
+        let _ = state.task_completed(task1);
+        let region_state = state
+            .regions
+            .get(root.arena_index())
+            .expect("region")
+            .state();
+        // Region should still be Closing (one task remains)
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closing,
+            "region still closing with live task",
+            crate::record::region::RegionState::Closing,
+            region_state
+        );
+        let finalizer_ran = finalizer_called.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            !finalizer_ran,
+            "finalizer not yet called",
+            false,
+            finalizer_ran
+        );
+
+        // Phase 3: Second task completes → triggers advance_region_state
+        // → Finalizing (no children, no tasks) → runs sync finalizers → Closed
+        state
+            .tasks
+            .get_mut(task2.arena_index())
+            .expect("task2")
+            .complete(Outcome::Cancelled(CancelReason::timeout()));
+        let _ = state.task_completed(task2);
+
+        // Region should transition through Finalizing → Closed
+        // (sync finalizers are run inline by advance_region_state)
+        let region_state = state
+            .regions
+            .get(root.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closed,
+            "region closed after all tasks complete",
+            crate::record::region::RegionState::Closed,
+            region_state
+        );
+        let finalizer_ran = finalizer_called.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            finalizer_ran,
+            "finalizer was called during finalization",
+            true,
+            finalizer_ran
+        );
+
+        // Verify metrics recorded both cancelled completions
+        let cancelled_count = metrics
+            .completions
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|o| **o == OutcomeKind::Cancelled)
+            .count();
+        crate::assert_with_log!(
+            cancelled_count == 2,
+            "cancelled completions count",
+            2usize,
+            cancelled_count
+        );
+
+        // Verify trace contains both CancelRequest and task completion events
+        let events = state.trace.snapshot();
+        let cancel_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::CancelRequest)
+            .count();
+        crate::assert_with_log!(
+            cancel_events >= 1,
+            "cancel request trace events",
+            true,
+            cancel_events >= 1
+        );
+        crate::test_complete!("cancel_drain_finalize_full_lifecycle");
+    }
+
+    #[test]
+    fn cancel_drain_finalize_nested_regions() {
+        init_test("cancel_drain_finalize_nested_regions");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+
+        let root_task = insert_task(&mut state, root);
+        let child_task = insert_task(&mut state, child);
+
+        // Cancel the root region (propagates to child)
+        let _ = state.cancel_request(root, &CancelReason::user("stop"), None);
+
+        // Complete child task first
+        state
+            .tasks
+            .get_mut(child_task.arena_index())
+            .expect("child_task")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(child_task);
+
+        // Child region should close since it has no tasks and no children
+        let child_state = state
+            .regions
+            .get(child.arena_index())
+            .expect("child region")
+            .state();
+        crate::assert_with_log!(
+            child_state == crate::record::region::RegionState::Closed,
+            "child closed after its task completes",
+            crate::record::region::RegionState::Closed,
+            child_state
+        );
+
+        // Root should still be open (has root_task)
+        let root_state = state
+            .regions
+            .get(root.arena_index())
+            .expect("root region")
+            .state();
+        crate::assert_with_log!(
+            root_state == crate::record::region::RegionState::Closing,
+            "root still closing with live task",
+            crate::record::region::RegionState::Closing,
+            root_state
+        );
+
+        // Complete root task → root should close
+        state
+            .tasks
+            .get_mut(root_task.arena_index())
+            .expect("root_task")
+            .complete(Outcome::Cancelled(CancelReason::user("stop")));
+        let _ = state.task_completed(root_task);
+
+        let root_state = state
+            .regions
+            .get(root.arena_index())
+            .expect("root region")
+            .state();
+        crate::assert_with_log!(
+            root_state == crate::record::region::RegionState::Closed,
+            "root closed after all tasks and children done",
+            crate::record::region::RegionState::Closed,
+            root_state
+        );
+        crate::test_complete!("cancel_drain_finalize_nested_regions");
+    }
+
+    #[test]
+    fn obligations_auto_aborted_on_cancelled_task_completion() {
+        init_test("obligations_auto_aborted_on_cancelled_task_completion");
+        let mut state = RuntimeState::new();
+        state.obligation_leak_response = ObligationLeakResponse::Silent;
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create obligations of different kinds
+        let obl_send = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("create send permit");
+        let obl_ack = state
+            .create_obligation(ObligationKind::Ack, task, region, None)
+            .expect("create ack");
+        let obl_io = state
+            .create_obligation(ObligationKind::IoOp, task, region, None)
+            .expect("create io op");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 3,
+            "three pending obligations",
+            3usize,
+            state.pending_obligation_count()
+        );
+
+        // Cancel region → task gets cancel-requested
+        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+
+        // Complete task with Cancelled outcome
+        // task_completed() should auto-abort orphaned obligations
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::timeout()));
+        let _ = state.task_completed(task);
+
+        // All obligations should be resolved (aborted by task_completed)
+        for obl_id in [obl_send, obl_ack, obl_io] {
+            let record = state
+                .obligations
+                .get(obl_id.arena_index())
+                .expect("obligation still in arena");
+            crate::assert_with_log!(
+                !record.is_pending(),
+                "obligation resolved after task cancel",
+                false,
+                record.is_pending()
+            );
+        }
+
+        // No pending obligations remain
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "zero pending obligations",
+            0usize,
+            state.pending_obligation_count()
+        );
+
+        // Verify trace has obligation events
+        let events = state.trace.snapshot();
+        let abort_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationAbort)
+            .count();
+        crate::assert_with_log!(
+            abort_events == 3,
+            "three obligation abort trace events",
+            3usize,
+            abort_events
+        );
+        crate::test_complete!("obligations_auto_aborted_on_cancelled_task_completion");
+    }
+
+    #[test]
+    fn obligation_commit_before_cancel_then_drain() {
+        init_test("obligation_commit_before_cancel_then_drain");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create obligation and commit it before cancellation
+        let obl = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("create obligation");
+        let _ = state.commit_obligation(obl).expect("commit before cancel");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "no pending after commit",
+            0usize,
+            state.pending_obligation_count()
+        );
+
+        // Cancel and complete the task
+        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::timeout()));
+        let _ = state.task_completed(task);
+
+        // Region should close cleanly (no leaks, obligation was already committed)
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closed,
+            "region closed cleanly",
+            crate::record::region::RegionState::Closed,
+            region_state
+        );
+
+        // Verify trace has commit event
+        let events = state.trace.snapshot();
+        let commit_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationCommit)
+            .count();
+        crate::assert_with_log!(
+            commit_events == 1,
+            "one obligation commit event",
+            1usize,
+            commit_events
+        );
+        crate::test_complete!("obligation_commit_before_cancel_then_drain");
+    }
+
+    #[test]
+    fn region_close_blocked_by_pending_obligations() {
+        init_test("region_close_blocked_by_pending_obligations");
+        let mut state = RuntimeState::new();
+        state.obligation_leak_response = ObligationLeakResponse::Silent;
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create an obligation
+        let obl = state
+            .create_obligation(ObligationKind::Lease, task, region, None)
+            .expect("create obligation");
+
+        // Transition region to Finalizing manually
+        let region_record = state.regions.get_mut(region.arena_index()).expect("region");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+
+        // Complete the task to make it terminal
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Ok(()));
+
+        // can_region_complete_close should return false (pending obligation)
+        let can_close = state.can_region_complete_close(region);
+        crate::assert_with_log!(
+            !can_close,
+            "cannot close with pending obligation",
+            false,
+            can_close
+        );
+
+        // Commit the obligation
+        let _ = state.commit_obligation(obl).expect("commit obligation");
+
+        // Now it should be closable (task is terminal, obligation resolved)
+        // Remove the task from the region to simulate full completion
+        if let Some(region_rec) = state.regions.get(region.arena_index()) {
+            region_rec.remove_task(task);
+        }
+        let can_close = state.can_region_complete_close(region);
+        crate::assert_with_log!(
+            can_close,
+            "can close after obligation committed",
+            true,
+            can_close
+        );
+        crate::test_complete!("region_close_blocked_by_pending_obligations");
+    }
+
+    #[test]
+    fn cancel_with_obligations_full_trace_lifecycle() {
+        init_test("cancel_with_obligations_full_trace_lifecycle");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create obligation
+        let _obl = state
+            .create_obligation(
+                ObligationKind::SendPermit,
+                task,
+                region,
+                Some("test-permit".to_string()),
+            )
+            .expect("create obligation");
+
+        // Cancel and complete
+        let _ = state.cancel_request(region, &CancelReason::deadline(), None);
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::deadline()));
+        let _ = state.task_completed(task);
+
+        // Verify full trace event sequence
+        let events = state.trace.snapshot();
+        let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
+
+        // Should contain: Spawn, ObligationReserve, CancelRequest, ObligationAbort
+        let has_spawn = kinds.contains(&TraceEventKind::Spawn);
+        let has_reserve = kinds.contains(&TraceEventKind::ObligationReserve);
+        let has_cancel = kinds.contains(&TraceEventKind::CancelRequest);
+        let has_abort = kinds.contains(&TraceEventKind::ObligationAbort);
+
+        crate::assert_with_log!(has_spawn, "trace has spawn", true, has_spawn);
+        crate::assert_with_log!(
+            has_reserve,
+            "trace has obligation reserve",
+            true,
+            has_reserve
+        );
+        crate::assert_with_log!(has_cancel, "trace has cancel request", true, has_cancel);
+        crate::assert_with_log!(has_abort, "trace has obligation abort", true, has_abort);
+
+        // Verify ordering: reserve < cancel < abort
+        let reserve_seq = events
+            .iter()
+            .find(|e| e.kind == TraceEventKind::ObligationReserve)
+            .map(|e| e.seq)
+            .expect("reserve event");
+        let cancel_seq = events
+            .iter()
+            .find(|e| e.kind == TraceEventKind::CancelRequest)
+            .map(|e| e.seq)
+            .expect("cancel event");
+        let abort_seq = events
+            .iter()
+            .find(|e| e.kind == TraceEventKind::ObligationAbort)
+            .map(|e| e.seq)
+            .expect("abort event");
+        crate::assert_with_log!(
+            reserve_seq < cancel_seq,
+            "reserve before cancel",
+            true,
+            reserve_seq < cancel_seq
+        );
+        crate::assert_with_log!(
+            cancel_seq < abort_seq,
+            "cancel before abort",
+            true,
+            cancel_seq < abort_seq
+        );
+
+        // Region should be fully closed
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closed,
+            "region closed",
+            crate::record::region::RegionState::Closed,
+            region_state
+        );
+        crate::test_complete!("cancel_with_obligations_full_trace_lifecycle");
+    }
+
+    #[test]
+    fn mixed_obligation_resolution_during_cancel() {
+        init_test("mixed_obligation_resolution_during_cancel");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create three obligations
+        let obl_committed = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("create send");
+        let obl_aborted = state
+            .create_obligation(ObligationKind::Ack, task, region, None)
+            .expect("create ack");
+        let obl_orphaned = state
+            .create_obligation(ObligationKind::IoOp, task, region, None)
+            .expect("create io");
+
+        // Commit one before cancellation
+        let _ = state.commit_obligation(obl_committed).expect("commit send");
+
+        // Explicitly abort another before cancellation
+        let _ = state
+            .abort_obligation(obl_aborted, ObligationAbortReason::Explicit)
+            .expect("abort ack");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 1,
+            "one obligation still pending",
+            1usize,
+            state.pending_obligation_count()
+        );
+
+        // Cancel and complete task (obl_orphaned should be auto-aborted)
+        let _ = state.cancel_request(region, &CancelReason::shutdown(), None);
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::shutdown()));
+        let _ = state.task_completed(task);
+
+        // All obligations resolved
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "zero pending obligations",
+            0usize,
+            state.pending_obligation_count()
+        );
+
+        // Verify the orphaned one was aborted
+        let orphaned_record = state
+            .obligations
+            .get(obl_orphaned.arena_index())
+            .expect("orphaned obligation");
+        crate::assert_with_log!(
+            !orphaned_record.is_pending(),
+            "orphaned obligation resolved",
+            false,
+            orphaned_record.is_pending()
+        );
+
+        // Region should be closed
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closed,
+            "region closed",
+            crate::record::region::RegionState::Closed,
+            region_state
+        );
+        crate::test_complete!("mixed_obligation_resolution_during_cancel");
+    }
+
+    #[test]
+    fn region_quiescence_requires_no_live_children_or_tasks() {
+        init_test("region_quiescence_requires_no_live_children_or_tasks");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let task = insert_task(&mut state, child);
+
+        // Root cannot finalize: has open child with live task
+        let can_finalize_root = state.can_region_finalize(root);
+        crate::assert_with_log!(
+            !can_finalize_root,
+            "root cannot finalize with open child",
+            false,
+            can_finalize_root
+        );
+
+        // Child cannot finalize: has live task
+        let can_finalize_child = state.can_region_finalize(child);
+        crate::assert_with_log!(
+            !can_finalize_child,
+            "child cannot finalize with live task",
+            false,
+            can_finalize_child
+        );
+
+        // Cancel and complete everything
+        let _ = state.cancel_request(root, &CancelReason::user("done"), None);
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(task);
+
+        // Both should now be closed (advance_region_state drives the cascade)
+        let child_state = state
+            .regions
+            .get(child.arena_index())
+            .expect("child")
+            .state();
+        crate::assert_with_log!(
+            child_state == crate::record::region::RegionState::Closed,
+            "child closed",
+            crate::record::region::RegionState::Closed,
+            child_state
+        );
+        let root_state = state.regions.get(root.arena_index()).expect("root").state();
+        crate::assert_with_log!(
+            root_state == crate::record::region::RegionState::Closed,
+            "root closed",
+            crate::record::region::RegionState::Closed,
+            root_state
+        );
+        crate::test_complete!("region_quiescence_requires_no_live_children_or_tasks");
+    }
+
+    #[test]
+    fn cancel_prevents_new_obligation_creation() {
+        init_test("cancel_prevents_new_obligation_creation");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Cancel the region
+        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+
+        // Attempt to create an obligation in a cancelled region should fail
+        let result = state.create_obligation(ObligationKind::SendPermit, task, region, None);
+        let rejected = result.is_err();
+        crate::assert_with_log!(
+            rejected,
+            "obligation creation rejected in cancelled region",
+            true,
+            rejected
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "no obligations created",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("cancel_prevents_new_obligation_creation");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn multiple_tasks_obligations_cancel_drain_finalize() {
+        init_test("multiple_tasks_obligations_cancel_drain_finalize");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task_a = insert_task(&mut state, region);
+        let task_b = insert_task(&mut state, region);
+
+        // Each task holds obligations
+        let obl_a = state
+            .create_obligation(ObligationKind::SendPermit, task_a, region, None)
+            .expect("obl_a");
+        let obl_b1 = state
+            .create_obligation(ObligationKind::Ack, task_b, region, None)
+            .expect("obl_b1");
+        let obl_b2 = state
+            .create_obligation(ObligationKind::Lease, task_b, region, None)
+            .expect("obl_b2");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 3,
+            "three pending",
+            3usize,
+            state.pending_obligation_count()
+        );
+
+        // Cancel the region
+        let _ = state.cancel_request(region, &CancelReason::deadline(), None);
+
+        // task_a commits its obligation during cleanup, then completes
+        let _ = state.commit_obligation(obl_a).expect("commit obl_a");
+        state
+            .tasks
+            .get_mut(task_a.arena_index())
+            .expect("task_a")
+            .complete(Outcome::Cancelled(CancelReason::deadline()));
+        let _ = state.task_completed(task_a);
+
+        // Region still open: task_b still alive with obligations
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closing,
+            "region still closing",
+            crate::record::region::RegionState::Closing,
+            region_state
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 2,
+            "two pending (task_b's)",
+            2usize,
+            state.pending_obligation_count()
+        );
+
+        // task_b completes → its orphaned obligations auto-aborted
+        state
+            .tasks
+            .get_mut(task_b.arena_index())
+            .expect("task_b")
+            .complete(Outcome::Cancelled(CancelReason::deadline()));
+        let _ = state.task_completed(task_b);
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "all obligations resolved",
+            0usize,
+            state.pending_obligation_count()
+        );
+
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == crate::record::region::RegionState::Closed,
+            "region closed",
+            crate::record::region::RegionState::Closed,
+            region_state
+        );
+
+        // Verify trace events
+        let events = state.trace.snapshot();
+        let reserve_count = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationReserve)
+            .count();
+        let commit_count = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationCommit)
+            .count();
+        let abort_count = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationAbort)
+            .count();
+        crate::assert_with_log!(
+            reserve_count == 3,
+            "three reserve events",
+            3usize,
+            reserve_count
+        );
+        crate::assert_with_log!(
+            commit_count == 1,
+            "one commit event (obl_a)",
+            1usize,
+            commit_count
+        );
+        crate::assert_with_log!(
+            abort_count == 2,
+            "two abort events (obl_b1 + obl_b2)",
+            2usize,
+            abort_count
+        );
+        // Suppress unused variable warnings
+        let _ = obl_b1;
+        let _ = obl_b2;
+        crate::test_complete!("multiple_tasks_obligations_cancel_drain_finalize");
+    }
+
     /// Integration test with real epoll reactor.
     #[cfg(target_os = "linux")]
     mod epoll_integration {
