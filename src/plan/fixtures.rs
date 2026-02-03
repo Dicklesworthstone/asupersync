@@ -801,12 +801,9 @@ fn spawn_lab_join(
     child_handles: Vec<SharedLabHandle>,
 ) -> (TaskId, TaskHandle<BTreeSet<String>>) {
     let future = async move {
-        let cx = crate::cx::Cx::current().expect("cx set");
         let mut all_labels = BTreeSet::new();
         for handle in &child_handles {
-            if let Ok(labels) = handle.inner.handle.join(&cx).await {
-                all_labels.extend(labels);
-            }
+            all_labels.extend(handle.join().await);
         }
         all_labels
     };
@@ -822,19 +819,14 @@ fn spawn_lab_race(
     child_handles: Vec<SharedLabHandle>,
 ) -> (TaskId, TaskHandle<BTreeSet<String>>) {
     let future = async move {
-        let cx = crate::cx::Cx::current().expect("cx set");
-
         if child_handles.is_empty() {
             return BTreeSet::new();
         }
         if child_handles.len() == 1 {
-            return child_handles[0]
-                .inner
-                .handle
-                .join(&cx)
-                .await
-                .unwrap_or_default();
+            return child_handles[0].join().await;
         }
+
+        let cx = crate::cx::Cx::current().expect("cx set");
 
         // Race children using waker-based select: create JoinFutures that
         // register the race driver's waker on each child's oneshot receiver.
@@ -876,11 +868,17 @@ fn spawn_lab_race(
             // abort_with_reason(race_loser) on losers.
         }
 
+        // Cache winner result in SharedLabHandle so other DAG parents
+        // that share this child (diamond patterns) see the value.
+        *child_handles[winner_idx].inner.state.lock().unwrap() =
+            LabJoinState::Ready(winner_result.clone());
+
         // Drain losers: wait for each non-winner to observe cancellation
-        // and complete.
+        // and complete. Use SharedLabHandle::join to respect the
+        // designated-joiner protocol for shared children.
         for (j, handle) in child_handles.iter().enumerate() {
             if j != winner_idx {
-                let _ = handle.inner.handle.join(&cx).await;
+                let _ = handle.join().await;
             }
         }
 
@@ -897,15 +895,7 @@ fn spawn_lab_timeout(
     region: crate::types::RegionId,
     child_handle: SharedLabHandle,
 ) -> (TaskId, TaskHandle<BTreeSet<String>>) {
-    let future = async move {
-        let cx = crate::cx::Cx::current().expect("cx set");
-        child_handle
-            .inner
-            .handle
-            .join(&cx)
-            .await
-            .unwrap_or_default()
-    };
+    let future = async move { child_handle.join().await };
     runtime
         .state
         .create_task(region, Budget::INFINITE, future)
