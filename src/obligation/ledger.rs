@@ -235,7 +235,7 @@ impl ObligationLedger {
             .expect("obligation not found in ledger");
         let duration = record.commit(now);
         self.stats.total_committed += 1;
-        self.stats.pending -= 1;
+        self.stats.pending = self.stats.pending.saturating_sub(1);
         duration
     }
 
@@ -259,7 +259,7 @@ impl ObligationLedger {
             .expect("obligation not found in ledger");
         let duration = record.abort(now, reason);
         self.stats.total_aborted += 1;
-        self.stats.pending -= 1;
+        self.stats.pending = self.stats.pending.saturating_sub(1);
         duration
     }
 
@@ -276,7 +276,7 @@ impl ObligationLedger {
             .expect("obligation not found in ledger");
         let duration = record.mark_leaked(now);
         self.stats.total_leaked += 1;
-        self.stats.pending -= 1;
+        self.stats.pending = self.stats.pending.saturating_sub(1);
         duration
     }
 

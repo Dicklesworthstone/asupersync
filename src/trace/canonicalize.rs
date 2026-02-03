@@ -176,9 +176,11 @@ impl TraceMonoid {
     /// The identity element of the trace monoid (empty trace).
     #[must_use]
     pub fn identity() -> Self {
+        let canonical = FoataTrace { layers: vec![] };
+        let fingerprint = canonical.fingerprint();
         Self {
-            canonical: FoataTrace { layers: vec![] },
-            fingerprint: 0,
+            canonical,
+            fingerprint,
         }
     }
 
@@ -388,7 +390,8 @@ pub fn canonicalize(events: &[TraceEvent]) -> FoataTrace {
 pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
     let n = events.len();
     if n == 0 {
-        return 0;
+        // Must match FoataTrace { layers: vec![] }.fingerprint()
+        return FoataTrace { layers: vec![] }.fingerprint();
     }
 
     // Layer assignment (same algorithm as canonicalize).
@@ -504,7 +507,8 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
             (k, *token, 0, 0)
         }
         TraceData::IoResult { token, bytes } => {
-            let bytes_key = u64::try_from((*bytes).max(0)).unwrap_or(0);
+            // Preserve total ordering of i64 in u64 space by flipping the sign bit.
+            let bytes_key = (*bytes).cast_unsigned() ^ (1u64 << 63);
             (k, *token, bytes_key, 0)
         }
         TraceData::IoError { token, kind } => (k, *token, u64::from(*kind), 0),
@@ -773,8 +777,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_trace_fingerprint_is_zero() {
-        assert_eq!(trace_fingerprint(&[]), 0);
+    fn empty_trace_fingerprint_matches_identity() {
+        let id = TraceMonoid::identity();
+        let empty = TraceMonoid::from_events(&[]);
+        assert_eq!(trace_fingerprint(&[]), id.class_fingerprint());
+        assert_eq!(id.class_fingerprint(), empty.class_fingerprint());
+        assert!(id.equivalent(&empty));
     }
 
     // === Layer depth = critical path ===

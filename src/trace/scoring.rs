@@ -88,7 +88,7 @@ impl ClassId {
         if self.death == usize::MAX {
             None
         } else {
-            Some((self.death - self.birth) as u64)
+            Some(self.death.saturating_sub(self.birth) as u64)
         }
     }
 }

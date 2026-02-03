@@ -302,8 +302,8 @@ impl LabRuntime {
         let worker_hint = (rng_value as usize) % worker_count;
         let (task_id, dispatch_lane) = {
             let mut sched = self.scheduler.lock().unwrap();
-            if let Some(tid) = sched.pop_for_worker(worker_hint, rng_value) {
-                (tid, DispatchLane::Ready)
+            if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value) {
+                (tid, lane)
             } else if let Some(tid) = sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
             {
                 (tid, DispatchLane::Stolen)
@@ -938,16 +938,16 @@ impl LabScheduler {
         self.workers[worker].schedule_timed(task, deadline);
     }
 
-    fn pop_for_worker(&mut self, worker: usize, rng_hint: u64) -> Option<TaskId> {
+    fn pop_for_worker(&mut self, worker: usize, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         if self.workers.is_empty() {
             return None;
         }
 
         let worker = worker % self.workers.len();
-        let task = self.workers[worker].pop_with_rng_hint(rng_hint)?;
+        let (task, lane) = self.workers[worker].pop_with_lane(rng_hint)?;
         self.scheduled.remove(&task);
         self.assignments.insert(task, worker);
-        Some(task)
+        Some((task, lane))
     }
 
     fn steal_for_worker(&mut self, thief: usize, rng_hint: u64) -> Option<TaskId> {

@@ -186,11 +186,8 @@ impl RewriteCertificate {
     pub fn fingerprint(&self) -> u64 {
         let mut h = FNV_OFFSET;
         h = fnv_u64(h, u64::from(self.version.number()));
-        // Hash policy as packed bits: assoc|comm|dist|require_binary_joins
-        let policy_bits: u8 = u8::from(self.policy.associativity)
-            | (u8::from(self.policy.commutativity) << 1)
-            | (u8::from(self.policy.distributivity) << 2)
-            | (u8::from(self.policy.require_binary_joins) << 3);
+        // Hash policy as packed bits: assoc|comm|dist|require_binary_joins|timeout_simplification
+        let policy_bits: u8 = pack_policy(self.policy);
         h = fnv_u8(h, policy_bits);
         h = fnv_u64(h, self.before_hash.value());
         h = fnv_u64(h, self.after_hash.value());
@@ -281,6 +278,7 @@ fn pack_policy(policy: RewritePolicy) -> u8 {
         | (u8::from(policy.commutativity) << 1)
         | (u8::from(policy.distributivity) << 2)
         | (u8::from(policy.require_binary_joins) << 3)
+        | (u8::from(policy.timeout_simplification) << 4)
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +339,7 @@ impl CompactCertificate {
     /// Upper bound on wire size in bytes.
     #[must_use]
     pub fn byte_size_bound(&self) -> usize {
-        Self::HEADER_SIZE + self.steps.len() * CompactStep::WIRE_SIZE
+        Self::HEADER_SIZE.saturating_add(self.steps.len().saturating_mul(CompactStep::WIRE_SIZE))
     }
 
     /// Returns true if the certificate size is within the linear bound

@@ -190,6 +190,14 @@ impl Scheduler {
     /// Order: cancel lane > timed lane > ready lane.
     /// O(log n) pop via binary heap.
     pub fn pop_with_rng_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        self.pop_with_lane(rng_hint).map(|(task, _)| task)
+    }
+
+    /// Pop the highest-priority task across all three lanes, returning both
+    /// the task and the lane it was dispatched from.
+    ///
+    /// Lane priority: Cancel > Timed > Ready (same as `pop_with_rng_hint`).
+    pub fn pop_with_lane(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         // For lab determinism, we want tie-breaking to vary with a seed while still being fully
         // deterministic for a given `rng_hint` sequence. We do this by selecting uniformly among
         // the set of max-priority (or earliest-deadline) tasks in the chosen lane.
@@ -197,21 +205,21 @@ impl Scheduler {
             Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
         {
             self.scheduled.remove(&entry.task);
-            return Some(entry.task);
+            return Some((entry.task, DispatchLane::Cancel));
         }
 
         if let Some(entry) =
             Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
         {
             self.scheduled.remove(&entry.task);
-            return Some(entry.task);
+            return Some((entry.task, DispatchLane::Timed));
         }
 
         if let Some(entry) =
             Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
         {
             self.scheduled.remove(&entry.task);
-            return Some(entry.task);
+            return Some((entry.task, DispatchLane::Ready));
         }
 
         None
