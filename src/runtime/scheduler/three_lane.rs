@@ -378,6 +378,9 @@ impl ThreeLaneWorker {
     /// 5. Steal from other workers
     /// 6. Park (with timeout based on next timer deadline)
     pub fn run_loop(&mut self) {
+        // Set thread-local scheduler for this worker thread.
+        let _guard = ScopedLocalScheduler::new(Arc::clone(&self.local));
+
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
 
@@ -955,8 +958,7 @@ impl ThreeLaneWorker {
 
                     if is_local {
                         // Schedule to local queue
-                        let mut local =
-                            self.local.lock().expect("local scheduler lock poisoned");
+                        let mut local = self.local.lock().expect("local scheduler lock poisoned");
                         if schedule_cancel {
                             local.schedule_cancel(task_id, cancel_priority);
                         } else {
@@ -2543,5 +2545,54 @@ mod tests {
         let m = worker.preemption_metrics();
         assert_eq!(m.cancel_dispatches, 6);
         assert!(m.fallback_cancel_dispatches > 0, "should use fallback path");
+    }
+
+    #[test]
+    fn test_local_queue_fast_path() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Access the worker's local scheduler
+        let worker_local = scheduler.workers[0].local.clone();
+
+        // Check global queue is empty
+        assert!(!scheduler.global.has_ready_work());
+
+        // Simulate running on worker thread
+        {
+            let _guard = ScopedLocalScheduler::new(worker_local.clone());
+            // Spawn task
+            scheduler.spawn(TaskId::new_for_test(1, 1), 100);
+        }
+
+        // Global queue should be empty (because it went to local)
+        assert!(!scheduler.global.has_ready_work(), "Global queue should be empty");
+
+        // Local queue should have the task
+        let count = {
+            let local = worker_local.lock().unwrap();
+            local.len()
+        };
+        assert_eq!(count, 1, "Local queue should have 1 task");
+
+        // Now verify wake also uses local queue
+        {
+            let _guard = ScopedLocalScheduler::new(worker_local.clone());
+            scheduler.wake(TaskId::new_for_test(1, 2), 100);
+        }
+
+        // Global queue still empty
+        assert!(!scheduler.global.has_ready_work());
+
+        let count = {
+            let local = worker_local.lock().unwrap();
+            local.len()
+        };
+        assert_eq!(count, 2, "Local queue should have 2 tasks");
+
+        // Now spawn WITHOUT guard (should go to global)
+        scheduler.spawn(TaskId::new_for_test(1, 3), 100);
+
+        assert!(scheduler.global.has_ready_work(), "Global queue should have task");
     }
 }
