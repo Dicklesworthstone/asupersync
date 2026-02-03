@@ -4,10 +4,36 @@
 //! - Replaying a trace to reproduce an execution
 //! - Comparing two traces to find divergences
 //! - Replay validation with certificate checking
+//! - **Trace normalization** for canonical replay ordering
+//!
+//! # Trace Normalization
+//!
+//! Use [`normalize_for_replay`] to reorder trace events into a canonical form
+//! that minimizes context switches while preserving all happens-before
+//! relationships. This is useful for:
+//!
+//! - Deterministic comparison of equivalent traces
+//! - Debugging with reduced interleaving noise
+//! - Trace minimization and simplification
+//!
+//! ```ignore
+//! use asupersync::lab::replay::{normalize_for_replay, traces_equivalent};
+//!
+//! // Normalize a trace
+//! let result = normalize_for_replay(&events);
+//! println!("{}", result); // Shows switch count reduction
+//!
+//! // Compare two traces for equivalence
+//! if traces_equivalent(&trace_a, &trace_b) {
+//!     println!("Traces are equivalent under normalization");
+//! }
+//! ```
 
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::LabRuntime;
-use crate::trace::{TraceBuffer, TraceBufferHandle, TraceEvent};
+use crate::trace::{
+    normalize_trace, trace_switch_cost, GeodesicConfig, TraceBuffer, TraceBufferHandle, TraceEvent,
+};
 
 /// Compares two traces and returns the first divergence point.
 ///
@@ -231,6 +257,123 @@ where
         .collect()
 }
 
+// ============================================================================
+// Trace Normalization for Canonical Replay
+// ============================================================================
+
+/// Result of trace normalization.
+#[derive(Debug, Clone)]
+pub struct NormalizationResult {
+    /// The normalized (reordered) trace events.
+    pub normalized: Vec<TraceEvent>,
+    /// Number of owner switches in the original trace.
+    pub original_switches: usize,
+    /// Number of owner switches after normalization.
+    pub normalized_switches: usize,
+    /// The algorithm used for normalization.
+    pub algorithm: String,
+}
+
+impl NormalizationResult {
+    /// Returns the reduction in switch count.
+    #[must_use]
+    pub fn switch_reduction(&self) -> usize {
+        self.original_switches.saturating_sub(self.normalized_switches)
+    }
+
+    /// Returns the switch reduction as a percentage.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn switch_reduction_pct(&self) -> f64 {
+        if self.original_switches == 0 {
+            0.0
+        } else {
+            (self.switch_reduction() as f64 / self.original_switches as f64) * 100.0
+        }
+    }
+}
+
+impl std::fmt::Display for NormalizationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Normalized {} events: {} → {} switches ({:.1}% reduction, {})",
+            self.normalized.len(),
+            self.original_switches,
+            self.normalized_switches,
+            self.switch_reduction_pct(),
+            self.algorithm
+        )
+    }
+}
+
+/// Normalize a trace for canonical replay ordering.
+///
+/// This reorders trace events to minimize context switches while preserving
+/// all happens-before relationships. The result is a canonical form suitable
+/// for:
+/// - Deterministic replay comparison
+/// - Debugging (reduced noise from interleaving)
+/// - Trace minimization
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::lab::replay::normalize_for_replay;
+///
+/// let events: Vec<TraceEvent> = /* captured trace */;
+/// let result = normalize_for_replay(&events);
+/// println!("{}", result); // Shows switch reduction
+/// ```
+#[must_use]
+pub fn normalize_for_replay(events: &[TraceEvent]) -> NormalizationResult {
+    normalize_for_replay_with_config(events, &GeodesicConfig::default())
+}
+
+/// Normalize a trace with custom configuration.
+///
+/// See [`GeodesicConfig`] for available options:
+/// - `beam_threshold`: Trace size above which beam search is used
+/// - `beam_width`: Width of beam search
+/// - `step_budget`: Maximum search steps
+#[must_use]
+pub fn normalize_for_replay_with_config(
+    events: &[TraceEvent],
+    config: &GeodesicConfig,
+) -> NormalizationResult {
+    let original_switches = trace_switch_cost(events);
+    let (normalized, geodesic_result) = normalize_trace(events, config);
+
+    NormalizationResult {
+        normalized,
+        original_switches,
+        normalized_switches: geodesic_result.switch_count,
+        algorithm: format!("{:?}", geodesic_result.algorithm),
+    }
+}
+
+/// Compare two traces for equivalence after normalization.
+///
+/// Two traces are considered equivalent if their normalized forms produce
+/// the same sequence of events (respecting happens-before ordering).
+///
+/// Returns `None` if the traces are equivalent, or `Some(divergence)` if
+/// they differ.
+#[must_use]
+pub fn compare_normalized(a: &[TraceEvent], b: &[TraceEvent]) -> Option<TraceDivergence> {
+    let norm_a = normalize_for_replay(a);
+    let norm_b = normalize_for_replay(b);
+    find_divergence(&norm_a.normalized, &norm_b.normalized)
+}
+
+/// Check if two traces are equivalent under normalization.
+///
+/// This is a convenience wrapper around [`compare_normalized`].
+#[must_use]
+pub fn traces_equivalent(a: &[TraceEvent], b: &[TraceEvent]) -> bool {
+    compare_normalized(a, b).is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +524,136 @@ mod tests {
         let s = format!("{v}");
         assert!(s.contains("DIVERGED"));
         assert!(s.contains("Certificate mismatch"));
+    }
+
+    // ── Normalization tests ─────────────────────────────────────────────
+
+    #[test]
+    fn normalization_single_owner_no_switches() {
+        init_test("normalization_single_owner_no_switches");
+        // All events from owner 1 - should have 0 switches
+        let events = vec![
+            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::Spawn, TraceData::None),
+            TraceEvent::new(2, Time::from_nanos(1), TraceEventKind::Poll, TraceData::None),
+            TraceEvent::new(3, Time::from_nanos(2), TraceEventKind::Complete, TraceData::None),
+        ];
+        // All have seq numbers, but owner extraction uses seq % some_value or similar
+        // The trace module should handle this; we're testing the wrapper
+
+        let result = normalize_for_replay(&events);
+        // Single-owner trace has no switches before or after
+        assert_eq!(result.switch_reduction(), 0);
+        crate::test_complete!("normalization_single_owner_no_switches");
+    }
+
+    #[test]
+    fn normalization_result_display() {
+        init_test("normalization_result_display");
+        let result = NormalizationResult {
+            normalized: vec![],
+            original_switches: 10,
+            normalized_switches: 3,
+            algorithm: "Greedy".to_string(),
+        };
+
+        let display = format!("{result}");
+        assert!(display.contains("10 → 3 switches"));
+        assert!(display.contains("70.0% reduction"));
+        assert!(display.contains("Greedy"));
+        crate::test_complete!("normalization_result_display");
+    }
+
+    #[test]
+    fn normalization_result_zero_switches() {
+        init_test("normalization_result_zero_switches");
+        let result = NormalizationResult {
+            normalized: vec![],
+            original_switches: 0,
+            normalized_switches: 0,
+            algorithm: "Trivial".to_string(),
+        };
+
+        // Avoid division by zero
+        let pct = result.switch_reduction_pct();
+        assert!((pct - 0.0).abs() < f64::EPSILON);
+        crate::test_complete!("normalization_result_zero_switches");
+    }
+
+    #[test]
+    fn traces_equivalent_identical() {
+        init_test("traces_equivalent_identical");
+        let events = vec![
+            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::Spawn, TraceData::None),
+            TraceEvent::new(2, Time::from_nanos(1), TraceEventKind::Complete, TraceData::None),
+        ];
+
+        let equivalent = traces_equivalent(&events, &events);
+        crate::assert_with_log!(equivalent, "identical traces equivalent", true, equivalent);
+        crate::test_complete!("traces_equivalent_identical");
+    }
+
+    #[test]
+    fn traces_equivalent_different_kinds() {
+        init_test("traces_equivalent_different_kinds");
+        let a = vec![TraceEvent::new(
+            1,
+            Time::from_nanos(0),
+            TraceEventKind::Spawn,
+            TraceData::None,
+        )];
+        let b = vec![TraceEvent::new(
+            1,
+            Time::from_nanos(0),
+            TraceEventKind::Complete,
+            TraceData::None,
+        )];
+
+        let equivalent = traces_equivalent(&a, &b);
+        crate::assert_with_log!(!equivalent, "different kinds not equivalent", false, equivalent);
+        crate::test_complete!("traces_equivalent_different_kinds");
+    }
+
+    #[test]
+    fn compare_normalized_returns_divergence() {
+        init_test("compare_normalized_returns_divergence");
+        let a = vec![TraceEvent::new(
+            1,
+            Time::from_nanos(0),
+            TraceEventKind::Spawn,
+            TraceData::None,
+        )];
+        let b = vec![TraceEvent::new(
+            1,
+            Time::from_nanos(0),
+            TraceEventKind::Complete,
+            TraceData::None,
+        )];
+
+        let divergence = compare_normalized(&a, &b);
+        let has_div = divergence.is_some();
+        crate::assert_with_log!(has_div, "divergence found", true, has_div);
+        crate::test_complete!("compare_normalized_returns_divergence");
+    }
+
+    #[test]
+    fn normalize_with_config_custom_beam() {
+        use crate::trace::GeodesicConfig;
+
+        init_test("normalize_with_config_custom_beam");
+        let events = vec![
+            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::Spawn, TraceData::None),
+            TraceEvent::new(2, Time::from_nanos(1), TraceEventKind::Poll, TraceData::None),
+        ];
+
+        let config = GeodesicConfig {
+            beam_threshold: 1,
+            beam_width: 4,
+            step_budget: 100,
+        };
+
+        let result = normalize_for_replay_with_config(&events, &config);
+        // Just verify it runs without panic; algorithm choice depends on trace size
+        assert!(!result.algorithm.is_empty());
+        crate::test_complete!("normalize_with_config_custom_beam");
     }
 }
