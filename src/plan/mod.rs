@@ -348,10 +348,16 @@ impl EGraph {
     ///
     /// Determinism rule: the smallest id always wins.
     pub fn merge(&mut self, a: EClassId, b: EClassId) -> EClassId {
+        let (winner, _) = self.merge_internal(a, b);
+        self.rebuild_hashcons();
+        winner
+    }
+
+    fn merge_internal(&mut self, a: EClassId, b: EClassId) -> (EClassId, bool) {
         let root_a = self.find(a);
         let root_b = self.find(b);
         if root_a == root_b {
-            return root_a;
+            return (root_a, false);
         }
 
         let (winner, loser) = if root_a.index() <= root_b.index() {
@@ -365,8 +371,7 @@ impl EGraph {
         let mut moved = mem::take(&mut self.classes[loser.index()].nodes);
         self.classes[winner.index()].nodes.append(&mut moved);
 
-        self.rebuild_hashcons();
-        winner
+        (winner, true)
     }
 
     fn find(&mut self, id: EClassId) -> EClassId {
@@ -402,26 +407,53 @@ impl EGraph {
     }
 
     fn rebuild_hashcons(&mut self) {
-        self.hashcons.clear();
-        for idx in 0..self.classes.len() {
-            let id = EClassId::new(idx);
-            if self.find(id) != id {
-                continue;
-            }
+        loop {
+            self.hashcons.clear();
+            let mut merges: Vec<(EClassId, EClassId)> = Vec::new();
 
-            let nodes = mem::take(&mut self.classes[idx].nodes);
-            let mut seen: DetHashSet<ENode> = DetHashSet::default();
-            let mut rebuilt = Vec::new();
-
-            for node in nodes {
-                let canonical = self.canonicalize_enode(node);
-                if seen.insert(canonical.clone()) {
-                    rebuilt.push(canonical.clone());
+            for idx in 0..self.classes.len() {
+                let id = EClassId::new(idx);
+                if self.find(id) != id {
+                    continue;
                 }
-                self.hashcons.insert(canonical, id);
+
+                let nodes = mem::take(&mut self.classes[idx].nodes);
+                let mut seen: DetHashSet<ENode> = DetHashSet::default();
+                let mut rebuilt = Vec::new();
+
+                for node in nodes {
+                    let canonical = self.canonicalize_enode(node);
+                    if seen.insert(canonical.clone()) {
+                        rebuilt.push(canonical.clone());
+                    }
+                    if let Some(existing) = self.hashcons.get(&canonical) {
+                        let existing_root = self.find(*existing);
+                        let id_root = self.find(id);
+                        if existing_root != id_root {
+                            let (a, b) = if existing_root.index() <= id_root.index() {
+                                (existing_root, id_root)
+                            } else {
+                                (id_root, existing_root)
+                            };
+                            merges.push((a, b));
+                        }
+                    } else {
+                        self.hashcons.insert(canonical, id);
+                    }
+                }
+
+                self.classes[idx].nodes = rebuilt;
             }
 
-            self.classes[idx].nodes = rebuilt;
+            if merges.is_empty() {
+                break;
+            }
+
+            merges.sort();
+            merges.dedup();
+            for (a, b) in merges {
+                self.merge_internal(a, b);
+            }
         }
     }
 }
@@ -1046,6 +1078,22 @@ mod tests {
         let join2 = eg.add_join(vec![a, b]);
         assert_eq!(eg.canonical_id(join1), eg.canonical_id(join2));
         crate::test_complete!("egraph_hashcons_dedup");
+    }
+
+    #[test]
+    fn egraph_rebuild_merges_congruent_nodes() {
+        init_test("egraph_rebuild_merges_congruent_nodes");
+        let mut eg = EGraph::new();
+        let a = eg.add_leaf("a");
+        let b = eg.add_leaf("b");
+        let join1 = eg.add_join(vec![a, b]);
+        let join2 = eg.add_join(vec![b, a]);
+        assert_ne!(eg.canonical_id(join1), eg.canonical_id(join2));
+
+        eg.merge(a, b);
+
+        assert_eq!(eg.canonical_id(join1), eg.canonical_id(join2));
+        crate::test_complete!("egraph_rebuild_merges_congruent_nodes");
     }
 
     #[test]

@@ -313,7 +313,7 @@ pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
         let log_s = LOG[s_val as usize] as usize;
         let result = EXP[log_s + log_c];
         // Branchless mask: 0xFF if s_val != 0, 0x00 if s_val == 0
-        let mask = 0u8.wrapping_sub((s_val != 0) as u8);
+        let mask = 0u8.wrapping_sub(u8::from(s_val != 0));
         *d ^= result & mask;
     }
 }
