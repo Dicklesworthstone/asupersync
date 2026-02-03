@@ -270,7 +270,8 @@ impl ObligationFlow {
         self.must_resolve.extend(other.must_resolve);
         // In a race, the loser's obligations may leak unless explicitly drained.
         self.leak_on_cancel.extend(other.leak_on_cancel);
-        self.leak_on_cancel.extend(self.must_resolve.iter().cloned());
+        self.leak_on_cancel
+            .extend(self.must_resolve.iter().cloned());
         // Conservative: can't guarantee all paths resolve in a race unless
         // both children guarantee it and are properly drained.
         self.all_paths_resolve = self.all_paths_resolve && other_all_paths_resolve;
@@ -1061,7 +1062,10 @@ mod tests {
         let analysis = PlanAnalyzer::analyze(&dag);
         let join_node = analysis.get(join).expect("join analyzed");
         // The join should track the obligation from the obl: leaf.
-        assert!(join_node.obligation_flow.reserves.contains(&"obl:permit".to_string()));
+        assert!(join_node
+            .obligation_flow
+            .reserves
+            .contains(&"obl:permit".to_string()));
     }
 
     #[test]
