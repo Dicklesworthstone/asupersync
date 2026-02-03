@@ -218,4 +218,121 @@ mod tests {
         crate::assert_with_log!(leader_count == 1, "leader count", 1usize, leader_count);
         crate::test_complete!("barrier_cancel_removes_arrival");
     }
+
+    #[test]
+    fn barrier_single_party_trips_immediately() {
+        init_test("barrier_single_party_trips_immediately");
+        let barrier = Barrier::new(1);
+        let cx: Cx = Cx::for_testing();
+
+        let result = barrier.wait(&cx).expect("wait failed");
+        crate::assert_with_log!(
+            result.is_leader(),
+            "single party is leader",
+            true,
+            result.is_leader()
+        );
+        crate::test_complete!("barrier_single_party_trips_immediately");
+    }
+
+    #[test]
+    fn barrier_parties_accessor() {
+        init_test("barrier_parties_accessor");
+        let barrier = Barrier::new(7);
+        let parties = barrier.parties();
+        crate::assert_with_log!(parties == 7, "parties", 7usize, parties);
+        crate::test_complete!("barrier_parties_accessor");
+    }
+
+    #[test]
+    fn barrier_multiple_generations() {
+        init_test("barrier_multiple_generations");
+        let barrier = Arc::new(Barrier::new(2));
+        let leader_count = Arc::new(AtomicUsize::new(0));
+
+        // Run two generations of the barrier.
+        for gen in 0..2u32 {
+            let b = Arc::clone(&barrier);
+            let lc = Arc::clone(&leader_count);
+            let handle = std::thread::spawn(move || {
+                let cx: Cx = Cx::for_testing();
+                let result = b.wait(&cx).expect("wait failed");
+                if result.is_leader() {
+                    lc.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+
+            let cx: Cx = Cx::for_testing();
+            let result = barrier.wait(&cx).expect("wait failed");
+            if result.is_leader() {
+                leader_count.fetch_add(1, Ordering::SeqCst);
+            }
+
+            handle.join().expect("thread failed");
+            let leaders_so_far = leader_count.load(Ordering::SeqCst);
+            let expected = (gen + 1) as usize;
+            crate::assert_with_log!(
+                leaders_so_far == expected,
+                "leader per generation",
+                expected,
+                leaders_so_far
+            );
+        }
+
+        crate::test_complete!("barrier_multiple_generations");
+    }
+
+    #[test]
+    fn barrier_cancel_does_not_trip() {
+        init_test("barrier_cancel_does_not_trip");
+        // With 3 parties, if one cancels, only 2 arrive — barrier should not trip.
+        let barrier = Arc::new(Barrier::new(3));
+
+        // Cancelled party.
+        let cx_cancel: Cx = Cx::for_testing();
+        cx_cancel.set_cancel_requested(true);
+        let err = barrier.wait(&cx_cancel).expect_err("expected cancel");
+        crate::assert_with_log!(
+            err == BarrierWaitError::Cancelled,
+            "cancelled",
+            BarrierWaitError::Cancelled,
+            err
+        );
+
+        // Now send 3 real parties to verify the barrier still works.
+        let barrier2 = Arc::clone(&barrier);
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let b = Arc::clone(&barrier2);
+            handles.push(std::thread::spawn(move || {
+                let cx: Cx = Cx::for_testing();
+                b.wait(&cx).expect("wait failed")
+            }));
+        }
+
+        let cx: Cx = Cx::for_testing();
+        let result = barrier2.wait(&cx).expect("wait failed");
+        let mut leader_count = if result.is_leader() { 1 } else { 0 };
+
+        for h in handles {
+            let r = h.join().expect("thread failed");
+            if r.is_leader() {
+                leader_count += 1;
+            }
+        }
+
+        crate::assert_with_log!(
+            leader_count == 1,
+            "exactly one leader",
+            1usize,
+            leader_count
+        );
+        crate::test_complete!("barrier_cancel_does_not_trip");
+    }
+
+    #[test]
+    #[should_panic(expected = "barrier requires at least 1 party")]
+    fn barrier_zero_parties_panics() {
+        let _ = Barrier::new(0);
+    }
 }

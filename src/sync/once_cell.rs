@@ -501,13 +501,27 @@ impl<T> Future for WaitInit<'_, T> {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use futures_lite::future::{block_on, pending};
+    use std::future::Future;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
     use std::thread;
 
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn noop_waker() -> Waker {
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopWaker))
     }
 
     #[test]
@@ -602,6 +616,33 @@ mod tests {
             counter.load(Ordering::SeqCst)
         );
         crate::test_complete!("get_or_init_blocking_initializes_once");
+    }
+
+    #[test]
+    fn get_or_init_cancelled_leaves_uninitialized() {
+        init_test("get_or_init_cancelled_leaves_uninitialized");
+        let cell: OnceCell<u32> = OnceCell::new();
+
+        let mut fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let poll = Future::poll(fut.as_mut(), &mut cx);
+        crate::assert_with_log!(poll.is_pending(), "init pending", true, poll.is_pending());
+
+        drop(fut);
+
+        let still_uninit = !cell.is_initialized();
+        crate::assert_with_log!(
+            still_uninit,
+            "cell uninitialized after cancel",
+            true,
+            still_uninit
+        );
+
+        let value = block_on(cell.get_or_init(|| async { 7 }));
+        crate::assert_with_log!(*value == 7, "init after cancel", 7u32, *value);
+        crate::test_complete!("get_or_init_cancelled_leaves_uninitialized");
     }
 
     #[test]

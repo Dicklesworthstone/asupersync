@@ -798,4 +798,122 @@ mod tests {
         crate::assert_with_log!(min > 0, "no starvation", true, min > 0);
         crate::test_complete!("stress_test_semaphore_fairness");
     }
+
+    #[test]
+    fn close_wakes_all_waiters_with_error() {
+        init_test("close_wakes_all_waiters_with_error");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(1);
+        let _held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let pending1 = poll_once(&mut fut1).is_none();
+        crate::assert_with_log!(pending1, "waiter 1 pending", true, pending1);
+
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let pending2 = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(pending2, "waiter 2 pending", true, pending2);
+
+        sem.close();
+
+        let result1 = poll_once(&mut fut1);
+        let closed1 = matches!(result1, Some(Err(AcquireError::Closed)));
+        crate::assert_with_log!(closed1, "waiter 1 closed", true, closed1);
+
+        let result2 = poll_once(&mut fut2);
+        let closed2 = matches!(result2, Some(Err(AcquireError::Closed)));
+        crate::assert_with_log!(closed2, "waiter 2 closed", true, closed2);
+
+        crate::test_complete!("close_wakes_all_waiters_with_error");
+    }
+
+    #[test]
+    fn try_acquire_fails_when_closed() {
+        init_test("try_acquire_fails_when_closed");
+        let sem = Semaphore::new(5);
+        sem.close();
+
+        let result = sem.try_acquire(1);
+        crate::assert_with_log!(
+            result.is_err(),
+            "try_acquire on closed",
+            true,
+            result.is_err()
+        );
+        crate::assert_with_log!(sem.is_closed(), "is_closed", true, sem.is_closed());
+        crate::test_complete!("try_acquire_fails_when_closed");
+    }
+
+    #[test]
+    fn permit_forget_leaks_permits() {
+        init_test("permit_forget_leaks_permits");
+        let sem = Semaphore::new(3);
+
+        let permit = sem.try_acquire(2).expect("acquire 2");
+        let avail_after = sem.available_permits();
+        crate::assert_with_log!(avail_after == 1, "after acquire", 1usize, avail_after);
+
+        permit.forget();
+
+        // Permits should NOT be returned — still 1 available.
+        let avail_leaked = sem.available_permits();
+        crate::assert_with_log!(avail_leaked == 1, "after forget", 1usize, avail_leaked);
+        crate::test_complete!("permit_forget_leaks_permits");
+    }
+
+    #[test]
+    fn add_permits_increases_available() {
+        init_test("add_permits_increases_available");
+        let sem = Semaphore::new(2);
+        let _p = sem.try_acquire(2).expect("acquire all");
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "zero",
+            0usize,
+            sem.available_permits()
+        );
+
+        sem.add_permits(3);
+        let avail = sem.available_permits();
+        crate::assert_with_log!(avail == 3, "after add", 3usize, avail);
+        crate::test_complete!("add_permits_increases_available");
+    }
+
+    #[test]
+    fn drop_permit_restores_count() {
+        init_test("drop_permit_restores_count");
+        let sem = Semaphore::new(4);
+
+        let p1 = sem.try_acquire(1).expect("p1");
+        let p2 = sem.try_acquire(2).expect("p2");
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "after two acquires",
+            1usize,
+            sem.available_permits()
+        );
+
+        let count1 = p1.count();
+        crate::assert_with_log!(count1 == 1, "p1 count", 1usize, count1);
+        let count2 = p2.count();
+        crate::assert_with_log!(count2 == 2, "p2 count", 2usize, count2);
+
+        drop(p1);
+        crate::assert_with_log!(
+            sem.available_permits() == 2,
+            "after drop p1",
+            2usize,
+            sem.available_permits()
+        );
+
+        drop(p2);
+        crate::assert_with_log!(
+            sem.available_permits() == 4,
+            "after drop p2",
+            4usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("drop_permit_restores_count");
+    }
 }

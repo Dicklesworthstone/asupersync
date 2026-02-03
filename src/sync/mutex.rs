@@ -735,4 +735,97 @@ mod tests {
         );
         crate::test_complete!("stress_test_mutex_high_contention");
     }
+
+    #[test]
+    fn mutex_fifo_cancel_middle_preserves_order() {
+        init_test("mutex_fifo_cancel_middle_preserves_order");
+        let cx1 = test_cx();
+        let cx2 = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 2)),
+            TaskId::from_arena(ArenaIndex::new(0, 2)),
+            Budget::INFINITE,
+        );
+        let cx3 = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        // Hold the lock.
+        let mut fut_hold = mutex.lock(&cx1);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        // Queue three waiters.
+        let mut fut1 = mutex.lock(&cx1);
+        let _ = poll_once(&mut fut1);
+        let mut fut2 = mutex.lock(&cx2);
+        let _ = poll_once(&mut fut2);
+        let mut fut3 = mutex.lock(&cx3);
+        let _ = poll_once(&mut fut3);
+
+        let waiters = mutex.waiters();
+        crate::assert_with_log!(waiters == 3, "3 waiters queued", 3usize, waiters);
+
+        // Cancel middle waiter.
+        cx2.set_cancel_requested(true);
+        let result2 = poll_once(&mut fut2);
+        let cancelled = matches!(result2, Some(Err(LockError::Cancelled)));
+        crate::assert_with_log!(cancelled, "middle cancelled", true, cancelled);
+
+        // Release lock — first waiter should get it, not third.
+        drop(guard);
+
+        let guard1 = poll_once(&mut fut1)
+            .expect("first acquires")
+            .expect("no error");
+        crate::assert_with_log!(true, "first waiter acquires", true, true);
+
+        // Third should still be pending.
+        let third_pending = poll_once(&mut fut3).is_none();
+        crate::assert_with_log!(third_pending, "third pending", true, third_pending);
+
+        drop(guard1);
+        crate::test_complete!("mutex_fifo_cancel_middle_preserves_order");
+    }
+
+    #[test]
+    fn mutex_guard_deref_mut() {
+        init_test("mutex_guard_deref_mut");
+        let cx = test_cx();
+        let mutex = Mutex::new(vec![1, 2, 3]);
+
+        let mut fut = mutex.lock(&cx);
+        let mut guard = poll_once(&mut fut).expect("immediate").expect("lock");
+
+        guard.push(4);
+        let len = guard.len();
+        crate::assert_with_log!(len == 4, "mutated via deref_mut", 4usize, len);
+
+        drop(guard);
+
+        // Verify the mutation persists.
+        let mut fut2 = mutex.lock(&cx);
+        let guard2 = poll_once(&mut fut2).expect("immediate").expect("lock");
+        let persisted = guard2.as_slice() == &[1, 2, 3, 4];
+        crate::assert_with_log!(persisted, "mutation persisted", true, persisted);
+
+        crate::test_complete!("mutex_guard_deref_mut");
+    }
+
+    #[test]
+    fn mutex_is_locked_is_poisoned() {
+        init_test("mutex_is_locked_is_poisoned");
+        let cx = test_cx();
+        let mutex = Mutex::new(0);
+
+        let unlocked = !mutex.is_locked();
+        crate::assert_with_log!(unlocked, "starts unlocked", true, unlocked);
+        let not_poisoned = !mutex.is_poisoned();
+        crate::assert_with_log!(not_poisoned, "not poisoned", true, not_poisoned);
+
+        let mut fut = mutex.lock(&cx);
+        let _guard = poll_once(&mut fut).expect("immediate").expect("lock");
+
+        let locked = mutex.is_locked();
+        crate::assert_with_log!(locked, "locked after acquire", true, locked);
+
+        crate::test_complete!("mutex_is_locked_is_poisoned");
+    }
 }
