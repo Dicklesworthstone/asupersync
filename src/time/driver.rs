@@ -830,6 +830,122 @@ mod tests {
     }
 
     // =========================================================================
+    // TimerDriverHandle Tests (bd-rpsc)
+    // =========================================================================
+
+    #[test]
+    fn timer_driver_handle_with_virtual_clock() {
+        init_test("timer_driver_handle_with_virtual_clock");
+        let clock = Arc::new(VirtualClock::new());
+        let handle = TimerDriverHandle::with_virtual_clock(clock.clone());
+
+        let now = handle.now();
+        crate::assert_with_log!(now == Time::ZERO, "initial time", Time::ZERO, now);
+
+        clock.advance(1_000_000_000);
+        let now = handle.now();
+        crate::assert_with_log!(
+            now == Time::from_secs(1),
+            "time after advance",
+            Time::from_secs(1),
+            now
+        );
+        crate::test_complete!("timer_driver_handle_with_virtual_clock");
+    }
+
+    #[test]
+    fn timer_driver_handle_register_and_cancel() {
+        init_test("timer_driver_handle_register_and_cancel");
+        let clock = Arc::new(VirtualClock::new());
+        let handle = TimerDriverHandle::with_virtual_clock(clock.clone());
+
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = waker_that_sets(woken.clone());
+        let timer_handle = handle.register(Time::from_secs(5), waker);
+
+        // Cancel before firing
+        let cancelled = handle.cancel(&timer_handle);
+        crate::assert_with_log!(cancelled, "timer cancelled", true, cancelled);
+
+        // Advance past deadline and process - nothing should fire
+        clock.set(Time::from_secs(10));
+        let fired = handle.process_timers();
+        crate::assert_with_log!(fired == 0, "no timers fire after cancel", 0usize, fired);
+        let woken_val = woken.load(Ordering::SeqCst);
+        crate::assert_with_log!(!woken_val, "waker not called", false, woken_val);
+        crate::test_complete!("timer_driver_handle_register_and_cancel");
+    }
+
+    #[test]
+    fn timer_driver_handle_update_reschedules() {
+        init_test("timer_driver_handle_update_reschedules");
+        let clock = Arc::new(VirtualClock::new());
+        let handle = TimerDriverHandle::with_virtual_clock(clock.clone());
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let waker = waker_that_increments(counter.clone());
+        let timer_handle = handle.register(Time::from_secs(5), waker);
+
+        // Update to fire at 2s instead
+        let waker2 = waker_that_increments(counter.clone());
+        let _new_handle = handle.update(&timer_handle, Time::from_secs(2), waker2);
+
+        // Advance to 3s - should fire the updated timer
+        clock.set(Time::from_secs(3));
+        let fired = handle.process_timers();
+        crate::assert_with_log!(fired == 1, "updated timer fires", 1usize, fired);
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "counter incremented", 1u64, count);
+
+        // Advance to 10s - old deadline should not fire again
+        clock.set(Time::from_secs(10));
+        let fired = handle.process_timers();
+        crate::assert_with_log!(fired == 0, "old timer cancelled", 0usize, fired);
+        crate::test_complete!("timer_driver_handle_update_reschedules");
+    }
+
+    #[test]
+    fn timer_driver_handle_next_deadline() {
+        init_test("timer_driver_handle_next_deadline");
+        let clock = Arc::new(VirtualClock::new());
+        let handle = TimerDriverHandle::with_virtual_clock(clock);
+
+        let no_deadline = handle.next_deadline();
+        crate::assert_with_log!(
+            no_deadline.is_none(),
+            "no deadline when empty",
+            true,
+            no_deadline.is_none()
+        );
+
+        let _ = handle.register(Time::from_secs(10), futures_waker());
+        let _ = handle.register(Time::from_secs(3), futures_waker());
+        let _ = handle.register(Time::from_secs(7), futures_waker());
+
+        let next = handle.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_secs(3)),
+            "earliest deadline returned",
+            Some(Time::from_secs(3)),
+            next
+        );
+        crate::test_complete!("timer_driver_handle_next_deadline");
+    }
+
+    #[test]
+    fn timer_driver_handle_ptr_eq() {
+        init_test("timer_driver_handle_ptr_eq");
+        let clock = Arc::new(VirtualClock::new());
+        let handle1 = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let handle2 = TimerDriverHandle::with_virtual_clock(clock);
+
+        // Different driver instances, even with same clock
+        let eq = handle1.ptr_eq(&handle2);
+        crate::assert_with_log!(!eq, "different drivers not equal", false, eq);
+        crate::test_complete!("timer_driver_handle_ptr_eq");
+    }
+
+    // =========================================================================
     // Helper Functions
     // =========================================================================
 

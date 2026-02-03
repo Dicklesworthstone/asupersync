@@ -1258,4 +1258,121 @@ mod tests {
 
         crate::test_complete!("config_builder_chain");
     }
+
+    // =========================================================================
+    // Timer Coalescing Behavior Tests (bd-rpsc)
+    // =========================================================================
+
+    #[test]
+    fn coalescing_fires_timers_within_window() {
+        init_test("coalescing_fires_timers_within_window");
+        let coalescing = CoalescingConfig::new()
+            .coalesce_window(Duration::from_millis(10))
+            .min_group_size(1)
+            .enable();
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Register timers at 3ms, 5ms, 15ms
+        // With coalescing window of 10ms, at t=9ms:
+        //   - coalesced boundary = ((9_000_000 / 10_000_000) + 1) * 10_000_000 = 10_000_000 (10ms)
+        //   - Both 3ms and 5ms are in ready (past their tick) and <= 10ms boundary
+        wheel.register(Time::from_millis(3), counter_waker(counter.clone()));
+        wheel.register(Time::from_millis(5), counter_waker(counter.clone()));
+        wheel.register(Time::from_millis(15), counter_waker(counter.clone()));
+
+        // At t=9ms, both 3ms and 5ms timers should have been moved to ready
+        // and both should fire (deadlines 3ms and 5ms both <= coalesced boundary 10ms)
+        let wakers = wheel.collect_expired(Time::from_millis(9));
+        for w in &wakers {
+            w.wake_by_ref();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            count == 2,
+            "both timers fired within coalescing window",
+            2u64,
+            count
+        );
+
+        // At t=16ms, the 15ms timer should fire
+        let wakers = wheel.collect_expired(Time::from_millis(16));
+        for w in &wakers {
+            w.wake_by_ref();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 3, "all three fired", 3u64, count);
+        crate::test_complete!("coalescing_fires_timers_within_window");
+    }
+
+    #[test]
+    fn coalescing_disabled_fires_only_expired() {
+        init_test("coalescing_disabled_fires_only_expired");
+        let coalescing = CoalescingConfig::new().disable();
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        // Register timers at 5ms, 8ms
+        wheel.register(Time::from_millis(5), counter_waker(counter.clone()));
+        wheel.register(Time::from_millis(8), counter_waker(counter.clone()));
+
+        // At t=6ms, only the 5ms timer should fire (no coalescing)
+        let wakers = wheel.collect_expired(Time::from_millis(6));
+        for w in &wakers {
+            w.wake_by_ref();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            count == 1,
+            "only expired timer fires without coalescing",
+            1u64,
+            count
+        );
+        crate::test_complete!("coalescing_disabled_fires_only_expired");
+    }
+
+    #[test]
+    fn coalescing_group_size_reports_window_contents() {
+        init_test("coalescing_group_size_reports_window_contents");
+        let coalescing = CoalescingConfig::new()
+            .coalesce_window(Duration::from_millis(10))
+            .min_group_size(1)
+            .enable();
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
+
+        // Advance wheel to t=20ms so that registering past-deadline timers
+        // puts them directly into the ready list (deadline <= current_time)
+        let _ = wheel.collect_expired(Time::from_millis(20));
+
+        // Register timers at 5ms, 8ms, 15ms - all go to ready (all < 20ms)
+        wheel.register(
+            Time::from_millis(5),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+        wheel.register(
+            Time::from_millis(8),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+        wheel.register(
+            Time::from_millis(15),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+
+        // coalescing_group_size queries the ready list.
+        // At query time t=6ms, coalescing window = ((6M/10M)+1)*10M = 10ms.
+        // Timers at 5ms and 8ms have deadline <= 10ms; 15ms does not.
+        let group_size = wheel.coalescing_group_size(Time::from_millis(6));
+        crate::assert_with_log!(
+            group_size == 2,
+            "two timers in coalescing window",
+            2usize,
+            group_size
+        );
+        crate::test_complete!("coalescing_group_size_reports_window_contents");
+    }
 }
