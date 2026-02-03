@@ -824,7 +824,7 @@ mod tests {
     fn same_seed_produces_same_certificate() {
         let run = |seed: u64| -> u64 {
             let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(seed, 1));
-            let report = explorer.explore(|runtime| {
+            explorer.explore(|runtime| {
                 let region = runtime.state.create_root_region(Budget::INFINITE);
                 let (t, _) = runtime
                     .state
@@ -833,7 +833,11 @@ mod tests {
                 runtime.scheduler.lock().unwrap().schedule(t, 0);
                 runtime.run_until_quiescent();
             });
-            report.runs[0].certificate_hash
+            let first = explorer
+                .results()
+                .first()
+                .expect("explorer should record at least one run");
+            first.certificate_hash
         };
 
         let h1 = run(77);
@@ -845,7 +849,7 @@ mod tests {
     fn different_seeds_may_produce_different_certificates() {
         let run = |seed: u64| -> u64 {
             let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(seed, 1));
-            let report = explorer.explore(|runtime| {
+            explorer.explore(|runtime| {
                 let region = runtime.state.create_root_region(Budget::INFINITE);
                 let (t1, _) = runtime
                     .state
@@ -862,7 +866,11 @@ mod tests {
                 }
                 runtime.run_until_quiescent();
             });
-            report.runs[0].certificate_hash
+            let first = explorer
+                .results()
+                .first()
+                .expect("explorer should record at least one run");
+            first.certificate_hash
         };
 
         // With two tasks and different seeds, the scheduling order may differ.

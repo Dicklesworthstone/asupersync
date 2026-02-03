@@ -12,7 +12,7 @@
 |--------|-------|
 | **Total dependencies** | 48 |
 | **Updated** | 2 |
-| **Skipped** | 0 |
+| **Skipped** | 4 |
 | **Failed (rolled back)** | 0 |
 | **Requires attention** | 1 |
 
@@ -44,6 +44,20 @@ error[E0308]: arguments to this function are incorrect
 error[E0252]: the name `VerificationResult` is defined multiple times
   --> src/trace/mod.rs:77:26
 ```
+
+### Skipped
+
+#### clap: 4.5.56 → 4.5.56
+
+**Reason:** Already on the latest 4.x release (Cargo.toml allows ^4.5; Cargo.lock shows 4.5.56). citeturn2open0
+
+#### criterion: 0.5.1 → 0.5.1
+
+**Reason:** Already on the latest 0.5.x release (Cargo.toml allows ^0.5; Cargo.lock shows 0.5.1). citeturn4open0
+
+#### crossbeam-queue: 0.3.12 → 0.3.12
+
+**Reason:** Already on the latest 0.3.x release (Cargo.toml allows ^0.3; Cargo.lock shows 0.3.12). citeturn6open0
 
 ### Requires Attention
 
