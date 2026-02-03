@@ -793,14 +793,16 @@ impl rusqlite::ToSql for SqliteValue {
 mod tests {
     use super::*;
     use crate::cx::Cx;
-    use crate::runtime::RuntimeState;
     use crate::types::Budget;
-    use std::sync::{Arc, Mutex};
+    use crate::util::ArenaIndex;
+    use crate::{RegionId, TaskId};
 
     fn create_test_cx() -> Cx {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
-        let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
-        Cx::new(state, region)
+        Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
+        )
     }
 
     #[test]
