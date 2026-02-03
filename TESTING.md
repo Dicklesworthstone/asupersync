@@ -113,6 +113,54 @@ for a per-module audit. Treat them as directional signals until we re-run a scri
 | Combinators | 433 | ~11 (1 file) | 15 | Good unit coverage |
 | **Totals** | **~3100+** | **~1297** | **381** | |
 
+### Coverage Measurement + CI Gating (bd-28bx)
+
+**Tooling choice:** `cargo llvm-cov` (LLVM source-based coverage). We standardize on this tool for
+local runs and CI, using a shared ignore regex to exclude tests/benches/examples/fuzz/conformance.
+
+**Local run (library coverage):**
+
+```bash
+cargo llvm-cov --lib --all-features \
+  --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+  --text --output-path coverage/coverage.txt
+```
+
+**CI gating (current floor):**
+- CI runs the same `--lib --all-features` coverage command and fails if **line coverage < 5%**.
+- This floor is intentionally low to avoid blocking while known integration-test compile issues
+  are resolved; it will be ratcheted upward once `cargo llvm-cov --all-targets --all-features`
+  completes cleanly.
+- No-mock policy is enforced separately in CI via an allowlisted `rg` scan.
+
+**Minimum coverage thresholds per invariant (v1):**
+
+| Invariant | Unit tests | Integration tests | E2E tests |
+| --- | --- | --- | --- |
+| Region close implies quiescence | ≥1 | ≥1 | ≥1 |
+| No task leaks | ≥1 | ≥1 | ≥1 |
+| No obligation leaks | ≥1 | ≥1 | ≥1 |
+| Losers drained after races | ≥1 | ≥1 | ≥1 |
+| Cancellation protocol (request → drain → finalize) | ≥1 | ≥1 | ≥1 |
+| Deterministic lab runtime (seed-stable) | ≥1 | ≥1 | ≥1 |
+| Bounded cleanup (budgeted) | ≥1 | ≥1 | ≥1 |
+
+**Minimum line-coverage floors per subsystem (initial targets, to ratchet):**
+
+| Subsystem | Floor (line %) |
+| --- | --- |
+| Runtime + scheduler | 20 |
+| Cancellation + obligations | 20 |
+| Channels + sync primitives | 15 |
+| IO + reactor + time | 15 |
+| Net + HTTP + H2 + WebSocket + gRPC | 10 |
+| RaptorQ codec + pipelines | 15 |
+| Distributed + remote | 10 |
+| Trace + record + replay + DPOR | 15 |
+| Security + capabilities | 10 |
+| Lab runtime + testing infra | 20 |
+| Config + CLI + observability | 10 |
+
 ### Oracle Coverage (src/lab/oracle/)
 
 These oracles verify the core invariants during lab runtime execution:
