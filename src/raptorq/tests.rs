@@ -680,9 +680,9 @@ mod property_tests {
 
             // Decode should succeed with exactly L symbols
             match result {
-                Ok(decoded) => {
+                Ok(decoded_result) => {
                     assert_eq!(
-                        decoded.source, source,
+                        decoded_result.source, source,
                         "decoded source must match for drop_seed={drop_seed}"
                     );
                 }

@@ -173,7 +173,7 @@ mod tests {
         let first = ring.node_for_key(&"alpha");
         let second = ring.node_for_key(&"alpha");
         assert_eq!(first, second);
-        assert!(matches!(first, Some("a") | Some("b") | Some("c")));
+        assert!(matches!(first, Some("a" | "b" | "c")));
     }
 
     #[test]

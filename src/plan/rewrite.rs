@@ -665,10 +665,158 @@ pub(crate) fn check_side_conditions(
                 return Err("race children not in canonical order".to_string());
             }
         }
-        RewriteRule::TimeoutMin | RewriteRule::DedupRaceJoin => {}
+        RewriteRule::TimeoutMin => {
+            let PlanNode::Timeout { child, duration } = dag
+                .node(before)
+                .ok_or_else(|| "missing before timeout".to_string())?
+            else {
+                return Err("before node is not Timeout".to_string());
+            };
+            let PlanNode::Timeout {
+                child: inner_child,
+                duration: inner_duration,
+            } = dag
+                .node(child)
+                .ok_or_else(|| "missing inner timeout".to_string())?
+            else {
+                return Err("before timeout child is not Timeout".to_string());
+            };
+            let PlanNode::Timeout {
+                child: after_child,
+                duration: after_duration,
+            } = dag
+                .node(after)
+                .ok_or_else(|| "missing after timeout".to_string())?
+            else {
+                return Err("after node is not Timeout".to_string());
+            };
+            let min_duration = if duration <= inner_duration {
+                duration
+            } else {
+                inner_duration
+            };
+            if after_child != inner_child {
+                return Err("timeout min child mismatch".to_string());
+            }
+            if after_duration != min_duration {
+                return Err("timeout min duration mismatch".to_string());
+            }
+        }
+        RewriteRule::DedupRaceJoin => {
+            let PlanNode::Race { children } = dag
+                .node(before)
+                .ok_or_else(|| "missing before race".to_string())?
+            else {
+                return Err("before node is not Race".to_string());
+            };
+            if children.len() < 2 {
+                return Err("dedup requires race with at least 2 children".to_string());
+            }
+            if policy.requires_binary_joins() && children.len() != 2 {
+                return Err("policy requires binary joins".to_string());
+            }
+
+            let mut join_children: Vec<Vec<PlanId>> = Vec::with_capacity(children.len());
+            for child in children {
+                let PlanNode::Join { children } = dag
+                    .node(*child)
+                    .ok_or_else(|| "missing join child".to_string())?
+                else {
+                    return Err("race child is not Join".to_string());
+                };
+                if policy.requires_binary_joins() && children.len() != 2 {
+                    return Err("policy requires binary joins".to_string());
+                }
+                join_children.push(children.clone());
+            }
+
+            let mut intersection: HashSet<PlanId> =
+                join_children[0].iter().copied().collect();
+            for nodes in join_children.iter().skip(1) {
+                let set: HashSet<PlanId> = nodes.iter().copied().collect();
+                intersection.retain(|id| set.contains(id));
+            }
+            if intersection.len() != 1 {
+                return Err("dedup requires exactly one shared child".to_string());
+            }
+            let shared = *intersection.iter().next().expect("len == 1");
+            if !policy.allows_shared_non_leaf() {
+                match dag.node(shared) {
+                    Some(PlanNode::Leaf { .. }) => {}
+                    _ => return Err("shared child must be Leaf in conservative policy".to_string()),
+                }
+            }
+
+            let PlanNode::Join {
+                children: after_children,
+            } = dag
+                .node(after)
+                .ok_or_else(|| "missing after join".to_string())?
+            else {
+                return Err("after node is not Join".to_string());
+            };
+            if after_children.len() != 2 {
+                return Err("after join must have exactly two children".to_string());
+            }
+            let race_candidate = if after_children[0] == shared {
+                after_children[1]
+            } else if after_children[1] == shared {
+                after_children[0]
+            } else {
+                return Err("after join missing shared child".to_string());
+            };
+
+            let actual_branches: Vec<PlanId> = match dag.node(race_candidate) {
+                Some(PlanNode::Race { children }) => children.clone(),
+                Some(_) => vec![race_candidate],
+                None => return Err("missing race candidate".to_string()),
+            };
+
+            let mut expected_signatures: Vec<Vec<usize>> =
+                Vec::with_capacity(join_children.len());
+            for nodes in &join_children {
+                let mut remaining: Vec<PlanId> =
+                    nodes.iter().copied().filter(|id| *id != shared).collect();
+                if remaining.is_empty() {
+                    return Err("dedup rewrite has empty branch".to_string());
+                }
+                if policy.requires_binary_joins() && remaining.len() != 1 {
+                    return Err("policy requires binary joins".to_string());
+                }
+                if remaining.len() == 1 {
+                    expected_signatures.push(vec![remaining[0].index()]);
+                } else {
+                    remaining.sort_by_key(|id| id.index());
+                    expected_signatures.push(remaining.iter().map(|id| id.index()).collect());
+                }
+            }
+
+            let mut actual_signatures: Vec<Vec<usize>> =
+                Vec::with_capacity(actual_branches.len());
+            for branch in actual_branches {
+                actual_signatures.push(branch_signature(dag, branch)?);
+            }
+            expected_signatures.sort();
+            actual_signatures.sort();
+            if expected_signatures != actual_signatures {
+                return Err("dedup race-join branches mismatch".to_string());
+            }
+        }
     }
 
     Ok(())
+}
+
+fn branch_signature(dag: &PlanDag, id: PlanId) -> Result<Vec<usize>, String> {
+    match dag.node(id) {
+        Some(PlanNode::Join { children }) => {
+            let mut sig: Vec<usize> = children.iter().map(|id| id.index()).collect();
+            sig.sort_unstable();
+            Ok(sig)
+        }
+        Some(_) => Ok(vec![id.index()]),
+        None => Err("missing branch node".to_string()),
+    }
 }
 
 fn same_children_unordered(a: &[PlanId], b: &[PlanId]) -> bool {

@@ -570,6 +570,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)]
     fn rule_witness_golden_fingerprints() {
         // Golden regression test: certificate fingerprints must be stable.
         // If these fail, either the hash function or the rewrite engine changed.
