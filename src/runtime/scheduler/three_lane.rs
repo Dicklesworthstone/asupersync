@@ -70,6 +70,37 @@ pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
 
+/// Coordination for waking workers.
+#[derive(Debug)]
+pub(crate) struct WorkerCoordinator {
+    parkers: Vec<Parker>,
+    next_wake: AtomicUsize,
+}
+
+impl WorkerCoordinator {
+    pub(crate) fn new(parkers: Vec<Parker>) -> Self {
+        Self {
+            parkers,
+            next_wake: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn wake_one(&self) {
+        let count = self.parkers.len();
+        if count == 0 {
+            return;
+        }
+        let idx = self.next_wake.fetch_add(1, Ordering::Relaxed);
+        self.parkers[idx % count].unpark();
+    }
+
+    pub(crate) fn wake_all(&self) {
+        for parker in &self.parkers {
+            parker.unpark();
+        }
+    }
+}
+
 thread_local! {
     static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = RefCell::new(None);
     /// Non-stealable queue for local (`!Send`) tasks.
@@ -161,10 +192,8 @@ pub struct ThreeLaneScheduler {
     workers: Vec<ThreeLaneWorker>,
     /// Shutdown signal.
     shutdown: Arc<AtomicBool>,
-    /// Parkers for waking idle workers.
-    parkers: Vec<Parker>,
-    /// Round-robin index for waking workers.
-    next_wake: AtomicUsize,
+    /// Coordination for waking workers.
+    coordinator: Arc<WorkerCoordinator>,
     /// Maximum consecutive cancel-lane dispatches before yielding.
     cancel_streak_limit: usize,
     /// Timer driver for processing timer wakeups.
@@ -221,6 +250,12 @@ impl ThreeLaneScheduler {
             local_schedulers.push(Arc::new(Mutex::new(PriorityScheduler::new())));
         }
 
+        // Create parkers first
+        for _ in 0..worker_count {
+            parkers.push(Parker::new());
+        }
+        let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone()));
+
         // Create fast queues (O(1) IntrusiveStack) for ready-lane fast path
         let fast_queues: Vec<LocalQueue> = (0..worker_count)
             .map(|_| LocalQueue::new(Arc::clone(state)))
@@ -228,8 +263,7 @@ impl ThreeLaneScheduler {
 
         // Create workers with references to all other workers' schedulers
         for id in 0..worker_count {
-            let parker = Parker::new();
-            parkers.push(parker.clone());
+            let parker = parkers[id].clone();
 
             // Stealers: all other workers' local schedulers (excluding self)
             let stealers: Vec<_> = local_schedulers
@@ -257,6 +291,7 @@ impl ThreeLaneScheduler {
                 global: Arc::clone(&global),
                 state: Arc::clone(state),
                 parker,
+                coordinator: Arc::clone(&coordinator),
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
                 timer_driver: timer_driver.clone(),
@@ -279,8 +314,7 @@ impl ThreeLaneScheduler {
             global,
             workers,
             shutdown,
-            parkers,
-            next_wake: AtomicUsize::new(0),
+            coordinator,
             timer_driver,
             state: Arc::clone(state),
             cancel_streak_limit,
@@ -471,20 +505,12 @@ impl ThreeLaneScheduler {
 
     /// Wakes one idle worker.
     fn wake_one(&self) {
-        let count = self.parkers.len();
-        if count == 0 {
-            return;
-        }
-
-        let idx = self.next_wake.fetch_add(1, Ordering::Relaxed);
-        self.parkers[idx % count].unpark();
+        self.coordinator.wake_one();
     }
 
     /// Wakes all idle workers.
     pub fn wake_all(&self) {
-        for parker in &self.parkers {
-            parker.unpark();
-        }
+        self.coordinator.wake_all();
     }
 
     /// Extract workers to run them in threads.
@@ -533,6 +559,8 @@ pub struct ThreeLaneWorker {
     pub state: Arc<Mutex<RuntimeState>>,
     /// Parking mechanism for idle workers.
     pub parker: Parker,
+    /// Coordination for waking other workers.
+    pub(crate) coordinator: Arc<WorkerCoordinator>,
     /// Deterministic RNG for stealing decisions.
     pub rng: DetRng,
     /// Shutdown signal.
@@ -1134,7 +1162,7 @@ impl ThreeLaneWorker {
                         priority,
                         wake_state: Arc::clone(&wake_state),
                         global: Arc::clone(&self.global),
-                        parker: self.parker.clone(),
+                        coordinator: Arc::clone(&self.coordinator),
                     }))
                 }
             }
@@ -1161,7 +1189,7 @@ impl ThreeLaneWorker {
                                 default_priority: priority,
                                 wake_state: Arc::clone(&wake_state),
                                 global: Arc::clone(&self.global),
-                                parker: self.parker.clone(),
+                                coordinator: Arc::clone(&self.coordinator),
                                 cx_inner: Arc::downgrade(inner),
                             }))
                         }
@@ -1206,7 +1234,7 @@ impl ThreeLaneWorker {
                             // woken globally.
                             // For now, consistent with Phase 1 Global Injector design for cross-task wakes.
                             self.global.inject_ready(waiter, waiter_priority);
-                            self.parker.unpark();
+                            self.coordinator.wake_one();
                         }
                     }
                 }
@@ -1266,6 +1294,7 @@ impl ThreeLaneWorker {
                                 .expect("local_ready lock poisoned")
                                 .push(task_id);
                         }
+                        self.parker.unpark();
                     } else {
                         // Schedule to global injector
                         if schedule_cancel {
@@ -1273,11 +1302,12 @@ impl ThreeLaneWorker {
                         } else {
                             self.global.inject_ready(task_id, priority);
                         }
+                        self.coordinator.wake_one();
                     }
-                    self.parker.unpark();
                 }
             }
         }
+
     }
 }
 
@@ -1286,14 +1316,14 @@ struct ThreeLaneWaker {
     priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalInjector>,
-    parker: Parker,
+    coordinator: Arc<WorkerCoordinator>,
 }
 
 impl ThreeLaneWaker {
     fn schedule(&self) {
         if self.wake_state.notify() {
             self.global.inject_ready(self.task_id, self.priority);
-            self.parker.unpark();
+            self.coordinator.wake_one();
         }
     }
 }
@@ -1349,7 +1379,7 @@ struct CancelLaneWaker {
     default_priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalInjector>,
-    parker: Parker,
+    coordinator: Arc<WorkerCoordinator>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -1381,7 +1411,7 @@ impl CancelLaneWaker {
         // Always inject to ensure priority promotion, even if already scheduled.
         // See `inject_cancel` for details.
         self.global.inject_cancel(self.task_id, priority);
-        self.parker.unpark();
+        self.coordinator.wake_one();
     }
 }
 
@@ -1916,12 +1946,13 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker.clone()]));
         let waker = Waker::from(Arc::new(CancelLaneWaker {
             task_id,
             default_priority: Budget::INFINITE.priority,
             wake_state,
             global: Arc::clone(&global),
-            parker,
+            coordinator,
             cx_inner: Arc::downgrade(&cx_inner),
         }));
 
@@ -2040,6 +2071,39 @@ mod tests {
             scheduler.global.has_cancel_work(),
             "Task should be promoted to cancel lane"
         );
+    }
+
+    #[test]
+    fn test_spawn_local_not_stolen() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+        let mut workers = scheduler.take_workers();
+        let local_ready_0 = Arc::clone(&workers[0].local_ready);
+        let mut worker1 = workers.pop().unwrap(); // worker 1 as mutable for try_steal
+
+        let task_id = TaskId::new_for_test(1, 0);
+
+        // Simulate worker 0 environment and schedule local task
+        {
+            let _guard = ScopedLocalReady::new(Arc::clone(&local_ready_0));
+            assert!(
+                schedule_local_task(task_id),
+                "schedule_local_task should succeed"
+            );
+        }
+
+        // Verify task is in worker 0's local_ready queue
+        {
+            let queue = local_ready_0.lock().unwrap();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0], task_id);
+        }
+
+        // Worker 1 tries to steal. It should NOT find the task because
+        // it only steals from PriorityScheduler and fast_queue, not local_ready.
+        let stolen = worker1.try_steal();
+        assert!(stolen.is_none(), "Local task should not be stolen");
     }
 
     #[test]
@@ -3064,7 +3128,6 @@ mod tests {
     fn fast_queue_no_loss_no_dup_two_workers_stealing() {
         // Tasks pushed to worker 0's fast_queue are consumed exactly
         // once across worker 0 (pop) and worker 1 (steal).
-        use std::collections::HashSet;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrd};
         use std::sync::{Arc as StdArc, Barrier};
         use std::thread;
@@ -3081,7 +3144,7 @@ mod tests {
         }
 
         let mut workers = scheduler.take_workers();
-        let mut w0 = workers.remove(0);
+        let w0 = workers.remove(0);
         let mut w1 = workers.remove(0);
 
         let counts: StdArc<Vec<AtomicUsize>> =
@@ -3454,5 +3517,66 @@ mod tests {
         let task = TaskId::new_for_test(1, 1);
         let scheduled = schedule_local_task(task);
         assert!(!scheduled, "should fail without TLS");
+    }
+
+    #[test]
+    fn execute_panics_on_local_waiter_without_waker() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+        let waiter_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (waiter_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            
+            // Mark waiter as local
+            if let Some(record) = guard.tasks.get_mut(waiter_id.arena_index()) {
+                record.mark_local();
+            }
+            waiter_id
+        };
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+                record.add_waiter(waiter_id);
+            }
+            // Ensure waiter is in a state that allows waking (e.g., Created or Running)
+            // Default is Created, which is fine.
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = scheduler.take_workers().into_iter().next().unwrap();
+
+        // execute() requires the task to have a stored future.
+        // create_task puts it in stored_futures.
+        
+        // We expect a panic because execute() runs without TLS, so schedule_local_task fails.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(task_id);
+        }));
+
+        assert!(result.is_err(), "execute should panic");
+        let err = result.unwrap_err();
+        let msg = if let Some(s) = err.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = err.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+
+        assert!(msg.contains("Cannot wake local waiter"), "Unexpected panic message: {}", msg);
     }
 }
