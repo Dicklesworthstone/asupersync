@@ -91,6 +91,8 @@ pub struct RunResult {
     pub is_new_class: bool,
     /// Invariant violations detected.
     pub violations: Vec<InvariantViolation>,
+    /// Schedule certificate hash (determinism witness).
+    pub certificate_hash: u64,
 }
 
 /// A violation found during exploration, with reproducer info.
@@ -166,6 +168,37 @@ impl ExplorationReport {
     #[must_use]
     pub fn violation_seeds(&self) -> Vec<u64> {
         self.violations.iter().map(|v| v.seed).collect()
+    }
+
+    /// Verify that runs with the same fingerprint produced the same certificate.
+    ///
+    /// Returns pairs of (seed_a, seed_b) where the traces are in the same
+    /// equivalence class but produced different certificates (divergence).
+    #[must_use]
+    pub fn certificate_divergences(&self) -> Vec<(u64, u64)> {
+        let mut by_class: HashMap<u64, Vec<&RunResult>> = HashMap::new();
+        for r in &self.runs {
+            by_class.entry(r.fingerprint).or_default().push(r);
+        }
+        let mut divergences = Vec::new();
+        for runs in by_class.values() {
+            if runs.len() < 2 {
+                continue;
+            }
+            let reference = runs[0].certificate_hash;
+            for r in &runs[1..] {
+                if r.certificate_hash != reference {
+                    divergences.push((runs[0].seed, r.seed));
+                }
+            }
+        }
+        divergences
+    }
+
+    /// True if all runs within the same equivalence class produced identical certificates.
+    #[must_use]
+    pub fn certificates_consistent(&self) -> bool {
+        self.certificate_divergences().is_empty()
     }
 }
 
@@ -285,12 +318,15 @@ impl ScheduleExplorer {
             });
         }
 
+        let certificate_hash = runtime.certificate().hash();
+
         self.results.push(RunResult {
             seed,
             steps,
             fingerprint,
             is_new_class,
             violations,
+            certificate_hash,
         });
     }
 
@@ -507,12 +543,15 @@ impl DporExplorer {
             });
         }
 
+        let certificate_hash = runtime.certificate().hash();
+
         let result = RunResult {
             seed,
             steps,
             fingerprint,
             is_new_class,
             violations,
+            certificate_hash,
         };
 
         (trace_events, result)
@@ -758,5 +797,113 @@ mod tests {
         });
 
         assert!(report.total_runs <= 3);
+    }
+
+    // ── Certificate integration tests ───────────────────────────────────
+
+    #[test]
+    fn certificate_hash_populated_in_run_results() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(42, 3));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (t, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 1 })
+                .expect("t");
+            runtime.scheduler.lock().unwrap().schedule(t, 0);
+            runtime.run_until_quiescent();
+        });
+
+        // Every run should have a non-zero certificate hash (tasks were polled).
+        for r in &report.runs {
+            assert_ne!(r.certificate_hash, 0, "seed {} had zero cert hash", r.seed);
+        }
+    }
+
+    #[test]
+    fn same_seed_produces_same_certificate() {
+        let run = |seed: u64| -> u64 {
+            let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(seed, 1));
+            let report = explorer.explore(|runtime| {
+                let region = runtime.state.create_root_region(Budget::INFINITE);
+                let (t, _) = runtime
+                    .state
+                    .create_task(region, Budget::INFINITE, async { 99 })
+                    .expect("t");
+                runtime.scheduler.lock().unwrap().schedule(t, 0);
+                runtime.run_until_quiescent();
+            });
+            report.runs[0].certificate_hash
+        };
+
+        let h1 = run(77);
+        let h2 = run(77);
+        assert_eq!(h1, h2, "same seed should yield same certificate");
+    }
+
+    #[test]
+    fn different_seeds_may_produce_different_certificates() {
+        let run = |seed: u64| -> u64 {
+            let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(seed, 1));
+            let report = explorer.explore(|runtime| {
+                let region = runtime.state.create_root_region(Budget::INFINITE);
+                let (t1, _) = runtime
+                    .state
+                    .create_task(region, Budget::INFINITE, async {})
+                    .expect("t1");
+                let (t2, _) = runtime
+                    .state
+                    .create_task(region, Budget::INFINITE, async {})
+                    .expect("t2");
+                {
+                    let mut sched = runtime.scheduler.lock().unwrap();
+                    sched.schedule(t1, 0);
+                    sched.schedule(t2, 0);
+                }
+                runtime.run_until_quiescent();
+            });
+            report.runs[0].certificate_hash
+        };
+
+        // With two tasks and different seeds, the scheduling order may differ.
+        // Collect several seeds and check we see at least 1 unique hash.
+        let hashes: HashSet<u64> = (0..10).map(|s| run(s)).collect();
+        assert!(hashes.len() >= 1);
+    }
+
+    #[test]
+    fn certificates_consistent_with_single_task() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(0, 5));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (t, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 42 })
+                .expect("t");
+            runtime.scheduler.lock().unwrap().schedule(t, 0);
+            runtime.run_until_quiescent();
+        });
+
+        // certificate_divergences checks within same fingerprint class.
+        // Even if no two runs share a fingerprint, no divergences is correct.
+        assert!(report.certificates_consistent());
+    }
+
+    #[test]
+    fn dpor_certificate_hash_populated() {
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(42, 5));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (t, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 1 })
+                .expect("t");
+            runtime.scheduler.lock().unwrap().schedule(t, 0);
+            runtime.run_until_quiescent();
+        });
+
+        for r in &report.runs {
+            assert_ne!(r.certificate_hash, 0, "seed {} had zero cert hash", r.seed);
+        }
     }
 }

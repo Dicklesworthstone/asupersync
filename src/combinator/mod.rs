@@ -81,7 +81,7 @@ pub use retry::{
     AlwaysRetry, NeverRetry, RetryError, RetryFailure, RetryIf, RetryPolicy, RetryPredicate,
     RetryResult, RetryState,
 };
-pub use select::{Either, Select};
+pub use select::{Either, Select, SelectAll, SelectAllDrain, SelectAllDrainResult};
 pub use timeout::{
     effective_deadline, make_timed_result, TimedError, TimedResult, Timeout, TimeoutConfig,
     TimeoutError,

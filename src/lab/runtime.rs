@@ -15,6 +15,7 @@ use crate::runtime::deadline_monitor::{
     default_warning_handler, DeadlineMonitor, DeadlineWarning, MonitorConfig,
 };
 use crate::runtime::reactor::LabReactor;
+use crate::runtime::scheduler::{DispatchLane, ScheduleCertificate};
 use crate::runtime::RuntimeState;
 use crate::time::VirtualClock;
 use crate::trace::event::TraceEventKind;
@@ -67,6 +68,8 @@ pub struct LabRuntime {
     deadline_monitor: Option<DeadlineMonitor>,
     /// Oracle suite for invariant verification.
     pub oracles: OracleSuite,
+    /// Schedule certificate for determinism verification.
+    certificate: ScheduleCertificate,
 }
 
 impl LabRuntime {
@@ -118,6 +121,7 @@ impl LabRuntime {
             replay_recorder,
             deadline_monitor: None,
             oracles: OracleSuite::new(),
+            certificate: ScheduleCertificate::new(),
         }
     }
 
@@ -167,6 +171,12 @@ impl LabRuntime {
     #[must_use]
     pub fn chaos_stats(&self) -> &ChaosStats {
         &self.chaos_stats
+    }
+
+    /// Returns the schedule certificate for determinism verification.
+    #[must_use]
+    pub fn certificate(&self) -> &ScheduleCertificate {
+        &self.certificate
     }
 
     /// Returns true if replay recording is enabled.
@@ -290,18 +300,22 @@ impl LabRuntime {
         // 1. Choose a worker and pop a task (deterministic multi-worker model)
         let worker_count = self.config.worker_count.max(1);
         let worker_hint = (rng_value as usize) % worker_count;
-        let task_id = {
+        let (task_id, dispatch_lane) = {
             let mut sched = self.scheduler.lock().unwrap();
-            sched
-                .pop_for_worker(worker_hint, rng_value)
-                .or_else(|| sched.steal_for_worker(worker_hint, rng_value.rotate_left(17)))
-        };
-        let Some(task_id) = task_id else {
-            self.check_deadline_monitor();
-            return;
+            if let Some(tid) = sched.pop_for_worker(worker_hint, rng_value) {
+                (tid, DispatchLane::Ready)
+            } else if let Some(tid) = sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
+            {
+                (tid, DispatchLane::Stolen)
+            } else {
+                drop(sched);
+                self.check_deadline_monitor();
+                return;
+            }
         };
 
-        // Record task scheduling
+        // Record task scheduling in certificate and replay recorder
+        self.certificate.record(task_id, dispatch_lane, self.steps);
         self.replay_recorder
             .record_task_scheduled(task_id, self.steps);
 

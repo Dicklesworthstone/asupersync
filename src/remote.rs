@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn spawn_remote_without_cap_fails() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         assert!(!cx.has_remote());
 
         let result = spawn_remote::<Vec<u8>>(
@@ -1745,7 +1745,7 @@ mod tests {
 
     #[test]
     fn spawn_remote_with_cap_succeeds() {
-        let cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
         assert!(cx.has_remote());
 
         let result = spawn_remote::<Vec<u8>>(
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn remote_handle_debug() {
-        let cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
         let handle = spawn_remote::<Vec<u8>>(
             &cx,
             NodeId::new("n1"),
@@ -1783,7 +1783,7 @@ mod tests {
 
     #[test]
     fn remote_handle_not_finished_initially() {
-        let cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
         let handle = spawn_remote::<u64>(
             &cx,
             NodeId::new("n1"),
@@ -1801,7 +1801,7 @@ mod tests {
 
     #[test]
     fn remote_handle_try_join_pending() {
-        let cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
         let handle = spawn_remote::<u64>(
             &cx,
             NodeId::new("n1"),
@@ -1819,7 +1819,7 @@ mod tests {
 
     #[test]
     fn remote_handle_abort_no_panic() {
-        let cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
         let handle = spawn_remote::<u64>(
             &cx,
             NodeId::new("n1"),
@@ -1835,7 +1835,7 @@ mod tests {
     #[test]
     fn remote_cap_custom_lease_propagates() {
         let cap = RemoteCap::new().with_default_lease(Duration::from_secs(120));
-        let cx = Cx::for_testing_with_remote(cap);
+        let cx: Cx = Cx::for_testing_with_remote(cap);
 
         let handle = spawn_remote::<u64>(
             &cx,
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[test]
     fn idempotency_key_generate() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let k1 = IdempotencyKey::generate(&cx);
         let k2 = IdempotencyKey::generate(&cx);
         // Keys should be unique (with overwhelming probability)
@@ -1873,7 +1873,7 @@ mod tests {
 
     #[test]
     fn spawn_request_construction() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let req = SpawnRequest {
             remote_task_id: RemoteTaskId::next(),
             computation: ComputationName::new("encode_block"),
@@ -1998,7 +1998,7 @@ mod tests {
     #[test]
     fn remote_message_task_id_dispatch() {
         let rtid = RemoteTaskId::next();
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
 
         let spawn_msg = RemoteMessage::SpawnRequest(SpawnRequest {
             remote_task_id: rtid,

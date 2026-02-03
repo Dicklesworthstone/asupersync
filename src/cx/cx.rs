@@ -1959,27 +1959,6 @@ impl Cx<cap::All> {
         cx.remote_cap = Some(Arc::new(cap));
         cx
     }
-
-    /// Returns the current task context, if one is set.
-    ///
-    /// This is set by the runtime while polling a task.
-    #[must_use]
-    pub fn current() -> Option<Self> {
-        CURRENT_CX.with(|slot| slot.borrow().clone())
-    }
-
-    /// Sets the current task context for the duration of the guard.
-    #[must_use]
-    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
-    pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
-        let prev = CURRENT_CX.with(|slot| {
-            let mut guard = slot.borrow_mut();
-            let prev = guard.take();
-            *guard = cx;
-            prev
-        });
-        CurrentCxGuard { prev }
-    }
 }
 
 /// RAII guard returned by [`Cx::enter_span`].
@@ -2038,7 +2017,7 @@ mod tests {
 
     #[test]
     fn io_available_with_for_testing_with_io() {
-        let cx = Cx::for_testing_with_io();
+        let cx: Cx = Cx::for_testing_with_io();
         assert!(cx.has_io());
         let io = cx.io().expect("should have io cap");
         assert!(!io.is_real_io());

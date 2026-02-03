@@ -1121,7 +1121,7 @@ mod tests {
 
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
 
         let result = scope.spawn_actor(&mut state, &cx, Counter::new(), 32);
@@ -1156,7 +1156,7 @@ mod tests {
 
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
 
         let (handle, stored) = scope
@@ -1247,7 +1247,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         let (on_stop_count, started, stopped) = observable_state();
@@ -1291,7 +1291,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         let (on_stop_count, started, stopped) = observable_state();
@@ -1334,7 +1334,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         let (on_stop_count, started, stopped) = observable_state();
@@ -1411,7 +1411,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         let final_count = Arc::new(AtomicU64::new(u64::MAX));
@@ -1483,7 +1483,7 @@ mod tests {
             let config = crate::lab::LabConfig::new(seed);
             let mut runtime = crate::lab::LabRuntime::new(config);
             let region = runtime.state.create_root_region(Budget::INFINITE);
-            let cx = Cx::for_testing();
+            let cx: Cx = Cx::for_testing();
             let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
             let (on_stop_count, started, stopped) = observable_state();
@@ -1529,7 +1529,7 @@ mod tests {
 
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
 
         let (handle, stored) = scope
@@ -1553,7 +1553,7 @@ mod tests {
     fn actor_context_child_management() {
         init_test("actor_context_child_management");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (sender, _receiver) = mpsc::channel::<u64>(32);
         let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
         let actor_ref = ActorRef {
@@ -1594,7 +1594,7 @@ mod tests {
     fn actor_context_stopping() {
         init_test("actor_context_stopping");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (sender, _receiver) = mpsc::channel::<u64>(32);
         let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
         let actor_ref = ActorRef {
@@ -1622,7 +1622,7 @@ mod tests {
     fn actor_context_parent_none() {
         init_test("actor_context_parent_none");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (sender, _receiver) = mpsc::channel::<u64>(32);
         let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
         let actor_ref = ActorRef {
@@ -1644,7 +1644,7 @@ mod tests {
     fn actor_context_cx_delegation() {
         init_test("actor_context_cx_delegation");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (sender, _receiver) = mpsc::channel::<u64>(32);
         let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
         let actor_ref = ActorRef {
@@ -1669,7 +1669,7 @@ mod tests {
     fn actor_context_debug() {
         init_test("actor_context_debug");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (sender, _receiver) = mpsc::channel::<u64>(32);
         let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
         let actor_ref = ActorRef {

@@ -813,7 +813,7 @@ mod tests {
     fn test_receiver_stream() {
         init_test("test_receiver_stream");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (tx, rx) = mpsc::channel(10);
         let mut stream = ReceiverStream::new(cx, rx);
 
@@ -852,7 +852,7 @@ mod tests {
     fn test_watch_stream() {
         init_test("test_watch_stream");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (tx, rx) = watch::channel(0);
         let mut stream = WatchStream::new(cx, rx);
         let waker = noop_waker();
@@ -883,7 +883,7 @@ mod tests {
     fn test_broadcast_stream() {
         init_test("test_broadcast_stream");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (tx, rx) = broadcast::channel(10);
         let mut stream = BroadcastStream::new(cx.clone(), rx);
         let waker = noop_waker();
@@ -913,7 +913,7 @@ mod tests {
     fn test_forward() {
         init_test("test_forward");
 
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let (tx_out, rx_out) = mpsc::channel(10);
         let input = iter(vec![1, 2, 3]);
 

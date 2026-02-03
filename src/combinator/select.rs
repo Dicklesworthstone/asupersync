@@ -1,4 +1,25 @@
 //! Select combinator: wait for the first of two futures to complete.
+//!
+//! # Loser-Drain Responsibility
+//!
+//! `Select` and `SelectAll` are low-level primitives that pick the winner
+//! and drop losers when the future is consumed. **Dropping a loser is NOT
+//! the same as draining it.** In asupersync, the "losers are drained"
+//! invariant requires that losers be explicitly cancelled and awaited to
+//! terminal state before the enclosing region can close.
+//!
+//! Callers MUST drain losers after select completes. The canonical pattern:
+//!
+//! ```text
+//! match Select::new(f1, f2).await {
+//!     Either::Left(val)  => { cancel(loser); await(loser); val }
+//!     Either::Right(val) => { cancel(loser); await(loser); val }
+//! }
+//! ```
+//!
+//! For task handles, use [`Scope::race`](crate::cx::Scope::race) which
+//! handles loser-drain automatically. Use raw `Select` only when you
+//! manage drain yourself.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,6 +47,13 @@ impl<A, B> Either<A, B> {
 }
 
 /// Future for the `select` combinator.
+///
+/// # Loser-Drain Warning
+///
+/// When `Select` resolves, the losing future is dropped (not drained).
+/// If the loser holds obligations or resources, the caller MUST cancel
+/// and drain it. See [`Scope::race`](crate::cx::Scope::race) for a
+/// higher-level API that handles draining automatically.
 pub struct Select<A, B> {
     a: A,
     b: B,
@@ -57,6 +85,11 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
 }
 
 /// Future for the `select_all` combinator.
+///
+/// # Loser-Drain Warning
+///
+/// When `SelectAll` completes, losers are dropped (not drained). Callers
+/// MUST drain losers themselves. See module-level docs.
 pub struct SelectAll<F> {
     futures: Vec<F>,
 }
@@ -92,6 +125,66 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
 
         if let Some(result) = first_ready {
             return Poll::Ready(result);
+        }
+
+        Poll::Pending
+    }
+}
+
+/// Drain-aware select_all: returns the winner value, winner index, and
+/// remaining (loser) futures so the caller can cancel and drain them.
+///
+/// This is the preferred variant when the "losers are drained" invariant
+/// must be enforced, as it makes it impossible to forget the losers.
+pub struct SelectAllDrain<F> {
+    futures: Option<Vec<F>>,
+}
+
+impl<F> SelectAllDrain<F> {
+    /// Creates a new drain-aware select_all combinator.
+    #[must_use]
+    pub fn new(futures: Vec<F>) -> Self {
+        Self {
+            futures: Some(futures),
+        }
+    }
+}
+
+/// Result of [`SelectAllDrain`]: winner value, winner index, and remaining futures.
+pub struct SelectAllDrainResult<T, F> {
+    /// The winning future's output.
+    pub value: T,
+    /// Index of the winning future in the original vec.
+    pub winner_index: usize,
+    /// Remaining (loser) futures that the caller MUST cancel and drain.
+    pub losers: Vec<F>,
+}
+
+impl<F: Future + Unpin> Future for SelectAllDrain<F> {
+    type Output = SelectAllDrainResult<F::Output, F>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let futures = self.futures.as_mut().expect("polled after completion");
+        let mut first_ready: Option<(F::Output, usize)> = None;
+
+        // Poll ALL futures to ensure initialization (same as SelectAll).
+        for (i, f) in futures.iter_mut().enumerate() {
+            if let Poll::Ready(v) = Pin::new(f).poll(cx) {
+                if first_ready.is_none() {
+                    first_ready = Some((v, i));
+                }
+            }
+        }
+
+        if let Some((value, winner_index)) = first_ready {
+            let mut all = self.futures.take().expect("polled after completion");
+            // Remove the winner; remaining are losers.
+            all.swap_remove(winner_index);
+            return Poll::Ready(SelectAllDrainResult {
+                value,
+                winner_index,
+                losers: all,
+            });
         }
 
         Poll::Pending
@@ -415,5 +508,179 @@ mod tests {
 
         let result = poll_once(&mut sel);
         assert!(matches!(result, Poll::Ready((1, 0))));
+    }
+
+    // ========== SelectAllDrain tests ==========
+
+    #[test]
+    fn test_select_all_drain_returns_losers() {
+        let futures = vec![
+            std::future::ready(10),
+            std::future::ready(20),
+            std::future::ready(30),
+        ];
+        let mut sel = SelectAllDrain::new(futures);
+
+        let result = poll_once(&mut sel);
+        match result {
+            Poll::Ready(r) => {
+                assert_eq!(r.value, 10);
+                assert_eq!(r.winner_index, 0);
+                // 2 losers remain (indices 1 and 2 originally)
+                assert_eq!(r.losers.len(), 2);
+            }
+            Poll::Pending => unreachable!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn test_select_all_drain_single_future() {
+        let futures = vec![std::future::ready(42)];
+        let mut sel = SelectAllDrain::new(futures);
+
+        let result = poll_once(&mut sel);
+        match result {
+            Poll::Ready(r) => {
+                assert_eq!(r.value, 42);
+                assert_eq!(r.winner_index, 0);
+                assert!(r.losers.is_empty());
+            }
+            Poll::Pending => unreachable!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn test_select_all_drain_middle_wins() {
+        struct MaybeReady(Option<i32>);
+        impl Future for MaybeReady {
+            type Output = i32;
+            fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<i32> {
+                self.0.take().map_or(Poll::Pending, Poll::Ready)
+            }
+        }
+
+        let futures = vec![MaybeReady(None), MaybeReady(Some(42)), MaybeReady(None)];
+        let mut sel = SelectAllDrain::new(futures);
+
+        let result = poll_once(&mut sel);
+        match result {
+            Poll::Ready(r) => {
+                assert_eq!(r.value, 42);
+                assert_eq!(r.winner_index, 1);
+                assert_eq!(r.losers.len(), 2);
+            }
+            Poll::Pending => unreachable!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn test_select_all_drain_pending_returns_pending() {
+        let futures: Vec<std::future::Pending<i32>> =
+            vec![std::future::pending(), std::future::pending()];
+        let mut sel = SelectAllDrain::new(futures);
+
+        let result = poll_once(&mut sel);
+        assert!(result.is_pending());
+    }
+
+    // ========== Loser-drain invariant tests ==========
+
+    #[test]
+    fn test_select_loser_is_not_drained_only_dropped() {
+        // This test documents the current behavior: Select drops losers
+        // but does NOT drain them. Callers must drain manually.
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        struct DrainTracker {
+            polled_count: Arc<AtomicU32>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl Drop for DrainTracker {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        impl Future for DrainTracker {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                self.polled_count.fetch_add(1, Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+
+        let polled = Arc::new(AtomicU32::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        {
+            let tracker = DrainTracker {
+                polled_count: Arc::clone(&polled),
+                dropped: Arc::clone(&dropped),
+            };
+            let mut sel = Select::new(std::future::ready(42), tracker);
+            let result = poll_once(&mut sel);
+            assert!(matches!(result, Poll::Ready(Either::Left(42))));
+        }
+
+        // Loser was dropped (cleanup via Drop) but NOT drained (not polled to completion)
+        assert!(dropped.load(Ordering::SeqCst), "loser must be dropped");
+        // Loser was polled exactly once (during Select::poll) but never reached Ready
+        assert_eq!(
+            polled.load(Ordering::SeqCst),
+            0,
+            "loser should not be polled when winner is left-biased and immediately ready"
+        );
+    }
+
+    #[test]
+    fn test_select_all_drain_losers_are_available_for_draining() {
+        // Verify that SelectAllDrain provides losers that can be further polled
+        // (i.e., drained) by the caller.
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountFuture {
+            count: Arc<AtomicU32>,
+            ready_on: u32,
+        }
+        impl Future for CountFuture {
+            type Output = u32;
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<u32> {
+                let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+                if n >= self.ready_on {
+                    Poll::Ready(n)
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        let counter_a = Arc::new(AtomicU32::new(0));
+        let counter_b = Arc::new(AtomicU32::new(0));
+
+        let futures = vec![
+            CountFuture {
+                count: Arc::clone(&counter_a),
+                ready_on: 1,
+            }, // Ready on first poll
+            CountFuture {
+                count: Arc::clone(&counter_b),
+                ready_on: 3,
+            }, // Needs 3 polls
+        ];
+        let mut sel = SelectAllDrain::new(futures);
+
+        let result = poll_once(&mut sel);
+        match result {
+            Poll::Ready(r) => {
+                assert_eq!(r.value, 1);
+                assert_eq!(r.losers.len(), 1);
+
+                // Drain the loser by polling it to completion
+                let mut loser = r.losers.into_iter().next().unwrap();
+                assert!(poll_once(&mut loser).is_pending()); // 2nd poll
+                let final_result = poll_once(&mut loser); // 3rd poll
+                assert!(matches!(final_result, Poll::Ready(3)));
+            }
+            Poll::Pending => unreachable!("expected Ready"),
+        }
     }
 }

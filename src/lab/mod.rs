@@ -50,6 +50,7 @@
 pub mod chaos;
 pub mod config;
 pub mod explorer;
+pub mod fuzz;
 pub mod http;
 pub mod injection;
 pub mod instrumented_future;
@@ -68,6 +69,7 @@ pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
     RunResult, ScheduleExplorer, ViolationReport,
 };
+pub use fuzz::{fuzz_quick, FuzzConfig, FuzzFinding, FuzzHarness, FuzzReport};
 pub use http::{
     RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer,
 };

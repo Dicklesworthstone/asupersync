@@ -1248,6 +1248,11 @@ where
 }
 
 /// Future for epoch-aware select.
+///
+/// Note: the losing future is dropped (not drained) when the winner
+/// resolves. This is safe because `EpochScoped` wrappers do not hold
+/// obligations. If the inner futures hold obligations, callers should
+/// use [`Scope::race`](crate::cx::Scope::race) instead.
 pub struct EpochSelect<A, B, TS: TimeSource, ES: EpochSource> {
     inner: Select<EpochScoped<A, TS, ES>, EpochScoped<B, TS, ES>>,
 }

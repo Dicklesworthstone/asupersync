@@ -548,7 +548,7 @@ mod tests {
         let (client_id, _) = runtime
             .state
             .create_task(region, crate::types::Budget::INFINITE, async move {
-                let cx = crate::cx::Cx::for_testing();
+                let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 let ep = client_ep.send(&cx, 42).await.expect("client send");
                 let (response, ep) = ep.recv(&cx).await.expect("client recv");
                 cr.store(response, Ordering::SeqCst);
@@ -560,7 +560,7 @@ mod tests {
         let (server_id, _) = runtime
             .state
             .create_task(region, crate::types::Budget::INFINITE, async move {
-                let cx = crate::cx::Cx::for_testing();
+                let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 let (request, ep) = server_ep.recv(&cx).await.expect("server recv");
                 sr.store(request, Ordering::SeqCst);
                 let ep = ep.send(&cx, request * 2).await.expect("server send");
@@ -610,7 +610,7 @@ mod tests {
         let (client_id, _) = runtime
             .state
             .create_task(region, crate::types::Budget::INFINITE, async move {
-                let cx = crate::cx::Cx::for_testing();
+                let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 let ep = client_ep.choose_left(&cx).await.expect("choose left");
                 let ep = ep.send(&cx, 99).await.expect("send on left");
                 ep.close();
@@ -621,7 +621,7 @@ mod tests {
         let (server_id, _) = runtime
             .state
             .create_task(region, crate::types::Budget::INFINITE, async move {
-                let cx = crate::cx::Cx::for_testing();
+                let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 match server_ep.offer(&cx).await.expect("offer") {
                     Offered::Left(ep) => {
                         lt.store(true, Ordering::SeqCst);
@@ -667,7 +667,7 @@ mod tests {
             let (cid, _) = runtime
                 .state
                 .create_task(region, crate::types::Budget::INFINITE, async move {
-                    let cx = crate::cx::Cx::for_testing();
+                    let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                     let ep = client_ep.send(&cx, 7).await.unwrap();
                     let (val, ep) = ep.recv(&cx).await.unwrap();
                     r.store(val, Ordering::SeqCst);
@@ -678,7 +678,7 @@ mod tests {
             let (sid, _) = runtime
                 .state
                 .create_task(region, crate::types::Budget::INFINITE, async move {
-                    let cx = crate::cx::Cx::for_testing();
+                    let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                     let (v, ep) = server_ep.recv(&cx).await.unwrap();
                     let ep = ep.send(&cx, v + 100).await.unwrap();
                     ep.close();

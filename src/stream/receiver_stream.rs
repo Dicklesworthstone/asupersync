@@ -99,8 +99,8 @@ mod tests {
     #[test]
     fn receiver_stream_reads_messages() {
         init_test("receiver_stream_reads_messages");
-        let _cx_send = Cx::for_testing();
-        let cx_recv = Cx::for_testing();
+        let _cx_send: Cx = Cx::for_testing();
+        let cx_recv: Cx = Cx::for_testing();
         let (tx, rx) = mpsc::channel(4);
 
         tx.try_send(1).expect("send 1");
