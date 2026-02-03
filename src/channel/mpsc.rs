@@ -978,6 +978,46 @@ mod tests {
     }
 
     #[test]
+    fn recv_cancelled_does_not_consume_message() {
+        init_test("recv_cancelled_does_not_consume_message");
+        let (tx, rx) = channel::<i32>(1);
+        let cx = test_cx();
+
+        block_on(tx.send(&cx, 9)).expect("send");
+
+        cx.set_cancel_requested(true);
+        let cancelled = block_on(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(cancelled, Err(RecvError::Cancelled)),
+            "recv cancelled",
+            "Err(Cancelled)",
+            format!("{:?}", cancelled)
+        );
+
+        cx.set_cancel_requested(false);
+        let value = block_on(rx.recv(&cx)).expect("recv");
+        crate::assert_with_log!(value == 9, "recv value after cancel", 9, value);
+        crate::test_complete!("recv_cancelled_does_not_consume_message");
+    }
+
+    #[test]
+    fn dropped_permit_releases_capacity() {
+        init_test("dropped_permit_releases_capacity");
+        let (tx, rx) = channel::<i32>(1);
+        let cx = test_cx();
+
+        let permit = block_on(tx.reserve(&cx)).expect("reserve");
+        drop(permit);
+
+        let permit2 = tx.try_reserve().expect("try_reserve after drop");
+        permit2.send(5);
+
+        let value = block_on(rx.recv(&cx)).expect("recv");
+        crate::assert_with_log!(value == 5, "recv value", 5, value);
+        crate::test_complete!("dropped_permit_releases_capacity");
+    }
+
+    #[test]
     fn send_after_receiver_drop_returns_disconnected() {
         init_test("send_after_receiver_drop_returns_disconnected");
         let (tx, rx) = channel::<i32>(1);

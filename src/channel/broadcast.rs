@@ -692,4 +692,116 @@ mod tests {
 
         crate::test_complete!("recv_cancelled_does_not_advance_cursor");
     }
+
+    #[test]
+    fn broadcast_cloned_sender_both_deliver() {
+        init_test("broadcast_cloned_sender_both_deliver");
+        let cx = test_cx();
+        let (tx1, mut rx) = channel(10);
+        let tx2 = tx1.clone();
+
+        tx1.send(&cx, 1).unwrap();
+        tx2.send(&cx, 2).unwrap();
+
+        let first = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(first == 1, "first", 1, first);
+        let second = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(second == 2, "second", 2, second);
+        crate::test_complete!("broadcast_cloned_sender_both_deliver");
+    }
+
+    #[test]
+    fn broadcast_heavy_lag_overwrite() {
+        init_test("broadcast_heavy_lag_overwrite");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(4);
+
+        // Send 10 messages into capacity-4 buffer, overwriting 6.
+        for i in 0..10 {
+            tx.send(&cx, i).unwrap();
+        }
+
+        // First recv should detect lag.
+        let result = block_on(rx.recv(&cx));
+        match result {
+            Err(RecvError::Lagged(n)) => {
+                crate::assert_with_log!(n == 6, "lagged 6", 6u64, n);
+            }
+            other => unreachable!("expected lagged, got {other:?}"),
+        }
+
+        // Now should receive 6, 7, 8, 9.
+        for expected in 6..10 {
+            let got = block_on(rx.recv(&cx)).unwrap();
+            crate::assert_with_log!(got == expected, "post-lag msg", expected, got);
+        }
+
+        crate::test_complete!("broadcast_heavy_lag_overwrite");
+    }
+
+    #[test]
+    fn broadcast_clone_receiver_shares_position() {
+        init_test("broadcast_clone_receiver_shares_position");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel(10);
+
+        tx.send(&cx, 10).unwrap();
+        tx.send(&cx, 20).unwrap();
+
+        // Advance rx1 past the first message.
+        let first = block_on(rx1.recv(&cx)).unwrap();
+        crate::assert_with_log!(first == 10, "rx1 first", 10, first);
+
+        // Clone after advancing — rx2 should start at the same cursor.
+        let mut rx2 = rx1.clone();
+
+        let rx1_second = block_on(rx1.recv(&cx)).unwrap();
+        crate::assert_with_log!(rx1_second == 20, "rx1 second", 20, rx1_second);
+
+        let rx2_second = block_on(rx2.recv(&cx)).unwrap();
+        crate::assert_with_log!(rx2_second == 20, "rx2 second", 20, rx2_second);
+
+        crate::test_complete!("broadcast_clone_receiver_shares_position");
+    }
+
+    #[test]
+    fn broadcast_reserve_then_send() {
+        init_test("broadcast_reserve_then_send");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(10);
+
+        let permit = tx.reserve(&cx).expect("reserve failed");
+        let count = permit.send(42);
+        crate::assert_with_log!(count == 1, "receiver count", 1usize, count);
+
+        let got = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 42, "received", 42, got);
+        crate::test_complete!("broadcast_reserve_then_send");
+    }
+
+    #[test]
+    fn broadcast_drop_all_senders_closes() {
+        init_test("broadcast_drop_all_senders_closes");
+        let cx = test_cx();
+        let (tx1, mut rx) = channel::<i32>(10);
+        let tx2 = tx1.clone();
+
+        // Drop first sender — channel still open (tx2 alive).
+        drop(tx1);
+
+        tx2.send(&cx, 5).unwrap();
+        let got = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 5, "still open", 5, got);
+
+        // Drop last sender — channel closed.
+        drop(tx2);
+        let result = block_on(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(result, Err(RecvError::Closed)),
+            "closed after all senders drop",
+            true,
+            true
+        );
+        crate::test_complete!("broadcast_drop_all_senders_closes");
+    }
 }
