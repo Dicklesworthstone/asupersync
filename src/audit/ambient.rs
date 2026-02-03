@@ -151,15 +151,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         exempt: false,
         exemption_reason: None,
     },
-    AmbientFinding {
-        file: "net/websocket/handshake.rs",
-        line: 61,
-        category: AmbientCategory::Entropy,
-        severity: Severity::Critical,
-        description: "getrandom::fill() for WebSocket client key",
-        exempt: false,
-        exemption_reason: None,
-    },
+    // NOTE: net/websocket/handshake.rs was fixed — now uses EntropySource capability.
     AmbientFinding {
         file: "server/connection.rs",
         line: 230,
@@ -214,6 +206,7 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"SystemTime::now\(\)", AmbientCategory::Time),
     (r"std::thread::spawn", AmbientCategory::Spawn),
     (r"thread::spawn", AmbientCategory::Spawn),
+    (r"thread::Builder", AmbientCategory::Spawn),
     (r"getrandom::", AmbientCategory::Entropy),
     (r"rand::thread_rng", AmbientCategory::Entropy),
     (r"std::net::TcpListener", AmbientCategory::Io),
@@ -237,10 +230,11 @@ mod tests {
     #[test]
     fn critical_findings_exist() {
         let critical = count_by_severity(Severity::Critical);
-        // We know about 3 critical findings (HTTP spawn, 2 WebSocket entropy).
+        // Critical: HTTP listener spawn, HTTP stream spawn, connection spawn,
+        // WebSocket frame entropy.
         assert!(
             critical >= 3,
-            "Expected at least 3 critical findings, got {critical}"
+            "Expected at least 3 non-exempt critical findings, got {critical}"
         );
     }
 
@@ -279,5 +273,347 @@ mod tests {
     fn severity_ordering() {
         assert!(Severity::Info < Severity::Warning);
         assert!(Severity::Warning < Severity::Critical);
+    }
+
+    // ── Source-tree scanning infrastructure ─────────────────────────────
+    //
+    // The tests below scan actual source files to enforce the
+    // no-ambient-authority invariant. They ensure:
+    //
+    // 1. "Pristine" modules (cx/, obligation/, plan/) have ZERO ambient
+    //    authority in non-test code.
+    // 2. Each KNOWN_FINDINGS entry corresponds to real code (no stale entries).
+    // 3. Exempt findings are only in recognized provider paths.
+    // 4. The total count of non-exempt violations doesn't grow silently.
+    //
+    // **Escape hatches for tests:**
+    // - Code inside `#[cfg(test)] mod tests { ... }` is excluded from scanning.
+    // - Files listed in EXEMPT_PREFIXES are skipped entirely (these ARE the
+    //   capability providers).
+    // - To add a NEW ambient authority usage: add it to KNOWN_FINDINGS,
+    //   bump AMBIENT_VIOLATION_CEILING, and justify in the PR description.
+
+    use std::path::{Path, PathBuf};
+
+    /// Paths (relative to src/) exempt from scanning.
+    /// These modules ARE the capability providers.
+    const EXEMPT_PREFIXES: &[&str] = &[
+        "util/entropy.rs",
+        "fs/",
+        "time/driver.rs",
+        "runtime/blocking_pool.rs",
+        "web/debug.rs",
+        "lab/",
+        "test_logging.rs",
+        "test_utils.rs",
+        "test_ndjson.rs",
+        "audit/",
+        "bin/",
+    ];
+
+    /// Modules that MUST have zero ambient authority in non-test code.
+    /// All effects in these modules must flow through the Cx capability system.
+    const PRISTINE_MODULES: &[&str] = &["cx", "obligation", "plan"];
+
+    /// Upper bound on non-test, non-exempt ambient authority violations.
+    /// Bump this ONLY after documenting the new usage in KNOWN_FINDINGS.
+    const AMBIENT_VIOLATION_CEILING: usize = 120;
+
+    fn src_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return files;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_rs_files(&path));
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    fn is_exempt(rel_path: &str) -> bool {
+        EXEMPT_PREFIXES.iter().any(|p| rel_path.starts_with(p))
+    }
+
+    /// Convert a grep-style regex pattern to a literal search string.
+    fn pattern_to_literal(pattern: &str) -> String {
+        pattern.replace(r"\(", "(").replace(r"\)", ")")
+    }
+
+    /// Return (line_number, line_text) pairs from non-test, non-comment code.
+    ///
+    /// Uses brace-depth tracking to skip `#[cfg(test)] mod ... { }` blocks.
+    fn non_test_lines(content: &str) -> Vec<(usize, String)> {
+        let mut result = Vec::new();
+        let mut in_cfg_test_mod = false;
+        let mut brace_depth: i32 = 0;
+        let mut pending_cfg_test = false;
+
+        for (idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+
+            if trimmed == "#[cfg(test)]" {
+                pending_cfg_test = true;
+                continue;
+            }
+
+            if pending_cfg_test {
+                if trimmed.starts_with("mod ") {
+                    in_cfg_test_mod = true;
+                    brace_depth = 0;
+                    pending_cfg_test = false;
+                    for ch in trimmed.chars() {
+                        match ch {
+                            '{' => brace_depth += 1,
+                            '}' => brace_depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    if brace_depth <= 0 {
+                        in_cfg_test_mod = false;
+                    }
+                    continue;
+                }
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    pending_cfg_test = false;
+                }
+            }
+
+            if in_cfg_test_mod {
+                for ch in line.chars() {
+                    match ch {
+                        '{' => brace_depth += 1,
+                        '}' => {
+                            brace_depth -= 1;
+                            if brace_depth <= 0 {
+                                in_cfg_test_mod = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            if trimmed.starts_with("//") {
+                continue;
+            }
+
+            result.push((idx + 1, line.to_string()));
+        }
+        result
+    }
+
+    struct Violation {
+        file: String,
+        line: usize,
+        pattern: String,
+        category: AmbientCategory,
+    }
+
+    impl std::fmt::Display for Violation {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "  {}:{} — {:?} ({})",
+                self.file, self.line, self.category, self.pattern
+            )
+        }
+    }
+
+    fn scan_directory(dir: &Path, root: &Path) -> Vec<Violation> {
+        let mut violations = Vec::new();
+        for file_path in collect_rs_files(dir) {
+            let rel = file_path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            if is_exempt(&rel) {
+                continue;
+            }
+
+            let Ok(content) = std::fs::read_to_string(&file_path) else {
+                continue;
+            };
+
+            let lines = non_test_lines(&content);
+
+            for (pattern, category) in GREP_PATTERNS {
+                let literal = pattern_to_literal(pattern);
+                for (line_num, line_text) in &lines {
+                    if line_text.contains(&literal) {
+                        violations.push(Violation {
+                            file: rel.clone(),
+                            line: *line_num,
+                            pattern: literal.clone(),
+                            category: *category,
+                        });
+                    }
+                }
+            }
+        }
+        violations
+    }
+
+    fn format_violations(vs: &[Violation]) -> String {
+        vs.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn pristine_modules_have_no_ambient_authority() {
+        let root = src_root();
+        for module in PRISTINE_MODULES {
+            let module_dir = root.join(module);
+            let violations = scan_directory(&module_dir, &root);
+            assert!(
+                violations.is_empty(),
+                "Pristine module '{module}' has {} ambient authority violation(s):\n{}",
+                violations.len(),
+                format_violations(&violations),
+            );
+        }
+    }
+
+    #[test]
+    fn known_findings_reference_real_code() {
+        let root = src_root();
+        for finding in KNOWN_FINDINGS {
+            let path = root.join(finding.file);
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                panic!(
+                    "KNOWN_FINDINGS references missing file: src/{}",
+                    finding.file
+                )
+            });
+
+            let has_nearby_match = GREP_PATTERNS.iter().any(|(pattern, cat)| {
+                if *cat != finding.category {
+                    return false;
+                }
+                let literal = pattern_to_literal(pattern);
+                content.lines().enumerate().any(|(i, line)| {
+                    let line_num = (i + 1) as u32;
+                    line_num.abs_diff(finding.line) <= 30 && line.contains(&literal)
+                })
+            });
+
+            assert!(
+                has_nearby_match,
+                "KNOWN_FINDINGS entry '{}' at src/{}:{} — \
+                 no matching grep pattern found within ±30 lines. Stale entry?",
+                finding.description, finding.file, finding.line,
+            );
+        }
+    }
+
+    #[test]
+    fn grep_patterns_catch_each_finding_category() {
+        for finding in KNOWN_FINDINGS {
+            let covered = GREP_PATTERNS
+                .iter()
+                .any(|(_, cat)| *cat == finding.category);
+            assert!(
+                covered,
+                "Finding '{}' with category {:?} has no grep pattern coverage",
+                finding.description, finding.category,
+            );
+        }
+    }
+
+    #[test]
+    fn exempt_findings_are_in_recognized_provider_paths() {
+        let provider_paths: &[&str] = &[
+            "time/driver.rs",
+            "time/sleep.rs",
+            "runtime/blocking_pool.rs",
+            "web/debug.rs",
+            "util/entropy.rs",
+            "fs/",
+        ];
+        for finding in KNOWN_FINDINGS.iter().filter(|f| f.exempt) {
+            let in_provider = provider_paths.iter().any(|p| finding.file.starts_with(p));
+            assert!(
+                in_provider,
+                "Exempt finding '{}' in src/{} is not in a recognized \
+                 provider path. Either remove the exemption or add the \
+                 path to provider_paths.",
+                finding.description, finding.file,
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_authority_does_not_regress() {
+        let root = src_root();
+        let violations = scan_directory(&root, &root);
+
+        assert!(
+            violations.len() <= AMBIENT_VIOLATION_CEILING,
+            "Ambient authority count ({}) exceeds ceiling ({}).\n\
+             Either remove the ambient authority usage or, if intentional,\n\
+             add it to KNOWN_FINDINGS and bump AMBIENT_VIOLATION_CEILING.\n\
+             Violations:\n{}",
+            violations.len(),
+            AMBIENT_VIOLATION_CEILING,
+            format_violations(&violations),
+        );
+    }
+
+    #[test]
+    fn non_test_lines_filter_skips_cfg_test_modules() {
+        let source = "\
+fn real_code() {
+    Instant::now();
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_code() {
+        Instant::now();
+    }
+}
+";
+        let lines = non_test_lines(source);
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            text.iter().any(|l| l.contains("real_code")),
+            "Should include production code"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("test_code")),
+            "Should exclude #[cfg(test)] module code"
+        );
+    }
+
+    #[test]
+    fn non_test_lines_filter_skips_comments() {
+        let source = "\
+// Instant::now() in a comment
+/// Instant::now() in a doc comment
+//! Instant::now() in a module doc
+let x = Instant::now();
+";
+        let lines = non_test_lines(source);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|(_, l)| l.contains("Instant::now"))
+                .count(),
+            1,
+            "Should have exactly one non-comment Instant::now() line"
+        );
     }
 }
