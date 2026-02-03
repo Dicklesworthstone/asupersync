@@ -28,7 +28,10 @@ use crate::trace::event_structure::TracePoset;
 use crate::trace::scoring::{
     score_persistence, seed_fingerprint, ClassId, EvidenceLedger, TopologicalScore,
 };
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+
+const DEFAULT_SATURATION_WINDOW: usize = 10;
+const DEFAULT_UNEXPLORED_LIMIT: usize = 5;
 
 /// Exploration mode: baseline seed-sweep or topology-prioritized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -134,6 +137,10 @@ pub struct CoverageMetrics {
     pub new_class_discoveries: usize,
     /// Per-class run counts (fingerprint -> count).
     pub class_run_counts: HashMap<u64, usize>,
+    /// Novelty histogram: novelty score -> run count.
+    pub novelty_histogram: BTreeMap<u32, usize>,
+    /// Saturation signals (deterministic summary).
+    pub saturation: SaturationMetrics,
 }
 
 impl CoverageMetrics {
@@ -157,6 +164,74 @@ impl CoverageMetrics {
     }
 }
 
+/// Saturation signals for exploration coverage.
+#[derive(Debug, Clone)]
+pub struct SaturationMetrics {
+    /// Window size used for saturation detection.
+    pub window: usize,
+    /// True if coverage is saturated under the window heuristic.
+    pub saturated: bool,
+    /// Total runs that hit existing classes.
+    pub existing_class_hits: usize,
+    /// Runs since the last new class (None if no runs yet).
+    pub runs_since_last_new_class: Option<usize>,
+}
+
+/// Ranked unexplored seed entry (for explainability).
+#[derive(Debug, Clone)]
+pub struct UnexploredSeed {
+    /// Seed value.
+    pub seed: u64,
+    /// Optional topological score (present for topology-prioritized mode).
+    pub score: Option<TopologicalScore>,
+}
+
+fn novelty_histogram_from_flags(results: &[RunResult]) -> BTreeMap<u32, usize> {
+    let mut histogram = BTreeMap::new();
+    for r in results {
+        let novelty = if r.is_new_class { 1 } else { 0 };
+        *histogram.entry(novelty).or_insert(0) += 1;
+    }
+    histogram
+}
+
+fn novelty_histogram_from_ledgers(ledgers: &[EvidenceLedger]) -> BTreeMap<u32, usize> {
+    let mut histogram = BTreeMap::new();
+    for ledger in ledgers {
+        *histogram.entry(ledger.score.novelty).or_insert(0) += 1;
+    }
+    histogram
+}
+
+fn saturation_metrics(
+    results: &[RunResult],
+    total_runs: usize,
+    new_class_discoveries: usize,
+) -> SaturationMetrics {
+    let existing_class_hits = total_runs.saturating_sub(new_class_discoveries);
+    let runs_since_last_new_class = if results.is_empty() {
+        None
+    } else {
+        let last_new = results.iter().rposition(|r| r.is_new_class);
+        Some(match last_new {
+            Some(idx) => results.len() - 1 - idx,
+            None => results.len(),
+        })
+    };
+    let window = DEFAULT_SATURATION_WINDOW;
+    let saturated = if total_runs < window {
+        false
+    } else {
+        existing_class_hits >= window
+    };
+    SaturationMetrics {
+        window,
+        saturated,
+        existing_class_hits,
+        runs_since_last_new_class,
+    }
+}
+
 /// Summary report after exploration completes.
 #[derive(Debug)]
 pub struct ExplorationReport {
@@ -168,6 +243,8 @@ pub struct ExplorationReport {
     pub violations: Vec<ViolationReport>,
     /// Coverage metrics.
     pub coverage: CoverageMetrics,
+    /// Top-ranked unexplored seeds (if any remain).
+    pub top_unexplored: Vec<UnexploredSeed>,
     /// Per-run results.
     pub runs: Vec<RunResult>,
 }
@@ -347,16 +424,22 @@ impl ScheduleExplorer {
 
     /// Build the final report.
     fn build_report(&self) -> ExplorationReport {
+        let total_runs = self.results.len();
+        let novelty_histogram = novelty_histogram_from_flags(&self.results);
+        let saturation = saturation_metrics(&self.results, total_runs, self.new_class_count);
         ExplorationReport {
-            total_runs: self.results.len(),
+            total_runs,
             unique_classes: self.known_fingerprints.len(),
             violations: self.violations.clone(),
             coverage: CoverageMetrics {
                 equivalence_classes: self.known_fingerprints.len(),
-                total_runs: self.results.len(),
+                total_runs,
                 new_class_discoveries: self.new_class_count,
                 class_run_counts: self.class_counts.clone(),
+                novelty_histogram,
+                saturation,
             },
+            top_unexplored: Vec::new(),
             runs: Vec::new(), // Omit per-run details from report to save memory.
         }
     }
@@ -370,11 +453,16 @@ impl ScheduleExplorer {
     /// Access the current coverage metrics.
     #[must_use]
     pub fn coverage(&self) -> CoverageMetrics {
+        let total_runs = self.results.len();
+        let novelty_histogram = novelty_histogram_from_flags(&self.results);
+        let saturation = saturation_metrics(&self.results, total_runs, self.new_class_count);
         CoverageMetrics {
             equivalence_classes: self.known_fingerprints.len(),
-            total_runs: self.results.len(),
+            total_runs,
             new_class_discoveries: self.new_class_count,
             class_run_counts: self.class_counts.clone(),
+            novelty_histogram,
+            saturation,
         }
     }
 }
@@ -573,16 +661,32 @@ impl DporExplorer {
     }
 
     fn build_report(&self) -> ExplorationReport {
+        let total_runs = self.results.len();
+        let new_class_discoveries = self.results.iter().filter(|r| r.is_new_class).count();
+        let novelty_histogram = novelty_histogram_from_flags(&self.results);
+        let saturation = saturation_metrics(&self.results, total_runs, new_class_discoveries);
+        let top_unexplored = self
+            .work_queue
+            .iter()
+            .take(DEFAULT_UNEXPLORED_LIMIT)
+            .map(|seed| UnexploredSeed {
+                seed: *seed,
+                score: None,
+            })
+            .collect();
         ExplorationReport {
-            total_runs: self.results.len(),
+            total_runs,
             unique_classes: self.known_classes.len(),
             violations: self.violations.clone(),
             coverage: CoverageMetrics {
                 equivalence_classes: self.known_classes.len(),
-                total_runs: self.results.len(),
-                new_class_discoveries: self.results.iter().filter(|r| r.is_new_class).count(),
+                total_runs,
+                new_class_discoveries,
                 class_run_counts: self.class_counts.clone(),
+                novelty_histogram,
+                saturation,
             },
+            top_unexplored,
             runs: Vec::new(),
         }
     }
@@ -593,12 +697,16 @@ impl DporExplorer {
     pub fn dpor_coverage(&self) -> DporCoverageMetrics {
         let new_class_count = self.results.iter().filter(|r| r.is_new_class).count();
         let total = self.results.len();
+        let novelty_histogram = novelty_histogram_from_flags(&self.results);
+        let saturation = saturation_metrics(&self.results, total, new_class_count);
         DporCoverageMetrics {
             base: CoverageMetrics {
                 equivalence_classes: self.known_classes.len(),
                 total_runs: total,
                 new_class_discoveries: new_class_count,
                 class_run_counts: self.class_counts.clone(),
+                novelty_histogram,
+                saturation,
             },
             total_races: self.total_races,
             total_backtrack_points: self.total_backtrack_points,
@@ -776,16 +884,22 @@ impl TopologyExplorer {
     }
 
     fn build_report(&self) -> ExplorationReport {
+        let total_runs = self.results.len();
+        let novelty_histogram = novelty_histogram_from_ledgers(&self.ledgers);
+        let saturation = saturation_metrics(&self.results, total_runs, self.new_class_count);
         ExplorationReport {
-            total_runs: self.results.len(),
+            total_runs,
             unique_classes: self.known_fingerprints.len(),
             violations: self.violations.clone(),
             coverage: CoverageMetrics {
                 equivalence_classes: self.known_fingerprints.len(),
-                total_runs: self.results.len(),
+                total_runs,
                 new_class_discoveries: self.new_class_count,
                 class_run_counts: self.class_counts.clone(),
+                novelty_histogram,
+                saturation,
             },
+            top_unexplored: self.top_unexplored(DEFAULT_UNEXPLORED_LIMIT),
             runs: Vec::new(),
         }
     }
@@ -805,12 +919,32 @@ impl TopologyExplorer {
     /// Access the current coverage metrics.
     #[must_use]
     pub fn coverage(&self) -> CoverageMetrics {
+        let total_runs = self.results.len();
+        let novelty_histogram = novelty_histogram_from_ledgers(&self.ledgers);
+        let saturation = saturation_metrics(&self.results, total_runs, self.new_class_count);
         CoverageMetrics {
             equivalence_classes: self.known_fingerprints.len(),
-            total_runs: self.results.len(),
+            total_runs,
             new_class_discoveries: self.new_class_count,
             class_run_counts: self.class_counts.clone(),
+            novelty_histogram,
+            saturation,
         }
+    }
+
+    fn top_unexplored(&self, limit: usize) -> Vec<UnexploredSeed> {
+        let mut heap = self.frontier.clone();
+        let mut out = Vec::new();
+        while out.len() < limit {
+            let Some((score, seed)) = heap.pop() else {
+                break;
+            };
+            out.push(UnexploredSeed {
+                seed,
+                score: Some(score),
+            });
+        }
+        out
     }
 }
 
