@@ -4,6 +4,7 @@
 //! Events carry sufficient information for replay and analysis.
 
 use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
+use crate::trace::distributed::LogicalTime;
 use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
 use core::fmt;
 
@@ -11,7 +12,7 @@ use core::fmt;
 pub const TRACE_EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// The kind of trace event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TraceEventKind {
     /// A task was spawned.
     Spawn,
@@ -221,6 +222,12 @@ pub struct TraceEvent {
     pub seq: u64,
     /// Timestamp when the event occurred.
     pub time: Time,
+    /// Logical clock timestamp for causal ordering.
+    ///
+    /// When set, enables causal consistency verification across distributed
+    /// traces. The logical time is ticked when the event is recorded and
+    /// can be used to establish happens-before relationships.
+    pub logical_time: Option<LogicalTime>,
     /// The kind of event.
     pub kind: TraceEventKind,
     /// Additional data.
@@ -235,9 +242,17 @@ impl TraceEvent {
             version: TRACE_EVENT_SCHEMA_VERSION,
             seq,
             time,
+            logical_time: None,
             kind,
             data,
         }
+    }
+
+    /// Attaches a logical clock timestamp to this event for causal ordering.
+    #[must_use]
+    pub fn with_logical_time(mut self, logical_time: LogicalTime) -> Self {
+        self.logical_time = Some(logical_time);
+        self
     }
 
     /// Creates a spawn event.
@@ -618,6 +633,9 @@ impl TraceEvent {
 impl fmt::Display for TraceEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{:06}] {} {:?}", self.seq, self.time, self.kind)?;
+        if let Some(ref lt) = self.logical_time {
+            write!(f, " @{lt:?}")?;
+        }
         match &self.data {
             TraceData::None => {}
             TraceData::Task { task, region } => write!(f, " {task} in {region}")?,

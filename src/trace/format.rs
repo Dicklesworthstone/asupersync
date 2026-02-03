@@ -67,8 +67,7 @@ impl GoldenTraceFixture {
             config.canonical_prefix_layers,
             config.canonical_prefix_events,
         );
-        let mut violations: Vec<String> =
-            oracle_violations.into_iter().map(Into::into).collect();
+        let mut violations: Vec<String> = oracle_violations.into_iter().map(Into::into).collect();
         violations.sort();
         violations.dedup();
 
@@ -95,6 +94,7 @@ pub struct GoldenTraceDiff {
 }
 
 impl GoldenTraceDiff {
+    /// Returns true when no mismatches were recorded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.mismatches.is_empty()
@@ -149,7 +149,7 @@ impl GoldenTraceDiff {
         diff
     }
 
-    fn into_result(self) -> Result<(), GoldenTraceDiff> {
+    fn into_result(self) -> Result<(), Self> {
         if self.is_empty() {
             Ok(())
         } else {
@@ -171,13 +171,22 @@ impl std::error::Error for GoldenTraceDiff {}
 
 #[derive(Debug)]
 enum GoldenTraceMismatch {
-    SchemaVersion { expected: u32, actual: u32 },
+    SchemaVersion {
+        expected: u32,
+        actual: u32,
+    },
     Config {
         expected: GoldenTraceConfig,
         actual: GoldenTraceConfig,
     },
-    Fingerprint { expected: u64, actual: u64 },
-    EventCount { expected: u64, actual: u64 },
+    Fingerprint {
+        expected: u64,
+        actual: u64,
+    },
+    EventCount {
+        expected: u64,
+        actual: u64,
+    },
     CanonicalPrefix {
         expected_layers: usize,
         actual_layers: usize,
@@ -210,9 +219,10 @@ impl std::fmt::Display for GoldenTraceMismatch {
                     "fingerprint changed (expected 0x{expected:016X}, actual 0x{actual:016X})"
                 )
             }
-            Self::EventCount { expected, actual } => {
-                write!(f, "event_count changed (expected {expected}, actual {actual})")
-            }
+            Self::EventCount { expected, actual } => write!(
+                f,
+                "event_count changed (expected {expected}, actual {actual})"
+            ),
             Self::CanonicalPrefix {
                 expected_layers,
                 actual_layers,

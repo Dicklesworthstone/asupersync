@@ -39,7 +39,7 @@ impl BitVec {
     /// Creates a zero vector of the given length.
     #[must_use]
     pub fn zeros(len: usize) -> Self {
-        let word_count = (len + 63) / 64;
+        let word_count = len.div_ceil(64);
         Self {
             words: vec![0; word_count],
             len,
@@ -60,6 +60,12 @@ impl BitVec {
         self.len
     }
 
+    /// Returns true if the vector has zero length.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Returns true if the vector is the zero vector.
     #[must_use]
     pub fn is_zero(&self) -> bool {
@@ -72,7 +78,11 @@ impl BitVec {
     /// Panics if `i >= self.len`.
     #[must_use]
     pub fn get(&self, i: usize) -> bool {
-        assert!(i < self.len, "bit index {i} out of range (len={})", self.len);
+        assert!(
+            i < self.len,
+            "bit index {i} out of range (len={})",
+            self.len
+        );
         let word = i / 64;
         let bit = i % 64;
         (self.words[word] >> bit) & 1 == 1
@@ -83,7 +93,11 @@ impl BitVec {
     /// # Panics
     /// Panics if `i >= self.len`.
     pub fn set(&mut self, i: usize) {
-        assert!(i < self.len, "bit index {i} out of range (len={})", self.len);
+        assert!(
+            i < self.len,
+            "bit index {i} out of range (len={})",
+            self.len
+        );
         let word = i / 64;
         let bit = i % 64;
         self.words[word] |= 1u64 << bit;
@@ -94,7 +108,11 @@ impl BitVec {
     /// # Panics
     /// Panics if `i >= self.len`.
     pub fn clear(&mut self, i: usize) {
-        assert!(i < self.len, "bit index {i} out of range (len={})", self.len);
+        assert!(
+            i < self.len,
+            "bit index {i} out of range (len={})",
+            self.len
+        );
         let word = i / 64;
         let bit = i % 64;
         self.words[word] &= !(1u64 << bit);
@@ -105,7 +123,11 @@ impl BitVec {
     /// # Panics
     /// Panics if `i >= self.len`.
     pub fn flip(&mut self, i: usize) {
-        assert!(i < self.len, "bit index {i} out of range (len={})", self.len);
+        assert!(
+            i < self.len,
+            "bit index {i} out of range (len={})",
+            self.len
+        );
         let word = i / 64;
         let bit = i % 64;
         self.words[word] ^= 1u64 << bit;
@@ -178,10 +200,17 @@ impl BitVec {
 
     /// Returns an iterator over the indices of set bits, in ascending order.
     pub fn ones(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words.iter().enumerate().flat_map(move |(word_idx, &word)| {
-            let base = word_idx * 64;
-            BitIter { word, base, len: self.len }
-        })
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(move |(word_idx, &word)| {
+                let base = word_idx * 64;
+                BitIter {
+                    word,
+                    base,
+                    len: self.len,
+                }
+            })
     }
 }
 
@@ -618,7 +647,7 @@ mod tests {
         // Columns 0 and 1 have pivots at rows 0 and 0... let's check.
         let p0 = reduced.matrix.column_pivot(0);
         let p1 = reduced.matrix.column_pivot(1);
-        let p2 = reduced.matrix.column_pivot(2);
+        let _p2 = reduced.matrix.column_pivot(2);
 
         // Column 0 pivot: row 0 (lowest bit of {0,1})
         assert_eq!(p0, Some(0));

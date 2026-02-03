@@ -24,17 +24,19 @@
 //! - [`dpor`]: DPOR race detection and backtracking
 //! - [`tla_export`]: TLA+ export for model checking
 
+pub mod boundary;
 pub mod buffer;
 pub mod canonicalize;
+pub mod causality;
 pub mod compat;
 pub mod distributed;
 pub mod dpor;
 pub mod event;
 pub mod event_structure;
 pub mod file;
-pub mod gf2;
 pub mod filter;
 pub mod format;
+pub mod gf2;
 pub mod independence;
 pub mod integrity;
 pub mod recorder;
@@ -43,10 +45,12 @@ pub mod replayer;
 pub mod streaming;
 pub mod tla_export;
 
+pub use boundary::{matmul_gf2, SquareComplex};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
 pub use canonicalize::{
     canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
 };
+pub use causality::{CausalOrderVerifier, CausalityViolation, CausalityViolationKind};
 pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
@@ -57,12 +61,12 @@ pub use dpor::{
 };
 pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
 pub use event_structure::{Event, EventId, EventStructure, HdaCell, HdaComplex};
-pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
 pub use file::{
     read_trace, write_trace, CompressionMode, TraceEventIterator, TraceFileConfig, TraceFileError,
     TraceReader, TraceWriter, TRACE_FILE_VERSION, TRACE_MAGIC,
 };
 pub use filter::{EventCategory, FilterBuilder, FilterableEvent, TraceFilter};
+pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
 pub use independence::{
     accesses_conflict, independent, resource_footprint, AccessMode, Resource, ResourceAccess,
 };

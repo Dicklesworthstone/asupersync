@@ -22,6 +22,7 @@
 //! ```
 
 pub mod builder;
+pub mod gf256;
 pub mod pipeline;
 
 pub use builder::{RaptorQReceiverBuilder, RaptorQSenderBuilder};

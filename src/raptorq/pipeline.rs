@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_send_object_roundtrip_all_symbols_succeeds() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let sink = VecSink::new();
         let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
 
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_send_object_roundtrip_source_only_succeeds() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let sink = VecSink::new();
         let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
 
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_send_object_rejects_oversized_data() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let sink = VecSink::new();
         let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
 
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_send_object_cancelled_returns_cancelled() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         let sink = VecSink::new();
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_send_symbols_direct_count_matches() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let sink = VecSink::new();
         let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
 
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_send_object_pending_sink_returns_rejected() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let sink = PendingSink;
         let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
 
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_receive_object_insufficient_symbols_errors() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let stream = VecStream::new(vec![]);
         let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
 
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_receive_object_cancelled_returns_cancelled() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         let stream = VecStream::new(vec![]);
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_receive_object_authenticated_flag_true_with_security() {
-        let cx = Cx::for_testing();
+        let cx: Cx = Cx::for_testing();
         let security = SecurityContext::for_testing(42);
         let sink = VecSink::new();
         let mut sender =

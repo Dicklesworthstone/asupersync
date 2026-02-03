@@ -87,6 +87,7 @@ pub struct TraceEventKey {
 }
 
 impl TraceEventKey {
+    /// Creates a new trace event key with the provided components.
     #[must_use]
     pub const fn new(kind: u8, primary: u64, secondary: u64, tertiary: u64) -> Self {
         Self {

@@ -113,7 +113,7 @@ fn default_config_passes_validation() {
 
 #[test]
 fn sender_encodes_and_transmits() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let mut sender = RaptorQSenderBuilder::new()
         .config(RaptorQConfig::default())
@@ -136,7 +136,7 @@ fn sender_encodes_and_transmits() {
 
 #[test]
 fn sender_with_security_signs_symbols() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let security = SecurityContext::for_testing(42);
 
@@ -155,7 +155,7 @@ fn sender_with_security_signs_symbols() {
 
 #[test]
 fn sender_rejects_oversized_data() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let mut sender = RaptorQSenderBuilder::new()
         .config(RaptorQConfig::default())
@@ -176,7 +176,7 @@ fn sender_rejects_oversized_data() {
 
 #[test]
 fn sender_respects_cancellation() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     cx.set_cancel_requested(true);
 
     let sink = VecSink::new();
@@ -193,7 +193,7 @@ fn sender_respects_cancellation() {
 
 #[test]
 fn sender_with_metrics_increments_counters() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let metrics = Metrics::new();
 
@@ -214,7 +214,7 @@ fn sender_with_metrics_increments_counters() {
 
 #[test]
 fn send_receive_roundtrip() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     // Sender side.
     let sink = VecSink::new();
@@ -261,7 +261,7 @@ fn send_receive_roundtrip() {
 
 #[test]
 fn receiver_reports_insufficient_symbols() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
 
     // Empty stream — no symbols available.
     let stream = VecStream::new(vec![]);
@@ -304,7 +304,7 @@ fn builder_accepts_custom_config() {
 
 #[test]
 fn send_empty_data_succeeds() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let mut sender = RaptorQSenderBuilder::new()
         .config(RaptorQConfig::default())
@@ -321,7 +321,7 @@ fn send_empty_data_succeeds() {
 
 #[test]
 fn send_symbols_directly() {
-    let cx = Cx::for_testing();
+    let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let mut sender = RaptorQSenderBuilder::new()
         .config(RaptorQConfig::default())

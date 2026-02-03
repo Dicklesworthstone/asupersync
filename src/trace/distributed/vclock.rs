@@ -365,6 +365,26 @@ impl LogicalTime {
             Self::Hybrid(_) => LogicalClockKind::Hybrid,
         }
     }
+
+    /// Compares two logical times for causal ordering.
+    ///
+    /// Returns the causal relationship between `self` and `other`.
+    /// For Lamport/Hybrid clocks this is derived from total/partial order;
+    /// for vector clocks this uses the vector clock causal order directly.
+    ///
+    /// Returns `CausalOrder::Concurrent` if the clock types differ.
+    #[must_use]
+    pub fn causal_order(&self, other: &Self) -> CausalOrder {
+        match (self, other) {
+            (Self::Vector(a), Self::Vector(b)) => a.causal_order(b),
+            _ => match self.partial_cmp(other) {
+                Some(std::cmp::Ordering::Less) => CausalOrder::Before,
+                Some(std::cmp::Ordering::Greater) => CausalOrder::After,
+                Some(std::cmp::Ordering::Equal) => CausalOrder::Equal,
+                None => CausalOrder::Concurrent,
+            },
+        }
+    }
 }
 
 impl PartialOrd for LogicalTime {
