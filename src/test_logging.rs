@@ -1259,6 +1259,13 @@ fn fnv1a_mix(root: u64, tag: &[u8]) -> u64 {
 pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 
 /// A reproducibility manifest for a test failure or notable execution.
+///
+/// # Artifact Layouts
+///
+/// - **Harness failures**: `$ASUPERSYNC_TEST_ARTIFACTS_DIR/<scenario_id>/repro_manifest.json`
+///   alongside `event_log.txt` and `failed_assertions.json`.
+/// - **Explicit dumps**: `<base>/<scenario_id>/<seed>/manifest.json` via
+///   [`ReproManifest::write_to_dir`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReproManifest {
     /// Schema version for forward compatibility.
@@ -1344,7 +1351,10 @@ impl ReproManifest {
         serde_json::to_string_pretty(self)
     }
 
-    /// Write this manifest to a file at the canonical artifact path.
+    /// Write this manifest to `<base>/<scenario_id>/<seed>/manifest.json`.
+    ///
+    /// Note: the test harness writes `repro_manifest.json` under
+    /// `$ASUPERSYNC_TEST_ARTIFACTS_DIR/<scenario_id>/`.
     pub fn write_to_dir(&self, base_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         let dir = base_dir
             .join(&self.scenario_id)
