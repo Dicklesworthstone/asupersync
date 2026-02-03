@@ -44,10 +44,10 @@ sqlite = ["dep:rusqlite"]
 postgres = ["dep:sha2"]
 # Enable MySQL async client with wire protocol.
 mysql = ["dep:sha2"]
-# Enable QUIC protocol support via quinn.
-quic = ["dep:quinn", "tls"]
-# Enable HTTP/3 client support over QUIC.
-http3 = ["quic", "dep:h3", "dep:h3-quinn", "dep:http", "dep:bytes"]
+# QUIC and HTTP/3 features removed (bd-9ipp): quinn/h3/h3-quinn
+# unconditionally depend on tokio, which conflicts with this custom
+# async runtime. Source code is preserved behind dead feature gates.
+# Re-enable when a tokio-free QUIC stack is available.
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
 # Enable Loom concurrency tests for scheduler verification.
@@ -120,15 +120,12 @@ time = { version = "0.3", features = ["formatting"], optional = true }
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 # SHA-256 for PostgreSQL SCRAM authentication
 sha2 = { version = "0.10", optional = true }
-# QUIC protocol implementation via quinn
-quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
-# HTTP/3 client support via h3 + h3-quinn
-h3 = { version = "0.0.8", optional = true }
-h3-quinn = { version = "0.0.10", optional = true }
-# External HTTP types for HTTP/3 integration
-http = { version = "1.1", optional = true }
-# External bytes crate for HTTP/3 integration
-bytes = { version = "1.11", optional = true }
+# QUIC/HTTP3 deps removed (bd-9ipp): quinn/h3/h3-quinn depend on tokio.
+# quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
+# h3 = { version = "0.0.8", optional = true }
+# h3-quinn = { version = "0.0.10", optional = true }
+# http = { version = "1.1", optional = true }
+# bytes = { version = "1.11", optional = true }
 # Kafka client integration via rdkafka (optional, requires librdkafka on the system).
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
@@ -195,7 +192,7 @@ harness = false
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(feature, values("quic", "http3"))'] }
 unsafe_code = "deny"
 missing_docs = "warn"
 unused = { level = "warn", priority = -1 }
