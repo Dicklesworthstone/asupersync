@@ -27,6 +27,8 @@ use crate::trace::event_structure::{OwnerKey, TracePoset};
 use crate::util::DetHashMap;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+#[cfg(feature = "test-internals")]
+use std::fmt::Write;
 
 /// Result of geodesic normalization.
 #[derive(Debug, Clone)]
@@ -100,6 +102,590 @@ impl GeodesicConfig {
             beam_width: 16,
             step_budget: 1_000_000,
         }
+    }
+}
+
+// ============================================================================
+// Decision ledger: debug-only structured log of normalization decisions
+// ============================================================================
+
+/// A single decision recorded during geodesic normalization.
+///
+/// Each entry captures one decision point: algorithm selection, event choice,
+/// or tie-break resolution. The ledger is deterministic — identical inputs
+/// produce identical ledger entries.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone)]
+pub enum DecisionEntry {
+    /// Which algorithm was selected for this trace.
+    AlgorithmSelected {
+        /// The algorithm chosen.
+        algorithm: GeodesicAlgorithm,
+        /// Number of events in the poset.
+        trace_len: usize,
+        /// Why this algorithm was chosen (thresholds vs trace size).
+        reason: String,
+    },
+    /// An event was chosen at a greedy step.
+    GreedyChoice {
+        /// Step index (0-based).
+        step: usize,
+        /// The event index chosen.
+        chosen: usize,
+        /// Owner of the chosen event.
+        chosen_owner: OwnerKey,
+        /// Whether the chosen event matched the current owner (no switch).
+        owner_match: bool,
+        /// Number of same-owner successors for the chosen event.
+        same_owner_successors: usize,
+        /// Number of candidates available at this step.
+        candidates: usize,
+        /// Runner-up event index, if any.
+        runner_up: Option<usize>,
+    },
+    /// Beam search pruned candidates at a level.
+    BeamPrune {
+        /// Schedule depth at this prune.
+        depth: usize,
+        /// Number of candidates before pruning.
+        candidates_before: usize,
+        /// Number of candidates after pruning (beam width).
+        candidates_after: usize,
+        /// Switch count of the best surviving candidate.
+        best_switch_count: usize,
+        /// Switch count of the worst surviving candidate.
+        worst_switch_count: usize,
+    },
+    /// A* search expanded a state.
+    ExactExpansion {
+        /// Number of events placed so far.
+        depth: usize,
+        /// Current cost (g).
+        cost: usize,
+        /// Heuristic estimate (h).
+        heuristic: usize,
+        /// Number of successors generated.
+        successors: usize,
+    },
+    /// Algorithm fell back to topological sort.
+    Fallback {
+        /// Why the fallback was needed.
+        reason: String,
+    },
+}
+
+/// A structured log of all decisions made during geodesic normalization.
+///
+/// The ledger is deterministic: identical inputs produce identical entries.
+/// It is intended for debugging and test assertions, not production use.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone)]
+pub struct DecisionLedger {
+    /// All decisions in chronological order.
+    pub entries: Vec<DecisionEntry>,
+    /// The final result.
+    pub result: GeodesicResult,
+}
+
+#[cfg(feature = "test-internals")]
+impl DecisionLedger {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            result: GeodesicResult {
+                schedule: vec![],
+                switch_count: 0,
+                algorithm: GeodesicAlgorithm::Greedy,
+            },
+        }
+    }
+
+    fn push(&mut self, entry: DecisionEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Returns a deterministic human-readable summary of the decision ledger.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut s = format!(
+            "geodesic: algorithm={:?}, switches={}, schedule_len={}\n",
+            self.result.algorithm,
+            self.result.switch_count,
+            self.result.schedule.len(),
+        );
+        for (i, entry) in self.entries.iter().enumerate() {
+            match entry {
+                DecisionEntry::AlgorithmSelected {
+                    algorithm,
+                    trace_len,
+                    reason,
+                } => {
+                    let _ = writeln!(
+                        &mut s,
+                        "  [{i}] SELECT algo={algorithm:?} n={trace_len} reason=\"{reason}\""
+                    );
+                }
+                DecisionEntry::GreedyChoice {
+                    step,
+                    chosen,
+                    chosen_owner,
+                    owner_match,
+                    same_owner_successors,
+                    candidates,
+                    runner_up,
+                } => {
+                    let match_tag = if *owner_match { "match" } else { "switch" };
+                    let runner = runner_up.map_or_else(|| "none".to_string(), |r| r.to_string());
+                    let _ = writeln!(
+                        &mut s,
+                        "  [{i}] GREEDY step={step} chose={chosen} \
+                         owner={chosen_owner:?} {match_tag} \
+                         succ_same={same_owner_successors} \
+                         pool={candidates} runner_up={runner}"
+                    );
+                }
+                DecisionEntry::BeamPrune {
+                    depth,
+                    candidates_before,
+                    candidates_after,
+                    best_switch_count,
+                    worst_switch_count,
+                } => {
+                    let _ = writeln!(
+                        &mut s,
+                        "  [{i}] BEAM_PRUNE depth={depth} \
+                         {candidates_before}->{candidates_after} \
+                         switches=[{best_switch_count}..{worst_switch_count}]"
+                    );
+                }
+                DecisionEntry::ExactExpansion {
+                    depth,
+                    cost,
+                    heuristic,
+                    successors,
+                } => {
+                    let _ = writeln!(
+                        &mut s,
+                        "  [{i}] A*_EXPAND depth={depth} g={cost} h={heuristic} \
+                         f={} children={successors}",
+                        cost + heuristic
+                    );
+                }
+                DecisionEntry::Fallback { reason } => {
+                    let _ = writeln!(&mut s, "  [{i}] FALLBACK reason=\"{reason}\"");
+                }
+            }
+        }
+        s
+    }
+}
+
+/// Normalize with a decision ledger for debugging/testing.
+///
+/// Same semantics as [`normalize`], but also returns a [`DecisionLedger`]
+/// recording every decision point. Gated behind `test-internals` to avoid
+/// any overhead in production builds.
+#[cfg(feature = "test-internals")]
+#[must_use]
+pub fn normalize_with_ledger(poset: &TracePoset, config: &GeodesicConfig) -> DecisionLedger {
+    let n = poset.len();
+    let mut ledger = DecisionLedger::new();
+
+    if n == 0 {
+        ledger.result = GeodesicResult {
+            schedule: vec![],
+            switch_count: 0,
+            algorithm: GeodesicAlgorithm::Greedy,
+        };
+        return ledger;
+    }
+
+    if n == 1 {
+        ledger.result = GeodesicResult {
+            schedule: vec![0],
+            switch_count: 0,
+            algorithm: GeodesicAlgorithm::Greedy,
+        };
+        return ledger;
+    }
+
+    if n <= config.exact_threshold {
+        ledger.push(DecisionEntry::AlgorithmSelected {
+            algorithm: GeodesicAlgorithm::ExactAStar,
+            trace_len: n,
+            reason: format!("n={n} <= exact_threshold={}", config.exact_threshold),
+        });
+        if let Some(result) = exact_search_with_ledger(poset, config.step_budget, &mut ledger) {
+            ledger.result = result;
+            return ledger;
+        }
+        ledger.push(DecisionEntry::Fallback {
+            reason: "exact search exhausted budget, trying heuristic".into(),
+        });
+    }
+
+    if n <= config.beam_threshold && config.beam_width > 1 {
+        ledger.push(DecisionEntry::AlgorithmSelected {
+            algorithm: GeodesicAlgorithm::BeamSearch {
+                width: config.beam_width,
+            },
+            trace_len: n,
+            reason: format!(
+                "n={n} <= beam_threshold={}, beam_width={}",
+                config.beam_threshold, config.beam_width
+            ),
+        });
+        ledger.result =
+            beam_search_with_ledger(poset, config.beam_width, config.step_budget, &mut ledger);
+    } else {
+        ledger.push(DecisionEntry::AlgorithmSelected {
+            algorithm: GeodesicAlgorithm::Greedy,
+            trace_len: n,
+            reason: format!(
+                "n={n} > beam_threshold={} or beam_width={}",
+                config.beam_threshold, config.beam_width
+            ),
+        });
+        ledger.result = greedy_with_ledger(poset, config.step_budget, &mut ledger);
+    }
+    ledger
+}
+
+#[cfg(feature = "test-internals")]
+#[allow(clippy::too_many_lines)]
+fn exact_search_with_ledger(
+    poset: &TracePoset,
+    step_budget: usize,
+    ledger: &mut DecisionLedger,
+) -> Option<GeodesicResult> {
+    let n = poset.len();
+    if n == 0 || n > 63 {
+        return None;
+    }
+
+    let pred_masks = build_pred_masks(poset);
+    let full_mask = (1u64 << n) - 1;
+
+    let start = ExactState {
+        mask: 0,
+        last_owner: None,
+    };
+    let mut open = BinaryHeap::new();
+    let mut best_g: DetHashMap<ExactState, usize> = DetHashMap::default();
+    let mut parent: DetHashMap<ExactState, ExactParent> = DetHashMap::default();
+
+    let start_h = owner_switch_lower_bound(poset, start.mask, start.last_owner);
+    open.push(ExactQueueEntry {
+        f: start_h,
+        g: 0,
+        mask: 0,
+        last_owner: None,
+    });
+    best_g.insert(start, 0);
+
+    let mut steps = 0usize;
+    // Sample expansions for the ledger (every 100th or when we find the goal)
+    let mut last_logged_depth = 0;
+    while let Some(entry) = open.pop() {
+        if steps >= step_budget {
+            return None;
+        }
+        steps += 1;
+
+        let state = ExactState {
+            mask: entry.mask,
+            last_owner: entry.last_owner,
+        };
+
+        if entry.g.ne(best_g.get(&state).unwrap_or(&usize::MAX)) {
+            continue;
+        }
+
+        let depth = state.mask.count_ones() as usize;
+
+        if state.mask == full_mask {
+            let schedule = reconstruct_exact_schedule(state, &parent, n);
+            let h = 0;
+            ledger.push(DecisionEntry::ExactExpansion {
+                depth,
+                cost: entry.g,
+                heuristic: h,
+                successors: 0,
+            });
+            return Some(GeodesicResult {
+                schedule,
+                switch_count: entry.g,
+                algorithm: GeodesicAlgorithm::ExactAStar,
+            });
+        }
+
+        let mut successors = 0usize;
+        for (idx, &pred_mask) in pred_masks.iter().enumerate() {
+            let bit = 1u64 << idx;
+            if state.mask & bit != 0 {
+                continue;
+            }
+            if pred_mask & !state.mask != 0 {
+                continue;
+            }
+
+            let owner = poset.owner(idx);
+            let mut new_g = entry.g;
+            if let Some(prev_owner) = state.last_owner {
+                if prev_owner != owner {
+                    new_g += 1;
+                }
+            }
+            let new_state = ExactState {
+                mask: state.mask | bit,
+                last_owner: Some(owner),
+            };
+
+            let best = best_g.get(&new_state).copied().unwrap_or(usize::MAX);
+            if new_g < best {
+                best_g.insert(new_state, new_g);
+                parent.insert(
+                    new_state,
+                    ExactParent {
+                        prev: state,
+                        chosen: idx,
+                    },
+                );
+                let h = owner_switch_lower_bound(poset, new_state.mask, new_state.last_owner);
+                open.push(ExactQueueEntry {
+                    f: new_g + h,
+                    g: new_g,
+                    mask: new_state.mask,
+                    last_owner: new_state.last_owner,
+                });
+                successors += 1;
+            }
+        }
+
+        // Log at each new depth level to keep the ledger bounded
+        if depth > last_logged_depth {
+            let h = owner_switch_lower_bound(poset, state.mask, state.last_owner);
+            ledger.push(DecisionEntry::ExactExpansion {
+                depth,
+                cost: entry.g,
+                heuristic: h,
+                successors,
+            });
+            last_logged_depth = depth;
+        }
+    }
+
+    None
+}
+
+#[cfg(feature = "test-internals")]
+fn greedy_with_ledger(
+    poset: &TracePoset,
+    step_budget: usize,
+    ledger: &mut DecisionLedger,
+) -> GeodesicResult {
+    let n = poset.len();
+    let mut indeg: Vec<usize> = (0..n).map(|i| poset.preds(i).len()).collect();
+    let mut available: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut schedule = Vec::with_capacity(n);
+    let mut current_owner: Option<OwnerKey> = None;
+    let mut switch_count = 0;
+    let mut steps = 0;
+
+    while !available.is_empty() && steps < step_budget {
+        available.sort_by(|&a, &b| {
+            let owner_a = poset.owner(a);
+            let owner_b = poset.owner(b);
+            let match_a = current_owner == Some(owner_a);
+            let match_b = current_owner == Some(owner_b);
+            if match_a != match_b {
+                return match_b.cmp(&match_a);
+            }
+            let score_a = count_same_owner_successors(poset, a, &indeg);
+            let score_b = count_same_owner_successors(poset, b, &indeg);
+            if score_a != score_b {
+                return score_b.cmp(&score_a);
+            }
+            a.cmp(&b)
+        });
+
+        let chosen = available[0];
+        let chosen_owner = poset.owner(chosen);
+        let owner_match = current_owner == Some(chosen_owner);
+        let same_owner_successors = count_same_owner_successors(poset, chosen, &indeg);
+        let runner_up = if available.len() > 1 {
+            Some(available[1])
+        } else {
+            None
+        };
+
+        ledger.push(DecisionEntry::GreedyChoice {
+            step: steps,
+            chosen,
+            chosen_owner,
+            owner_match,
+            same_owner_successors,
+            candidates: available.len(),
+            runner_up,
+        });
+
+        available.remove(0);
+        steps += 1;
+
+        if let Some(prev) = current_owner {
+            if prev != chosen_owner {
+                switch_count += 1;
+            }
+        }
+        current_owner = Some(chosen_owner);
+        schedule.push(chosen);
+
+        for &succ in poset.succs(chosen) {
+            indeg[succ] -= 1;
+            if indeg[succ] == 0 {
+                available.push(succ);
+            }
+        }
+    }
+
+    if schedule.len() < n {
+        ledger.push(DecisionEntry::Fallback {
+            reason: format!(
+                "greedy budget exhausted at step {steps}, placed {}/{}",
+                schedule.len(),
+                n
+            ),
+        });
+        return fallback_topo(poset);
+    }
+
+    GeodesicResult {
+        schedule,
+        switch_count,
+        algorithm: GeodesicAlgorithm::Greedy,
+    }
+}
+
+#[cfg(feature = "test-internals")]
+fn beam_search_with_ledger(
+    poset: &TracePoset,
+    beam_width: usize,
+    step_budget: usize,
+    ledger: &mut DecisionLedger,
+) -> GeodesicResult {
+    let n = poset.len();
+    let init_indeg: Vec<usize> = (0..n).map(|i| poset.preds(i).len()).collect();
+
+    let init_state = BeamState {
+        schedule: Vec::with_capacity(n),
+        indeg: init_indeg,
+        current_owner: None,
+        switch_count: 0,
+    };
+
+    let mut beam = vec![init_state];
+    let mut steps = 0;
+
+    while steps < step_budget {
+        if beam.iter().all(|s| s.schedule.len() == n) {
+            break;
+        }
+
+        let mut candidates: Vec<BeamState> = Vec::new();
+        let depth = beam.first().map_or(0, |s| s.schedule.len());
+
+        for state in &beam {
+            if state.schedule.len() == n {
+                candidates.push(state.clone());
+                continue;
+            }
+
+            let available = state.available();
+            if available.is_empty() {
+                continue;
+            }
+
+            for &chosen in &available {
+                steps += 1;
+                if steps >= step_budget {
+                    break;
+                }
+
+                let mut new_state = state.clone();
+                let chosen_owner = poset.owner(chosen);
+
+                if let Some(prev) = new_state.current_owner {
+                    if prev != chosen_owner {
+                        new_state.switch_count += 1;
+                    }
+                }
+                new_state.current_owner = Some(chosen_owner);
+                new_state.schedule.push(chosen);
+
+                for &succ in poset.succs(chosen) {
+                    new_state.indeg[succ] -= 1;
+                }
+
+                candidates.push(new_state);
+            }
+
+            if steps >= step_budget {
+                break;
+            }
+        }
+
+        if candidates.is_empty() {
+            break;
+        }
+
+        let candidates_before = candidates.len();
+        candidates.sort_by(|a, b| {
+            let key_a = a.key();
+            let key_b = b.key();
+            if key_a != key_b {
+                return key_a.cmp(&key_b);
+            }
+            a.schedule.cmp(&b.schedule)
+        });
+
+        candidates.truncate(beam_width);
+        let candidates_after = candidates.len();
+
+        if candidates_before > candidates_after {
+            let best_sc = candidates.first().map_or(0, |s| s.switch_count);
+            let worst_sc = candidates.last().map_or(0, |s| s.switch_count);
+            ledger.push(DecisionEntry::BeamPrune {
+                depth,
+                candidates_before,
+                candidates_after,
+                best_switch_count: best_sc,
+                worst_switch_count: worst_sc,
+            });
+        }
+
+        beam = candidates;
+    }
+
+    let best = beam
+        .into_iter()
+        .filter(|s| s.schedule.len() == n)
+        .min_by(|a, b| {
+            let key_a = (a.switch_count, &a.schedule);
+            let key_b = (b.switch_count, &b.schedule);
+            key_a.cmp(&key_b)
+        });
+
+    if let Some(state) = best {
+        GeodesicResult {
+            schedule: state.schedule,
+            switch_count: state.switch_count,
+            algorithm: GeodesicAlgorithm::BeamSearch { width: beam_width },
+        }
+    } else {
+        ledger.push(DecisionEntry::Fallback {
+            reason: "beam search budget exhausted without completion".into(),
+        });
+        fallback_topo(poset)
     }
 }
 
@@ -1282,6 +1868,161 @@ mod tests {
         })
     }
 
+    // ========================================================================
+    // Decision ledger tests
+    // ========================================================================
+
+    #[test]
+    fn ledger_exact_has_algorithm_selected() {
+        let events = [
+            TraceEvent::spawn(1, Time::from_nanos(0), tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::from_nanos(1000), tid(2), rid(2)),
+            TraceEvent::spawn(3, Time::from_nanos(2000), tid(1), rid(1)),
+        ];
+        let poset = make_poset(&events);
+        let config = GeodesicConfig {
+            exact_threshold: 10,
+            beam_threshold: 0,
+            beam_width: 0,
+            step_budget: 100_000,
+        };
+        let ledger = normalize_with_ledger(&poset, &config);
+
+        // Must have at least one AlgorithmSelected entry
+        let has_algo = ledger.entries.iter().any(|e| {
+            matches!(
+                e,
+                DecisionEntry::AlgorithmSelected {
+                    algorithm: GeodesicAlgorithm::ExactAStar,
+                    ..
+                }
+            )
+        });
+        assert!(has_algo, "ledger missing AlgorithmSelected for exact");
+        assert_eq!(ledger.result.schedule.len(), 3);
+        assert!(is_valid_linear_extension(&poset, &ledger.result.schedule));
+    }
+
+    #[test]
+    fn ledger_greedy_records_choices() {
+        let events: Vec<TraceEvent> = (0..10)
+            .map(|i| {
+                TraceEvent::spawn(
+                    (i + 1) as u64,
+                    Time::from_nanos(i as u64 * 1000),
+                    tid((i % 3) as u32),
+                    rid((i % 3) as u32),
+                )
+            })
+            .collect();
+        let poset = make_poset(&events);
+        let config = GeodesicConfig {
+            exact_threshold: 0,
+            beam_threshold: 0,
+            beam_width: 0,
+            step_budget: 100_000,
+        };
+        let ledger = normalize_with_ledger(&poset, &config);
+
+        // Must have greedy choice entries
+        let greedy_choices: Vec<_> = ledger
+            .entries
+            .iter()
+            .filter(|e| matches!(e, DecisionEntry::GreedyChoice { .. }))
+            .collect();
+        assert_eq!(greedy_choices.len(), 10, "one greedy choice per event");
+
+        // Result must match normalize()
+        let plain = normalize(&poset, &config);
+        assert_eq!(ledger.result.schedule, plain.schedule);
+        assert_eq!(ledger.result.switch_count, plain.switch_count);
+    }
+
+    #[test]
+    fn ledger_beam_records_prunes() {
+        let events: Vec<TraceEvent> = (0..15)
+            .map(|i| {
+                TraceEvent::spawn(
+                    (i + 1) as u64,
+                    Time::from_nanos(i as u64 * 1000),
+                    tid((i % 4) as u32),
+                    rid((i % 4) as u32),
+                )
+            })
+            .collect();
+        let poset = make_poset(&events);
+        let config = GeodesicConfig {
+            exact_threshold: 0,
+            beam_threshold: 100,
+            beam_width: 4,
+            step_budget: 100_000,
+        };
+        let ledger = normalize_with_ledger(&poset, &config);
+
+        // Must have beam prune entries
+        let prune_count = ledger
+            .entries
+            .iter()
+            .filter(|e| matches!(e, DecisionEntry::BeamPrune { .. }))
+            .count();
+        assert!(prune_count > 0, "beam search should produce prune entries");
+        assert!(is_valid_linear_extension(&poset, &ledger.result.schedule));
+    }
+
+    #[test]
+    fn ledger_deterministic() {
+        let events: Vec<TraceEvent> = (0..12)
+            .map(|i| {
+                TraceEvent::spawn(
+                    (i + 1) as u64,
+                    Time::from_nanos(i as u64 * 1000),
+                    tid((i % 3) as u32),
+                    rid((i % 3) as u32),
+                )
+            })
+            .collect();
+        let poset = make_poset(&events);
+        let config = GeodesicConfig::default();
+
+        let ledger1 = normalize_with_ledger(&poset, &config);
+        let ledger2 = normalize_with_ledger(&poset, &config);
+
+        assert_eq!(ledger1.result.schedule, ledger2.result.schedule);
+        assert_eq!(ledger1.result.switch_count, ledger2.result.switch_count);
+        assert_eq!(ledger1.entries.len(), ledger2.entries.len());
+        assert_eq!(ledger1.summary(), ledger2.summary());
+    }
+
+    #[test]
+    fn ledger_summary_is_readable() {
+        let events = [
+            TraceEvent::spawn(1, Time::from_nanos(0), tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::from_nanos(1000), tid(2), rid(2)),
+            TraceEvent::spawn(3, Time::from_nanos(2000), tid(1), rid(1)),
+            TraceEvent::spawn(4, Time::from_nanos(3000), tid(2), rid(2)),
+        ];
+        let poset = make_poset(&events);
+        let config = GeodesicConfig {
+            exact_threshold: 10,
+            beam_threshold: 0,
+            beam_width: 0,
+            step_budget: 100_000,
+        };
+        let ledger = normalize_with_ledger(&poset, &config);
+        let summary = ledger.summary();
+
+        // Summary must contain key information
+        assert!(
+            summary.contains("algorithm="),
+            "summary missing algorithm info"
+        );
+        assert!(
+            summary.contains("switches="),
+            "summary missing switch count"
+        );
+        assert!(!summary.is_empty());
+    }
+
     proptest! {
         /// Soundness: exact solver always produces a valid linear extension.
         #[test]
@@ -1434,6 +2175,83 @@ mod tests {
                 "geodesic {} > foata {} for {} events",
                 result.switch_count, foata_cost, events.len(),
             );
+        }
+    }
+
+    // =========================================================================
+    // Additional decision ledger tests
+    // =========================================================================
+
+    #[test]
+    fn ledger_empty_trace() {
+        let poset = make_poset(&[]);
+        let ledger = normalize_with_ledger(&poset, &GeodesicConfig::default());
+        assert!(ledger.entries.is_empty());
+        assert_eq!(ledger.result.switch_count, 0);
+        assert!(ledger.result.schedule.is_empty());
+    }
+
+    #[test]
+    fn ledger_single_event() {
+        let events = [TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1))];
+        let poset = make_poset(&events);
+        let ledger = normalize_with_ledger(&poset, &GeodesicConfig::default());
+        assert!(ledger.entries.is_empty());
+        assert_eq!(ledger.result.schedule, vec![0]);
+    }
+
+    #[test]
+    fn ledger_greedy_shows_owner_match() {
+        // Chain of same-owner events followed by different owner
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::poll(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(4, Time::ZERO, tid(2), rid(2)),
+        ];
+        let poset = make_poset(&events);
+        let ledger = normalize_with_ledger(&poset, &GeodesicConfig::greedy_only());
+
+        let greedy_choices: Vec<_> = ledger
+            .entries
+            .iter()
+            .filter_map(|e| {
+                if let DecisionEntry::GreedyChoice { owner_match, .. } = e {
+                    Some(*owner_match)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // First step has no previous owner
+        assert!(!greedy_choices[0], "first step has no previous owner");
+        // Middle steps are same-owner continuations
+        for &m in &greedy_choices[1..greedy_choices.len() - 1] {
+            assert!(m, "continuation of same owner should match");
+        }
+    }
+
+    #[test]
+    fn ledger_result_matches_normalize() {
+        // Ledger result must match plain normalize for all config presets
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::complete(4, Time::ZERO, tid(2), rid(2)),
+        ];
+        let poset = make_poset(&events);
+
+        for config in &[
+            GeodesicConfig::default(),
+            GeodesicConfig::greedy_only(),
+            GeodesicConfig::high_quality(),
+        ] {
+            let plain = normalize(&poset, config);
+            let ledger = normalize_with_ledger(&poset, config);
+            assert_eq!(plain.schedule, ledger.result.schedule);
+            assert_eq!(plain.switch_count, ledger.result.switch_count);
         }
     }
 }

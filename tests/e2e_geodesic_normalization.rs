@@ -295,9 +295,10 @@ fn scenario_obligation_interleave() -> ScenarioReport {
         } else {
             ObligationKind::Ack
         };
-        if let Ok(obl) = runtime
-            .state
-            .create_obligation(kind, tid, region, Some(format!("e2e-obl-{i}")))
+        if let Ok(obl) =
+            runtime
+                .state
+                .create_obligation(kind, tid, region, Some(format!("e2e-obl-{i}")))
         {
             obligations.push((obl, i));
         }
