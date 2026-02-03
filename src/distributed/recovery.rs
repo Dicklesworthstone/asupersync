@@ -455,8 +455,8 @@ impl StateDecoder {
 
     /// Attempts to decode the collected symbols into raw bytes.
     ///
-    /// Uses source symbols directly. If some source symbols are missing,
-    /// attempts XOR-parity recovery using repair symbols.
+    /// Uses the deterministic RaptorQ decoding pipeline so recovery
+    /// aligns with RFC-grade encoding behavior.
     pub fn decode(&mut self, params: &ObjectParams) -> Result<Vec<u8>, Error> {
         let k = params.min_symbols_for_decode();
         if self.symbols.len() < k as usize {
@@ -466,134 +466,52 @@ impl StateDecoder {
             return Err(Error::insufficient_symbols(self.symbols.len() as u32, k));
         }
 
-        // Separate source and repair symbols.
-        let (source_by_esi, repair_symbols) = self.partition_symbols(k);
-
-        // Count missing source symbols.
-        let missing: Vec<usize> = source_by_esi
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| if s.is_none() { Some(i) } else { None })
-            .collect();
-
-        if missing.is_empty() {
-            let data = Self::concatenate_sources(&source_by_esi, params.object_size as usize);
-            self.decoder_state = DecoderState::Complete;
-            return Ok(data);
-        }
-
-        if repair_symbols.len() >= missing.len() {
-            let data =
-                Self::recover_with_xor_parity(&source_by_esi, &repair_symbols, &missing, params)?;
-            self.decoder_state = DecoderState::Complete;
-            return Ok(data);
-        }
-
-        self.decoder_state = DecoderState::Failed {
-            reason: format!(
-                "missing {} source symbols, only {} repair available",
-                missing.len(),
-                repair_symbols.len()
-            ),
+        let config = DecodingConfig {
+            symbol_size: params.symbol_size,
+            max_block_size: params.object_size as usize,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
         };
-        Err(Error::insufficient_symbols(self.symbols.len() as u32, k))
-    }
+        let mut pipeline = DecodingPipeline::new(config);
+        if let Err(err) = pipeline.set_object_params(*params) {
+            self.decoder_state = DecoderState::Failed {
+                reason: err.to_string(),
+            };
+            return Err(Error::from(err));
+        }
 
-    /// Partitions accumulated symbols into source (by ESI slot) and repair.
-    fn partition_symbols(&self, k: u32) -> (Vec<Option<&Symbol>>, Vec<&Symbol>) {
-        let mut source_by_esi: Vec<Option<&Symbol>> = vec![None; k as usize];
-        let mut repair_symbols: Vec<&Symbol> = Vec::new();
-
-        for sym in &self.symbols {
-            if sym.kind() == SymbolKind::Source {
-                let esi = sym.esi() as usize;
-                if esi < k as usize {
-                    source_by_esi[esi] = Some(sym);
+        for symbol in &self.symbols {
+            let auth = AuthenticatedSymbol::new_verified(
+                symbol.clone(),
+                AuthenticationTag::zero(),
+            );
+            match pipeline.feed(auth).map_err(Error::from)? {
+                SymbolAcceptResult::Rejected(reason) => {
+                    let message = format!("symbol rejected: {reason:?}");
+                    self.decoder_state = DecoderState::Failed {
+                        reason: message.clone(),
+                    };
+                    return Err(Error::new(ErrorKind::DecodingFailed).with_message(message));
                 }
-            } else {
-                repair_symbols.push(sym);
+                _ => {}
             }
         }
-        (source_by_esi, repair_symbols)
-    }
 
-    /// Concatenates all present source symbols and truncates to object size.
-    fn concatenate_sources(source_by_esi: &[Option<&Symbol>], object_size: usize) -> Vec<u8> {
-        let mut data = Vec::with_capacity(object_size);
-        for src in source_by_esi.iter().flatten() {
-            data.extend_from_slice(src.data());
-        }
-        data.truncate(object_size);
-        data
-    }
-
-    /// Recovers missing source symbols via XOR parity with repair symbols.
-    fn recover_with_xor_parity(
-        source_by_esi: &[Option<&Symbol>],
-        repair_symbols: &[&Symbol],
-        missing: &[usize],
-        params: &ObjectParams,
-    ) -> Result<Vec<u8>, Error> {
-        let symbol_size = source_by_esi
-            .iter()
-            .flatten()
-            .next()
-            .map(|s| s.len())
-            .ok_or_else(|| {
-                Error::new(ErrorKind::DecodingFailed)
-                    .with_message("no source symbols available for size reference")
-            })?;
-
-        let mut data = Vec::with_capacity(params.object_size as usize);
-        for (esi, slot) in source_by_esi.iter().enumerate() {
-            if let Some(src) = slot {
-                data.extend_from_slice(src.data());
-            } else {
-                let recovered = Self::xor_recover_symbol(
-                    esi,
-                    source_by_esi,
-                    repair_symbols,
-                    missing,
-                    symbol_size,
-                    params,
-                );
-                data.extend_from_slice(&recovered);
+        match pipeline.into_data() {
+            Ok(data) => {
+                self.decoder_state = DecoderState::Complete;
+                Ok(data)
+            }
+            Err(err) => {
+                self.decoder_state = DecoderState::Failed {
+                    reason: err.to_string(),
+                };
+                Err(Error::from(err))
             }
         }
-        data.truncate(params.object_size as usize);
-        Ok(data)
-    }
-
-    /// Recovers a single missing source symbol via XOR with a repair symbol.
-    fn xor_recover_symbol(
-        esi: usize,
-        source_by_esi: &[Option<&Symbol>],
-        repair_symbols: &[&Symbol],
-        missing: &[usize],
-        symbol_size: usize,
-        params: &ObjectParams,
-    ) -> Vec<u8> {
-        let repair_idx = missing.iter().position(|&m| m == esi);
-        let Some(ri) = repair_idx else {
-            return vec![0u8; params.symbol_size as usize];
-        };
-        if ri >= repair_symbols.len() {
-            return vec![0u8; params.symbol_size as usize];
-        }
-
-        let mut recovered = vec![0u8; symbol_size];
-        let rd = repair_symbols[ri].data();
-        let cl = std::cmp::min(recovered.len(), rd.len());
-        recovered[..cl].copy_from_slice(&rd[..cl]);
-
-        for (other_esi, other_slot) in source_by_esi.iter().enumerate() {
-            if other_esi != esi {
-                if let Some(src) = other_slot {
-                    xor_into(&mut recovered, src.data());
-                }
-            }
-        }
-        recovered
     }
 
     /// Convenience: decode and deserialize directly to [`RegionSnapshot`].

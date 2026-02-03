@@ -648,6 +648,12 @@ fn verify_dedup_race_join_result(
     }
 
     // One child should be the shared leaf/node, and the other a Race.
+    if !children.contains(&shared) {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Join containing the shared child after DedupRaceJoin",
+        });
+    }
     let has_race_child = children.iter().any(|child_id| {
         dag.node(*child_id)
             .is_some_and(|n| matches!(n, PlanNode::Race { .. }))
