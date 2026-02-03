@@ -26,10 +26,12 @@ pub mod decoder;
 pub mod gf256;
 pub mod linalg;
 pub mod pipeline;
+pub mod proof;
 pub mod systematic;
 
 pub use builder::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 pub use pipeline::{RaptorQReceiver, RaptorQSender, ReceiveOutcome, SendOutcome, SendProgress};
+pub use proof::{DecodeConfig, DecodeProof, DecodeProofBuilder, FailureReason, ProofOutcome};
 
 #[cfg(test)]
 mod tests;

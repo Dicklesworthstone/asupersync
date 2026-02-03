@@ -544,6 +544,7 @@ fn verify_timeout_min_result(
 
 /// Verify that a `DedupRaceJoin` step produced valid structure:
 /// the `after` node should be `Join[shared, Race[...remaining]]`.
+#[allow(clippy::too_many_lines)]
 fn verify_dedup_race_join_result(
     idx: usize,
     step: &CertifiedStep,
