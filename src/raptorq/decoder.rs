@@ -333,9 +333,7 @@ impl InactivationDecoder {
         let mut proof_builder = DecodeProof::builder(config);
 
         // Capture received symbols summary
-        let received = ReceivedSummary::from_received(
-            symbols.iter().map(|s| (s.esi, s.is_source)),
-        );
+        let received = ReceivedSummary::from_received(symbols.iter().map(|s| (s.esi, s.is_source)));
         proof_builder.set_received(received);
 
         // Validate input
@@ -366,7 +364,9 @@ impl InactivationDecoder {
         Self::peel_with_proof(&mut state, proof_builder.peeling_mut());
 
         // Phase 2: Inactivation + Gaussian elimination with proof capture
-        if let Err(err) = self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut()) {
+        if let Err(err) =
+            self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut())
+        {
             proof_builder.set_failure(FailureReason::from(&err));
             return Err((err, proof_builder.build()));
         }
@@ -467,11 +467,11 @@ impl InactivationDecoder {
 
         // Additional LDPC connections using seed-derived pattern
         let mut rng = DetRng::new(self.seed.wrapping_add(0x1D9C_1D9C_0000));
-        for row in 0..s {
+        for terms in row_terms.iter_mut().take(s) {
             let extra = 1 + rng.next_usize(2); // 1-2 additional connections
             for _ in 0..extra {
                 let col = rng.next_usize(l);
-                row_terms[row].push((col, Gf256::ONE));
+                terms.push((col, Gf256::ONE));
             }
         }
 
