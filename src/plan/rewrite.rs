@@ -3,12 +3,13 @@
 use std::collections::HashSet;
 use std::fmt::Write;
 
+use super::analysis::SideConditionChecker;
 use super::{PlanDag, PlanId, PlanNode};
 
 /// Policy controlling which rewrites are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RewritePolicy {
-    /// Conservative: only rewrite when the shared child is a leaf and joins are binary.
+    /// Conservative: only apply rewrites that do not assume commutativity.
     #[default]
     Conservative,
     /// Assume associativity/commutativity and independence of children.
@@ -16,6 +17,14 @@ pub enum RewritePolicy {
 }
 
 impl RewritePolicy {
+    fn allows_associative(self) -> bool {
+        true
+    }
+
+    fn allows_commutative(self) -> bool {
+        matches!(self, Self::AssumeAssociativeComm)
+    }
+
     fn allows_shared_non_leaf(self) -> bool {
         matches!(self, Self::AssumeAssociativeComm)
     }
@@ -25,11 +34,128 @@ impl RewritePolicy {
     }
 }
 
+/// Declarative schema for a rewrite rule.
+#[derive(Debug, Clone, Copy)]
+pub struct RewriteRuleSchema {
+    /// Pattern shape (lhs).
+    pub pattern: &'static str,
+    /// Replacement shape (rhs).
+    pub replacement: &'static str,
+    /// Side conditions that must hold.
+    pub side_conditions: &'static [&'static str],
+    /// Human-readable explanation.
+    pub explanation: &'static str,
+}
+
 /// Rewrite rules available for plan DAGs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewriteRule {
+    /// Associativity for joins: Join[Join[a,b], c] -> Join[a,b,c].
+    JoinAssoc,
+    /// Associativity for races: Race[Race[a,b], c] -> Race[a,b,c].
+    RaceAssoc,
+    /// Commutativity for joins (deterministic canonical order).
+    JoinCommute,
+    /// Commutativity for races (deterministic canonical order).
+    RaceCommute,
+    /// Minimize nested timeouts: Timeout(d1, Timeout(d2, f)) -> Timeout(min(d1,d2), f).
+    TimeoutMin,
     /// Dedupe a shared child across a race of joins.
     DedupRaceJoin,
+}
+
+impl RewriteRule {
+    /// Returns the full rule schema (pattern, replacement, side conditions, explanation).
+    #[must_use]
+    pub fn schema(self) -> RewriteRuleSchema {
+        match self {
+            RewriteRule::JoinAssoc => RewriteRuleSchema {
+                pattern: "Join[Join[a,b], c]",
+                replacement: "Join[a,b,c]",
+                side_conditions: &[
+                    "policy allows associativity",
+                    "obligations safe (before/after)",
+                    "cancel safe (before/after)",
+                    "budget monotone (after <= before)",
+                ],
+                explanation: "Associativity of join: regrouping does not change outcomes.",
+            },
+            RewriteRule::RaceAssoc => RewriteRuleSchema {
+                pattern: "Race[Race[a,b], c]",
+                replacement: "Race[a,b,c]",
+                side_conditions: &[
+                    "policy allows associativity",
+                    "obligations safe (before/after)",
+                    "cancel safe (before/after)",
+                    "budget monotone (after <= before)",
+                ],
+                explanation: "Associativity of race: regrouping preserves winner set.",
+            },
+            RewriteRule::JoinCommute => RewriteRuleSchema {
+                pattern: "Join[a,b]",
+                replacement: "Join[b,a] (canonical order)",
+                side_conditions: &[
+                    "policy allows commutativity",
+                    "children pairwise independent",
+                    "deterministic child order",
+                    "obligations safe (before/after)",
+                    "cancel safe (before/after)",
+                    "budget monotone (after <= before)",
+                ],
+                explanation: "Commutativity of join when children are independent.",
+            },
+            RewriteRule::RaceCommute => RewriteRuleSchema {
+                pattern: "Race[a,b]",
+                replacement: "Race[b,a] (canonical order)",
+                side_conditions: &[
+                    "policy allows commutativity",
+                    "children pairwise independent",
+                    "deterministic child order",
+                    "obligations safe (before/after)",
+                    "cancel safe (before/after)",
+                    "budget monotone (after <= before)",
+                ],
+                explanation: "Commutativity of race when children are independent.",
+            },
+            RewriteRule::TimeoutMin => RewriteRuleSchema {
+                pattern: "Timeout(d1, Timeout(d2, f))",
+                replacement: "Timeout(min(d1,d2), f)",
+                side_conditions: &[
+                    "obligations safe (before/after)",
+                    "cancel safe (before/after)",
+                    "budget monotone (after <= before)",
+                ],
+                explanation: "Nested timeouts reduce to the tighter deadline.",
+            },
+            RewriteRule::DedupRaceJoin => RewriteRuleSchema {
+                pattern: "Race[Join[s,a], Join[s,b]]",
+                replacement: "Join[s, Race[a,b]]",
+                side_conditions: &[
+                    "policy allows shared-child law",
+                    "shared child leaf if conservative",
+                    "joins binary if conservative",
+                    "obligations safe (before/after)",
+                    "cancel safe (before/after)",
+                    "budget monotone (after <= before)",
+                ],
+                explanation: "Race/Join distributivity with shared work dedup.",
+            },
+        }
+    }
+
+    /// Returns all known rules in a stable order.
+    #[must_use]
+    pub fn all() -> &'static [RewriteRule] {
+        const RULES: &[RewriteRule] = &[
+            RewriteRule::JoinAssoc,
+            RewriteRule::RaceAssoc,
+            RewriteRule::JoinCommute,
+            RewriteRule::RaceCommute,
+            RewriteRule::TimeoutMin,
+            RewriteRule::DedupRaceJoin,
+        ];
+        RULES
+    }
 }
 
 /// A single rewrite step applied to the plan DAG.
