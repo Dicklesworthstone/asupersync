@@ -286,7 +286,7 @@ impl Interval {
     /// ```
     pub fn tick(&mut self, now: Time) -> Time {
         // For the first tick, if now < deadline, we still return deadline
-        // (the start time) to match tokio semantics where first tick is immediate
+        // (the start time) so the first tick is immediate.
         if !self.first_tick_done {
             self.first_tick_done = true;
             let tick_time = self.deadline;

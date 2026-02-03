@@ -49,7 +49,7 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 
 ## TL;DR
 
-**The Problem**: Rust's async ecosystem (tokio, async-std) gives you *tools* but not *guarantees*. Cancellation silently drops data. Spawned tasks can orphan. Cleanup is best-effort. Testing concurrent code is non-deterministic. You write correct code by convention, and discover bugs in production.
+**The Problem**: Rust's async ecosystem gives you *tools* but not *guarantees*. Cancellation silently drops data. Spawned tasks can orphan. Cleanup is best-effort. Testing concurrent code is non-deterministic. You write correct code by convention, and discover bugs in production.
 
 **The Solution**: Asupersync is an async runtime where **correctness is structural, not conventional**. Tasks are owned by regions that close to quiescence. Cancellation is a protocol with bounded cleanup. Effects require capabilities. The lab runtime makes concurrency deterministic and replayable.
 
@@ -125,8 +125,8 @@ fn test_cancellation_is_bounded() {
 Tasks don't float free. Every task is owned by a region. Regions form a tree. When a region closes, it *guarantees* all children are complete, all finalizers have run, all obligations are resolved. This is the "no orphans" invariant, enforced by the type system and runtime rather than by discipline.
 
 ```rust
-// Tokio: what happens when this scope exits?
-tokio::spawn(async { /* orphaned? cancelled? who knows */ });
+// Typical executors: what happens when this scope exits?
+spawn(async { /* orphaned? cancelled? who knows */ });
 
 // Asupersync: scope guarantees quiescence
 scope.region(|sub| async {
@@ -192,16 +192,16 @@ Concurrency bugs become reproducible test failures.
 
 ## How Asupersync Compares
 
-| Feature | Asupersync | tokio | async-std | smol |
-|---------|------------|-------|-----------|------|
-| **Structured concurrency** | ✅ Enforced | ❌ Manual | ❌ Manual | ❌ Manual |
-| **Cancel-correctness** | ✅ Protocol | ⚠️ Drop-based | ⚠️ Drop-based | ⚠️ Drop-based |
-| **No orphan tasks** | ✅ Guaranteed | ❌ spawn detaches | ❌ spawn detaches | ❌ spawn detaches |
-| **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort | ❌ Best-effort |
-| **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools | ❌ External tools |
-| **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None | ❌ None |
-| **Ecosystem** | 🔜 Growing | ✅ Massive | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | 🔜 Active dev | ✅ Production | ✅ Production | ✅ Production |
+| Feature | Asupersync | async-std | smol |
+|---------|------------|-----------|------|
+| **Structured concurrency** | ✅ Enforced | ❌ Manual | ❌ Manual |
+| **Cancel-correctness** | ✅ Protocol | ⚠️ Drop-based | ⚠️ Drop-based |
+| **No orphan tasks** | ✅ Guaranteed | ❌ spawn detaches | ❌ spawn detaches |
+| **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort |
+| **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools |
+| **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None |
+| **Ecosystem** | 🔜 Growing | ⚠️ Medium | ⚠️ Small |
+| **Maturity** | 🔜 Active dev | ✅ Production | ✅ Production |
 
 **When to use Asupersync:**
 - Internal applications where correctness > ecosystem
@@ -210,7 +210,7 @@ Concurrency bugs become reproducible test failures.
 - Distributed systems with structured shutdown requirements
 
 **When to consider alternatives:**
-- You need tokio ecosystem library compatibility (we're building native equivalents)
+- You need broad ecosystem library compatibility (we're building native equivalents)
 - Rapid prototyping where correctness guarantees aren't yet critical
 
 ---
@@ -618,8 +618,8 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 ### What Asupersync Doesn't Do
 
 - **Cooperative cancellation only**: Non-cooperative code requires explicit escalation boundaries
-- **Not a drop-in tokio replacement**: Different API, different guarantees
-- **No ecosystem compatibility**: Can't directly use tokio-based libraries (adapters planned)
+- **Not a drop-in replacement for other runtimes**: Different API, different guarantees
+- **No ecosystem compatibility**: Can't directly use runtime-specific libraries (adapters planned)
 
 ### Design Trade-offs
 
@@ -651,7 +651,7 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 
 "A super sync": structured concurrency done right.
 
-### Why not just use tokio with careful conventions?
+### Why not just use existing runtimes with careful conventions?
 
 Conventions don't compose. The 100th engineer on your team will spawn a detached task. The library you depend on will drop a future holding a lock. Asupersync makes incorrect code unrepresentable (or at least detectable).
 

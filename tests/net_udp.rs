@@ -146,7 +146,7 @@ fn net_udp_003_multiple_datagrams() {
 
         // Set a timeout for receiving
         for _ in 0..NET_UDP_NUM_DATAGRAMS {
-            match tokio_timeout(Duration::from_millis(100), server.recv_from(&mut buf)).await {
+            match poll_timeout(Duration::from_millis(100), server.recv_from(&mut buf)).await {
                 Ok(Ok((n, _addr))) => {
                     let msg = std::str::from_utf8(&buf[..n]).unwrap_or("<invalid>");
                     tracing::debug!(received_count, msg, "received datagram");
@@ -179,7 +179,7 @@ fn net_udp_003_multiple_datagrams() {
 }
 
 /// Simple timeout helper for tests
-async fn tokio_timeout<F: std::future::Future>(
+async fn poll_timeout<F: std::future::Future>(
     duration: Duration,
     future: F,
 ) -> Result<F::Output, ()> {

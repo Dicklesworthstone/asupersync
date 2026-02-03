@@ -24,7 +24,6 @@
 
 use crate::trace::event_structure::{OwnerKey, TracePoset};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 
 /// Result of geodesic normalization.
 #[derive(Debug, Clone)]
@@ -43,7 +42,10 @@ pub enum GeodesicAlgorithm {
     /// Greedy "same owner first" heuristic.
     Greedy,
     /// Beam search with specified width.
-    BeamSearch { width: usize },
+    BeamSearch {
+        /// Beam width used for search.
+        width: usize,
+    },
     /// Fallback to topological sort (no optimization).
     TopoSort,
 }

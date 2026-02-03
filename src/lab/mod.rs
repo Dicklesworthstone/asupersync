@@ -59,6 +59,7 @@ pub mod network;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
+pub mod snapshot_restore;
 pub mod virtual_time_wheel;
 
 pub use crate::util::{
@@ -98,4 +99,7 @@ pub use oracle::{
     TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
 pub use runtime::LabRuntime;
+pub use snapshot_restore::{
+    RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
+};
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};

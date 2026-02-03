@@ -32,7 +32,7 @@ This migration harmonizes the asupersync bead hierarchy to eliminate duplicates,
 
 **Resolution**:
 - Made `asupersync-n5o` depend on `asupersync-xrc`
-- Updated n5o description to note it's a tokio-equivalence alias
+- Updated n5o description to note it's a legacy equivalence alias
 - Canonical EPIC: **asupersync-xrc**
 
 ### 3. Priority Alignment (bd-4rpn)
