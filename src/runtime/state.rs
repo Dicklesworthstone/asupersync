@@ -15,7 +15,7 @@ use crate::record::{
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionLimits,
     RegionRecord, SourceLocation, TaskRecord,
 };
-use crate::runtime::config::ObligationLeakResponse;
+use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
@@ -241,6 +241,10 @@ pub struct RuntimeState {
     blocking_pool: Option<BlockingPoolHandle>,
     /// Response policy when obligation leaks are detected.
     obligation_leak_response: ObligationLeakResponse,
+    /// Optional escalation policy for obligation leaks.
+    leak_escalation: Option<LeakEscalation>,
+    /// Cumulative count of obligation leaks (for escalation threshold).
+    leak_count: u64,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -262,6 +266,8 @@ impl std::fmt::Debug for RuntimeState {
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
             .field("obligation_leak_response", &self.obligation_leak_response)
+            .field("leak_escalation", &self.leak_escalation)
+            .field("leak_count", &self.leak_count)
             .finish()
     }
 }
@@ -296,6 +302,8 @@ impl RuntimeState {
             observability: None,
             blocking_pool: None,
             obligation_leak_response: ObligationLeakResponse::Log,
+            leak_escalation: None,
+            leak_count: 0,
         }
     }
 
@@ -451,6 +459,17 @@ impl RuntimeState {
     /// Sets the response policy when obligation leaks are detected.
     pub fn set_obligation_leak_response(&mut self, response: ObligationLeakResponse) {
         self.obligation_leak_response = response;
+    }
+
+    /// Sets the escalation policy for obligation leaks.
+    pub fn set_leak_escalation(&mut self, escalation: Option<LeakEscalation>) {
+        self.leak_escalation = escalation;
+    }
+
+    /// Returns the cumulative count of obligation leaks.
+    #[must_use]
+    pub fn leak_count(&self) -> u64 {
+        self.leak_count
     }
 
     /// Returns a handle to the trace buffer.
@@ -826,14 +845,33 @@ impl RuntimeState {
             return;
         }
 
-        let leak_ids: Vec<ObligationId> = error.leaks.iter().map(|leak| leak.id).collect();
-        for id in leak_ids {
-            let _ = self.mark_obligation_leaked(id);
-        }
+        // Track cumulative leaks for escalation.
+        self.leak_count = self.leak_count.saturating_add(error.leaks.len() as u64);
 
-        match self.obligation_leak_response {
-            ObligationLeakResponse::Panic => panic!("{error}"),
+        // Determine the effective response: check escalation threshold first.
+        let response = if let Some(ref esc) = self.leak_escalation {
+            if self.leak_count >= esc.threshold {
+                esc.escalate_to
+            } else {
+                self.obligation_leak_response
+            }
+        } else {
+            self.obligation_leak_response
+        };
+
+        let leak_ids: Vec<ObligationId> = error.leaks.iter().map(|leak| leak.id).collect();
+        match response {
+            ObligationLeakResponse::Panic => {
+                // Mark leaked first so trace/metrics capture the event before panicking.
+                for id in leak_ids {
+                    let _ = self.mark_obligation_leaked(id);
+                }
+                panic!("{error}");
+            }
             ObligationLeakResponse::Log => {
+                for id in leak_ids {
+                    let _ = self.mark_obligation_leaked(id);
+                }
                 crate::tracing_compat::error!(
                     task_id = ?error.task_id,
                     region_id = ?error.region_id,
@@ -841,11 +879,33 @@ impl RuntimeState {
                         .completion
                         .map_or("unknown", TaskCompletionKind::as_str),
                     leak_count = error.leaks.len(),
+                    cumulative_leaks = self.leak_count,
                     details = %error,
                     "obligation leaks detected"
                 );
             }
-            ObligationLeakResponse::Silent => {}
+            ObligationLeakResponse::Silent => {
+                for id in leak_ids {
+                    let _ = self.mark_obligation_leaked(id);
+                }
+            }
+            ObligationLeakResponse::Recover => {
+                for id in leak_ids {
+                    // Abort instead of marking leaked — performs resource cleanup.
+                    let _ = self.abort_obligation(id, ObligationAbortReason::Error);
+                }
+                crate::tracing_compat::warn!(
+                    task_id = ?error.task_id,
+                    region_id = ?error.region_id,
+                    completion = %error
+                        .completion
+                        .map_or("unknown", TaskCompletionKind::as_str),
+                    leak_count = error.leaks.len(),
+                    cumulative_leaks = self.leak_count,
+                    details = %error,
+                    "obligation leaks recovered via auto-abort"
+                );
+            }
         }
     }
 
@@ -5150,5 +5210,299 @@ mod tests {
             crate::assert_with_log!(quiescent, "quiescent", true, quiescent);
             crate::test_complete!("runtime_state_with_epoll_reactor");
         }
+    }
+
+    // =========================================================================
+    // OBLIGATION LEAK ESCALATION POLICY TESTS (bd-n6xm4)
+    // =========================================================================
+
+    /// Helper: create a state with an obligation that will leak on task completion.
+    /// Returns (state, region, task, obligation_id).
+    fn setup_leakable_obligation(
+        response: ObligationLeakResponse,
+    ) -> (RuntimeState, RegionId, TaskId, ObligationId) {
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(response);
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+        let obl = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("create obligation");
+        (state, region, task, obl)
+    }
+
+    /// Helper: complete a task with Ok outcome (triggers leak detection for
+    /// pending obligations, unlike Cancelled which auto-aborts them).
+    fn complete_task_ok(state: &mut RuntimeState, task: TaskId) {
+        state
+            .tasks
+            .get_mut(task.arena_index())
+            .expect("task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task);
+    }
+
+    #[test]
+    fn leak_response_silent_marks_leaked_no_log() {
+        init_test("leak_response_silent_marks_leaked_no_log");
+        let (mut state, _region, task, obl) =
+            setup_leakable_obligation(ObligationLeakResponse::Silent);
+
+        complete_task_ok(&mut state, task);
+
+        // Obligation should be in Leaked state
+        let record = state.obligations.get(obl.arena_index()).expect("obl");
+        crate::assert_with_log!(
+            record.state == ObligationState::Leaked,
+            "obligation leaked",
+            ObligationState::Leaked,
+            record.state
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 1,
+            "leak count incremented",
+            1u64,
+            state.leak_count()
+        );
+        crate::test_complete!("leak_response_silent_marks_leaked_no_log");
+    }
+
+    #[test]
+    fn leak_response_log_marks_leaked() {
+        init_test("leak_response_log_marks_leaked");
+        let (mut state, _region, task, obl) =
+            setup_leakable_obligation(ObligationLeakResponse::Log);
+
+        complete_task_ok(&mut state, task);
+
+        let record = state.obligations.get(obl.arena_index()).expect("obl");
+        crate::assert_with_log!(
+            record.state == ObligationState::Leaked,
+            "obligation leaked via Log mode",
+            ObligationState::Leaked,
+            record.state
+        );
+
+        // Trace should contain ObligationLeak event
+        let events = state.trace.snapshot();
+        let leak_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationLeak)
+            .count();
+        crate::assert_with_log!(
+            leak_events == 1,
+            "one leak trace event",
+            1usize,
+            leak_events
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 1,
+            "leak count",
+            1u64,
+            state.leak_count()
+        );
+        crate::test_complete!("leak_response_log_marks_leaked");
+    }
+
+    #[test]
+    fn leak_response_recover_aborts_instead_of_leaking() {
+        init_test("leak_response_recover_aborts_instead_of_leaking");
+        let (mut state, _region, task, obl) =
+            setup_leakable_obligation(ObligationLeakResponse::Recover);
+
+        complete_task_ok(&mut state, task);
+
+        // With Recover, the obligation is aborted (not leaked)
+        let record = state.obligations.get(obl.arena_index()).expect("obl");
+        crate::assert_with_log!(
+            record.state == ObligationState::Aborted,
+            "obligation aborted by recovery",
+            ObligationState::Aborted,
+            record.state
+        );
+
+        // Trace should contain ObligationAbort (not ObligationLeak)
+        let events = state.trace.snapshot();
+        let abort_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationAbort)
+            .count();
+        let leak_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationLeak)
+            .count();
+        crate::assert_with_log!(
+            abort_events >= 1,
+            "abort trace event from recovery",
+            true,
+            abort_events >= 1
+        );
+        crate::assert_with_log!(
+            leak_events == 0,
+            "no leak trace event in recover mode",
+            0usize,
+            leak_events
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 1,
+            "leak count still incremented",
+            1u64,
+            state.leak_count()
+        );
+        crate::test_complete!("leak_response_recover_aborts_instead_of_leaking");
+    }
+
+    #[test]
+    #[should_panic(expected = "obligation leak")]
+    fn leak_response_panic_panics() {
+        init_test("leak_response_panic_panics");
+        let (mut state, _region, task, _obl) =
+            setup_leakable_obligation(ObligationLeakResponse::Panic);
+
+        complete_task_ok(&mut state, task);
+        // Should panic before reaching here
+    }
+
+    #[test]
+    fn leak_escalation_from_log_to_panic() {
+        init_test("leak_escalation_from_log_to_panic");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Log);
+        state.set_leak_escalation(Some(LeakEscalation::new(3, ObligationLeakResponse::Panic)));
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // First two leaks should be logged (not panic)
+        for i in 0u64..2 {
+            let task = insert_task(&mut state, region);
+            state
+                .create_obligation(ObligationKind::SendPermit, task, region, None)
+                .expect("create obligation");
+            complete_task_ok(&mut state, task);
+            let expected = i + 1;
+            crate::assert_with_log!(
+                state.leak_count() == expected,
+                &format!("leak count after batch {expected}"),
+                expected,
+                state.leak_count()
+            );
+        }
+
+        // Third leak should escalate to Panic
+        let task = insert_task(&mut state, region);
+        state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("create obligation");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            complete_task_ok(&mut state, task);
+        }));
+        crate::assert_with_log!(
+            result.is_err(),
+            "escalated to panic at threshold",
+            true,
+            result.is_err()
+        );
+        crate::test_complete!("leak_escalation_from_log_to_panic");
+    }
+
+    #[test]
+    fn leak_escalation_from_silent_to_recover() {
+        init_test("leak_escalation_from_silent_to_recover");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+        state.set_leak_escalation(Some(LeakEscalation::new(
+            2,
+            ObligationLeakResponse::Recover,
+        )));
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // First leak: Silent mode — obligation gets Leaked state
+        let task1 = insert_task(&mut state, region);
+        let obl1 = state
+            .create_obligation(ObligationKind::Ack, task1, region, None)
+            .expect("create");
+        complete_task_ok(&mut state, task1);
+        let record1 = state.obligations.get(obl1.arena_index()).expect("obl1");
+        crate::assert_with_log!(
+            record1.state == ObligationState::Leaked,
+            "first leak: Leaked state (silent)",
+            ObligationState::Leaked,
+            record1.state
+        );
+
+        // Second leak: escalates to Recover — obligation gets Aborted state
+        let task2 = insert_task(&mut state, region);
+        let obl2 = state
+            .create_obligation(ObligationKind::Lease, task2, region, None)
+            .expect("create");
+        complete_task_ok(&mut state, task2);
+        let record2 = state.obligations.get(obl2.arena_index()).expect("obl2");
+        crate::assert_with_log!(
+            record2.state == ObligationState::Aborted,
+            "second leak: Aborted (recovered)",
+            ObligationState::Aborted,
+            record2.state
+        );
+        crate::assert_with_log!(
+            state.leak_count() == 2,
+            "total leak count",
+            2u64,
+            state.leak_count()
+        );
+        crate::test_complete!("leak_escalation_from_silent_to_recover");
+    }
+
+    #[test]
+    fn leak_count_accumulates_across_tasks() {
+        init_test("leak_count_accumulates_across_tasks");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Create 5 tasks, each with 2 obligations — 10 total leaks
+        for _ in 0..5 {
+            let task = insert_task(&mut state, region);
+            state
+                .create_obligation(ObligationKind::SendPermit, task, region, None)
+                .expect("create");
+            state
+                .create_obligation(ObligationKind::IoOp, task, region, None)
+                .expect("create");
+            complete_task_ok(&mut state, task);
+        }
+
+        crate::assert_with_log!(
+            state.leak_count() == 10,
+            "10 cumulative leaks",
+            10u64,
+            state.leak_count()
+        );
+        crate::test_complete!("leak_count_accumulates_across_tasks");
+    }
+
+    #[test]
+    fn no_escalation_when_not_configured() {
+        init_test("no_escalation_when_not_configured");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+        // No escalation configured
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Even after 100 leaks, response stays Silent (no escalation)
+        for _ in 0..100 {
+            let task = insert_task(&mut state, region);
+            state
+                .create_obligation(ObligationKind::SendPermit, task, region, None)
+                .expect("create");
+            complete_task_ok(&mut state, task);
+        }
+
+        crate::assert_with_log!(
+            state.leak_count() == 100,
+            "100 leaks, no panic",
+            100u64,
+            state.leak_count()
+        );
+        crate::test_complete!("no_escalation_when_not_configured");
     }
 }

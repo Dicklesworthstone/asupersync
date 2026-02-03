@@ -53,6 +53,38 @@ pub enum ObligationLeakResponse {
     Log,
     /// Suppress logging for leaks (still marked as leaked).
     Silent,
+    /// Automatically abort leaked obligations and log a warning.
+    ///
+    /// Unlike `Log`, this performs best-effort cleanup by aborting the
+    /// obligation (transitioning to `Aborted` instead of `Leaked`),
+    /// which releases associated resources. Useful in production where
+    /// crashing is unacceptable but resource cleanup is important.
+    Recover,
+}
+
+/// Escalation policy for obligation leaks.
+///
+/// When configured, the runtime tracks the cumulative number of leaks
+/// and escalates from the base response to a stricter one after a
+/// threshold is reached. For example, a service might log the first
+/// few leaks but panic after 10 to prevent cascading resource exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeakEscalation {
+    /// Number of leaks that trigger escalation.
+    pub threshold: u64,
+    /// Response to switch to after the threshold is reached.
+    pub escalate_to: ObligationLeakResponse,
+}
+
+impl LeakEscalation {
+    /// Creates a new escalation policy.
+    #[must_use]
+    pub const fn new(threshold: u64, escalate_to: ObligationLeakResponse) -> Self {
+        Self {
+            threshold,
+            escalate_to,
+        }
+    }
 }
 
 /// Runtime configuration.
@@ -103,6 +135,11 @@ pub struct RuntimeConfig {
     pub cancel_attribution: CancelAttributionConfig,
     /// Response policy for obligation leaks detected at runtime.
     pub obligation_leak_response: ObligationLeakResponse,
+    /// Optional escalation policy for obligation leaks.
+    ///
+    /// When set, the runtime escalates from `obligation_leak_response` to
+    /// `escalation.escalate_to` after `escalation.threshold` leaks.
+    pub leak_escalation: Option<LeakEscalation>,
     /// Enable the Lyapunov governor for scheduling suggestions.
     ///
     /// When enabled, the scheduler periodically snapshots runtime state and
@@ -169,6 +206,7 @@ impl Default for RuntimeConfig {
             observability: None,
             cancel_attribution: CancelAttributionConfig::default(),
             obligation_leak_response: ObligationLeakResponse::Log,
+            leak_escalation: None,
             enable_governor: false,
             governor_interval: 32,
         }
@@ -264,6 +302,7 @@ mod tests {
             observability: None,
             cancel_attribution: CancelAttributionConfig::new(1, 256),
             obligation_leak_response: ObligationLeakResponse::Log,
+            leak_escalation: None,
             logical_clock_mode: None,
             enable_governor: false,
             governor_interval: 32,
@@ -365,6 +404,7 @@ mod tests {
             observability: None,
             cancel_attribution: CancelAttributionConfig::new(8, 1024),
             obligation_leak_response: ObligationLeakResponse::Silent,
+            leak_escalation: None,
             logical_clock_mode: None,
             enable_governor: false,
             governor_interval: 32,

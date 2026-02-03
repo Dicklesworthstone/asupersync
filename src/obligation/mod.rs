@@ -68,6 +68,6 @@ pub mod marking;
 pub mod recovery;
 
 pub use leak_check::{
-    Body, CheckResult, Diagnostic, DiagnosticKind, Instruction, LeakChecker, ObligationVar,
-    VarState,
+    ArmBuilder, Body, BodyBuilder, BranchBuilder, CheckResult, Diagnostic, DiagnosticKind,
+    Instruction, LeakChecker, ObligationAnalyzer, ObligationVar, VarState,
 };

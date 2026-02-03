@@ -491,6 +491,367 @@ impl LeakChecker {
 }
 
 // ============================================================================
+// BodyBuilder — fluent IR construction
+// ============================================================================
+
+/// Fluent builder for constructing obligation [`Body`] IR.
+///
+/// Bridges the gap between real obligation code patterns and the static
+/// checker's structured IR. Variables are auto-assigned incrementally.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::obligation::BodyBuilder;
+/// use asupersync::record::ObligationKind;
+///
+/// let mut b = BodyBuilder::new("send_handler");
+/// let permit = b.reserve(ObligationKind::SendPermit);
+/// b.branch(|bb| {
+///     bb.arm(|a| { a.commit(permit); });
+///     bb.arm(|a| { a.abort(permit); });
+/// });
+/// let body = b.build();
+///
+/// let mut checker = asupersync::obligation::LeakChecker::new();
+/// let result = checker.check(&body);
+/// assert!(result.is_clean());
+/// ```
+#[derive(Debug)]
+pub struct BodyBuilder {
+    name: String,
+    instructions: Vec<Instruction>,
+    next_var: u32,
+}
+
+impl BodyBuilder {
+    /// Create a new builder for a scope/function with the given name.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            instructions: Vec::new(),
+            next_var: 0,
+        }
+    }
+
+    /// Reserve a new obligation, returning the auto-assigned variable.
+    pub fn reserve(&mut self, kind: ObligationKind) -> ObligationVar {
+        let var = ObligationVar(self.next_var);
+        self.next_var += 1;
+        self.instructions.push(Instruction::Reserve { var, kind });
+        var
+    }
+
+    /// Record a commit instruction for the given variable.
+    pub fn commit(&mut self, var: ObligationVar) -> &mut Self {
+        self.instructions.push(Instruction::Commit { var });
+        self
+    }
+
+    /// Record an abort instruction for the given variable.
+    pub fn abort(&mut self, var: ObligationVar) -> &mut Self {
+        self.instructions.push(Instruction::Abort { var });
+        self
+    }
+
+    /// Add a branch (if/else, match) with multiple arms.
+    ///
+    /// Each arm is built via the [`BranchBuilder`] callback.
+    pub fn branch(&mut self, build: impl FnOnce(&mut BranchBuilder)) -> &mut Self {
+        let mut bb = BranchBuilder { arms: Vec::new() };
+        build(&mut bb);
+        self.instructions
+            .push(Instruction::Branch { arms: bb.arms });
+        self
+    }
+
+    /// Consume the builder and produce a [`Body`].
+    #[must_use]
+    pub fn build(self) -> Body {
+        Body {
+            name: self.name,
+            instructions: self.instructions,
+        }
+    }
+
+    /// Returns the next variable index (useful for manual variable allocation).
+    #[must_use]
+    pub fn next_var_index(&self) -> u32 {
+        self.next_var
+    }
+}
+
+/// Builder for branch arms within a [`BodyBuilder::branch`] call.
+#[derive(Debug)]
+pub struct BranchBuilder {
+    arms: Vec<Vec<Instruction>>,
+}
+
+impl BranchBuilder {
+    /// Add a branch arm. The callback receives an [`ArmBuilder`] to populate
+    /// the arm's instructions.
+    pub fn arm(&mut self, build: impl FnOnce(&mut ArmBuilder)) -> &mut Self {
+        let mut ab = ArmBuilder {
+            instructions: Vec::new(),
+        };
+        build(&mut ab);
+        self.arms.push(ab.instructions);
+        self
+    }
+}
+
+/// Builder for a single branch arm's instruction sequence.
+#[derive(Debug)]
+pub struct ArmBuilder {
+    instructions: Vec<Instruction>,
+}
+
+impl ArmBuilder {
+    /// Record a commit in this arm.
+    pub fn commit(&mut self, var: ObligationVar) -> &mut Self {
+        self.instructions.push(Instruction::Commit { var });
+        self
+    }
+
+    /// Record an abort in this arm.
+    pub fn abort(&mut self, var: ObligationVar) -> &mut Self {
+        self.instructions.push(Instruction::Abort { var });
+        self
+    }
+
+    /// Reserve a new obligation within this arm (for obligations local to one branch).
+    pub fn reserve(&mut self, var: ObligationVar, kind: ObligationKind) -> &mut Self {
+        self.instructions.push(Instruction::Reserve { var, kind });
+        self
+    }
+
+    /// Add a nested branch within this arm.
+    pub fn branch(&mut self, build: impl FnOnce(&mut BranchBuilder)) -> &mut Self {
+        let mut bb = BranchBuilder { arms: Vec::new() };
+        build(&mut bb);
+        self.instructions
+            .push(Instruction::Branch { arms: bb.arms });
+        self
+    }
+}
+
+// ============================================================================
+// ObligationAnalyzer — record-then-check bridge
+// ============================================================================
+
+/// Records obligation operations and validates them via the static [`LeakChecker`].
+///
+/// Bridges real obligation usage patterns to the static checker. Construct an
+/// analyzer, call `reserve`/`commit`/`abort` as your code would, then call
+/// `check()` to run the leak analysis.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::obligation::ObligationAnalyzer;
+/// use asupersync::record::ObligationKind;
+///
+/// let mut analyzer = ObligationAnalyzer::new("my_handler");
+/// let permit = analyzer.reserve(ObligationKind::SendPermit);
+/// analyzer.commit(permit);
+/// let result = analyzer.check();
+/// assert!(result.is_clean());
+/// ```
+#[derive(Debug)]
+pub struct ObligationAnalyzer {
+    builder: BodyBuilder,
+}
+
+impl ObligationAnalyzer {
+    /// Create a new analyzer for the given scope name.
+    #[must_use]
+    pub fn new(scope: impl Into<String>) -> Self {
+        Self {
+            builder: BodyBuilder::new(scope),
+        }
+    }
+
+    /// Record a reserve operation, returning the variable handle.
+    pub fn reserve(&mut self, kind: ObligationKind) -> ObligationVar {
+        self.builder.reserve(kind)
+    }
+
+    /// Record a commit operation.
+    pub fn commit(&mut self, var: ObligationVar) {
+        self.builder.commit(var);
+    }
+
+    /// Record an abort operation.
+    pub fn abort(&mut self, var: ObligationVar) {
+        self.builder.abort(var);
+    }
+
+    /// Record a branch with multiple arms.
+    pub fn branch(&mut self, build: impl FnOnce(&mut BranchBuilder)) {
+        self.builder.branch(build);
+    }
+
+    /// Run the leak checker and return the result.
+    #[must_use]
+    pub fn check(self) -> CheckResult {
+        let body = self.builder.build();
+        let mut checker = LeakChecker::new();
+        checker.check(&body)
+    }
+
+    /// Assert that the recorded operations have no leaks.
+    ///
+    /// # Panics
+    ///
+    /// Panics with diagnostic details if any leaks are found.
+    pub fn assert_clean(self) {
+        let result = self.check();
+        assert!(result.is_clean(), "obligation leak check failed:\n{result}");
+    }
+
+    /// Assert that the recorded operations have exactly `expected` leak diagnostics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of leaks doesn't match.
+    pub fn assert_leaks(self, expected: usize) {
+        let result = self.check();
+        let leaks = result.leaks();
+        assert_eq!(
+            leaks.len(),
+            expected,
+            "expected {expected} leak(s) but found {}:\n{result}",
+            leaks.len()
+        );
+    }
+}
+
+// ============================================================================
+// Macros — DSL for inline body construction + assertion
+// ============================================================================
+
+/// Construct an obligation [`Body`] from a concise inline description.
+///
+/// # Syntax
+///
+/// ```text
+/// obligation_body!("scope_name", |b| {
+///     let permit = b.reserve(ObligationKind::SendPermit);
+///     b.branch(|bb| {
+///         bb.arm(|a| { a.commit(permit); });
+///         bb.arm(|a| { a.abort(permit); });
+///     });
+/// })
+/// ```
+///
+/// # Example
+///
+/// ```
+/// use asupersync::obligation_body;
+/// use asupersync::record::ObligationKind;
+///
+/// let body = obligation_body!("handler", |b| {
+///     let v = b.reserve(ObligationKind::SendPermit);
+///     b.commit(v);
+/// });
+///
+/// let mut checker = asupersync::obligation::LeakChecker::new();
+/// assert!(checker.check(&body).is_clean());
+/// ```
+#[macro_export]
+macro_rules! obligation_body {
+    ($name:expr, |$b:ident| $block:block) => {{
+        let mut $b = $crate::obligation::BodyBuilder::new($name);
+        $block
+        $b.build()
+    }};
+}
+
+/// Assert that an obligation body (or inline builder) has no leaks.
+///
+/// # Forms
+///
+/// ```text
+/// // Check an existing Body:
+/// assert_no_leaks!(body);
+///
+/// // Build and check inline:
+/// assert_no_leaks!("scope_name", |b| {
+///     let v = b.reserve(ObligationKind::SendPermit);
+///     b.commit(v);
+/// });
+/// ```
+///
+/// # Example
+///
+/// ```
+/// use asupersync::assert_no_leaks;
+/// use asupersync::record::ObligationKind;
+///
+/// // Inline form:
+/// assert_no_leaks!("clean_handler", |b| {
+///     let v = b.reserve(ObligationKind::SendPermit);
+///     b.commit(v);
+/// });
+/// ```
+///
+/// ```should_panic
+/// use asupersync::assert_no_leaks;
+/// use asupersync::record::ObligationKind;
+///
+/// // This panics because the obligation is never resolved:
+/// assert_no_leaks!("leaky_handler", |b| {
+///     let _v = b.reserve(ObligationKind::SendPermit);
+/// });
+/// ```
+#[macro_export]
+macro_rules! assert_no_leaks {
+    ($body:expr) => {{
+        let mut __checker = $crate::obligation::LeakChecker::new();
+        let __result = __checker.check(&$body);
+        assert!(
+            __result.is_clean(),
+            "obligation leak check failed:\n{__result}"
+        );
+    }};
+    ($name:expr, |$b:ident| $block:block) => {{
+        let __body = $crate::obligation_body!($name, |$b| $block);
+        $crate::assert_no_leaks!(__body);
+    }};
+}
+
+/// Assert that an obligation body has exactly the specified number of leaks.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::{assert_has_leaks, obligation_body};
+/// use asupersync::record::ObligationKind;
+///
+/// let body = obligation_body!("leaky", |b| {
+///     let _v = b.reserve(ObligationKind::SendPermit);
+///     // No commit or abort — definite leak.
+/// });
+/// assert_has_leaks!(body, 1);
+/// ```
+#[macro_export]
+macro_rules! assert_has_leaks {
+    ($body:expr, $expected:expr) => {{
+        let mut __checker = $crate::obligation::LeakChecker::new();
+        let __result = __checker.check(&$body);
+        let __leaks = __result.leaks();
+        assert_eq!(
+            __leaks.len(),
+            $expected,
+            "expected {} leak(s) but found {}:\n{__result}",
+            $expected,
+            __leaks.len()
+        );
+    }};
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1297,5 +1658,233 @@ mod tests {
         let has_count = dirty_str.contains("1 diagnostic");
         crate::assert_with_log!(has_count, "dirty display", true, has_count);
         crate::test_complete!("check_result_display");
+    }
+
+    // ---- BodyBuilder -------------------------------------------------------
+
+    #[test]
+    fn builder_clean_reserve_commit() {
+        init_test("builder_clean_reserve_commit");
+        let mut b = BodyBuilder::new("clean");
+        let v = b.reserve(ObligationKind::SendPermit);
+        b.commit(v);
+        let body = b.build();
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        crate::assert_with_log!(result.is_clean(), "clean", true, result.is_clean());
+        crate::test_complete!("builder_clean_reserve_commit");
+    }
+
+    #[test]
+    fn builder_leak_detected() {
+        init_test("builder_leak_detected");
+        let mut b = BodyBuilder::new("leaky");
+        let _v = b.reserve(ObligationKind::Lease);
+        let body = b.build();
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let leaks = result.leaks();
+        crate::assert_with_log!(leaks.len() == 1, "leak count", 1, leaks.len());
+        crate::test_complete!("builder_leak_detected");
+    }
+
+    #[test]
+    fn builder_branch_clean() {
+        init_test("builder_branch_clean");
+        let mut b = BodyBuilder::new("branch_clean");
+        let v = b.reserve(ObligationKind::IoOp);
+        b.branch(|bb| {
+            bb.arm(|a| {
+                a.commit(v);
+            });
+            bb.arm(|a| {
+                a.abort(v);
+            });
+        });
+        let body = b.build();
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        crate::assert_with_log!(result.is_clean(), "clean", true, result.is_clean());
+        crate::test_complete!("builder_branch_clean");
+    }
+
+    #[test]
+    fn builder_branch_potential_leak() {
+        init_test("builder_branch_potential_leak");
+        let mut b = BodyBuilder::new("branch_leak");
+        let v = b.reserve(ObligationKind::Ack);
+        b.branch(|bb| {
+            bb.arm(|a| {
+                a.commit(v);
+            });
+            bb.arm(|_a| {}); // Missing resolution.
+        });
+        let body = b.build();
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let leaks = result.leaks();
+        crate::assert_with_log!(leaks.len() == 1, "leak count", 1, leaks.len());
+        let kind = &leaks[0].kind;
+        crate::assert_with_log!(
+            *kind == DiagnosticKind::PotentialLeak,
+            "potential",
+            DiagnosticKind::PotentialLeak,
+            kind
+        );
+        crate::test_complete!("builder_branch_potential_leak");
+    }
+
+    #[test]
+    fn builder_auto_var_numbering() {
+        init_test("builder_auto_var_numbering");
+        let mut b = BodyBuilder::new("auto_vars");
+        let v0 = b.reserve(ObligationKind::SendPermit);
+        let v1 = b.reserve(ObligationKind::Ack);
+        let v2 = b.reserve(ObligationKind::Lease);
+        crate::assert_with_log!(v0 == ObligationVar(0), "v0", ObligationVar(0), v0);
+        crate::assert_with_log!(v1 == ObligationVar(1), "v1", ObligationVar(1), v1);
+        crate::assert_with_log!(v2 == ObligationVar(2), "v2", ObligationVar(2), v2);
+        b.commit(v0);
+        b.commit(v1);
+        b.commit(v2);
+        let body = b.build();
+        let mut checker = LeakChecker::new();
+        crate::assert_with_log!(
+            checker.check(&body).is_clean(),
+            "clean",
+            true,
+            checker.check(&body).is_clean()
+        );
+        crate::test_complete!("builder_auto_var_numbering");
+    }
+
+    #[test]
+    fn builder_nested_branch() {
+        init_test("builder_nested_branch");
+        let mut b = BodyBuilder::new("nested");
+        let v = b.reserve(ObligationKind::SendPermit);
+        b.branch(|bb| {
+            bb.arm(|a| {
+                a.branch(|bb2| {
+                    bb2.arm(|a2| {
+                        a2.commit(v);
+                    });
+                    bb2.arm(|a2| {
+                        a2.abort(v);
+                    });
+                });
+            });
+            bb.arm(|a| {
+                a.abort(v);
+            });
+        });
+        let body = b.build();
+        let mut checker = LeakChecker::new();
+        crate::assert_with_log!(
+            checker.check(&body).is_clean(),
+            "clean",
+            true,
+            checker.check(&body).is_clean()
+        );
+        crate::test_complete!("builder_nested_branch");
+    }
+
+    // ---- ObligationAnalyzer ------------------------------------------------
+
+    #[test]
+    fn analyzer_clean() {
+        init_test("analyzer_clean");
+        let mut a = ObligationAnalyzer::new("clean_scope");
+        let v = a.reserve(ObligationKind::SendPermit);
+        a.commit(v);
+        a.assert_clean();
+        crate::test_complete!("analyzer_clean");
+    }
+
+    #[test]
+    fn analyzer_detects_leak() {
+        init_test("analyzer_detects_leak");
+        let mut a = ObligationAnalyzer::new("leaky_scope");
+        let _v = a.reserve(ObligationKind::Lease);
+        a.assert_leaks(1);
+        crate::test_complete!("analyzer_detects_leak");
+    }
+
+    #[test]
+    fn analyzer_branch_clean() {
+        init_test("analyzer_branch_clean");
+        let mut a = ObligationAnalyzer::new("branch_scope");
+        let v = a.reserve(ObligationKind::IoOp);
+        a.branch(|bb| {
+            bb.arm(|arm| {
+                arm.commit(v);
+            });
+            bb.arm(|arm| {
+                arm.abort(v);
+            });
+        });
+        a.assert_clean();
+        crate::test_complete!("analyzer_branch_clean");
+    }
+
+    #[test]
+    fn analyzer_branch_leak() {
+        init_test("analyzer_branch_leak");
+        let mut a = ObligationAnalyzer::new("branch_leak");
+        let v = a.reserve(ObligationKind::Ack);
+        a.branch(|bb| {
+            bb.arm(|arm| {
+                arm.commit(v);
+            });
+            bb.arm(|_arm| {}); // Missing.
+        });
+        a.assert_leaks(1);
+        crate::test_complete!("analyzer_branch_leak");
+    }
+
+    // ---- Macros ------------------------------------------------------------
+
+    #[test]
+    fn macro_obligation_body_clean() {
+        init_test("macro_obligation_body_clean");
+        let body = crate::obligation_body!("macro_clean", |b| {
+            let v = b.reserve(ObligationKind::SendPermit);
+            b.commit(v);
+        });
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        crate::assert_with_log!(result.is_clean(), "clean", true, result.is_clean());
+        crate::test_complete!("macro_obligation_body_clean");
+    }
+
+    #[test]
+    fn macro_assert_no_leaks_inline() {
+        init_test("macro_assert_no_leaks_inline");
+        crate::assert_no_leaks!("inline_clean", |b| {
+            let v = b.reserve(ObligationKind::SendPermit);
+            b.commit(v);
+        });
+        crate::test_complete!("macro_assert_no_leaks_inline");
+    }
+
+    #[test]
+    fn macro_assert_has_leaks() {
+        init_test("macro_assert_has_leaks");
+        let body = crate::obligation_body!("leaky_macro", |b| {
+            let _v = b.reserve(ObligationKind::Lease);
+        });
+        crate::assert_has_leaks!(body, 1);
+        crate::test_complete!("macro_assert_has_leaks");
+    }
+
+    #[test]
+    fn macro_assert_no_leaks_body() {
+        init_test("macro_assert_no_leaks_body");
+        let body = crate::obligation_body!("body_clean", |b| {
+            let v = b.reserve(ObligationKind::Ack);
+            b.abort(v);
+        });
+        crate::assert_no_leaks!(body);
+        crate::test_complete!("macro_assert_no_leaks_body");
     }
 }
