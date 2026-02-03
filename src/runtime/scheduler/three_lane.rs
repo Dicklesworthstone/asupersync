@@ -762,9 +762,22 @@ impl ThreeLaneWorker {
             cached_cancel_waker,
         ) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
-            let Some(stored) = state.remove_stored_future(task_id) else {
+            
+            // Try global storage first
+            let stored = if let Some(stored) = state.remove_stored_future(task_id) {
+                Some(AnyStoredTask::Global(stored))
+            } else {
+                // Try local storage
+                drop(state); // Drop lock to access TLS
+                let local = crate::runtime::local::remove_local_task(task_id);
+                state = self.state.lock().expect("runtime state lock poisoned"); // Re-acquire
+                local.map(AnyStoredTask::Local)
+            };
+
+            let Some(stored) = stored else {
                 return;
             };
+
             let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
                 return;
             };
@@ -793,16 +806,30 @@ impl ThreeLaneWorker {
             )
         };
 
+        let is_local = matches!(stored, AnyStoredTask::Local(_));
+
         // Reuse cached waker if priority hasn't changed, otherwise allocate new one
         let waker = match cached_waker {
             Some((w, cached_priority)) if cached_priority == priority => w,
-            _ => Waker::from(Arc::new(ThreeLaneWaker {
-                task_id,
-                priority,
-                wake_state: Arc::clone(&wake_state),
-                global: Arc::clone(&self.global),
-                parker: self.parker.clone(),
-            })),
+            _ => {
+                if is_local {
+                    Waker::from(Arc::new(ThreeLaneLocalWaker {
+                        task_id,
+                        priority,
+                        wake_state: Arc::clone(&wake_state),
+                        local: Arc::clone(&self.local),
+                        parker: self.parker.clone(),
+                    }))
+                } else {
+                    Waker::from(Arc::new(ThreeLaneWaker {
+                        task_id,
+                        priority,
+                        wake_state: Arc::clone(&wake_state),
+                        global: Arc::clone(&self.global),
+                        parker: self.parker.clone(),
+                    }))
+                }
+            }
         };
         // Create/reuse cancel waker if cx_inner exists
         let cancel_waker_for_cache = cx_inner.as_ref().map_or_else(
@@ -810,14 +837,27 @@ impl ThreeLaneWorker {
             |inner| {
                 let cancel_waker = match cached_cancel_waker {
                     Some((w, cached_priority)) if cached_priority == priority => w,
-                    _ => Waker::from(Arc::new(CancelLaneWaker {
-                        task_id,
-                        default_priority: priority,
-                        wake_state: Arc::clone(&wake_state),
-                        global: Arc::clone(&self.global),
-                        parker: self.parker.clone(),
-                        cx_inner: Arc::downgrade(inner),
-                    })),
+                    _ => {
+                        if is_local {
+                            Waker::from(Arc::new(ThreeLaneLocalCancelWaker {
+                                task_id,
+                                default_priority: priority,
+                                wake_state: Arc::clone(&wake_state),
+                                local: Arc::clone(&self.local),
+                                parker: self.parker.clone(),
+                                cx_inner: Arc::downgrade(inner),
+                            }))
+                        } else {
+                            Waker::from(Arc::new(CancelLaneWaker {
+                                task_id,
+                                default_priority: priority,
+                                wake_state: Arc::clone(&wake_state),
+                                global: Arc::clone(&self.global),
+                                parker: self.parker.clone(),
+                                cx_inner: Arc::downgrade(inner),
+                            }))
+                        }
+                    }
                 };
                 if let Ok(mut guard) = inner.write() {
                     guard.cancel_waker = Some(cancel_waker.clone());
@@ -849,6 +889,14 @@ impl ThreeLaneWorker {
                             .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
                             .unwrap_or(0);
                         if record.wake_state.notify() {
+                            // Waiters are always ready tasks.
+                            // NOTE: If we had local waiters, we'd need to know where to schedule them.
+                            // Currently we assume waiters are global or cross-thread wakeable.
+                            // If a waiter is local, injecting to global might be wrong!
+                            // But `task_completed` doesn't know about waiter locality.
+                            // This is a limitation: local tasks waiting on other tasks might be
+                            // woken globally.
+                            // For now, consistent with Phase 1 Global Injector design for cross-task wakes.
                             self.global.inject_ready(waiter, waiter_priority);
                             self.parker.unpark();
                         }
@@ -858,14 +906,29 @@ impl ThreeLaneWorker {
                 wake_state.clear();
             }
             Poll::Pending => {
-                let mut state = self.state.lock().expect("runtime state lock poisoned");
-                state.store_spawned_task(task_id, stored);
-                // Cache wakers back in the task record for reuse on next poll
-                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
-                    record.cached_waker = Some((waker, priority));
-                    record.cached_cancel_waker = cancel_waker_for_cache;
+                // Store task back
+                match stored {
+                    AnyStoredTask::Global(t) => {
+                        let mut state = self.state.lock().expect("runtime state lock poisoned");
+                        state.store_spawned_task(task_id, t);
+                        // Cache wakers back in the task record for reuse on next poll
+                        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                            record.cached_waker = Some((waker, priority));
+                            record.cached_cancel_waker = cancel_waker_for_cache;
+                        }
+                    }
+                    AnyStoredTask::Local(t) => {
+                        crate::runtime::local::store_local_task(task_id, t);
+                        // For local tasks, we also want to cache wakers in the global record
+                        // (since record is global).
+                        let mut state = self.state.lock().expect("runtime state lock poisoned");
+                        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                            record.cached_waker = Some((waker, priority));
+                            record.cached_cancel_waker = cancel_waker_for_cache;
+                        }
+                    }
                 }
-                drop(state);
+
                 if wake_state.finish_poll() {
                     let mut cancel_priority = priority;
                     let mut schedule_cancel = false;
@@ -879,12 +942,25 @@ impl ThreeLaneWorker {
                             }
                         }
                     }
-                    if schedule_cancel {
-                        self.global.inject_cancel(task_id, cancel_priority);
+                    
+                    if is_local {
+                        // Schedule to local queue
+                        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+                        if schedule_cancel {
+                            local.schedule_cancel(task_id, cancel_priority);
+                        } else {
+                            local.schedule(task_id, priority);
+                        }
+                        self.parker.unpark();
                     } else {
-                        self.global.inject_ready(task_id, priority);
+                        // Schedule to global injector
+                        if schedule_cancel {
+                            self.global.inject_cancel(task_id, cancel_priority);
+                        } else {
+                            self.global.inject_ready(task_id, priority);
+                        }
+                        self.parker.unpark();
                     }
-                    self.parker.unpark();
                 }
             }
         }
@@ -909,6 +985,36 @@ impl ThreeLaneWaker {
 }
 
 impl Wake for ThreeLaneWaker {
+    fn wake(self: Arc<Self>) {
+        self.schedule();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.schedule();
+    }
+}
+
+struct ThreeLaneLocalWaker {
+    task_id: TaskId,
+    priority: u8,
+    wake_state: Arc<crate::record::task::TaskWakeState>,
+    local: Arc<Mutex<PriorityScheduler>>,
+    parker: Parker,
+}
+
+impl ThreeLaneLocalWaker {
+    fn schedule(&self) {
+        if self.wake_state.notify() {
+            {
+                let mut local = self.local.lock().expect("local scheduler lock poisoned");
+                local.schedule(self.task_id, self.priority);
+            }
+            self.parker.unpark();
+        }
+    }
+}
+
+impl Wake for ThreeLaneLocalWaker {
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
@@ -960,6 +1066,57 @@ impl CancelLaneWaker {
 }
 
 impl Wake for CancelLaneWaker {
+    fn wake(self: Arc<Self>) {
+        self.schedule();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.schedule();
+    }
+}
+
+struct ThreeLaneLocalCancelWaker {
+    task_id: TaskId,
+    default_priority: u8,
+    wake_state: Arc<crate::record::task::TaskWakeState>,
+    local: Arc<Mutex<PriorityScheduler>>,
+    parker: Parker,
+    cx_inner: Weak<RwLock<CxInner>>,
+}
+
+impl ThreeLaneLocalCancelWaker {
+    fn schedule(&self) {
+        let Some(inner) = self.cx_inner.upgrade() else {
+            return;
+        };
+        let (cancel_requested, priority) = match inner.read() {
+            Ok(guard) => {
+                let priority = guard
+                    .cancel_reason
+                    .as_ref()
+                    .map_or(self.default_priority, |reason| {
+                        reason.cleanup_budget().priority
+                    });
+                (guard.cancel_requested, priority)
+            }
+            Err(_) => return,
+        };
+
+        if !cancel_requested {
+            return;
+        }
+
+        // Always notify
+        self.wake_state.notify();
+
+        // Inject to local cancel lane
+        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        local.schedule_cancel(self.task_id, priority);
+        self.parker.unpark();
+    }
+}
+
+impl Wake for ThreeLaneLocalCancelWaker {
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
