@@ -253,7 +253,7 @@ impl RecoveryGovernor {
         let mut budget = self.config.max_resolutions_per_tick;
 
         // Phase 1: Scan for stale obligations
-        self.update_first_seen(ledger);
+        self.update_first_seen(ledger, now_ns);
 
         // Phase 2: Resolve anomalies
         self.phase = RecoveryPhase::Resolving;
@@ -343,27 +343,19 @@ impl RecoveryGovernor {
     }
 
     /// Updates the first-seen timestamps for currently reserved obligations.
-    fn update_first_seen(&mut self, ledger: &CrdtObligationLedger) {
+    fn update_first_seen(&mut self, ledger: &CrdtObligationLedger, now_ns: u64) {
         // Remove entries for obligations no longer in Reserved state
         self.first_seen_reserved
             .retain(|id, _| ledger.get(id) == LatticeState::Reserved);
 
-        // Add new entries for newly-seen Reserved obligations
-        // (we use 0 as placeholder; caller should provide real time via tick)
+        // Add new entries for newly-seen Reserved obligations.
         for id in ledger.pending() {
-            self.first_seen_reserved.entry(id).or_insert(0);
+            self.first_seen_reserved.entry(id).or_insert(now_ns);
         }
     }
 
-    /// Updates first-seen with the actual time for new obligations.
-    fn find_stale(&mut self, now_ns: u64) -> Vec<ObligationId> {
-        // Set first-seen for entries that are still 0 (just discovered)
-        for ts in self.first_seen_reserved.values_mut() {
-            if *ts == 0 {
-                *ts = now_ns;
-            }
-        }
-
+    /// Returns obligations that have exceeded the stale timeout.
+    fn find_stale(&self, now_ns: u64) -> Vec<ObligationId> {
         self.first_seen_reserved
             .iter()
             .filter(|(_, &first_seen)| {
