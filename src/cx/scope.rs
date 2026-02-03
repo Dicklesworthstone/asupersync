@@ -643,15 +643,16 @@ impl<P: Policy> Scope<'_, P> {
             if let Some(record) = state.tasks.get(task_id.arena_index()) {
                 let _ = record.wake_state.notify();
             }
-        } else {
-            debug!(
-                task_id = ?task_id,
-                region_id = ?self.region,
-                "spawn_local called without active local scheduler"
-            );
+            return Ok(handle);
         }
 
-        Ok(handle)
+        // No local scheduler available: rollback to avoid a permanently parked task.
+        crate::runtime::local::remove_local_task(task_id);
+        if let Some(region) = state.regions.get(self.region.arena_index()) {
+            region.remove_task(task_id);
+        }
+        state.tasks.remove(task_id.arena_index());
+        Err(SpawnError::LocalSchedulerUnavailable)
     }
 
     /// Spawns a blocking operation on a dedicated thread pool.
@@ -1017,6 +1018,7 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimeState;
     use crate::util::ArenaIndex;
+    use std::sync::{Arc, Mutex};
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -1130,6 +1132,11 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
+        let local_ready = Arc::new(Mutex::new(Vec::new()));
+        let _local_ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
+
         // In Phase 0, spawn_local requires Send bounds
         // In Phase 1+, this will work with !Send futures
         let handle = scope
@@ -1140,6 +1147,22 @@ mod tests {
         let task = state.tasks.get(handle.task_id().arena_index());
         assert!(task.is_some());
         assert_eq!(task.unwrap().owner, region);
+    }
+
+    #[test]
+    fn spawn_local_without_scheduler_fails_and_rolls_back() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let result = scope.spawn_local(&mut state, &cx, |_| async move { 5_i32 });
+        assert!(matches!(result, Err(SpawnError::LocalSchedulerUnavailable)));
+
+        // Task should not exist
+        assert!(state.tasks.is_empty());
+        let region_record = state.regions.get(region.arena_index()).unwrap();
+        assert!(region_record.task_ids().is_empty());
     }
 
     #[test]
