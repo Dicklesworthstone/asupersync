@@ -755,7 +755,7 @@ fn compat_migrator_same_version_noop() {
     let migrator = TraceMigrator::new();
     let meta = TraceMetadata::new(42);
     let events = vec![ReplayEvent::RngSeed { seed: 42 }];
-    let result = migrator.migrate(meta, events.clone(), REPLAY_SCHEMA_VERSION);
+    let result = migrator.migrate(meta, events, REPLAY_SCHEMA_VERSION);
     assert!(result.is_some());
     let (new_meta, new_events) = result.unwrap();
     assert_eq!(new_meta.seed, 42);
@@ -1118,8 +1118,7 @@ fn geodesic_valid_linear_extension_always() {
         let result = normalize(&poset, config);
         assert!(
             is_valid_linear_extension(&poset, &result.schedule),
-            "Invalid extension for config {:?}",
-            config
+            "Invalid extension for config {config:?}"
         );
     }
 }

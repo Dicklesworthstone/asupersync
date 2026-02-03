@@ -312,7 +312,7 @@ mod tests {
 
         let cx: Cx = Cx::for_testing();
         let result = barrier2.wait(&cx).expect("wait failed");
-        let mut leader_count = if result.is_leader() { 1 } else { 0 };
+        let mut leader_count = usize::from(result.is_leader());
 
         for h in handles {
             let r = h.join().expect("thread failed");

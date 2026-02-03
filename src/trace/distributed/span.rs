@@ -385,11 +385,11 @@ mod tests {
 
         assert_eq!(span.attributes().len(), 2);
         assert_eq!(
-            span.attributes().get("codec").map(|s| s.as_str()),
+            span.attributes().get("codec").map(String::as_str),
             Some("raptorq")
         );
         assert_eq!(
-            span.attributes().get("overhead").map(|s| s.as_str()),
+            span.attributes().get("overhead").map(String::as_str),
             Some("1.05")
         );
     }
@@ -410,7 +410,7 @@ mod tests {
 
         assert_eq!(span.attributes().len(), 1);
         assert_eq!(
-            span.attributes().get("retry").map(|s| s.as_str()),
+            span.attributes().get("retry").map(String::as_str),
             Some("1")
         );
     }

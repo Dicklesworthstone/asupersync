@@ -803,7 +803,7 @@ mod tests {
         // Verify the mutation persists.
         let mut fut2 = mutex.lock(&cx);
         let guard2 = poll_once(&mut fut2).expect("immediate").expect("lock");
-        let persisted = guard2.as_slice() == &[1, 2, 3, 4];
+        let persisted = guard2.as_slice() == [1, 2, 3, 4];
         crate::assert_with_log!(persisted, "mutation persisted", true, persisted);
 
         crate::test_complete!("mutex_guard_deref_mut");

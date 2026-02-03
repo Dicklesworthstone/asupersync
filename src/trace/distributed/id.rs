@@ -190,7 +190,7 @@ mod tests {
         let id = TraceId::new(high, low);
         assert_eq!(id.high(), high);
         assert_eq!(id.low(), low);
-        let expected_u128 = ((high as u128) << 64) | (low as u128);
+        let expected_u128 = (u128::from(high) << 64) | u128::from(low);
         assert_eq!(id.as_u128(), expected_u128);
         assert_eq!(TraceId::from_u128(expected_u128), id);
     }

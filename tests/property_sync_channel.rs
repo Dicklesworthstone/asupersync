@@ -154,7 +154,7 @@ proptest! {
         loop {
             match rx.try_recv() {
                 Ok(v) => received.push(v),
-                Err(mpsc::RecvError::Disconnected) | Err(mpsc::RecvError::Empty) => break,
+                Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => break,
                 Err(e) => panic!("unexpected recv error: {e:?}"),
             }
         }
@@ -188,11 +188,8 @@ proptest! {
         drop(tx);
 
         let mut received = Vec::new();
-        loop {
-            match rx.try_recv() {
-                Ok(v) => received.push(v),
-                Err(_) => break,
-            }
+        while let Ok(v) = rx.try_recv() {
+            received.push(v);
         }
 
         prop_assert_eq!(
@@ -259,7 +256,8 @@ proptest! {
         // Send some messages
         let mut actual_sends = 0usize;
         for i in 0..send_count {
-            if tx.try_send(i as i32).is_ok() {
+            let value = i32::try_from(i).expect("send_count fits i32");
+            if tx.try_send(value).is_ok() {
                 actual_sends += 1;
             }
         }
@@ -355,9 +353,8 @@ proptest! {
         // Send messages (broadcast never blocks senders; old msgs overwritten)
         let mut sent = Vec::new();
         for &msg in &messages {
-            match tx.send(&cx, msg) {
-                Ok(_count) => sent.push(msg),
-                Err(_) => {} // no receivers (shouldn't happen here)
+            if let Ok(_count) = tx.send(&cx, msg) {
+                sent.push(msg);
             }
         }
         drop(tx);
@@ -370,10 +367,8 @@ proptest! {
                     Ok(v) => received.push(v),
                     Err(broadcast::RecvError::Lagged(n)) => {
                         tracing::debug!(receiver = i, lagged = n, "receiver lagged");
-                        continue;
                     }
-                    Err(broadcast::RecvError::Closed) => break,
-                    Err(broadcast::RecvError::Cancelled) => break,
+                    Err(broadcast::RecvError::Closed | broadcast::RecvError::Cancelled) => break,
                 }
             }
 
@@ -447,12 +442,9 @@ proptest! {
         let mut held: Vec<usize> = Vec::new();
         for count in &acquire_counts {
             let count = (*count).min(max_permits); // don't try to acquire more than max
-            match sem.try_acquire(count) {
-                Ok(permit) => {
-                    held.push(permit.count());
-                    std::mem::forget(permit); // hold without releasing
-                }
-                Err(_) => {} // not enough permits, skip
+            if let Ok(permit) = sem.try_acquire(count) {
+                held.push(permit.count());
+                std::mem::forget(permit); // hold without releasing
             }
         }
 
