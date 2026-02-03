@@ -337,7 +337,7 @@ mod tests {
             PathSelectionPolicy, PathSet, ReordererConfig, SymbolDeduplicator, SymbolReorderer,
             TransportPath,
         };
-        use crate::transport::mock::{sim_channel, SimNetwork, SimTransportConfig};
+        use crate::transport::mock::{mock_channel, MockNetwork, MockTransportConfig};
         use crate::transport::router::{
             DispatchConfig, DispatchStrategy, Endpoint, EndpointId, LoadBalanceStrategy, RouteKey,
             RoutingEntry, RoutingTable, SymbolDispatcher, SymbolRouter,
@@ -357,8 +357,8 @@ mod tests {
         fn test_single_path_happy_flow_basic() {
             init_test("test_single_path_happy_flow_basic");
 
-            let config = SimTransportConfig::reliable();
-            let (mut sink, mut stream) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (mut sink, mut stream) = mock_channel(config);
 
             future::block_on(async {
                 // Send 100 symbols
@@ -391,8 +391,8 @@ mod tests {
         fn test_single_path_happy_flow_with_router() {
             init_test("test_single_path_happy_flow_with_router");
 
-            let config = SimTransportConfig::reliable();
-            let (sink, mut stream) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (sink, mut stream) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let endpoint_id = EndpointId(1);
@@ -442,8 +442,8 @@ mod tests {
         fn test_single_path_happy_flow_batch_send() {
             init_test("test_single_path_happy_flow_batch_send");
 
-            let config = SimTransportConfig::reliable();
-            let (mut sink, mut stream) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (mut sink, mut stream) = mock_channel(config);
 
             future::block_on(async {
                 // Send batch of symbols
@@ -495,8 +495,8 @@ mod tests {
             init_test("test_multipath_dedup_across_paths");
 
             // Create mock network with 3 nodes
-            let config = SimTransportConfig::reliable();
-            let network = SimNetwork::fully_connected(3, config);
+            let config = MockTransportConfig::reliable();
+            let network = MockNetwork::fully_connected(3, config);
 
             // Get transports from node 0 to node 1, and node 2 to node 1
             let (mut sink_0_1, _stream_0_1) = network.transport(0, 1);
@@ -621,11 +621,11 @@ mod tests {
         fn test_backpressure_channel_full() {
             init_test("test_backpressure_channel_full");
 
-            let config = SimTransportConfig {
+            let config = MockTransportConfig {
                 capacity: 3,
-                ..SimTransportConfig::reliable()
+                ..MockTransportConfig::reliable()
             };
-            let (mut sink, mut stream) = sim_channel(config);
+            let (mut sink, mut stream) = mock_channel(config);
 
             let waker = noop_waker();
             let mut cx = Context::from_waker(&waker);
@@ -667,11 +667,11 @@ mod tests {
         fn test_backpressure_propagation_through_router() {
             init_test("test_backpressure_propagation_through_router");
 
-            let config = SimTransportConfig {
+            let config = MockTransportConfig {
                 capacity: 2,
-                ..SimTransportConfig::reliable()
+                ..MockTransportConfig::reliable()
             };
-            let (sink, mut stream) = sim_channel(config);
+            let (sink, mut stream) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let endpoint_id = EndpointId(1);
@@ -725,11 +725,11 @@ mod tests {
         fn test_backpressure_buffered_sink() {
             init_test("test_backpressure_buffered_sink");
 
-            let config = SimTransportConfig {
+            let config = MockTransportConfig {
                 capacity: 10,
-                ..SimTransportConfig::reliable()
+                ..MockTransportConfig::reliable()
             };
-            let (sink, mut stream) = sim_channel(config);
+            let (sink, mut stream) = mock_channel(config);
 
             // Buffer with capacity 5
             let mut buffered = sink.buffer(5);
@@ -761,10 +761,10 @@ mod tests {
         fn test_priority_dispatch_unicast() {
             init_test("test_priority_dispatch_unicast");
 
-            let config = SimTransportConfig::reliable();
-            let (sink1, mut stream1) = sim_channel(config.clone());
-            let (sink2, mut stream2) = sim_channel(config.clone());
-            let (sink3, _stream3) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (sink1, mut stream1) = mock_channel(config.clone());
+            let (sink2, mut stream2) = mock_channel(config.clone());
+            let (sink3, _stream3) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "target1"));
@@ -828,10 +828,10 @@ mod tests {
         fn test_priority_dispatch_broadcast() {
             init_test("test_priority_dispatch_broadcast");
 
-            let config = SimTransportConfig::reliable();
-            let (sink1, mut stream1) = sim_channel(config.clone());
-            let (sink2, mut stream2) = sim_channel(config.clone());
-            let (sink3, mut stream3) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (sink1, mut stream1) = mock_channel(config.clone());
+            let (sink2, mut stream2) = mock_channel(config.clone());
+            let (sink3, mut stream3) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let _e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "node1"));
@@ -888,10 +888,10 @@ mod tests {
         fn test_priority_dispatch_multicast() {
             init_test("test_priority_dispatch_multicast");
 
-            let config = SimTransportConfig::reliable();
-            let (sink1, mut stream1) = sim_channel(config.clone());
-            let (sink2, mut stream2) = sim_channel(config.clone());
-            let (sink3, mut stream3) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (sink1, mut stream1) = mock_channel(config.clone());
+            let (sink2, mut stream2) = mock_channel(config.clone());
+            let (sink3, mut stream3) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "a"));
@@ -968,7 +968,7 @@ mod tests {
         fn test_priority_dispatch_quorum_cast() {
             init_test("test_priority_dispatch_quorum_cast");
 
-            let config = SimTransportConfig::reliable();
+            let config = MockTransportConfig::reliable();
             let mut streams = Vec::new();
 
             let table = Arc::new(RoutingTable::new());
@@ -977,7 +977,7 @@ mod tests {
 
             // Create 5 nodes
             for i in 0u64..5 {
-                let (sink, stream) = sim_channel(config.clone());
+                let (sink, stream) = mock_channel(config.clone());
                 let id = EndpointId(i);
                 let _endpoint = table.register_endpoint(Endpoint::new(id, format!("node{i}")));
                 dispatcher.add_sink(id, Box::new(sink));
@@ -1029,8 +1029,8 @@ mod tests {
         fn test_cancel_mid_flight_stream() {
             init_test("test_cancel_mid_flight_stream");
 
-            let config = SimTransportConfig::reliable();
-            let (mut sink, mut stream) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (mut sink, mut stream) = mock_channel(config);
 
             let cx: Cx = Cx::for_testing();
 
@@ -1064,8 +1064,8 @@ mod tests {
         fn test_cancel_mid_flight_pending() {
             init_test("test_cancel_mid_flight_pending");
 
-            let config = SimTransportConfig::reliable();
-            let (_sink, mut stream) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (_sink, mut stream) = mock_channel(config);
             let cx: Cx = Cx::for_testing();
 
             let waker = noop_waker();
@@ -1089,8 +1089,8 @@ mod tests {
         fn test_cancel_mid_flight_batch() {
             init_test("test_cancel_mid_flight_batch");
 
-            let config = SimTransportConfig::reliable();
-            let (mut sink, mut stream) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (mut sink, mut stream) = mock_channel(config);
             let cx: Cx = Cx::for_testing();
 
             future::block_on(async {
@@ -1133,15 +1133,15 @@ mod tests {
             init_test("test_failover_endpoint_failure");
 
             // Primary endpoint that fails after 3 operations
-            let config_fail = SimTransportConfig {
+            let config_fail = MockTransportConfig {
                 fail_after: Some(3),
-                ..SimTransportConfig::reliable()
+                ..MockTransportConfig::reliable()
             };
-            let (sink_primary, _stream_primary) = sim_channel(config_fail);
+            let (sink_primary, _stream_primary) = mock_channel(config_fail);
 
             // Backup endpoint that's reliable
-            let config_backup = SimTransportConfig::reliable();
-            let (sink_backup, mut stream_backup) = sim_channel(config_backup);
+            let config_backup = MockTransportConfig::reliable();
+            let (sink_backup, mut stream_backup) = mock_channel(config_backup);
 
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "primary"));
@@ -1196,8 +1196,8 @@ mod tests {
         fn test_failover_network_partition() {
             init_test("test_failover_network_partition");
 
-            let config = SimTransportConfig::reliable();
-            let mut network = SimNetwork::fully_connected(4, config);
+            let config = MockTransportConfig::reliable();
+            let mut network = MockNetwork::fully_connected(4, config);
 
             // Partition: nodes 0,1 can't reach 2,3
             network.partition(&[0, 1], &[2, 3]);
@@ -1258,17 +1258,17 @@ mod tests {
             init_test("test_failover_lossy_path_recovery");
 
             // Lossy path with 50% loss
-            let config_lossy = SimTransportConfig {
+            let config_lossy = MockTransportConfig {
                 loss_rate: 0.5,
                 seed: Some(42),
                 capacity: 1024,
-                ..SimTransportConfig::default()
+                ..MockTransportConfig::default()
             };
-            let (mut sink_lossy, mut stream_lossy) = sim_channel(config_lossy);
+            let (mut sink_lossy, mut stream_lossy) = mock_channel(config_lossy);
 
             // Reliable backup path
-            let config_reliable = SimTransportConfig::reliable();
-            let (mut sink_reliable, mut stream_reliable) = sim_channel(config_reliable);
+            let config_reliable = MockTransportConfig::reliable();
+            let (mut sink_reliable, mut stream_reliable) = mock_channel(config_reliable);
 
             future::block_on(async {
                 // Send 100 symbols via lossy path
@@ -1321,8 +1321,8 @@ mod tests {
         fn test_failover_ring_topology() {
             init_test("test_failover_ring_topology");
 
-            let config = SimTransportConfig::reliable();
-            let network = SimNetwork::ring(4, config);
+            let config = MockTransportConfig::reliable();
+            let network = MockNetwork::ring(4, config);
 
             // In a ring of 4 nodes: 0-1-2-3-0
             // Direct links: 0<->1, 1<->2, 2<->3, 3<->0
@@ -1602,10 +1602,10 @@ mod tests {
         fn test_load_balance_round_robin() {
             init_test("test_load_balance_round_robin");
 
-            let config = SimTransportConfig::reliable();
-            let (sink1, mut stream1) = sim_channel(config.clone());
-            let (sink2, mut stream2) = sim_channel(config.clone());
-            let (sink3, mut stream3) = sim_channel(config);
+            let config = MockTransportConfig::reliable();
+            let (sink1, mut stream1) = mock_channel(config.clone());
+            let (sink2, mut stream2) = mock_channel(config.clone());
+            let (sink3, mut stream3) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "e1"));
