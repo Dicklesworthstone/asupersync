@@ -692,15 +692,16 @@ fn bench_intrusive_stack(c: &mut Criterion) {
     }
 
     // Work stealing: push then steal half
-    for &count in &[16, 64, 256] {
+    for &count in &[16usize, 64, 256] {
         group.bench_with_input(
             BenchmarkId::new("push_then_steal_batch", count),
             &count,
             |b, &count| {
-                let task_ids = tasks(count as usize);
+                let task_ids = tasks(count);
                 b.iter_batched(
                     || {
-                        let arena = setup_arena(count as u32);
+                        let count_u32 = u32::try_from(count).expect("count fits u32");
+                        let arena = setup_arena(count_u32);
                         let stack = IntrusiveStack::new(QUEUE_TAG_READY);
                         (arena, stack, task_ids.clone())
                     },
@@ -708,7 +709,7 @@ fn bench_intrusive_stack(c: &mut Criterion) {
                         for t in &tasks {
                             stack.push(*t, &mut arena);
                         }
-                        let stolen = stack.steal_batch(count as usize / 2, &mut arena);
+                        let stolen = stack.steal_batch(count / 2, &mut arena);
                         black_box(stolen)
                     },
                     BatchSize::SmallInput,
@@ -756,30 +757,26 @@ fn bench_intrusive_vs_vecdeque(c: &mut Criterion) {
         );
 
         // VecDeque (allocates on growth)
-        group.bench_with_input(
-            BenchmarkId::new("vecdeque", count),
-            &count,
-            |b, &count| {
-                let task_ids = tasks(count as usize);
-                b.iter_batched(
-                    || {
-                        let deque: VecDeque<TaskId> = VecDeque::new();
-                        (deque, task_ids.clone())
-                    },
-                    |(mut deque, tasks)| {
-                        for t in &tasks {
-                            deque.push_back(*t);
-                        }
-                        let mut popped = 0;
-                        while deque.pop_front().is_some() {
-                            popped += 1;
-                        }
-                        black_box(popped)
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("vecdeque", count), &count, |b, &count| {
+            let task_ids = tasks(count as usize);
+            b.iter_batched(
+                || {
+                    let deque: VecDeque<TaskId> = VecDeque::new();
+                    (deque, task_ids.clone())
+                },
+                |(mut deque, tasks)| {
+                    for t in &tasks {
+                        deque.push_back(*t);
+                    }
+                    let mut popped = 0;
+                    while deque.pop_front().is_some() {
+                        popped += 1;
+                    }
+                    black_box(popped)
+                },
+                BatchSize::SmallInput,
+            )
+        });
 
         // VecDeque with pre-allocated capacity
         group.bench_with_input(

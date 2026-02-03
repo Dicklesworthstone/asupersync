@@ -444,7 +444,7 @@ impl InactivationDecoder {
 
         // Extract the first S+H rows (LDPC + HDPC constraints)
         for row in 0..base_rows {
-            let (columns, coefficients) = self.constraint_row_equation(&constraints, row);
+            let (columns, coefficients) = Self::constraint_row_equation(&constraints, row);
             result.push(ReceivedSymbol {
                 esi: row as u32,
                 is_source: false,
@@ -459,7 +459,6 @@ impl InactivationDecoder {
 
     /// Extract a sparse equation from a constraint matrix row.
     fn constraint_row_equation(
-        &self,
         constraints: &ConstraintMatrix,
         row: usize,
     ) -> (Vec<usize>, Vec<Gf256>) {

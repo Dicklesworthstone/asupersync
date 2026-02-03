@@ -284,9 +284,7 @@ pub fn topology_report_json(
     top_ledgers: &[asupersync::trace::EvidenceLedger],
     scoring_overhead_ms: Option<u64>,
 ) -> serde_json::Value {
-    fn report_metrics(
-        report: &asupersync::lab::explorer::ExplorationReport,
-    ) -> serde_json::Value {
+    fn report_metrics(report: &asupersync::lab::explorer::ExplorationReport) -> serde_json::Value {
         let novelty_histogram = serde_json::to_value(&report.coverage.novelty_histogram)
             .unwrap_or(serde_json::Value::Null);
         let saturation = serde_json::json!({
@@ -313,7 +311,10 @@ pub fn topology_report_json(
     let baseline_metrics = report_metrics(baseline);
     let topology_metrics = report_metrics(topology);
     let top_ledger_summaries: Vec<String> =
-        top_ledgers.iter().map(|ledger| ledger.summary()).collect();
+        top_ledgers
+            .iter()
+            .map(asupersync::trace::EvidenceLedger::summary)
+            .collect();
 
     serde_json::json!({
         "suite": suite_name,
