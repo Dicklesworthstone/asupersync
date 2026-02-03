@@ -764,15 +764,16 @@ impl ThreeLaneWorker {
         ) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
             
-            // Try global storage first
-            let stored = if let Some(stored) = state.remove_stored_future(task_id) {
-                Some(AnyStoredTask::Global(stored))
-            } else {
-                // Try local storage
-                drop(state); // Drop lock to access TLS
-                let local = crate::runtime::local::remove_local_task(task_id);
-                state = self.state.lock().expect("runtime state lock poisoned"); // Re-acquire
-                local.map(AnyStoredTask::Local)
+            // Try global storage first.
+            let stored = match state.remove_stored_future(task_id) {
+                Some(stored) => Some(AnyStoredTask::Global(stored)),
+                None => {
+                    // Try local storage.
+                    drop(state); // Drop lock to access TLS
+                    let local = crate::runtime::local::remove_local_task(task_id);
+                    state = self.state.lock().expect("runtime state lock poisoned"); // Re-acquire
+                    local.map(AnyStoredTask::Local)
+                }
             };
 
             let Some(stored) = stored else {
@@ -952,6 +953,7 @@ impl ThreeLaneWorker {
                         } else {
                             local.schedule(task_id, priority);
                         }
+                        drop(local);
                         self.parker.unpark();
                     } else {
                         // Schedule to global injector
