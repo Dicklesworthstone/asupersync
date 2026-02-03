@@ -31,9 +31,7 @@
 
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::LabRuntime;
-use crate::trace::{
-    normalize_trace, trace_switch_cost, GeodesicConfig, TraceBuffer, TraceBufferHandle, TraceEvent,
-};
+use crate::trace::{TraceBuffer, TraceBufferHandle, TraceEvent};
 
 /// Compares two traces and returns the first divergence point.
 ///
@@ -327,7 +325,7 @@ impl std::fmt::Display for NormalizationResult {
 /// ```
 #[must_use]
 pub fn normalize_for_replay(events: &[TraceEvent]) -> NormalizationResult {
-    normalize_for_replay_with_config(events, &GeodesicConfig::default())
+    normalize_for_replay_with_config(events, &crate::trace::GeodesicConfig::default())
 }
 
 /// Normalize a trace with custom configuration.
@@ -339,10 +337,10 @@ pub fn normalize_for_replay(events: &[TraceEvent]) -> NormalizationResult {
 #[must_use]
 pub fn normalize_for_replay_with_config(
     events: &[TraceEvent],
-    config: &GeodesicConfig,
+    config: &crate::trace::GeodesicConfig,
 ) -> NormalizationResult {
-    let original_switches = trace_switch_cost(events);
-    let (normalized, geodesic_result) = normalize_trace(events, config);
+    let original_switches = crate::trace::trace_switch_cost(events);
+    let (normalized, geodesic_result) = crate::trace::normalize_trace(events, config);
 
     NormalizationResult {
         normalized,

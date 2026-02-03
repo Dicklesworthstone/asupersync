@@ -276,6 +276,8 @@ pub fn write_topology_report<T: serde::Serialize>(suite_name: &str, report: &T) 
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn topology_report_json(
     suite_name: &str,
     scenario_name: &str,
