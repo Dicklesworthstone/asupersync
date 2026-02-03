@@ -65,6 +65,7 @@ mod leak_check;
 pub mod ledger;
 pub mod lyapunov;
 pub mod marking;
+pub mod recovery;
 
 pub use leak_check::{
     Body, CheckResult, Diagnostic, DiagnosticKind, Instruction, LeakChecker, ObligationVar,

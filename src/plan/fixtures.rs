@@ -291,7 +291,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::certificate::{verify, verify_steps, PlanHash, RewriteCertificate};
 use super::rewrite::RewritePolicy;
-use super::PlanNode;
+use super::{PlanId, PlanNode};
 
 /// Result of running original vs optimized plan through the outcome oracle.
 #[derive(Debug, Clone)]

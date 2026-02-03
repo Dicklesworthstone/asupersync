@@ -1088,7 +1088,8 @@ impl<Caps> Cx<Caps> {
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
         let seq = trace.next_seq();
-        trace.push_event(TraceEvent::user_trace(seq, now, message));
+        let logical_time = self.logical_tick();
+        trace.push_event(TraceEvent::user_trace(seq, now, message).with_logical_time(logical_time));
     }
 
     /// Logs a trace-level message with structured key-value fields.
@@ -1119,7 +1120,8 @@ impl<Caps> Cx<Caps> {
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
         let seq = trace.next_seq();
-        trace.push_event(TraceEvent::user_trace(seq, now, message));
+        let logical_time = self.logical_tick();
+        trace.push_event(TraceEvent::user_trace(seq, now, message).with_logical_time(logical_time));
     }
 
     /// Enters a named span, returning a guard that ends the span on drop.
@@ -1987,6 +1989,7 @@ impl<Caps> Drop for SpanGuard<Caps> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::TraceBufferHandle;
     use crate::util::{ArenaIndex, DetEntropy};
 
     fn test_cx() -> Cx {
@@ -2053,6 +2056,19 @@ mod tests {
             cx.checkpoint().is_err(),
             "checkpoint should fail after unmasking"
         );
+    }
+
+    #[test]
+    fn trace_attaches_logical_time() {
+        let cx = test_cx();
+        let trace = TraceBufferHandle::new(8);
+        cx.set_trace_buffer(trace.clone());
+
+        cx.trace("hello");
+
+        let events = trace.snapshot();
+        let event = events.first().expect("trace event");
+        assert!(event.logical_time.is_some());
     }
 
     #[test]

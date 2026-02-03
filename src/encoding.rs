@@ -398,13 +398,11 @@ impl EncodingIterator<'_> {
         if needs_rebuild {
             let source_symbols = build_source_symbols(self.data, block, self.symbol_size);
             let seed = seed_for_block(self.object_id, block.sbn);
-            let encoder =
-                SystematicEncoder::new(&source_symbols, self.symbol_size, seed).ok_or(
-                    EncodingError::ComputationFailed {
-                        details: "systematic encoder failed: singular constraint matrix"
-                            .to_string(),
-                    },
-                )?;
+            let encoder = SystematicEncoder::new(&source_symbols, self.symbol_size, seed).ok_or(
+                EncodingError::ComputationFailed {
+                    details: "systematic encoder failed: singular constraint matrix".to_string(),
+                },
+            )?;
             self.systematic_encoder = Some(encoder);
             self.systematic_block_index = Some(self.block_index);
         }
@@ -454,11 +452,7 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
     }
 }
 
-fn build_source_symbols(
-    data: &[u8],
-    block: &BlockPlan,
-    symbol_size: usize,
-) -> Vec<Vec<u8>> {
+fn build_source_symbols(data: &[u8], block: &BlockPlan, symbol_size: usize) -> Vec<Vec<u8>> {
     let mut symbols = Vec::with_capacity(block.k);
     for idx in 0..block.k {
         let mut buffer = vec![0u8; symbol_size];
@@ -688,8 +682,7 @@ mod tests {
         };
         let source_symbols = build_source_symbols(&data, &block, symbol_size);
         let seed = seed_for_block(object_id, block.sbn);
-        let encoder =
-            SystematicEncoder::new(&source_symbols, symbol_size, seed).expect("encoder");
+        let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed).expect("encoder");
 
         for sym in symbols.iter().filter(|s| s.kind() == SymbolKind::Repair) {
             let esi = sym.id().esi();

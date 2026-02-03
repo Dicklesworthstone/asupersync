@@ -142,6 +142,7 @@ use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
 use crate::time::TimerDriverHandle;
+use crate::trace::distributed::LogicalClockMode;
 use crate::types::Budget;
 use std::future::Future;
 use std::io;
@@ -231,6 +232,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn steal_batch_size(mut self, size: usize) -> Self {
         self.config.steal_batch_size = size;
+        self
+    }
+
+    /// Set the logical clock mode used for causal trace ordering.
+    #[must_use]
+    pub fn logical_clock_mode(mut self, mode: LogicalClockMode) -> Self {
+        self.config.logical_clock_mode = Some(mode);
         self
     }
 
@@ -917,6 +925,9 @@ impl RuntimeInner {
             let mut guard = state.lock().expect("runtime state lock poisoned");
             if let Some(observability) = config.observability.clone() {
                 guard.set_observability_config(observability);
+            }
+            if let Some(mode) = config.logical_clock_mode.clone() {
+                guard.set_logical_clock_mode(mode);
             }
             guard.set_obligation_leak_response(config.obligation_leak_response);
             if guard.timer_driver().is_none() {

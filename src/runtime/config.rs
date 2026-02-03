@@ -21,8 +21,8 @@
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::observability::ObservabilityConfig;
 use crate::record::RegionLimits;
-use crate::trace::distributed::LogicalClockMode;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
+use crate::trace::distributed::LogicalClockMode;
 use std::sync::Arc;
 
 /// Configuration for the blocking pool.
@@ -74,7 +74,11 @@ pub struct RuntimeConfig {
     /// Time slice for cooperative yielding (polls).
     pub poll_budget: u32,
     /// Logical clock mode used for trace causal ordering.
-    pub logical_clock_mode: LogicalClockMode,
+    ///
+    /// When `None`, the runtime chooses a default:
+    /// - No reactor: Lamport (deterministic lab-friendly)
+    /// - With reactor: Hybrid (wall-clock + logical)
+    pub logical_clock_mode: Option<LogicalClockMode>,
     /// Admission limits applied to the root region (if set).
     pub root_region_limits: Option<RegionLimits>,
     /// Callback executed when a worker thread starts.
@@ -132,7 +136,7 @@ impl Default for RuntimeConfig {
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
-            logical_clock_mode: LogicalClockMode::Lamport,
+            logical_clock_mode: None,
             root_region_limits: None,
             on_thread_start: None,
             on_thread_stop: None,
@@ -148,7 +152,6 @@ impl Default for RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::distributed::LogicalClockMode;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -184,9 +187,9 @@ mod tests {
             config.poll_budget
         );
         crate::assert_with_log!(
-            matches!(config.logical_clock_mode, LogicalClockMode::Lamport),
+            config.logical_clock_mode.is_none(),
             "logical_clock_mode",
-            "Lamport",
+            "None",
             format!("{:?}", config.logical_clock_mode)
         );
         crate::assert_with_log!(
