@@ -522,7 +522,7 @@ impl SymbolSink for SimSymbolSink {
                 Some(waiter) if !waiter.load(Ordering::Acquire) => {
                     // We were woken but capacity isn't available yet - re-register
                     waiter.store(true, Ordering::Release);
-                    state.send_wakers.push(MockWaiter {
+                    state.send_wakers.push(SimWaiter {
                         waker: cx.waker().clone(),
                         queued: Arc::clone(waiter),
                     });
@@ -531,7 +531,7 @@ impl SymbolSink for SimSymbolSink {
                 None => {
                     // First time waiting - create new waiter
                     let waiter = Arc::new(AtomicBool::new(true));
-                    state.send_wakers.push(MockWaiter {
+                    state.send_wakers.push(SimWaiter {
                         waker: cx.waker().clone(),
                         queued: Arc::clone(&waiter),
                     });
@@ -656,7 +656,7 @@ impl SymbolSink for SimSymbolSink {
     }
 }
 
-impl SymbolStream for MockSymbolStream {
+impl SymbolStream for SimSymbolStream {
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -733,7 +733,7 @@ impl SymbolStream for MockSymbolStream {
             Some(waiter) if !waiter.load(Ordering::Acquire) => {
                 // We were woken but no message yet - re-register
                 waiter.store(true, Ordering::Release);
-                state.recv_wakers.push(MockWaiter {
+                state.recv_wakers.push(SimWaiter {
                     waker: cx.waker().clone(),
                     queued: Arc::clone(waiter),
                 });
@@ -742,7 +742,7 @@ impl SymbolStream for MockSymbolStream {
             None => {
                 // First time waiting - create new waiter
                 let waiter = Arc::new(AtomicBool::new(true));
-                state.recv_wakers.push(MockWaiter {
+                state.recv_wakers.push(SimWaiter {
                     waker: cx.waker().clone(),
                     queued: Arc::clone(&waiter),
                 });
@@ -780,7 +780,7 @@ fn chance(rng: &mut DetRng, probability: f64) -> bool {
     sample < probability
 }
 
-fn sample_latency(config: &MockTransportConfig, rng: &mut DetRng) -> Duration {
+fn sample_latency(config: &SimTransportConfig, rng: &mut DetRng) -> Duration {
     if config.base_latency == Duration::ZERO && config.latency_jitter == Duration::ZERO {
         return Duration::ZERO;
     }
@@ -834,8 +834,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_channel_reliable() {
-        let (mut sink, mut stream) = mock_channel(MockTransportConfig::reliable());
+    fn test_sim_channel_reliable() {
+        let (mut sink, mut stream) = sim_channel(SimTransportConfig::reliable());
         let s1 = create_symbol(1);
         let s2 = create_symbol(2);
 
@@ -852,13 +852,13 @@ mod tests {
     }
 
     fn run_lossy(seed: u64) -> usize {
-        let config = MockTransportConfig {
+        let config = SimTransportConfig {
             loss_rate: 0.5,
             seed: Some(seed),
             capacity: 1024,
-            ..MockTransportConfig::default()
+            ..SimTransportConfig::default()
         };
-        let (mut sink, mut stream) = mock_channel(config);
+        let (mut sink, mut stream) = sim_channel(config);
 
         future::block_on(async {
             for i in 0..100 {
@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_channel_loss_deterministic() {
+    fn test_sim_channel_loss_deterministic() {
         let count1 = run_lossy(42);
         let count2 = run_lossy(42);
         assert_eq!(count1, count2);
@@ -885,13 +885,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_channel_duplication() {
-        let config = MockTransportConfig {
+    fn test_sim_channel_duplication() {
+        let config = SimTransportConfig {
             duplication_rate: 1.0,
             capacity: 128,
-            ..MockTransportConfig::deterministic(7)
+            ..SimTransportConfig::deterministic(7)
         };
-        let (mut sink, mut stream) = mock_channel(config);
+        let (mut sink, mut stream) = sim_channel(config);
 
         future::block_on(async {
             for i in 0..10 {
@@ -910,12 +910,12 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_channel_fail_after() {
-        let config = MockTransportConfig {
+    fn test_sim_channel_fail_after() {
+        let config = SimTransportConfig {
             fail_after: Some(2),
-            ..MockTransportConfig::default()
+            ..SimTransportConfig::default()
         };
-        let (mut sink, _stream) = mock_channel(config);
+        let (mut sink, _stream) = sim_channel(config);
 
         future::block_on(async {
             sink.send(create_symbol(1)).await.unwrap();
@@ -926,12 +926,12 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_channel_backpressure_pending() {
-        let config = MockTransportConfig {
+    fn test_sim_channel_backpressure_pending() {
+        let config = SimTransportConfig {
             capacity: 1,
-            ..MockTransportConfig::default()
+            ..SimTransportConfig::default()
         };
-        let (mut sink, _stream) = mock_channel(config);
+        let (mut sink, _stream) = sim_channel(config);
 
         future::block_on(async {
             sink.send(create_symbol(1)).await.unwrap();
