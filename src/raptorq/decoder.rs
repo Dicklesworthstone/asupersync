@@ -508,7 +508,6 @@ impl InactivationDecoder {
                 crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
             }
 
-            state.solved[col] = Some(solution.clone());
             state.active_cols.remove(&col);
             state.stats.peeled += 1;
 
@@ -526,6 +525,9 @@ impl InactivationDecoder {
                 // Remove the term from the equation
                 eq.terms.retain(|(c, _)| *c != col);
             }
+
+            // Move solution instead of cloning (avoids allocation)
+            state.solved[col] = Some(solution);
         }
     }
 
@@ -562,7 +564,6 @@ impl InactivationDecoder {
                 crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
             }
 
-            state.solved[col] = Some(solution.clone());
             state.active_cols.remove(&col);
             state.stats.peeled += 1;
 
@@ -583,6 +584,9 @@ impl InactivationDecoder {
                 // Remove the term from the equation
                 eq.terms.retain(|(c, _)| *c != col);
             }
+
+            // Move solution instead of cloning (avoids allocation)
+            state.solved[col] = Some(solution);
         }
     }
 

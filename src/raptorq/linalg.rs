@@ -740,13 +740,16 @@ impl GaussianSolver {
             return;
         }
 
-        // Eliminate in coefficient matrix
-        for col in 0..self.cols {
-            let pivot_val = self.matrix[pivot][col];
-            if pivot_val != 0 {
-                self.matrix[target][col] ^= (Gf256::new(pivot_val) * factor).raw();
-            }
-        }
+        // Eliminate in coefficient matrix using bulk operation.
+        // Use split_at_mut to get separate mutable/immutable references.
+        let (target_row, pivot_row) = if target < pivot {
+            let (lo, hi) = self.matrix.split_at_mut(pivot);
+            (&mut lo[target], hi[0].as_slice())
+        } else {
+            let (lo, hi) = self.matrix.split_at_mut(target);
+            (&mut hi[0], lo[pivot].as_slice())
+        };
+        gf256_addmul_slice(target_row, pivot_row, factor);
 
         // Eliminate in RHS - use split_at_mut to satisfy borrow checker
         let rhs_len = self.rhs[pivot].len();

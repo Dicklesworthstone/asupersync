@@ -283,6 +283,8 @@ pub fn topology_report_json(
     topology: &asupersync::lab::explorer::ExplorationReport,
     top_ledgers: &[asupersync::trace::EvidenceLedger],
     scoring_overhead_ms: Option<u64>,
+    scoring_work_units: u64,
+    execution_steps: u64,
 ) -> serde_json::Value {
     fn report_metrics(report: &asupersync::lab::explorer::ExplorationReport) -> serde_json::Value {
         let novelty_histogram = serde_json::to_value(&report.coverage.novelty_histogram)
@@ -294,7 +296,9 @@ pub fn topology_report_json(
             "runs_since_last_new_class": report.coverage.saturation.runs_since_last_new_class,
         });
         let violation_seeds: Vec<u64> = report.violation_seeds();
-        let first_violation_seed = violation_seeds.iter().copied().min();
+        let first_violation = report.violations.iter().min_by_key(|v| v.seed);
+        let first_violation_seed = first_violation.map(|v| v.seed);
+        let first_violation_steps = first_violation.map(|v| v.steps);
 
         serde_json::json!({
             "total_runs": report.total_runs,
@@ -303,6 +307,7 @@ pub fn topology_report_json(
             "violations": report.violations.len(),
             "violation_seeds": violation_seeds,
             "first_violation_seed": first_violation_seed,
+            "first_violation_steps": first_violation_steps,
             "novelty_histogram": novelty_histogram,
             "saturation": saturation,
         })
@@ -316,6 +321,15 @@ pub fn topology_report_json(
             .map(asupersync::trace::EvidenceLedger::summary)
             .collect();
 
+    let scoring_disabled = top_ledgers.iter().all(|ledger| ledger.entries.is_empty());
+    let scoring_note = if scoring_overhead_ms.is_some() {
+        None
+    } else if scoring_disabled {
+        Some("scoring produced no ledger entries")
+    } else {
+        Some("timing disabled for determinism; use work units")
+    };
+
     serde_json::json!({
         "suite": suite_name,
         "scenario": scenario_name,
@@ -323,6 +337,10 @@ pub fn topology_report_json(
         "topology": topology_metrics,
         "top_ledger_summaries": top_ledger_summaries,
         "scoring_overhead_ms": scoring_overhead_ms,
+        "scoring_work_units": scoring_work_units,
+        "execution_steps": execution_steps,
+        "scoring_disabled": scoring_disabled,
+        "scoring_note": scoring_note,
     })
 }
 
