@@ -128,8 +128,9 @@ impl GlobalInjector {
 
     /// Injects a task into the ready lane.
     ///
-    /// Ready tasks have the lowest lane priority but are still ordered
-    /// by their individual priority within the lane.
+    /// Ready tasks have the lowest lane priority. The global ready queue
+    /// uses FIFO ordering for lock-free throughput; per-task priority
+    /// ordering is applied by the local `PriorityScheduler` after stealing.
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         self.ready_queue.push(PriorityTask { task, priority });
         self.pending_count.fetch_add(1, Ordering::Relaxed);
