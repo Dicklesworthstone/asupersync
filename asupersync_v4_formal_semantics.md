@@ -730,6 +730,46 @@ to survive task completion.)
 This lemma underpins the lab-runtime oracle: when the oracle reports no leaks,
 region close is safe w.r.t. obligations.
 
+#### 3.4.6 No silent drop (safety theorem, sketch)
+
+**Theorem (No Silent Drop):** For any obligation `o`, the system records
+either `commit(o)` or `abort(o)` **before** the holder task completes,
+or else a `leak(o)` transition is recorded. Therefore obligations cannot
+be dropped silently.
+
+*Proof sketch:*
+
+1. `reserve` introduces `Obl(k, o)` into the linear context `Δ` and a
+   `Reserved` record in `O`.
+2. The only linear eliminators are `commit` and `abort`, which change
+   `O[o].state` to `Committed` or `Aborted`.
+3. If a task completes while `O[o].state = Reserved`, the `LEAK` rule
+   fires, recording `Leaked`.
+4. Thus, every obligation is either resolved or explicitly detected
+   as a leak. There is no transition path that silently discards `Obl(k, o)`.
+
+This is precisely what the lab oracle checks: a non-empty `Held(t)` at
+task completion implies a `leak(o)` witness.
+
+#### 3.4.7 Cancellation interaction (drain requirement)
+
+Cancellation **does not** resolve obligations. It only changes task state.
+Therefore, any correct cancellation protocol must ensure that a cancelling
+task reaches a point where all held obligations are committed or aborted
+before completion.
+
+Operationally:
+
+```
+T[t].state ∈ {CancelRequested, Cancelling, Finalizing}
+  ∧ Held(t) ≠ ∅
+  ⇒ completion triggers leak(o) for each o ∈ Held(t)
+```
+
+This is why cancellation is modeled as request → drain → finalize: the
+drain phase is where obligations are resolved. Budgets provide the bound
+that makes this guarantee checkable.
+
 ---
 
 ### 3.5 Joining and Waiting
