@@ -65,6 +65,15 @@ pub enum RewriteRule {
     DedupRaceJoin,
 }
 
+const ALL_REWRITE_RULES: &[RewriteRule] = &[
+    RewriteRule::JoinAssoc,
+    RewriteRule::RaceAssoc,
+    RewriteRule::JoinCommute,
+    RewriteRule::RaceCommute,
+    RewriteRule::TimeoutMin,
+    RewriteRule::DedupRaceJoin,
+];
+
 impl RewriteRule {
     /// Returns the full rule schema (pattern, replacement, side conditions, explanation).
     #[must_use]
@@ -147,15 +156,7 @@ impl RewriteRule {
     /// Returns all known rules in a stable order.
     #[must_use]
     pub fn all() -> &'static [Self] {
-        const RULES: &[Self] = &[
-            Self::JoinAssoc,
-            Self::RaceAssoc,
-            Self::JoinCommute,
-            Self::RaceCommute,
-            Self::TimeoutMin,
-            Self::DedupRaceJoin,
-        ];
-        RULES
+        ALL_REWRITE_RULES
     }
 }
 

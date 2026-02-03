@@ -4,7 +4,7 @@
 //! distribution to replicas using the deterministic RFC-grade pipeline.
 
 use crate::config::EncodingConfig as PipelineEncodingConfig;
-use crate::encoding::{EncodingError as PipelineEncodingError, EncodingPipeline};
+use crate::encoding::EncodingPipeline;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
 use crate::types::Time;
