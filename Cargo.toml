@@ -154,6 +154,7 @@ lz4_flex = "0.11"
 toml = "0.8"
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.13"
+sha2 = "0.10"
 
 [[bench]]
 name = "phase0_baseline"
@@ -197,6 +198,10 @@ harness = false
 
 [[bench]]
 name = "homology_benchmark"
+harness = false
+
+[[bench]]
+name = "golden_output"
 harness = false
 
 [lints.rust]

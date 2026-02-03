@@ -418,12 +418,23 @@ let mut env = TestEnvironment::new(ctx);
 let http_port = env.allocate_port("http")?;
 let ws_port = env.allocate_port("websocket")?;
 
-// Register and start services
+// Register services
+env.register_service(Box::new(
+    DockerFixtureService::new("redis", "redis:7-alpine")
+        .with_port_map(env.port_for("redis").unwrap(), 6379)
+        .with_health_cmd(vec!["redis-cli", "ping"]),
+));
 env.register_service(Box::new(TempDirFixture::new("workdir")));
+
+// Start all and wait for readiness
 env.start_all_services()?;
+for (name, _) in env.health_check() {
+    // Or use wait_until_healthy per-service before start_all
+}
 
 // Emit metadata to logs + artifact dir
 env.emit_metadata();
+env.write_metadata_artifact();
 
 // ... test body ...
 
