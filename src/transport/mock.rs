@@ -1,7 +1,8 @@
-//! Mock transport implementations for testing.
+//! Deterministic transport simulator for testing.
 //!
-//! These mocks implement `SymbolSink` and `SymbolStream` with deterministic,
-//! configurable behaviors for testing transport behavior without real I/O.
+//! This module provides in-memory, deterministic transport components for
+//! exercising transport behavior without real I/O. The module name is legacy;
+//! types are explicitly labeled as simulator/test components.
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::transport::error::{SinkError, StreamError};
@@ -15,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-/// Configuration for mock transport behavior.
+/// Configuration for simulated transport behavior.
 #[derive(Debug, Clone)]
-pub struct MockTransportConfig {
+pub struct SimTransportConfig {
     /// Base latency added to every operation.
     pub base_latency: Duration,
     /// Random latency jitter (uniform distribution 0..jitter).
@@ -38,7 +39,7 @@ pub struct MockTransportConfig {
     pub fail_after: Option<usize>,
 }
 
-impl Default for MockTransportConfig {
+impl Default for SimTransportConfig {
     fn default() -> Self {
         Self {
             base_latency: Duration::ZERO,
@@ -54,7 +55,7 @@ impl Default for MockTransportConfig {
     }
 }
 
-impl MockTransportConfig {
+impl SimTransportConfig {
     /// Create config for reliable, zero-latency transport (unit tests).
     #[must_use]
     pub fn reliable() -> Self {
@@ -90,28 +91,28 @@ impl MockTransportConfig {
     }
 }
 
-/// Node identifier for mock network topologies.
+/// Node identifier for simulated network topologies.
 pub type NodeId = u64;
 
-/// Mock link configuration between two nodes.
+/// Simulated link configuration between two nodes.
 #[derive(Debug, Clone)]
-pub struct MockLink {
+pub struct SimLink {
     /// Transport behavior for this link.
-    pub config: MockTransportConfig,
+    pub config: SimTransportConfig,
 }
 
-/// Simulated network topology for mock transports.
+/// Simulated network topology for transport tests.
 #[derive(Debug)]
-pub struct MockNetwork {
+pub struct SimNetwork {
     nodes: HashSet<NodeId>,
-    links: HashMap<(NodeId, NodeId), MockLink>,
-    default_config: MockTransportConfig,
+    links: HashMap<(NodeId, NodeId), SimLink>,
+    default_config: SimTransportConfig,
 }
 
-impl MockNetwork {
+impl SimNetwork {
     /// Create a fully-connected network of N nodes.
     #[must_use]
-    pub fn fully_connected(n: usize, config: MockTransportConfig) -> Self {
+    pub fn fully_connected(n: usize, config: SimTransportConfig) -> Self {
         let mut nodes = HashSet::new();
         let mut links = HashMap::new();
         for i in 0..n {
@@ -122,7 +123,7 @@ impl MockNetwork {
                 if from != to {
                     links.insert(
                         (from, to),
-                        MockLink {
+                        SimLink {
                             config: config.clone(),
                         },
                     );
@@ -138,7 +139,7 @@ impl MockNetwork {
 
     /// Create a ring topology.
     #[must_use]
-    pub fn ring(n: usize, config: MockTransportConfig) -> Self {
+    pub fn ring(n: usize, config: SimTransportConfig) -> Self {
         let mut nodes = HashSet::new();
         let mut links = HashMap::new();
         if n == 0 {
@@ -156,15 +157,15 @@ impl MockNetwork {
             let to = ((i + 1) % n) as NodeId;
             links.insert(
                 (from, to),
-                MockLink {
-                    config: config.clone(),
-                },
+                    SimLink {
+                        config: config.clone(),
+                    },
             );
             links.insert(
                 (to, from),
-                MockLink {
-                    config: config.clone(),
-                },
+                    SimLink {
+                        config: config.clone(),
+                    },
             );
         }
         Self {
@@ -194,13 +195,13 @@ impl MockNetwork {
                 if self.nodes.contains(&a) && self.nodes.contains(&b) {
                     self.links.insert(
                         (a, b),
-                        MockLink {
+                        SimLink {
                             config: self.default_config.clone(),
                         },
                     );
                     self.links.insert(
                         (b, a),
-                        MockLink {
+                        SimLink {
                             config: self.default_config.clone(),
                         },
                     );
@@ -214,9 +215,9 @@ impl MockNetwork {
     /// If the link is missing, returns a closed channel pair.
     #[must_use]
     #[allow(clippy::option_if_let_else)] // if-let-else is clearer than map_or_else here
-    pub fn transport(&self, from: NodeId, to: NodeId) -> (MockChannelSink, MockChannelStream) {
+    pub fn transport(&self, from: NodeId, to: NodeId) -> (SimChannelSink, SimChannelStream) {
         if let Some(link) = self.links.get(&(from, to)) {
-            mock_channel(link.config.clone())
+            sim_channel(link.config.clone())
         } else {
             closed_channel(self.default_config.clone())
         }
@@ -282,34 +283,34 @@ impl Delay {
 
 /// A waiter entry with tracking flag to prevent unbounded queue growth.
 #[derive(Debug)]
-struct MockWaiter {
+struct SimWaiter {
     waker: Waker,
     /// Flag indicating if this waiter is still queued. When woken, this is set to false.
     queued: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
-struct MockQueueState {
+struct SimQueueState {
     queue: VecDeque<AuthenticatedSymbol>,
     sent_symbols: Vec<AuthenticatedSymbol>,
-    send_wakers: Vec<MockWaiter>,
-    recv_wakers: Vec<MockWaiter>,
+    send_wakers: Vec<SimWaiter>,
+    recv_wakers: Vec<SimWaiter>,
     closed: bool,
     rng: DetRng,
 }
 
 #[derive(Debug)]
-struct MockQueue {
-    config: MockTransportConfig,
-    state: Mutex<MockQueueState>,
+struct SimQueue {
+    config: SimTransportConfig,
+    state: Mutex<SimQueueState>,
 }
 
-impl MockQueue {
-    fn new(config: MockTransportConfig) -> Self {
+impl SimQueue {
+    fn new(config: SimTransportConfig) -> Self {
         let seed = config.seed.unwrap_or(1);
         Self {
             config,
-            state: Mutex::new(MockQueueState {
+            state: Mutex::new(SimQueueState {
                 queue: VecDeque::new(),
                 sent_symbols: Vec::new(),
                 send_wakers: Vec::new(),
@@ -321,7 +322,7 @@ impl MockQueue {
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().expect("mock queue lock poisoned");
+        let mut state = self.state.lock().expect("sim queue lock poisoned");
         state.closed = true;
         let send_wakers = std::mem::take(&mut state.send_wakers);
         let recv_wakers = std::mem::take(&mut state.recv_wakers);
