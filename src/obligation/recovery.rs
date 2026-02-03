@@ -508,6 +508,11 @@ mod tests {
     fn conflict_flagged_when_auto_resolve_disabled() {
         let mut config = test_config();
         config.auto_resolve_conflicts = false;
+        // Also disable auto-abort for violations: the merged ledger has both a
+        // conflict (Committed ⊔ Aborted) and a linearity violation (2 acquires,
+        // 2 resolves). If auto_abort_violations is true, force_abort_repair()
+        // clears the conflict before remaining_conflicts is computed.
+        config.auto_abort_violations = false;
         let mut gov = RecoveryGovernor::new(config);
 
         let mut a = CrdtObligationLedger::new(node("A"));

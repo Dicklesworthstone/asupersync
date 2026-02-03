@@ -270,7 +270,11 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
         let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
         d_chunk.copy_from_slice(&result.to_ne_bytes());
     }
-    for (d, s) in d_chunks.into_remainder().iter_mut().zip(s_chunks.remainder()) {
+    for (d, s) in d_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks.remainder())
+    {
         *d ^= s;
     }
 }
