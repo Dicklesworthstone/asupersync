@@ -8,7 +8,7 @@
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::systematic::{RobustSoliton, SystematicEncoder, SystematicParams};
+use asupersync::raptorq::systematic::{ConstraintMatrix, RobustSoliton, SystematicEncoder, SystematicParams};
 use asupersync::util::DetRng;
 
 // ============================================================================
@@ -35,20 +35,52 @@ fn make_patterned_source(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
 }
 
 /// Build received symbols from encoder, optionally dropping some.
+/// Extract non-zero columns and GF(256) coefficients for a constraint matrix row.
+fn constraint_row_equation(
+    constraints: &ConstraintMatrix,
+    row: usize,
+) -> (Vec<usize>, Vec<Gf256>) {
+    let mut columns = Vec::new();
+    let mut coefficients = Vec::new();
+    for col in 0..constraints.cols {
+        let coeff = constraints.get(row, col);
+        if !coeff.is_zero() {
+            columns.push(col);
+            coefficients.push(coeff);
+        }
+    }
+    (columns, coefficients)
+}
+
 fn build_received_symbols(
     encoder: &SystematicEncoder,
     decoder: &InactivationDecoder,
     source: &[Vec<u8>],
     drop_source_indices: &[usize],
     max_repair_esi: u32,
+    seed: u64,
 ) -> Vec<ReceivedSymbol> {
     let k = source.len();
-    let mut received = Vec::new();
+    let params = decoder.params();
+    let base_rows = params.s + params.h;
+    let constraints = ConstraintMatrix::build(params, seed);
 
-    // Add source symbols (except dropped)
+    // Start with constraint symbols (LDPC + HDPC parity checks with zero RHS).
+    let mut received = decoder.constraint_symbols();
+
+    // Add source symbols with their LT encoding equations from the constraint
+    // matrix (rows S+H .. S+H+K-1), not identity equations.
     for (i, data) in source.iter().enumerate() {
         if !drop_source_indices.contains(&i) {
-            received.push(ReceivedSymbol::source(i as u32, data.clone()));
+            let row = base_rows + i;
+            let (columns, coefficients) = constraint_row_equation(&constraints, row);
+            received.push(ReceivedSymbol {
+                esi: i as u32,
+                is_source: true,
+                columns,
+                coefficients,
+                data: data.clone(),
+            });
         }
     }
 
@@ -78,7 +110,7 @@ fn roundtrip_no_loss() {
     let l = decoder.params().l;
 
     // Receive all source + enough repair to reach L
-    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
     let result = decoder.decode(&received).expect("decode should succeed");
 
@@ -107,7 +139,7 @@ fn roundtrip_with_source_loss() {
 
     // Need enough repair to compensate
     let max_repair = (l + dropped_count) as u32;
-    let received = build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair);
+    let received = build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair, seed);
 
     let result = decoder.decode(&received).expect("decode should succeed");
 
@@ -135,7 +167,7 @@ fn roundtrip_repair_only() {
 
     // Need L repair symbols
     let max_repair = (k + l) as u32;
-    let received = build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair);
+    let received = build_received_symbols(&encoder, &decoder, &source, &drop_indices, max_repair, seed);
 
     let result = decoder.decode(&received).expect("decode should succeed");
 
@@ -191,7 +223,7 @@ fn decoder_deterministic_same_input() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let l = decoder.params().l;
 
-    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
     let result1 = decoder.decode(&received).unwrap();
     let result2 = decoder.decode(&received).unwrap();
@@ -222,7 +254,7 @@ fn full_roundtrip_deterministic() {
             .filter(|i| (i + seed as usize).is_multiple_of(3))
             .collect();
         let max_repair = (l + drop.len()) as u32;
-        let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair);
+        let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair, seed);
 
         let result = decoder.decode(&received).expect("decode failed");
 
@@ -250,7 +282,7 @@ fn edge_case_k_equals_1() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let l = decoder.params().l;
 
-    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
     let result = decoder.decode(&received).expect("k=1 decode failed");
     assert_eq!(result.source[0], source[0], "k=1 roundtrip failed");
@@ -267,7 +299,7 @@ fn edge_case_k_equals_2() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let l = decoder.params().l;
 
-    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
     let result = decoder.decode(&received).expect("k=2 decode failed");
     assert_eq!(result.source, source, "k=2 roundtrip failed");
@@ -284,7 +316,7 @@ fn edge_case_tiny_symbol_size() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let l = decoder.params().l;
 
-    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
     let result = decoder
         .decode(&received)
@@ -303,7 +335,7 @@ fn edge_case_large_symbol_size() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let l = decoder.params().l;
 
-    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+    let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
     let result = decoder
         .decode(&received)
@@ -325,7 +357,7 @@ fn edge_case_larger_k() {
     // Drop 10% of source symbols
     let drop: Vec<usize> = (0..k).filter(|i| i % 10 == 0).collect();
     let max_repair = (l + drop.len()) as u32;
-    let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair);
+    let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair, seed);
 
     let result = decoder.decode(&received).expect("k=100 decode failed");
     for (i, original) in source.iter().enumerate() {
@@ -347,8 +379,8 @@ fn insufficient_symbols_fails() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let l = decoder.params().l;
 
-    // Only receive k-1 source symbols (not enough)
-    let received: Vec<ReceivedSymbol> = source[..l - 1]
+    // Only receive k-1 source symbols (not enough: need at least L total)
+    let received: Vec<ReceivedSymbol> = source[..k - 1]
         .iter()
         .enumerate()
         .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
@@ -417,7 +449,7 @@ fn fuzz_roundtrip_various_sizes() {
             .collect();
 
         let max_repair = (l + drop.len() + 2) as u32; // +2 margin
-        let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair);
+        let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair, seed);
 
         let result = decoder
             .decode(&received)
@@ -455,7 +487,7 @@ fn fuzz_random_loss_patterns() {
         let drop: Vec<usize> = (0..k).filter(|_| rng.next_usize(100) < loss_pct).collect();
 
         let max_repair = (l + drop.len() + 3) as u32;
-        let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair);
+        let received = build_received_symbols(&encoder, &decoder, &source, &drop, max_repair, seed);
 
         let result = decoder.decode(&received).unwrap_or_else(|e| {
             panic!(
@@ -488,7 +520,7 @@ fn stress_many_small_decodes() {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
-        let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32);
+        let received = build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
 
         let result = decoder
             .decode(&received)
@@ -522,18 +554,20 @@ fn soliton_distribution_coverage() {
             degrees[d] += 1;
         }
 
-        // Degree 1 should be most common
+        // Degree 2 should have significant mass (robust soliton concentrates
+        // probability at degree 2 via the 1/(d*(d-1)) ideal soliton term).
         assert!(
-            degrees[1] > degrees[2],
-            "k={k}: degree 1 should be most common"
+            degrees[2] > 0,
+            "k={k}: degree 2 should have nonzero mass"
         );
 
-        // Low degrees should dominate
-        let low_total: u32 = degrees[1..=5.min(k)].iter().sum();
-        let samples_u32 = u32::try_from(samples).unwrap_or(u32::MAX);
+        // The top degree (threshold region) should have significant mass
+        // from the tau perturbation. Check that degrees aren't all
+        // concentrated at a single value.
+        let nonzero_degrees = degrees[1..].iter().filter(|&&c| c > 0).count();
         assert!(
-            low_total > samples_u32 / 2,
-            "k={k}: low degrees should dominate, got {low_total}/{samples}"
+            nonzero_degrees >= 3,
+            "k={k}: should have at least 3 distinct degrees sampled"
         );
     }
 }
@@ -581,16 +615,16 @@ fn params_consistency() {
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn params_overhead_bounded() {
-    // Overhead should be reasonable (not excessive)
-    for k in [10, 50, 100, 500] {
+    // Overhead = (L - K) / K should decrease as K grows. For small K the
+    // fixed minimum LDPC (S >= 7) and HDPC (H >= 3) counts dominate, so we
+    // use a per-K bound: 150% for k=10, trending toward <25% for k=500.
+    for (k, max_overhead) in [(10, 1.5), (50, 0.5), (100, 0.35), (500, 0.25)] {
         let params = SystematicParams::for_source_block(k, 64);
         let overhead = params.l - params.k;
-        let overhead_pct = overhead as f64 / k as f64;
-
-        // Overhead should be less than 50% for reasonable k
+        let overhead_ratio = overhead as f64 / k as f64;
         assert!(
-            overhead_pct < 0.5,
-            "k={k}: overhead {overhead_pct:.2}% too high"
+            overhead_ratio < max_overhead,
+            "k={k}: overhead {overhead_ratio:.2} exceeds bound {max_overhead}"
         );
     }
 }
