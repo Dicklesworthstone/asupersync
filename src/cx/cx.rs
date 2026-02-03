@@ -411,125 +411,6 @@ impl<Caps> Cx<Caps> {
         }
     }
 
-    /// Creates a capability context for testing purposes.
-    ///
-    /// This constructor creates a Cx with default IDs and an infinite budget,
-    /// suitable for unit and integration tests. The resulting context is fully
-    /// functional but not connected to a real runtime.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use asupersync::Cx;
-    ///
-    /// let cx = Cx::for_testing();
-    /// assert!(!cx.is_cancel_requested());
-    /// assert!(cx.checkpoint().is_ok());
-    /// ```
-    ///
-    /// # Note
-    ///
-    /// This API is intended for testing only. Production code should receive
-    /// Cx instances from the runtime, not construct them directly.
-    #[must_use]
-    pub fn for_testing() -> Self {
-        Self::new(
-            RegionId::new_for_test(0, 0),
-            TaskId::new_for_test(0, 0),
-            Budget::INFINITE,
-        )
-    }
-
-    /// Creates a test-only capability context with a specified budget.
-    ///
-    /// Similar to [`Self::for_testing()`] but allows specifying a custom budget
-    /// for testing timeout behavior.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use asupersync::{Cx, Budget, Time};
-    ///
-    /// // Create a context with a 30-second deadline
-    /// let cx = Cx::for_testing_with_budget(
-    ///     Budget::new().with_deadline(Time::from_secs(30))
-    /// );
-    /// ```
-    ///
-    /// # Note
-    ///
-    /// This API is intended for testing only. Production code should receive
-    /// Cx instances from the runtime, not construct them directly.
-    #[must_use]
-    pub fn for_testing_with_budget(budget: Budget) -> Self {
-        Self::new(
-            RegionId::new_for_test(0, 0),
-            TaskId::new_for_test(0, 0),
-            budget,
-        )
-    }
-
-    /// Creates a test-only capability context with lab I/O capability.
-    ///
-    /// This constructor creates a Cx with a `LabIoCap` for testing I/O code paths
-    /// without performing real I/O.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use asupersync::Cx;
-    ///
-    /// let cx = Cx::for_testing_with_io();
-    /// assert!(cx.has_io());
-    /// assert!(!cx.io().unwrap().is_real_io());
-    /// ```
-    ///
-    /// # Note
-    ///
-    /// This API is intended for testing only.
-    #[must_use]
-    pub fn for_testing_with_io() -> Self {
-        Self::new_with_io(
-            RegionId::new_for_test(0, 0),
-            TaskId::new_for_test(0, 0),
-            Budget::INFINITE,
-            None,
-            None,
-            Some(Arc::new(crate::io::LabIoCap::new())),
-            None,
-        )
-    }
-
-    /// Creates a request-scoped capability context with a specified budget.
-    ///
-    /// This is intended for production request handling that needs unique
-    /// task/region identifiers outside the scheduler.
-    #[must_use]
-    pub fn for_request_with_budget(budget: Budget) -> Self {
-        Self::new(RegionId::new_ephemeral(), TaskId::new_ephemeral(), budget)
-    }
-
-    /// Creates a request-scoped capability context with an infinite budget.
-    #[must_use]
-    pub fn for_request() -> Self {
-        Self::for_request_with_budget(Budget::INFINITE)
-    }
-
-    /// Creates a test-only capability context with a remote capability.
-    ///
-    /// This constructor creates a Cx with a [`RemoteCap`] for testing remote
-    /// task spawning without a real network transport.
-    ///
-    /// # Note
-    ///
-    /// This API is intended for testing only.
-    #[must_use]
-    pub fn for_testing_with_remote(cap: RemoteCap) -> Self {
-        let mut cx = Self::for_testing();
-        cx.remote_cap = Some(Arc::new(cap));
-        cx
-    }
-
     /// Returns a cloned handle to the I/O driver, if present.
     #[must_use]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
@@ -1958,6 +1839,125 @@ impl<Caps> Cx<Caps> {
 }
 
 impl Cx<cap::All> {
+    /// Creates a capability context for testing purposes.
+    ///
+    /// This constructor creates a Cx with default IDs and an infinite budget,
+    /// suitable for unit and integration tests. The resulting context is fully
+    /// functional but not connected to a real runtime.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::Cx;
+    ///
+    /// let cx = Cx::for_testing();
+    /// assert!(!cx.is_cancel_requested());
+    /// assert!(cx.checkpoint().is_ok());
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only. Production code should receive
+    /// Cx instances from the runtime, not construct them directly.
+    #[must_use]
+    pub fn for_testing() -> Self {
+        Self::new(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+        )
+    }
+
+    /// Creates a test-only capability context with a specified budget.
+    ///
+    /// Similar to [`Self::for_testing()`] but allows specifying a custom budget
+    /// for testing timeout behavior.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::{Cx, Budget, Time};
+    ///
+    /// // Create a context with a 30-second deadline
+    /// let cx = Cx::for_testing_with_budget(
+    ///     Budget::new().with_deadline(Time::from_secs(30))
+    /// );
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only. Production code should receive
+    /// Cx instances from the runtime, not construct them directly.
+    #[must_use]
+    pub fn for_testing_with_budget(budget: Budget) -> Self {
+        Self::new(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            budget,
+        )
+    }
+
+    /// Creates a test-only capability context with lab I/O capability.
+    ///
+    /// This constructor creates a Cx with a `LabIoCap` for testing I/O code paths
+    /// without performing real I/O.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::Cx;
+    ///
+    /// let cx = Cx::for_testing_with_io();
+    /// assert!(cx.has_io());
+    /// assert!(!cx.io().unwrap().is_real_io());
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only.
+    #[must_use]
+    pub fn for_testing_with_io() -> Self {
+        Self::new_with_io(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(Arc::new(crate::io::LabIoCap::new())),
+            None,
+        )
+    }
+
+    /// Creates a request-scoped capability context with a specified budget.
+    ///
+    /// This is intended for production request handling that needs unique
+    /// task/region identifiers outside the scheduler.
+    #[must_use]
+    pub fn for_request_with_budget(budget: Budget) -> Self {
+        Self::new(RegionId::new_ephemeral(), TaskId::new_ephemeral(), budget)
+    }
+
+    /// Creates a request-scoped capability context with an infinite budget.
+    #[must_use]
+    pub fn for_request() -> Self {
+        Self::for_request_with_budget(Budget::INFINITE)
+    }
+
+    /// Creates a test-only capability context with a remote capability.
+    ///
+    /// This constructor creates a Cx with a [`RemoteCap`] for testing remote
+    /// task spawning without a real network transport.
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only.
+    #[must_use]
+    pub fn for_testing_with_remote(cap: RemoteCap) -> Self {
+        let mut cx = Self::for_testing();
+        cx.remote_cap = Some(Arc::new(cap));
+        cx
+    }
+
     /// Returns the current task context, if one is set.
     ///
     /// This is set by the runtime while polling a task.

@@ -32,6 +32,7 @@ pub mod dpor;
 pub mod event;
 pub mod event_structure;
 pub mod file;
+pub mod gf2;
 pub mod filter;
 pub mod format;
 pub mod independence;
@@ -43,7 +44,9 @@ pub mod streaming;
 pub mod tla_export;
 
 pub use buffer::{TraceBuffer, TraceBufferHandle};
-pub use canonicalize::{canonicalize, trace_fingerprint, FoataTrace, TraceMonoid};
+pub use canonicalize::{
+    canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
+};
 pub use compat::{
     check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
@@ -54,6 +57,7 @@ pub use dpor::{
 };
 pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
 pub use event_structure::{Event, EventId, EventStructure, HdaCell, HdaComplex};
+pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
 pub use file::{
     read_trace, write_trace, CompressionMode, TraceEventIterator, TraceFileConfig, TraceFileError,
     TraceReader, TraceWriter, TRACE_FILE_VERSION, TRACE_MAGIC,
