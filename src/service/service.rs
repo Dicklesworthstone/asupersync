@@ -814,9 +814,8 @@ where
                 future.await.map_err(TowerAdapterError::Service)
             }
             CancellationMode::Strict => {
-                // Use tokio's select to race cancellation
-                // For now, fallback to best effort since we don't have tokio dependency
-                // In strict mode, we'd fail if cancellation is requested during execution
+                // Use a select-style race with cancellation once we wire the runtime primitive.
+                // For now, fall back to best effort and report if cancellation was ignored.
                 let result = future.await.map_err(TowerAdapterError::Service);
 
                 // After completion, check if we were cancelled

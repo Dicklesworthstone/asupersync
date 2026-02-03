@@ -7,8 +7,6 @@
 //! reconstitutes source symbols deterministically for testing.
 
 use crate::error::{Error, ErrorKind};
-use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
-use crate::raptorq::systematic::{ConstraintMatrix, RobustSoliton, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -506,28 +504,25 @@ impl DecodingPipeline {
             return None;
         }
 
-        let decoded_symbols = match decode_block(
-            block_plan,
-            &symbols,
-            usize::from(self.config.symbol_size),
-        ) {
-            Ok(symbols) => symbols,
-            Err(
-                DecodingError::MatrixInversionFailed { .. }
-                | DecodingError::InsufficientSymbols { .. },
-            ) => {
-                return None;
-            }
-            Err(_err) => {
-                let block = self.blocks.get_mut(&sbn);
-                if let Some(block) = block {
-                    block.state = BlockDecodingState::Failed;
+        let decoded_symbols =
+            match decode_block(block_plan, &symbols) {
+                Ok(symbols) => symbols,
+                Err(
+                    DecodingError::MatrixInversionFailed { .. }
+                    | DecodingError::InsufficientSymbols { .. },
+                ) => {
+                    return None;
                 }
-                return Some(SymbolAcceptResult::Rejected(
-                    RejectReason::MemoryLimitReached,
-                ));
-            }
-        };
+                Err(_err) => {
+                    let block = self.blocks.get_mut(&sbn);
+                    if let Some(block) = block {
+                        block.state = BlockDecodingState::Failed;
+                    }
+                    return Some(SymbolAcceptResult::Rejected(
+                        RejectReason::MemoryLimitReached,
+                    ));
+                }
+            };
 
         let mut block_data = Vec::with_capacity(block_plan.len);
         for symbol in &decoded_symbols {
@@ -618,7 +613,11 @@ fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
     threshold
 }
 
-fn decode_block(plan: &BlockPlan, symbols: &[Symbol]) -> Result<Vec<Symbol>, DecodingError> {
+fn decode_block(
+    plan: &BlockPlan,
+    symbols: &[Symbol],
+    symbol_size: usize,
+) -> Result<Vec<Symbol>, DecodingError> {
     let k = plan.k;
     if symbols.len() < k {
         return Err(DecodingError::InsufficientSymbols {
@@ -627,20 +626,95 @@ fn decode_block(plan: &BlockPlan, symbols: &[Symbol]) -> Result<Vec<Symbol>, Dec
         });
     }
 
-    let mut rows: Vec<Row> = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let coeffs = build_coeffs(plan, symbol)?;
-        rows.push(Row {
-            coeffs,
-            data: symbol.data().to_vec(),
+    let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+    let params = SystematicParams::for_source_block(k, symbol_size);
+    let block_seed = seed_for_block(object_id, plan.sbn);
+    let constraints = ConstraintMatrix::build(&params, block_seed);
+    let base_rows = params.s + params.h;
+
+    let decoder = InactivationDecoder::new(k, symbol_size, block_seed);
+    let mut received: Vec<ReceivedSymbol> = Vec::with_capacity(base_rows + symbols.len());
+
+    for row in 0..base_rows {
+        let (columns, coefficients) = constraint_row_equation(&constraints, row);
+        received.push(ReceivedSymbol {
+            esi: row as u32,
+            is_source: false,
+            columns,
+            coefficients,
+            data: vec![0u8; symbol_size],
         });
     }
 
-    let solved = gaussian_elimination(rows, k)?;
-    let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+    for symbol in symbols {
+        match symbol.kind() {
+            SymbolKind::Source => {
+                let esi = symbol.esi() as usize;
+                if esi >= k {
+                    return Err(DecodingError::InconsistentMetadata {
+                        sbn: plan.sbn,
+                        details: format!("source esi {esi} >= k {k}"),
+                    });
+                }
+                let row = base_rows + esi;
+                let (columns, coefficients) = constraint_row_equation(&constraints, row);
+                received.push(ReceivedSymbol {
+                    esi: symbol.esi(),
+                    is_source: true,
+                    columns,
+                    coefficients,
+                    data: symbol.data().to_vec(),
+                });
+            }
+            SymbolKind::Repair => {
+                let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                received.push(ReceivedSymbol {
+                    esi: symbol.esi(),
+                    is_source: false,
+                    columns,
+                    coefficients,
+                    data: symbol.data().to_vec(),
+                });
+            }
+        }
+    }
+
+    let intermediate = match decoder.decode(&received) {
+        Ok(result) => result.intermediate,
+        Err(err) => {
+            let mapped = match err {
+                RaptorDecodeError::InsufficientSymbols { received, required } => {
+                    DecodingError::InsufficientSymbols {
+                        received,
+                        needed: required,
+                    }
+                }
+                RaptorDecodeError::SingularMatrix { row } => {
+                    DecodingError::MatrixInversionFailed {
+                        reason: format!("singular matrix at row {row}"),
+                    }
+                }
+                RaptorDecodeError::SymbolSizeMismatch { expected, actual } => {
+                    DecodingError::SymbolSizeMismatch {
+                        expected: expected as u16,
+                        actual,
+                    }
+                }
+            };
+            return Err(mapped);
+        }
+    };
 
     let mut decoded = Vec::with_capacity(k);
-    for (esi, data) in solved.into_iter().enumerate() {
+    for esi in 0..k {
+        let row = base_rows + esi;
+        let mut data = vec![0u8; symbol_size];
+        for col in 0..params.l {
+            let coeff = constraints.get(row, col);
+            if !coeff.is_zero() {
+                gf256_addmul_slice(&mut data, &intermediate[col], coeff);
+            }
+        }
         decoded.push(Symbol::new(
             SymbolId::new(object_id, plan.sbn, esi as u32),
             data,
@@ -651,31 +725,24 @@ fn decode_block(plan: &BlockPlan, symbols: &[Symbol]) -> Result<Vec<Symbol>, Dec
     Ok(decoded)
 }
 
-fn build_coeffs(plan: &BlockPlan, symbol: &Symbol) -> Result<Vec<u8>, DecodingError> {
-    let k = plan.k;
-    let mut coeffs = vec![0u8; k];
-    match symbol.kind() {
-        SymbolKind::Source => {
-            let esi = symbol.esi() as usize;
-            if esi >= k {
-                return Err(DecodingError::InconsistentMetadata {
-                    sbn: plan.sbn,
-                    details: format!("source esi {esi} >= k {k}"),
-                });
-            }
-            coeffs[esi] = 1;
-        }
-        SymbolKind::Repair => {
-            let seed = seed_for(symbol.object_id(), plan.sbn, symbol.esi());
-            let mut rng = DetRng::new(seed);
-            let degree = 1 + rng.next_usize(k);
-            for _ in 0..degree {
-                let idx = rng.next_usize(k);
-                coeffs[idx] ^= 1;
-            }
+fn constraint_row_equation(
+    constraints: &ConstraintMatrix,
+    row: usize,
+) -> (Vec<usize>, Vec<Gf256>) {
+    let mut columns = Vec::new();
+    let mut coefficients = Vec::new();
+    for col in 0..constraints.cols {
+        let coeff = constraints.get(row, col);
+        if !coeff.is_zero() {
+            columns.push(col);
+            coefficients.push(coeff);
         }
     }
-    Ok(coeffs)
+    (columns, coefficients)
+}
+
+fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
+    seed_for(object_id, sbn, 0)
 }
 
 fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
@@ -690,78 +757,6 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
     } else {
         seed
     }
-}
-
-#[derive(Debug, Clone)]
-struct Row {
-    coeffs: Vec<u8>,
-    data: Vec<u8>,
-}
-
-impl Row {
-    fn xor_with(&mut self, other: &Self) {
-        for (a, b) in self.coeffs.iter_mut().zip(&other.coeffs) {
-            *a ^= *b;
-        }
-        for (a, b) in self.data.iter_mut().zip(&other.data) {
-            *a ^= *b;
-        }
-    }
-
-    fn pivot_col(&self) -> Option<usize> {
-        self.coeffs.iter().position(|&c| c == 1)
-    }
-
-    #[allow(clippy::naive_bytecount)]
-    fn ones_count(&self) -> usize {
-        self.coeffs.iter().filter(|&&c| c == 1).count()
-    }
-}
-
-fn gaussian_elimination(rows: Vec<Row>, k: usize) -> Result<Vec<Vec<u8>>, DecodingError> {
-    let mut rows = rows;
-    let mut pivot_row = 0usize;
-
-    for col in 0..k {
-        let Some(pivot) = (pivot_row..rows.len()).find(|r| rows[*r].coeffs[col] == 1) else {
-            continue;
-        };
-        if pivot != pivot_row {
-            rows.swap(pivot_row, pivot);
-        }
-
-        for r in 0..rows.len() {
-            if r != pivot_row && rows[r].coeffs[col] == 1 {
-                let pivot_clone = rows[pivot_row].clone();
-                rows[r].xor_with(&pivot_clone);
-            }
-        }
-
-        pivot_row += 1;
-        if pivot_row == rows.len() {
-            break;
-        }
-    }
-
-    let mut solution: Vec<Option<Vec<u8>>> = vec![None; k];
-    for row in rows {
-        if row.ones_count() == 1 {
-            if let Some(col) = row.pivot_col() {
-                solution[col] = Some(row.data);
-            }
-        }
-    }
-
-    if solution.iter().any(Option::is_none) {
-        return Err(DecodingError::MatrixInversionFailed {
-            reason: "insufficient rank".to_string(),
-        });
-    }
-
-    Ok(solution
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect())
 }
 
 #[cfg(test)]

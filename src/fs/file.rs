@@ -202,12 +202,7 @@ mod tests {
     #[test]
     fn test_file_create_write_read() {
         init_test("test_file_create_write_read");
-        // Since we are synchronous in Phase 0, we can just block_on or run directly?
-        // But functions are async.
-        // We need a runtime or simple block_on.
-        // I'll use futures_lite::future::block_on if available, or just tokio if test supports it?
-        // The project has `conformance` with `block_on`.
-        // Or I can use `futures_lite::future::block_on` since I added it to dev-dependencies.
+        // Phase 0 is synchronous; we use a simple block_on for async tests.
 
         futures_lite::future::block_on(async {
             let dir = tempdir().unwrap();

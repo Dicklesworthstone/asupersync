@@ -1,7 +1,7 @@
 //! TaskHandle for awaiting spawned task results.
 //!
 //! `TaskHandle<T>` is returned by spawn operations and allows the spawner
-//! to await the task's result. Similar to tokio's `JoinHandle`.
+//! to await the task's result. Similar to join handles in other runtimes.
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
