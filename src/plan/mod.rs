@@ -146,6 +146,12 @@ impl PlanDag {
         self.nodes.get_mut(id.index())
     }
 
+    /// Returns the number of nodes in this DAG.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// Validates the DAG for structural correctness.
     pub fn validate(&self) -> Result<(), PlanError> {
         let Some(root) = self.root else {
@@ -466,6 +472,7 @@ impl EGraph {
 
 pub mod analysis;
 pub mod certificate;
+pub mod extractor;
 pub mod fixtures;
 pub mod rewrite;
 pub use analysis::{
@@ -476,6 +483,7 @@ pub use analysis::{
 pub use certificate::{
     CertificateVersion, PlanHash, RewriteCertificate, StepVerifyError, VerifyError,
 };
+pub use extractor::{ExtractionCertificate, ExtractionVerifyError, Extractor, PlanCost};
 pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule, RewriteRuleSchema};
 
 #[cfg(test)]
