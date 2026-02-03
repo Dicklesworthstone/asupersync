@@ -10,7 +10,9 @@
 
 use crate::types::{TaskId, Time};
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BinaryHeap;
+use std::hash::{Hash, Hasher};
 
 /// A task entry in a scheduler lane ordered by priority.
 ///
@@ -462,6 +464,140 @@ impl Scheduler {
         self.timed_lane.clear();
         self.ready_lane.clear();
         self.scheduled.clear();
+    }
+}
+
+/// Scheduler operating mode.
+///
+/// Controls whether the scheduler uses deterministic or throughput-optimized
+/// scheduling. The deterministic mode is used by the lab runtime for
+/// reproducible testing; the throughput mode is used in production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerMode {
+    /// Deterministic mode: same seed → identical schedule.
+    ///
+    /// Uses RNG-seeded tie-breaking for reproducibility. Suitable for:
+    /// - Lab runtime testing
+    /// - DPOR exploration
+    /// - Replay debugging
+    /// - Proof-carrying trace generation
+    Deterministic,
+
+    /// Throughput mode: optimized for wall-clock performance.
+    ///
+    /// May use non-deterministic optimizations (e.g., batch wakeups,
+    /// relaxed ordering). Not suitable for DPOR or replay.
+    Throughput,
+}
+
+impl Default for SchedulerMode {
+    fn default() -> Self {
+        Self::Deterministic
+    }
+}
+
+/// A schedule certificate: a hash of the sequence of scheduling decisions.
+///
+/// Two runs with the same seed should produce identical certificates if the
+/// scheduler is deterministic. A divergence in certificates indicates
+/// non-determinism or a bug.
+///
+/// # Construction
+///
+/// The certificate is built incrementally by hashing each scheduling decision:
+/// - Task ID popped
+/// - Lane from which it was popped (cancel=0, timed=1, ready=2, stolen=3)
+/// - Step number
+///
+/// # Verification
+///
+/// To verify determinism, run the same test twice with the same seed and
+/// compare certificates. Divergence at step N means the schedule diverged
+/// at that point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleCertificate {
+    /// Running hash of all schedule decisions.
+    hash: u64,
+    /// Number of decisions recorded.
+    decisions: u64,
+    /// Step at which the first decision diverged from a reference (if any).
+    divergence_step: Option<u64>,
+}
+
+/// The lane from which a task was dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DispatchLane {
+    /// Task was in cancellation state.
+    Cancel,
+    /// Task had a deadline.
+    Timed,
+    /// Task was in the general ready queue.
+    Ready,
+    /// Task was stolen from another worker.
+    Stolen,
+}
+
+impl ScheduleCertificate {
+    /// Creates a new empty certificate.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            hash: 0,
+            decisions: 0,
+            divergence_step: None,
+        }
+    }
+
+    /// Record a scheduling decision: task dispatched from a lane at a step.
+    pub fn record(&mut self, task: TaskId, lane: DispatchLane, step: u64) {
+        let mut hasher = DefaultHasher::new();
+        self.hash.hash(&mut hasher);
+        // Pack the arena index for deterministic hashing.
+        let idx = task.0;
+        (idx.index(), idx.generation()).hash(&mut hasher);
+        lane.hash(&mut hasher);
+        step.hash(&mut hasher);
+        self.hash = hasher.finish();
+        self.decisions += 1;
+    }
+
+    /// Returns the current certificate hash.
+    #[must_use]
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    /// Returns the number of decisions recorded.
+    #[must_use]
+    pub fn decisions(&self) -> u64 {
+        self.decisions
+    }
+
+    /// Compare with a reference certificate and detect divergence.
+    ///
+    /// Returns `true` if the certificates match.
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.decisions == other.decisions
+    }
+
+    /// Mark a divergence at the given step.
+    pub fn mark_divergence(&mut self, step: u64) {
+        if self.divergence_step.is_none() {
+            self.divergence_step = Some(step);
+        }
+    }
+
+    /// Returns the step at which divergence was first detected.
+    #[must_use]
+    pub fn divergence_step(&self) -> Option<u64> {
+        self.divergence_step
+    }
+}
+
+impl Default for ScheduleCertificate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -944,5 +1080,76 @@ mod tests {
 
         assert_eq!(popped, count);
         assert!(sched.is_empty());
+    }
+
+    // ── ScheduleCertificate tests ───────────────────────────────────────
+
+    #[test]
+    fn certificate_empty() {
+        let cert = ScheduleCertificate::new();
+        assert_eq!(cert.decisions(), 0);
+        assert_eq!(cert.divergence_step(), None);
+    }
+
+    #[test]
+    fn certificate_deterministic_same_sequence() {
+        let mut c1 = ScheduleCertificate::new();
+        let mut c2 = ScheduleCertificate::new();
+
+        c1.record(task(1), DispatchLane::Ready, 0);
+        c1.record(task(2), DispatchLane::Cancel, 1);
+        c1.record(task(3), DispatchLane::Timed, 2);
+
+        c2.record(task(1), DispatchLane::Ready, 0);
+        c2.record(task(2), DispatchLane::Cancel, 1);
+        c2.record(task(3), DispatchLane::Timed, 2);
+
+        assert!(c1.matches(&c2));
+        assert_eq!(c1.hash(), c2.hash());
+        assert_eq!(c1.decisions(), 3);
+    }
+
+    #[test]
+    fn certificate_different_sequences_diverge() {
+        let mut c1 = ScheduleCertificate::new();
+        let mut c2 = ScheduleCertificate::new();
+
+        c1.record(task(1), DispatchLane::Ready, 0);
+        c1.record(task(2), DispatchLane::Ready, 1);
+
+        c2.record(task(2), DispatchLane::Ready, 0);
+        c2.record(task(1), DispatchLane::Ready, 1);
+
+        assert!(!c1.matches(&c2));
+    }
+
+    #[test]
+    fn certificate_lane_matters() {
+        let mut c1 = ScheduleCertificate::new();
+        let mut c2 = ScheduleCertificate::new();
+
+        c1.record(task(1), DispatchLane::Ready, 0);
+        c2.record(task(1), DispatchLane::Cancel, 0);
+
+        assert!(!c1.matches(&c2));
+    }
+
+    #[test]
+    fn certificate_divergence_tracking() {
+        let mut cert = ScheduleCertificate::new();
+        cert.record(task(1), DispatchLane::Ready, 0);
+        assert_eq!(cert.divergence_step(), None);
+
+        cert.mark_divergence(5);
+        assert_eq!(cert.divergence_step(), Some(5));
+
+        // First divergence is sticky.
+        cert.mark_divergence(10);
+        assert_eq!(cert.divergence_step(), Some(5));
+    }
+
+    #[test]
+    fn scheduler_mode_default_is_deterministic() {
+        assert_eq!(SchedulerMode::default(), SchedulerMode::Deterministic);
     }
 }
