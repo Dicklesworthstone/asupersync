@@ -895,12 +895,12 @@ impl<'a> SideConditionChecker<'a> {
         &self.analysis
     }
 
-    /// Check if a node's children are obligation-safe (no leaks).
+    /// Check if a node's children are obligation-safe (no cancel leaks).
     #[must_use]
     pub fn obligations_safe(&self, id: PlanId) -> bool {
-        self.analysis
-            .get(id)
-            .is_some_and(|a| a.obligation.is_safe())
+        self.analysis.get(id).is_some_and(|a| {
+            a.obligation.is_safe() && a.obligation_flow.leak_on_cancel.is_empty()
+        })
     }
 
     /// Check if a node's cancel behavior is safe (losers drained).
@@ -1181,6 +1181,16 @@ mod tests {
 
         let checker = SideConditionChecker::new(&dag);
         assert!(checker.are_independent(a, b));
+    }
+
+    #[test]
+    fn obligations_safe_rejects_leak_on_cancel() {
+        let mut dag = PlanDag::new();
+        let obl = dag.leaf("obl:permit");
+        dag.set_root(obl);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert!(!checker.obligations_safe(obl));
     }
 
     #[test]

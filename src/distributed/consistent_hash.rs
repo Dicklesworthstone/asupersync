@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn add_node_minimal_remap() {
         let mut ring = build_ring(5, 64);
-        let keys: Vec<u64> = (0..10_000).map(|i| i as u64).collect();
+        let keys: Vec<u64> = (0..10_000u64).collect();
 
         let before: Vec<String> = keys
             .iter()
@@ -198,7 +198,9 @@ mod tests {
             .zip(after.iter())
             .filter(|(a, b)| a != b)
             .count();
-        let ratio = changed as f64 / keys.len() as f64;
+        let changed_f = changed as f64;
+        let keys_len_f = keys.len() as f64;
+        let ratio = changed_f / keys_len_f;
 
         // Expected ~1/(n+1) for n=5; allow conservative headroom.
         assert!(ratio <= 0.30, "remap ratio too high: {ratio}");
@@ -207,7 +209,7 @@ mod tests {
     #[test]
     fn remove_node_remaps_only_that_node() {
         let mut ring = build_ring(4, 64);
-        let keys: Vec<u64> = (0..10_000).map(|i| i as u64).collect();
+        let keys: Vec<u64> = (0..10_000u64).collect();
 
         let before: Vec<String> = keys
             .iter()
@@ -234,7 +236,7 @@ mod tests {
     #[test]
     fn uniformity_chi_squared_is_reasonable() {
         let ring = build_ring(5, 128);
-        let keys: Vec<u64> = (0..20_000).map(|i| i as u64).collect();
+        let keys: Vec<u64> = (0..20_000u64).collect();
 
         let mut counts = std::collections::BTreeMap::new();
         for key in keys {
@@ -242,18 +244,29 @@ mod tests {
             *counts.entry(node).or_insert(0usize) += 1;
         }
 
-        let expected = counts.values().sum::<usize>() as f64 / counts.len() as f64;
+        let total = counts.values().sum::<usize>();
+        #[allow(clippy::cast_precision_loss)]
+        let total_f = total as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let count_len_f = counts.len() as f64;
+        let expected = total_f / count_len_f;
         let chi_sq: f64 = counts
             .values()
             .map(|&obs| {
-                let diff = obs as f64 - expected;
+                #[allow(clippy::cast_precision_loss)]
+                let obs_f = obs as f64;
+                let diff = obs_f - expected;
                 diff * diff / expected
             })
             .sum();
 
         let max_dev = counts
             .values()
-            .map(|&obs| (obs as f64 - expected).abs() / expected)
+            .map(|&obs| {
+                #[allow(clippy::cast_precision_loss)]
+                let obs_f = obs as f64;
+                (obs_f - expected).abs() / expected
+            })
             .fold(0.0, f64::max);
 
         assert!(max_dev <= 0.25, "distribution skew too high: {max_dev}");

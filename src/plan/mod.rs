@@ -394,16 +394,22 @@ impl EGraph {
         match node {
             ENode::Leaf { label } => ENode::Leaf { label },
             ENode::Join { children } => ENode::Join {
-                children: children.into_iter().map(|id| self.find(id)).collect(),
+                children: self.canonicalize_children(children),
             },
             ENode::Race { children } => ENode::Race {
-                children: children.into_iter().map(|id| self.find(id)).collect(),
+                children: self.canonicalize_children(children),
             },
             ENode::Timeout { child, duration } => ENode::Timeout {
                 child: self.find(child),
                 duration,
             },
         }
+    }
+
+    fn canonicalize_children(&mut self, children: Vec<EClassId>) -> Vec<EClassId> {
+        let mut canonical: Vec<EClassId> = children.into_iter().map(|id| self.find(id)).collect();
+        canonical.sort_unstable();
+        canonical
     }
 
     fn rebuild_hashcons(&mut self) {
@@ -1081,13 +1087,30 @@ mod tests {
     }
 
     #[test]
+    fn egraph_commutative_canonicalizes_children() {
+        init_test("egraph_commutative_canonicalizes_children");
+        let mut eg = EGraph::new();
+        let a = eg.add_leaf("a");
+        let b = eg.add_leaf("b");
+        let join_ab = eg.add_join(vec![a, b]);
+        let join_ba = eg.add_join(vec![b, a]);
+        assert_eq!(eg.canonical_id(join_ab), eg.canonical_id(join_ba));
+
+        let race_ab = eg.add_race(vec![a, b]);
+        let race_ba = eg.add_race(vec![b, a]);
+        assert_eq!(eg.canonical_id(race_ab), eg.canonical_id(race_ba));
+        crate::test_complete!("egraph_commutative_canonicalizes_children");
+    }
+
+    #[test]
     fn egraph_rebuild_merges_congruent_nodes() {
         init_test("egraph_rebuild_merges_congruent_nodes");
         let mut eg = EGraph::new();
         let a = eg.add_leaf("a");
         let b = eg.add_leaf("b");
-        let join1 = eg.add_join(vec![a, b]);
-        let join2 = eg.add_join(vec![b, a]);
+        let c = eg.add_leaf("c");
+        let join1 = eg.add_join(vec![a, c]);
+        let join2 = eg.add_join(vec![b, c]);
         assert_ne!(eg.canonical_id(join1), eg.canonical_id(join2));
 
         eg.merge(a, b);
