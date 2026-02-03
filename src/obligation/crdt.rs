@@ -395,7 +395,6 @@ mod tests {
     use super::*;
     use crate::remote::NodeId;
     use crate::types::ObligationId;
-    use crate::util::ArenaIndex;
 
     fn oid(index: u32) -> ObligationId {
         ObligationId::new_for_test(index, 0)

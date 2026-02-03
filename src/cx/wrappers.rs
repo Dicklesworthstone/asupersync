@@ -149,10 +149,11 @@ impl BackgroundContext {
 /// let full_cx: Arc<Cx<All>> = runtime.create_cx();
 ///
 /// // Narrow to web handler capabilities
-/// let web_cx: Arc<Cx<WebCaps>> = narrow(full_cx);
+/// let web_cx: Arc<Cx<WebCaps>> = narrow(&full_cx);
 /// ```
-pub fn narrow<From, To>(cx: Arc<Cx<From>>) -> Arc<Cx<To>> {
-    Arc::new(cx.retype::<To>())
+#[must_use]
+pub fn narrow<From, To>(cx: &Arc<Cx<From>>) -> Arc<Cx<To>> {
+    Arc::new(cx.as_ref().retype::<To>())
 }
 
 #[cfg(test)]

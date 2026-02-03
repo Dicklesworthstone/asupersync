@@ -1470,7 +1470,7 @@ impl RuntimeState {
                     let newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
                     let already_cancelling = task.state.is_cancelling();
-                    let cancel_kind = task.cancel_reason().map(|r| r.kind);
+                    let _cancel_kind = task.cancel_reason().map(|r| r.kind);
                     if newly_cancelled {
                         let seq = self.trace.next_seq();
                         let event = TraceEvent::cancel_request(
@@ -1488,7 +1488,7 @@ impl RuntimeState {
                         from_region = ?rid,
                         to_task = ?task_id,
                         depth = node.depth,
-                        cancel_kind = ?cancel_kind,
+                        cancel_kind = ?_cancel_kind,
                         chain_depth = task_reason.chain_depth()
                     );
                     span.follows_from(&root_span);

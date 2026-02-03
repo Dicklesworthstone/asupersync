@@ -38,6 +38,49 @@ Notes:
 
 ---
 
+## Effect-Safe Context Wrappers
+
+Framework integrations should wrap `Cx` to provide least-privilege access.
+
+### HTTP (RequestRegion)
+
+```ignore
+use asupersync::cx::cap::CapSet;
+use asupersync::web::request_region::RequestContext;
+
+type RequestCaps = CapSet<true, true, false, false, false>;
+
+async fn handler(ctx: &RequestContext<'_>) -> Response {
+    let cx = ctx.cx_narrow::<RequestCaps>();
+    cx.checkpoint()?;
+    // spawn/time allowed; IO/remote not exposed
+    todo!()
+}
+```
+
+For fully read-only handlers, use `ctx.cx_readonly()` to remove all gated APIs.
+
+### gRPC (CallContextWithCx)
+
+```ignore
+use asupersync::cx::cap::CapSet;
+use asupersync::grpc::CallContextWithCx;
+
+type GrpcCaps = CapSet<true, true, false, false, false>;
+
+fn handle(ctx: &CallContextWithCx<'_>) {
+    let cx = ctx.cx_narrow::<GrpcCaps>();
+    cx.trace("handling request");
+}
+```
+
+Use `CallContext::with_cx(&cx)` to construct the wrapper.
+
+These wrappers are zero-cost type-level restrictions; they do not alter runtime
+behavior, but they remove access to gated APIs at compile time.
+
+---
+
 ## Architecture Overview
 
 ### Conceptual flow

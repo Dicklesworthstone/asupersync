@@ -10,6 +10,7 @@ use crate::types::{
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::Waker;
 use std::time::Instant;
 
 /// The concrete outcome type stored in task records (Phase 0).
@@ -221,6 +222,11 @@ pub struct TaskRecord {
     pub last_polled_step: u64,
     /// Tasks waiting for this task to complete.
     pub waiters: Vec<TaskId>,
+    /// Cached waker for this task (avoids per-poll Arc allocation).
+    /// The tuple stores (waker, priority) so we can detect priority changes.
+    pub cached_waker: Option<(Waker, u8)>,
+    /// Cached cancel waker for this task (avoids per-poll Arc allocation).
+    pub cached_cancel_waker: Option<(Waker, u8)>,
     /// Cancellation epoch (increments on first cancel request).
     pub cancel_epoch: u64,
 }
@@ -249,6 +255,8 @@ impl TaskRecord {
             created_instant: Instant::now(),
             last_polled_step: 0,
             waiters: Vec::new(),
+            cached_waker: None,
+            cached_cancel_waker: None,
             cancel_epoch: 0,
         }
     }

@@ -398,11 +398,10 @@ impl EncodingIterator<'_> {
         if needs_rebuild {
             let source_symbols = build_source_symbols(self.data, block, self.symbol_size);
             let seed = seed_for_block(self.object_id, block.sbn);
-            let encoder = SystematicEncoder::new(&source_symbols, self.symbol_size, seed).ok_or(
-                EncodingError::ComputationFailed {
+            let encoder = SystematicEncoder::new(&source_symbols, self.symbol_size, seed)
+                .ok_or_else(|| EncodingError::ComputationFailed {
                     details: "systematic encoder failed: singular constraint matrix".to_string(),
-                },
-            )?;
+                })?;
             self.systematic_encoder = Some(encoder);
             self.systematic_block_index = Some(self.block_index);
         }

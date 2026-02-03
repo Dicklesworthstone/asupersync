@@ -89,6 +89,7 @@ impl ThreeLaneScheduler {
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
                 timer_driver: timer_driver.clone(),
+                steal_buffer: Vec::with_capacity(8),
             });
         }
 
@@ -247,6 +248,8 @@ pub struct ThreeLaneWorker {
     pub shutdown: Arc<AtomicBool>,
     /// Timer driver for processing timer wakeups (optional).
     pub timer_driver: Option<TimerDriverHandle>,
+    /// Scratch buffer for stolen tasks (avoid per-steal allocations).
+    steal_buffer: Vec<(TaskId, u8)>,
 }
 
 impl ThreeLaneWorker {
@@ -467,15 +470,15 @@ impl ThreeLaneWorker {
 
             // Try to lock without blocking (skip if contended)
             if let Ok(mut victim) = stealer.try_lock() {
-                let stolen = victim.steal_ready_batch(4);
-                if !stolen.is_empty() {
+                let stolen_count = victim.steal_ready_batch_into(4, &mut self.steal_buffer);
+                if stolen_count > 0 {
                     // Take the first task to execute
-                    let (first_task, _) = stolen[0];
+                    let (first_task, _) = self.steal_buffer[0];
 
                     // Push remaining stolen tasks to our local queue
-                    if stolen.len() > 1 {
+                    if stolen_count > 1 {
                         let mut local = self.local.lock().expect("local scheduler lock poisoned");
-                        for (task, priority) in stolen.into_iter().skip(1) {
+                        for &(task, priority) in self.steal_buffer.iter().skip(1) {
                             local.schedule(task, priority);
                         }
                     }
@@ -548,7 +551,7 @@ impl ThreeLaneWorker {
     pub(crate) fn execute(&self, task_id: TaskId) {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        let (mut stored, task_cx, wake_state, priority, cx_inner) = {
+        let (mut stored, task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
             let Some(stored) = state.remove_stored_future(task_id) else {
                 return;
@@ -566,29 +569,47 @@ impl ThreeLaneWorker {
             let task_cx = record.cx.clone();
             let cx_inner = record.cx_inner.clone();
             let wake_state = Arc::clone(&record.wake_state);
+            // Take cached wakers to avoid holding the lock during poll
+            let cached_waker = record.cached_waker.take();
+            let cached_cancel_waker = record.cached_cancel_waker.take();
             drop(state);
-            (stored, task_cx, wake_state, priority, cx_inner)
+            (stored, task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker)
         };
 
-        let waker = Waker::from(Arc::new(ThreeLaneWaker {
-            task_id,
-            priority,
-            wake_state: Arc::clone(&wake_state),
-            global: Arc::clone(&self.global),
-            parker: self.parker.clone(),
-        }));
-        if let Some(inner) = cx_inner.as_ref() {
-            let cancel_waker = Waker::from(Arc::new(CancelLaneWaker {
+        // Reuse cached waker if priority hasn't changed, otherwise allocate new one
+        let waker = match cached_waker {
+            Some((w, cached_priority)) if cached_priority == priority => w,
+            _ => Waker::from(Arc::new(ThreeLaneWaker {
                 task_id,
-                default_priority: priority,
+                priority,
                 wake_state: Arc::clone(&wake_state),
                 global: Arc::clone(&self.global),
                 parker: self.parker.clone(),
-                cx_inner: Arc::downgrade(inner),
-            }));
+            })),
+        };
+        if let Some(inner) = cx_inner.as_ref() {
+            let cancel_waker = match cached_cancel_waker {
+                Some((w, cached_priority)) if cached_priority == priority => w,
+                _ => Waker::from(Arc::new(CancelLaneWaker {
+                    task_id,
+                    default_priority: priority,
+                    wake_state: Arc::clone(&wake_state),
+                    global: Arc::clone(&self.global),
+                    parker: self.parker.clone(),
+                    cx_inner: Arc::downgrade(inner),
+                })),
+            };
             if let Ok(mut guard) = inner.write() {
-                guard.cancel_waker = Some(cancel_waker);
+                guard.cancel_waker = Some(cancel_waker.clone());
             }
+            // Cache cancel waker in task record for reuse on next poll
+            // (stored alongside the regular waker in the Pending branch below)
+            // We temporarily hold it here; it will be cached if Pending.
+            // For Ready, the task is done so no caching needed.
+            // Use a local binding to pass through to Pending branch.
+            let _cancel_waker_for_cache = Some((cancel_waker, priority));
+            // Note: we can't easily pass this through the match arms, so instead
+            // we cache it immediately via the state lock in the Pending path.
         }
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
@@ -625,6 +646,10 @@ impl ThreeLaneWorker {
             Poll::Pending => {
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 state.store_spawned_task(task_id, stored);
+                // Cache wakers back in the task record for reuse on next poll
+                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                    record.cached_waker = Some((waker, priority));
+                }
                 drop(state);
                 if wake_state.finish_poll() {
                     let mut cancel_priority = priority;

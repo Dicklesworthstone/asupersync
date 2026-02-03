@@ -730,7 +730,6 @@ impl TopologyExplorer {
         let ledger = if trace_events.len() >= 2 {
             let poset = TracePoset::from_trace(&trace_events);
             let complex = SquareComplex::from_trace_poset(&poset);
-            let d1 = complex.boundary_1();
             let d2 = complex.boundary_2();
 
             // Build the combined boundary matrix for H1 computation.

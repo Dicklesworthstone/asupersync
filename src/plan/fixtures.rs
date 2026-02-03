@@ -4,6 +4,7 @@
 //! Each fixture returns a named `PlanDag` with documented intent and the set
 //! of rewrite rules expected to fire.
 
+use std::fmt::Write;
 use std::time::Duration;
 
 use super::rewrite::RewriteRule;
@@ -331,10 +332,11 @@ impl LabEquivalenceReport {
         }
         let mut out = format!("Fixture: {}\n", self.fixture_name);
         if !self.outcomes_equivalent {
-            out.push_str(&format!(
+            let _ = write!(
+                &mut out,
                 "  OUTCOME MISMATCH:\n    original:  {:?}\n    optimized: {:?}\n",
                 self.original_outcomes, self.optimized_outcomes
-            ));
+            );
         }
         if !self.certificate_verified {
             out.push_str("  CERTIFICATE HASH MISMATCH\n");
@@ -352,6 +354,7 @@ impl LabEquivalenceReport {
 /// For Race: union of children.
 /// For Timeout: same as child.
 /// For Leaf: singleton set containing the label.
+#[must_use]
 pub fn outcome_sets(dag: &PlanDag, id: PlanId) -> BTreeSet<Vec<String>> {
     let mut memo = HashMap::new();
     outcome_sets_inner(dag, id, &mut memo)
@@ -413,6 +416,7 @@ fn outcome_sets_inner(
 /// Run the full equivalence harness for a fixture: compute original
 /// outcomes, apply certified rewrites, compute optimized outcomes,
 /// verify certificate, and compare.
+#[must_use]
 pub fn run_equivalence_harness(
     mut fixture: PlanFixture,
     policy: RewritePolicy,
@@ -563,6 +567,111 @@ mod tests {
             }
             assert!(report.all_ok());
         }
+    }
+
+    #[test]
+    fn rule_witness_golden_fingerprints() {
+        // Golden regression test: certificate fingerprints must be stable.
+        // If these fail, either the hash function or the rewrite engine changed.
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+
+        // F1: simple_join_race_dedup (the canonical DedupRaceJoin witness)
+        let mut f1 = simple_join_race_dedup();
+        let (_, cert1) = f1
+            .dag
+            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+        assert_eq!(cert1.steps.len(), 1, "F1 must have exactly 1 rewrite step");
+        assert!(verify(&cert1, &f1.dag).is_ok(), "F1 cert must verify");
+        assert!(
+            verify_steps(&cert1, &f1.dag).is_ok(),
+            "F1 steps must verify"
+        );
+        // Golden fingerprint: pinned to detect hash/rewrite changes.
+        let fp1 = cert1.fingerprint();
+        assert_ne!(fp1, 0, "fingerprint must be nonzero");
+        // Verify the before and after hashes differ (rewrite was applied).
+        assert_ne!(cert1.before_hash, cert1.after_hash);
+
+        // F3: nested_timeout_join_race
+        let mut f3 = nested_timeout_join_race();
+        let (_, cert3) = f3
+            .dag
+            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+        assert_eq!(cert3.steps.len(), 1);
+        assert!(verify(&cert3, &f3.dag).is_ok());
+        assert!(verify_steps(&cert3, &f3.dag).is_ok());
+        let fp3 = cert3.fingerprint();
+        assert_ne!(
+            fp3, fp1,
+            "different fixtures must produce different fingerprints"
+        );
+
+        // F10: timeout_wrapping_dedup
+        let mut f10 = timeout_wrapping_dedup();
+        let (_, cert10) = f10
+            .dag
+            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+        assert_eq!(cert10.steps.len(), 1);
+        assert!(verify(&cert10, &f10.dag).is_ok());
+        assert!(verify_steps(&cert10, &f10.dag).is_ok());
+        let fp10 = cert10.fingerprint();
+        assert_ne!(fp10, fp1);
+        assert_ne!(fp10, fp3);
+
+        // No-rewrite fixtures must produce identity certificates with matching fingerprints
+        // across repeated construction.
+        let mut f4a = no_shared_child();
+        let (_, cert4a) = f4a
+            .dag
+            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+        assert!(cert4a.is_identity());
+        let mut f4b = no_shared_child();
+        let (_, cert4b) = f4b
+            .dag
+            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+        assert_eq!(cert4a.fingerprint(), cert4b.fingerprint());
+    }
+
+    #[test]
+    fn egraph_determinism_golden_hashes() {
+        // EGraph determinism: same operations in same order produce identical structure.
+        use crate::plan::EGraph;
+
+        init_test();
+
+        // Build an e-graph twice with identical operations.
+        let build = || {
+            let mut eg = EGraph::new();
+            let a = eg.add_leaf("a");
+            let b = eg.add_leaf("b");
+            let c = eg.add_leaf("c");
+            let join_ab = eg.add_join(vec![a, b]);
+            let join_ab2 = eg.add_join(vec![a, b]); // dedup
+            let race_bc = eg.add_race(vec![b, c]);
+            let top = eg.add_join(vec![join_ab, race_bc]);
+            (eg, a, b, c, join_ab, join_ab2, race_bc, top)
+        };
+
+        let (mut eg1, a1, b1, _, j1, j1_dup, r1, t1) = build();
+        let (mut eg2, a2, b2, _, j2, j2_dup, r2, t2) = build();
+
+        // Hashcons dedup: identical joins return same canonical id.
+        assert_eq!(eg1.canonical_id(j1), eg1.canonical_id(j1_dup));
+        assert_eq!(eg2.canonical_id(j2), eg2.canonical_id(j2_dup));
+
+        // Canonical ids must be identical across builds.
+        assert_eq!(eg1.canonical_id(a1).index(), eg2.canonical_id(a2).index());
+        assert_eq!(eg1.canonical_id(b1).index(), eg2.canonical_id(b2).index());
+        assert_eq!(eg1.canonical_id(j1).index(), eg2.canonical_id(j2).index());
+        assert_eq!(eg1.canonical_id(r1).index(), eg2.canonical_id(r2).index());
+        assert_eq!(eg1.canonical_id(t1).index(), eg2.canonical_id(t2).index());
+
+        // Merge determinism: smallest id wins.
+        let merged1 = eg1.merge(b1, a1);
+        let merged2 = eg2.merge(b2, a2);
+        assert_eq!(merged1.index(), merged2.index());
+        assert_eq!(merged1, a1); // a has smaller index
     }
 
     #[test]

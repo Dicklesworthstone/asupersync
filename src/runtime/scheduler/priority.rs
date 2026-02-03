@@ -85,6 +85,10 @@ pub struct Scheduler {
     scheduled: std::collections::HashSet<TaskId>,
     /// Next generation number for FIFO ordering.
     next_generation: u64,
+    /// Scratch space for RNG tie-breaking (ready/cancel lanes).
+    scratch_entries: Vec<SchedulerEntry>,
+    /// Scratch space for RNG tie-breaking (timed lane).
+    scratch_timed: Vec<TimedEntry>,
 }
 
 impl Scheduler {
@@ -189,70 +193,79 @@ impl Scheduler {
         // For lab determinism, we want tie-breaking to vary with a seed while still being fully
         // deterministic for a given `rng_hint` sequence. We do this by selecting uniformly among
         // the set of max-priority (or earliest-deadline) tasks in the chosen lane.
-
-        fn pop_entry_with_rng(
-            lane: &mut BinaryHeap<SchedulerEntry>,
-            rng_hint: u64,
-        ) -> Option<SchedulerEntry> {
-            let first = lane.pop()?;
-            let priority = first.priority;
-            let mut candidates = vec![first];
-
-            while let Some(peek) = lane.peek() {
-                if peek.priority != priority {
-                    break;
-                }
-                // `peek` guarantees the next `pop` is `Some`.
-                candidates.push(lane.pop().expect("popped after peek"));
-            }
-
-            let idx = (rng_hint as usize) % candidates.len();
-            let chosen = candidates.swap_remove(idx);
-            for entry in candidates {
-                lane.push(entry);
-            }
-            Some(chosen)
-        }
-
-        fn pop_timed_with_rng(
-            lane: &mut BinaryHeap<TimedEntry>,
-            rng_hint: u64,
-        ) -> Option<TimedEntry> {
-            let first = lane.pop()?;
-            let deadline = first.deadline;
-            let mut candidates = vec![first];
-
-            while let Some(peek) = lane.peek() {
-                if peek.deadline != deadline {
-                    break;
-                }
-                candidates.push(lane.pop().expect("popped after peek"));
-            }
-
-            let idx = (rng_hint as usize) % candidates.len();
-            let chosen = candidates.swap_remove(idx);
-            for entry in candidates {
-                lane.push(entry);
-            }
-            Some(chosen)
-        }
-
-        if let Some(entry) = pop_entry_with_rng(&mut self.cancel_lane, rng_hint) {
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
+        {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
 
-        if let Some(entry) = pop_timed_with_rng(&mut self.timed_lane, rng_hint) {
+        if let Some(entry) =
+            Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
+        {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
 
-        if let Some(entry) = pop_entry_with_rng(&mut self.ready_lane, rng_hint) {
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
+        {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
         }
 
         None
+    }
+
+    fn pop_entry_with_rng(
+        lane: &mut BinaryHeap<SchedulerEntry>,
+        rng_hint: u64,
+        scratch: &mut Vec<SchedulerEntry>,
+    ) -> Option<SchedulerEntry> {
+        let first = lane.pop()?;
+        let priority = first.priority;
+        scratch.clear();
+        scratch.push(first);
+
+        while let Some(peek) = lane.peek() {
+            if peek.priority != priority {
+                break;
+            }
+            // `peek` guarantees the next `pop` is `Some`.
+            scratch.push(lane.pop().expect("popped after peek"));
+        }
+
+        let idx = (rng_hint as usize) % scratch.len();
+        let chosen = scratch.swap_remove(idx);
+        for entry in scratch.drain(..) {
+            lane.push(entry);
+        }
+        Some(chosen)
+    }
+
+    fn pop_timed_with_rng(
+        lane: &mut BinaryHeap<TimedEntry>,
+        rng_hint: u64,
+        scratch: &mut Vec<TimedEntry>,
+    ) -> Option<TimedEntry> {
+        let first = lane.pop()?;
+        let deadline = first.deadline;
+        scratch.clear();
+        scratch.push(first);
+
+        while let Some(peek) = lane.peek() {
+            if peek.deadline != deadline {
+                break;
+            }
+            scratch.push(lane.pop().expect("popped after peek"));
+        }
+
+        let idx = (rng_hint as usize) % scratch.len();
+        let chosen = scratch.swap_remove(idx);
+        for entry in scratch.drain(..) {
+            lane.push(entry);
+        }
+        Some(chosen)
     }
 
     /// Removes a specific task from the scheduler.
@@ -425,19 +438,35 @@ impl Scheduler {
     ///
     /// O(k log n) where k is the number of tasks stolen.
     pub fn steal_ready_batch(&mut self, max_steal: usize) -> Vec<(TaskId, u8)> {
+        let mut stolen = Vec::new();
+        let _ = self.steal_ready_batch_into(max_steal, &mut stolen);
+        stolen
+    }
+
+    /// Steals ready tasks into a caller-provided buffer.
+    ///
+    /// Returns the number of tasks stolen.
+    pub fn steal_ready_batch_into(
+        &mut self,
+        max_steal: usize,
+        out: &mut Vec<(TaskId, u8)>,
+    ) -> usize {
+        out.clear();
         let steal_count = (self.ready_lane.len() / 2).min(max_steal).max(1);
-        let mut stolen = Vec::with_capacity(steal_count);
+        if out.capacity() < steal_count {
+            out.reserve(steal_count - out.capacity());
+        }
 
         for _ in 0..steal_count {
             if let Some(entry) = self.ready_lane.pop() {
                 self.scheduled.remove(&entry.task);
-                stolen.push((entry.task, entry.priority));
+                out.push((entry.task, entry.priority));
             } else {
                 break;
             }
         }
 
-        stolen
+        out.len()
     }
 
     /// Returns true if the cancel lane has pending tasks.

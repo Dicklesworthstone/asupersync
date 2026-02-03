@@ -22,7 +22,7 @@
 //! - `Level::Skeleton`: Keeps only lifecycle + obligation + cancel events.
 
 use crate::trace::certificate::TraceCertificate;
-use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
+use crate::trace::event::{TraceEvent, TraceEventKind};
 
 /// Compression level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +143,7 @@ pub fn validate_compressed(trace: &CompressedTrace) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::event::TraceData;
     use crate::types::Time;
 
     fn make_event(seq: u64, kind: TraceEventKind) -> TraceEvent {

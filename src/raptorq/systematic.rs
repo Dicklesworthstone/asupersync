@@ -74,7 +74,7 @@ impl SystematicParams {
 /// Uses a simplified formula inspired by RFC 6330 Table 2:
 /// S = max(1, ceil(0.01 * K) + X) where X provides minimum LDPC density.
 fn compute_s(k: usize) -> usize {
-    let base = (k as f64 * 0.01).ceil() as usize;
+    let base = k.div_ceil(100);
     // Ensure minimum LDPC coverage
     let x = if k <= 8 {
         2
@@ -90,8 +90,25 @@ fn compute_s(k: usize) -> usize {
 ///
 /// H ≈ ceil(sqrt(K)) provides half-distance parity coverage.
 fn compute_h(k: usize) -> usize {
-    let h = (k as f64).sqrt().ceil() as usize;
-    h.max(1)
+    fn ceil_sqrt(value: usize) -> usize {
+        if value <= 1 {
+            return value;
+        }
+        let target = value as u128;
+        let mut lo = 1u128;
+        let mut hi = target;
+        while lo < hi {
+            let mid = u128::midpoint(lo, hi);
+            if mid * mid < target {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo as usize
+    }
+
+    ceil_sqrt(k).max(1)
 }
 
 // ============================================================================
@@ -118,6 +135,7 @@ impl RobustSoliton {
     /// - `c`: free parameter (typically 0.1–0.5)
     /// - `delta`: failure probability bound (typically 0.01–0.1)
     #[must_use]
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
     pub fn new(k: usize, c: f64, delta: f64) -> Self {
         assert!(k > 0);
         let k_f = k as f64;
@@ -128,18 +146,20 @@ impl RobustSoliton {
         // Ideal soliton ρ(d)
         let mut rho = vec![0.0f64; k + 1];
         rho[1] = 1.0 / k_f;
-        for d in 2..=k {
-            rho[d] = 1.0 / (d as f64 * (d as f64 - 1.0));
+        for (d, value) in rho.iter_mut().enumerate().skip(2) {
+            let d_f = d as f64;
+            *value = 1.0 / (d_f * (d_f - 1.0));
         }
 
         // Perturbation τ(d)
         let mut tau = vec![0.0f64; k + 1];
         let threshold = (k_f / r).floor() as usize;
-        for d in 1..=k.min(threshold.max(1)) {
+        let max_d = k.min(threshold.max(1));
+        for (d, value) in tau.iter_mut().enumerate().skip(1).take(max_d) {
             if d < threshold {
-                tau[d] = r / (d as f64 * k_f);
+                *value = r / (d as f64 * k_f);
             } else {
-                tau[d] = r * (r / delta).ln() / k_f;
+                *value = r * (r / delta).ln() / k_f;
             }
         }
 
@@ -175,6 +195,33 @@ impl RobustSoliton {
         match self.cdf.binary_search(&rand_val) {
             Ok(idx) | Err(idx) => idx.max(1).min(self.k),
         }
+    }
+
+    /// Number of input symbols (K).
+    #[must_use]
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// Maximum possible degree (equals K).
+    #[must_use]
+    pub fn max_degree(&self) -> usize {
+        self.k
+    }
+
+    /// Validate parameters before construction. Returns an error string if invalid.
+    #[must_use]
+    pub fn validate_params(k: usize, c: f64, delta: f64) -> Option<&'static str> {
+        if k == 0 {
+            return Some("k must be positive");
+        }
+        if c <= 0.0 || !c.is_finite() {
+            return Some("c must be a positive finite number");
+        }
+        if delta <= 0.0 || delta >= 1.0 || !delta.is_finite() {
+            return Some("delta must be in (0, 1)");
+        }
+        None
     }
 }
 
@@ -261,6 +308,7 @@ impl ConstraintMatrix {
     /// Returns the `cols`-row solution matrix (intermediate symbols).
     ///
     /// Returns `None` if the matrix is singular.
+    #[must_use]
     pub fn solve(&self, rhs: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
         assert_eq!(rhs.len(), self.rows);
         let symbol_size = if rhs.is_empty() { 0 } else { rhs[0].len() };
@@ -333,7 +381,7 @@ impl ConstraintMatrix {
         let mut result = vec![vec![0u8; symbol_size]; n];
         for (row, &col) in pivot_col.iter().enumerate() {
             if col < n {
-                result[col] = b[row].clone();
+                result[col].clone_from(&b[row]);
             }
         }
 
@@ -461,6 +509,7 @@ impl SystematicEncoder {
     ///
     /// Returns `None` if the constraint matrix is singular (should not happen
     /// for well-chosen parameters).
+    #[must_use]
     pub fn new(source_symbols: &[Vec<u8>], symbol_size: usize, seed: u64) -> Option<Self> {
         let k = source_symbols.len();
         assert!(k > 0, "need at least one source symbol");
@@ -607,6 +656,94 @@ mod tests {
             low > 1000,
             "low degrees should appear frequently: {low}/10000"
         );
+    }
+
+    #[test]
+    fn soliton_deterministic_same_seed() {
+        let sol = RobustSoliton::new(30, 0.2, 0.05);
+        let run = |seed: u64| -> Vec<usize> {
+            let mut rng = DetRng::new(seed);
+            (0..100).map(|_| sol.sample(rng.next_u64() as u32)).collect()
+        };
+        let a = run(42);
+        let b = run(42);
+        assert_eq!(a, b, "same seed must produce identical degree sequence");
+    }
+
+    #[test]
+    fn soliton_different_seeds_differ() {
+        let sol = RobustSoliton::new(30, 0.2, 0.05);
+        let run = |seed: u64| -> Vec<usize> {
+            let mut rng = DetRng::new(seed);
+            (0..100).map(|_| sol.sample(rng.next_u64() as u32)).collect()
+        };
+        let a = run(42);
+        let b = run(12345);
+        assert_ne!(a, b, "different seeds should produce different sequences");
+    }
+
+    #[test]
+    fn soliton_k_accessor() {
+        let sol = RobustSoliton::new(42, 0.2, 0.05);
+        assert_eq!(sol.k(), 42);
+        assert_eq!(sol.max_degree(), 42);
+    }
+
+    #[test]
+    fn soliton_validate_params() {
+        assert!(RobustSoliton::validate_params(50, 0.2, 0.05).is_none());
+        assert!(RobustSoliton::validate_params(0, 0.2, 0.05).is_some());
+        assert!(RobustSoliton::validate_params(50, -0.1, 0.05).is_some());
+        assert!(RobustSoliton::validate_params(50, 0.2, 0.0).is_some());
+        assert!(RobustSoliton::validate_params(50, 0.2, 1.0).is_some());
+        assert!(RobustSoliton::validate_params(50, f64::NAN, 0.05).is_some());
+        assert!(RobustSoliton::validate_params(50, 0.2, f64::INFINITY).is_some());
+    }
+
+    #[test]
+    fn soliton_k_1_produces_degree_1() {
+        let sol = RobustSoliton::new(1, 0.2, 0.05);
+        let mut rng = DetRng::new(0);
+        for _ in 0..100 {
+            let d = sol.sample(rng.next_u64() as u32);
+            assert_eq!(d, 1, "k=1 should always produce degree 1");
+        }
+    }
+
+    #[test]
+    fn soliton_large_k_low_degrees_dominate() {
+        let sol = RobustSoliton::new(1000, 0.2, 0.05);
+        let mut rng = DetRng::new(99);
+        let mut low_count = 0;
+        let n = 10_000;
+        for _ in 0..n {
+            let d = sol.sample(rng.next_u64() as u32);
+            if d <= 10 {
+                low_count += 1;
+            }
+        }
+        // Low degrees should dominate for robust soliton
+        assert!(
+            low_count > n / 2,
+            "low degrees should dominate: {low_count}/{n}"
+        );
+    }
+
+    #[test]
+    fn soliton_configurable_parameters() {
+        // Different c and delta produce different distributions
+        let sol_a = RobustSoliton::new(50, 0.1, 0.01);
+        let sol_b = RobustSoliton::new(50, 0.5, 0.1);
+        let mut rng_a = DetRng::new(42);
+        let mut rng_b = DetRng::new(42);
+        let a: Vec<usize> = (0..100)
+            .map(|_| sol_a.sample(rng_a.next_u64() as u32))
+            .collect();
+        let b: Vec<usize> = (0..100)
+            .map(|_| sol_b.sample(rng_b.next_u64() as u32))
+            .collect();
+        // Same seed but different distributions should differ
+        assert_ne!(a, b, "different parameters should produce different samples");
     }
 
     #[test]
