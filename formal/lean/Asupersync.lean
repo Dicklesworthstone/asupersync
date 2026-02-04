@@ -1055,4 +1055,170 @@ theorem leak_marks_leaked {Value Error Panic : Type}
     subst hUpdate
     exact ⟨_, by simp [getObligation, setRegion, setObligation], rfl⟩
 
+-- ==========================================================================
+-- Well-formedness predicate (bd-fxos5, GrayMeadow)
+-- A state is well-formed when all internal references are consistent.
+-- ==========================================================================
+
+/-- A state is well-formed when internal references are consistent. -/
+structure WellFormed {Value Error Panic : Type} (s : State Value Error Panic) : Prop where
+  /-- Every task's region exists. -/
+  task_region_exists : ∀ t task, getTask s t = some task →
+    ∃ region, getRegion s task.region = some region
+  /-- Every obligation's region exists. -/
+  obligation_region_exists : ∀ o ob, getObligation s o = some ob →
+    ∃ region, getRegion s ob.region = some region
+  /-- Every obligation's holder task exists. -/
+  obligation_holder_exists : ∀ o ob, getObligation s o = some ob →
+    ∃ task, getTask s ob.holder = some task
+  /-- Every obligation in a region's ledger exists and is reserved. -/
+  ledger_obligations_reserved : ∀ r region, getRegion s r = some region →
+    ∀ o, o ∈ region.ledger →
+      ∃ ob, getObligation s o = some ob ∧ ob.state = ObligationState.reserved ∧ ob.region = r
+  /-- Every child task in a region exists. -/
+  children_exist : ∀ r region, getRegion s r = some region →
+    ∀ t, t ∈ region.children → ∃ task, getTask s t = some task
+  /-- Every subregion referenced by a region exists. -/
+  subregions_exist : ∀ r region, getRegion s r = some region →
+    ∀ r', r' ∈ region.subregions → ∃ sub, getRegion s r' = some sub
+
+-- ==========================================================================
+-- Terminal state: no step can fire (bd-fxos5)
+-- ==========================================================================
+
+/-- A state is terminal (stuck) when no step relation can fire. -/
+def Terminal {Value Error Panic : Type} (s : State Value Error Panic) : Prop :=
+  ¬ ∃ (l : Label Value Error Panic) (s' : State Value Error Panic), Step s l s'
+
+-- ==========================================================================
+-- Multi-step reflexive transitive closure (bd-fxos5)
+-- ==========================================================================
+
+/-- Multi-step execution: zero or more steps. -/
+inductive Steps {Value Error Panic : Type} :
+    State Value Error Panic → State Value Error Panic → Prop where
+  | refl {s : State Value Error Panic} : Steps s s
+  | step {s s' s'' : State Value Error Panic} {l : Label Value Error Panic} :
+      Step s l s' → Steps s' s'' → Steps s s''
+
+/-- Steps is transitive. -/
+theorem Steps.trans {Value Error Panic : Type}
+    {s₁ s₂ s₃ : State Value Error Panic}
+    (h₁ : Steps s₁ s₂) (h₂ : Steps s₂ s₃) : Steps s₁ s₃ := by
+  induction h₁ with
+  | refl => exact h₂
+  | step hStep _ ih => exact Steps.step hStep (ih h₂)
+
+-- ==========================================================================
+-- Progress for tick: any state can always take a tick step (bd-fxos5)
+-- This means no well-formed state is terminal in the small-step semantics.
+-- ==========================================================================
+
+theorem tick_always_available {Value Error Panic : Type}
+    (s : State Value Error Panic) :
+    ∃ (l : Label Value Error Panic) (s' : State Value Error Panic), Step s l s' :=
+  ⟨Label.tick, { s with now := s.now + 1 }, Step.tick rfl⟩
+
+/-- Corollary: no state is terminal (tick is always available). -/
+theorem no_terminal_states {Value Error Panic : Type}
+    (s : State Value Error Panic) :
+    ¬ Terminal s := by
+  intro hTerm
+  exact hTerm (tick_always_available s)
+
+-- ==========================================================================
+-- Preservation: tick preserves well-formedness (bd-fxos5)
+-- ==========================================================================
+
+theorem tick_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.tick) s')
+    : WellFormed s' := by
+  cases hStep with
+  | tick hUpdate =>
+    subst hUpdate
+    exact {
+      task_region_exists := fun t task h =>
+        hWF.task_region_exists t task (by simpa [getTask] using h)
+      obligation_region_exists := fun o ob h =>
+        hWF.obligation_region_exists o ob (by simpa [getObligation] using h)
+      obligation_holder_exists := fun o ob h =>
+        hWF.obligation_holder_exists o ob (by simpa [getObligation] using h)
+      ledger_obligations_reserved := fun r region h o hMem =>
+        hWF.ledger_obligations_reserved r region (by simpa [getRegion] using h) o hMem
+      children_exist := fun r region h t hMem =>
+        hWF.children_exist r region (by simpa [getRegion] using h) t hMem
+      subregions_exist := fun r region h r' hMem =>
+        hWF.subregions_exist r region (by simpa [getRegion] using h) r' hMem
+    }
+
+-- ==========================================================================
+-- Preservation: complete preserves well-formedness (bd-fxos5)
+-- Only the task state changes; all references remain valid.
+-- ==========================================================================
+
+theorem complete_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {t : TaskId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.complete t outcome) s')
+    : WellFormed s' := by
+  cases hStep with
+  | complete _ hTask hTaskState hUpdate =>
+    subst hUpdate
+    exact {
+      task_region_exists := fun t' task' h => by
+        by_cases hEq : t' = t
+        · subst hEq
+          simp [getTask, setTask] at h
+          obtain ⟨region, hReg⟩ := hWF.task_region_exists t task hTask
+          exact ⟨region, by simp [getRegion, setTask]; exact hReg⟩
+        · exact hWF.task_region_exists t' task' (by simp [getTask, setTask, hEq] at h; exact h)
+      obligation_region_exists := fun o ob h =>
+        hWF.obligation_region_exists o ob (by simp [getObligation, setTask] at h; exact h)
+      obligation_holder_exists := fun o ob h => by
+        simp [getObligation, setTask] at h
+        obtain ⟨task', hTask'⟩ := hWF.obligation_holder_exists o ob h
+        by_cases hEq : ob.holder = t
+        · exact ⟨{ task with state := TaskState.completed outcome },
+            by simp [getTask, setTask, hEq]⟩
+        · exact ⟨task', by simp [getTask, setTask, hEq]; exact hTask'⟩
+      ledger_obligations_reserved := fun r region h o hMem => by
+        simp [getRegion, setTask] at h
+        obtain ⟨ob, hOb, hState, hReg⟩ := hWF.ledger_obligations_reserved r region h o hMem
+        exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hState, hReg⟩
+      children_exist := fun r region h t' hMem => by
+        simp [getRegion, setTask] at h
+        obtain ⟨task', hTask'⟩ := hWF.children_exist r region h t' hMem
+        by_cases hEq : t' = t
+        · exact ⟨{ task with state := TaskState.completed outcome },
+            by simp [getTask, setTask, hEq]⟩
+        · exact ⟨task', by simp [getTask, setTask, hEq]; exact hTask'⟩
+      subregions_exist := fun r region h r' hMem =>
+        hWF.subregions_exist r region (by simp [getRegion, setTask] at h; exact h) r' hMem
+    }
+
+-- ==========================================================================
+-- Budget algebra: combine is associative (bd-fxos5)
+-- ==========================================================================
+
+section BudgetAlgebra2
+
+private theorem minOpt_assoc (a b c : Option Nat) :
+    minOpt (minOpt a b) c = minOpt a (minOpt b c) := by
+  cases a with
+  | none => cases b with | none => rfl | some _ => rfl
+  | some x => cases b with
+    | none => rfl
+    | some y => cases c with
+      | none => rfl
+      | some z => simp [minOpt, Nat.min_assoc]
+
+theorem Budget.combine_assoc (b1 b2 b3 : Budget) :
+    Budget.combine (Budget.combine b1 b2) b3 = Budget.combine b1 (Budget.combine b2 b3) := by
+  simp [Budget.combine, minOpt_assoc, Nat.min_assoc, Nat.max_assoc]
+
+end BudgetAlgebra2
+
 end Asupersync
