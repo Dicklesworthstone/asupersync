@@ -746,3 +746,123 @@ fn deterministic_dispatch_order_with_fixed_limit() {
     let seq2 = dispatch_sequence(2);
     assert_eq!(seq, seq2, "dispatch order should be deterministic");
 }
+
+// ===========================================================================
+// BOOSTED 2L+1 BOUND UNDER DrainObligations/DrainRegions (bd-3dv80)
+// ===========================================================================
+//
+// The formal semantics (asupersync_v4_formal_semantics.md) specify a boosted
+// cancel streak limit of 2*L when the governor suggests DrainObligations or
+// DrainRegions. The ready/timed fairness bound becomes 2L+1 dispatches.
+
+use asupersync::obligation::lyapunov::SchedulingSuggestion;
+
+/// Verify the boosted 2L+1 starvation bound under DrainObligations/DrainRegions.
+///
+/// With `cancel_streak_limit = L` and the governor suggesting a drain mode,
+/// the scheduler doubles the effective limit to 2*L. A ready task must be
+/// dispatched within at most 2*L + 1 steps.
+///
+/// Uses `next_task()` directly to track dispatch order by TaskId (tasks are
+/// not polled; only dispatch ordering matters for fairness verification).
+fn verify_boosted_bound_for_limit(cancel_streak_limit: usize, suggestion: SchedulingSuggestion) {
+    let state = setup_state();
+
+    // Use governor-enabled scheduler so we can set the suggestion.
+    let mut scheduler =
+        ThreeLaneScheduler::new_with_options(1, &state, cancel_streak_limit, true, 1);
+
+    // Flood cancel lane with 8x the boosted limit.
+    let boosted_limit = cancel_streak_limit * 2;
+    let num_cancel = boosted_limit * 4;
+    let mut cancel_ids = Vec::with_capacity(num_cancel);
+    for i in 0..num_cancel {
+        let id = TaskId::new_for_test(1, i as u32);
+        scheduler.inject_cancel(id, 100);
+        cancel_ids.push(id);
+    }
+
+    // One ready task — track its position in the dispatch sequence.
+    let ready_id = TaskId::new_for_test(2, 0);
+    scheduler.inject_ready(ready_id, 100);
+
+    let mut workers = scheduler.take_workers();
+    // Force the cached suggestion to the drain variant.
+    workers[0].set_cached_suggestion(suggestion);
+
+    // Manually dispatch and record the order.
+    let mut order = Vec::new();
+    let total = num_cancel + 1;
+    for _ in 0..total {
+        // Re-apply the suggestion before each dispatch (the governor would
+        // normally refresh it, but we keep it fixed for determinism).
+        workers[0].set_cached_suggestion(suggestion);
+        if let Some(task_id) = workers[0].next_task() {
+            order.push(task_id);
+        }
+    }
+
+    let ready_pos = order
+        .iter()
+        .position(|id| *id == ready_id)
+        .expect("ready task should appear in dispatch sequence");
+    // Position is 0-indexed; the formal bound is 2L+1 dispatches (1-indexed),
+    // so the 0-indexed bound is 2L.
+    let bound_0idx = boosted_limit;
+    assert!(
+        ready_pos <= bound_0idx,
+        "ready task at 0-indexed position {ready_pos} exceeds boosted bound {bound_0idx} \
+         (limit={cancel_streak_limit}, 2L={boosted_limit})"
+    );
+    // Verify the boost is actually in effect: under drain mode the cancel
+    // streak should extend beyond the normal L limit.
+    if cancel_streak_limit >= 2 {
+        assert!(
+            ready_pos >= cancel_streak_limit,
+            "ready task at position {ready_pos} suggests boosted limit not in effect \
+             (expected >= {cancel_streak_limit} under drain suggestion)"
+        );
+    }
+}
+
+#[test]
+fn boosted_bound_drain_obligations_limit_1() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(1, SchedulingSuggestion::DrainObligations);
+}
+
+#[test]
+fn boosted_bound_drain_obligations_limit_2() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(2, SchedulingSuggestion::DrainObligations);
+}
+
+#[test]
+fn boosted_bound_drain_obligations_limit_4() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(4, SchedulingSuggestion::DrainObligations);
+}
+
+#[test]
+fn boosted_bound_drain_obligations_limit_8() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(8, SchedulingSuggestion::DrainObligations);
+}
+
+#[test]
+fn boosted_bound_drain_obligations_limit_16() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(16, SchedulingSuggestion::DrainObligations);
+}
+
+#[test]
+fn boosted_bound_drain_regions_limit_4() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(4, SchedulingSuggestion::DrainRegions);
+}
+
+#[test]
+fn boosted_bound_drain_regions_limit_16() {
+    init_test_logging();
+    verify_boosted_bound_for_limit(16, SchedulingSuggestion::DrainRegions);
+}

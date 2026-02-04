@@ -801,6 +801,13 @@ impl ThreeLaneWorker {
         &self.preemption_metrics
     }
 
+    /// Force the cached scheduling suggestion for testing the boosted 2L+1
+    /// fairness bound under `DrainObligations`/`DrainRegions`.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_cached_suggestion(&mut self, suggestion: SchedulingSuggestion) {
+        self.cached_suggestion = suggestion;
+    }
+
     /// Runs the worker scheduling loop.
     ///
     /// The loop maintains strict priority ordering:
