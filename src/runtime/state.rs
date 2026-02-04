@@ -3977,7 +3977,7 @@ mod tests {
         let child_reason = state
             .regions
             .get(child.arena_index())
-            .and_then(|region| region.cancel_reason())
+            .and_then(RegionRecord::cancel_reason)
             .expect("child cancel reason missing");
         crate::assert_with_log!(
             child_reason.chain_depth() == 2,
@@ -3995,7 +3995,7 @@ mod tests {
         let grandchild_reason = state
             .regions
             .get(grandchild.arena_index())
-            .and_then(|region| region.cancel_reason())
+            .and_then(RegionRecord::cancel_reason)
             .expect("grandchild cancel reason missing");
         crate::assert_with_log!(
             grandchild_reason.chain_depth() == 2,
