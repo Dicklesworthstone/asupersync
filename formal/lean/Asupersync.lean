@@ -638,6 +638,42 @@ theorem commit_removes_from_ledger {Value Error Panic : Type}
     exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
 
 -- ==========================================================================
+-- Safety Lemma 4a: Abort removes obligation from region ledger
+-- After abort, the obligation ID is no longer in the ledger.
+-- ==========================================================================
+
+theorem abort_removes_from_ledger {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    {ob : ObligationRecord}
+    (hStep : Step s (Label.abort o) s')
+    (hOb : getObligation s o = some ob)
+    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
+  cases hStep with
+  | abort hOb' hHolder hState hRegion hUpdate =>
+    subst hUpdate
+    simp [getObligation] at hOb hOb'
+    rw [hOb] at hOb'; injection hOb' with hOb'
+    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+
+-- ==========================================================================
+-- Safety Lemma 4b: Leak removes obligation from region ledger
+-- After leak, the obligation ID is no longer in the ledger.
+-- ==========================================================================
+
+theorem leak_removes_from_ledger {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    {ob : ObligationRecord}
+    (hStep : Step s (Label.leak o) s')
+    (hOb : getObligation s o = some ob)
+    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
+  cases hStep with
+  | leak outcome hTask hTaskState hOb' hHolder hState hRegion hUpdate =>
+    subst hUpdate
+    simp [getObligation] at hOb hOb'
+    rw [hOb] at hOb'; injection hOb' with hOb'
+    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+
+-- ==========================================================================
 -- Safety Lemma 4: Region close implies quiescence
 -- The Close rule requires Quiescent as precondition, so any closed region
 -- was quiescent at the moment of closing.
@@ -863,5 +899,160 @@ theorem reserve_holder_exists {Value Error Panic : Type}
     refine ⟨_, _, by simp [getObligation, setRegion, setObligation], ?_⟩
     simp [getTask, setRegion, setObligation]
     exact hTask
+
+-- ==========================================================================
+-- Budget algebra: combine is commutative (bd-3bg3e, GrayMeadow)
+-- ==========================================================================
+
+section BudgetAlgebra
+
+private theorem minOpt_comm (a b : Option Nat) : minOpt a b = minOpt b a := by
+  cases a with
+  | none => cases b with | none => rfl | some _ => rfl
+  | some x => cases b with | none => rfl | some y => simp [minOpt, Nat.min_comm]
+
+theorem Budget.combine_comm (b1 b2 : Budget) :
+    Budget.combine b1 b2 = Budget.combine b2 b1 := by
+  simp [Budget.combine, minOpt_comm, Nat.min_comm, Nat.max_comm]
+
+end BudgetAlgebra
+
+-- ==========================================================================
+-- strengthenOpt monotonicity: result rank ≥ incoming rank (bd-3bg3e)
+-- ==========================================================================
+
+theorem strengthenOpt_rank_ge_incoming (current : Option CancelReason) (incoming : CancelReason) :
+    CancelKind.rank (strengthenOpt current incoming).kind ≥ CancelKind.rank incoming.kind := by
+  cases current with
+  | none => simp [strengthenOpt]; exact Nat.le_refl _
+  | some r =>
+    simp [strengthenOpt, strengthenReason]
+    split
+    · rename_i h; exact h
+    · exact Nat.le_refl _
+
+-- ==========================================================================
+-- Frame lemma: spawn preserves obligations (bd-3bg3e)
+-- After spawning a new task, existing obligations are unchanged.
+-- ==========================================================================
+
+theorem spawn_preserves_obligation {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId} {t : TaskId} {o : ObligationId}
+    (hStep : Step s (Label.spawn r t) s')
+    : getObligation s' o = getObligation s o := by
+  cases hStep with
+  | spawn hRegion hOpen hAbsent hUpdate =>
+    subst hUpdate
+    simp [getObligation, setRegion, setTask]
+
+-- ==========================================================================
+-- Frame lemma: complete preserves regions (bd-3bg3e)
+-- Completing a task does not change any region.
+-- ==========================================================================
+
+theorem complete_preserves_region {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {t : TaskId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    {r : RegionId}
+    (hStep : Step s (Label.complete t outcome) s')
+    : getRegion s' r = getRegion s r := by
+  cases hStep with
+  | complete _ hTask hTaskState hUpdate =>
+    subst hUpdate
+    simp [getRegion, setTask]
+
+-- ==========================================================================
+-- Frame lemma: complete preserves obligations (bd-3bg3e)
+-- Completing a task does not change any obligation.
+-- ==========================================================================
+
+theorem complete_preserves_obligation {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {t : TaskId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    {o : ObligationId}
+    (hStep : Step s (Label.complete t outcome) s')
+    : getObligation s' o = getObligation s o := by
+  cases hStep with
+  | complete _ hTask hTaskState hUpdate =>
+    subst hUpdate
+    simp [getObligation, setTask]
+
+-- ==========================================================================
+-- Frame lemma: cancel request preserves obligations (bd-3bg3e)
+-- Requesting cancellation for a task does not change obligations.
+-- ==========================================================================
+
+theorem cancel_request_preserves_obligation {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {reason : CancelReason} {o : ObligationId}
+    (hStep : Step s (Label.cancel r reason) s')
+    : getObligation s' o = getObligation s o := by
+  cases hStep with
+  | cancelRequest _ _ hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+    subst hUpdate
+    simp [getObligation, setTask, setRegion]
+
+-- ==========================================================================
+-- Safety: Tick preserves all tasks, regions, and obligations (bd-3bg3e)
+-- ==========================================================================
+
+theorem tick_preserves_task {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {t : TaskId}
+    (hStep : Step s (Label.tick) s')
+    : getTask s' t = getTask s t := by
+  cases hStep with
+  | tick hUpdate =>
+    subst hUpdate
+    simp [getTask]
+
+theorem tick_preserves_region {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    (hStep : Step s (Label.tick) s')
+    : getRegion s' r = getRegion s r := by
+  cases hStep with
+  | tick hUpdate =>
+    subst hUpdate
+    simp [getRegion]
+
+theorem tick_preserves_obligation {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hStep : Step s (Label.tick) s')
+    : getObligation s' o = getObligation s o := by
+  cases hStep with
+  | tick hUpdate =>
+    subst hUpdate
+    simp [getObligation]
+
+-- ==========================================================================
+-- Safety: Reserve adds obligation to ledger (bd-3bg3e)
+-- After a reserve step, the obligation ID is in the region's ledger.
+-- ==========================================================================
+
+theorem reserve_adds_to_ledger {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hStep : Step s (Label.reserve o) s')
+    : ∃ ob region, getObligation s' o = some ob ∧
+        getRegion s' ob.region = some region ∧
+        o ∈ region.ledger := by
+  cases hStep with
+  | reserve hTask hRegion hAbsent hUpdate =>
+    subst hUpdate
+    refine ⟨_, _, by simp [getObligation, setRegion, setObligation], ?_, ?_⟩
+    · simp [getRegion, setRegion, setObligation]
+    · simp [List.mem_append]
+
+-- ==========================================================================
+-- Safety: Leak marks obligation as leaked (bd-3bg3e)
+-- After a leak step, the obligation is in leaked state.
+-- ==========================================================================
+
+theorem leak_marks_leaked {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hStep : Step s (Label.leak o) s')
+    : ∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.leaked := by
+  cases hStep with
+  | leak _ hTask hTaskState hOb hHolder hState hRegion hUpdate =>
+    subst hUpdate
+    exact ⟨_, by simp [getObligation, setRegion, setObligation], rfl⟩
 
 end Asupersync
