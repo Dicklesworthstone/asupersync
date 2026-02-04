@@ -7,8 +7,15 @@ description = "Spec-first, cancel-correct, capability-secure async runtime for R
 repository = "https://github.com/Dicklesworthstone/asupersync"
 readme = "README.md"
 documentation = "https://docs.rs/asupersync"
-keywords = ["async", "structured-concurrency", "cancellation", "runtime"]
+keywords = ["async", "structured", "cancellation", "runtime"]
 categories = ["asynchronous", "concurrency"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "assets/dashboard.html",
+    "src/**",
+]
 
 [features]
 default = ["test-internals"]
