@@ -362,12 +362,12 @@ impl EProcessMonitor {
     /// was detected in the report.
     pub fn observe_report(&mut self, report: &OracleReport) {
         for ep in &mut self.processes {
-            let violated = report
-                .entries
-                .iter()
-                .find(|e| e.invariant == ep.invariant)
-                .is_some_and(|e| !e.passed);
-            ep.observe(violated);
+            // Only update invariants that actually appear in the report.
+            // A missing entry means the oracle didn't check this invariant,
+            // so we must not silently treat it as passing.
+            if let Some(entry) = report.entries.iter().find(|e| e.invariant == ep.invariant) {
+                ep.observe(!entry.passed);
+            }
         }
     }
 
