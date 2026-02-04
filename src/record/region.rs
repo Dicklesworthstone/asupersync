@@ -6,7 +6,7 @@
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
-use crate::types::rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
+use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
