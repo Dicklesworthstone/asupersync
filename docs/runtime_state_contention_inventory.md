@@ -320,3 +320,163 @@ pattern (RuntimeState → TraceBuffer) entirely.
 | Obligation commit during polling | Blocks behind poll lock | ObligationShard independent |
 | Lyapunov snapshot during polling | Blocks all polls | RwLock per shard; read-only |
 | Spawn during polling | Blocks behind poll lock | Region check (B) + task insert (A) pipelined |
+
+## Invariants to Preserve (bd-1tc1m)
+
+The sharding refactor MUST NOT change any observable behavior. These invariants
+are hard constraints:
+
+### INV-1: Determinism
+
+Under Lab mode (single-threaded, fixed seed), all trace event sequences,
+task scheduling order, and obligation state transitions must be identical
+before and after sharding. Verified by: Lab oracle replay + trace diffing.
+
+### INV-2: Cancel-Correctness
+
+`cancel_request(region)` must atomically:
+1. Mark the region's cancel flag (B)
+2. Propagate to all descendant tasks (A) via wake_state injection
+3. Emit trace events (D) for each cancellation
+
+All three must complete as a unit. Partial cancellation (flag set but tasks
+not notified) violates cancel-correctness. The lock order D→B→A ensures
+all shards are held during the operation.
+
+### INV-3: Obligation Linearity (No Leaks, No Double-Commit)
+
+Every obligation must transition through exactly one of:
+`Reserved → Committed` or `Reserved → Aborted` or `Reserved → Leaked`.
+
+`task_completed` must scan and abort orphan obligations atomically with
+task removal. Lock order D→B→A→C ensures the task is removed (A) before
+orphan scan (C), preventing the window where a new obligation could be
+created for a dead task.
+
+### INV-4: Region State Machine
+
+Region transitions (Open → Closing → Closed → Drained) must be
+monotonic and consistent with child task/obligation counts. The
+`advance_region_state` cascade (B→A→C) must not skip states or
+leave a region stuck in Closing with zero children.
+
+### INV-5: No Ambient Authority
+
+Tasks must only access state through their `Cx` handle. The sharding
+refactor must not expose shard locks to task code. All shard access
+goes through `ShardGuard` or equivalent accessor methods.
+
+## Affected Modules (bd-1tc1m)
+
+### High Complexity (API redesign required)
+
+| Module | Shards | Notes |
+|--------|--------|-------|
+| `src/runtime/state.rs` | ALL | Source module — split into shard structs |
+| `src/runtime/builder.rs` | ALL | Runtime init: creates all shards, configures |
+| `src/runtime/scheduler/worker.rs` | A, D, E | Hot path: poll loop, task_completed, metrics clone |
+| `src/runtime/scheduler/three_lane.rs` | A | Scheduler lanes: tasks arena access |
+| `src/runtime/scheduler/local_queue.rs` | A | LocalQueue + Stealer: intrusive stack on tasks arena |
+| `src/cx/scope.rs` | A, B, C, D, E | Spawn infrastructure: create_task, create_region, create_obligation |
+| `src/lab/runtime.rs` | ALL | Lab runtime: direct mutable state access |
+
+### Medium Complexity (read-only or narrow access)
+
+| Module | Shards | Notes |
+|--------|--------|-------|
+| `src/runtime/io_op.rs` | C | Obligation create/commit/abort only |
+| `src/obligation/lyapunov.rs` | A, B, C, E | Read-only arena iteration for snapshots |
+| `src/observability/diagnostics.rs` | A, B, C, E | Read-only arena iteration + timer_driver |
+| `src/observability/obligation_tracker.rs` | C, E | Obligation iteration + timer_driver |
+| `src/observability/otel.rs` | A, B, D | Arena iteration for metrics export |
+| `src/actor.rs` | A | tasks.get_mut() only |
+| `src/distributed/bridge.rs` | A, B | Arena access for coordination |
+| `src/distributed/encoding.rs` | A, B, C | Arena access for serialization |
+| `src/distributed/recovery.rs` | A, B, C | Arena access for state recovery |
+| `src/distributed/snapshot.rs` | ALL | Full state serialization |
+| `src/lab/snapshot_restore.rs` | ALL | Full state serialization |
+
+### Low Complexity (minimal surface)
+
+| Module | Shards | Notes |
+|--------|--------|-------|
+| `src/time/sleep.rs` | D, E | timer_driver + trace only |
+| `src/trace/divergence.rs` | A, B, C | Read-only trace analysis |
+| `src/trace/tla_export.rs` | A, B, C | Read-only TLA+ export |
+| `src/record/region.rs` | A, B, C | Record management |
+
+### Test Files (~100+ files)
+
+All test files that construct `RuntimeState` or call `.lock()` on the
+state mutex will need updating. Key categories:
+
+- **Scheduler tests** (`tests/cancel_lane_fairness_bounds.rs`, etc.): Shards A, B
+- **E2E tests** (`tests/runtime_e2e.rs`, `tests/obligation_lifecycle_e2e.rs`): ALL
+- **Benchmarks** (`benches/phase0_baseline.rs`, etc.): Varies
+- **Lab oracles** (`src/lab/oracle/*.rs`): A, B, C (read-only iteration)
+
+## Test Strategy (bd-1tc1m)
+
+### Phase 1: Unit Tests (per-shard correctness)
+
+| Test Category | What to Verify | Shard(s) |
+|---------------|---------------|----------|
+| TaskShard CRUD | insert/get/get_mut/remove + intrusive links | A |
+| RegionShard lifecycle | create/advance_state/close + child counts | B |
+| ObligationShard lifecycle | create/commit/abort/leak + orphan scan | C |
+| ConfigShard reads | All config fields readable without lock | E |
+| InstrumentationShard | trace.push_event + metrics calls without state lock | D |
+| ShardGuard construction | Correct lock ordering for each `for_*` constructor | All |
+| Disallowed orders | Attempt reverse acquisitions → timeout/deadlock detection | All |
+
+### Phase 2: Lab Tests (determinism + invariant preservation)
+
+| Test Category | What to Verify |
+|---------------|---------------|
+| Trace replay | Lab run produces identical trace sequences pre/post sharding |
+| Cancel cascade | cancel_request propagates to all descendants atomically |
+| Obligation linearity | No leaked/double-committed obligations after sharding |
+| Region state machine | advance_region_state cascades correctly across shards |
+| Lyapunov stability | Snapshot values match pre-sharding baseline |
+| task_completed atomicity | Remove task + abort orphans + advance region in one guard |
+
+### Phase 3: E2E Tests (structured logging + trace artifacts)
+
+| Test Category | Structured Logging Fields | Trace Artifacts |
+|---------------|--------------------------|-----------------|
+| Multi-worker poll contention | `lock_wait_ns`, `shard`, `worker_id` | Per-shard lock timing histograms |
+| Cross-shard task_completed | `shards_held`, `lock_order`, `duration_ns` | Lock acquisition waterfall |
+| Concurrent spawn + cancel | `task_id`, `region_id`, `cancel_seq` | Cancel propagation graph |
+| Obligation commit under load | `obligation_id`, `shard_wait_ns` | Obligation lifecycle timeline |
+| Snapshot during active work | `snapshot_duration_ns`, `stale_reads` | Read-lock contention profile |
+
+### Required Structured Logging Fields
+
+All shard operations should emit structured log events with:
+
+```
+shard: "A" | "B" | "C" | "D" | "E"
+operation: "lock" | "unlock" | "try_lock" | "read_lock" | "read_unlock"
+worker_id: u64
+wait_ns: u64  // time spent waiting for lock
+held_ns: u64  // time lock was held
+caller: &str  // method name (e.g., "task_completed", "spawn")
+```
+
+Feature-gated behind `cfg(feature = "lock-metrics")`.
+
+## Reviewer Checklist (bd-1tc1m)
+
+When reviewing sharding PRs, verify:
+
+- [ ] **Lock order compliance**: Every multi-shard acquisition follows E→D→B→A→C
+- [ ] **No reverse acquisitions**: No code path acquires A before B, C before A, etc.
+- [ ] **ShardGuard usage**: All multi-shard operations use `ShardGuard::for_*()` constructors
+- [ ] **Trace determinism**: Lab oracle tests pass with identical trace output
+- [ ] **Cancel atomicity**: cancel_request holds D+B+A for the entire cascade
+- [ ] **Obligation orphan scan**: task_completed holds A+C simultaneously
+- [ ] **No shard leak**: Shard locks not exposed to task code (only through Cx/scope)
+- [ ] **Config immutability**: Shard E has no lock; all fields are read-only after init
+- [ ] **Instrumentation lock-free**: Shard D trace/metrics accessed without any shard lock
+- [ ] **Test coverage**: New tests for each affected cross-shard operation
+- [ ] **Benchmark comparison**: Pre/post contention numbers from bd-3urgh baseline
