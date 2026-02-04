@@ -13,9 +13,7 @@
 #[macro_use]
 mod common;
 
-use asupersync::lab::oracle::{
-    ObligationLeakOracle, QuiescenceOracle, TaskLeakOracle,
-};
+use asupersync::lab::oracle::{ObligationLeakOracle, QuiescenceOracle, TaskLeakOracle};
 use asupersync::record::obligation::ObligationKind;
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 use common::*;
@@ -341,12 +339,7 @@ fn close_region_with_live_task_violates_leak() {
 
     let result = task_leak.check(t(100));
     let is_err = result.is_err();
-    assert_with_log!(
-        is_err,
-        "violation: live task at close",
-        true,
-        is_err
-    );
+    assert_with_log!(is_err, "violation: live task at close", true, is_err);
 
     test_complete!("close_region_with_live_task_violates_leak");
 }

@@ -534,6 +534,55 @@ mod tests {
     }
 
     #[test]
+    fn generation_monotonic_on_reuse() {
+        let mut heap = RegionHeap::new();
+
+        let mut idx = heap.alloc(0u32);
+        for i in 1u32..16 {
+            assert!(heap.dealloc(idx));
+
+            let next = heap.alloc(i);
+            assert_eq!(next.index(), idx.index());
+            assert_eq!(next.generation(), idx.generation().wrapping_add(1));
+            assert_eq!(heap.get::<u32>(idx), None);
+
+            idx = next;
+        }
+    }
+
+    #[test]
+    fn deterministic_reuse_pattern() {
+        fn run_pattern() -> Vec<(u32, u32)> {
+            let mut heap = RegionHeap::new();
+
+            let a = heap.alloc(1u32);
+            let b = heap.alloc(2u32);
+            let c = heap.alloc(3u32);
+
+            assert!(heap.dealloc(b));
+            let d = heap.alloc(4u32); // should reuse b's slot
+
+            assert!(heap.dealloc(a));
+            assert!(heap.dealloc(c));
+            let e = heap.alloc(5u32); // reuse c's slot (last freed)
+            let f = heap.alloc(6u32); // reuse a's slot
+
+            vec![
+                (a.index(), a.generation()),
+                (b.index(), b.generation()),
+                (c.index(), c.generation()),
+                (d.index(), d.generation()),
+                (e.index(), e.generation()),
+                (f.index(), f.generation()),
+            ]
+        }
+
+        let first = run_pattern();
+        let second = run_pattern();
+        assert_eq!(first, second, "allocation pattern should be deterministic");
+    }
+
+    #[test]
     fn reclaim_all() {
         let mut heap = RegionHeap::new();
 
