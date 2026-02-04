@@ -182,6 +182,10 @@ def holdsObligation (s : State Value Error Panic) (t : TaskId) (o : ObligationId
   | some ob => ob.holder = t ∧ ob.state = ObligationState.reserved
   | none => False
 
+theorem removeObligationId_not_mem (o : ObligationId) (xs : List ObligationId) :
+    o ∉ removeObligationId o xs := by
+  simp [removeObligationId]
+
 def runnable {Value Error Panic : Type} (st : TaskState Value Error Panic) : Prop :=
   match st with
   | TaskState.created => True
