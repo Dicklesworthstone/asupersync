@@ -97,6 +97,25 @@ DPOR coverage metrics include:
 These metrics are deterministic and can be logged alongside the replay artifacts
 described below.
 
+### Exporting JSON Reports
+
+Use the JSON export helpers on `ExplorationReport` to write a deterministic,
+machine‑readable summary for CI artifacts:
+
+```rust
+// After exploration:
+let report = explorer.explore(|runtime| {
+    runtime.run_until_quiescent();
+});
+
+// Write to a stable artifact path
+report.write_json_summary("target/test-artifacts/dpor_report.json", true)?;
+```
+
+The JSON output is intentionally lightweight: it records coverage metrics,
+fingerprints, certificate hashes, and stringified violations without embedding
+large trace payloads.
+
 ## Deterministic Seed Registry + Artifact Schema (bd-30pc)
 
 This section standardizes how seeds are chosen, propagated, logged, and stored in
