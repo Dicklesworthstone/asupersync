@@ -188,7 +188,7 @@ impl Worker {
 
             if let Some(stored) = state.remove_stored_future(task_id) {
                 // Global task found
-                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                if let Some(record) = state.task_mut(task_id) {
                     record.start_running();
                     record.wake_state.begin_poll();
                     let task_cx = record.cx.clone();
@@ -207,7 +207,7 @@ impl Worker {
                     // Local task found
                     // We need to re-acquire state lock to get record info
                     let mut state = self.state.lock().expect("runtime state lock poisoned");
-                    if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                    if let Some(record) = state.task_mut(task_id) {
                         record.start_running();
                         record.wake_state.begin_poll();
                         let task_cx = record.cx.clone();
@@ -253,7 +253,7 @@ impl Worker {
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                if let Some(record) = state.task_mut(task_id) {
                     if !record.state.is_terminal() {
                         let mut completed_via_cancel = false;
                         if matches!(task_outcome, crate::types::Outcome::Ok(())) {
@@ -305,7 +305,7 @@ impl Worker {
                 let mut global_waiters = Vec::new();
 
                 for waiter in waiters {
-                    if let Some(record) = state.tasks.get(waiter.arena_index()) {
+                    if let Some(record) = state.task(waiter) {
                         if record.wake_state.notify() {
                             if record.is_local() {
                                 if let Some(worker_id) = record.pinned_worker() {
@@ -385,7 +385,7 @@ impl Worker {
     }
 
     fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
-        let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+        let Some(record) = state.task_mut(task_id) else {
             return false;
         };
         let Some(inner) = record.cx_inner.as_ref() else {
