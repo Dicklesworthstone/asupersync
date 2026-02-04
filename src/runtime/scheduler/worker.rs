@@ -5,6 +5,7 @@ use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
 use crate::runtime::RuntimeState;
+use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::trace;
@@ -31,7 +32,7 @@ pub struct Worker {
     /// Global queue shared across workers.
     pub global: Arc<GlobalQueue>,
     /// Shared runtime state.
-    pub state: Arc<Mutex<RuntimeState>>, // RuntimeState is usually guarded
+    pub state: Arc<ContendedMutex<RuntimeState>>,
     /// Parking mechanism for idle workers.
     pub parker: Parker,
     /// Deterministic RNG for stealing decisions.
@@ -54,7 +55,7 @@ impl Worker {
         id: WorkerId,
         stealers: Vec<Stealer>,
         global: Arc<GlobalQueue>,
-        state: Arc<Mutex<RuntimeState>>,
+        state: Arc<ContendedMutex<RuntimeState>>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         let (io_driver, trace, timer_driver) = {

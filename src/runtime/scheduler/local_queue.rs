@@ -8,6 +8,7 @@ use super::intrusive::{IntrusiveStack, QUEUE_TAG_READY};
 #[cfg(any(test, feature = "test-internals"))]
 use crate::record::task::TaskRecord;
 use crate::runtime::RuntimeState;
+use crate::sync::ContendedMutex;
 use crate::types::TaskId;
 #[cfg(any(test, feature = "test-internals"))]
 use crate::types::{Budget, RegionId};
@@ -25,14 +26,14 @@ thread_local! {
 /// from the other end (FIFO).
 #[derive(Debug, Clone)]
 pub struct LocalQueue {
-    state: Arc<Mutex<RuntimeState>>,
+    state: Arc<ContendedMutex<RuntimeState>>,
     inner: Arc<Mutex<IntrusiveStack>>,
 }
 
 impl LocalQueue {
     /// Creates a new local queue.
     #[must_use]
-    pub fn new(state: Arc<Mutex<RuntimeState>>) -> Self {
+    pub fn new(state: Arc<ContendedMutex<RuntimeState>>) -> Self {
         Self {
             state,
             inner: Arc::new(Mutex::new(IntrusiveStack::new(QUEUE_TAG_READY))),
@@ -67,7 +68,7 @@ impl LocalQueue {
     /// Creates a runtime state with preallocated task records for tests.
     #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
-    pub fn test_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
+    pub fn test_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
         let mut state = RuntimeState::new();
         for id in 0..=max_task_id {
             let task_id = TaskId::new_for_test(id, 0);
@@ -75,7 +76,7 @@ impl LocalQueue {
             let idx = state.tasks.insert(record);
             debug_assert_eq!(idx.index(), id);
         }
-        Arc::new(Mutex::new(state))
+        Arc::new(ContendedMutex::new("runtime_state", state))
     }
 
     /// Creates a local queue with an isolated test runtime state.
@@ -134,7 +135,7 @@ impl Drop for CurrentQueueGuard {
 /// A handle to steal tasks from a local queue.
 #[derive(Debug, Clone)]
 pub struct Stealer {
-    state: Arc<Mutex<RuntimeState>>,
+    state: Arc<ContendedMutex<RuntimeState>>,
     inner: Arc<Mutex<IntrusiveStack>>,
 }
 

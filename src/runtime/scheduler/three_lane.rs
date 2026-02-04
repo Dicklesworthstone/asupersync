@@ -55,6 +55,7 @@ use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::RuntimeState;
+use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::trace;
 use crate::types::{CxInner, TaskId, Time};
@@ -290,19 +291,19 @@ pub struct ThreeLaneScheduler {
     /// Timer driver for processing timer wakeups.
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
-    state: Arc<Mutex<RuntimeState>>,
+    state: Arc<ContendedMutex<RuntimeState>>,
 }
 
 impl ThreeLaneScheduler {
     /// Creates a new 3-lane scheduler with the given number of workers.
-    pub fn new(worker_count: usize, state: &Arc<Mutex<RuntimeState>>) -> Self {
+    pub fn new(worker_count: usize, state: &Arc<ContendedMutex<RuntimeState>>) -> Self {
         Self::new_with_options(worker_count, state, DEFAULT_CANCEL_STREAK_LIMIT, false, 32)
     }
 
     /// Creates a new 3-lane scheduler with a configurable cancel streak limit.
     pub fn new_with_cancel_limit(
         worker_count: usize,
-        state: &Arc<Mutex<RuntimeState>>,
+        state: &Arc<ContendedMutex<RuntimeState>>,
         cancel_streak_limit: usize,
     ) -> Self {
         Self::new_with_options(worker_count, state, cancel_streak_limit, false, 32)
@@ -316,7 +317,7 @@ impl ThreeLaneScheduler {
     /// to the ungoverned baseline.
     pub fn new_with_options(
         worker_count: usize,
-        state: &Arc<Mutex<RuntimeState>>,
+        state: &Arc<ContendedMutex<RuntimeState>>,
         cancel_streak_limit: usize,
         enable_governor: bool,
         governor_interval: u32,
@@ -778,7 +779,7 @@ pub struct ThreeLaneWorker {
     /// Global injection queue.
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
-    pub state: Arc<Mutex<RuntimeState>>,
+    pub state: Arc<ContendedMutex<RuntimeState>>,
     /// Parking mechanism for idle workers.
     pub parker: Parker,
     /// Coordination for waking other workers.
