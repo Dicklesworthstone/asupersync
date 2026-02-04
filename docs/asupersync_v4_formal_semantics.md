@@ -184,7 +184,50 @@ lane(t) =
 Timed lane ordering is Earliest-Deadline-First (EDF). When deadlines tie,
 deterministic task-id ordering breaks ties.
 
-### 1.12 Derived predicates (definitions)
+### 1.12 Scheduler fairness bound (implementation model)
+
+The implementation uses a **per-worker cancel streak counter** to bound
+starvation of timed/ready work while preserving cancel preemption.
+Let `k >= 1` be `cancel_streak_limit`, and let `cancel_streak` track the
+consecutive number of cancel dispatches for a worker.
+
+Dispatch model (per worker):
+
+```
+if cancel_lane nonempty and cancel_streak < k:
+  dispatch cancel; cancel_streak += 1
+else:
+  dispatch timed if available, else ready (or steal)
+  cancel_streak := 0
+
+// fallback: if cancel_streak >= k but no timed/ready work exists,
+// dispatch one cancel task and set cancel_streak := 1
+```
+
+Under `DrainObligations` / `DrainRegions` scheduling suggestions, the effective
+limit is `2k` (cancel streak is allowed to grow to `2 * k` before yielding).
+
+**Bounded starvation guarantee (per worker):**
+If timed/ready work is continuously available, it is dispatched within at most
+`k` cancel dispatches (or `2k` under drain suggestions). The fallback path only
+activates when timed/ready work is absent, preserving liveness for cancel-only
+loads.
+
+**Proof sketch:**
+1. `cancel_streak` increments only on cancel dispatches and resets to 0 on any
+   timed/ready/steal dispatch or after idle backoff.
+2. When `cancel_streak` reaches the effective limit and timed/ready work exists,
+   the scheduler bypasses cancel work and dispatches timed/ready next, resetting
+   the streak.
+3. The fallback cancel dispatch is only reachable when timed/ready/steal are empty,
+   so it does not delay available lower-priority work.
+
+**Test harness:**
+See `tests/scheduler_lane_fairness.rs` and the preemption tests in
+`src/runtime/scheduler/three_lane.rs` (e.g., `test_preemption_max_streak_bounded_by_limit`,
+`test_preemption_fairness_yield_under_cancel_flood`) for empirical confirmation.
+
+### 1.13 Derived predicates (definitions)
 
 We will use the following derived predicates:
 
