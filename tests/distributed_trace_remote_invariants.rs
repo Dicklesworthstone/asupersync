@@ -15,7 +15,8 @@ use asupersync::distributed::snapshot::{
 };
 use asupersync::record::region::RegionState;
 use asupersync::remote::{
-    ComputationName, NodeId, RemoteCap, RemoteError, RemoteInput, RemoteTaskId, RemoteTaskState,
+    ComputationName, DedupDecision, IdempotencyKey, IdempotencyStore, NodeId, RemoteCap,
+    RemoteError, RemoteInput, RemoteOutcome, RemoteTaskId, RemoteTaskState, Saga, SagaState,
 };
 use asupersync::trace::causality::{CausalOrderVerifier, CausalityViolationKind};
 use asupersync::trace::certificate::{CertificateVerifier, TraceCertificate};
@@ -1067,6 +1068,60 @@ fn remote_error_display_variants() {
 fn remote_error_is_std_error() {
     let err: Box<dyn std::error::Error> = Box::new(RemoteError::LeaseExpired);
     assert!(format!("{err}").contains("lease"));
+}
+
+#[test]
+fn idempotency_store_duplicate_returns_cached_outcome() {
+    let mut store = IdempotencyStore::new(Duration::from_secs(60));
+    let key = IdempotencyKey::from_raw(0x42);
+    let computation = ComputationName::new("encode_block");
+    let now = Time::from_secs(1);
+
+    assert!(matches!(
+        store.check(&key, &computation),
+        DedupDecision::New
+    ));
+    assert!(store.record(key, RemoteTaskId::from_raw(7), computation.clone(), now));
+
+    let outcome = RemoteOutcome::Success(vec![1, 2, 3]);
+    assert!(store.complete(&key, outcome));
+
+    match store.check(&key, &computation) {
+        DedupDecision::Duplicate(record) => {
+            assert_eq!(record.remote_task_id, RemoteTaskId::from_raw(7));
+            match record.outcome {
+                Some(RemoteOutcome::Success(payload)) => {
+                    assert_eq!(payload, vec![1, 2, 3]);
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        other => panic!("expected duplicate, got {other:?}"),
+    }
+
+    let conflict = store.check(&key, &ComputationName::new("other"));
+    assert!(matches!(conflict, DedupDecision::Conflict));
+}
+
+#[test]
+fn saga_compensates_in_reverse_order_on_failure() {
+    let mut saga = Saga::new();
+
+    saga.step("step-1", || Ok(()), || "undo-1".into())
+        .expect("step-1 should succeed");
+    saga.step("step-2", || Ok(()), || "undo-2".into())
+        .expect("step-2 should succeed");
+
+    let err = saga
+        .step("step-3", || Err::<(), _>("boom".into()), || "undo-3".into())
+        .unwrap_err();
+    assert!(err.message.contains("boom"));
+    assert_eq!(saga.state(), SagaState::Aborted);
+
+    let results = saga.compensation_results();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].result, "undo-2");
+    assert_eq!(results[1].result, "undo-1");
 }
 
 // ===========================================================================

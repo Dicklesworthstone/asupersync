@@ -293,6 +293,8 @@ label ::= τ                        // Silent/internal
         | finalize(r, f)
         | close(r, outcome)
         | tick
+        | dedup(key)
+        | compensate(saga)
 ```
 
 ---
@@ -950,6 +952,144 @@ Preconditions:
   ∀r where R[r].budget.deadline = Some(d) ∧ d ≤ τ'_now:
     apply CANCEL-REQUEST(r, Timeout)
 ```
+
+---
+
+### 3.7 Remote Idempotency + Saga Semantics (distributed extensions)
+
+We model two distributed extensions used by remote tasks:
+
+1. **Idempotency store** for deduplicating spawn requests.
+2. **Saga** for compensation-ordered rollback.
+
+These are expressed as a small state machine that can be used in model checking
+and for the lab-runtime test harness.
+
+#### 3.7.1 Idempotency Store
+
+Let:
+
+```
+k ∈ IdempotencyKey = {0,1}^128
+rt ∈ RemoteTaskId  = ℕ
+cn ∈ ComputationName = String
+```
+
+Define the idempotency store state:
+
+```
+D: IdempotencyKey → IdempotencyRecord
+
+IdempotencyRecord = {
+  key: k,
+  remote_task_id: rt,
+  computation: cn,
+  created_at: τ,
+  expires_at: τ,
+  outcome: Option<RemoteOutcome>
+}
+```
+
+Decision rules when a request arrives:
+
+```
+DEDUP-NEW:
+  k ∉ dom(D)
+  --------------------------------
+  decision = New
+
+DEDUP-DUPLICATE:
+  D[k].computation = cn
+  --------------------------------
+  decision = Duplicate(D[k])
+
+DEDUP-CONFLICT:
+  k ∈ dom(D) ∧ D[k].computation ≠ cn
+  --------------------------------
+  decision = Conflict
+```
+
+Record + complete:
+
+```
+RECORD-NEW:
+  k ∉ dom(D)
+  --------------------------------
+  D' = D[k ↦ { key = k, remote_task_id = rt, computation = cn,
+              created_at = τ_now, expires_at = τ_now + ttl, outcome = None }]
+
+RECORD-COMPLETE:
+  k ∈ dom(D)
+  --------------------------------
+  D'[k].outcome = Some(outcome)
+```
+
+Eviction (periodic):
+
+```
+EVICT:
+  D' = { (k ↦ rec) ∈ D | τ_now < rec.expires_at }
+```
+
+Operational consequence:
+- A duplicate request with the same key and computation must return the
+  **original** `remote_task_id` and any cached `outcome`.
+- A conflicting request with the same key but different computation is rejected.
+
+#### 3.7.2 Saga Compensation Ordering
+
+Let a saga state be:
+
+```
+Saga = {
+  state: Running | Completed | Compensating | Aborted,
+  compensations: List<Compensation>,  // forward order
+  completed_steps: ℕ
+}
+```
+
+Transition rules:
+
+```
+SAGA-STEP-OK:
+  saga.state = Running
+  action(step) = Ok(value)
+  --------------------------------
+  saga' = saga with
+    compensations = compensations ++ [comp(step)],
+    completed_steps = completed_steps + 1
+
+SAGA-STEP-FAIL:
+  saga.state = Running
+  action(step) = Err(msg)
+  --------------------------------
+  saga' = run_compensations_reverse(saga)
+  saga'.state = Aborted
+
+SAGA-ABORT:
+  saga.state = Running
+  --------------------------------
+  saga' = run_compensations_reverse(saga)
+  saga'.state = Aborted
+
+SAGA-COMPLETE:
+  saga.state = Running
+  --------------------------------
+  saga'.state = Completed
+```
+
+Compensation order is **reverse** (LIFO) and deterministic:
+
+```
+run_compensations_reverse([c1, c2, ..., cn]) executes cn, ..., c2, c1
+```
+
+Invariant (safety):
+- Each step's compensation executes at most once.
+- If a saga aborts, all completed steps are compensated in reverse order.
+
+Invariant (determinism):
+- Given the same step outcomes, the compensation sequence is identical.
 
 ---
 
