@@ -89,6 +89,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::{GlobalInjector, GlobalQueue, LocalQueue, PriorityScheduler};
 use asupersync::runtime::{global_alloc_count, RegionHeap, RuntimeState};
+use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use std::sync::{Arc, Mutex};
 
@@ -108,7 +109,7 @@ fn region() -> RegionId {
     RegionId::new_for_test(0, 0)
 }
 
-fn setup_runtime_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
+fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
     let mut state = RuntimeState::new();
     for i in 0..=max_task_id {
         let id = task(i);
@@ -116,7 +117,7 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
         let idx = state.tasks.insert(record);
         assert_eq!(idx.index(), i);
     }
-    Arc::new(Mutex::new(state))
+    Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
 // =============================================================================

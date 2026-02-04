@@ -17,6 +17,7 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use asupersync::sync::ContendedMutex;
 use std::sync::{Arc, Mutex};
 
 // ── Counting allocator (same pattern as allocation_audit.rs) ──────────
@@ -132,7 +133,7 @@ fn setup_arena(count: u32) -> Arena<TaskRecord> {
     arena
 }
 
-fn setup_runtime_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
+fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
     LocalQueue::test_state(max_task_id)
 }
 

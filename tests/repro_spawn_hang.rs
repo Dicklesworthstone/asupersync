@@ -7,13 +7,14 @@ mod tests {
     use asupersync::runtime::RuntimeState;
     use asupersync::types::{Budget, TaskId};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use asupersync::sync::ContendedMutex;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[test]
     fn repro_spawn_registered_hangs_manual_state() {
         // 1. Setup RuntimeState and Scheduler (simulating a worker environment)
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(1, &state); // 1 worker
 
         // 2. Create a root region

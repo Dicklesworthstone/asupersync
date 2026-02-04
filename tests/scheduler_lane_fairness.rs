@@ -10,6 +10,7 @@ use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use asupersync::sync::ContendedMutex;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ fn test_cancel_preempts_timed_and_ready_deterministic() {
     let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
     let mut runtime_state = RuntimeState::new();
     runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-    let state = Arc::new(Mutex::new(runtime_state));
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
 
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -77,7 +78,7 @@ fn test_timed_lane_edf_ordering_deterministic() {
     let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
     let mut runtime_state = RuntimeState::new();
     runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-    let state = Arc::new(Mutex::new(runtime_state));
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
 
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -126,7 +127,7 @@ fn test_timed_not_due_yields_ready_then_due() {
     let clock = Arc::new(VirtualClock::new());
     let mut runtime_state = RuntimeState::new();
     runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
-    let state = Arc::new(Mutex::new(runtime_state));
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
 
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -165,7 +166,7 @@ fn test_timed_not_due_yields_ready_then_due() {
 fn test_cancel_fairness_bound_deterministic() {
     init_test("cancel_fairness_bound_deterministic");
 
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
 
     let cancel_a = TaskId::new_for_test(1, 30);
@@ -206,7 +207,7 @@ fn test_cancel_fairness_bound_deterministic() {
 fn test_steal_only_from_ready_lane_deterministic() {
     init_test("steal_only_from_ready_lane_deterministic");
 
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
     let cancel_task = TaskId::new_for_test(1, 40);
@@ -241,7 +242,7 @@ fn test_steal_only_from_ready_lane_deterministic() {
 /// This verifies the fairness limit prevents cancel starvation.
 #[test]
 fn test_ready_not_starved_by_cancel_flood() {
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
 
     // Create a ready task that we want to see complete
@@ -295,7 +296,7 @@ fn test_ready_not_starved_by_cancel_flood() {
 /// Test that ready work runs within the fairness window when cancel tasks flood.
 #[test]
 fn test_ready_runs_within_fairness_window() {
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
 
     let seq = Arc::new(AtomicUsize::new(0));
@@ -361,7 +362,7 @@ fn test_timed_not_starved_by_cancel_flood() {
     runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
         VirtualClock::new(),
     )));
-    let state = Arc::new(Mutex::new(runtime_state));
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
 
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
 
@@ -416,7 +417,7 @@ fn test_all_lanes_make_progress() {
     runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
         VirtualClock::new(),
     )));
-    let state = Arc::new(Mutex::new(runtime_state));
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
 
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
 
@@ -502,7 +503,7 @@ fn test_all_lanes_make_progress() {
 /// Stress test: cascading cancellation doesn't starve ready work.
 #[test]
 fn stress_cascading_cancellation() {
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
 
     let mut scheduler = ThreeLaneScheduler::new(1, &state);
@@ -565,7 +566,7 @@ fn stress_cascading_cancellation() {
 /// Stress test with multiple workers.
 #[test]
 fn stress_multi_worker_lane_fairness() {
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
 
     let mut scheduler = ThreeLaneScheduler::new(4, &state);
