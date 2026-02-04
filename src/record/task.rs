@@ -80,14 +80,16 @@ impl TaskPhase {
     /// │ Running          │ CancelRequested, Completed                     │
     /// │ CancelRequested  │ CancelRequested (strengthen), Cancelling,      │
     /// │                  │ Completed                                      │
-    /// │ Cancelling       │ Finalizing, Completed                          │
-    /// │ Finalizing       │ Completed                                      │
+    /// │ Cancelling       │ Cancelling (strengthen), Finalizing, Completed │
+    /// │ Finalizing       │ Finalizing (strengthen), Completed             │
     /// │ Completed        │ (terminal — no transitions)                    │
     /// └─────────────────┴────────────────────────────────────────────────┘
     /// ```
     ///
     /// Notes:
     /// - `CancelRequested → CancelRequested` is valid (reason strengthening).
+    /// - `Cancelling → Cancelling` and `Finalizing → Finalizing` are valid
+    ///   (reason/budget strengthening during cleanup/finalizers).
     /// - `Created → Completed` allows error/panic during spawn before running.
     /// - `CancelRequested → Completed` allows error/panic before cancel ack.
     /// - `Cancelling → Completed` and `Finalizing → Completed` allow for
@@ -104,10 +106,10 @@ impl TaskPhase {
             | (1, 2 | 5)
             // CancelRequested → CancelRequested (strengthen) | Cancelling | Completed (err/panic before ack)
             | (2, 2 | 3 | 5)
-            // Cancelling → Finalizing | Completed (err/panic during cleanup)
-            | (3, 4 | 5)
-            // Finalizing → Completed
-            | (4, 5)
+            // Cancelling → Cancelling (strengthen) | Finalizing | Completed (err/panic during cleanup)
+            | (3, 3 | 4 | 5)
+            // Finalizing → Finalizing (strengthen) | Completed
+            | (4, 4 | 5)
         )
     }
 }
@@ -152,6 +154,10 @@ impl TaskPhaseCell {
         #[cfg(debug_assertions)]
         {
             let current = self.load();
+            if current == phase {
+                self.inner.store(phase as u8, Ordering::Release);
+                return;
+            }
             debug_assert!(
                 current.is_valid_transition(phase),
                 "invalid TaskPhase transition: {current:?} -> {phase:?}"
