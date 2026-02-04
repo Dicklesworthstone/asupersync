@@ -3086,7 +3086,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
-    use crate::types::CancelKind;
+    use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3959,6 +3959,64 @@ mod tests {
         let _ = child_task;
 
         crate::test_complete!("cancel_request_builds_cause_chains");
+    }
+
+    #[test]
+    fn cancel_request_respects_attribution_limits() {
+        init_test("cancel_request_respects_attribution_limits");
+        let mut state = RuntimeState::new();
+        state.set_cancel_attribution_config(CancelAttributionConfig::new(2, 256));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let grandchild = create_child_region(&mut state, child);
+
+        let reason = CancelReason::deadline().with_message("root deadline");
+        let _ = state.cancel_request(root, &reason, None);
+
+        let child_reason = state
+            .regions
+            .get(child.arena_index())
+            .and_then(|region| region.cancel_reason())
+            .expect("child cancel reason missing");
+        crate::assert_with_log!(
+            child_reason.chain_depth() == 2,
+            "child chain depth",
+            2,
+            child_reason.chain_depth()
+        );
+        crate::assert_with_log!(
+            !child_reason.truncated,
+            "child chain not truncated",
+            false,
+            child_reason.truncated
+        );
+
+        let grandchild_reason = state
+            .regions
+            .get(grandchild.arena_index())
+            .and_then(|region| region.cancel_reason())
+            .expect("grandchild cancel reason missing");
+        crate::assert_with_log!(
+            grandchild_reason.chain_depth() == 2,
+            "grandchild chain depth",
+            2,
+            grandchild_reason.chain_depth()
+        );
+        crate::assert_with_log!(
+            grandchild_reason.truncated,
+            "grandchild chain truncated",
+            true,
+            grandchild_reason.truncated
+        );
+        crate::assert_with_log!(
+            grandchild_reason.truncated_at_depth == Some(2),
+            "grandchild truncation depth",
+            Some(2),
+            grandchild_reason.truncated_at_depth
+        );
+
+        crate::test_complete!("cancel_request_respects_attribution_limits");
     }
 
     #[test]
