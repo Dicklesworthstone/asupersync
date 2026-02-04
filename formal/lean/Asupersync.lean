@@ -123,6 +123,7 @@ structure Region (Value Error Panic : Type) where
   children : List TaskId
   subregions : List RegionId
   ledger : List ObligationId
+  finalizers : List TaskId
   deadline : Option Time
 
 /-- Obligation record (minimal, extend as needed). -/
@@ -259,7 +260,10 @@ def allRegionsClosed (s : State Value Error Panic) (rs : List RegionId) : Prop :
     | none => False) rs
 
 def Quiescent (s : State Value Error Panic) (r : Region Value Error Panic) : Prop :=
-  allTasksCompleted s r.children ∧ allRegionsClosed s r.subregions ∧ r.ledger = []
+  allTasksCompleted s r.children ∧
+  allRegionsClosed s r.subregions ∧
+  r.ledger = [] ∧
+  r.finalizers = []
 
 def LoserDrained (s : State Value Error Panic) (t1 t2 : TaskId) : Prop :=
   match getTask s t1, getTask s t2 with
@@ -511,6 +515,16 @@ inductive Step (Value Error Panic : Type) :
         s' = setRegion s r { region with state := RegionState.closed outcome }) :
       Step s (Label.close r outcome) s'
 
+  /-- FINALIZE: run one finalizer in LIFO order. -/
+  | finalize {s s' : State Value Error Panic} {r : RegionId} {f : TaskId}
+      {region : Region Value Error Panic} {rest : List TaskId}
+      (hRegion : getRegion s r = some region)
+      (hState : region.state = RegionState.finalizing)
+      (hFinalizers : region.finalizers = f :: rest)
+      (hUpdate :
+        s' = setRegion s r { region with finalizers := rest }) :
+      Step s (Label.finalize r f) s'
+
   /-- TICK: advance virtual time by one unit. -/
   | tick {s s' : State Value Error Panic}
       (hUpdate : s' = { s with now := s.now + 1 }) :
@@ -699,7 +713,19 @@ theorem close_implies_ledger_empty {Value Error Panic : Type}
     (hStep : Step s (Label.close r outcome) s')
     : ∃ region, getRegion s r = some region ∧ region.ledger = [] := by
   obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
-  exact ⟨region, hRegion, hQ.2.2⟩
+  exact ⟨region, hRegion, hQ.2.2.1⟩
+
+-- ==========================================================================
+-- Safety Lemma 5b: Region close implies no pending finalizers
+-- ==========================================================================
+
+theorem close_implies_finalizers_empty {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧ region.finalizers = [] := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  exact ⟨region, hRegion, hQ.2.2.2⟩
 
 -- ==========================================================================
 -- Safety Lemma 6: Completed tasks are not runnable
