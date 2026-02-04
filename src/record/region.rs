@@ -1536,32 +1536,28 @@ mod tests {
     // baseline after all regions are closed.
 
     #[test]
-    fn global_alloc_count_returns_to_baseline_single_region() {
-        use crate::runtime::region_heap::global_alloc_count;
-        let baseline = global_alloc_count();
-
+    fn heap_stats_return_to_zero_single_region() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         region.heap_alloc(1u32).unwrap();
         region.heap_alloc(2u64).unwrap();
         region.heap_alloc("hello".to_string()).unwrap();
 
-        // 3 allocations above baseline
-        assert_eq!(global_alloc_count(), baseline + 3);
+        assert_eq!(region.heap_stats().live, 3);
+        assert_eq!(region.heap_stats().allocations, 3);
 
         // Close the region
         assert!(region.begin_close(None));
         assert!(region.begin_finalize());
         assert!(region.complete_close());
 
-        // Counter must return to baseline
-        assert_eq!(global_alloc_count(), baseline);
+        // Stats must reflect full reclamation
+        assert_eq!(region.heap_stats().live, 0);
+        assert_eq!(region.heap_stats().reclaimed, 3);
+        assert_eq!(region.heap_len(), 0);
     }
 
     #[test]
-    fn global_alloc_count_multi_region_hierarchy() {
-        use crate::runtime::region_heap::global_alloc_count;
-        let baseline = global_alloc_count();
-
+    fn multi_region_hierarchy_reclamation() {
         // Create parent and two children
         let parent_id = RegionId::from_arena(ArenaIndex::new(100, 0));
         let child1_id = RegionId::from_arena(ArenaIndex::new(101, 0));
@@ -1581,18 +1577,26 @@ mod tests {
         child2.heap_alloc(40u64).unwrap();
         child2.heap_alloc(50u64).unwrap();
 
-        assert_eq!(global_alloc_count(), baseline + 5);
+        // Verify per-region allocation counts
+        assert_eq!(parent.heap_stats().live, 2);
+        assert_eq!(child1.heap_stats().live, 1);
+        assert_eq!(child2.heap_stats().live, 2);
 
         // Close children first (structured concurrency: innermost first)
         assert!(child1.begin_close(None));
         assert!(child1.begin_finalize());
         assert!(child1.complete_close());
-        assert_eq!(global_alloc_count(), baseline + 4);
+        assert_eq!(child1.heap_stats().live, 0);
+        assert_eq!(child1.heap_stats().reclaimed, 1);
 
         assert!(child2.begin_close(None));
         assert!(child2.begin_finalize());
         assert!(child2.complete_close());
-        assert_eq!(global_alloc_count(), baseline + 2);
+        assert_eq!(child2.heap_stats().live, 0);
+        assert_eq!(child2.heap_stats().reclaimed, 2);
+
+        // Parent heap still live while parent is open
+        assert_eq!(parent.heap_stats().live, 2);
 
         // Remove children and close parent
         parent.remove_child(child1_id);
@@ -1600,7 +1604,8 @@ mod tests {
         assert!(parent.begin_close(None));
         assert!(parent.begin_finalize());
         assert!(parent.complete_close());
-        assert_eq!(global_alloc_count(), baseline);
+        assert_eq!(parent.heap_stats().live, 0);
+        assert_eq!(parent.heap_stats().reclaimed, 2);
     }
 
     #[test]
@@ -1662,7 +1667,7 @@ mod tests {
 
         // Allocate various types
         region.heap_alloc(42u32).unwrap();
-        region.heap_alloc(3.14f64).unwrap();
+        region.heap_alloc(std::f64::consts::PI).unwrap();
         region.heap_alloc(vec![1u8, 2, 3]).unwrap();
 
         let stats_before = region.heap_stats();
@@ -1712,9 +1717,6 @@ mod tests {
 
     #[test]
     fn complete_close_is_idempotent_for_reclamation() {
-        use crate::runtime::region_heap::global_alloc_count;
-        let baseline = global_alloc_count();
-
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         region.heap_alloc(1u32).unwrap();
         region.heap_alloc(2u32).unwrap();
@@ -1722,11 +1724,13 @@ mod tests {
         assert!(region.begin_close(None));
         assert!(region.begin_finalize());
         assert!(region.complete_close());
-        assert_eq!(global_alloc_count(), baseline);
+        assert_eq!(region.heap_stats().live, 0);
+        assert_eq!(region.heap_stats().reclaimed, 2);
 
-        // Second call to complete_close should be a no-op
+        // Second call to complete_close should be a no-op (returns false)
         assert!(!region.complete_close());
-        assert_eq!(global_alloc_count(), baseline);
+        // Stats unchanged — reclamation was not double-counted
+        assert_eq!(region.heap_stats().reclaimed, 2);
     }
 
     #[test]
