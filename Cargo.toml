@@ -146,7 +146,6 @@ io-uring = { version = "0.7.11", optional = true }
 ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
-asupersync = { version = "0.1.0", path = ".", features = ["test-internals"] }
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 futures-lite = "2.6"

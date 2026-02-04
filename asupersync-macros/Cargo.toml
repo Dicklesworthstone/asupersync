@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 description = "Proc macros for asupersync structured concurrency runtime"
 repository = "https://github.com/Dicklesworthstone/asupersync"
-keywords = ["async", "structured-concurrency", "macros", "proc-macro"]
+keywords = ["async", "structured", "concurrency", "macros", "proc-macro"]
 categories = ["asynchronous", "concurrency"]
 
 [lib]
@@ -17,7 +17,6 @@ quote = "1.0"
 proc-macro2 = "1.0"
 
 [dev-dependencies]
-asupersync = { version = "0.1.0", path = ".." }
 trybuild = "1.0"
 
 [lints.rust]
