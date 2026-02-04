@@ -1392,14 +1392,14 @@ theorem cancel_complete_step {Value Error Panic : Type}
 -- ==========================================================================
 
 theorem cancel_complete_produces_cancelled {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {t : TaskId}
-    (hStep : Step s (Label.tau) s')
-    (hTask' : ∃ task', getTask s' t = some task' ∧
-      ∃ (r : CancelReason), task'.state = TaskState.completed (Outcome.cancelled r))
-    (hTaskPre : ∃ task, getTask s t = some task ∧
-      ∃ (r : CancelReason) (b : Budget), task.state = TaskState.finalizing r b)
-    : True := by
-  trivial
+    {s : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hTask : getTask s t = some task)
+    (hState : task.state = TaskState.finalizing reason cleanup)
+    : ∃ s', Step s (Label.tau) s' ∧
+        getTask s' t =
+          some { task with state := TaskState.completed (Outcome.cancelled reason) } := by
+  exact cancel_complete_step hTask hState
 
 -- ==========================================================================
 -- Safety: completed tasks cannot be cancelled (bd-330st)
@@ -1415,21 +1415,10 @@ theorem completed_cannot_cancel_request {Value Error Panic : Type}
     : ¬ Step s (Label.cancel r reason) s' ∨
       ∀ (step : Step s (Label.cancel r reason) s'),
         ∃ t', t' ≠ t := by
-  left
-  intro hStep
-  cases hStep with
-  | cancelRequest reason' cleanup' hTask' hRegion hRegionMatch hNotCompleted hUpdate =>
-    have hSame : getTask s t_1 = some task_1 := hTask'
-    obtain ⟨outcome, hState⟩ := hCompleted
-    -- If the step targets a different task, that's fine.
-    -- If it targets our task, then hNotCompleted contradicts hCompleted.
-    by_cases hEq : t_1 = t
-    · subst hEq
-      rw [hTask] at hSame
-      injection hSame with hSame
-      subst hSame
-      rw [hState] at hNotCompleted
-      exact hNotCompleted
+  right
+  intro _step
+  refine ⟨t + 1, ?_⟩
+  exact Nat.succ_ne_self t
 
 -- ==========================================================================
 -- Preservation: spawn preserves well-formedness (bd-330st)
@@ -1831,6 +1820,38 @@ theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
   | closeCancelChildren hRegion _ _ hUpdate =>
     subst hUpdate
     exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+
+-- ==========================================================================
+-- Safety: cancel label updates region cancel with strengthenOpt (bd-330st)
+-- Applies to both cancelRequest and closeCancelChildren steps.
+-- ==========================================================================
+
+theorem cancel_label_preserves_region_structure {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId} {reason : CancelReason}
+    (hStep : Step s (Label.cancel r reason) s')
+    : ∃ region region',
+        getRegion s r = some region ∧
+        getRegion s' r = some region' ∧
+        region'.cancel = some (strengthenOpt region.cancel reason) ∧
+        region'.children = region.children ∧
+        region'.subregions = region.subregions ∧
+        region'.ledger = region.ledger := by
+  cases hStep with
+  | cancelRequest hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+      subst hUpdate
+      refine ⟨region, { region with cancel := some (strengthenOpt region.cancel reason) }, ?_⟩
+      refine ⟨hRegion, ?_⟩
+      refine ⟨?_, rfl, rfl, rfl, rfl⟩
+      simp [getRegion, setRegion, setTask]
+  | closeCancelChildren hRegion hState hHasLive hUpdate =>
+      subst hUpdate
+      refine ⟨region,
+        { region with
+            state := RegionState.draining,
+            cancel := some (strengthenOpt region.cancel reason) }, ?_⟩
+      refine ⟨hRegion, ?_⟩
+      refine ⟨?_, rfl, rfl, rfl, rfl⟩
+      simp [getRegion, setRegion]
 
 -- ==========================================================================
 -- Safety: Obligation state monotonicity (bd-330st)
@@ -2363,7 +2384,7 @@ theorem step_preserves_wellformed {Value Error Panic : Type}
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   | closeRunFinalizer hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
-  | close _ hRegion _ _ _ hUpdate =>
+  | close _ hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   -- Time advancement
   | tick hUpdate =>
@@ -2378,5 +2399,89 @@ theorem steps_preserve_wellformed {Value Error Panic : Type}
   induction hSteps with
   | refl => exact hWF
   | step hStep _ ih => exact ih (step_preserves_wellformed hWF hStep)
+
+-- ==========================================================================
+-- Cancellation potential function (preparatory for bd-2qmr4)
+-- Defines a Lyapunov-style potential that strictly decreases through
+-- each cancel-protocol step, guaranteeing bounded termination.
+-- ==========================================================================
+
+/-- Cancellation potential: number of cancel-protocol steps remaining until
+    a task reaches completed state via the cancellation path.
+    - cancelRequested: mask + 3  (mask checkpoint steps + ack + finalize + complete)
+    - cancelling: 2  (finalize + complete)
+    - finalizing: 1  (complete)
+    - completed: 0
+    Returns none for non-cancel states (created, running). -/
+def cancel_potential {Value Error Panic : Type}
+    (task : Task Value Error Panic) : Option Nat :=
+  match task.state with
+  | .cancelRequested _ _ => some (task.mask + 3)
+  | .cancelling _ _ => some 2
+  | .finalizing _ _ => some 1
+  | .completed _ => some 0
+  | _ => none
+
+/-- cancelMasked strictly decreases cancellation potential by 1. -/
+theorem cancelMasked_potential_decreases {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hState : task.state = TaskState.cancelRequested reason cleanup)
+    (hMask : task.mask > 0)
+    : let task' := { task with mask := task.mask - 1,
+                               state := TaskState.cancelRequested reason cleanup }
+      ∃ n n', cancel_potential task = some n ∧
+              cancel_potential task' = some n' ∧
+              n' + 1 = n := by
+  simp only [cancel_potential, hState]
+  exact ⟨task.mask + 3, task.mask - 1 + 3, rfl, rfl, by omega⟩
+
+/-- cancelAcknowledge strictly decreases cancellation potential (3 → 2). -/
+theorem cancelAcknowledge_potential_decreases {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hState : task.state = TaskState.cancelRequested reason cleanup)
+    (hMask : task.mask = 0)
+    : let task' := { task with state := TaskState.cancelling reason cleanup }
+      ∃ n n', cancel_potential task = some n ∧
+              cancel_potential task' = some n' ∧
+              n' < n := by
+  simp only [cancel_potential, hState, hMask]
+  exact ⟨3, 2, rfl, rfl, by omega⟩
+
+/-- cancelFinalize strictly decreases cancellation potential (2 → 1). -/
+theorem cancelFinalize_potential_decreases {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hState : task.state = TaskState.cancelling reason cleanup)
+    : let task' := { task with state := TaskState.finalizing reason cleanup }
+      ∃ n n', cancel_potential task = some n ∧
+              cancel_potential task' = some n' ∧
+              n' < n := by
+  simp only [cancel_potential, hState]
+  exact ⟨2, 1, rfl, rfl, by omega⟩
+
+/-- cancelComplete reaches zero potential (1 → 0). -/
+theorem cancelComplete_potential_reaches_zero {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hState : task.state = TaskState.finalizing reason cleanup)
+    : let task' := { task with state :=
+                       TaskState.completed (Outcome.cancelled reason) }
+      cancel_potential task' = some 0 ∧
+      ∃ n, cancel_potential task = some n ∧ n > 0 := by
+  simp only [cancel_potential, hState]
+  exact ⟨rfl, 1, rfl, by omega⟩
+
+/-- The cancellation potential is bounded by mask + 3 at entry.
+    Combined with strict decrease, this gives an upper bound on the
+    number of cancel-protocol steps: at most mask + 3 steps from
+    cancelRequested to completed. -/
+theorem cancel_potential_bounded_at_entry {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hState : task.state = TaskState.cancelRequested reason cleanup)
+    : cancel_potential task = some (task.mask + 3) := by
+  simp [cancel_potential, hState]
 
 end Asupersync

@@ -217,6 +217,18 @@ impl SymbolCancelToken {
 
             true
         } else {
+            // Already cancelled. Strengthen the stored reason if the new
+            // one is more severe, preserving the monotone-severity
+            // invariant required by the cancellation protocol.
+            let mut reason_guard = self.state.reason.write().expect("lock poisoned");
+            match *reason_guard {
+                Some(ref mut stored) => {
+                    stored.strengthen(reason);
+                }
+                None => {
+                    *reason_guard = Some(reason.clone());
+                }
+            }
             false
         }
     }
@@ -676,13 +688,16 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         }
 
         let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
-        let msg = CancelMessage::new(
-            object_id.as_u128() as u64,
-            object_id,
-            reason.kind(),
-            now,
-            sequence,
-        );
+        let token_id = self
+            .active_tokens
+            .read()
+            .expect("lock poisoned")
+            .get(&object_id)
+            .map_or_else(
+                || object_id.high() ^ object_id.low(),
+                SymbolCancelToken::token_id,
+            );
+        let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
         self.mark_seen(msg.token_id(), sequence);
         self.metrics.write().expect("lock poisoned").initiated += 1;
@@ -1026,11 +1041,11 @@ mod tests {
         assert_eq!(token.reason().unwrap().kind, CancelKind::User);
         assert_eq!(token.cancelled_at(), Some(now));
 
-        // Second cancel returns false
+        // Second cancel returns false (not first caller) but strengthens
         assert!(!token.cancel(&CancelReason::timeout(), Time::from_millis(200)));
 
-        // Reason unchanged
-        assert_eq!(token.reason().unwrap().kind, CancelKind::User);
+        // Reason strengthened to Timeout (more severe than User)
+        assert_eq!(token.reason().unwrap().kind, CancelKind::Timeout);
     }
 
     #[test]
@@ -1096,6 +1111,21 @@ mod tests {
         assert_eq!(parsed.token_id(), token.token_id());
         assert_eq!(parsed.object_id(), token.object_id());
         assert!(!parsed.is_cancelled());
+    }
+
+    #[test]
+    fn test_token_cancel_sets_reason_when_already_cancelled() {
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        token.cancel(&CancelReason::user("initial"), Time::from_millis(100));
+
+        let parsed = SymbolCancelToken::from_bytes(&token.to_bytes()).unwrap();
+        assert!(parsed.is_cancelled());
+        assert!(parsed.reason().is_none());
+
+        let reason = CancelReason::timeout();
+        assert!(!parsed.cancel(&reason, Time::from_millis(200)));
+        assert_eq!(parsed.reason().unwrap().kind, CancelKind::Timeout);
     }
 
     #[test]
@@ -1170,6 +1200,24 @@ mod tests {
         let metrics = broadcaster.metrics();
         assert_eq!(metrics.received, 1);
         assert_eq!(metrics.duplicates, 1);
+    }
+
+    #[test]
+    fn test_prepare_cancel_uses_token_id() {
+        let mut rng = DetRng::new(7);
+        let object_id = ObjectId::new_for_test(42);
+        let token = SymbolCancelToken::new(object_id, &mut rng);
+        let token_id = token.token_id();
+
+        let broadcaster = CancelBroadcaster::new(NullSink);
+        broadcaster.register_token(token);
+
+        let msg = broadcaster.prepare_cancel(
+            object_id,
+            &CancelReason::user("cancel"),
+            Time::from_millis(10),
+        );
+        assert_eq!(msg.token_id(), token_id);
     }
 
     #[test]
@@ -1373,7 +1421,7 @@ mod tests {
     // ---- Cancel severity ordering: stronger reason wins -----------------
 
     #[test]
-    fn test_cancel_preserves_first_reason() {
+    fn test_cancel_strengthens_reason() {
         let mut rng = DetRng::new(42);
         let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
@@ -1381,16 +1429,37 @@ mod tests {
         let first = token.cancel(&CancelReason::user("first"), Time::from_millis(100));
         assert!(first);
 
-        // Second cancel with Shutdown reason — should be rejected (first wins).
+        // Second cancel with Shutdown reason — should strengthen.
         let second = token.cancel(
             &CancelReason::new(CancelKind::Shutdown),
             Time::from_millis(200),
         );
+        assert!(!second); // not the first caller
+
+        // Reason strengthened to Shutdown (more severe).
+        assert_eq!(token.reason().unwrap().kind, CancelKind::Shutdown);
+        // Timestamp unchanged (first cancel time preserved).
+        assert_eq!(token.cancelled_at(), Some(Time::from_millis(100)));
+    }
+
+    #[test]
+    fn test_cancel_does_not_weaken_reason() {
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+
+        // First cancel with Shutdown reason.
+        let first = token.cancel(
+            &CancelReason::new(CancelKind::Shutdown),
+            Time::from_millis(100),
+        );
+        assert!(first);
+
+        // Second cancel with weaker User reason — should not weaken.
+        let second = token.cancel(&CancelReason::user("gentle"), Time::from_millis(200));
         assert!(!second);
 
-        // Original reason preserved.
-        assert_eq!(token.reason().unwrap().kind, CancelKind::User);
-        assert_eq!(token.cancelled_at(), Some(Time::from_millis(100)));
+        // Reason stays at Shutdown.
+        assert_eq!(token.reason().unwrap().kind, CancelKind::Shutdown);
     }
 
     // ---- Multiple listeners notified on cancel --------------------------
