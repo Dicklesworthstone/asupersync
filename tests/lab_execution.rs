@@ -220,6 +220,65 @@ fn test_parallel_lab_equivalent_to_single_worker_outcomes() {
 }
 
 #[test]
+fn test_lab_cancel_fairness_bound() {
+    init_test("test_lab_cancel_fairness_bound");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(123).worker_count(1));
+    let cancel_limit = runtime.scheduler.lock().unwrap().cancel_streak_limit();
+    let cancel_count = cancel_limit + 3;
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let order = Arc::new(AtomicUsize::new(0));
+    let ready_position = Arc::new(AtomicUsize::new(usize::MAX));
+
+    for _ in 0..cancel_count {
+        let order = Arc::clone(&order);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                order.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("create cancel task");
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule_cancel(task_id, 0);
+    }
+
+    {
+        let order = Arc::clone(&order);
+        let ready_position = Arc::clone(&ready_position);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let position = order.fetch_add(1, Ordering::SeqCst);
+                ready_position.store(position, Ordering::SeqCst);
+            })
+            .expect("create ready task");
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    }
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recorded_position = ready_position.load(Ordering::SeqCst);
+    let saw_ready = recorded_position != usize::MAX;
+    assert_with_log!(saw_ready, "ready task should execute", true, saw_ready);
+
+    let ready_slot = recorded_position + 1;
+    let bound = cancel_limit + 1;
+    assert_with_log!(
+        ready_slot <= bound,
+        "ready task should run within cancel fairness bound",
+        bound,
+        ready_slot
+    );
+
+    test_complete!("test_lab_cancel_fairness_bound");
+}
+
+#[test]
 fn test_lab_executor_wakes_task_yielding() {
     init_test("test_lab_executor_wakes_task_yielding");
     test_section!("setup");

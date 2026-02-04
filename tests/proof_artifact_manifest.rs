@@ -38,11 +38,19 @@ fn validate_manifest(manifest: &Value) -> Vec<String> {
     let mut errors = Vec::new();
 
     // Required top-level fields
-    let required_strings = ["version", "bead", "started_at", "finished_at", "git_sha", "git_branch", "status"];
+    let required_strings = [
+        "version",
+        "bead",
+        "started_at",
+        "finished_at",
+        "git_sha",
+        "git_branch",
+        "status",
+    ];
     for field in &required_strings {
         match manifest.get(field) {
             Some(Value::String(_)) => {}
-            Some(other) => errors.push(format!("'{field}' should be string, got {}", other)),
+            Some(other) => errors.push(format!("'{field}' should be string, got {other}")),
             None => errors.push(format!("missing required field '{field}'")),
         }
     }
@@ -51,7 +59,7 @@ fn validate_manifest(manifest: &Value) -> Vec<String> {
     for field in &required_numbers {
         match manifest.get(field) {
             Some(Value::Number(_)) => {}
-            Some(other) => errors.push(format!("'{field}' should be number, got {}", other)),
+            Some(other) => errors.push(format!("'{field}' should be number, got {other}")),
             None => errors.push(format!("missing required field '{field}'")),
         }
     }
@@ -93,15 +101,21 @@ fn validate_manifest(manifest: &Value) -> Vec<String> {
                 for field in &check_required_strings {
                     match check.get(field) {
                         Some(Value::String(_)) => {}
-                        Some(other) => errors.push(format!("checks[{i}].'{field}' should be string, got {other}")),
-                        None => errors.push(format!("checks[{i}] missing required field '{field}'")),
+                        Some(other) => errors.push(format!(
+                            "checks[{i}].'{field}' should be string, got {other}"
+                        )),
+                        None => {
+                            errors.push(format!("checks[{i}] missing required field '{field}'"));
+                        }
                     }
                 }
 
                 // elapsed_s must be a number
                 match check.get("elapsed_s") {
                     Some(Value::Number(_)) => {}
-                    Some(other) => errors.push(format!("checks[{i}].'elapsed_s' should be number, got {other}")),
+                    Some(other) => errors.push(format!(
+                        "checks[{i}].'elapsed_s' should be number, got {other}"
+                    )),
                     None => errors.push(format!("checks[{i}] missing required field 'elapsed_s'")),
                 }
 
@@ -147,7 +161,10 @@ fn manifest_schema_valid_pass() {
     .expect("valid JSON");
 
     let errors = validate_manifest(&manifest);
-    assert!(errors.is_empty(), "unexpected validation errors: {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "unexpected validation errors: {errors:?}"
+    );
 }
 
 #[test]
@@ -174,7 +191,10 @@ fn manifest_schema_valid_fail() {
     .expect("valid JSON");
 
     let errors = validate_manifest(&manifest);
-    assert!(errors.is_empty(), "unexpected validation errors: {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "unexpected validation errors: {errors:?}"
+    );
 }
 
 #[test]
@@ -193,7 +213,10 @@ fn manifest_rejects_missing_fields() {
     .expect("valid JSON");
 
     let errors = validate_manifest(&manifest);
-    assert!(!errors.is_empty(), "should have validation errors for missing fields");
+    assert!(
+        !errors.is_empty(),
+        "should have validation errors for missing fields"
+    );
     assert!(errors.iter().any(|e| e.contains("bead")));
     assert!(errors.iter().any(|e| e.contains("started_at")));
     assert!(errors.iter().any(|e| e.contains("git_sha")));
@@ -220,7 +243,10 @@ fn manifest_rejects_bad_arithmetic() {
     .expect("valid JSON");
 
     let errors = validate_manifest(&manifest);
-    assert!(errors.iter().any(|e| e.contains("total")), "should detect arithmetic mismatch: {:?}", errors);
+    assert!(
+        errors.iter().any(|e| e.contains("total")),
+        "should detect arithmetic mismatch: {errors:?}"
+    );
 }
 
 #[test]
@@ -246,7 +272,10 @@ fn manifest_rejects_invalid_status() {
     .expect("valid JSON");
 
     let errors = validate_manifest(&manifest);
-    assert!(errors.iter().any(|e| e.contains("'status' must be")), "should reject invalid status values: {:?}", errors);
+    assert!(
+        errors.iter().any(|e| e.contains("'status' must be")),
+        "should reject invalid status values: {errors:?}"
+    );
 }
 
 #[test]
@@ -270,7 +299,10 @@ fn manifest_rejects_bad_version() {
     .expect("valid JSON");
 
     let errors = validate_manifest(&manifest);
-    assert!(errors.iter().any(|e| e.contains("semver")), "should reject non-semver version: {:?}", errors);
+    assert!(
+        errors.iter().any(|e| e.contains("semver")),
+        "should reject non-semver version: {errors:?}"
+    );
 }
 
 /// Validate TLA+ model check result format.
@@ -278,7 +310,10 @@ fn manifest_rejects_bad_version() {
 fn tla_result_schema_valid() {
     let result_path = std::path::Path::new("formal/tla/output/result.json");
     if !result_path.exists() {
-        eprintln!("TLA+ result not found at {}, skipping", result_path.display());
+        eprintln!(
+            "TLA+ result not found at {}, skipping",
+            result_path.display()
+        );
         return;
     }
 
@@ -289,7 +324,10 @@ fn tla_result_schema_valid() {
     assert!(result.get("status").is_some(), "missing 'status'");
     assert!(result.get("spec").is_some(), "missing 'spec'");
     assert!(result.get("bead").is_some(), "missing 'bead'");
-    assert!(result.get("invariants_checked").is_some(), "missing 'invariants_checked'");
+    assert!(
+        result.get("invariants_checked").is_some(),
+        "missing 'invariants_checked'"
+    );
 
     let status = result["status"].as_str().unwrap();
     assert!(
@@ -298,7 +336,10 @@ fn tla_result_schema_valid() {
     );
 
     if status == "pass" {
-        assert!(result.get("violations").is_some(), "pass result should have 'violations'");
+        assert!(
+            result.get("violations").is_some(),
+            "pass result should have 'violations'"
+        );
         let violations = result["violations"].as_u64().unwrap();
         assert_eq!(violations, 0, "pass result should have 0 violations");
     }

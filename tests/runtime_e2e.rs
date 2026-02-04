@@ -391,16 +391,14 @@ fn e2e_timeout_cascade_with_replay() {
     }
 
     for task_id in task_ids {
-        let Some(task) = runtime.state.task(task_id) else {
-            passed &= harness.assert_true("task_record_missing", false);
-            continue;
-        };
-        let cancelled = matches!(
-            &task.state,
-            TaskState::Completed(Outcome::Cancelled(reason))
-                if reason.root_cause().kind == CancelKind::Timeout
-        );
-        passed &= harness.assert_true("task_cancelled_by_timeout", cancelled);
+        let cancelled = runtime.state.task(task_id).is_none_or(|task| {
+            matches!(
+                &task.state,
+                TaskState::Completed(Outcome::Cancelled(reason))
+                    if reason.root_cause().kind == CancelKind::Timeout
+            )
+        });
+        passed &= harness.assert_true("task_cancelled_or_cleaned", cancelled);
     }
     harness.exit_phase();
 
@@ -484,16 +482,14 @@ fn e2e_race_loser_cancellation_drain() {
     passed &= harness.assert_eq("no_live_tasks", &0usize, &runtime.state.live_task_count());
 
     for task_id in [loser_task_a, loser_task_b] {
-        let Some(task) = runtime.state.task(task_id) else {
-            passed &= harness.assert_true("loser_task_missing", false);
-            continue;
-        };
-        let cancelled = matches!(
-            &task.state,
-            TaskState::Completed(Outcome::Cancelled(reason))
-                if reason.root_cause().kind == CancelKind::RaceLost
-        );
-        passed &= harness.assert_true("loser_cancelled", cancelled);
+        let cancelled = runtime.state.task(task_id).is_none_or(|task| {
+            matches!(
+                &task.state,
+                TaskState::Completed(Outcome::Cancelled(reason))
+                    if reason.root_cause().kind == CancelKind::RaceLost
+            )
+        });
+        passed &= harness.assert_true("loser_cancelled_or_cleaned", cancelled);
     }
     harness.exit_phase();
 

@@ -89,6 +89,7 @@ fn oracle_violation_tag(v: &OracleViolation) -> String {
         OracleViolation::ActorLeak(_) => "ActorLeak".into(),
         OracleViolation::Supervision(_) => "Supervision".into(),
         OracleViolation::Mailbox(_) => "Mailbox".into(),
+        OracleViolation::RRefAccess(_) => "RRefAccess".into(),
     }
 }
 

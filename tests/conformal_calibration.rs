@@ -9,7 +9,7 @@ use common::*;
 
 use asupersync::lab::conformal::{CalibrationReport, ConformalCalibrator, ConformalConfig};
 use asupersync::lab::oracle::OracleSuite;
-use asupersync::lab::{LabConfig, LabRuntime, OracleReport};
+use asupersync::lab::{LabConfig, LabRuntime, OracleReport, ALL_ORACLE_INVARIANTS};
 use asupersync::types::{Budget, Time};
 
 const SEED_BASE: u64 = 0xCAFE_1234;
@@ -444,14 +444,14 @@ fn e2e_conformal_prediction_set_properties() {
 }
 
 #[test]
-fn e2e_conformal_12_invariants_covered() {
+fn e2e_conformal_13_invariants_covered() {
     init_test_logging();
-    test_phase!("e2e_conformal_12_invariants_covered");
+    test_phase!("e2e_conformal_13_invariants_covered");
 
     let config = ConformalConfig::new(0.05).min_samples(5);
     let mut cal = ConformalCalibrator::new(config);
 
-    // Oracle reports from OracleSuite have 12 invariants.
+    // Oracle reports from OracleSuite include all registered invariants.
     for i in 0..10 {
         cal.calibrate(&clean_oracle_report(i * 1000));
     }
@@ -460,11 +460,11 @@ fn e2e_conformal_12_invariants_covered() {
         .predict(&clean_oracle_report(99_000))
         .expect("calibrated");
 
-    // Should have prediction sets for all 12 invariants.
+    // Should have prediction sets for all oracle invariants.
     assert_eq!(
         report.prediction_sets.len(),
-        12,
-        "should cover all 12 oracle invariants"
+        ALL_ORACLE_INVARIANTS.len(),
+        "should cover all oracle invariants"
     );
 
     let invariant_names: Vec<&str> = report
@@ -479,5 +479,5 @@ fn e2e_conformal_12_invariants_covered() {
     assert!(invariant_names.contains(&"quiescence"));
     assert!(invariant_names.contains(&"cancellation_protocol"));
 
-    test_complete!("e2e_conformal_12_invariants_covered");
+    test_complete!("e2e_conformal_13_invariants_covered");
 }

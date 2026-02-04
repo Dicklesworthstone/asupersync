@@ -194,29 +194,29 @@ fn timeout_cascade_5_levels() {
     init_test("timeout_cascade_5_levels");
 
     let mut oracle = CancellationProtocolOracle::new();
-    let regions: Vec<RegionId> = (0..5).map(|i| region(i)).collect();
+    let regions: Vec<RegionId> = (0..5).map(region).collect();
     oracle.on_region_create(regions[0], None);
-    for i in 1..5 {
-        oracle.on_region_create(regions[i], Some(regions[i - 1]));
+    for window in regions.windows(2) {
+        oracle.on_region_create(window[1], Some(window[0]));
     }
 
-    let tasks: Vec<TaskId> = (0..5).map(|i| task(i)).collect();
-    for i in 0..5 {
-        oracle.on_task_create(tasks[i], regions[i]);
-        oracle.on_transition(tasks[i], &TaskState::Created, &TaskState::Running, t(5));
+    let tasks: Vec<TaskId> = (0..5).map(task).collect();
+    for (&task_id, &region_id) in tasks.iter().zip(regions.iter()) {
+        oracle.on_task_create(task_id, region_id);
+        oracle.on_transition(task_id, &TaskState::Created, &TaskState::Running, t(5));
     }
 
     // Propagate region cancel to all regions (root = Timeout, children = ParentCancelled)
     oracle.on_region_cancel(regions[0], CancelReason::timeout(), t(100));
-    for i in 1..5 {
+    for &region_id in regions.iter().skip(1) {
         oracle.on_region_cancel(
-            regions[i],
+            region_id,
             CancelReason::new(CancelKind::ParentCancelled),
             t(100),
         );
     }
 
-    for i in 0..5 {
+    for (i, &task_id) in tasks.iter().enumerate() {
         // Root task cancelled for Timeout, descendants for ParentCancelled
         let reason = if i == 0 {
             CancelReason::timeout()
@@ -224,11 +224,11 @@ fn timeout_cascade_5_levels() {
             CancelReason::new(CancelKind::ParentCancelled)
         };
         let req_time = 110 + (i as u64) * 10;
-        run_cancel_sequence(&mut oracle, tasks[i], reason, req_time, req_time + 8);
+        run_cancel_sequence(&mut oracle, task_id, reason, req_time, req_time + 8);
     }
 
-    for i in (0..5).rev() {
-        oracle.on_region_close(regions[i], t(300 + (4 - i as u64) * 10));
+    for (offset, &region_id) in regions.iter().rev().enumerate() {
+        oracle.on_region_close(region_id, t(300 + (offset as u64) * 10));
     }
 
     let result = oracle.check();
@@ -476,12 +476,9 @@ fn cancel_chain_attribution() {
     init_test("cancel_chain_attribution");
 
     let root_reason = CancelReason::new(CancelKind::User);
-    let child1_reason =
-        CancelReason::new(CancelKind::ParentCancelled).with_cause(root_reason.clone());
-    let child2_reason =
-        CancelReason::new(CancelKind::ParentCancelled).with_cause(child1_reason.clone());
-    let child3_reason =
-        CancelReason::new(CancelKind::ParentCancelled).with_cause(child2_reason.clone());
+    let child1_reason = CancelReason::new(CancelKind::ParentCancelled).with_cause(root_reason);
+    let child2_reason = CancelReason::new(CancelKind::ParentCancelled).with_cause(child1_reason);
+    let child3_reason = CancelReason::new(CancelKind::ParentCancelled).with_cause(child2_reason);
 
     let mut depth = 0u32;
     let mut current = Some(&child3_reason);
@@ -564,7 +561,7 @@ fn deterministic_cancel_replay() {
 
         let mut order: Vec<u32> = (0..n_tasks).collect();
         for i in 0..n_tasks as usize {
-            let j = ((seed.wrapping_mul(i as u64 + 1)) % n_tasks as u64) as usize;
+            let j = ((seed.wrapping_mul(i as u64 + 1)) % u64::from(n_tasks)) as usize;
             order.swap(i, j);
         }
 

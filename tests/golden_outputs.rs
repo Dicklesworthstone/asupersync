@@ -65,6 +65,7 @@ fn oracle_violation_tag(violation: &OracleViolation) -> &'static str {
         OracleViolation::ActorLeak(_) => "ActorLeak",
         OracleViolation::Supervision(_) => "Supervision",
         OracleViolation::Mailbox(_) => "Mailbox",
+        OracleViolation::RRefAccess(_) => "RRefAccess",
     }
 }
 
