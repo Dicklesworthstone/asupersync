@@ -767,6 +767,119 @@ theorem close_implies_finalizers_empty {Value Error Panic : Type}
   exact ⟨region, hRegion, hQ.2.2.2⟩
 
 -- ==========================================================================
+-- Safety Lemma 5c: Close ⇒ Full Quiescence Decomposition (bd-sbi6e)
+-- Proves: close(region) ⇒ quiescence(all descendants) + no live
+-- obligations + finalizers complete.
+--
+-- Cross-reference to runtime code paths:
+--   Region close state machine: src/record/region.rs:659-720
+--     begin_close()     → Open → Closing
+--     begin_drain()     → Closing → Draining
+--     begin_finalize()  → Closing|Draining → Finalizing
+--     complete_close()  → Finalizing → Closed
+--   Quiescence check:   src/runtime/state.rs:1945-1980
+--     can_region_complete_close() verifies:
+--       state == Finalizing, finalizers empty, all tasks terminal,
+--       pending_obligations() == 0
+--   Obligation drain:   src/record/region.rs:502-532
+--     try_reserve_obligation() / resolve_obligation()
+-- ==========================================================================
+
+/-- Helper: listAll preserves membership — if all elements satisfy p
+    and x is in the list, then p x holds. -/
+theorem listAll_mem {α : Type} {p : α → Prop} {xs : List α} {x : α}
+    (hAll : listAll p xs) (hMem : x ∈ xs)
+    : p x := by
+  induction xs with
+  | nil => exact absurd hMem (List.not_mem_nil x)
+  | cons y ys ih =>
+    cases hMem with
+    | head => exact hAll.1
+    | tail _ hTail => exact ih hAll.2 hTail
+
+/-- Quiescent implies all children tasks are completed. -/
+theorem quiescent_tasks_completed {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : Region Value Error Panic}
+    (hQ : Quiescent s r)
+    : allTasksCompleted s r.children :=
+  hQ.1
+
+/-- Quiescent implies all subregions are closed. -/
+theorem quiescent_subregions_closed {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : Region Value Error Panic}
+    (hQ : Quiescent s r)
+    : allRegionsClosed s r.subregions :=
+  hQ.2.1
+
+/-- Quiescent implies obligation ledger is empty (no live obligations). -/
+theorem quiescent_no_obligations {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : Region Value Error Panic}
+    (hQ : Quiescent s r)
+    : r.ledger = [] :=
+  hQ.2.2.1
+
+/-- Quiescent implies no pending finalizers. -/
+theorem quiescent_no_finalizers {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : Region Value Error Panic}
+    (hQ : Quiescent s r)
+    : r.finalizers = [] :=
+  hQ.2.2.2
+
+/-- Close produces a full quiescence decomposition: all four properties hold.
+    Master theorem combining all quiescence properties at close time. -/
+theorem close_quiescence_decomposition {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        allTasksCompleted s region.children ∧
+        allRegionsClosed s region.subregions ∧
+        region.ledger = [] ∧
+        region.finalizers = [] := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  exact ⟨region, hRegion, hQ.1, hQ.2.1, hQ.2.2.1, hQ.2.2.2⟩
+
+/-- In a well-formed state, closing a region ensures every child task
+    referenced by that region exists and is in a completed state.
+    Combines WellFormed.children_exist with quiescence. -/
+theorem close_children_exist_completed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        ∀ t, t ∈ region.children →
+          ∃ task, getTask s t = some task ∧ taskCompleted task := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  refine ⟨region, hRegion, fun t hMem => ?_⟩
+  obtain ⟨task, hTask⟩ := hWF.children_exist r region hRegion t hMem
+  have hPred : (match getTask s t with
+    | some task => taskCompleted task
+    | none => False) := listAll_mem hQ.1 hMem
+  rw [hTask] at hPred
+  exact ⟨task, hTask, hPred⟩
+
+/-- In a well-formed state, closing a region ensures every subregion
+    referenced by that region exists and has a closed state.
+    Combines WellFormed.subregions_exist with quiescence. -/
+theorem close_subregions_exist_closed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        ∀ r', r' ∈ region.subregions →
+          ∃ sub, getRegion s r' = some sub ∧ regionClosed sub := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  refine ⟨region, hRegion, fun r' hMem => ?_⟩
+  obtain ⟨sub, hSub⟩ := hWF.subregions_exist r region hRegion r' hMem
+  have hPred : (match getRegion s r' with
+    | some region => regionClosed region
+    | none => False) := listAll_mem hQ.2.1 hMem
+  rw [hSub] at hPred
+  exact ⟨sub, hSub, hPred⟩
+
+-- ==========================================================================
 -- Safety Lemma 6: Completed tasks are not runnable
 -- ==========================================================================
 
