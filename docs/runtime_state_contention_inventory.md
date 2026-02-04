@@ -103,6 +103,123 @@
 
 This ensures task_completed acquires: A (task removal) -> C (orphan scan) -> B (region update) -> D (trace emit), following the ordering convention.
 
+## Canonical Lock Order (bd-20way)
+
+### Global Lock Order
+
+When multiple shard locks must be held simultaneously, acquire in this
+fixed order to prevent deadlocks:
+
+```
+E (Config) → D (Instrumentation) → B (Regions) → A (Tasks) → C (Obligations)
+```
+
+**Mnemonic:** **E**very **D**ay **B**rings **A**nother **C**hallenge.
+
+### Rationale
+
+1. **E (Config)** first — read-only after init, so locks are brief or zero-cost
+   (`Arc<RuntimeConfig>` needs no lock). Listed first because it's accessed
+   earliest in task creation (building Cx).
+
+2. **D (Instrumentation)** second — trace/metrics are append-only and may
+   become lock-free. When locked, hold briefly for event emission.
+
+3. **B (Regions)** before A/C — region operations (create, close, advance_state)
+   gate task and obligation operations (admission checks). Region state
+   determines whether a task can be created or an obligation resolved.
+
+4. **A (Tasks)** before C — task completion triggers orphan obligation abort.
+   The natural flow is: complete task (A) → scan+abort obligations (C).
+
+5. **C (Obligations)** last — obligation commit/abort triggers
+   `advance_region_state(B)`, but B is already held. If B were after C,
+   this would deadlock.
+
+### Lock Combination Rules
+
+| Operation | Locks Needed | Acquisition Order |
+|-----------|-------------|-------------------|
+| **poll (execute)** | A | A only |
+| **push/pop/steal** | A | A only |
+| **inject_cancel/ready/timed** | (none with QW#4) or A | A only |
+| **spawn/wake** | (none with QW#4) or A | A only |
+| **task_completed** | D → B → A → C | Full order |
+| **cancel_request** | D → B → A | Skip C |
+| **create_task** | E → D → B → A | Skip C |
+| **create_obligation** | D → B → C | Skip A (unless logical time from task) |
+| **commit/abort_obligation** | D → B → C | Skip A |
+| **advance_region_state** | D → B → A → C | Full order (recursive) |
+| **drain_ready_async_finalizers** | D → B → A | Skip C |
+| **snapshot / is_quiescent** | Read-lock all: D → B → A → C | All shards, read-only |
+| **Lyapunov snapshot** | Read-lock all: D → B → A → C | All shards, read-only |
+
+### Disallowed Lock Sequences (deadlock risk)
+
+These sequences MUST NOT occur:
+
+- **A → B** — Tasks before Regions (violates B → A order)
+- **C → A** — Obligations before Tasks (violates A → C order)
+- **C → B** — Obligations before Regions (violates B → C order; would deadlock
+  commit_obligation → advance_region_state)
+- **A → D** — Tasks before Instrumentation (violates D → A order)
+
+### Guard Helpers (proposed API)
+
+```rust
+/// Multi-shard lock guard that enforces canonical ordering at the type level.
+/// Fields are Option<MutexGuard> acquired in order during construction.
+pub struct ShardGuard<'a> {
+    config: &'a Arc<RuntimeConfig>,        // E: no lock needed
+    instrumentation: Option<InstrGuard>,   // D: trace + metrics
+    regions: Option<MutexGuard<'a, RegionShard>>,     // B
+    tasks: Option<MutexGuard<'a, TaskShard>>,         // A
+    obligations: Option<MutexGuard<'a, ObligationShard>>, // C
+}
+
+impl<'a> ShardGuard<'a> {
+    /// Lock only the task shard (hot path).
+    pub fn tasks_only(shards: &'a ShardedState) -> Self { ... }
+
+    /// Lock for task_completed: D → B → A → C.
+    pub fn for_task_completed(shards: &'a ShardedState) -> Self { ... }
+
+    /// Lock for cancel_request: D → B → A.
+    pub fn for_cancel(shards: &'a ShardedState) -> Self { ... }
+
+    /// Lock for obligation lifecycle: D → B → C.
+    pub fn for_obligation(shards: &'a ShardedState) -> Self { ... }
+}
+```
+
+### Extending the Order for New Shards
+
+When adding a new shard:
+
+1. Determine which existing shards it interacts with.
+2. Place it in the ordering such that:
+   - It comes BEFORE any shard it gates/controls.
+   - It comes AFTER any shard that triggers operations on it.
+3. Update the `ShardGuard` struct and all `for_*` constructors.
+4. Add a test that attempts the disallowed reverse order and deadlocks
+   (use a timeout-based deadlock detector in tests).
+
+### Deadlock Detection in Tests
+
+```rust
+#[cfg(test)]
+mod lock_order_tests {
+    /// Verify that the documented lock order prevents deadlocks
+    /// by attempting concurrent cross-order acquisitions with timeout.
+    #[test]
+    fn canonical_order_no_deadlock() {
+        // Spawn threads that acquire locks in canonical order.
+        // All should complete within timeout. If any deadlocks,
+        // the test fails via timeout.
+    }
+}
+```
+
 ## Expected Contention Reduction
 
 | Scenario | Current | After Sharding |
