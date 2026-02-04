@@ -29,6 +29,7 @@
 //! - Panic while holding: Guard dropped via unwind (unwind safety)
 
 mod barrier;
+mod contended_mutex;
 mod mutex;
 mod notify;
 mod once_cell;
@@ -37,6 +38,7 @@ mod rwlock;
 mod semaphore;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
+pub use contended_mutex::{ContendedMutex, ContendedMutexGuard, LockMetricsSnapshot};
 pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
 pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, OnceCellError};

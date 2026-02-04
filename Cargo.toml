@@ -30,6 +30,9 @@ trace-compression = ["dep:lz4_flex"]
 debug-server = []
 # Enable TOML config file loading for RuntimeBuilder.
 config-file = ["dep:toml"]
+# Enable lock contention metrics for ContendedMutex (wait/hold time tracking).
+# Zero cost when disabled. Used for sharding before/after comparison.
+lock-metrics = []
 # Enable io_uring reactor for Linux modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls
