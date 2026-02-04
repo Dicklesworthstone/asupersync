@@ -52,10 +52,12 @@ struct AllocSnapshot {
     bytes: u64,
 }
 
+#[allow(dead_code)]
 struct AllocCountingGuard {
     prev: bool,
 }
 
+#[allow(dead_code)]
 impl AllocCountingGuard {
     fn enable() -> Self {
         let prev = ALLOC_COUNTING_ENABLED.swap(true, Ordering::SeqCst);
@@ -86,6 +88,7 @@ impl AllocSnapshot {
     }
 }
 
+#[allow(dead_code)]
 fn measure_allocs<F: FnOnce()>(f: F) -> (u64, u64) {
     let _guard = AllocCountingGuard::enable();
     let before = AllocSnapshot::take();
