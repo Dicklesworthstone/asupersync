@@ -1,7 +1,7 @@
 //! Built-in meta-mutations for testing the oracle suite.
 
 use crate::actor::ActorId;
-use crate::lab::oracle::{CapabilityKind, OracleViolation};
+use crate::lab::oracle::{CapabilityKind, OracleViolation, RRefId};
 use crate::record::ObligationKind;
 use crate::supervision::{EscalationPolicy, RestartPolicy};
 use crate::types::{Budget, CancelReason, TaskId};
@@ -33,6 +33,8 @@ pub const INVARIANT_ACTOR_LEAK: &str = "actor_leak";
 pub const INVARIANT_SUPERVISION: &str = "supervision";
 /// Invariant name for the mailbox oracle.
 pub const INVARIANT_MAILBOX: &str = "mailbox";
+/// Invariant name for the RRef access oracle.
+pub const INVARIANT_RREF_ACCESS: &str = "rref_access";
 
 /// Ordered list of all oracle invariants covered by the meta runner.
 pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
@@ -48,6 +50,7 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_ACTOR_LEAK,
     INVARIANT_SUPERVISION,
     INVARIANT_MAILBOX,
+    INVARIANT_RREF_ACCESS,
 ];
 
 /// Built-in mutations used to validate oracle detection.
@@ -77,6 +80,8 @@ pub enum BuiltinMutation {
     SupervisionRestartLimitExceeded,
     /// Mailbox capacity exceeded.
     MailboxCapacityExceeded,
+    /// Task accesses RRef from a different region.
+    CrossRegionRRefAccess,
 }
 
 /// Returns all built-in mutations in a stable order.
@@ -95,6 +100,7 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
         BuiltinMutation::ActorLeak,
         BuiltinMutation::SupervisionRestartLimitExceeded,
         BuiltinMutation::MailboxCapacityExceeded,
+        BuiltinMutation::CrossRegionRRefAccess,
     ]
 }
 
@@ -117,6 +123,7 @@ impl BuiltinMutation {
             Self::ActorLeak => "mutation_actor_leak",
             Self::SupervisionRestartLimitExceeded => "mutation_supervision_restart_limit",
             Self::MailboxCapacityExceeded => "mutation_mailbox_capacity_exceeded",
+            Self::CrossRegionRRefAccess => "mutation_cross_region_rref_access",
         }
     }
 
@@ -136,6 +143,7 @@ impl BuiltinMutation {
             Self::ActorLeak => INVARIANT_ACTOR_LEAK,
             Self::SupervisionRestartLimitExceeded => INVARIANT_SUPERVISION,
             Self::MailboxCapacityExceeded => INVARIANT_MAILBOX,
+            Self::CrossRegionRRefAccess => INVARIANT_RREF_ACCESS,
         }
     }
 
@@ -153,6 +161,7 @@ impl BuiltinMutation {
             Self::ActorLeak => baseline_actor_leak(harness),
             Self::SupervisionRestartLimitExceeded => baseline_supervision_restart(harness),
             Self::MailboxCapacityExceeded => baseline_mailbox_capacity(harness),
+            Self::CrossRegionRRefAccess => baseline_rref_access(harness),
         }
     }
 
@@ -170,6 +179,7 @@ impl BuiltinMutation {
             Self::ActorLeak => mutation_actor_leak(harness),
             Self::SupervisionRestartLimitExceeded => mutation_supervision_restart(harness),
             Self::MailboxCapacityExceeded => mutation_mailbox_capacity(harness),
+            Self::CrossRegionRRefAccess => mutation_rref_access(harness),
         }
     }
 }
@@ -522,6 +532,37 @@ fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
     harness.oracles.mailbox.on_send(actor(300), now);
 }
 
+fn baseline_rref_access(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let task = harness.next_task();
+    let rref = RRefId {
+        owner_region: region,
+        alloc_index: 0,
+    };
+    harness.oracles.rref_access.on_rref_create(rref, region);
+    harness.oracles.rref_access.on_task_spawn(task, region);
+    // Same-region access: no violation.
+    harness.oracles.rref_access.on_rref_access(rref, task, now);
+    harness.oracles.rref_access.on_region_close(region, now);
+}
+
+fn mutation_rref_access(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region_a = harness.next_region();
+    let region_b = harness.next_region();
+    let task = harness.next_task();
+    let rref = RRefId {
+        owner_region: region_a,
+        alloc_index: 0,
+    };
+    harness.oracles.rref_access.on_rref_create(rref, region_a);
+    // Task belongs to region B.
+    harness.oracles.rref_access.on_task_spawn(task, region_b);
+    // Cross-region access: violation.
+    harness.oracles.rref_access.on_rref_access(rref, task, now);
+}
+
 /// Maps an oracle violation to its invariant name.
 #[must_use]
 pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
@@ -538,6 +579,7 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,
         OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
         OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
+        OracleViolation::RRefAccess(_) => INVARIANT_RREF_ACCESS,
     }
 }
 
@@ -548,7 +590,7 @@ mod tests {
 
     #[test]
     fn all_oracle_invariants_count() {
-        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 12);
+        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 13);
     }
 
     #[test]
@@ -559,7 +601,7 @@ mod tests {
 
     #[test]
     fn builtin_mutations_count() {
-        assert_eq!(builtin_mutations().len(), 12);
+        assert_eq!(builtin_mutations().len(), 13);
     }
 
     #[test]
@@ -622,6 +664,10 @@ mod tests {
             BuiltinMutation::MailboxCapacityExceeded.name(),
             "mutation_mailbox_capacity_exceeded"
         );
+        assert_eq!(
+            BuiltinMutation::CrossRegionRRefAccess.name(),
+            "mutation_cross_region_rref_access"
+        );
     }
 
     #[test]
@@ -664,6 +710,10 @@ mod tests {
         assert_eq!(
             BuiltinMutation::MailboxCapacityExceeded.invariant(),
             INVARIANT_MAILBOX
+        );
+        assert_eq!(
+            BuiltinMutation::CrossRegionRRefAccess.invariant(),
+            INVARIANT_RREF_ACCESS
         );
     }
 
