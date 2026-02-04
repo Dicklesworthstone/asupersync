@@ -66,6 +66,52 @@ pub enum TaskPhase {
     Completed = 5,
 }
 
+impl TaskPhase {
+    /// Returns whether transitioning from `self` to `next` is a legal
+    /// state machine transition.
+    ///
+    /// The formal transition table for task phases:
+    ///
+    /// ```text
+    /// ┌─────────────────┬────────────────────────────────────────────────┐
+    /// │ From             │ Valid targets                                  │
+    /// ├─────────────────┼────────────────────────────────────────────────┤
+    /// │ Created          │ Running, CancelRequested, Completed            │
+    /// │ Running          │ CancelRequested, Completed                     │
+    /// │ CancelRequested  │ CancelRequested (strengthen), Cancelling,      │
+    /// │                  │ Completed                                      │
+    /// │ Cancelling       │ Finalizing, Completed                          │
+    /// │ Finalizing       │ Completed                                      │
+    /// │ Completed        │ (terminal — no transitions)                    │
+    /// └─────────────────┴────────────────────────────────────────────────┘
+    /// ```
+    ///
+    /// Notes:
+    /// - `CancelRequested → CancelRequested` is valid (reason strengthening).
+    /// - `Created → Completed` allows error/panic during spawn before running.
+    /// - `CancelRequested → Completed` allows error/panic before cancel ack.
+    /// - `Cancelling → Completed` and `Finalizing → Completed` allow for
+    ///   err/panic during cleanup/finalization.
+    /// - `Running → Completed` allows normal completion (Ok/Err/Panic).
+    /// - `Completed` is terminal; no further transitions are valid.
+    #[must_use]
+    pub const fn is_valid_transition(self, next: Self) -> bool {
+        matches!(
+            (self as u8, next as u8),
+            // Created → Running | CancelRequested | Completed (err/panic at spawn)
+            (0, 1 | 2 | 5)
+            // Running → CancelRequested | Completed
+            | (1, 2 | 5)
+            // CancelRequested → CancelRequested (strengthen) | Cancelling | Completed (err/panic before ack)
+            | (2, 2 | 3 | 5)
+            // Cancelling → Finalizing | Completed (err/panic during cleanup)
+            | (3, 4 | 5)
+            // Finalizing → Completed
+            | (4, 5)
+        )
+    }
+}
+
 /// Atomic task phase cell for cross-thread state checks.
 #[derive(Debug)]
 pub struct TaskPhaseCell {
@@ -98,8 +144,19 @@ impl TaskPhaseCell {
         }
     }
 
-    /// Stores the new phase.
+    /// Stores the new phase, validating the transition in debug builds.
+    ///
+    /// In debug mode, this asserts that the transition from the current phase
+    /// to the new phase is valid according to the cancellation state machine.
     pub fn store(&self, phase: TaskPhase) {
+        #[cfg(debug_assertions)]
+        {
+            let current = self.load();
+            debug_assert!(
+                current.is_valid_transition(phase),
+                "invalid TaskPhase transition: {current:?} -> {phase:?}"
+            );
+        }
         self.inner.store(phase as u8, Ordering::Release);
     }
 }
@@ -1390,5 +1447,120 @@ mod tests {
             requested_state
         );
         crate::test_complete!("request_cancel_updates_shared_cx");
+    }
+
+    // =================================================================
+    // TaskPhase transition table validation (bd-2qqyi)
+    // =================================================================
+
+    use TaskPhase::*;
+
+    #[test]
+    fn valid_transitions_accepted() {
+        init_test("valid_transitions_accepted");
+        let valid = [
+            (Created, Running),
+            (Created, CancelRequested),
+            (Created, Completed), // err/panic at spawn
+            (Running, CancelRequested),
+            (Running, Completed),
+            (CancelRequested, CancelRequested), // strengthen
+            (CancelRequested, Cancelling),
+            (CancelRequested, Completed), // err/panic before ack
+            (Cancelling, Finalizing),
+            (Cancelling, Completed), // err/panic during cleanup
+            (Finalizing, Completed),
+        ];
+
+        for (from, to) in valid {
+            crate::assert_with_log!(
+                from.is_valid_transition(to),
+                "transition should be valid",
+                true,
+                (from, to)
+            );
+        }
+        crate::test_complete!("valid_transitions_accepted");
+    }
+
+    #[test]
+    fn invalid_transitions_rejected() {
+        init_test("invalid_transitions_rejected");
+        let invalid = [
+            // Backwards transitions
+            (Running, Created),
+            (CancelRequested, Running),
+            (CancelRequested, Created),
+            (Cancelling, CancelRequested),
+            (Cancelling, Running),
+            (Cancelling, Created),
+            (Finalizing, Cancelling),
+            (Finalizing, CancelRequested),
+            (Finalizing, Running),
+            (Finalizing, Created),
+            // Skipped states
+            (Created, Cancelling),
+            (Created, Finalizing),
+            (Running, Cancelling),
+            (Running, Finalizing),
+            (CancelRequested, Finalizing),
+            // Terminal: no transitions out
+            (Completed, Created),
+            (Completed, Running),
+            (Completed, CancelRequested),
+            (Completed, Cancelling),
+            (Completed, Finalizing),
+            (Completed, Completed),
+        ];
+
+        for (from, to) in invalid {
+            crate::assert_with_log!(
+                !from.is_valid_transition(to),
+                "transition should be invalid",
+                false,
+                (from, to)
+            );
+        }
+        crate::test_complete!("invalid_transitions_rejected");
+    }
+
+    #[test]
+    fn transition_table_is_exhaustive() {
+        init_test("transition_table_is_exhaustive");
+        let phases = [
+            Created,
+            Running,
+            CancelRequested,
+            Cancelling,
+            Finalizing,
+            Completed,
+        ];
+
+        // Every (from, to) pair should be either valid or invalid — never panic
+        let mut valid_count = 0;
+        let mut invalid_count = 0;
+        for from in phases {
+            for to in phases {
+                if from.is_valid_transition(to) {
+                    valid_count += 1;
+                } else {
+                    invalid_count += 1;
+                }
+            }
+        }
+        // 6x6 = 36 total pairs; 11 valid (see valid_transitions_accepted)
+        crate::assert_with_log!(
+            valid_count == 11,
+            "valid transitions count",
+            11,
+            valid_count
+        );
+        crate::assert_with_log!(
+            invalid_count == 25,
+            "invalid transitions count",
+            25,
+            invalid_count
+        );
+        crate::test_complete!("transition_table_is_exhaustive");
     }
 }
