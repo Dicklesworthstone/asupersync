@@ -2,7 +2,7 @@
 //! Oracle E2E regression suite with evidence logs.
 //!
 //! This suite provides:
-//! - Full meta-mutation regression across all 12 invariants
+//! - Full meta-mutation regression across all invariants
 //! - Evidence ledger integration for galaxy-brain diagnostics
 //! - E-process anytime-valid monitoring regression
 //! - Deterministic reproduction via fixed seeds
@@ -84,11 +84,11 @@ fn regression_meta_all_12_mutations_detected() {
 
     let report = run_meta_suite(REGRESSION_SEED);
 
-    // All 12 mutations must succeed: clean baseline + detected mutation.
+    // All mutations must succeed: clean baseline + detected mutation.
     assert_eq!(
         report.results().len(),
-        12,
-        "must run all 12 built-in mutations"
+        builtin_mutations().len(),
+        "must run all built-in mutations"
     );
 
     for result in report.results() {
@@ -141,7 +141,7 @@ fn regression_meta_coverage_all_invariants() {
         "all invariants must be covered; missing: {missing:?}"
     );
 
-    // Verify 11 of 12 invariant names are covered (excluding ambient_authority).
+    // Verify all invariant names are covered (excluding ambient_authority).
     let covered: std::collections::HashSet<&str> = coverage
         .entries()
         .iter()
@@ -187,7 +187,11 @@ fn regression_meta_text_output_stable() {
 
     // Must contain key structural elements (actual format uses lowercase).
     assert!(text.contains("meta report:"), "header present");
-    assert!(text.contains("12 mutations"), "all 12 mutations present");
+    let mutation_count = builtin_mutations().len();
+    assert!(
+        text.contains(&format!("{mutation_count} mutations")),
+        "all mutations present"
+    );
     assert!(text.contains("coverage:"), "coverage section present");
 
     // Text must be deterministic.
@@ -207,8 +211,12 @@ fn regression_evidence_clean_suite() {
     let report = clean_report(1_000_000);
     let ledger = EvidenceLedger::from_report(&report);
 
-    // All 12 entries must exist.
-    assert_eq!(ledger.entries.len(), 12, "12 evidence entries");
+    // All entries must exist.
+    assert_eq!(
+        ledger.entries.len(),
+        ALL_ORACLE_INVARIANTS.len(),
+        "all evidence entries present"
+    );
 
     // All must be "Against" (negative evidence for violation).
     for entry in &ledger.entries {
@@ -227,7 +235,7 @@ fn regression_evidence_clean_suite() {
     }
 
     // Summary must reflect clean state.
-    assert_eq!(ledger.summary.total_invariants, 12);
+    assert_eq!(ledger.summary.total_invariants, ALL_ORACLE_INVARIANTS.len());
     assert_eq!(ledger.summary.violations_detected, 0);
 
     test_complete!("regression_evidence_clean_suite");
@@ -241,8 +249,8 @@ fn regression_evidence_violated_suite() {
     let report = violated_report(1_000_000);
     let ledger = EvidenceLedger::from_report(&report);
 
-    // Must have 12 entries total.
-    assert_eq!(ledger.entries.len(), 12);
+    // Must have entries for all invariants.
+    assert_eq!(ledger.entries.len(), ALL_ORACLE_INVARIANTS.len());
 
     // task_leak entry must show violation.
     let task_leak = ledger
@@ -375,9 +383,13 @@ fn regression_evidence_json_roundtrip() {
         "must have check_time_nanos"
     );
 
-    // Entries must be an array of 12.
+    // Entries must be an array of all invariants.
     let entries = obj["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 12, "12 entries in JSON");
+    assert_eq!(
+        entries.len(),
+        ALL_ORACLE_INVARIANTS.len(),
+        "all entries in JSON"
+    );
 
     test_complete!("regression_evidence_json_roundtrip");
 }
@@ -512,8 +524,8 @@ fn regression_eprocess_all_twelve_invariants() {
 
     assert_eq!(
         results.len(),
-        12,
-        "all_invariants monitor has 12 invariants"
+        ALL_ORACLE_INVARIANTS.len(),
+        "all_invariants monitor has all invariants"
     );
 
     for invariant in ALL_ORACLE_INVARIANTS {
@@ -674,7 +686,7 @@ fn regression_integrated_diagnostic_pipeline() {
     // Step 2: Generate evidence ledger from a clean report.
     let report = clean_report(1_000_000);
     let ledger = EvidenceLedger::from_report(&report);
-    assert_eq!(ledger.entries.len(), 12);
+    assert_eq!(ledger.entries.len(), ALL_ORACLE_INVARIANTS.len());
 
     // Step 3: Run e-process monitor.
     let mut monitor = EProcessMonitor::all_invariants();
@@ -694,7 +706,11 @@ fn regression_integrated_diagnostic_pipeline() {
 
     // Step 5: Verify meta section (ambient_authority is a known undetected mutation).
     let meta_section = &obj["meta"];
-    assert_eq!(meta_section["total"], 12);
+    assert_eq!(
+        meta_section["total"],
+        builtin_mutations().len(),
+        "meta total matches mutation count"
+    );
     // ambient_authority counts as 1 failure in the raw report
     assert!(
         meta_section["failures"].as_u64().unwrap() <= 1,
@@ -922,16 +938,11 @@ fn regression_scenario_region_tree() {
 fn regression_scenario_ambient_authority() {
     init_test_logging();
     test_phase!("regression_scenario_ambient_authority");
-    // Known limitation: ambient_authority detection is incomplete.
-    // Verify the mutation runs without panic, even if not detected.
-    let runner = MetaRunner::new(REGRESSION_SEED);
-    let report = runner.run(std::iter::once(
+    // After fixing CapabilitySet::revoke to clear Full, this is now detected.
+    assert_mutation_detected(
         asupersync::lab::meta::BuiltinMutation::AmbientAuthoritySpawnWithoutCapability,
-    ));
-    assert_eq!(report.results().len(), 1);
-    let result = &report.results()[0];
-    assert!(result.baseline_clean(), "baseline must be clean");
-    // Detection may fail — this is a known limitation, not a regression.
+        "ambient_authority",
+    );
     test_complete!("regression_scenario_ambient_authority");
 }
 

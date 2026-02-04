@@ -785,11 +785,7 @@ mod tests {
 
     #[test]
     fn mutation_produces_expected_violation() {
-        let skip = [BuiltinMutation::AmbientAuthoritySpawnWithoutCapability];
         for m in builtin_mutations() {
-            if skip.contains(&m) {
-                continue;
-            }
             let mut h = MetaHarness::new(42);
             m.apply_mutation(&mut h);
             let v = h.oracles.check_all(h.now());
