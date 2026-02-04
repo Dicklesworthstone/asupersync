@@ -2029,7 +2029,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -2062,7 +2062,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let workers = scheduler.take_workers();
@@ -2119,7 +2119,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -2163,7 +2163,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -2193,7 +2193,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -2241,7 +2241,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -2271,7 +2271,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
         let mut state = RuntimeState::new();
         state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
@@ -3060,7 +3060,7 @@ mod tests {
         let (_task_id, _handle) = state
             .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
             .expect("create task");
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
 
@@ -3103,7 +3103,7 @@ mod tests {
             .create_obligation(ObligationKind::SendPermit, task_id, root, None)
             .expect("create obligation");
         state.now = Time::from_nanos(1_000_000_000); // 1s age
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         // Governor enabled, cancel_streak_limit=2, interval=1.
         let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 2, true, 1);
@@ -3179,7 +3179,7 @@ mod tests {
             .create_obligation(ObligationKind::SendPermit, task_id, root, None)
             .expect("create obligation");
         state.now = Time::from_nanos(2_000_000_000);
-        let state = Arc::new(Mutex::new(state));
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new_with_options(4, &state, 16, true, 1);
         let mut workers = scheduler.take_workers();
