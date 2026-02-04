@@ -984,6 +984,8 @@ impl RuntimeInner {
             config.enable_governor,
             config.governor_interval,
         );
+        scheduler.set_steal_batch_size(config.steal_batch_size);
+        scheduler.set_enable_parking(config.enable_parking);
 
         let mut worker_threads = Vec::new();
         if config.worker_threads > 0 {
