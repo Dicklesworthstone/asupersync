@@ -335,7 +335,9 @@ impl ObligationMarking {
     /// Returns the total pending obligations across all dimensions.
     #[must_use]
     pub fn total_pending(&self) -> u32 {
-        self.counts.values().fold(0u32, |acc, &v| acc.saturating_add(v))
+        self.counts
+            .values()
+            .fold(0u32, |acc, &v| acc.saturating_add(v))
     }
 
     /// Returns the total pending obligations for a specific region.
@@ -345,7 +347,7 @@ impl ObligationMarking {
             .iter()
             .filter(|(DimKey(_, r), _)| *r == region)
             .map(|(_, count)| *count)
-            .fold(0u32, |acc, v| acc.saturating_add(v))
+            .fold(0u32, u32::saturating_add)
     }
 
     /// Returns true if the marking is zero (no pending obligations).

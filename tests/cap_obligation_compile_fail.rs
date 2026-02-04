@@ -16,11 +16,19 @@ mod common;
 use common::*;
 
 use asupersync::cx::cap::{All, CapSet, None as CapNone};
+use asupersync::obligation::graded::TokenKind;
 use asupersync::obligation::graded::{
-    GradedObligation, GradedScope, ObligationToken, Resolution, SendPermit, AckKind, LeaseKind,
-    IoOpKind, SendPermitToken, AckToken, LeaseToken, IoOpToken,
+    AckKind, AckToken, GradedObligation, GradedScope, IoOpKind, IoOpToken, LeaseKind, LeaseToken,
+    ObligationToken, Resolution, SendPermit, SendPermitToken,
 };
 use asupersync::record::ObligationKind;
+
+fn assert_subset<Sub: asupersync::cx::cap::SubsetOf<Super>, Super>() {}
+
+// Real-world framework patterns:
+type WebCaps = CapSet<false, true, false, true, false>; // Time + IO.
+type GrpcCaps = CapSet<true, true, false, true, false>; // Spawn + Time + IO.
+type BackgroundCaps = CapSet<true, true, false, false, false>; // Spawn + Time.
 
 // ==================== Drop Bomb Enforcement ====================
 
@@ -343,8 +351,6 @@ fn cap_none_subset_of_everything() {
     init_test_logging();
     test_phase!("cap_none_subset_of_everything");
 
-    fn assert_subset<Sub: asupersync::cx::cap::SubsetOf<Super>, Super>() {}
-
     assert_subset::<CapNone, All>();
     assert_subset::<CapNone, CapSet<true, false, false, false, false>>();
     assert_subset::<CapNone, CapSet<false, true, false, false, false>>();
@@ -361,8 +367,6 @@ fn cap_all_subset_only_of_self() {
     init_test_logging();
     test_phase!("cap_all_subset_only_of_self");
 
-    fn assert_subset<Sub: asupersync::cx::cap::SubsetOf<Super>, Super>() {}
-
     // All ⊆ All (reflexive).
     assert_subset::<All, All>();
     // All is NOT a subset of anything smaller — verified by compile_fail doctests.
@@ -374,13 +378,6 @@ fn cap_all_subset_only_of_self() {
 fn cap_framework_wrapper_types() {
     init_test_logging();
     test_phase!("cap_framework_wrapper_types");
-
-    fn assert_subset<Sub: asupersync::cx::cap::SubsetOf<Super>, Super>() {}
-
-    // Real-world framework patterns:
-    type WebCaps = CapSet<false, true, false, true, false>; // Time + IO.
-    type GrpcCaps = CapSet<true, true, false, true, false>; // Spawn + Time + IO.
-    type BackgroundCaps = CapSet<true, true, false, false, false>; // Spawn + Time.
 
     // WebCaps ⊆ GrpcCaps (Web drops Spawn).
     assert_subset::<WebCaps, GrpcCaps>();
@@ -402,8 +399,6 @@ fn cap_framework_wrapper_types() {
 fn token_kind_mapping_correct() {
     init_test_logging();
     test_phase!("token_kind_mapping_correct");
-
-    use asupersync::obligation::graded::TokenKind;
     assert_eq!(SendPermit::obligation_kind(), ObligationKind::SendPermit);
     assert_eq!(AckKind::obligation_kind(), ObligationKind::Ack);
     assert_eq!(LeaseKind::obligation_kind(), ObligationKind::Lease);

@@ -2325,6 +2325,34 @@ mod tests {
     }
 
     #[test]
+    fn schedule_cancel_on_current_local_removes_local_ready() {
+        let task_id = TaskId::new_for_test(1, 0);
+        let local_ready = Arc::new(Mutex::new(vec![task_id]));
+        let local = Arc::new(Mutex::new(PriorityScheduler::new()));
+
+        let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&local_ready));
+        let _local_guard = ScopedLocalScheduler::new(Arc::clone(&local));
+
+        let scheduled = schedule_cancel_on_current_local(task_id, 7);
+        assert!(scheduled, "should schedule via current local scheduler");
+
+        let queue = local_ready.lock().expect("local_ready lock poisoned");
+        assert!(
+            !queue.contains(&task_id),
+            "local_ready should not retain cancelled task"
+        );
+        drop(queue);
+
+        assert!(
+            local
+                .lock()
+                .expect("local scheduler lock poisoned")
+                .is_in_cancel_lane(task_id),
+            "task should be promoted to cancel lane"
+        );
+    }
+
+    #[test]
     fn test_schedule_local_dedup_prevents_double_schedule() {
         let state = Arc::new(Mutex::new(RuntimeState::new()));
         let region = state

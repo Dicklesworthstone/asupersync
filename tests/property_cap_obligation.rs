@@ -10,8 +10,8 @@ use common::*;
 
 use asupersync::cx::cap::{All, CapSet, None as CapNone};
 use asupersync::obligation::graded::{
-    GradedObligation, GradedScope, ObligationToken, Resolution, SendPermit, AckKind, LeaseKind,
-    IoOpKind,
+    AckKind, GradedObligation, GradedScope, IoOpKind, LeaseKind, ObligationToken, Resolution,
+    SendPermit,
 };
 use asupersync::obligation::{BodyBuilder, DiagnosticKind, LeakChecker, ObligationVar, VarState};
 use asupersync::record::ObligationKind;
@@ -238,8 +238,7 @@ proptest! {
         let mut b = BodyBuilder::new("prop_branch_clean");
         let v = b.reserve(kind);
         b.branch(|bb| {
-            for i in 0..n_arms {
-                let commit = resolve_commit[i];
+            for commit in resolve_commit.iter().take(n_arms).copied() {
                 bb.arm(move |a| {
                     if commit {
                         a.commit(v);
@@ -379,10 +378,8 @@ fn cap_subset_chain() {
     // Partial ⊆ All.
     assert_subset::<CapSet<true, false, false, false, false>, All>();
     // Partial ⊆ bigger partial.
-    assert_subset::<
-        CapSet<true, false, false, false, false>,
-        CapSet<true, true, false, true, false>,
-    >();
+    assert_subset::<CapSet<true, false, false, false, false>, CapSet<true, true, false, true, false>>(
+    );
 }
 
 /// Verify marker traits align with capability bits.
@@ -416,7 +413,8 @@ fn cap_subset_reflexive() {
 
     assert_subset::<All, All>();
     assert_subset::<CapNone, CapNone>();
-    assert_subset::<CapSet<true, false, true, false, true>, CapSet<true, false, true, false, true>>();
+    assert_subset::<CapSet<true, false, true, false, true>, CapSet<true, false, true, false, true>>(
+    );
 }
 
 /// Compile-time test: SubsetOf is transitive (demonstrated).
@@ -449,16 +447,16 @@ fn cap_subset_transitive() {
 /// and external trait impls are rejected at compile time.
 #[test]
 fn ambient_authority_rejected_by_sealing() {
-    init_test_logging();
-    test_phase!("ambient_authority_rejected_by_sealing");
-
-    // Verify that only valid narrowing compiles.
     fn narrow<Sub: asupersync::cx::cap::SubsetOf<Super> + Default, Super>(_: &Sub) -> Sub {
         Sub::default()
     }
 
-    let all: All = Default::default();
-    let none: CapNone = Default::default();
+    init_test_logging();
+    test_phase!("ambient_authority_rejected_by_sealing");
+
+    // Verify that only valid narrowing compiles.
+    let all: All = CapSet;
+    let none: CapNone = CapSet;
     let _narrowed: CapNone = narrow::<CapNone, All>(&none);
     let _self: All = narrow::<All, All>(&all);
 
@@ -600,8 +598,13 @@ fn checker_deterministic_across_runs() {
         let v2 = b.reserve(ObligationKind::Lease);
         b.commit(v0);
         b.branch(|bb| {
-            bb.arm(|a| { a.commit(v1); a.commit(v2); });
-            bb.arm(|a| { a.abort(v1); });
+            bb.arm(|a| {
+                a.commit(v1);
+                a.commit(v2);
+            });
+            bb.arm(|a| {
+                a.abort(v1);
+            });
         });
         b.build()
     };
