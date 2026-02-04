@@ -605,14 +605,16 @@ pub struct CancelBroadcaster<S: CancelSink> {
 }
 
 /// Deterministic dedup tracking with bounded memory.
+type SeenKey = (ObjectId, u64, u64);
+
 #[derive(Debug, Default)]
 struct SeenSequences {
-    set: HashSet<(u64, u64)>,
-    order: VecDeque<(u64, u64)>,
+    set: HashSet<SeenKey>,
+    order: VecDeque<SeenKey>,
 }
 
 impl SeenSequences {
-    fn insert(&mut self, key: (u64, u64)) -> bool {
+    fn insert(&mut self, key: SeenKey) -> bool {
         if self.set.insert(key) {
             self.order.push_back(key);
             true
@@ -621,7 +623,7 @@ impl SeenSequences {
         }
     }
 
-    fn remove_oldest(&mut self) -> Option<(u64, u64)> {
+    fn remove_oldest(&mut self) -> Option<SeenKey> {
         let oldest = self.order.pop_front()?;
         self.set.remove(&oldest);
         Some(oldest)
@@ -706,7 +708,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             );
         let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
-        self.mark_seen(msg.token_id(), sequence);
+        self.mark_seen(object_id, msg.token_id(), sequence);
         self.metrics.write().expect("lock poisoned").initiated += 1;
 
         msg
@@ -719,12 +721,12 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     /// synchronous core of [`handle_message`][Self::handle_message].
     pub fn receive_message(&self, msg: &CancelMessage, now: Time) -> Option<CancelMessage> {
         // Check for duplicate
-        if self.is_seen(msg.token_id(), msg.sequence()) {
+        if self.is_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
             self.metrics.write().expect("lock poisoned").duplicates += 1;
             return None;
         }
 
-        self.mark_seen(msg.token_id(), msg.sequence());
+        self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence());
         self.metrics.write().expect("lock poisoned").received += 1;
 
         // Cancel local token if present
@@ -779,17 +781,17 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         self.metrics.read().expect("lock poisoned").clone()
     }
 
-    fn is_seen(&self, token_id: u64, sequence: u64) -> bool {
+    fn is_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
         self.seen_sequences
             .read()
             .expect("lock poisoned")
             .set
-            .contains(&(token_id, sequence))
+            .contains(&(object_id, token_id, sequence))
     }
 
-    fn mark_seen(&self, token_id: u64, sequence: u64) {
+    fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) {
         let mut seen = self.seen_sequences.write().expect("lock poisoned");
-        let inserted = seen.insert((token_id, sequence));
+        let inserted = seen.insert((object_id, token_id, sequence));
         if !inserted {
             return;
         }
@@ -1271,17 +1273,18 @@ mod tests {
     fn test_broadcaster_seen_eviction_is_fifo() {
         let mut broadcaster = CancelBroadcaster::new(NullSink);
         broadcaster.max_seen = 3;
+        let object_id = ObjectId::new_for_test(1);
 
         // Insert 4 distinct sequences; oldest should be evicted.
         for seq in 0..4 {
-            broadcaster.mark_seen(1, seq);
+            broadcaster.mark_seen(object_id, 1, seq);
         }
 
         let (len, has_10, has_11, front) = {
             let seen = broadcaster.seen_sequences.read().expect("lock poisoned");
             let len = seen.set.len();
-            let has_10 = seen.set.contains(&(1, 0));
-            let has_11 = seen.set.contains(&(1, 1));
+            let has_10 = seen.set.contains(&(object_id, 1, 0));
+            let has_11 = seen.set.contains(&(object_id, 1, 1));
             let front = seen.order.front().copied();
             drop(seen);
             (len, has_10, has_11, front)
@@ -1289,7 +1292,7 @@ mod tests {
         assert_eq!(len, 3);
         assert!(!has_10);
         assert!(has_11);
-        assert_eq!(front, Some((1, 1)));
+        assert_eq!(front, Some((object_id, 1, 1)));
     }
 
     #[test]
