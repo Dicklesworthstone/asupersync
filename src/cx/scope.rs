@@ -101,9 +101,9 @@ use crate::combinator::{Either, Select};
 use crate::cx::{cap, Cx};
 use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
-use crate::runtime::{RuntimeState, SpawnError, StoredTask};
+use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
-use crate::types::{Budget, CancelReason, PanicPayload, Policy, RegionId, TaskId};
+use crate::types::{Budget, CancelReason, Outcome, PanicPayload, Policy, RegionId, TaskId};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -776,6 +776,89 @@ impl<P: Policy> Scope<'_, P> {
     }
 
     // =========================================================================
+    // Child Regions
+    // =========================================================================
+
+    /// Creates a child region and runs the provided future within a child scope.
+    ///
+    /// The child region inherits the parent's budget by default. Use
+    /// [`Scope::region_with_budget`] to tighten constraints for the child.
+    ///
+    /// The returned outcome is the result of the body future. After the body
+    /// completes, the child region begins its close sequence and advances until
+    /// it can close (assuming all child tasks have completed and obligations are resolved).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegionCreateError`] if the parent is closed, missing, or at capacity.
+    pub async fn region<P2, F, Fut, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        cx: &Cx<Caps>,
+        policy: P2,
+        f: F,
+    ) -> Result<Outcome<T, P2::Error>, RegionCreateError>
+    where
+        P2: Policy,
+        F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
+        Fut: Future<Output = Outcome<T, P2::Error>>,
+    {
+        self.region_with_budget(state, cx, self.budget, policy, f)
+            .await
+    }
+
+    /// Creates a child region with an explicit budget (met with the parent budget).
+    ///
+    /// The effective budget is `parent.meet(child)` to ensure nested scopes can
+    /// never relax constraints.
+    pub async fn region_with_budget<P2, F, Fut, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        _cx: &Cx<Caps>,
+        budget: Budget,
+        _policy: P2,
+        f: F,
+    ) -> Result<Outcome<T, P2::Error>, RegionCreateError>
+    where
+        P2: Policy,
+        F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
+        Fut: Future<Output = Outcome<T, P2::Error>>,
+    {
+        let child_region = state.create_child_region(self.region, budget)?;
+        let child_budget = state
+            .region(child_region)
+            .map_or(self.budget, crate::record::RegionRecord::budget);
+        let child_scope = Scope::<P2>::new(child_region, child_budget);
+
+        let result = CatchUnwind(Box::pin(f(child_scope, state))).await;
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                let msg = payload_to_string(&payload);
+                Outcome::Panicked(PanicPayload::new(msg))
+            }
+        };
+
+        match &outcome {
+            Outcome::Ok(_) => {
+                if let Some(region) = state.region(child_region) {
+                    region.begin_close(None);
+                }
+            }
+            Outcome::Cancelled(reason) => {
+                let _ = state.cancel_request(child_region, reason, None);
+            }
+            Outcome::Err(_) | Outcome::Panicked(_) => {
+                let reason = CancelReason::fail_fast().with_region(child_region);
+                let _ = state.cancel_request(child_region, &reason, None);
+            }
+        }
+
+        state.advance_region_state(child_region);
+        Ok(outcome)
+    }
+
+    // =========================================================================
     // Combinators
     // =========================================================================
 
@@ -1022,7 +1105,9 @@ impl<P: Policy> std::fmt::Debug for Scope<'_, P> {
 mod tests {
     use super::*;
     use crate::runtime::RuntimeState;
+    use crate::types::Outcome;
     use crate::util::ArenaIndex;
+    use futures_lite::future::block_on;
     use std::sync::{Arc, Mutex};
 
     fn test_cx() -> Cx {
@@ -1359,6 +1444,146 @@ mod tests {
             Poll::Ready(Err(e)) => panic!("Task failed unexpectedly: {e}"),
             Poll::Pending => panic!("Join should be ready"),
         }
+    }
+
+    #[test]
+    fn region_closes_empty_child() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent, Budget::INFINITE);
+
+        let outcome = block_on(scope.region(
+            &mut state,
+            &cx,
+            crate::types::policy::FailFast,
+            |child, _state| {
+                let child_id = child.region_id();
+                async move { Outcome::Ok(child_id) }
+            },
+        ))
+        .expect("child region created");
+
+        let child_id = match outcome {
+            Outcome::Ok(id) => id,
+            other => panic!("expected Outcome::Ok(child_id), got {other:?}"),
+        };
+
+        let child_record = state.region(child_id).expect("child record missing");
+        assert_eq!(
+            child_record.state(),
+            crate::record::region::RegionState::Closed
+        );
+
+        let parent_record = state.region(parent).expect("parent record missing");
+        assert!(
+            !parent_record.child_ids().contains(&child_id),
+            "closed child should be removed from parent"
+        );
+    }
+
+    #[test]
+    fn region_budget_is_met_with_parent() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::with_deadline_secs(10));
+        let scope = test_scope(parent, Budget::with_deadline_secs(10));
+
+        let outcome = block_on(scope.region_with_budget(
+            &mut state,
+            &cx,
+            Budget::with_deadline_secs(30),
+            crate::types::policy::FailFast,
+            |child, _state| {
+                let child_id = child.region_id();
+                async move { Outcome::Ok(child_id) }
+            },
+        ))
+        .expect("child region created");
+
+        let child_id = match outcome {
+            Outcome::Ok(id) => id,
+            other => panic!("expected Outcome::Ok(child_id), got {other:?}"),
+        };
+
+        let child_budget = state
+            .region(child_id)
+            .expect("child record missing")
+            .budget();
+        assert_eq!(
+            child_budget.deadline,
+            Some(crate::types::Time::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn region_spawns_tasks_in_child() {
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent, Budget::INFINITE);
+
+        let outcome = block_on(scope.region(
+            &mut state,
+            &cx,
+            crate::types::policy::FailFast,
+            |child, state| {
+                let child_id = child.region_id();
+                let (handle, mut stored) = child
+                    .spawn(state, &cx, |_| async { 7_i32 })
+                    .expect("spawn in child");
+
+                let parent_has = state
+                    .region(parent)
+                    .expect("parent record missing")
+                    .task_ids()
+                    .contains(&handle.task_id());
+                let child_has = state
+                    .region(child_id)
+                    .expect("child record missing")
+                    .task_ids()
+                    .contains(&handle.task_id());
+
+                let waker = Waker::from(Arc::new(NoopWaker));
+                let mut poll_cx = Context::from_waker(&waker);
+                let poll_result = stored.poll(&mut poll_cx);
+                if let Poll::Ready(outcome) = poll_result {
+                    let task_outcome = match outcome {
+                        Outcome::Ok(()) => Outcome::Ok(()),
+                        Outcome::Panicked(payload) => Outcome::Panicked(payload),
+                        other => panic!("unexpected task outcome: {other:?}"),
+                    };
+                    if let Some(task_record) = state.tasks.get_mut(handle.task_id().arena_index()) {
+                        task_record.complete(task_outcome);
+                    }
+                    let _ = state.task_completed(handle.task_id());
+                }
+
+                std::future::ready(Outcome::Ok((child_id, parent_has, child_has)))
+            },
+        ))
+        .expect("child region created");
+
+        let (child_id, parent_has, child_has) = match outcome {
+            Outcome::Ok(tuple) => tuple,
+            other => panic!("expected Outcome::Ok(tuple), got {other:?}"),
+        };
+
+        assert!(!parent_has, "task should not be owned by parent region");
+        assert!(child_has, "task should be owned by child region");
+
+        let parent_record = state.region(parent).expect("parent record missing");
+        assert!(
+            !parent_record.child_ids().contains(&child_id),
+            "closed child should be removed from parent"
+        );
     }
 
     #[test]

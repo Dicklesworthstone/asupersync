@@ -179,6 +179,10 @@ pub enum RRefError {
         /// The region ID that was provided.
         actual: RegionId,
     },
+    /// The region is closed and its heap has been reclaimed.
+    RegionClosed,
+    /// The access witness references a different region than expected.
+    WrongRegion,
 }
 
 impl fmt::Display for RRefError {
@@ -189,11 +193,37 @@ impl fmt::Display for RRefError {
             Self::RegionMismatch { expected, actual } => {
                 write!(f, "region mismatch: expected {expected:?}, got {actual:?}")
             }
+            Self::RegionClosed => write!(f, "region is closed"),
+            Self::WrongRegion => write!(f, "access witness references wrong region"),
         }
     }
 }
 
 impl std::error::Error for RRefError {}
+
+/// Capability witness proving access rights to a specific region's heap.
+///
+/// Constructed by the region when granting access; carries the region ID
+/// so that `RegionRecord::rref_access` can verify the caller belongs to
+/// the correct region before returning data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RRefAccessWitness {
+    region_id: RegionId,
+}
+
+impl RRefAccessWitness {
+    /// Creates a new access witness for the given region.
+    #[must_use]
+    pub const fn new(region_id: RegionId) -> Self {
+        Self { region_id }
+    }
+
+    /// Returns the region this witness grants access to.
+    #[must_use]
+    pub const fn region(&self) -> RegionId {
+        self.region_id
+    }
+}
 
 /// Extension trait for accessing RRef values through a region.
 ///

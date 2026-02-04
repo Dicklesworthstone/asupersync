@@ -159,7 +159,7 @@ pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, So
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
 pub use scheduler::Scheduler;
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
-pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
+pub use state::{RegionCreateError, RuntimeSnapshot, RuntimeState, SpawnError};
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};
 pub use yield_now::yield_now;

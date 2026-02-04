@@ -81,6 +81,43 @@ impl std::fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
+/// Errors that can occur when creating a child region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionCreateError {
+    /// The parent region does not exist.
+    ParentNotFound(RegionId),
+    /// The parent region is closed or draining and cannot accept new children.
+    ParentClosed(RegionId),
+    /// The parent region has reached its admission limit for children.
+    ParentAtCapacity {
+        /// The parent region that rejected the child.
+        region: RegionId,
+        /// The configured admission limit.
+        limit: usize,
+        /// The number of live children at the time of rejection.
+        live: usize,
+    },
+}
+
+impl std::fmt::Display for RegionCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParentNotFound(id) => write!(f, "parent region not found: {id:?}"),
+            Self::ParentClosed(id) => write!(f, "parent region closed: {id:?}"),
+            Self::ParentAtCapacity {
+                region,
+                limit,
+                live,
+            } => write!(
+                f,
+                "parent region admission limit reached: region={region:?} limit={limit} live={live}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RegionCreateError {}
+
 #[derive(Debug, Clone, Copy)]
 enum TaskCompletionKind {
     Ok,
@@ -591,6 +628,64 @@ impl RuntimeState {
             .push_event(TraceEvent::region_created(seq, self.now, id, None));
         self.metrics.region_created(id, None);
         id
+    }
+
+    /// Creates a child region under the given parent and returns its ID.
+    ///
+    /// The child's effective budget is the meet (tightest constraints) of the
+    /// parent budget and the provided budget.
+    pub fn create_child_region(
+        &mut self,
+        parent: RegionId,
+        budget: Budget,
+    ) -> Result<RegionId, RegionCreateError> {
+        let parent_budget = self
+            .regions
+            .get(parent.arena_index())
+            .map(RegionRecord::budget)
+            .ok_or(RegionCreateError::ParentNotFound(parent))?;
+
+        let effective_budget = parent_budget.meet(budget);
+
+        let idx = self.regions.insert(RegionRecord::new_with_time(
+            RegionId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
+            Some(parent),
+            effective_budget,
+            self.now,
+        ));
+        let id = RegionId::from_arena(idx);
+
+        if let Some(record) = self.regions.get_mut(idx) {
+            record.id = id;
+        }
+
+        let add_result = self
+            .regions
+            .get(parent.arena_index())
+            .ok_or(RegionCreateError::ParentNotFound(parent))
+            .and_then(|record| {
+                record.add_child(id).map_err(|err| match err {
+                    AdmissionError::Closed => RegionCreateError::ParentClosed(parent),
+                    AdmissionError::LimitReached { limit, live, .. } => {
+                        RegionCreateError::ParentAtCapacity {
+                            region: parent,
+                            limit,
+                            live,
+                        }
+                    }
+                })
+            });
+
+        if let Err(err) = add_result {
+            self.regions.remove(idx);
+            return Err(err);
+        }
+
+        let seq = self.next_trace_seq();
+        self.trace
+            .push_event(TraceEvent::region_created(seq, self.now, id, Some(parent)));
+        self.metrics.region_created(id, Some(parent));
+        Ok(id)
     }
 
     /// Updates admission limits for a region.
