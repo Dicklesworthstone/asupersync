@@ -948,12 +948,14 @@ impl ThreeLaneWorker {
         };
         if self.cancel_streak >= effective_limit {
             if let Some(task) = self.try_cancel_work() {
-                // Fallback: no ready work available, so dispatch another cancel.
-                // Don't extend the streak peak — the limit bounds the maximum
-                // consecutive cancel dispatches before a fairness yield.
+                // Fallback: no ready/timed/steal work available, so dispatch one
+                // more cancel task. Count this dispatch toward the streak (reset
+                // to 1, not 0) so the next call re-checks for ready/timed work
+                // after at most cancel_streak_limit − 1 more cancel dispatches,
+                // matching the documented fairness bound.
                 self.preemption_metrics.cancel_dispatches += 1;
                 self.preemption_metrics.fallback_cancel_dispatches += 1;
-                self.cancel_streak = 0;
+                self.cancel_streak = 1;
                 return Some(task);
             }
             self.cancel_streak = 0;
@@ -3165,6 +3167,63 @@ mod tests {
         let m = worker.preemption_metrics();
         assert_eq!(m.cancel_dispatches, 6);
         assert!(m.fallback_cancel_dispatches > 0, "should use fallback path");
+    }
+
+    /// Verify that the fallback cancel dispatch counts toward the cancel
+    /// streak. After a fallback (cancel_streak = 1), injecting a ready
+    /// task should see it dispatched within cancel_streak_limit − 1 more
+    /// cancel dispatches, not cancel_streak_limit.
+    #[test]
+    fn test_fallback_cancel_streak_counts_toward_limit() {
+        let limit: usize = 3;
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+
+        // Inject enough cancel tasks to hit the fallback + continue.
+        // With limit=3: dispatches 1-3 (streak 1-3), fallback (streak=1),
+        // dispatches 5-6 (streak 2-3), fairness yield.
+        // We inject a ready task at that point to prove it gets dispatched.
+        for i in 0..20u32 {
+            scheduler.inject_cancel(TaskId::new_for_test(1, i), 100);
+        }
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // Dispatch limit (3) cancel tasks, then the fallback (4th).
+        for _ in 0..=limit {
+            assert!(worker.next_task().is_some(), "should dispatch cancel");
+        }
+
+        // After the fallback, cancel_streak should be 1 (the fallback
+        // dispatch counted). Now inject a ready task. It should be
+        // dispatched after at most limit − 1 more cancel dispatches.
+        let ready_task = TaskId::new_for_test(99, 0);
+        worker.fast_queue.push(ready_task);
+
+        let mut dispatches_until_ready = 0;
+        for _ in 0..limit {
+            let task = worker.next_task().expect("should have work");
+            dispatches_until_ready += 1;
+            if task == ready_task {
+                break;
+            }
+        }
+
+        // The ready task must appear within limit dispatches (limit − 1
+        // cancel + 1 ready, not limit cancel + 1 ready).
+        let last_task = worker.fast_queue.pop();
+        let ready_was_dispatched = dispatches_until_ready <= limit
+            && (last_task.is_none() || last_task != Some(ready_task));
+
+        // Specifically: with cancel_streak=1 after fallback and limit=3,
+        // we should see exactly 2 more cancel tasks then the ready task
+        // (streak goes 1→2→3, fairness yield, ready dispatched).
+        assert!(
+            ready_was_dispatched,
+            "ready task should be dispatched within {limit} steps after fallback, \
+             took {dispatches_until_ready}"
+        );
     }
 
     #[test]
