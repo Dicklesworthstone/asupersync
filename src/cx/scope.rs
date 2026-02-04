@@ -348,7 +348,7 @@ impl<P: Policy> Scope<'_, P> {
 
         // Set the shared inner state in the TaskRecord
         // This links the user-facing Cx to the runtime's TaskRecord
-        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx_full.clone());
         }
@@ -377,7 +377,7 @@ impl<P: Policy> Scope<'_, P> {
                         {
                             region.remove_task(self.task_id);
                         }
-                        self.state.tasks.remove(self.task_id.arena_index());
+                        self.state.remove_task(self.task_id);
                     }
                 }
             }
@@ -585,7 +585,7 @@ impl<P: Policy> Scope<'_, P> {
                         {
                             region.remove_task(self.task_id);
                         }
-                        self.state.tasks.remove(self.task_id.arena_index());
+                        self.state.remove_task(self.task_id);
                     }
                 }
             }
@@ -631,7 +631,7 @@ impl<P: Policy> Scope<'_, P> {
         // Mark the task record as local so that safety guards in the scheduler
         // (inject_ready panic, try_steal debug_assert) can detect accidental
         // cross-thread migration of !Send futures.
-        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = state.task_mut(task_id) {
             if let Some(worker_id) = crate::runtime::scheduler::three_lane::current_worker_id() {
                 record.pin_to_worker(worker_id);
             } else {
@@ -645,7 +645,7 @@ impl<P: Policy> Scope<'_, P> {
         let scheduled = crate::runtime::scheduler::three_lane::schedule_local_task(task_id);
 
         if scheduled {
-            if let Some(record) = state.tasks.get(task_id.arena_index()) {
+            if let Some(record) = state.task(task_id) {
                 let _ = record.wake_state.notify();
             }
             return Ok(handle);
@@ -656,7 +656,7 @@ impl<P: Policy> Scope<'_, P> {
         if let Some(region) = state.regions.get(self.region.arena_index()) {
             region.remove_task(task_id);
         }
-        state.tasks.remove(task_id.arena_index());
+        state.remove_task(task_id);
         Err(SpawnError::LocalSchedulerUnavailable)
     }
 
@@ -739,7 +739,7 @@ impl<P: Policy> Scope<'_, P> {
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
 
         // Set the shared inner state in the TaskRecord
-        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx_full.clone());
         }
@@ -992,7 +992,7 @@ impl<P: Policy> Scope<'_, P> {
         use crate::util::ArenaIndex;
 
         // Create placeholder task record
-        let idx = state.tasks.insert(TaskRecord::new_with_time(
+        let idx = state.insert_task(TaskRecord::new_with_time(
             TaskId::from_arena(ArenaIndex::new(0, 0)), // placeholder ID
             self.region,
             self.budget,
@@ -1003,7 +1003,7 @@ impl<P: Policy> Scope<'_, P> {
         let task_id = TaskId::from_arena(idx);
 
         // Update the task record with the correct ID
-        if let Some(record) = state.tasks.get_mut(idx) {
+        if let Some(record) = state.task_mut(task_id) {
             record.id = task_id;
         }
 
@@ -1011,7 +1011,7 @@ impl<P: Policy> Scope<'_, P> {
         if let Some(region) = state.regions.get(self.region.arena_index()) {
             if let Err(err) = region.add_task(task_id) {
                 // Rollback task creation
-                state.tasks.remove(idx);
+                state.remove_task(task_id);
                 return Err(match err {
                     AdmissionError::Closed => SpawnError::RegionClosed(self.region),
                     AdmissionError::LimitReached { limit, live, .. } => {
@@ -1025,7 +1025,7 @@ impl<P: Policy> Scope<'_, P> {
             }
         } else {
             // Rollback task creation
-            state.tasks.remove(idx);
+            state.remove_task(task_id);
             return Err(SpawnError::RegionNotFound(self.region));
         }
 
@@ -1132,7 +1132,7 @@ mod tests {
         let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
 
         // Task should exist in state
-        let task = state.tasks.get(handle.task_id().arena_index());
+        let task = state.task(handle.task_id());
         assert!(task.is_some());
 
         // Task should be owned by the region
@@ -1153,7 +1153,7 @@ mod tests {
             .unwrap();
 
         // Task record should exist
-        let task = state.tasks.get(handle.task_id().arena_index());
+        let task = state.task(handle.task_id());
         assert!(task.is_some());
         assert_eq!(task.unwrap().owner, region);
 
@@ -1210,7 +1210,7 @@ mod tests {
         let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42_i32).unwrap();
 
         // Task should exist
-        let task = state.tasks.get(handle.task_id().arena_index());
+        let task = state.task(handle.task_id());
         assert!(task.is_some());
         assert_eq!(task.unwrap().owner, region);
     }
@@ -1234,7 +1234,7 @@ mod tests {
             .unwrap();
 
         // Task should exist
-        let task = state.tasks.get(handle.task_id().arena_index());
+        let task = state.task(handle.task_id());
         assert!(task.is_some());
         assert_eq!(task.unwrap().owner, region);
     }
@@ -1250,7 +1250,7 @@ mod tests {
         assert!(matches!(result, Err(SpawnError::LocalSchedulerUnavailable)));
 
         // Task should not exist
-        assert!(state.tasks.is_empty());
+        assert!(state.tasks_is_empty());
         let region_record = state.regions.get(region.arena_index()).unwrap();
         assert!(region_record.task_ids().is_empty());
     }
@@ -1560,7 +1560,7 @@ mod tests {
                         Outcome::Panicked(payload) => Outcome::Panicked(payload),
                         other => panic!("unexpected task outcome: {other:?}"),
                     };
-                    if let Some(task_record) = state.tasks.get_mut(handle.task_id().arena_index()) {
+                    if let Some(task_record) = state.task_mut(handle.task_id()) {
                         task_record.complete(task_outcome);
                     }
                     let _ = state.task_completed(handle.task_id());

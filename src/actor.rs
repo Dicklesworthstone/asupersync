@@ -816,7 +816,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         .with_blocking_pool_handle(cx.blocking_pool_handle());
 
         // Link Cx to TaskRecord
-        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx.clone());
         }
@@ -929,7 +929,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             Some(child_entropy),
         );
 
-        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx.clone());
         }
