@@ -957,6 +957,18 @@ theorem cancelling_from_cancelRequested {Value Error Panic : Type}
       · refine ⟨task', ?_, ?_⟩
         · simpa [getTask, setTask, hEq] using hGet
         · exact ⟨reason', cleanup', Or.inr hState'⟩
+  | closeBegin hRegion hState hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason, cleanup, hState'⟩
+      subst hUpdate
+      refine ⟨task', ?_, ?_⟩
+      · simpa [getTask, setRegion] using hGet
+      · exact ⟨reason, cleanup, Or.inr hState'⟩
+  | closeChildrenDone hRegion hState hChildren hSubs hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason, cleanup, hState'⟩
+      subst hUpdate
+      refine ⟨task', ?_, ?_⟩
+      · simpa [getTask, setRegion] using hGet
+      · exact ⟨reason, cleanup, Or.inr hState'⟩
 
 -- ==========================================================================
 -- Well-formedness: obligation holder exists
