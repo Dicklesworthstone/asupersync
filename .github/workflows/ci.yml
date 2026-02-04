@@ -327,6 +327,22 @@ jobs:
       - name: Trace canonicalization tests
         run: cargo test --lib trace::canonicalize --all-features -- --nocapture
 
+      - name: Lease semantics and liveness tests (bd-yj06g)
+        run: cargo test --test lease_semantics -- --nocapture
+
+      - name: Close quiescence regression tests (bd-sbi6e)
+        run: cargo test --test close_quiescence_regression -- --nocapture
+
+      - name: Refinement conformance tests (bd-3g13z)
+        run: cargo test --test refinement_conformance -- --nocapture
+
+      - name: Proof artifact manifest validation
+        run: cargo test --test proof_artifact_manifest -- --nocapture
+
+      - name: TLA+ bounded model check (bd-11g3i)
+        run: bash scripts/run_model_check.sh --ci
+        continue-on-error: true
+
       - name: Generate proof artifacts report
         if: always()
         run: |
@@ -335,6 +351,11 @@ jobs:
           cargo test --lib plan::certificate --all-features -- --format json 2>&1 | tee proof-artifacts/certificate-tests.json || true
           cargo test --lib obligation --all-features -- --format json 2>&1 | tee proof-artifacts/obligation-tests.json || true
           cargo test --lib lab::oracle --all-features -- --format json 2>&1 | tee proof-artifacts/oracle-tests.json || true
+          cargo test --test lease_semantics -- --format json 2>&1 | tee proof-artifacts/lease-semantics.json || true
+          cargo test --test close_quiescence_regression -- --format json 2>&1 | tee proof-artifacts/close-quiescence.json || true
+          cargo test --test refinement_conformance -- --format json 2>&1 | tee proof-artifacts/refinement-conformance.json || true
+          # Copy TLA+ results if available
+          cp formal/tla/output/result.json proof-artifacts/tla-model-check.json 2>/dev/null || true
 
       - name: Upload proof artifacts
         if: always()
