@@ -11,14 +11,17 @@ use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
 use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::record::{
-    finalizer::Finalizer, region::RegionState, task::TaskState, AdmissionError,
-    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionLimits,
-    RegionRecord, SourceLocation, TaskRecord,
+    finalizer::{finalizer_budget, Finalizer, FINALIZER_TIME_BUDGET_NANOS},
+    region::RegionState,
+    task::TaskState,
+    AdmissionError, ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState,
+    RegionLimits, RegionRecord, SourceLocation, TaskRecord,
 };
 use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
+use crate::runtime::task_handle::JoinError;
 use crate::runtime::BlockingPoolHandle;
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
@@ -26,6 +29,7 @@ use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
 use crate::types::policy::PolicyAction;
+use crate::types::task_context::{CxInner, MAX_MASK_DEPTH};
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, ObligationId, Outcome, Policy,
     RegionId, TaskId, Time,
@@ -37,6 +41,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 /// Errors that can occur when spawning a task.
@@ -148,6 +153,72 @@ impl TaskCompletionKind {
         }
     }
 }
+
+struct MaskedFinalizer {
+    inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    cx_inner: Arc<std::sync::RwLock<CxInner>>,
+    entered: bool,
+}
+
+impl MaskedFinalizer {
+    fn new(
+        inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+        cx_inner: Arc<std::sync::RwLock<CxInner>>,
+    ) -> Self {
+        Self {
+            inner,
+            cx_inner,
+            entered: false,
+        }
+    }
+
+    fn enter_mask(&mut self) {
+        if self.entered {
+            return;
+        }
+        let mut guard = self.cx_inner.write().expect("lock poisoned");
+        assert!(
+            guard.mask_depth < MAX_MASK_DEPTH,
+            "mask depth exceeded MAX_MASK_DEPTH ({MAX_MASK_DEPTH}): this violates INV-MASK-BOUNDED \
+             and prevents cancellation from ever being observed. \
+             Reduce nesting of masked sections.",
+        );
+        guard.mask_depth += 1;
+        drop(guard);
+        self.entered = true;
+    }
+
+    fn exit_mask(&mut self) {
+        if !self.entered {
+            return;
+        }
+        if let Ok(mut guard) = self.cx_inner.write() {
+            guard.mask_depth = guard.mask_depth.saturating_sub(1);
+        }
+        self.entered = false;
+    }
+}
+
+impl Future for MaskedFinalizer {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        self.enter_mask();
+        let poll = self.inner.as_mut().poll(cx);
+        if poll.is_ready() {
+            self.exit_mask();
+        }
+        poll
+    }
+}
+
+impl Drop for MaskedFinalizer {
+    fn drop(&mut self) {
+        self.exit_mask();
+    }
+}
+
+impl Unpin for MaskedFinalizer {}
 
 #[derive(Debug, Clone)]
 struct LeakedObligationInfo {
@@ -1385,7 +1456,8 @@ impl RuntimeState {
         let no_tasks = self.live_task_count() == 0;
         let no_obligations = self.pending_obligation_count() == 0;
         let no_io = self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty);
-        no_tasks && no_obligations && no_io
+        let no_finalizers = self.regions.iter().all(|(_, r)| r.finalizers_empty());
+        no_tasks && no_obligations && no_io && no_finalizers
     }
 
     /// Applies the region policy when a child reaches a terminal outcome.
@@ -1675,6 +1747,21 @@ impl RuntimeState {
             }
         }
 
+        // Ensure regions with pending finalizers and no live work can advance into
+        // Finalizing immediately so finalizers are scheduled without waiting for
+        // task completion.
+        for node in &regions_to_cancel {
+            let Some(region) = self.regions.get(node.id.arena_index()) else {
+                continue;
+            };
+            let no_children = region.child_ids().is_empty();
+            let no_tasks = region.task_ids().is_empty();
+            let has_finalizers = !region.finalizers_empty();
+            if no_children && no_tasks && has_finalizers {
+                self.advance_region_state(node.id);
+            }
+        }
+
         tasks_to_cancel
     }
 
@@ -1738,28 +1825,41 @@ impl RuntimeState {
     /// Returns the task's waiters that should be woken.
     #[allow(clippy::used_underscore_binding)]
     pub fn task_completed(&mut self, task_id: TaskId) -> Vec<TaskId> {
-        // Remove the task record to prevent memory leaks
-        let Some(task) = self.tasks.remove(task_id.arena_index()) else {
-            trace!(
-                task_id = ?task_id,
-                "task_completed called for unknown task"
-            );
-            return Vec::new();
-        };
-        if let Some(inner) = task.cx_inner.as_ref() {
-            if let Ok(mut guard) = inner.write() {
-                guard.cancel_waker = None;
+        let (owner, completion, _outcome_kind, waiters) = {
+            let Some(task) = self.tasks.get(task_id.arena_index()) else {
+                trace!(
+                    task_id = ?task_id,
+                    "task_completed called for unknown task"
+                );
+                return Vec::new();
+            };
+            if let Some(inner) = task.cx_inner.as_ref() {
+                if let Ok(mut guard) = inner.write() {
+                    guard.cancel_waker = None;
+                }
             }
-        }
 
-        self.record_task_complete(&task);
+            self.record_task_complete(task);
 
-        // Get the owning region and the waiters before we mutate
-        let owner = task.owner;
-        let waiters = task.waiters.clone();
+            let outcome_kind = match &task.state {
+                crate::record::task::TaskState::Completed(outcome) => match outcome {
+                    Outcome::Ok(()) => "Ok",
+                    Outcome::Err(_) => "Err",
+                    Outcome::Cancelled(_) => "Cancelled",
+                    Outcome::Panicked(_) => "Panicked",
+                },
+                _ => "Unknown",
+            };
+            let owner = task.owner;
+            let completion = TaskCompletionKind::from_state(&task.state);
+            let waiters = task.waiters.clone();
+            (owner, completion, outcome_kind, waiters)
+        };
         let _waiter_count = waiters.len();
 
-        let completion = TaskCompletionKind::from_state(&task.state);
+        // Remove the task record to prevent memory leaks
+        let _ = self.tasks.remove(task_id.arena_index());
+
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks(|record| record.holder == task_id);
             if !leaks.is_empty() {
@@ -1773,15 +1873,6 @@ impl RuntimeState {
         }
 
         // Trace task completion
-        let _outcome_kind = match &task.state {
-            crate::record::task::TaskState::Completed(outcome) => match outcome {
-                Outcome::Ok(()) => "Ok",
-                Outcome::Err(_) => "Err",
-                Outcome::Cancelled(_) => "Cancelled",
-                Outcome::Panicked(_) => "Panicked",
-            },
-            _ => "Unknown",
-        };
         debug!(
             task_id = ?task_id,
             region_id = ?owner,
@@ -1812,6 +1903,66 @@ impl RuntimeState {
 
         // Return the waiters for the completed task
         waiters
+    }
+
+    // =========================================================================
+    // Async Finalizer Scheduling
+    // =========================================================================
+
+    /// Drains async finalizers for regions that are ready to run them.
+    ///
+    /// This runs sync finalizers inline and schedules at most one async
+    /// finalizer per region (respecting the async barrier).
+    pub fn drain_ready_async_finalizers(&mut self) -> Vec<(TaskId, u8)> {
+        let mut scheduled = Vec::new();
+        let regions: Vec<RegionId> = self
+            .regions
+            .iter()
+            .filter(|(_, region)| {
+                region.state() == RegionState::Finalizing && !region.finalizers_empty()
+            })
+            .map(|(idx, _)| RegionId::from_arena(idx))
+            .collect();
+
+        for region_id in regions {
+            let Some(finalizer) = self.run_sync_finalizers(region_id) else {
+                continue;
+            };
+            let Finalizer::Async(future) = finalizer else {
+                continue;
+            };
+            if let Some((task_id, priority)) = self.spawn_finalizer_task(region_id, future) {
+                scheduled.push((task_id, priority));
+            }
+        }
+
+        scheduled
+    }
+
+    fn spawn_finalizer_task(
+        &mut self,
+        region_id: RegionId,
+        future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    ) -> Option<(TaskId, u8)> {
+        let deadline = self.now.saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
+        let budget = finalizer_budget().with_deadline(deadline);
+
+        let (task_id, _handle, cx, result_tx) = self
+            .create_task_infrastructure::<()>(region_id, budget)
+            .ok()?;
+        let cx_inner = Arc::clone(&cx.inner);
+        let masked = MaskedFinalizer::new(future, cx_inner);
+
+        let wrapped_future = async move {
+            masked.await;
+            let _ = result_tx.send(&cx, Ok::<_, JoinError>(()));
+            Outcome::Ok(())
+        };
+
+        self.stored_futures
+            .insert(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+
+        Some((task_id, budget.priority))
     }
 
     // =========================================================================
@@ -4316,11 +4467,12 @@ mod tests {
         // Verify state transition
         let region_record = state.regions.get(region.arena_index()).expect("region");
         let region_state = region_record.state();
+        let can_spawn = region_state.can_spawn();
         crate::assert_with_log!(
-            region_state == crate::record::region::RegionState::Closing,
-            "region closing",
-            crate::record::region::RegionState::Closing,
-            region_state
+            !can_spawn,
+            "region no longer accepts spawns",
+            false,
+            can_spawn
         );
 
         // Verify spawning is rejected with error (not panic)
@@ -4642,11 +4794,16 @@ mod tests {
             .get(root.arena_index())
             .expect("root region")
             .state();
+        let root_closing = matches!(
+            root_state,
+            crate::record::region::RegionState::Closing
+                | crate::record::region::RegionState::Draining
+        );
         crate::assert_with_log!(
-            root_state == crate::record::region::RegionState::Closing,
-            "root still closing with live task",
-            crate::record::region::RegionState::Closing,
-            root_state
+            root_closing,
+            "root still closing/draining with live task",
+            true,
+            root_closing
         );
 
         // Complete root task → root should close

@@ -108,6 +108,10 @@ impl Worker {
                 continue;
             }
 
+            if self.schedule_ready_finalizers() {
+                continue;
+            }
+
             // 4. Drive I/O (Leader/Follower pattern)
             // If we can acquire the IO driver lock, we become the I/O leader.
             // The leader polls the reactor with a short timeout.
@@ -171,6 +175,7 @@ impl Worker {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute(&self, task_id: TaskId) {
         use crate::runtime::stored_task::AnyStoredTask;
 
@@ -239,19 +244,64 @@ impl Worker {
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
+                let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
-                        record.complete(task_outcome);
+                        let mut completed_via_cancel = false;
+                        if matches!(task_outcome, crate::types::Outcome::Ok(())) {
+                            let should_cancel = matches!(
+                                record.state,
+                                crate::record::task::TaskState::Cancelling { .. }
+                                    | crate::record::task::TaskState::Finalizing { .. }
+                            ) || (cancel_ack
+                                && matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::CancelRequested { .. }
+                                ));
+                            if should_cancel {
+                                if matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::CancelRequested { .. }
+                                ) {
+                                    let _ = record.acknowledge_cancel();
+                                }
+                                if matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::Cancelling { .. }
+                                ) {
+                                    record.cleanup_done();
+                                }
+                                if matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::Finalizing { .. }
+                                ) {
+                                    record.finalize_done();
+                                }
+                                completed_via_cancel = matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::Completed(
+                                        crate::types::Outcome::Cancelled(_)
+                                    )
+                                );
+                            }
+                        }
+                        if !completed_via_cancel {
+                            record.complete(task_outcome);
+                        }
                     }
                 }
 
                 let waiters = state.task_completed(task_id);
+                let finalizers = state.drain_ready_async_finalizers();
                 for waiter in waiters {
                     if let Some(record) = state.tasks.get(waiter.arena_index()) {
                         if record.wake_state.notify() {
                             self.global.push(waiter);
                         }
                     }
+                }
+                for (finalizer_task, _) in finalizers {
+                    self.global.push(finalizer_task);
                 }
                 drop(state);
                 wake_state.clear();
@@ -358,9 +408,47 @@ impl Worker {
                     }
                     self.parker.unpark();
                 }
+
+                if let Ok(mut state) = self.state.lock() {
+                    let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
+                }
             }
         }
         metrics.scheduler_tick(1, poll_start.elapsed());
+    }
+
+    fn schedule_ready_finalizers(&self) -> bool {
+        let tasks = {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            state.drain_ready_async_finalizers()
+        };
+        if tasks.is_empty() {
+            return false;
+        }
+        for (task_id, _) in tasks {
+            self.global.push(task_id);
+        }
+        true
+    }
+
+    fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
+        let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+            return false;
+        };
+        let Some(inner) = record.cx_inner.as_ref() else {
+            return false;
+        };
+        let mut acknowledged = false;
+        if let Ok(mut guard) = inner.write() {
+            if guard.cancel_acknowledged {
+                guard.cancel_acknowledged = false;
+                acknowledged = true;
+            }
+        }
+        if acknowledged {
+            let _ = record.acknowledge_cancel();
+        }
+        acknowledged
     }
 }
 

@@ -9,6 +9,7 @@
 use super::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
 use super::oracle::OracleSuite;
+use crate::record::task::TaskState;
 use crate::record::ObligationKind;
 use crate::runtime::config::ObligationLeakResponse;
 use crate::runtime::deadline_monitor::{
@@ -296,6 +297,7 @@ impl LabRuntime {
             let _ = timer.process_timers();
         }
         self.poll_io();
+        self.schedule_async_finalizers();
 
         // 1. Choose a worker and pop a task (deterministic multi-worker model)
         let worker_count = self.config.worker_count.max(1);
@@ -381,6 +383,7 @@ impl LabRuntime {
             // Task lost (should not happen if consistent)
             return;
         };
+        let cancel_ack = self.consume_cancel_ack(task_id);
 
         // 5. Handle result
         match result {
@@ -408,7 +411,32 @@ impl LabRuntime {
                                 crate::types::Outcome::Panicked(p)
                             }
                         };
-                        record.complete(record_outcome);
+                        let mut completed_via_cancel = false;
+                        if matches!(record_outcome, crate::types::Outcome::Ok(())) {
+                            let should_cancel = matches!(
+                                record.state,
+                                TaskState::Cancelling { .. } | TaskState::Finalizing { .. }
+                            ) || (cancel_ack
+                                && matches!(record.state, TaskState::CancelRequested { .. }));
+                            if should_cancel {
+                                if matches!(record.state, TaskState::CancelRequested { .. }) {
+                                    let _ = record.acknowledge_cancel();
+                                }
+                                if matches!(record.state, TaskState::Cancelling { .. }) {
+                                    record.cleanup_done();
+                                }
+                                if matches!(record.state, TaskState::Finalizing { .. }) {
+                                    record.finalize_done();
+                                }
+                                completed_via_cancel = matches!(
+                                    record.state,
+                                    TaskState::Completed(crate::types::Outcome::Cancelled(_))
+                                );
+                            }
+                        }
+                        if !completed_via_cancel {
+                            record.complete(record_outcome);
+                        }
                     }
                 }
 
@@ -560,7 +588,9 @@ impl LabRuntime {
             self.inject_budget_exhaust(task_id);
         }
 
-        if !skip_poll {
+        if skip_poll {
+            self.reschedule_after_chaos_skip(task_id);
+        } else {
             self.chaos_stats.record_no_injection();
         }
 
@@ -588,6 +618,53 @@ impl LabRuntime {
             self.chaos_stats.record_wakeup_storm(count as u64);
             self.inject_spurious_wakes(task_id, priority, count);
         }
+    }
+
+    fn reschedule_after_chaos_skip(&self, task_id: TaskId) {
+        let Some(record) = self.state.tasks.get(task_id.arena_index()) else {
+            return;
+        };
+        if record.state.is_terminal() {
+            return;
+        }
+        let priority = record
+            .cx_inner
+            .as_ref()
+            .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+            .unwrap_or(0);
+        let mut sched = self.scheduler.lock().unwrap();
+        sched.schedule_cancel(task_id, priority);
+    }
+
+    fn schedule_async_finalizers(&mut self) {
+        let tasks = self.state.drain_ready_async_finalizers();
+        if tasks.is_empty() {
+            return;
+        }
+        let mut sched = self.scheduler.lock().unwrap();
+        for (task_id, priority) in tasks {
+            sched.schedule(task_id, priority);
+        }
+    }
+
+    fn consume_cancel_ack(&mut self, task_id: TaskId) -> bool {
+        let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) else {
+            return false;
+        };
+        let Some(inner) = record.cx_inner.as_ref() else {
+            return false;
+        };
+        let mut acknowledged = false;
+        if let Ok(mut guard) = inner.write() {
+            if guard.cancel_acknowledged {
+                guard.cancel_acknowledged = false;
+                acknowledged = true;
+            }
+        }
+        if acknowledged {
+            let _ = record.acknowledge_cancel();
+        }
+        acknowledged
     }
 
     /// Injects a cancellation for a task.
@@ -865,6 +942,8 @@ impl LabRuntime {
     }
 }
 
+const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;
+
 #[derive(Debug)]
 /// Deterministic lab scheduler with per-worker queues.
 ///
@@ -875,11 +954,14 @@ pub struct LabScheduler {
     scheduled: HashSet<TaskId>,
     assignments: HashMap<TaskId, usize>,
     next_worker: usize,
+    cancel_streak: Vec<usize>,
+    cancel_streak_limit: usize,
 }
 
 impl LabScheduler {
     fn new(worker_count: usize) -> Self {
         let count = if worker_count == 0 { 1 } else { worker_count };
+        let cancel_streak_limit = DEFAULT_LAB_CANCEL_STREAK_LIMIT.max(1);
         Self {
             workers: (0..count)
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
@@ -887,11 +969,19 @@ impl LabScheduler {
             scheduled: HashSet::new(),
             assignments: HashMap::new(),
             next_worker: 0,
+            cancel_streak: vec![0; count],
+            cancel_streak_limit,
         }
     }
 
     fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+
+    /// Returns the configured cancel streak limit for lab scheduling.
+    #[must_use]
+    pub fn cancel_streak_limit(&self) -> usize {
+        self.cancel_streak_limit
     }
 
     fn assign_worker(&mut self, task: TaskId) -> usize {
@@ -944,10 +1034,33 @@ impl LabScheduler {
         }
 
         let worker = worker % self.workers.len();
-        let (task, lane) = self.workers[worker].pop_with_lane(rng_hint)?;
-        self.scheduled.remove(&task);
-        self.assignments.insert(task, worker);
-        Some((task, lane))
+        let cancel_streak = &mut self.cancel_streak[worker];
+
+        if *cancel_streak < self.cancel_streak_limit {
+            if let Some((task, lane)) = self.workers[worker].pop_cancel_with_rng(rng_hint) {
+                *cancel_streak += 1;
+                self.scheduled.remove(&task);
+                self.assignments.insert(task, worker);
+                return Some((task, lane));
+            }
+        }
+
+        if let Some((task, lane)) = self.workers[worker].pop_non_cancel_with_rng(rng_hint) {
+            *cancel_streak = 0;
+            self.scheduled.remove(&task);
+            self.assignments.insert(task, worker);
+            return Some((task, lane));
+        }
+
+        if let Some((task, lane)) = self.workers[worker].pop_cancel_with_rng(rng_hint) {
+            *cancel_streak = 1;
+            self.scheduled.remove(&task);
+            self.assignments.insert(task, worker);
+            return Some((task, lane));
+        }
+
+        *cancel_streak = 0;
+        None
     }
 
     fn steal_for_worker(&mut self, thief: usize, rng_hint: u64) -> Option<TaskId> {

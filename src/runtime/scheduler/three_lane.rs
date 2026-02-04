@@ -786,6 +786,10 @@ impl ThreeLaneWorker {
                 continue;
             }
 
+            if self.schedule_ready_finalizers() {
+                continue;
+            }
+
             // PHASE 5: Backoff before parking
             let mut backoff = 0;
 
@@ -1363,13 +1367,55 @@ impl ThreeLaneWorker {
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
+                let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
-                        record.complete(task_outcome);
+                        let mut completed_via_cancel = false;
+                        if matches!(task_outcome, crate::types::Outcome::Ok(())) {
+                            let should_cancel = matches!(
+                                record.state,
+                                crate::record::task::TaskState::Cancelling { .. }
+                                    | crate::record::task::TaskState::Finalizing { .. }
+                            ) || (cancel_ack
+                                && matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::CancelRequested { .. }
+                                ));
+                            if should_cancel {
+                                if matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::CancelRequested { .. }
+                                ) {
+                                    let _ = record.acknowledge_cancel();
+                                }
+                                if matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::Cancelling { .. }
+                                ) {
+                                    record.cleanup_done();
+                                }
+                                if matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::Finalizing { .. }
+                                ) {
+                                    record.finalize_done();
+                                }
+                                completed_via_cancel = matches!(
+                                    record.state,
+                                    crate::record::task::TaskState::Completed(
+                                        crate::types::Outcome::Cancelled(_)
+                                    )
+                                );
+                            }
+                        }
+                        if !completed_via_cancel {
+                            record.complete(task_outcome);
+                        }
                     }
                 }
 
                 let waiters = state.task_completed(task_id);
+                let finalizers = state.drain_ready_async_finalizers();
                 for waiter in waiters {
                     if let Some(record) = state.tasks.get(waiter.arena_index()) {
                         let waiter_priority = record
@@ -1407,6 +1453,10 @@ impl ThreeLaneWorker {
                             }
                         }
                     }
+                }
+                for (finalizer_task, priority) in finalizers {
+                    self.global.inject_ready(finalizer_task, priority);
+                    self.coordinator.wake_one();
                 }
                 drop(state);
                 wake_state.clear();
@@ -1476,8 +1526,47 @@ impl ThreeLaneWorker {
                         self.coordinator.wake_one();
                     }
                 }
+
+                if let Ok(mut state) = self.state.lock() {
+                    let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
+                }
             }
         }
+    }
+
+    fn schedule_ready_finalizers(&self) -> bool {
+        let tasks = {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            state.drain_ready_async_finalizers()
+        };
+        if tasks.is_empty() {
+            return false;
+        }
+        for (task_id, priority) in tasks {
+            self.global.inject_ready(task_id, priority);
+            self.coordinator.wake_one();
+        }
+        true
+    }
+
+    fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
+        let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+            return false;
+        };
+        let Some(inner) = record.cx_inner.as_ref() else {
+            return false;
+        };
+        let mut acknowledged = false;
+        if let Ok(mut guard) = inner.write() {
+            if guard.cancel_acknowledged {
+                guard.cancel_acknowledged = false;
+                acknowledged = true;
+            }
+        }
+        if acknowledged {
+            let _ = record.acknowledge_cancel();
+        }
+        acknowledged
     }
 }
 
