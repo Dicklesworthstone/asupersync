@@ -595,6 +595,72 @@ ack.commit(); // drop => nack
 
 Reserve slot + idempotency key; commit sends; cancel triggers best-effort cancel; lease bounds orphan work.
 
+#### 8.4.1 Remote protocol state machine (named computations)
+
+**Entities**
+
+* **Origin node**: owns the region/handle; initiates spawn/cancel.
+* **Remote node**: executes named computation; sends ack/result/lease renewals.
+
+**Message types (Phase 1+)**
+
+* `SpawnRequest { remote_task_id, computation, input, lease, idempotency_key, budget, origin_node, origin_region, origin_task }`
+* `SpawnAck { remote_task_id, status: Accepted | Rejected(reason), assigned_node }`
+* `CancelRequest { remote_task_id, reason, origin_node }`
+* `ResultDelivery { remote_task_id, outcome, execution_time }`
+* `LeaseRenewal { remote_task_id, new_lease, current_state, node }`
+
+**Origin-side states (RemoteHandle)**
+
+```
+Pending --(SpawnAck:Accepted)--> Running
+Pending --(SpawnAck:Rejected)--> Failed(Rejected)
+Running --(ResultDelivery:Success)--> Completed
+Running --(ResultDelivery:Failed/Panicked)--> Failed
+Running --(ResultDelivery:Cancelled)--> Cancelled
+Running --(lease timeout)--> LeaseExpired
+LeaseExpired --(ResultDelivery:any)--> terminal (Completed/Failed/Cancelled)
+```
+
+State transitions must be **monotone** and **idempotent**. Duplicate messages are legal and must not regress state.
+
+**Origin-side transition table (Phase 1+)**
+
+| Current | Input | Next | Notes |
+| --- | --- | --- | --- |
+| Pending | SpawnAck:Accepted | Running | Record assigned node and lease. |
+| Pending | SpawnAck:Rejected | Failed | Rejection reason is terminal. |
+| Pending | CancelRequest (local) | Pending | Cancel is best-effort before ack. |
+| Running | ResultDelivery:Success | Completed | Terminal. |
+| Running | ResultDelivery:Failed/Panicked | Failed | Terminal. |
+| Running | ResultDelivery:Cancelled | Cancelled | Terminal. |
+| Running | Lease timeout | LeaseExpired | Escalate via policy. |
+| LeaseExpired | ResultDelivery:any | Completed/Failed/Cancelled | Terminal and idempotent. |
+
+**Remote-side behavior**
+
+* `SpawnRequest` -> check `idempotency_key` against a dedup store keyed by `(key, computation)`:
+* `SpawnRequest` new -> record entry, start task, send `SpawnAck:Accepted`.
+* `SpawnRequest` duplicate -> resend cached `SpawnAck`, and if outcome known, resend `ResultDelivery`.
+* `SpawnRequest` conflict -> send `SpawnAck:Rejected(IdempotencyConflict)`.
+* `SpawnRequest` reject -> if computation unknown or capacity exceeded, reject with reason (no task start).
+* `CancelRequest` -> mark task cancel requested; eventually deliver `ResultDelivery:Cancelled`.
+* Completion or cancel -> emit exactly one terminal `ResultDelivery`.
+* Dedup entries expire after a TTL; expiry is a policy knob and must be traceable.
+
+**Lease semantics**
+
+* Leases are obligations; the origin's region cannot close while a lease is active.
+* `LeaseRenewal` extends liveness; lack of renewal within the lease window moves origin state to `LeaseExpired`.
+* After `LeaseExpired`, the origin may issue `CancelRequest` as a best-effort fence and must surface a deterministic outcome (policy: fail region, retry, or escalate).
+
+**Determinism invariants**
+
+* For each `RemoteTaskId`, at most one terminal outcome is accepted.
+* `IdempotencyKey` deterministically maps to a single `(computation,input)` tuple.
+* Message handling is order-agnostic: causal time orders only when required; duplicates are safe.
+* Retries reuse the same `IdempotencyKey`; the remote responds with the original `remote_task_id` and any cached outcome.
+
 ### 8.5 Permit drop semantics
 
 Release mode: auto-abort/nack + telemetry.
