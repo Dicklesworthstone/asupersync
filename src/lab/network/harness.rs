@@ -79,6 +79,8 @@ pub struct SimNode {
 pub struct RunningTask {
     /// The remote task ID.
     pub task_id: RemoteTaskId,
+    /// Idempotency key for deduplication.
+    pub idempotency_key: IdempotencyKey,
     /// Origin node that spawned this task.
     pub origin: NodeId,
     /// Simulated work remaining (in time units).
@@ -191,10 +193,28 @@ impl SimNode {
         // Check idempotency
         let dedup = self.dedup.check(&req.idempotency_key, &req.computation);
         match dedup {
-            crate::remote::DedupDecision::Duplicate(_) => {
+            crate::remote::DedupDecision::Duplicate(record) => {
                 self.event_log.push(NodeEvent::DuplicateSpawn {
                     task_id: req.remote_task_id,
                 });
+                self.outbox.push_back((
+                    req.origin_node.clone(),
+                    RemoteMessage::SpawnAck(SpawnAck {
+                        remote_task_id: record.remote_task_id,
+                        status: SpawnAckStatus::Accepted,
+                        assigned_node: self.node_id.clone(),
+                    }),
+                ));
+                if let Some(outcome) = record.outcome.clone() {
+                    self.outbox.push_back((
+                        req.origin_node,
+                        RemoteMessage::ResultDelivery(ResultDelivery {
+                            remote_task_id: record.remote_task_id,
+                            outcome,
+                            execution_time: Duration::ZERO,
+                        }),
+                    ));
+                }
                 return;
             }
             crate::remote::DedupDecision::Conflict => {
@@ -226,6 +246,7 @@ impl SimNode {
         // Accept the spawn
         let task = RunningTask {
             task_id: req.remote_task_id,
+            idempotency_key: req.idempotency_key,
             origin: req.origin_node.clone(),
             work_remaining: Duration::from_millis(100), // Default simulated work
             cancel_requested: false,
@@ -282,13 +303,14 @@ impl SimNode {
 
         for (id, task) in &mut self.running_tasks {
             if task.cancel_requested {
+                let outcome =
+                    RemoteOutcome::Cancelled(crate::types::CancelReason::user("harness cancel"));
+                let _ = self.dedup.complete(&task.idempotency_key, outcome.clone());
                 completed.push((
                     task.origin.clone(),
                     RemoteMessage::ResultDelivery(ResultDelivery {
                         remote_task_id: *id,
-                        outcome: RemoteOutcome::Cancelled(crate::types::CancelReason::user(
-                            "harness cancel",
-                        )),
+                        outcome,
                         execution_time: Duration::ZERO,
                     }),
                 ));
@@ -296,11 +318,13 @@ impl SimNode {
                     .push(NodeEvent::TaskCancelled { task_id: *id });
                 to_remove.push(*id);
             } else if task.work_remaining <= elapsed {
+                let outcome = RemoteOutcome::Success(vec![]);
+                let _ = self.dedup.complete(&task.idempotency_key, outcome.clone());
                 completed.push((
                     task.origin.clone(),
                     RemoteMessage::ResultDelivery(ResultDelivery {
                         remote_task_id: *id,
-                        outcome: RemoteOutcome::Success(vec![]),
+                        outcome,
                         execution_time: Duration::ZERO,
                     }),
                 ));
@@ -700,11 +724,13 @@ impl DistributedHarness {
                     let task_ids: Vec<RemoteTaskId> = node.running_tasks.keys().copied().collect();
                     for tid in task_ids {
                         if let Some(task) = node.running_tasks.remove(&tid) {
+                            let outcome = RemoteOutcome::Failed("lease expired".into());
+                            let _ = node.dedup.complete(&task.idempotency_key, outcome.clone());
                             node.outbox.push_back((
                                 task.origin,
                                 RemoteMessage::ResultDelivery(ResultDelivery {
                                     remote_task_id: tid,
-                                    outcome: RemoteOutcome::Failed("lease expired".into()),
+                                    outcome,
                                     execution_time: Duration::ZERO,
                                 }),
                             ));
@@ -844,6 +870,67 @@ mod tests {
             .events()
             .iter()
             .any(|e| matches!(e, NodeEvent::TaskCompleted { .. })));
+    }
+
+    #[test]
+    fn duplicate_spawn_resends_ack() {
+        let (mut harness, a, b) = setup_harness();
+        let task_id = RemoteTaskId::next();
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_millis(10));
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_millis(10));
+
+        let ack_count = harness
+            .trace()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    HarnessTraceEvent {
+                        kind: HarnessTraceKind::MessageSent { from, to, msg_type },
+                        ..
+                    } if from == &b && to == &a && msg_type == "SpawnAck"
+                )
+            })
+            .count();
+        assert!(ack_count >= 2);
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(node_b
+            .events()
+            .iter()
+            .any(|e| matches!(e, NodeEvent::DuplicateSpawn { .. })));
+        assert_eq!(node_b.running_task_count(), 1);
+    }
+
+    #[test]
+    fn duplicate_spawn_after_completion_resends_result() {
+        let (mut harness, a, b) = setup_harness();
+        let task_id = RemoteTaskId::next();
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_millis(300));
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_millis(20));
+
+        let result_count = harness
+            .trace()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    HarnessTraceEvent {
+                        kind: HarnessTraceKind::MessageSent { from, to, msg_type },
+                        ..
+                    } if from == &b && to == &a && msg_type == "ResultDelivery"
+                )
+            })
+            .count();
+        assert!(result_count >= 2);
     }
 
     #[test]
