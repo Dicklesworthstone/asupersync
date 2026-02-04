@@ -642,9 +642,11 @@ never stdout/stderr.
 ### 5) Distributed Regions (conceptual)
 
 The distributed API is in-progress. The intent is to provide region-scoped
-fault tolerance with explicit leases and idempotency. Use the `distributed/`
-module as the primary entry point, and prefer `Cx`-threaded capabilities over
-ambient globals.
+fault tolerance with explicit leases and idempotency. Today there are two
+entrypoints: `distributed` for region snapshot/replication/recovery, and
+`remote` for named computations with leases and idempotency. The `remote`
+surface is Phase 0 (handle-only; no network transport yet), and all remote
+operations require `RemoteCap` from `Cx` (no closure shipping).
 
 ---
 

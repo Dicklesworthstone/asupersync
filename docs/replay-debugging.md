@@ -43,6 +43,60 @@ If any precondition is violated, replay should fail fast with explicit diagnosti
 
 ---
 
+## Schedule Exploration (Seed Sweep + DPOR)
+
+Asupersync ships a deterministic **schedule explorer** in `src/lab/explorer.rs` to
+systematically vary task interleavings and discover concurrency bugs.
+
+Two modes are available:
+- **Seed sweep** (`ScheduleExplorer`): run many seeds, classify runs by Foata fingerprints, and track equivalence classes.
+- **DPOR-guided** (`DporExplorer`): detect races, generate backtrack points, and explore alternative schedules with sleep-set pruning.
+
+### When to Use
+
+- Use **seed sweep** for quick coverage with minimal configuration.
+- Use **DPOR-guided** when you need systematic exploration of race alternatives and coverage metrics.
+
+### Example: Seed Sweep
+
+```rust
+use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer};
+
+let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(42, 50));
+let report = explorer.explore(|runtime| {
+    // setup tasks, then run
+    runtime.run_until_quiescent();
+});
+
+assert!(!report.has_violations());
+println!("Unique classes: {}", report.unique_classes);
+```
+
+### Example: DPOR-Guided Exploration
+
+```rust
+use asupersync::lab::explorer::{DporExplorer, ExplorerConfig};
+
+let mut explorer = DporExplorer::new(ExplorerConfig::new(42, 25));
+let report = explorer.explore(|runtime| {
+    runtime.run_until_quiescent();
+});
+
+let coverage = explorer.dpor_coverage();
+println!("Total races: {}", coverage.total_races);
+println!("Backtrack points: {}", coverage.total_backtrack_points);
+```
+
+### Coverage Signals
+
+DPOR coverage metrics include:
+- `total_races` and `total_hb_races`
+- `total_backtrack_points`, `pruned_backtrack_points`, and `sleep_pruned`
+- `estimated_class_trend` for saturation signals
+
+These metrics are deterministic and can be logged alongside the replay artifacts
+described below.
+
 ## Deterministic Seed Registry + Artifact Schema (bd-30pc)
 
 This section standardizes how seeds are chosen, propagated, logged, and stored in

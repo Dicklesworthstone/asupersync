@@ -25,6 +25,58 @@ cargo bench -- --save-baseline initial --noplot
 cargo bench -- --baseline initial --noplot
 ```
 
+## Extreme Optimization Loop (bd-4bfy4)
+
+Use this loop for any performance work so results are measurable, attributable,
+and behavior-preserving:
+
+1. **Profile + baseline**: run the relevant benchmark and capture a baseline.
+2. **Score the opportunity**: use the Opportunity Matrix; require Score >= 2.0.
+3. **One lever change**: limit the change to a single optimization lever.
+4. **Prove isomorphism**: fill the isomorphism proof template.
+5. **Validate**: run golden outputs and compare benchmarks vs baseline.
+6. **Record artifacts**: store baselines + smoke report under `baselines/`.
+
+Example baseline + smoke capture:
+
+```bash
+./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/criterion
+```
+
+### Smoke Report Schema (artifact manifest)
+
+The smoke report produced by `--smoke` is the canonical artifact manifest for
+perf work. Example shape (fields must be present; values may be `null` when not
+available):
+
+```json
+{
+  "generated_at": "2026-02-03T19:00:00Z",
+  "command": "cargo bench --bench phase0_baseline",
+  "seed": "3735928559",
+  "criterion_dir": "target/criterion",
+  "baseline_path": "baselines/criterion/baseline_20260203_190000.json",
+  "latest_path": "baselines/criterion/baseline_latest.json",
+  "git_sha": "deadbeef...",
+  "config": {
+    "criterion_dir": "target/criterion",
+    "save_dir": "baselines/criterion",
+    "compare_path": null,
+    "metric": "median_ns",
+    "max_regression_pct": 10.0
+  },
+  "env": {
+    "CI": "true",
+    "RUSTFLAGS": "-C force-frame-pointers=yes"
+  },
+  "system": {
+    "os": "linux",
+    "arch": "x86_64",
+    "platform": "Linux-6.x"
+  }
+}
+```
+
 ## Benchmark Suites
 
 ### phase0_baseline
@@ -456,6 +508,24 @@ Reads `target/criterion/*/new/estimates.json` and produces a single JSON with `{
 The baseline JSON also includes `p95_ns` and `p99_ns`, computed from `sample.json`
 as per-iteration latencies.
 
+## Perf E2E Runner (bd-2nf3x)
+
+For multi-benchmark runs with structured artifacts, use:
+
+```bash
+./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark
+./scripts/run_perf_e2e.sh --compare baselines/criterion/baseline_latest.json
+./scripts/run_perf_e2e.sh --save-baseline baselines/criterion
+```
+
+Artifacts are written under `target/perf-results/` with:
+- `report.json` containing run metadata, bench exit codes, compare output, and system info
+- `logs/` for per-benchmark logs
+- `artifacts/` for baseline JSONs and comparison output
+
+This runner is the preferred harness for bd-4bfy4 performance work because it
+produces a deterministic, machine-readable manifest for perf regression tracking.
+
 ## Allocation Census
 
 Use the allocation census script to capture allocation-heavy hot paths without
@@ -591,6 +661,16 @@ threshold regressions:
 
 This is enforced in `.github/workflows/benchmarks.yml` using the baseline JSON produced by
 `scripts/capture_baseline.sh`.
+
+## Perf Dashboard Inputs
+
+If you are building a dashboard, ingest these artifacts:
+- `baselines/criterion/baseline_latest.json` for the current benchmark baseline
+- `target/perf-results/perf_<timestamp>/report.json` for each perf run
+- `target/perf-results/perf_<timestamp>/artifacts/baseline_current.json` for per-run baseline snapshots
+
+These files are stable, machine‑readable, and include enough metadata to plot
+trendlines across commits and to attribute regressions to specific benches.
 
 ## Measurement Methodology
 
