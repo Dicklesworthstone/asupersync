@@ -28,9 +28,12 @@ use crate::trace::event_structure::TracePoset;
 use crate::trace::scoring::{
     score_persistence, seed_fingerprint, ClassId, EvidenceLedger, TopologicalScore,
 };
+use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::io;
+use std::path::Path;
 
 const DEFAULT_SATURATION_WINDOW: usize = 10;
 const DEFAULT_UNEXPLORED_LIMIT: usize = 5;
@@ -130,7 +133,7 @@ pub struct ViolationReport {
 }
 
 /// Coverage metrics for the exploration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CoverageMetrics {
     /// Number of distinct equivalence classes discovered.
     pub equivalence_classes: usize,
@@ -168,7 +171,7 @@ impl CoverageMetrics {
 }
 
 /// Saturation signals for exploration coverage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SaturationMetrics {
     /// Window size used for saturation detection.
     pub window: usize,
@@ -291,6 +294,169 @@ impl ExplorationReport {
     #[must_use]
     pub fn certificates_consistent(&self) -> bool {
         self.certificate_divergences().is_empty()
+    }
+
+    /// Convert to a JSON-serializable summary (no heavy per-run violation payloads).
+    #[must_use]
+    pub fn to_json_summary(&self) -> ExplorationReportJson {
+        ExplorationReportJson {
+            total_runs: self.total_runs,
+            unique_classes: self.unique_classes,
+            violations: self
+                .violations
+                .iter()
+                .map(ViolationReport::summary)
+                .collect(),
+            violation_seeds: self.violation_seeds(),
+            coverage: self.coverage.clone(),
+            top_unexplored: self
+                .top_unexplored
+                .iter()
+                .map(UnexploredSeedJson::from_seed)
+                .collect(),
+            runs: self.runs.iter().map(RunResult::summary).collect(),
+            certificate_divergences: self.certificate_divergences(),
+        }
+    }
+
+    /// Serialize the summary report to JSON.
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.to_json_summary())
+    }
+
+    /// Serialize the summary report to pretty JSON.
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(&self.to_json_summary())
+    }
+
+    /// Write the summary report as JSON to a file.
+    ///
+    /// When `pretty` is true, pretty-printed JSON is emitted.
+    pub fn write_json_summary<P: AsRef<Path>>(&self, path: P, pretty: bool) -> io::Result<()> {
+        let json = if pretty {
+            self.to_json_pretty().map_err(json_err)?
+        } else {
+            self.to_json_string().map_err(json_err)?
+        };
+        std::fs::write(path, json)
+    }
+}
+
+fn json_err(err: serde_json::Error) -> io::Error {
+    io::Error::other(err)
+}
+
+/// JSON-safe summary for an exploration report.
+#[derive(Debug, Serialize)]
+pub struct ExplorationReportJson {
+    /// Total runs performed.
+    pub total_runs: usize,
+    /// Unique equivalence classes discovered.
+    pub unique_classes: usize,
+    /// Violation summaries (stringified to keep output stable).
+    pub violations: Vec<ViolationSummary>,
+    /// Seeds that triggered violations.
+    pub violation_seeds: Vec<u64>,
+    /// Coverage metrics.
+    pub coverage: CoverageMetrics,
+    /// Top-ranked unexplored seeds (if any remain).
+    pub top_unexplored: Vec<UnexploredSeedJson>,
+    /// Per-run summaries (no heavy violation payloads).
+    pub runs: Vec<RunSummary>,
+    /// Certificate divergences within equivalence classes.
+    pub certificate_divergences: Vec<(u64, u64)>,
+}
+
+/// JSON-safe summary for a single run.
+#[derive(Debug, Serialize)]
+pub struct RunSummary {
+    /// Seed used for the run.
+    pub seed: u64,
+    /// Steps executed before completion.
+    pub steps: u64,
+    /// Foata fingerprint for the run's trace.
+    pub fingerprint: u64,
+    /// True if this run discovered a new equivalence class.
+    pub is_new_class: bool,
+    /// Number of invariant violations observed.
+    pub violation_count: usize,
+    /// Hash of the schedule certificate for determinism checks.
+    pub certificate_hash: u64,
+}
+
+impl RunResult {
+    fn summary(&self) -> RunSummary {
+        RunSummary {
+            seed: self.seed,
+            steps: self.steps,
+            fingerprint: self.fingerprint,
+            is_new_class: self.is_new_class,
+            violation_count: self.violations.len(),
+            certificate_hash: self.certificate_hash,
+        }
+    }
+}
+
+/// JSON-safe summary for a violation report.
+#[derive(Debug, Serialize)]
+pub struct ViolationSummary {
+    /// Seed that triggered the violation.
+    pub seed: u64,
+    /// Steps taken before the violation was observed.
+    pub steps: u64,
+    /// Foata fingerprint for the violating trace.
+    pub fingerprint: u64,
+    /// Stringified violation details (stable, human-readable).
+    pub violations: Vec<String>,
+}
+
+impl ViolationReport {
+    fn summary(&self) -> ViolationSummary {
+        ViolationSummary {
+            seed: self.seed,
+            steps: self.steps,
+            fingerprint: self.fingerprint,
+            violations: self.violations.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+/// JSON-safe wrapper for optional topological scores.
+#[derive(Debug, Serialize)]
+pub struct TopologicalScoreJson {
+    /// Novelty score (new homology classes).
+    pub novelty: u32,
+    /// Sum of persistence interval lengths.
+    pub persistence_sum: u64,
+    /// Deterministic fingerprint tie-break.
+    pub fingerprint: u64,
+}
+
+impl From<TopologicalScore> for TopologicalScoreJson {
+    fn from(score: TopologicalScore) -> Self {
+        Self {
+            novelty: score.novelty,
+            persistence_sum: score.persistence_sum,
+            fingerprint: score.fingerprint,
+        }
+    }
+}
+
+/// JSON-safe unexplored seed entry.
+#[derive(Debug, Serialize)]
+pub struct UnexploredSeedJson {
+    /// Seed value pending exploration.
+    pub seed: u64,
+    /// Optional topological score (if available).
+    pub score: Option<TopologicalScoreJson>,
+}
+
+impl UnexploredSeedJson {
+    fn from_seed(seed: &UnexploredSeed) -> Self {
+        Self {
+            seed: seed.seed,
+            score: seed.score.map(TopologicalScoreJson::from),
+        }
     }
 }
 
@@ -521,7 +687,7 @@ pub struct DporExplorer {
 }
 
 /// Extended coverage metrics for DPOR exploration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DporCoverageMetrics {
     /// Base coverage metrics.
     pub base: CoverageMetrics,
@@ -1036,6 +1202,9 @@ impl Clone for ViolationReport {
 mod tests {
     use super::*;
     use crate::types::Budget;
+    use serde_json::Value as JsonValue;
+    use std::fs;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn explore_single_task_no_violations() {
@@ -1350,5 +1519,44 @@ mod tests {
         for r in &report.runs {
             assert_ne!(r.certificate_hash, 0, "seed {} had zero cert hash", r.seed);
         }
+    }
+
+    #[test]
+    fn json_summary_includes_core_fields() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(7, 2));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.run_until_quiescent();
+        });
+
+        let json = report.to_json_string().expect("json");
+        let value: JsonValue = serde_json::from_str(&json).expect("parse");
+        assert!(value.get("total_runs").is_some());
+        assert!(value.get("unique_classes").is_some());
+        assert!(value.get("coverage").is_some());
+        assert!(value.get("violations").is_some());
+        assert!(value.get("violation_seeds").is_some());
+    }
+
+    #[test]
+    fn json_summary_can_be_written() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(11, 1));
+        let report = explorer.explore(|runtime| {
+            let _region = runtime.state.create_root_region(Budget::INFINITE);
+            runtime.run_until_quiescent();
+        });
+
+        let tmp = NamedTempFile::new().expect("tmp");
+        report
+            .write_json_summary(tmp.path(), false)
+            .expect("write json");
+        let contents = fs::read_to_string(tmp.path()).expect("read");
+        let value: JsonValue = serde_json::from_str(&contents).expect("parse");
+        assert!(value.get("coverage").is_some());
     }
 }
