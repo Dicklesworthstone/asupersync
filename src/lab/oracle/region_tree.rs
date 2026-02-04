@@ -70,6 +70,14 @@ pub enum RegionTreeViolation {
 
     /// No root region exists (all regions have parents but none is root).
     NoRoot,
+
+    /// A parent's subregions set references a region that does not exist.
+    PhantomSubregion {
+        /// The parent with the stale reference.
+        parent: RegionId,
+        /// The non-existent child.
+        phantom_child: RegionId,
+    },
 }
 
 impl fmt::Display for RegionTreeViolation {
@@ -98,6 +106,15 @@ impl fmt::Display for RegionTreeViolation {
             }
             Self::NoRoot => {
                 write!(f, "No root region exists (all regions have parents)")
+            }
+            Self::PhantomSubregion {
+                parent,
+                phantom_child,
+            } => {
+                write!(
+                    f,
+                    "Parent {parent:?} references non-existent subregion {phantom_child:?}"
+                )
             }
         }
     }
@@ -173,7 +190,8 @@ impl RegionTreeOracle {
     /// 1. Exactly one root region exists (parent = None)
     /// 2. Every non-root region has a parent that exists
     /// 3. Every region is in its parent's subregions set
-    /// 4. No cycles exist in the parent relationship
+    /// 4. Every subregion reference points to an existing region
+    /// 5. No cycles exist in the parent relationship
     ///
     /// # Returns
     /// * `Ok(())` if no violations are found
@@ -223,7 +241,19 @@ impl RegionTreeOracle {
             }
         }
 
-        // 4. Check for cycles using DFS
+        // 4. Reverse check: every subregion reference points to an existing region
+        for (&parent, entry) in &self.regions {
+            for &child in &entry.subregions {
+                if !self.regions.contains_key(&child) {
+                    return Err(RegionTreeViolation::PhantomSubregion {
+                        parent,
+                        phantom_child: child,
+                    });
+                }
+            }
+        }
+
+        // 5. Check for cycles using DFS
         if let Some(cycle) = self.find_cycle() {
             return Err(RegionTreeViolation::CycleDetected { cycle });
         }
@@ -849,5 +879,58 @@ mod tests {
             crate::assert_with_log!(depth == Some(1), "depth", Some(1), depth);
         }
         crate::test_complete!("many_siblings");
+    }
+
+    // === Phantom Subregion Tests ===
+
+    #[test]
+    fn phantom_subregion_detected() {
+        init_test("phantom_subregion_detected");
+        let mut oracle = RegionTreeOracle::new();
+
+        oracle.on_region_create(region(0), None, t(0));
+        // Manually inject a phantom child via on_subregion_add without creating it.
+        oracle.on_subregion_add(region(0), region(99));
+
+        let result = oracle.check();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegionTreeViolation::PhantomSubregion {
+                parent,
+                phantom_child,
+            } => {
+                assert_eq!(parent, region(0));
+                assert_eq!(phantom_child, region(99));
+            }
+            other => panic!("expected PhantomSubregion, got {other:?}"),
+        }
+
+        crate::test_complete!("phantom_subregion_detected");
+    }
+
+    #[test]
+    fn phantom_subregion_display() {
+        init_test("phantom_subregion_display");
+        let v = RegionTreeViolation::PhantomSubregion {
+            parent: region(0),
+            phantom_child: region(42),
+        };
+        let msg = v.to_string();
+        assert!(msg.contains("non-existent subregion"), "got: {msg}");
+        crate::test_complete!("phantom_subregion_display");
+    }
+
+    #[test]
+    fn valid_subregion_add_passes() {
+        init_test("valid_subregion_add_passes");
+        let mut oracle = RegionTreeOracle::new();
+
+        oracle.on_region_create(region(0), None, t(0));
+        oracle.on_region_create(region(1), Some(region(0)), t(1));
+        // Redundant add — child already in subregions from on_region_create.
+        oracle.on_subregion_add(region(0), region(1));
+
+        assert!(oracle.check().is_ok());
+        crate::test_complete!("valid_subregion_add_passes");
     }
 }
