@@ -1375,6 +1375,27 @@ impl<T> MessageEnvelope<T> {
     }
 }
 
+/// Transport hook for Phase 1+ remote protocol integration.
+///
+/// Implementations are responsible for framing, handshake, and delivery of
+/// `RemoteMessage` envelopes between nodes. The runtime remains transport-agnostic.
+pub trait RemoteTransport {
+    /// Send a protocol message to a target node.
+    ///
+    /// Implementations should perform version checks and framing at the
+    /// transport layer.
+    fn send(
+        &mut self,
+        to: &NodeId,
+        envelope: MessageEnvelope<RemoteMessage>,
+    ) -> Result<(), RemoteError>;
+
+    /// Try to receive the next inbound protocol message.
+    ///
+    /// Returns `None` if no message is available.
+    fn try_recv(&mut self) -> Option<MessageEnvelope<RemoteMessage>>;
+}
+
 /// A message in the remote structured concurrency protocol.
 ///
 /// All protocol messages are tagged with the enum variant for dispatch.
