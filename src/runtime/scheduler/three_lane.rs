@@ -107,12 +107,6 @@ impl WorkerCoordinator {
             parker.unpark();
         }
     }
-
-    pub(crate) fn wake_worker(&self, worker_id: WorkerId) {
-        if let Some(parker) = self.parkers.get(worker_id) {
-            parker.unpark();
-        }
-    }
 }
 
 thread_local! {
