@@ -1725,7 +1725,11 @@ impl<Caps> Cx<Caps> {
         Caps: cap::HasTime,
     {
         let race_fut = Box::pin(self.race(futures));
-        timeout(wall_clock_now(), duration, race_fut)
+        let now = self
+            .timer_driver
+            .as_ref()
+            .map_or_else(wall_clock_now, TimerDriverHandle::now);
+        timeout(now, duration, race_fut)
             .await
             .unwrap_or_else(|_| Err(JoinError::Cancelled(CancelReason::timeout())))
     }
