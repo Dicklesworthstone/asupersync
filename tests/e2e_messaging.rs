@@ -3,6 +3,13 @@
 
 mod common;
 
+use asupersync::channel::mpsc;
+use asupersync::channel::session::tracked_channel;
+use asupersync::cx::Cx;
+use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::types::{Budget, CancelReason};
+use std::sync::{Arc, Mutex};
+
 // =========================================================================
 // MPSC Queue: exactly-once delivery
 // =========================================================================
@@ -184,5 +191,198 @@ fn e2e_broadcast_unsubscribe() {
         assert_eq!(v2, 2);
 
         test_complete!("e2e_broadcast_unsubscribe");
+    });
+}
+
+// =========================================================================
+// Tracked MPSC (obligation tokens) — Lab E2E
+// =========================================================================
+
+#[test]
+fn e2e_tracked_mpsc_commit_with_lab_replay() {
+    common::init_test_logging();
+    test_phase!("Tracked MPSC Commit (Lab)");
+
+    let seed = 0x00C0_FFEE_u64;
+    let mut runtime = LabRuntime::new(
+        LabConfig::new(seed)
+            .with_default_replay_recording()
+            .trace_capacity(16 * 1024),
+    );
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (tx, rx) = tracked_channel::<u64>(2);
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let recv_store = Arc::clone(&received);
+
+    test_section!("spawn_receiver");
+    let (recv_task, _) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return;
+            };
+            let value = rx.recv(&cx).await.expect("recv");
+            recv_store.lock().expect("recv_store lock").push(value);
+        })
+        .expect("create recv task");
+    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+
+    test_section!("spawn_sender");
+    let (send_task, _) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return;
+            };
+            let permit = tx.reserve(&cx).await.expect("reserve");
+            let proof = permit.send(42);
+            tracing::info!(proof_kind = ?proof.kind(), "tracked permit committed");
+        })
+        .expect("create send task");
+    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let guard = received.lock().expect("received lock");
+    assert_eq!(&*guard, &[42]);
+    drop(guard);
+    assert!(runtime.is_quiescent(), "runtime should be quiescent");
+    let trace = runtime.finish_replay_trace();
+    assert!(trace.is_some(), "replay trace should be captured");
+
+    test_complete!("e2e_tracked_mpsc_commit_with_lab_replay", messages = 1);
+}
+
+#[test]
+fn e2e_tracked_mpsc_abort_with_lab_replay() {
+    common::init_test_logging();
+    test_phase!("Tracked MPSC Abort (Lab)");
+
+    let seed = 0x000A_11CE_u64;
+    let mut runtime = LabRuntime::new(
+        LabConfig::new(seed)
+            .with_default_replay_recording()
+            .trace_capacity(16 * 1024),
+    );
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (tx, rx) = tracked_channel::<u64>(1);
+    let result = Arc::new(Mutex::new(None));
+    let recv_result = Arc::clone(&result);
+
+    test_section!("spawn_receiver");
+    let (recv_task, _) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return;
+            };
+            let recv = rx.recv(&cx).await;
+            *recv_result.lock().expect("recv_result lock") = Some(recv);
+        })
+        .expect("create recv task");
+    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+
+    test_section!("spawn_sender_abort");
+    let (send_task, _) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return;
+            };
+            let permit = tx.reserve(&cx).await.expect("reserve");
+            let proof = permit.abort();
+            tracing::info!(proof_kind = ?proof.kind(), "tracked permit aborted");
+        })
+        .expect("create send task");
+    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let recv = result.lock().expect("result lock").take();
+    assert!(matches!(recv, Some(Err(mpsc::RecvError::Disconnected))));
+    assert!(runtime.is_quiescent(), "runtime should be quiescent");
+    let trace = runtime.finish_replay_trace();
+    assert!(trace.is_some(), "replay trace should be captured");
+
+    test_complete!("e2e_tracked_mpsc_abort_with_lab_replay");
+}
+
+#[test]
+fn e2e_tracked_mpsc_cancel_mid_reserve() {
+    common::init_test_logging();
+    test_phase!("Tracked MPSC Cancel Mid-Reserve (Lab)");
+
+    let seed = 0xCA11_0FFEu64;
+    let mut runtime = LabRuntime::new(
+        LabConfig::new(seed)
+            .with_default_replay_recording()
+            .trace_capacity(16 * 1024),
+    );
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (tx, _rx) = mpsc::channel::<u64>(1);
+    let outcome = Arc::new(Mutex::new(None));
+    let outcome_store = Arc::clone(&outcome);
+
+    let (task_id, _) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let Some(cx) = Cx::current() else {
+                return;
+            };
+
+            let hold = tx.reserve(&cx).await.expect("reserve initial");
+            let result = tx.reserve(&cx).await.map(|permit| {
+                permit.abort();
+            });
+
+            tracing::info!(result = ?result, "second reserve result after cancel");
+            hold.abort();
+            *outcome_store.lock().expect("outcome lock") = Some(result);
+        })
+        .expect("create task");
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    test_section!("block_then_cancel");
+    for _ in 0..3 {
+        runtime.step_for_test();
+    }
+    let reason = CancelReason::user("mid-reserve");
+    let tasks = runtime.state.cancel_request(root, &reason, None);
+    if let Ok(mut scheduler) = runtime.scheduler.lock() {
+        for (task, priority) in tasks {
+            scheduler.schedule_cancel(task, priority);
+        }
+    }
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let result = outcome.lock().expect("outcome lock").take();
+    assert!(matches!(result, Some(Err(mpsc::SendError::Cancelled(())))));
+    assert!(runtime.is_quiescent(), "runtime should be quiescent");
+    let trace = runtime.finish_replay_trace();
+    assert!(trace.is_some(), "replay trace should be captured");
+
+    test_complete!("e2e_tracked_mpsc_cancel_mid_reserve");
+}
+
+#[test]
+#[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
+fn e2e_tracked_mpsc_leak_detection_panics() {
+    common::init_test_logging();
+    test_phase!("Tracked MPSC Leak Detection");
+
+    common::run_test_with_cx(|cx| async move {
+        let (tx, _rx) = tracked_channel::<u64>(1);
+        let permit = tx.reserve(&cx).await.expect("reserve");
+        drop(permit);
     });
 }

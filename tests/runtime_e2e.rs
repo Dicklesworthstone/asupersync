@@ -9,10 +9,13 @@
 #[macro_use]
 mod common;
 
+use asupersync::channel::mpsc;
+use asupersync::channel::session::{tracked_channel, tracked_oneshot};
 use asupersync::cx::Cx;
 use asupersync::error::ErrorKind;
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::obligation::graded::{GradedScope, SendPermit};
 use asupersync::record::task::TaskState;
 use asupersync::record::{
     AdmissionError, AdmissionKind, ObligationAbortReason, ObligationKind, RegionLimits,
@@ -1699,4 +1702,297 @@ fn e2e_deterministic_cancel_storm() {
     });
 
     test_complete!("e2e_deterministic_cancel_storm");
+}
+
+// ============================================================================
+// Obligation lifecycle E2E (bd-275by)
+// ============================================================================
+
+#[test]
+fn e2e_obligation_tracked_channel_commit() {
+    let seed = 0xC0FF_EE17u64;
+    let ctx = TestContext::new("obligation_tracked_channel_commit", seed)
+        .with_subsystem("obligation")
+        .with_invariant("two_phase_commit")
+        .with_invariant("quiescence");
+    let mut harness = TestHarness::with_context("e2e_obligation_tracked_channel_commit", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .trace_capacity(8 * 1024)
+        .max_steps(10_000);
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (tx, rx) = tracked_channel::<u32>(1);
+    let recv_value = Arc::new(Mutex::new(None));
+    let recv_value_clone = recv_value.clone();
+    let proof_kind = Arc::new(Mutex::new(None));
+    let proof_kind_clone = proof_kind.clone();
+
+    harness.enter_phase("spawn");
+    let (send_task, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("cx");
+            let permit = tx.reserve(&cx).await.expect("reserve");
+            let proof = permit.send(7);
+            *proof_kind_clone.lock().unwrap() = Some(proof.kind());
+        })
+        .expect("create send task");
+    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+
+    let (recv_task, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("cx");
+            let value = rx.recv(&cx).await.expect("recv");
+            *recv_value_clone.lock().unwrap() = Some(value);
+        })
+        .expect("create recv task");
+    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+    harness.exit_phase();
+
+    harness.enter_phase("run");
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    let value = *recv_value.lock().unwrap();
+    passed &= harness.assert_eq("recv_value", &Some(7u32), &value);
+    let kind = *proof_kind.lock().unwrap();
+    passed &= harness.assert_eq("proof_kind", &Some(ObligationKind::SendPermit), &kind);
+    passed &= harness.assert_true("quiescent", runtime.is_quiescent());
+    let pending = runtime.state.pending_obligation_count();
+    passed &= harness.assert_eq("pending_obligations", &0usize, &pending);
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(
+            &mut harness,
+            &mut runtime,
+            "obligation_tracked_channel_commit",
+        );
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "tracked channel commit failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
+}
+
+#[test]
+fn e2e_obligation_tracked_oneshot_abort() {
+    let seed = 0xAB0F_700Du64;
+    let ctx = TestContext::new("obligation_tracked_oneshot_abort", seed)
+        .with_subsystem("obligation")
+        .with_invariant("two_phase_abort")
+        .with_invariant("quiescence");
+    let mut harness = TestHarness::with_context("e2e_obligation_tracked_oneshot_abort", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .trace_capacity(8 * 1024)
+        .max_steps(10_000);
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (tx, rx) = tracked_oneshot::<u32>();
+    let recv_closed = Arc::new(Mutex::new(None));
+    let recv_closed_clone = recv_closed.clone();
+    let proof_kind = Arc::new(Mutex::new(None));
+    let proof_kind_clone = proof_kind.clone();
+
+    harness.enter_phase("spawn");
+    let (send_task, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("cx");
+            let permit = tx.reserve(&cx);
+            let proof = permit.abort();
+            *proof_kind_clone.lock().unwrap() = Some(proof.kind());
+        })
+        .expect("create oneshot abort task");
+    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+
+    let (recv_task, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("cx");
+            let result = rx.recv(&cx).await;
+            let closed = matches!(result, Err(asupersync::channel::oneshot::RecvError::Closed));
+            *recv_closed_clone.lock().unwrap() = Some(closed);
+        })
+        .expect("create oneshot recv task");
+    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+    harness.exit_phase();
+
+    harness.enter_phase("run");
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    let closed = *recv_closed.lock().unwrap();
+    passed &= harness.assert_eq("recv_closed", &Some(true), &closed);
+    let kind = *proof_kind.lock().unwrap();
+    passed &= harness.assert_eq("proof_kind", &Some(ObligationKind::SendPermit), &kind);
+    passed &= harness.assert_true("quiescent", runtime.is_quiescent());
+    let pending = runtime.state.pending_obligation_count();
+    passed &= harness.assert_eq("pending_obligations", &0usize, &pending);
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(
+            &mut harness,
+            &mut runtime,
+            "obligation_tracked_oneshot_abort",
+        );
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "tracked oneshot abort failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
+}
+
+#[test]
+fn e2e_obligation_cancel_mid_reserve() {
+    let seed = 0xCA11_BA5Eu64;
+    let ctx = TestContext::new("obligation_cancel_mid_reserve", seed)
+        .with_subsystem("obligation")
+        .with_invariant("cancel_reserve");
+    let mut harness = TestHarness::with_context("e2e_obligation_cancel_mid_reserve", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .trace_capacity(8 * 1024)
+        .max_steps(10_000);
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (tx, _rx) = tracked_channel::<u32>(1);
+    let proof = tx.try_reserve().expect("reserve slot").send(1);
+    assert_eq!(proof.kind(), ObligationKind::SendPermit);
+
+    let reserve_result = Arc::new(Mutex::new(None));
+    let reserve_result_clone = reserve_result.clone();
+
+    harness.enter_phase("spawn");
+    let (reserve_task, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("cx");
+            let result = tx.reserve(&cx).await.map(|_permit| ());
+            *reserve_result_clone.lock().unwrap() = Some(result);
+        })
+        .expect("create reserve task");
+    runtime.scheduler.lock().unwrap().schedule(reserve_task, 0);
+    harness.exit_phase();
+
+    harness.enter_phase("block_then_cancel");
+    for _ in 0..3 {
+        runtime.step_for_test();
+    }
+    let reason = CancelReason::user("mid-reserve cancel");
+    let scheduled = cancel_region(&mut runtime, root, &reason);
+    harness.assert_true("cancel_scheduled", scheduled > 0);
+    harness.exit_phase();
+
+    harness.enter_phase("run");
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    let result = *reserve_result.lock().unwrap();
+    let cancelled = matches!(result, Some(Err(mpsc::SendError::Cancelled(()))));
+    passed &= harness.assert_true("reserve_cancelled", cancelled);
+    passed &= harness.assert_true("quiescent", runtime.is_quiescent());
+    let pending = runtime.state.pending_obligation_count();
+    passed &= harness.assert_eq("pending_obligations", &0usize, &pending);
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(
+            &mut harness,
+            &mut runtime,
+            "obligation_cancel_mid_reserve",
+        );
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "cancel mid-reserve failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
+}
+
+#[test]
+fn e2e_obligation_token_leak_detection() {
+    let seed = 0x1EA5E_u64;
+    let ctx = TestContext::new("obligation_token_leak_detection", seed)
+        .with_subsystem("obligation")
+        .with_invariant("graded_scope_leak");
+    let mut harness = TestHarness::with_context("e2e_obligation_token_leak_detection", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .trace_capacity(8 * 1024)
+        .max_steps(10_000);
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let leak_detected = Arc::new(Mutex::new(None));
+    let leak_detected_clone = leak_detected.clone();
+
+    harness.enter_phase("spawn");
+    let (leak_task, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let mut scope = GradedScope::open("graded_scope_leak");
+            let token = scope.reserve_token::<SendPermit>("leaky_send_permit");
+            let _raw = token.into_raw();
+            let leaked = scope.close().is_err();
+            *leak_detected_clone.lock().unwrap() = Some(leaked);
+        })
+        .expect("create leak task");
+    runtime.scheduler.lock().unwrap().schedule(leak_task, 0);
+    harness.exit_phase();
+
+    harness.enter_phase("run");
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    let leaked = *leak_detected.lock().unwrap();
+    passed &= harness.assert_eq("leak_detected", &Some(true), &leaked);
+    passed &= harness.assert_true("quiescent", runtime.is_quiescent());
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(
+            &mut harness,
+            &mut runtime,
+            "obligation_token_leak_detection",
+        );
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "obligation token leak detection failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
 }
