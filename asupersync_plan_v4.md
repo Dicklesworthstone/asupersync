@@ -803,18 +803,36 @@ Future-proof; not required.
   obligation (permit/ack/lease) so region close blocks until it resolves.
 - Region close is permitted iff:
   `children = 0 ∧ tasks = 0 ∧ obligations = 0 ∧ finalizers = 0`.
+- Region admission enforces `RegionLimits::max_obligations` at reserve time and
+  maps rejections to `AdmissionDenied` (create-obligation path).
 
 ### 10.4 Leak detection + determinism
 
 - Deterministic counters (`GLOBAL_ALLOC_COUNT`, `HeapStats`) provide leak visibility.
 - Lab oracles assert `global_alloc_count() == 0` after region close.
 - Production uses structured trace + metrics for leak reporting.
+- Tests cover ABA safety and deterministic reuse patterns in the heap, plus
+  witness-based access rejection (`WrongRegion`, `RegionClosed`).
+- Heap admission enforces `RegionLimits::max_heap_bytes` using live-bytes
+  tracked in `HeapStats`.
+- Free-list reuse is deterministic (LIFO), which makes `HeapIndex` reuse
+  patterns reproducible under fixed schedules.
 
 ### 10.5 Proof obligations (memory/resource safety)
 
 - **Safety:** no use-after-free; `RRef` is invalid after close.
 - **Liveness:** if a region reaches quiescence, heap reclamation occurs.
 - **Determinism:** `HeapIndex` generation prevents ABA; no pointer identity leaks.
+- **Access control:** witness validation rejects wrong-region and closed-region
+  access attempts.
+
+### 10.6 Leak regression E2E (bd-105vq)
+
+- Deterministic lab runs that stress region close under mixed obligations,
+  heap allocations, and admission limits.
+- Emit structured traces + allocation counters; assert `global_alloc_count() == 0`
+  and `pending_obligations == 0` at quiescence.
+- Record seeds and replay traces on failure for leak triage.
 
 ---
 
