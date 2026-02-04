@@ -203,9 +203,16 @@ impl std::error::Error for RRefError {}
 
 /// Capability witness proving access rights to a specific region's heap.
 ///
-/// Constructed by the region when granting access; carries the region ID
-/// so that `RegionRecord::rref_access` can verify the caller belongs to
-/// the correct region before returning data.
+/// Constructed exclusively by [`RegionRecord::access_witness`] when the region
+/// is in a non-terminal state. External code cannot forge a witness because
+/// the constructor is `pub(crate)`.
+///
+/// # Usage
+///
+/// ```ignore
+/// let witness = region_record.access_witness()?;
+/// let value = region_record.rref_get_with(&rref, &witness)?;
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RRefAccessWitness {
     region_id: RegionId,
@@ -213,8 +220,11 @@ pub struct RRefAccessWitness {
 
 impl RRefAccessWitness {
     /// Creates a new access witness for the given region.
+    ///
+    /// This is `pub(crate)` to prevent external forging. Use
+    /// [`RegionRecord::access_witness`] to obtain a witness.
     #[must_use]
-    pub const fn new(region_id: RegionId) -> Self {
+    pub(crate) const fn new(region_id: RegionId) -> Self {
         Self { region_id }
     }
 
@@ -225,9 +235,23 @@ impl RRefAccessWitness {
     }
 }
 
+impl<T> RRef<T> {
+    /// Validates that a witness matches this RRef's region.
+    ///
+    /// Returns `Err(WrongRegion)` if the witness was obtained from a different
+    /// region than the one this RRef belongs to.
+    pub fn validate_witness(&self, witness: &RRefAccessWitness) -> Result<(), RRefError> {
+        if witness.region() != self.region_id {
+            return Err(RRefError::WrongRegion);
+        }
+        Ok(())
+    }
+}
+
 /// Extension trait for accessing RRef values through a region.
 ///
 /// This trait is implemented for types that can provide access to a region's heap.
+/// Implementations must validate region ownership and state before returning data.
 pub trait RRefAccess {
     /// Gets a clone of the value referenced by an RRef.
     ///
@@ -240,6 +264,26 @@ pub trait RRefAccess {
     fn rref_with<T: 'static, R, F: FnOnce(&T) -> R>(
         &self,
         rref: &RRef<T>,
+        f: F,
+    ) -> Result<R, RRefError>;
+
+    /// Gets a clone of the value, requiring a pre-validated witness.
+    ///
+    /// The witness proves the caller has been granted access to the region.
+    /// This is the preferred access path in capability-aware code.
+    fn rref_get_with<T: Clone + 'static>(
+        &self,
+        rref: &RRef<T>,
+        witness: &RRefAccessWitness,
+    ) -> Result<T, RRefError>;
+
+    /// Executes a closure with a reference, requiring a pre-validated witness.
+    ///
+    /// The witness proves the caller has been granted access to the region.
+    fn rref_with_witness<T: 'static, R, F: FnOnce(&T) -> R>(
+        &self,
+        rref: &RRef<T>,
+        witness: &RRefAccessWitness,
         f: F,
     ) -> Result<R, RRefError>;
 }
