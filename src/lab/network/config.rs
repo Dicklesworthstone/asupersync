@@ -46,6 +46,8 @@ pub struct NetworkConditions {
     pub packet_loss: f64,
     /// Packet corruption probability (0.0 - 1.0).
     pub packet_corrupt: f64,
+    /// Packet duplication probability (0.0 - 1.0).
+    pub packet_duplicate: f64,
     /// Packet reordering probability (0.0 - 1.0).
     pub packet_reorder: f64,
     /// Maximum packets in flight.
@@ -68,6 +70,7 @@ impl NetworkConditions {
             latency: LatencyModel::Fixed(Duration::ZERO),
             packet_loss: 0.0,
             packet_corrupt: 0.0,
+            packet_duplicate: 0.0,
             packet_reorder: 0.0,
             max_in_flight: usize::MAX,
             bandwidth: None,

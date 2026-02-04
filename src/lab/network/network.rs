@@ -81,6 +81,8 @@ pub struct NetworkMetrics {
     pub packets_delivered: u64,
     /// Total packets dropped.
     pub packets_dropped: u64,
+    /// Total packets duplicated.
+    pub packets_duplicated: u64,
     /// Total packets corrupted.
     pub packets_corrupted: u64,
 }
@@ -107,6 +109,10 @@ pub enum NetworkTraceKind {
     Deliver,
     /// Packet dropped.
     Drop,
+    /// Packet duplication injected.
+    Duplicate,
+    /// Packet reordering injected.
+    Reorder,
 }
 
 #[derive(Debug)]
@@ -180,6 +186,7 @@ pub struct SimulatedNetwork {
     links: HashMap<LinkKey, NetworkConditions>,
     partitions: HashSet<LinkKey>,
     queue: BinaryHeap<ScheduledPacket>,
+    in_flight: HashMap<LinkKey, usize>,
     link_next_available: HashMap<LinkKey, Time>,
     metrics: NetworkMetrics,
     trace: Vec<NetworkTraceEvent>,
@@ -200,6 +207,7 @@ impl SimulatedNetwork {
             links: HashMap::new(),
             partitions: HashSet::new(),
             queue: BinaryHeap::new(),
+            in_flight: HashMap::new(),
             link_next_available: HashMap::new(),
             metrics: NetworkMetrics::default(),
             trace: Vec::new(),
@@ -248,74 +256,29 @@ impl SimulatedNetwork {
         self.metrics.packets_sent = self.metrics.packets_sent.saturating_add(1);
         self.trace_event(NetworkTraceKind::Send, src, dst);
 
-        if self.queue.len() >= self.config.max_queue_depth {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, src, dst);
-            return;
-        }
-
-        if self.is_partitioned(src, dst) {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, src, dst);
-            return;
-        }
-
-        let Some(src_host) = self.hosts.get(&src) else {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, src, dst);
-            return;
-        };
-        let Some(dst_host) = self.hosts.get(&dst) else {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, src, dst);
-            return;
-        };
-        if src_host.crashed || dst_host.crashed {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, src, dst);
+        if self.queue.len() >= self.config.max_queue_depth
+            || self.is_partitioned(src, dst)
+            || !self.endpoints_ready(src, dst)
+        {
+            self.drop_packet(src, dst);
             return;
         }
 
         let conditions = self.link_conditions(src, dst);
+        let link = LinkKey::new(src, dst);
+        if !self.check_in_flight(link, &conditions, src, dst) {
+            return;
+        }
         if self.should_drop(conditions.packet_loss) {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, src, dst);
+            self.drop_packet(src, dst);
             return;
         }
 
         let (payload, corrupted) = self.maybe_corrupt(payload, conditions.packet_corrupt);
-        let base_latency = conditions.latency.sample(&mut self.rng);
-        let jitter = conditions
-            .jitter
-            .as_ref()
-            .map_or(Duration::ZERO, |j| j.sample(&mut self.rng));
-        let mut deliver_at = self.now + base_latency + jitter;
+        let mut deliver_at = self.compute_delivery_time(link, &conditions, payload.len());
+        deliver_at = self.maybe_reorder(deliver_at, src, dst, &conditions);
 
-        if self.config.enable_bandwidth {
-            if let Some(bw) = conditions.bandwidth.or(Some(self.config.default_bandwidth)) {
-                if bw > 0 {
-                    let link = LinkKey::new(src, dst);
-                    let next_available = self
-                        .link_next_available
-                        .get(&link)
-                        .copied()
-                        .unwrap_or(self.now);
-                    if next_available > deliver_at {
-                        deliver_at = next_available;
-                    }
-                    let tx_nanos = bytes_to_nanos(payload.len(), bw);
-                    deliver_at = deliver_at.saturating_add_nanos(tx_nanos);
-                    self.link_next_available.insert(link, deliver_at);
-                }
-            }
-        }
-
-        if self.should_drop(conditions.packet_reorder) {
-            let reorder_jitter = Duration::from_micros(self.rng.next_u64() % 1000);
-            deliver_at = deliver_at + reorder_jitter;
-        }
-
-        let packet = Packet {
+        let base_packet = Packet {
             src,
             dst,
             payload,
@@ -323,13 +286,23 @@ impl SimulatedNetwork {
             received_at: deliver_at,
             corrupted,
         };
-        let scheduled = ScheduledPacket {
-            deliver_at,
-            sequence: self.next_sequence,
-            packet,
-        };
-        self.next_sequence = self.next_sequence.saturating_add(1);
-        self.queue.push(scheduled);
+        if !self.try_schedule_packet(link, base_packet.clone(), src, dst) {
+            return;
+        }
+
+        if self.should_drop(conditions.packet_duplicate) {
+            self.metrics.packets_duplicated = self.metrics.packets_duplicated.saturating_add(1);
+            self.trace_event(NetworkTraceKind::Duplicate, src, dst);
+            let duplicate_delay = Duration::from_micros(self.rng.next_u64() % 1000);
+            let duplicate = Packet {
+                received_at: deliver_at + duplicate_delay,
+                ..base_packet
+            };
+            if !self.check_in_flight(link, &conditions, src, dst) {
+                return;
+            }
+            let _ = self.try_schedule_packet(link, duplicate, src, dst);
+        }
     }
 
     /// Runs the simulation for the given duration.
@@ -394,6 +367,7 @@ impl SimulatedNetwork {
     }
 
     fn deliver(&mut self, packet: Packet) {
+        self.decrement_in_flight(LinkKey::new(packet.src, packet.dst));
         if self.is_partitioned(packet.src, packet.dst) {
             self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
             self.trace_event(NetworkTraceKind::Drop, packet.src, packet.dst);
@@ -432,6 +406,22 @@ impl SimulatedNetwork {
 
     fn is_partitioned(&self, src: HostId, dst: HostId) -> bool {
         self.partitions.contains(&LinkKey::new(src, dst))
+    }
+
+    fn increment_in_flight(&mut self, link: LinkKey) {
+        let count = self.in_flight.entry(link).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    fn decrement_in_flight(&mut self, link: LinkKey) {
+        let Some(count) = self.in_flight.get_mut(&link) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+        } else {
+            self.in_flight.remove(&link);
+        }
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -490,8 +480,7 @@ fn bytes_to_nanos(len: usize, bandwidth: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lab::network::LatencyModel;
-    use crate::lab::network::NetworkConfig;
+    use crate::lab::network::{JitterModel, LatencyModel, NetworkConfig};
 
     #[test]
     fn deterministic_delivery_same_seed() {
@@ -655,6 +644,29 @@ mod tests {
     }
 
     #[test]
+    fn max_in_flight_limits_enforced() {
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                latency: LatencyModel::Fixed(Duration::from_millis(10)),
+                max_in_flight: 1,
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"first"));
+        net.send(h1, h2, Bytes::copy_from_slice(b"second"));
+        net.run_until_idle();
+
+        let inbox = net.inbox(h2).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(net.metrics().packets_dropped, 1);
+    }
+
+    #[test]
     fn trace_capture_records_events() {
         let config = NetworkConfig {
             capture_trace: true,
@@ -709,5 +721,74 @@ mod tests {
 
         assert!(net.inbox(h2).unwrap().is_empty());
         assert_eq!(net.metrics().packets_dropped, 1);
+    }
+
+    #[test]
+    fn packet_duplication_delivers_twice() {
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                packet_duplicate: 1.0,
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"dup"));
+        net.run_until_idle();
+
+        let inbox = net.inbox(h2).unwrap();
+        assert_eq!(inbox.len(), 2);
+        assert_eq!(net.metrics().packets_duplicated, 1);
+    }
+
+    #[test]
+    fn reorder_trace_records_event() {
+        let config = NetworkConfig {
+            capture_trace: true,
+            default_conditions: NetworkConditions {
+                packet_reorder: 1.0,
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"reorder"));
+        net.run_until_idle();
+
+        let trace = net.trace();
+        assert!(trace.iter().any(|e| e.kind == NetworkTraceKind::Reorder));
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds() {
+        let max = Duration::from_millis(5);
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                latency: LatencyModel::Fixed(Duration::ZERO),
+                jitter: Some(JitterModel::Uniform { max }),
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        for _ in 0..10 {
+            net.send(h1, h2, Bytes::copy_from_slice(b"j"));
+        }
+        net.run_until_idle();
+
+        for packet in net.inbox(h2).unwrap() {
+            let nanos = packet.received_at.duration_since(packet.sent_at);
+            let jitter = Duration::from_nanos(nanos);
+            assert!(jitter <= max);
+        }
     }
 }
