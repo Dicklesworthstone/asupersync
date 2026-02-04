@@ -1171,6 +1171,57 @@ mod tests {
     }
 
     #[test]
+    fn spawn_local_makes_progress_via_local_ready() {
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let local_ready = Arc::new(Mutex::new(Vec::new()));
+        let _local_ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
+
+        let handle = scope
+            .spawn_local(&mut state, &cx, |_| async move { 7_i32 })
+            .unwrap();
+
+        let queued = {
+            let queue = local_ready.lock().expect("local_ready lock poisoned");
+            queue.contains(&handle.task_id())
+        };
+        assert!(queued, "spawn_local should enqueue into local_ready");
+
+        let task_id = {
+            let mut queue = local_ready.lock().expect("local_ready lock poisoned");
+            queue.remove(0)
+        };
+
+        let mut join_fut = Box::pin(handle.join(&cx));
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut ctx = Context::from_waker(&waker);
+
+        assert!(join_fut.as_mut().poll(&mut ctx).is_pending());
+
+        let mut local_task =
+            crate::runtime::local::remove_local_task(task_id).expect("local task missing");
+        assert!(local_task.poll(&mut ctx).is_ready());
+
+        match join_fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(Ok(val)) => assert_eq!(val, 7),
+            res => panic!("Expected Ready(Ok(7)), got {res:?}"),
+        }
+    }
+
+    #[test]
     fn task_added_to_region() {
         let mut state = RuntimeState::new();
         let cx = test_cx();
