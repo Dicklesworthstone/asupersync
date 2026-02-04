@@ -775,11 +775,9 @@ fn verify_boosted_bound_for_limit(cancel_streak_limit: usize, suggestion: Schedu
     // Flood cancel lane with 8x the boosted limit.
     let boosted_limit = cancel_streak_limit * 2;
     let num_cancel = boosted_limit * 4;
-    let mut cancel_ids = Vec::with_capacity(num_cancel);
     for i in 0..num_cancel {
         let id = TaskId::new_for_test(1, i as u32);
         scheduler.inject_cancel(id, 100);
-        cancel_ids.push(id);
     }
 
     // One ready task — track its position in the dispatch sequence.
