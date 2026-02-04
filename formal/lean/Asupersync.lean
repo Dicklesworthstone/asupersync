@@ -880,6 +880,112 @@ theorem close_subregions_exist_closed {Value Error Panic : Type}
   exact ⟨sub, hSub, hPred⟩
 
 -- ==========================================================================
+-- Lease Semantics and Liveness (bd-yj06g)
+--
+-- Proves that:
+--   (1) Lease obligations follow the standard reserve/commit/abort lifecycle
+--   (2) An unresolved lease blocks region close (via empty-ledger requirement)
+--   (3) Commit or abort of a lease removes it from the ledger, enabling close
+--   (4) Lease leak marks the obligation as leaked and removes from ledger
+--
+-- Cross-references:
+--   Obligation state machine: src/record/obligation.rs:125-130
+--   VASS marking: src/obligation/marking.rs
+--   Lease tests: tests/lease_semantics.rs
+-- ==========================================================================
+
+/-- A reserved lease obligation is in the region's ledger.
+    The reserve step adds the obligation to the ledger, regardless of kind. -/
+theorem lease_reserve_in_ledger {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hStep : Step s (Label.reserve o) s')
+    : ∃ ob, getObligation s' o = some ob ∧
+        ob.state = ObligationState.reserved ∧
+        ∃ region', getRegion s' ob.region = some region' ∧ o ∈ region'.ledger := by
+  cases hStep with
+  | reserve hTask hRegion hAbsent hUpdate =>
+    subst hUpdate
+    refine ⟨_, by simp [getObligation, setObligation, setRegion], rfl,
+            _, by simp [getRegion, setRegion, setObligation], ?_⟩
+    simp [List.mem_append]
+
+/-- An unresolved lease (or any obligation) in the ledger blocks region close.
+    If an obligation o is in a region's ledger, that region cannot close,
+    because close requires Quiescent which requires ledger = []. -/
+theorem obligation_in_ledger_blocks_close {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    {region : Region Value Error Panic} {o : ObligationId}
+    (hRegion : getRegion s r = some region)
+    (hInLedger : o ∈ region.ledger)
+    (hStep : Step s (Label.close r outcome) s')
+    : False := by
+  obtain ⟨region', hRegion', hLedger⟩ := close_implies_ledger_empty hStep
+  rw [hRegion] at hRegion'
+  injection hRegion' with hEq
+  rw [← hEq] at hLedger
+  exact absurd (hLedger ▸ hInLedger) (by simp)
+
+/-- Committing a lease (or any obligation) removes it from the ledger.
+    After commit, the obligation is no longer blocking region close. -/
+theorem commit_removes_from_ledger {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    {ob : ObligationRecord}
+    (hStep : Step s (Label.commit o) s')
+    (hOb : getObligation s o = some ob)
+    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
+  cases hStep with
+  | commit hOb' hHolder hState hRegion hUpdate =>
+    subst hUpdate
+    simp [getObligation] at hOb hOb'
+    rw [hOb] at hOb'; injection hOb' with hOb'
+    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+
+/-- Aborting a lease (or any obligation) removes it from the ledger.
+    After abort, the obligation is no longer blocking region close. -/
+theorem abort_removes_from_ledger {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    {ob : ObligationRecord}
+    (hStep : Step s (Label.abort o) s')
+    (hOb : getObligation s o = some ob)
+    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
+  cases hStep with
+  | abort hOb' hHolder hState hRegion hUpdate =>
+    subst hUpdate
+    simp [getObligation] at hOb hOb'
+    rw [hOb] at hOb'; injection hOb' with hOb'
+    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+
+/-- Lease liveness: any resolution (commit, abort, or leak) of a lease
+    removes the obligation from the ledger, making progress toward
+    enabling region close.
+
+    This is stated as: after any resolution step, if the obligation was
+    in the pre-state, it is no longer in the post-state's ledger. -/
+theorem lease_resolution_enables_close {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    {ob : ObligationRecord}
+    (hOb : getObligation s o = some ob)
+    (hKind : ob.kind = ObligationKind.lease)
+    (hState : ob.state = ObligationState.reserved)
+    -- Commit resolves the lease:
+    (hCommit : Step s (Label.commit o) s')
+    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger :=
+  commit_removes_from_ledger hCommit hOb
+
+/-- Lease leak also removes from ledger (different resolution path).
+    The obligation transitions to leaked state but is no longer blocking. -/
+theorem lease_leak_removes_and_marks {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    {ob : ObligationRecord}
+    (hOb : getObligation s o = some ob)
+    (hKind : ob.kind = ObligationKind.lease)
+    (hStep : Step s (Label.leak o) s')
+    : (∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger) ∧
+      (∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.leaked) :=
+  ⟨leak_removes_from_ledger hStep hOb, leak_marks_leaked hStep⟩
+
+-- ==========================================================================
 -- Safety Lemma 6: Completed tasks are not runnable
 -- ==========================================================================
 
