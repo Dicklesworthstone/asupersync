@@ -1851,7 +1851,7 @@ mod tests {
 
     #[test]
     fn test_three_lane_scheduler_creation() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let scheduler = ThreeLaneScheduler::new(2, &state);
 
         assert!(!scheduler.is_shutdown());
@@ -1860,7 +1860,7 @@ mod tests {
 
     #[test]
     fn test_three_lane_worker_shutdown() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         let workers = scheduler.take_workers();
@@ -1890,7 +1890,7 @@ mod tests {
 
     #[test]
     fn test_cancel_priority_over_ready() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
         // Inject ready first, then cancel
@@ -1914,7 +1914,7 @@ mod tests {
 
     #[test]
     fn test_cancel_lane_fairness_limit() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
 
         let cancel_tasks = [
@@ -1945,7 +1945,7 @@ mod tests {
 
     #[test]
     fn test_stealing_only_from_ready_lane() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         // Add cancel and ready work to worker 0's local queue
@@ -1976,7 +1976,7 @@ mod tests {
 
     #[test]
     fn execute_completes_task_and_schedules_waiter() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2089,7 +2089,7 @@ mod tests {
     #[test]
     fn test_scheduler_timer_driver_propagates_to_workers() {
         // State without timer driver
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         // Workers should not have timer driver
@@ -2331,7 +2331,7 @@ mod tests {
     #[test]
     fn test_inject_ready_dedup_prevents_double_schedule() {
         // Create state with a real task record
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2369,7 +2369,7 @@ mod tests {
 
     #[test]
     fn test_inject_cancel_allows_duplicates_for_priority() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2405,7 +2405,7 @@ mod tests {
 
     #[test]
     fn test_inject_cancel_promotes_ready_task() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2439,7 +2439,7 @@ mod tests {
 
     #[test]
     fn test_spawn_local_not_stolen() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         let mut worker_pool = scheduler.take_workers();
@@ -2546,7 +2546,7 @@ mod tests {
 
     #[test]
     fn test_schedule_local_dedup_prevents_double_schedule() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2581,7 +2581,7 @@ mod tests {
     #[test]
     fn test_local_then_global_dedup() {
         // Test: schedule locally first, then try to inject globally
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2657,7 +2657,7 @@ mod tests {
     #[test]
     fn test_wake_state_cleared_allows_reschedule() {
         // After task completes, wake_state is cleared, allowing new schedule
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -2750,7 +2750,7 @@ mod tests {
     #[ignore = "stress test; run manually"]
     fn stress_test_scheduler_inject_while_parking() {
         // Race: inject work between empty check and park
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let scheduler = Arc::new(ThreeLaneScheduler::new(4, &state));
         let injected = Arc::new(AtomicUsize::new(0));
         let executed = Arc::new(AtomicUsize::new(0));
@@ -2988,7 +2988,7 @@ mod tests {
     #[test]
     fn test_round_robin_wakeup_distribution() {
         // Verify that wake_one distributes wakeups across workers
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let scheduler = ThreeLaneScheduler::new(4, &state);
 
         // Track which parkers have been woken
@@ -3024,7 +3024,7 @@ mod tests {
 
     #[test]
     fn test_governor_disabled_returns_no_preference() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
@@ -3036,7 +3036,7 @@ mod tests {
 
     #[test]
     fn test_governor_enabled_quiescent_returns_no_preference() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
@@ -3144,7 +3144,7 @@ mod tests {
     #[test]
     fn test_governor_interval_caches_suggestion() {
         // With interval=4, governor snapshots every 4th call.
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 4);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
@@ -3204,7 +3204,7 @@ mod tests {
         // Verify that with governor disabled (default), the dispatch order
         // matches the baseline: cancel > timed > ready (existing tests cover
         // this, but here we explicitly compare against governor-disabled).
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
 
         // Build two schedulers: one with governor, one without.
         let mut sched_off = ThreeLaneScheduler::new(1, &state);
@@ -3242,7 +3242,7 @@ mod tests {
 
     #[test]
     fn test_preemption_metrics_track_dispatches() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
 
         for i in 0..3u32 {
@@ -3271,7 +3271,7 @@ mod tests {
     #[test]
     fn test_preemption_fairness_yield_under_cancel_flood() {
         let limit: usize = 4;
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
 
         let cancel_count: u32 = 20;
@@ -3307,7 +3307,7 @@ mod tests {
     #[test]
     fn test_preemption_max_streak_bounded_by_limit() {
         for limit in [1, 2, 4, 8, 16] {
-            let state = Arc::new(Mutex::new(RuntimeState::new()));
+            let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
             let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
 
             let n_cancel = (limit * 3) as u32;
@@ -3336,7 +3336,7 @@ mod tests {
     #[test]
     fn test_preemption_fallback_cancel_when_only_cancel_work() {
         let limit: usize = 2;
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
 
         for i in 0..6u32 {
@@ -3366,7 +3366,7 @@ mod tests {
     #[test]
     fn test_fallback_cancel_streak_counts_toward_limit() {
         let limit: usize = 3;
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
 
         // Inject enough cancel tasks to hit the fallback + continue.
@@ -3418,7 +3418,7 @@ mod tests {
 
     #[test]
     fn test_local_queue_fast_path() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let scheduler = ThreeLaneScheduler::new(1, &state);
 
         // Access the worker's local scheduler
@@ -3578,7 +3578,7 @@ mod tests {
     fn try_steal_falls_back_to_priority_scheduler() {
         // When fast queues are empty, steal should fall back to
         // PriorityScheduler heaps.
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         // Push task only into worker 0's PriorityScheduler.
@@ -3716,7 +3716,7 @@ mod tests {
     fn fast_queue_cancel_timed_bypass_fast_path() {
         // Cancel and timed tasks should NOT go through the fast queue.
         // They must use PriorityScheduler for priority/deadline ordering.
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
         let cancel_task = TaskId::new_for_test(1, 1);
@@ -3877,7 +3877,7 @@ mod tests {
 
     #[test]
     fn local_ready_queue_not_visible_to_fast_stealers() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
         let mut workers = scheduler.take_workers();
 
@@ -3905,7 +3905,7 @@ mod tests {
 
     #[test]
     fn local_ready_queue_not_visible_to_priority_stealers() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
         let mut workers = scheduler.take_workers();
 
@@ -3926,7 +3926,7 @@ mod tests {
 
     #[test]
     fn local_ready_survives_concurrent_steal_pressure() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
         let mut workers = scheduler.take_workers();
 
@@ -3990,7 +3990,7 @@ mod tests {
 
     #[test]
     fn backoff_loop_wakes_for_local_ready() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
@@ -4028,7 +4028,7 @@ mod tests {
     /// the waiter is routed to the current worker's local_ready queue.
     #[test]
     fn local_waiter_routes_to_current_worker_local_ready() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -4082,7 +4082,7 @@ mod tests {
     /// the waiter is routed to the owner worker's local_ready queue.
     #[test]
     fn local_waiter_pinned_routes_to_owner_worker() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")
@@ -4143,7 +4143,7 @@ mod tests {
     /// Global waiters still go through the global injector (regression).
     #[test]
     fn global_waiter_routes_to_global_injector() {
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
             .expect("runtime state lock poisoned")

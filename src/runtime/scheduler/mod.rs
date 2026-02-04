@@ -84,13 +84,14 @@ pub use priority::Scheduler;
 mod tests {
     use super::*;
     use crate::runtime::RuntimeState;
-    use std::sync::{Arc, Mutex};
+    use crate::sync::ContendedMutex;
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]
     fn test_worker_shutdown() {
         // Create state
-        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
 
         // Create scheduler with 2 workers
         let mut scheduler = WorkStealingScheduler::new(2, &state);
