@@ -941,7 +941,7 @@ impl<F: Future> Future for CatchUnwind<F> {
 struct RuntimeInner {
     config: RuntimeConfig,
     next_worker_id: AtomicUsize,
-    state: Arc<Mutex<RuntimeState>>,
+    state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
     scheduler: ThreeLaneScheduler,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     root_region: crate::types::RegionId,
@@ -951,7 +951,7 @@ struct RuntimeInner {
 
 impl RuntimeInner {
     fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> io::Result<Self> {
-        let state = Arc::new(Mutex::new(match reactor {
+        let state = Arc::new(crate::sync::ContendedMutex::new("runtime_state", match reactor {
             Some(reactor) => {
                 RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
             }
