@@ -106,8 +106,16 @@ impl CapabilitySet {
     }
 
     /// Revokes a capability.
+    ///
+    /// When revoking a specific capability from a set that contains `Full`,
+    /// `Full` is also removed since the set is no longer complete. The
+    /// remaining individual capabilities stay intact.
     pub fn revoke(&mut self, cap: CapabilityKind) {
         self.capabilities.remove(&cap);
+        // A specific revocation invalidates the Full meta-capability.
+        if cap != CapabilityKind::Full {
+            self.capabilities.remove(&CapabilityKind::Full);
+        }
     }
 
     /// Checks if a capability is granted.
@@ -667,6 +675,78 @@ mod tests {
         let has_time = caps.has(CapabilityKind::Time);
         crate::assert_with_log!(has_time, "time still", true, has_time);
         crate::test_complete!("capability_set_individual_grants");
+    }
+
+    #[test]
+    fn revoke_clears_full_meta_capability() {
+        init_test("revoke_clears_full_meta_capability");
+        let mut caps = CapabilitySet::full();
+
+        // Full set implies Spawn
+        let has_spawn = caps.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(has_spawn, "spawn via full", true, has_spawn);
+
+        // Revoke Spawn — should also clear Full
+        caps.revoke(CapabilityKind::Spawn);
+        let has_spawn = caps.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(!has_spawn, "spawn revoked", false, has_spawn);
+        let has_full = caps.has(CapabilityKind::Full);
+        crate::assert_with_log!(!has_full, "full cleared", false, has_full);
+
+        // Other individual capabilities remain
+        let has_time = caps.has(CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "time remains", true, has_time);
+        let has_trace = caps.has(CapabilityKind::Trace);
+        crate::assert_with_log!(has_trace, "trace remains", true, has_trace);
+        let has_region = caps.has(CapabilityKind::Region);
+        crate::assert_with_log!(has_region, "region remains", true, has_region);
+        let has_obligation = caps.has(CapabilityKind::Obligation);
+        crate::assert_with_log!(has_obligation, "obligation remains", true, has_obligation);
+        crate::test_complete!("revoke_clears_full_meta_capability");
+    }
+
+    #[test]
+    fn revoke_full_directly_leaves_individual_caps() {
+        init_test("revoke_full_directly_leaves_individual_caps");
+        let mut caps = CapabilitySet::full();
+
+        // Revoke Full directly — individual caps still present
+        caps.revoke(CapabilityKind::Full);
+        let has_full = caps.has(CapabilityKind::Full);
+        crate::assert_with_log!(!has_full, "full revoked", false, has_full);
+        let has_spawn = caps.has(CapabilityKind::Spawn);
+        crate::assert_with_log!(has_spawn, "spawn remains", true, has_spawn);
+        let has_time = caps.has(CapabilityKind::Time);
+        crate::assert_with_log!(has_time, "time remains", true, has_time);
+        crate::test_complete!("revoke_full_directly_leaves_individual_caps");
+    }
+
+    #[test]
+    fn revoke_from_full_then_oracle_detects_violation() {
+        init_test("revoke_from_full_then_oracle_detects_violation");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        // Root task with full capabilities
+        oracle.on_task_created(task(1), region(0), None, t(0));
+
+        // Revoke only Spawn (Full should also be cleared internally)
+        oracle.on_capability_revoked(task(1), CapabilityKind::Spawn, t(5));
+
+        // Attempt spawn — should fail
+        oracle.on_spawn_effect(task(1), task(2), t(10));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "violation detected", true, err);
+
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.required_capability == CapabilityKind::Spawn,
+            "required spawn",
+            CapabilityKind::Spawn,
+            violation.required_capability
+        );
+        crate::test_complete!("revoke_from_full_then_oracle_detects_violation");
     }
 
     #[test]
