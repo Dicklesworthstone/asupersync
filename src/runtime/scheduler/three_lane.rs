@@ -527,8 +527,7 @@ impl ThreeLaneScheduler {
         let should_schedule = {
             let state = self.state.lock().expect("runtime state lock poisoned");
             state
-                .tasks
-                .get(task.arena_index())
+                .task(task)
                 .is_none_or(|record| record.wake_state.notify())
         };
         if should_schedule {
@@ -1274,8 +1273,7 @@ impl ThreeLaneWorker {
         let should_schedule = {
             let state = self.state.lock().expect("runtime state lock poisoned");
             state
-                .tasks
-                .get(task.arena_index())
+                .task(task)
                 .is_none_or(|record| record.wake_state.notify())
         };
         if should_schedule {
@@ -1296,7 +1294,7 @@ impl ThreeLaneWorker {
     pub fn schedule_local_cancel(&self, task: TaskId, priority: u8) {
         {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            if let Some(record) = state.tasks.get(task.arena_index()) {
+            if let Some(record) = state.task(task) {
                 record.wake_state.notify();
             }
         }
@@ -1317,8 +1315,7 @@ impl ThreeLaneWorker {
         let should_schedule = {
             let state = self.state.lock().expect("runtime state lock poisoned");
             state
-                .tasks
-                .get(task.arena_index())
+                .task(task)
                 .is_none_or(|record| record.wake_state.notify())
         };
         if should_schedule {
@@ -1361,7 +1358,7 @@ impl ThreeLaneWorker {
 
             let mut state = self.state.lock().expect("runtime state lock poisoned");
 
-            let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+            let Some(record) = state.task_mut(task_id) else {
                 return;
             };
             record.start_running();
@@ -1460,7 +1457,7 @@ impl ThreeLaneWorker {
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                if let Some(record) = state.task_mut(task_id) {
                     if !record.state.is_terminal() {
                         let mut completed_via_cancel = false;
                         if matches!(task_outcome, crate::types::Outcome::Ok(())) {
@@ -1509,7 +1506,7 @@ impl ThreeLaneWorker {
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
                 for waiter in waiters {
-                    if let Some(record) = state.tasks.get(waiter.arena_index()) {
+                    if let Some(record) = state.task(waiter) {
                         let waiter_priority = record
                             .cx_inner
                             .as_ref()
@@ -1569,7 +1566,7 @@ impl ThreeLaneWorker {
                         let mut state = self.state.lock().expect("runtime state lock poisoned");
                         state.store_spawned_task(task_id, t);
                         // Cache wakers back in the task record for reuse on next poll
-                        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                        if let Some(record) = state.task_mut(task_id) {
                             record.cached_waker = Some((waker, priority));
                             record.cached_cancel_waker = cancel_waker_for_cache;
                         }
@@ -1579,7 +1576,7 @@ impl ThreeLaneWorker {
                         // For local tasks, we also want to cache wakers in the global record
                         // (since record is global).
                         let mut state = self.state.lock().expect("runtime state lock poisoned");
-                        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                        if let Some(record) = state.task_mut(task_id) {
                             record.cached_waker = Some((waker, priority));
                             record.cached_cancel_waker = cancel_waker_for_cache;
                         }
@@ -1651,7 +1648,7 @@ impl ThreeLaneWorker {
     }
 
     fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
-        let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+        let Some(record) = state.task_mut(task_id) else {
             return false;
         };
         let Some(inner) = record.cx_inner.as_ref() else {
