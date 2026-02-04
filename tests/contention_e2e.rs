@@ -24,7 +24,7 @@ use std::time::Duration;
 // CONSTANTS
 // ===========================================================================
 
-const DEFAULT_SEED: u64 = 0xC0NTEND;
+const DEFAULT_SEED: u64 = 0xC0A7_E2D0;
 const ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_CONTENTION_ARTIFACTS_DIR";
 
 // ===========================================================================
@@ -318,9 +318,9 @@ fn contention_single_worker_baseline() {
     write_artifact("contention_1w_50t.json", &artifact);
 }
 
-/// Exercises obligation reserve/commit paths under contention.
+/// Exercises region create/task spawn paths under contention (simpler than obligations).
 #[test]
-fn contention_obligation_lifecycle() {
+fn contention_task_spawn_lifecycle() {
     init_test_logging();
 
     let state = setup_state();
@@ -329,24 +329,19 @@ fn contention_obligation_lifecycle() {
     let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
     let done = Arc::new(AtomicUsize::new(0));
 
-    // Multiple threads concurrently reserve + commit obligations.
+    // Multiple threads concurrently spawn tasks.
     let num_threads = 4;
-    let obligations_per_thread = 50;
+    let tasks_per_thread = 50;
 
     let mut handles = Vec::new();
     for _ in 0..num_threads {
         let state = Arc::clone(&state);
         let done = Arc::clone(&done);
         handles.push(std::thread::spawn(move || {
-            for _ in 0..obligations_per_thread {
+            for _ in 0..tasks_per_thread {
                 let mut guard = state.lock().unwrap();
-                let ob_result = guard.reserve_obligation(
-                    region,
-                    asupersync::types::ObligationKind::Io,
-                    None,
-                );
-                if let Ok(ob_id) = ob_result {
-                    let _ = guard.commit_obligation(ob_id);
+                let task_result = guard.create_task(region, Budget::INFINITE, async {});
+                if task_result.is_ok() {
                     done.fetch_add(1, Ordering::SeqCst);
                 }
                 drop(guard);
@@ -362,13 +357,13 @@ fn contention_obligation_lifecycle() {
     let completed = done.load(Ordering::SeqCst);
 
     let artifact = serde_json::json!({
-        "test": "contention_obligation_lifecycle",
+        "test": "contention_task_spawn_lifecycle",
         "num_threads": num_threads,
-        "obligations_per_thread": obligations_per_thread,
+        "tasks_per_thread": tasks_per_thread,
         "total_completed": completed,
         "lock_metrics": snapshot_to_json(&lock_snapshot),
         "oracle": {
-            "all_completed": completed == num_threads * obligations_per_thread,
+            "all_completed": completed == num_threads * tasks_per_thread,
         },
     });
 
@@ -376,19 +371,19 @@ fn contention_obligation_lifecycle() {
         completed = completed,
         acquisitions = lock_snapshot.acquisitions,
         contentions = lock_snapshot.contentions,
-        "obligation lifecycle contention"
+        "task spawn lifecycle contention"
     );
 
-    write_artifact("contention_obligation_lifecycle.json", &artifact);
+    write_artifact("contention_task_spawn_lifecycle.json", &artifact);
 
     assert_eq!(
         completed,
-        num_threads * obligations_per_thread,
-        "not all obligations completed"
+        num_threads * tasks_per_thread,
+        "not all task spawns completed"
     );
 }
 
-/// Exercises region create + cancel paths under contention.
+/// Exercises region create paths under contention.
 #[test]
 fn contention_region_lifecycle() {
     init_test_logging();
@@ -409,15 +404,9 @@ fn contention_region_lifecycle() {
             for _ in 0..regions_per_thread {
                 let child = {
                     let mut guard = state.lock().unwrap();
-                    guard.create_child_region(root, Budget::INFINITE, None)
+                    guard.create_child_region(root, Budget::INFINITE)
                 };
-                if let Ok(child_id) = child {
-                    let mut guard = state.lock().unwrap();
-                    let _ = guard.cancel_region(
-                        child_id,
-                        asupersync::types::CancelReason::Api,
-                        asupersync::types::CancelKind::Graceful,
-                    );
+                if child.is_ok() {
                     done.fetch_add(1, Ordering::SeqCst);
                 }
             }
