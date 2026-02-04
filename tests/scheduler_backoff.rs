@@ -3,6 +3,7 @@
 
 use asupersync::runtime::scheduler::WorkStealingScheduler;
 use asupersync::runtime::RuntimeState;
+use asupersync::sync::ContendedMutex;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ fn test_scheduler_shutdown_with_backoff() {
     // This test verifies that the worker loop with backoff eventually parks and
     // can be properly shut down.
 
-    let state = Arc::new(Mutex::new(RuntimeState::new()));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = WorkStealingScheduler::new(1, &state);
 
     // Take workers to run in a thread

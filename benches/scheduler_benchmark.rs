@@ -27,6 +27,7 @@ use asupersync::runtime::RuntimeState;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, ArenaIndex};
 use std::collections::{BinaryHeap, VecDeque};
+use asupersync::sync::ContendedMutex;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -61,7 +62,7 @@ fn setup_arena(count: u32) -> Arena<TaskRecord> {
     arena
 }
 
-fn setup_runtime_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
+fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
     let mut state = RuntimeState::new();
     for i in 0..=max_task_id {
         let id = task(i);
@@ -69,7 +70,7 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<Mutex<RuntimeState>> {
         let idx = state.tasks.insert(record);
         assert_eq!(idx.index(), i);
     }
-    Arc::new(Mutex::new(state))
+    Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
 fn local_queue(max_task_id: u32) -> LocalQueue {
