@@ -650,6 +650,265 @@ operations require `RemoteCap` from `Cx` (no closure shipping).
 
 ---
 
+### 6) Remote Protocol Spec (Named Computations)
+
+This section defines the Phase 1+ **remote structured concurrency protocol**.
+It is transport-agnostic and uses the message types defined in `src/remote.rs`
+(`RemoteMessage`, `SpawnRequest`, `SpawnAck`, `CancelRequest`, `ResultDelivery`,
+`LeaseRenewal`).
+
+**Goals**
+- Deterministic, replayable message encoding.
+- No closure shipping: only named computations.
+- Explicit capability checks and computation registry validation.
+- Idempotent spawns with exactly-once semantics (from the originator's view).
+- Lease-based liveness with explicit expiry behavior.
+
+#### 6.1 Handshake (transport-level)
+
+Before exchanging `RemoteMessage` envelopes, peers perform a transport-level
+handshake:
+
+```
+Hello = {
+  protocol_version: "1.0",
+  node_id: "node-a",
+  clock_kind: "lamport" | "vector" | "hybrid",
+  registry_hash: "hex_sha256",
+  capabilities: ["remote_spawn", "lease_renewal", "cancel", "result_delivery"]
+}
+```
+
+Rules:
+- **Major version mismatch** -> connection rejected.
+- **Minor version mismatch** -> allowed if receiver supports the sender's minor.
+- `registry_hash` is the hash of the *named computation registry*; mismatch
+  is allowed but MUST be logged and MAY trigger `UnknownComputation` rejections.
+- Capability negotiation is **deny by default**: if the receiver does not list
+  a capability, the sender MUST NOT depend on it.
+
+`RemoteTransport::send()` implementations are responsible for enforcing
+handshake completion and version checks.
+
+#### 6.2 Serialization Format (deterministic)
+
+All protocol frames use **canonical CBOR (RFC 8949)** with deterministic
+map key ordering. Implementations MAY additionally expose JSON debug encoding
+for test vectors, but canonical CBOR is the wire format.
+
+Canonical type mappings:
+- `NodeId` -> UTF-8 string
+- `RemoteTaskId` -> u64
+- `IdempotencyKey` -> hex string `"IK-<32 hex>"` (lowercase)
+- `Time` / `Duration` -> u64 nanoseconds
+- `RegionId`, `TaskId` -> `{ "index": u32, "generation": u32 }`
+- `RemoteInput` / `RemoteOutcome::Success` payload -> byte string (CBOR bytes)
+
+#### 6.3 Envelope Schema
+
+```
+RemoteEnvelope = {
+  version: "1.0",
+  sender: NodeId,
+  sender_time: LogicalTime,
+  payload: RemoteMessage
+}
+
+LogicalTime =
+  | { kind: "lamport", value: u64 }
+  | { kind: "vector", entries: [{ node: NodeId, counter: u64 }, ...] }
+  | { kind: "hybrid", physical_ns: u64, logical: u64 }
+```
+
+`vector` entries MUST be sorted by `node` for determinism.
+
+#### 6.4 Message Schemas
+
+**SpawnRequest**
+```
+{
+  type: "SpawnRequest",
+  remote_task_id: u64,
+  computation: "encode_block",
+  input: <bytes>,
+  lease_ns: u64,
+  idempotency_key: "IK-...",
+  budget: { deadline_ns?: u64, poll_quota: u32, cost_quota?: u64, priority: u8 } | null,
+  origin_node: NodeId,
+  origin_region: { index: u32, generation: u32 },
+  origin_task: { index: u32, generation: u32 }
+}
+```
+
+**SpawnAck**
+```
+{
+  type: "SpawnAck",
+  remote_task_id: u64,
+  status: { kind: "accepted" } |
+          { kind: "rejected", reason: "UnknownComputation" | "CapacityExceeded" |
+                               "NodeShuttingDown" | "InvalidInput" | "IdempotencyConflict",
+            detail?: "string" },
+  assigned_node: NodeId
+}
+```
+
+**CancelRequest**
+```
+{
+  type: "CancelRequest",
+  remote_task_id: u64,
+  reason: CancelReason,
+  origin_node: NodeId
+}
+```
+
+**ResultDelivery**
+```
+{
+  type: "ResultDelivery",
+  remote_task_id: u64,
+  outcome: RemoteOutcome,
+  execution_time_ns: u64
+}
+```
+
+**LeaseRenewal**
+```
+{
+  type: "LeaseRenewal",
+  remote_task_id: u64,
+  new_lease_ns: u64,
+  current_state: "Pending" | "Running" | "Completed" | "Failed" | "Cancelled" | "LeaseExpired",
+  node: NodeId
+}
+```
+
+**CancelReason** (minimal, deterministic encoding)
+```
+{
+  kind: "User" | "Timeout" | "Deadline" | "PollQuota" | "CostBudget" |
+        "FailFast" | "RaceLost" | "ParentCancelled" | "ResourceUnavailable" | "Shutdown",
+  origin_region: { index: u32, generation: u32 },
+  origin_task: { index: u32, generation: u32 } | null,
+  timestamp_ns: u64,
+  message: "static_string" | null,
+  cause: CancelReason | null,
+  truncated: bool,
+  truncated_at_depth: u32 | null
+}
+```
+
+**RemoteOutcome**
+```
+{ kind: "Success", output: <bytes> } |
+{ kind: "Failed", message: "string" } |
+{ kind: "Cancelled", reason: CancelReason } |
+{ kind: "Panicked", message: "string" }
+```
+
+Capability checks:
+- Originator MUST hold `RemoteCap` in `Cx` to issue a `SpawnRequest`.
+- Remote node MUST validate computation name against its registry and
+  MUST reject unauthorized computations (`UnknownComputation` or
+  `InvalidInput`).
+
+#### 6.5 Idempotency Rules
+
+- Each `SpawnRequest` MUST include an `IdempotencyKey`.
+- On duplicate request with same key:
+  - If computation + input match: return the original `SpawnAck` without re-executing.
+  - If computation + input differ: respond with `SpawnAck` rejected
+    `IdempotencyConflict`.
+- Idempotency records expire per `IdempotencyStore` TTL; expired keys are treated
+  as new requests.
+
+#### 6.6 Lease Rules
+
+- The originator sets `lease_ns` (default from `RemoteCap`).
+- The remote node MUST send `LeaseRenewal` within the lease window while running.
+- If the originator misses renewals and the lease expires, it transitions the
+  handle to `RemoteTaskState::LeaseExpired`. Implementations MAY send a
+  `CancelRequest` to request cleanup, but should not assume delivery.
+
+#### 6.7 Compatibility & Versioning
+
+- Unknown fields MUST be ignored (forward compatibility).
+- Missing required fields MUST reject the message.
+- Major version mismatch => disconnect; minor mismatch => accept if supported.
+- `sender_time` kinds may differ; if incompatible, receivers treat causal order
+  as `Concurrent` and proceed without ordering assumptions.
+
+#### 6.8 Test Vectors (JSON, debug-only)
+
+For JSON debug vectors, `input` / `output` byte fields are base64 strings.
+
+**SpawnRequest**
+```json
+{
+  "version": "1.0",
+  "sender": "node-a",
+  "sender_time": { "kind": "lamport", "value": 7 },
+  "payload": {
+    "type": "SpawnRequest",
+    "remote_task_id": 42,
+    "computation": "encode_block",
+    "input": "AQID",
+    "lease_ns": 30000000000,
+    "idempotency_key": "IK-0000000000000000000000000000002a",
+    "budget": { "deadline_ns": 60000000000, "poll_quota": 10000, "cost_quota": null, "priority": 128 },
+    "origin_node": "node-a",
+    "origin_region": { "index": 12, "generation": 1 },
+    "origin_task": { "index": 98, "generation": 3 }
+  }
+}
+```
+
+**SpawnAck (accepted)**
+```json
+{
+  "version": "1.0",
+  "sender": "node-b",
+  "sender_time": { "kind": "lamport", "value": 9 },
+  "payload": {
+    "type": "SpawnAck",
+    "remote_task_id": 42,
+    "status": { "kind": "accepted" },
+    "assigned_node": "node-b"
+  }
+}
+```
+
+**ResultDelivery (success)**
+```json
+{
+  "version": "1.0",
+  "sender": "node-b",
+  "sender_time": { "kind": "lamport", "value": 14 },
+  "payload": {
+    "type": "ResultDelivery",
+    "remote_task_id": 42,
+    "outcome": { "kind": "Success", "output": "BAUG" },
+    "execution_time_ns": 1200000000
+  }
+}
+```
+
+#### 6.9 Stub Implementation Hooks
+
+The Phase 0 harness and runtime already include hook points for integrating
+the protocol:
+
+- `src/remote.rs`: `RemoteTransport` trait (`send`, `try_recv`)
+- `src/remote.rs`: `MessageEnvelope` + `RemoteMessage` types
+- `src/remote.rs`: `trace_events::*` constants for structured tracing
+- `src/lab/network/harness.rs`: `encode_message` / `decode_message` placeholder codec
+
+These locations are the intended integration points for the real transport
+and wire codec.
+
+---
+
 ## Configuration Reference (high level)
 
 Asupersync centralizes configuration in `RaptorQConfig` and related structs.
