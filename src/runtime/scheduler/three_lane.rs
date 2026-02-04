@@ -495,7 +495,18 @@ impl ThreeLaneScheduler {
             if schedule_cancel_on_current_local(task, priority) {
                 return;
             }
-            panic!("Attempted to inject_cancel local task {task:?} without owner worker");
+            // SAFETY: Local (!Send) tasks must only be polled on their owner
+            // worker. If we can't route to the correct worker, skipping cancel
+            // injection may cause a hang but avoids UB from wrong-thread polling.
+            debug_assert!(
+                false,
+                "Attempted to inject_cancel local task {task:?} without owner worker"
+            );
+            tracing::error!(
+                ?task,
+                "inject_cancel: cannot route local task to owner worker, cancel skipped"
+            );
+            return;
         }
 
         // Cancel is the highest-priority lane.  Always inject so that
@@ -548,10 +559,19 @@ impl ThreeLaneScheduler {
                 })
         };
 
-        assert!(
+        // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
+        // Injecting globally would allow wrong-thread polling = UB.
+        debug_assert!(
             !is_local,
             "Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread."
         );
+        if is_local {
+            tracing::error!(
+                ?task,
+                "inject_ready: refusing to globally inject local task, scheduling skipped"
+            );
+            return;
+        }
 
         if should_schedule {
             self.global.inject_ready(task, priority);
@@ -592,7 +612,17 @@ impl ThreeLaneScheduler {
             if schedule_local_task(task) {
                 return;
             }
-            panic!("Attempted to spawn local task {task:?} from non-owner thread or outside worker context");
+            // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
+            // Skipping spawn may cause the task to never run, but avoids UB.
+            debug_assert!(
+                false,
+                "Attempted to spawn local task {task:?} from non-owner thread or outside worker context"
+            );
+            tracing::error!(
+                ?task,
+                "spawn: local task cannot be scheduled from non-owner thread, spawn skipped"
+            );
+            return;
         }
 
         // Fast path 1: O(1) push to worker's LocalQueue via TLS.
@@ -652,7 +682,17 @@ impl ThreeLaneScheduler {
             if schedule_local_task(task) {
                 return;
             }
-            panic!("Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead.");
+            // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
+            // Skipping wake may cause the task to hang, but avoids UB.
+            debug_assert!(
+                false,
+                "Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead."
+            );
+            tracing::error!(
+                ?task,
+                "wake: local task cannot be woken from non-owner thread, wake skipped"
+            );
+            return;
         }
 
         // Fast path 1: O(1) push to worker's LocalQueue via TLS.
@@ -1484,8 +1524,17 @@ impl ThreeLaneWorker {
                                             .push(waiter);
                                         self.coordinator.wake_worker(worker_id);
                                     } else {
-                                        panic!(
+                                        // SAFETY: Invalid worker id for a local waiter means
+                                        // we can't route to the correct queue. Skipping the
+                                        // wake may hang the waiter, but avoids potential UB.
+                                        debug_assert!(
+                                            false,
                                             "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
+                                        );
+                                        tracing::error!(
+                                            ?waiter,
+                                            worker_id,
+                                            "execute: pinned local waiter has invalid worker id, wake skipped"
                                         );
                                     }
                                 } else {
