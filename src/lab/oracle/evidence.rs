@@ -1076,7 +1076,7 @@ mod tests {
         let report = suite.report(crate::types::Time::ZERO);
         let ledger = EvidenceLedger::from_report(&report);
 
-        assert_eq!(ledger.entries.len(), 12);
+        assert_eq!(ledger.entries.len(), 13);
         assert_eq!(ledger.summary.violations_detected, 0);
         // All should show evidence against violation.
         for entry in &ledger.entries {

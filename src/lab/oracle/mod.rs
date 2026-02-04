@@ -37,6 +37,7 @@ pub mod loser_drain;
 pub mod obligation_leak;
 pub mod quiescence;
 pub mod region_tree;
+pub mod rref_access;
 pub mod task_leak;
 
 pub use actor::{
@@ -64,6 +65,7 @@ pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
 pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
+pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
 
 use serde::{Deserialize, Serialize};
@@ -98,6 +100,8 @@ pub enum OracleViolation {
     Supervision(SupervisionViolation),
     /// Mailbox invariant violated.
     Mailbox(MailboxViolation),
+    /// RRef access violation (cross-region, post-close, or witness mismatch).
+    RRefAccess(RRefAccessViolation),
 }
 
 impl std::fmt::Display for OracleViolation {
@@ -115,6 +119,7 @@ impl std::fmt::Display for OracleViolation {
             Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
             Self::Supervision(v) => write!(f, "Supervision violation: {v}"),
             Self::Mailbox(v) => write!(f, "Mailbox violation: {v}"),
+            Self::RRefAccess(v) => write!(f, "RRef access violation: {v}"),
         }
     }
 }
@@ -148,6 +153,8 @@ pub struct OracleSuite {
     pub supervision: SupervisionOracle,
     /// Mailbox oracle.
     pub mailbox: MailboxOracle,
+    /// RRef access oracle.
+    pub rref_access: RRefAccessOracle,
 }
 
 impl OracleSuite {
@@ -210,6 +217,10 @@ impl OracleSuite {
             violations.push(OracleViolation::Mailbox(v));
         }
 
+        if let Err(v) = self.rref_access.check() {
+            violations.push(OracleViolation::RRefAccess(v));
+        }
+
         violations
     }
 
@@ -227,6 +238,7 @@ impl OracleSuite {
         self.actor_leak.reset();
         self.supervision.reset();
         self.mailbox.reset();
+        self.rref_access.reset();
     }
 
     /// Generates a unified oracle report with per-oracle status and statistics.
@@ -372,6 +384,19 @@ impl OracleSuite {
                 OracleStats {
                     entities_tracked: self.mailbox.mailbox_count(),
                     events_recorded: self.mailbox.mailbox_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "rref_access",
+                self.rref_access
+                    .check()
+                    .err()
+                    .map(OracleViolation::RRefAccess),
+                OracleStats {
+                    entities_tracked: self.rref_access.rref_count(),
+                    events_recorded: self.rref_access.rref_count()
+                        + self.rref_access.task_count()
+                        + self.rref_access.closed_region_count(),
                 },
             ),
         ];
