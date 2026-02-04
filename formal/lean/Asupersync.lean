@@ -723,20 +723,130 @@ theorem reserve_creates_reserved {Value Error Panic : Type}
 
 -- ==========================================================================
 -- Safety Lemma 10: Cancellation protocol monotonicity
--- Once a task enters cancelRequested, the protocol progresses forward
--- through cancelling → finalizing → completed(Cancelled).
+-- If a task is observed in cancelling state after a τ-step, then either it
+-- was already cancelling or it transitioned from cancelRequested.
 -- ==========================================================================
 
-/-- A task in cancelling state was previously in cancelRequested state
-    (by construction of the Step rules). -/
+/-- A task in cancelling state was previously in cancelRequested state or was
+    already cancelling (unchanged by a τ-step). -/
 theorem cancelling_from_cancelRequested {Value Error Panic : Type}
     {s s' : State Value Error Panic} {t : TaskId}
     (hStep : Step s (Label.tau) s')
     (hTask : ∃ task', getTask s' t = some task' ∧
       ∃ reason cleanup, task'.state = TaskState.cancelling reason cleanup)
     : ∃ task, getTask s t = some task ∧
-      ∃ reason cleanup, task.state = TaskState.cancelRequested reason cleanup := by
-  sorry -- Requires case analysis on all tau-labeled constructors; needs Lean build env to verify
+      ∃ reason cleanup,
+        task.state = TaskState.cancelRequested reason cleanup ∨
+        task.state = TaskState.cancelling reason cleanup := by
+  have hCancelling := hTask
+  cases hStep with
+  | enqueue hReady hTask0 hRegion hRunnable hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason, cleanup, hState⟩
+      subst hUpdate
+      refine ⟨task', ?_, ?_⟩
+      · simpa [getTask] using hGet
+      · exact ⟨reason, cleanup, Or.inr hState⟩
+  | scheduleStep hPick hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason, cleanup, hState⟩
+      subst hUpdate
+      refine ⟨task', ?_, ?_⟩
+      · simpa [getTask] using hGet
+      · exact ⟨reason, cleanup, Or.inr hState⟩
+  | schedule hTask0 hRegion hTaskState hRegionState hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason, cleanup, hState⟩
+      subst hUpdate
+      by_cases hEq : t = t_1
+      · subst hEq
+        have hEqTask : task' = { task with state := TaskState.running } := by
+          simpa [getTask, setTask] using hGet
+        have hContra :
+            (TaskState.running : TaskState Value Error Panic) =
+              TaskState.cancelling reason cleanup := by
+          simpa [hEqTask] using hState
+        cases hContra
+      · refine ⟨task', ?_, ?_⟩
+        · simpa [getTask, setTask, hEq] using hGet
+        · exact ⟨reason, cleanup, Or.inr hState⟩
+  | cancelMasked hTask0 hState hMask hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      subst hUpdate
+      by_cases hEq : t = t_1
+      · subst hEq
+        have hEqTask : task' = { task with
+            mask := task.mask - 1,
+            state := TaskState.cancelRequested reason cleanup } := by
+          simpa [getTask, setTask] using hGet
+        have hContra :
+            (TaskState.cancelRequested reason cleanup : TaskState Value Error Panic) =
+              TaskState.cancelling reason' cleanup' := by
+          simpa [hEqTask] using hState'
+        cases hContra
+      · refine ⟨task', ?_, ?_⟩
+        · simpa [getTask, setTask, hEq] using hGet
+        · exact ⟨reason', cleanup', Or.inr hState'⟩
+  | cancelAcknowledge hTask0 hState hMask hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      subst hUpdate
+      by_cases hEq : t = t_1
+      · subst hEq
+        refine ⟨task, hTask0, ?_⟩
+        exact ⟨reason, cleanup, Or.inl hState⟩
+      · refine ⟨task', ?_, ?_⟩
+        · simpa [getTask, setTask, hEq] using hGet
+        · exact ⟨reason', cleanup', Or.inr hState'⟩
+  | cancelFinalize hTask0 hState hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      subst hUpdate
+      by_cases hEq : t = t_1
+      · subst hEq
+        have hEqTask : task' = { task with state := TaskState.finalizing reason cleanup } := by
+          simpa [getTask, setTask] using hGet
+        have hContra :
+            (TaskState.finalizing reason cleanup : TaskState Value Error Panic) =
+              TaskState.cancelling reason' cleanup' := by
+          simpa [hEqTask] using hState'
+        cases hContra
+      · refine ⟨task', ?_, ?_⟩
+        · simpa [getTask, setTask, hEq] using hGet
+        · exact ⟨reason', cleanup', Or.inr hState'⟩
+  | cancelComplete hTask0 hState hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      subst hUpdate
+      by_cases hEq : t = t_1
+      · subst hEq
+        have hEqTask :
+            task' = { task with state := TaskState.completed (Outcome.cancelled reason) } := by
+          simpa [getTask, setTask] using hGet
+        have hContra :
+            (TaskState.completed (Outcome.cancelled reason) : TaskState Value Error Panic) =
+              TaskState.cancelling reason' cleanup' := by
+          simpa [hEqTask] using hState'
+        cases hContra
+      · refine ⟨task', ?_, ?_⟩
+        · simpa [getTask, setTask, hEq] using hGet
+        · exact ⟨reason', cleanup', Or.inr hState'⟩
+  | cancelPropagate hRegion hCancel hChild hSub hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason, cleanup, hState⟩
+      subst hUpdate
+      refine ⟨task', ?_, ?_⟩
+      · simpa [getTask] using hGet
+      · exact ⟨reason, cleanup, Or.inr hState⟩
+  | cancelChild hRegion hCancel hChild hTask0 hNotCompleted hUpdate =>
+      rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      subst hUpdate
+      by_cases hEq : t = t_1
+      · subst hEq
+        have hEqTask :
+            task' = { task with state := TaskState.cancelRequested reason cleanup } := by
+          simpa [getTask, setTask] using hGet
+        have hContra :
+            (TaskState.cancelRequested reason cleanup : TaskState Value Error Panic) =
+              TaskState.cancelling reason' cleanup' := by
+          simpa [hEqTask] using hState'
+        cases hContra
+      · refine ⟨task', ?_, ?_⟩
+        · simpa [getTask, setTask, hEq] using hGet
+        · exact ⟨reason', cleanup', Or.inr hState'⟩
 
 -- ==========================================================================
 -- Well-formedness: obligation holder exists
