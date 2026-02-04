@@ -612,19 +612,19 @@ Reserve slot + idempotency key; commit sends; cancel triggers best-effort cancel
 
 **Envelope + serialization (Phase 1+)**
 
-* All messages are carried inside an explicit envelope: `MessageEnvelope { sender, sender_time, payload }`.
-* `sender_time` is a logical clock snapshot (vector clock or equivalent) to preserve causal order.
-* Wire frame (transport-level, not part of `RemoteMessage`):
-  * `magic = "ASR1"` (4 bytes), `version` (u16), `flags` (u16), `len` (u32), then payload bytes.
-  * `version` is protocol version for message schema compatibility.
-* Payload encoding must be canonical and deterministic. Phase 1 recommendation:
-  * `serde` + `postcard` (or equivalent) with fixed-int encoding and stable field order.
-  * No map-order dependence; sets must be encoded in deterministic order.
-  * Unknown fields: ignored for forward compatibility; unknown variants: reject.
+* All messages are carried inside an explicit envelope:
+  * `RemoteEnvelope { version, sender, sender_time, payload }`
+  * `sender_time` is a logical clock snapshot (vector clock or equivalent).
+* Transport framing is transport-specific (length prefix; optional magic for stream resync).
+* Serialization is **canonical CBOR (RFC 8949)**:
+  * Deterministic map key ordering; no map-order dependence.
+  * Sets/collections must be encoded in deterministic order.
+  * JSON is allowed for debug/test vectors only (not the wire format).
+* Unknown fields: ignored for forward compatibility; unknown variants: reject.
 
 **Versioning rules**
 
-* `major.minor` versioning for the envelope:
+* `major.minor` versioning is carried in `RemoteEnvelope.version`:
   * Unknown major: reject the message and close transport.
   * Unknown minor: accept if all required fields are present; ignore unknown fields.
 * Any change to semantics of existing fields requires a major bump.
@@ -780,9 +780,41 @@ Future-proof; not required.
 
 ## 10. Memory: region heap + quiescent reclamation
 
-Region owns an arena; reclaimed at close after quiescence.
-`RRef<'r, T>` can be `Send`/`Sync` when `T` is.
-Debug/lab can attach obligation metadata to allocations.
+### 10.1 Allocation model (region-owned)
+
+- Each region owns a `RegionHeap` for all region-scoped allocations.
+- Handles are **indices with generations** (no pointer identity leaks).
+- `RRef<'r, T>` is a typed handle tied to the region lifetime `'r`.
+- `RRef<'r, T>` is `Send`/`Sync` when `T` is, but only valid while the region is open.
+
+### 10.2 Quiescent reclamation invariant
+
+- Reclamation happens **only** at region close after quiescence.
+- `RegionRecord::clear_heap()` calls `RegionHeap::reclaim_all()` exactly once,
+  during the `Finalizing -> Closed` transition.
+- All admission paths are closed before draining; no new tasks/children/obligations
+  can enter once closing begins.
+- Stale handles are rejected: `HeapIndex` generation guards against ABA reuse and
+  `RRef::get()` returns `AllocationInvalid` after close.
+
+### 10.3 Obligations tie-in
+
+- Any operation that holds region-owned memory across an await must create an
+  obligation (permit/ack/lease) so region close blocks until it resolves.
+- Region close is permitted iff:
+  `children = 0 ∧ tasks = 0 ∧ obligations = 0 ∧ finalizers = 0`.
+
+### 10.4 Leak detection + determinism
+
+- Deterministic counters (`GLOBAL_ALLOC_COUNT`, `HeapStats`) provide leak visibility.
+- Lab oracles assert `global_alloc_count() == 0` after region close.
+- Production uses structured trace + metrics for leak reporting.
+
+### 10.5 Proof obligations (memory/resource safety)
+
+- **Safety:** no use-after-free; `RRef` is invalid after close.
+- **Liveness:** if a region reaches quiescence, heap reclamation occurs.
+- **Determinism:** `HeapIndex` generation prevents ABA; no pointer identity leaks.
 
 ---
 

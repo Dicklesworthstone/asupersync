@@ -43,9 +43,9 @@ When combining outcomes, **worst wins** (monotone aggregation).
 ```
 CancelReason ::= { kind: CancelKind, message: Option<String> }
 
-CancelKind ::= User | Timeout | FailFast | ParentCancelled | Shutdown
+CancelKind ::= User | Timeout | FailFast | RaceLost | ParentCancelled | Shutdown
 
-Severity: User < Timeout < FailFast < ParentCancelled < Shutdown
+Severity: User < Timeout < FailFast = RaceLost < ParentCancelled < Shutdown
 ```
 
 ### 1.4 Budgets
@@ -977,12 +977,48 @@ race(r, f1, f2) =
   t1 ← spawn(r, f1)
   t2 ← spawn(r, f2)
   (winner, loser) ← select_first(t1, t2)
-  cancel(loser)
+  cancel(loser, RaceLost)
   await(loser)              // IMPORTANT: drain loser
   return winner.outcome
 ```
 
 **Critical invariant**: losers are always drained, never abandoned.
+
+**Cancellation attribution**: the loser is cancelled with `CancelKind::RaceLost`
+unless a stronger reason is already present (e.g., parent cancellation).
+
+#### Lemma L-LOSER-DRAINED (Race)
+
+Let `race(r, f1, f2)` evaluate in state `Σ` to a value `v` in state `Σ'`.
+Let `t1, t2` be the tasks spawned for `f1, f2`, with `tW` the winner and `tL` the loser.
+Then:
+
+```
+T'[tW].state = Completed(oW)
+T'[tL].state = Completed(oL)
+oL = Cancelled(RaceLost) or oL is Cancelled(r) with r ⪰ RaceLost
+```
+
+Moreover, all tasks in the race’s subregion are completed (quiescent) when
+`race` returns.
+
+*Proof sketch*: `select_first` ensures one task reaches `Completed`. The other
+is cancelled via `CANCEL-REQUEST(RaceLost)` and awaited; `await` returns only
+after terminal completion. Quiescence of the race subregion follows from
+`INV-QUIESCENCE` and ownership of all spawned children by `r`.
+
+#### Alignment Notes (Implementation)
+
+- `Scope::race` and `Scope::race_all` in `src/cx/scope.rs` use
+  `join_with_drop_reason(CancelReason::race_loser())`, then explicitly
+  `abort_with_reason(RaceLost)` and `join` to drain losers.
+- `JoinFuture::drop` in `src/runtime/task_handle.rs` aborts a task when the join
+  future is dropped, preserving race safety even under early drops.
+- `src/combinator/race.rs` and `src/combinator/join.rs` document the same
+  loser-drain and “no abandonment” invariants; `src/combinator/timeout.rs`
+  defines timeout in terms of `race`.
+- `CancelKind::RaceLost` is defined in `src/types/cancel.rs` with the same
+  severity as `FailFast`.
 
 ### 4.3 timeout(duration, f)
 
