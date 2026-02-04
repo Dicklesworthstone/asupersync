@@ -110,6 +110,17 @@ impl EProcessConfig {
     ///
     /// Returns `Err` if constraints are violated.
     pub fn validate(&self) -> Result<(), String> {
+        // Guard against NaN/Inf first — IEEE 754 NaN comparisons always return
+        // false, so range checks alone cannot reject NaN.
+        if !self.p0.is_finite() {
+            return Err(format!("p0 must be finite, got {}", self.p0));
+        }
+        if !self.lambda.is_finite() {
+            return Err(format!("lambda must be finite, got {}", self.lambda));
+        }
+        if !self.alpha.is_finite() {
+            return Err(format!("alpha must be finite, got {}", self.alpha));
+        }
         if self.p0 <= 0.0 || self.p0 >= 1.0 {
             return Err(format!("p0 must be in (0, 1), got {}", self.p0));
         }
@@ -179,7 +190,7 @@ impl EProcess {
     /// Creates a new e-process for the given invariant.
     #[must_use]
     pub fn new(invariant: &str, config: EProcessConfig) -> Self {
-        debug_assert!(
+        assert!(
             config.validate().is_ok(),
             "EProcessConfig validation failed: {}",
             config.validate().unwrap_err()
@@ -352,13 +363,13 @@ impl EProcessMonitor {
         Self { processes, config }
     }
 
-    /// Creates a monitor for all 12 oracle invariants.
+    /// Creates a monitor for all oracle invariants.
     #[must_use]
     pub fn all_invariants() -> Self {
         Self::all_invariants_with_config(EProcessConfig::default())
     }
 
-    /// Creates a monitor for all 12 oracle invariants with custom config.
+    /// Creates a monitor for all oracle invariants with custom config.
     #[must_use]
     pub fn all_invariants_with_config(config: EProcessConfig) -> Self {
         let invariants = [
@@ -374,6 +385,7 @@ impl EProcessMonitor {
             "actor_leak",
             "supervision",
             "mailbox",
+            "rref_access",
         ];
         Self::new(&invariants, config)
     }
@@ -844,7 +856,7 @@ mod tests {
     #[test]
     fn monitor_all_invariants_has_twelve() {
         let monitor = EProcessMonitor::all_invariants();
-        assert_eq!(monitor.processes.len(), 12);
+        assert_eq!(monitor.processes.len(), 13);
     }
 
     #[test]
@@ -1057,6 +1069,63 @@ mod tests {
             fpr < 0.10,
             "false positive rate under optional stopping should be ≤ α, got {fpr:.4}"
         );
+    }
+
+    // -- NaN / Inf rejection --
+
+    #[test]
+    fn validate_rejects_nan_p0() {
+        let config = EProcessConfig {
+            p0: f64::NAN,
+            ..EProcessConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_lambda() {
+        let config = EProcessConfig {
+            lambda: f64::NAN,
+            ..EProcessConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_nan_alpha() {
+        let config = EProcessConfig {
+            alpha: f64::NAN,
+            ..EProcessConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_inf_p0() {
+        let config = EProcessConfig {
+            p0: f64::INFINITY,
+            ..EProcessConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_neg_inf_lambda() {
+        let config = EProcessConfig {
+            lambda: f64::NEG_INFINITY,
+            ..EProcessConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "EProcessConfig validation failed")]
+    fn constructor_panics_on_nan_config() {
+        let config = EProcessConfig {
+            p0: f64::NAN,
+            ..EProcessConfig::default()
+        };
+        let _ep = EProcess::new("test", config);
     }
 
     // -- Integration with OracleSuite --
