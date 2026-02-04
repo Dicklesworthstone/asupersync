@@ -4,6 +4,15 @@ use crate::types::{Budget, CancelReason, RegionId, TaskId};
 use std::task::Waker;
 use std::time::Instant;
 
+/// Maximum nesting depth for `Cx::masked()` sections.
+///
+/// Enforces the INV-MASK-BOUNDED invariant from the formal semantics:
+/// a task's mask depth must be finite and bounded to guarantee that
+/// cancellation cannot be deferred indefinitely. Exceeding this limit
+/// indicates a programming error (excessive nesting of masked critical
+/// sections).
+pub const MAX_MASK_DEPTH: u32 = 64;
+
 /// State for tracking checkpoint progress.
 ///
 /// This struct tracks progress reporting checkpoints, which are distinct from

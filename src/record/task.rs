@@ -834,6 +834,11 @@ impl TaskRecord {
     pub fn increment_mask(&mut self) -> u32 {
         if let Some(inner) = &self.cx_inner {
             if let Ok(mut guard) = inner.write() {
+                assert!(
+                    guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+                    "mask depth exceeded MAX_MASK_DEPTH ({}): violates INV-MASK-BOUNDED",
+                    crate::types::task_context::MAX_MASK_DEPTH,
+                );
                 guard.mask_depth += 1;
                 return guard.mask_depth;
             }

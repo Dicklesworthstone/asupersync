@@ -1047,6 +1047,13 @@ impl<Caps> Cx<Caps> {
     {
         {
             let mut inner = self.inner.write().expect("lock poisoned");
+            assert!(
+                inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+                "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
+                 and prevents cancellation from ever being observed. \
+                 Reduce nesting of Cx::masked() sections.",
+                crate::types::task_context::MAX_MASK_DEPTH,
+            );
             inner.mask_depth += 1;
         }
 
@@ -2099,6 +2106,23 @@ mod tests {
             cx.checkpoint().is_err(),
             "Cx remains masked after panic! mask_depth leaked."
         );
+    }
+
+    /// INV-MASK-BOUNDED: exceeding MAX_MASK_DEPTH must panic.
+    #[test]
+    #[should_panic(expected = "MAX_MASK_DEPTH")]
+    fn mask_depth_exceeds_bound_panics() {
+        let cx = test_cx();
+
+        // Directly set mask_depth to the limit, then call masked() once
+        // to trigger the bound check. This avoids deep nesting which
+        // would cause double-panic in MaskGuard drops during unwind.
+        {
+            let mut inner = cx.inner.write().expect("lock");
+            inner.mask_depth = crate::types::task_context::MAX_MASK_DEPTH;
+        }
+        // This call should panic because mask_depth is already at the limit.
+        cx.masked(|| {});
     }
 
     #[test]
