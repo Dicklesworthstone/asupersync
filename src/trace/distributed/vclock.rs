@@ -585,7 +585,7 @@ impl VectorClock {
         *entry
     }
 
-    /// Sets the counter for a node to a specific value.
+    /// Sets the counter for a node to a specific value, monotone.
     ///
     /// Used when receiving a message: update local clock to be at least
     /// as large as the sender's value for each node.
@@ -593,7 +593,10 @@ impl VectorClock {
         if value == 0 {
             return;
         }
-        self.entries.insert(node.clone(), value);
+        let entry = self.entries.entry(node.clone()).or_insert(0);
+        if value > *entry {
+            *entry = value;
+        }
     }
 
     /// Returns the merge (join / componentwise max) of two vector clocks.
@@ -995,6 +998,22 @@ mod tests {
         let vc = VectorClock::for_node(&n);
         assert_eq!(vc.get(&n), 1);
         assert_eq!(vc.node_count(), 1);
+    }
+
+    #[test]
+    fn set_is_monotone() {
+        let n = node("A");
+        let mut vc = VectorClock::new();
+        vc.set(&n, 3);
+        assert_eq!(vc.get(&n), 3);
+
+        // Lower value should not regress the clock.
+        vc.set(&n, 1);
+        assert_eq!(vc.get(&n), 3);
+
+        // Higher value should advance.
+        vc.set(&n, 7);
+        assert_eq!(vc.get(&n), 7);
     }
 
     #[test]
