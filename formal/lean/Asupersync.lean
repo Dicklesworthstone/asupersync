@@ -501,6 +501,54 @@ inductive Step (Value Error Panic : Type) :
           setTask s t { task with state := TaskState.cancelRequested reason cleanup }) :
       Step s (Label.tau) s'
 
+  /-- CLOSE-BEGIN: region starts closing. -/
+  | closeBegin {s s' : State Value Error Panic} {r : RegionId}
+      {region : Region Value Error Panic}
+      (hRegion : getRegion s r = some region)
+      (hState : region.state = RegionState.open)
+      (hUpdate :
+        s' = setRegion s r { region with state := RegionState.closing }) :
+      Step s (Label.tau) s'
+
+  /-- CLOSE-CANCEL-CHILDREN: cancel live children and enter draining. -/
+  | closeCancelChildren {s s' : State Value Error Panic} {r : RegionId}
+      {region : Region Value Error Panic}
+      (reason : CancelReason)
+      (hRegion : getRegion s r = some region)
+      (hState : region.state = RegionState.closing)
+      (hHasLive :
+        ∃ t ∈ region.children,
+          match getTask s t with
+          | some task => ¬ taskCompleted task
+          | none => False)
+      (hUpdate :
+        s' = setRegion s r
+          { region with
+              state := RegionState.draining,
+              cancel := some (strengthenOpt region.cancel reason) }) :
+      Step s (Label.cancel r reason) s'
+
+  /-- CLOSE-CHILDREN-DONE: all children/subregions complete; enter finalizing. -/
+  | closeChildrenDone {s s' : State Value Error Panic} {r : RegionId}
+      {region : Region Value Error Panic}
+      (hRegion : getRegion s r = some region)
+      (hState : region.state = RegionState.draining)
+      (hChildren : allTasksCompleted s region.children)
+      (hSubs : allRegionsClosed s region.subregions)
+      (hUpdate :
+        s' = setRegion s r { region with state := RegionState.finalizing }) :
+      Step s (Label.tau) s'
+
+  /-- CLOSE-RUN-FINALIZER: run one finalizer (LIFO). -/
+  | closeRunFinalizer {s s' : State Value Error Panic} {r : RegionId}
+      {region : Region Value Error Panic} {f : TaskId} {rest : List TaskId}
+      (hRegion : getRegion s r = some region)
+      (hState : region.state = RegionState.finalizing)
+      (hFinalizers : region.finalizers = f :: rest)
+      (hUpdate :
+        s' = setRegion s r { region with finalizers := rest }) :
+      Step s (Label.finalize r f) s'
+
   /-- CLOSE: close a quiescent region with an outcome. -/
   | close {s s' : State Value Error Panic} {r : RegionId}
       {region : Region Value Error Panic}
@@ -1017,6 +1065,9 @@ theorem cancel_request_preserves_obligation {Value Error Panic : Type}
   | cancelRequest _ _ hTask hRegion hRegionMatch hNotCompleted hUpdate =>
     subst hUpdate
     simp [getObligation, setTask, setRegion]
+  | closeCancelChildren _ hRegion hState hHasLive hUpdate =>
+    subst hUpdate
+    simp [getObligation, setRegion]
 
 -- ==========================================================================
 -- Safety: Tick preserves all tasks, regions, and obligations (bd-3bg3e)
@@ -1346,62 +1397,6 @@ theorem cancel_complete_produces_cancelled {Value Error Panic : Type}
       ∃ (r : CancelReason) (b : Budget), task.state = TaskState.finalizing r b)
     : True := by
   trivial
-
--- ==========================================================================
--- Progress lemmas for cancellation steps (bd-330st)
--- These are constructive witnesses for the cancellation transitions.
--- ==========================================================================
-
-theorem cancel_masked_step {Value Error Panic : Type}
-    {s : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
-    {reason : CancelReason} {cleanup : Budget}
-    (hTask : getTask s t = some task)
-    (hState : task.state = TaskState.cancelRequested reason cleanup)
-    (hMask : task.mask > 0)
-    : ∃ s', Step s (Label.tau) s' ∧
-        getTask s' t = some { task with
-          mask := task.mask - 1,
-          state := TaskState.cancelRequested reason cleanup } := by
-  refine ⟨_, ?_, ?_⟩
-  · exact Step.cancelMasked reason cleanup hTask hState hMask rfl
-  · simp [getTask, setTask]
-
-theorem cancel_ack_step {Value Error Panic : Type}
-    {s : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
-    {reason : CancelReason} {cleanup : Budget}
-    (hTask : getTask s t = some task)
-    (hState : task.state = TaskState.cancelRequested reason cleanup)
-    (hMask : task.mask = 0)
-    : ∃ s', Step s (Label.tau) s' ∧
-        getTask s' t = some { task with
-          state := TaskState.cancelling reason cleanup } := by
-  refine ⟨_, ?_, ?_⟩
-  · exact Step.cancelAcknowledge reason cleanup hTask hState hMask rfl
-  · simp [getTask, setTask]
-
-theorem cancel_finalize_step {Value Error Panic : Type}
-    {s : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
-    {reason : CancelReason} {cleanup : Budget}
-    (hTask : getTask s t = some task)
-    (hState : task.state = TaskState.cancelling reason cleanup)
-    : ∃ s', Step s (Label.tau) s' ∧
-        getTask s' t = some { task with
-          state := TaskState.finalizing reason cleanup } := by
-  refine ⟨_, ?_, ?_⟩
-  · exact Step.cancelFinalize reason cleanup hTask hState rfl
-  · simp [getTask, setTask]
-
-theorem cancel_complete_step {Value Error Panic : Type}
-    {s : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
-    {reason : CancelReason} {cleanup : Budget}
-    (hTask : getTask s t = some task)
-    (hState : task.state = TaskState.finalizing reason cleanup)
-    : ∃ s', Step s (Label.tau) s' ∧
-        getTask s' t = some { task with
-          state := TaskState.completed (Outcome.cancelled reason) } := by
-  refine ⟨_, ?_, ?_⟩
-  · exact Step.cancelComplete reason cleanup hTask hState rfl
-  · simp [getTask, setTask]
 
 -- ==========================================================================
 -- Safety: completed tasks cannot be cancelled (bd-330st)
