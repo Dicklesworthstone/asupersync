@@ -7,7 +7,7 @@ use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
-use crate::types::{Budget, CancelReason, CurveBudget, RegionId, TaskId, Time};
+use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
 
@@ -814,12 +814,12 @@ impl RegionRecord {
     pub fn rref_get_with<T: Clone + 'static>(
         &self,
         rref: &RRef<T>,
-        witness: &RRefAccessWitness,
+        witness: RRefAccessWitness,
     ) -> Result<T, RRefError> {
         if witness.region() != self.id {
             return Err(RRefError::WrongRegion);
         }
-        rref.validate_witness(witness)?;
+        rref.validate_witness(&witness)?;
         if self.state().is_terminal() {
             return Err(RRefError::RegionClosed);
         }
@@ -835,13 +835,13 @@ impl RegionRecord {
     pub fn rref_with_witness<T: 'static, R, F: FnOnce(&T) -> R>(
         &self,
         rref: &RRef<T>,
-        witness: &RRefAccessWitness,
+        witness: RRefAccessWitness,
         f: F,
     ) -> Result<R, RRefError> {
         if witness.region() != self.id {
             return Err(RRefError::WrongRegion);
         }
-        rref.validate_witness(witness)?;
+        rref.validate_witness(&witness)?;
         if self.state().is_terminal() {
             return Err(RRefError::RegionClosed);
         }
@@ -924,7 +924,7 @@ impl RRefAccess for RegionRecord {
     fn rref_get_with<T: Clone + 'static>(
         &self,
         rref: &RRef<T>,
-        witness: &RRefAccessWitness,
+        witness: RRefAccessWitness,
     ) -> Result<T, RRefError> {
         self.rref_get_with(rref, witness)
     }
@@ -932,7 +932,7 @@ impl RRefAccess for RegionRecord {
     fn rref_with_witness<T: 'static, R, F: FnOnce(&T) -> R>(
         &self,
         rref: &RRef<T>,
-        witness: &RRefAccessWitness,
+        witness: RRefAccessWitness,
         f: F,
     ) -> Result<R, RRefError> {
         self.rref_with_witness(rref, witness, f)
@@ -947,6 +947,39 @@ mod tests {
 
     fn test_region_id() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(1, 0))
+    }
+
+    fn rref_get_via_trait<A: RRefAccess, T: Clone + 'static>(accessor: &A, rref: &RRef<T>) -> T {
+        accessor.rref_get(rref).expect("trait get")
+    }
+
+    fn rref_with_via_trait<A: RRefAccess, T: 'static, R, F: FnOnce(&T) -> R>(
+        accessor: &A,
+        rref: &RRef<T>,
+        f: F,
+    ) -> R {
+        accessor.rref_with(rref, f).expect("trait with")
+    }
+
+    fn rref_get_with_via_trait<A: RRefAccess, T: Clone + 'static>(
+        accessor: &A,
+        rref: &RRef<T>,
+        witness: RRefAccessWitness,
+    ) -> T {
+        accessor
+            .rref_get_with(rref, witness)
+            .expect("trait get_with")
+    }
+
+    fn rref_with_witness_via_trait<A: RRefAccess, T: 'static, R, F: FnOnce(&T) -> R>(
+        accessor: &A,
+        rref: &RRef<T>,
+        witness: RRefAccessWitness,
+        f: F,
+    ) -> R {
+        accessor
+            .rref_with_witness(rref, witness, f)
+            .expect("trait with_witness")
     }
 
     #[test]
@@ -1853,5 +1886,169 @@ mod tests {
             region.remove_task(c);
             assert_eq!(region.task_ids().len(), 0);
         }
+    }
+
+    // ========================================================================
+    // RRef Access Safety — Witness-Gated Access Tests (bd-27c7l)
+    // ========================================================================
+
+    #[test]
+    fn access_witness_available_while_open() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        let witness = region.access_witness();
+        assert!(witness.is_ok());
+        assert_eq!(witness.unwrap().region(), test_region_id());
+    }
+
+    #[test]
+    fn access_witness_available_through_closing_phases() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+
+        // Witness available in Open
+        assert!(region.access_witness().is_ok());
+
+        region.begin_close(None);
+        // Witness available in Closing
+        assert!(region.access_witness().is_ok());
+
+        region.begin_drain();
+        // Witness available in Draining
+        assert!(region.access_witness().is_ok());
+
+        region.begin_finalize();
+        // Witness available in Finalizing
+        assert!(region.access_witness().is_ok());
+    }
+
+    #[test]
+    fn access_witness_denied_after_close() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        region.begin_close(None);
+        region.begin_drain();
+        region.begin_finalize();
+        region.complete_close();
+
+        let witness = region.access_witness();
+        assert!(witness.is_err());
+        assert_eq!(witness.unwrap_err(), RRefError::RegionClosed);
+    }
+
+    #[test]
+    fn witness_gated_get_succeeds_with_matching_region() {
+        let rid = test_region_id();
+        let region = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = region.heap_alloc(42u32).expect("heap alloc");
+        let rref = RRef::<u32>::new(rid, index);
+
+        let witness = region.access_witness().expect("witness");
+        let value = region.rref_get_with(&rref, witness).expect("get_with");
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn witness_gated_with_succeeds_with_matching_region() {
+        let rid = test_region_id();
+        let region = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = region.heap_alloc("hello".to_string()).expect("heap alloc");
+        let rref = RRef::<String>::new(rid, index);
+
+        let witness = region.access_witness().expect("witness");
+        let len = region
+            .rref_with_witness(&rref, witness, String::len)
+            .expect("with_witness");
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn witness_from_wrong_region_rejected() {
+        let rid_a = test_region_id();
+        let rid_b = RegionId::from_arena(ArenaIndex::new(99, 0));
+        let region_a = RegionRecord::new(rid_a, None, Budget::INFINITE);
+        let region_b = RegionRecord::new(rid_b, None, Budget::INFINITE);
+
+        let index = region_a.heap_alloc(7u32).expect("heap alloc");
+        let rref = RRef::<u32>::new(rid_a, index);
+
+        // Witness from region_b cannot access region_a's RRef
+        let wrong_witness = region_b.access_witness().expect("witness");
+        let err = region_a.rref_get_with(&rref, wrong_witness);
+        assert_eq!(err.unwrap_err(), RRefError::WrongRegion);
+    }
+
+    #[test]
+    fn witness_rref_region_mismatch_rejected() {
+        let rid_a = test_region_id();
+        let rid_b = RegionId::from_arena(ArenaIndex::new(99, 0));
+        let region_a = RegionRecord::new(rid_a, None, Budget::INFINITE);
+
+        let index = region_a.heap_alloc(7u32).expect("heap alloc");
+        // RRef claims to belong to region_b but index is from region_a
+        let rref = RRef::<u32>::new(rid_b, index);
+
+        let witness = region_a.access_witness().expect("witness");
+        let err = region_a.rref_get_with(&rref, witness);
+        // Witness region matches record (a), but rref region is b → WrongRegion
+        assert_eq!(err.unwrap_err(), RRefError::WrongRegion);
+    }
+
+    #[test]
+    fn stale_witness_rejected_after_close() {
+        let rid = test_region_id();
+        let region = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = region.heap_alloc(42u32).expect("heap alloc");
+        let rref = RRef::<u32>::new(rid, index);
+
+        // Obtain witness while open
+        let witness = region.access_witness().expect("witness");
+
+        // Close the region fully
+        region.begin_close(None);
+        region.begin_drain();
+        region.begin_finalize();
+        region.complete_close();
+
+        // Stale witness cannot access data after region is closed
+        let err = region.rref_get_with(&rref, witness);
+        assert_eq!(err.unwrap_err(), RRefError::RegionClosed);
+    }
+
+    #[test]
+    fn rref_access_trait_get_works() {
+        let rid = test_region_id();
+        let region = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = region.heap_alloc(99i64).expect("heap alloc");
+        let rref = RRef::<i64>::new(rid, index);
+
+        let value = rref_get_via_trait(&region, &rref);
+        assert_eq!(value, 99);
+    }
+
+    #[test]
+    fn rref_access_trait_with_works() {
+        let rid = test_region_id();
+        let region = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = region.heap_alloc(vec![1, 2, 3]).expect("heap alloc");
+        let rref = RRef::<Vec<i32>>::new(rid, index);
+
+        let len = rref_with_via_trait(&region, &rref, Vec::len);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn rref_access_trait_witness_methods_work() {
+        let rid = test_region_id();
+        let region = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = region
+            .heap_alloc("witness".to_string())
+            .expect("heap alloc");
+        let rref = RRef::<String>::new(rid, index);
+
+        let witness = region.access_witness().expect("witness");
+
+        let value = rref_get_with_via_trait(&region, &rref, witness);
+        assert_eq!(value, "witness");
+
+        let len = rref_with_witness_via_trait(&region, &rref, witness, String::len);
+        assert_eq!(len, 7);
     }
 }

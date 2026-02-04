@@ -211,7 +211,7 @@ impl std::error::Error for RRefError {}
 ///
 /// ```ignore
 /// let witness = region_record.access_witness()?;
-/// let value = region_record.rref_get_with(&rref, &witness)?;
+/// let value = region_record.rref_get_with(&rref, witness)?;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RRefAccessWitness {
@@ -274,7 +274,7 @@ pub trait RRefAccess {
     fn rref_get_with<T: Clone + 'static>(
         &self,
         rref: &RRef<T>,
-        witness: &RRefAccessWitness,
+        witness: RRefAccessWitness,
     ) -> Result<T, RRefError>;
 
     /// Executes a closure with a reference, requiring a pre-validated witness.
@@ -283,7 +283,7 @@ pub trait RRefAccess {
     fn rref_with_witness<T: 'static, R, F: FnOnce(&T) -> R>(
         &self,
         rref: &RRef<T>,
-        witness: &RRefAccessWitness,
+        witness: RRefAccessWitness,
         f: F,
     ) -> Result<R, RRefError>;
 }
@@ -404,5 +404,71 @@ mod tests {
         assert_sync::<RRef<u32>>();
         assert_sync::<RRef<String>>();
         assert_sync::<RRef<Vec<i32>>>();
+    }
+
+    // ================================================================
+    // Witness validation tests (bd-27c7l)
+    // ================================================================
+
+    #[test]
+    fn validate_witness_matching_region_succeeds() {
+        let rid = test_region_id();
+        let record = RegionRecord::new(rid, None, Budget::INFINITE);
+        let index = record.heap_alloc(42u32).expect("heap alloc");
+        let rref = RRef::<u32>::new(rid, index);
+
+        let witness = RRefAccessWitness::new(rid);
+        assert!(rref.validate_witness(&witness).is_ok());
+    }
+
+    #[test]
+    fn validate_witness_wrong_region_fails() {
+        let rid_a = test_region_id();
+        let rid_b = RegionId::from_arena(ArenaIndex::new(77, 0));
+        let record = RegionRecord::new(rid_a, None, Budget::INFINITE);
+        let index = record.heap_alloc(42u32).expect("heap alloc");
+        let rref = RRef::<u32>::new(rid_a, index);
+
+        let wrong_witness = RRefAccessWitness::new(rid_b);
+        let err = rref.validate_witness(&wrong_witness);
+        assert_eq!(err.unwrap_err(), RRefError::WrongRegion);
+    }
+
+    #[test]
+    fn access_witness_is_copy_and_eq() {
+        let rid = test_region_id();
+        let w1 = RRefAccessWitness::new(rid);
+        let w2 = w1; // Copy
+        assert_eq!(w1, w2);
+        assert_eq!(w1.region(), rid);
+    }
+
+    #[test]
+    fn rref_error_display_coverage() {
+        let rid = test_region_id();
+        let cases: Vec<(RRefError, &str)> = vec![
+            (RRefError::RegionNotFound(rid), "region not found"),
+            (RRefError::AllocationInvalid, "heap allocation is invalid"),
+            (
+                RRefError::RegionMismatch {
+                    expected: rid,
+                    actual: rid,
+                },
+                "region mismatch",
+            ),
+            (RRefError::RegionClosed, "region is closed"),
+            (
+                RRefError::WrongRegion,
+                "access witness references wrong region",
+            ),
+        ];
+
+        for (err, expected_substring) in cases {
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(expected_substring),
+                "expected '{expected_substring}' in '{msg}'"
+            );
+        }
     }
 }
