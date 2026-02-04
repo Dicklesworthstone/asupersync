@@ -167,7 +167,11 @@ impl SymbolCancelToken {
     pub fn cancelled_at(&self) -> Option<Time> {
         let nanos = self.state.cancelled_at.load(Ordering::SeqCst);
         if nanos == 0 {
-            None
+            if self.is_cancelled() {
+                Some(Time::ZERO)
+            } else {
+                None
+            }
         } else {
             Some(Time::from_nanos(nanos))
         }
@@ -267,7 +271,10 @@ impl SymbolCancelToken {
         let mut listeners = self.state.listeners.write().expect("lock poisoned");
         if self.is_cancelled() {
             drop(listeners);
-            if let (Some(reason), Some(at)) = (self.reason(), self.cancelled_at()) {
+            let reason = self
+                .reason()
+                .unwrap_or_else(|| CancelReason::new(CancelKind::User));
+            if let Some(at) = self.cancelled_at() {
                 listener.on_cancel(&reason, at);
             }
         } else {
@@ -1126,6 +1133,26 @@ mod tests {
         let reason = CancelReason::timeout();
         assert!(!parsed.cancel(&reason, Time::from_millis(200)));
         assert_eq!(parsed.reason().unwrap().kind, CancelKind::Timeout);
+    }
+
+    #[test]
+    fn test_deserialized_cancelled_token_notifies_listener() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        token.cancel(&CancelReason::user("initial"), Time::from_millis(100));
+
+        let parsed = SymbolCancelToken::from_bytes(&token.to_bytes()).unwrap();
+        assert!(parsed.is_cancelled());
+
+        let notified = Arc::new(AtomicBool::new(false));
+        let notified_clone = Arc::clone(&notified);
+        parsed.add_listener(move |_reason: &CancelReason, _at: Time| {
+            notified_clone.store(true, Ordering::SeqCst);
+        });
+
+        assert!(notified.load(Ordering::SeqCst));
     }
 
     #[test]
