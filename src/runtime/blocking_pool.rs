@@ -586,24 +586,28 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     let thread_id = inner.active_threads.fetch_add(1, Ordering::Relaxed);
     let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
 
-    let handle = thread::Builder::new()
-        .name(name)
-        .spawn(move || {
-            if let Some(ref callback) = inner_clone.on_thread_start {
-                callback();
-            }
+    match thread::Builder::new().name(name).spawn(move || {
+        if let Some(ref callback) = inner_clone.on_thread_start {
+            callback();
+        }
 
-            blocking_worker_loop(&inner_clone);
+        blocking_worker_loop(&inner_clone);
 
-            if let Some(ref callback) = inner_clone.on_thread_stop {
-                callback();
-            }
+        if let Some(ref callback) = inner_clone.on_thread_stop {
+            callback();
+        }
 
-            inner_clone.active_threads.fetch_sub(1, Ordering::Relaxed);
-        })
-        .expect("failed to spawn blocking thread");
-
-    inner.thread_handles.lock().unwrap().push(handle);
+        inner_clone.active_threads.fetch_sub(1, Ordering::Relaxed);
+    }) {
+        Ok(handle) => {
+            inner.thread_handles.lock().unwrap().push(handle);
+        }
+        Err(_) => {
+            // Spawn failed — roll back the counter so active_threads
+            // stays consistent with the actual number of live threads.
+            inner.active_threads.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Check if we should spawn a new thread and do so if needed.
@@ -634,12 +638,17 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) {
                 continue;
             }
 
-            // Execute the task
+            // Execute the task. Use catch_unwind so a panicking task
+            // doesn't leak the busy_threads counter or skip signal_done(),
+            // which would cause waiters to hang indefinitely and the
+            // worker thread to die (losing on_thread_stop + active_threads
+            // decrement).
             inner.busy_threads.fetch_add(1, Ordering::Relaxed);
-            (task.work)();
+            let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.work));
             inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
 
-            // Signal completion
+            // Always signal completion so waiters are unblocked, even
+            // if the task panicked.
             task.completion.signal_done();
             continue;
         }
@@ -1100,5 +1109,46 @@ mod tests {
         let recorded = names.lock().unwrap().clone();
         let unique: HashSet<_> = recorded.into_iter().collect();
         assert_eq!(unique.len(), 2, "Expected two unique thread names");
+    }
+
+    /// A panicking task must not hang waiters or leak busy_threads.
+    /// The pool should catch the panic, signal completion, and continue
+    /// processing subsequent tasks on the same worker thread.
+    #[test]
+    fn panicking_task_does_not_hang_waiters() {
+        // Install a no-op panic hook so the test output isn't noisy.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let pool = BlockingPool::new(1, 1);
+
+        // Submit a task that panics.
+        let panic_handle = pool.spawn(|| {
+            panic!("intentional test panic");
+        });
+
+        // Submit a follow-up task to verify the worker thread survived.
+        let survived = Arc::new(AtomicBool::new(false));
+        let survived_clone = Arc::clone(&survived);
+        let follow_up = pool.spawn(move || {
+            survived_clone.store(true, Ordering::Release);
+        });
+
+        // Both handles must complete without hanging.
+        assert!(
+            panic_handle.wait_timeout(Duration::from_secs(5)),
+            "panicking task should signal completion, not hang"
+        );
+        assert!(
+            follow_up.wait_timeout(Duration::from_secs(5)),
+            "follow-up task should complete on the surviving worker"
+        );
+        assert!(
+            survived.load(Ordering::Acquire),
+            "worker thread should survive a task panic"
+        );
+
+        // Restore the original panic hook.
+        std::panic::set_hook(prev_hook);
     }
 }
