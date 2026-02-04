@@ -782,6 +782,9 @@ impl<Caps> Cx<Caps> {
         let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let mut inner = self.inner.write().expect("lock poisoned");
             inner.checkpoint_state.record();
+            if inner.cancel_requested && inner.mask_depth == 0 {
+                inner.cancel_acknowledged = true;
+            }
             (
                 inner.cancel_requested,
                 inner.mask_depth,
@@ -833,6 +836,9 @@ impl<Caps> Cx<Caps> {
         let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let mut inner = self.inner.write().expect("lock poisoned");
             inner.checkpoint_state.record_with_message(msg.into());
+            if inner.cancel_requested && inner.mask_depth == 0 {
+                inner.cancel_acknowledged = true;
+            }
             (
                 inner.cancel_requested,
                 inner.mask_depth,

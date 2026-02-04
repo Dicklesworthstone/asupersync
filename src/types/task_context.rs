@@ -84,6 +84,8 @@ pub struct CxInner {
     pub cancel_requested: bool,
     /// The reason for cancellation, if requested.
     pub cancel_reason: Option<CancelReason>,
+    /// Whether cancellation has been acknowledged at a checkpoint.
+    pub cancel_acknowledged: bool,
     /// Waker used to schedule cancellation promptly.
     pub cancel_waker: Option<Waker>,
     /// Current mask depth.
@@ -104,6 +106,7 @@ impl CxInner {
             budget_baseline: budget,
             cancel_requested: false,
             cancel_reason: None,
+            cancel_acknowledged: false,
             cancel_waker: None,
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),

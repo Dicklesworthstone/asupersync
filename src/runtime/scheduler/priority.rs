@@ -228,6 +228,35 @@ impl Scheduler {
         None
     }
 
+    /// Pop a task from the cancel lane using deterministic RNG tie-breaking.
+    pub fn pop_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
+        let entry =
+            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
+        self.scheduled.remove(&entry.task);
+        Some((entry.task, DispatchLane::Cancel))
+    }
+
+    /// Pop a task from timed or ready lanes (excluding cancel lane).
+    ///
+    /// Timed lane has priority over ready lane.
+    pub fn pop_non_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
+        if let Some(entry) =
+            Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
+        {
+            self.scheduled.remove(&entry.task);
+            return Some((entry.task, DispatchLane::Timed));
+        }
+
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
+        {
+            self.scheduled.remove(&entry.task);
+            return Some((entry.task, DispatchLane::Ready));
+        }
+
+        None
+    }
+
     fn pop_entry_with_rng(
         lane: &mut BinaryHeap<SchedulerEntry>,
         rng_hint: u64,
