@@ -2277,6 +2277,111 @@ theorem popNext_ready_when_others_empty (sched : SchedulerState)
     exact ⟨t, rest, by simp [popNext, popLane, hCancel, hTimed, h]⟩
 
 -- ==========================================================================
+-- Fairness: bounded cancel-streak yield (bd-3dv80)
+-- If cancel_streak_limit is reached and non-cancel work exists, the scheduler
+-- must select a timed/ready task. This models the fairness yield logic in the
+-- runtime scheduler (cancel-streak counter).
+-- ==========================================================================
+
+def nonCancelAvailable (sched : SchedulerState) : Prop :=
+  sched.timedLane ≠ [] ∨ sched.readyLane ≠ []
+
+/-- popNextFair: a fairness-aware selection policy used for specification.
+
+If `cancelStreak < limit`, use normal lane priority.
+If `cancelStreak ≥ limit`, prefer timed, then ready; if neither exists,
+fallback to normal lane priority (cancel).
+-/
+def popNextFair (limit cancelStreak : Nat) (sched : SchedulerState) :
+    Option (TaskId × SchedulerState) :=
+  if h : cancelStreak < limit then
+    popNext sched
+  else
+    match popLane sched.timedLane with
+    | some (t, rest) => some (t, { sched with timedLane := rest })
+    | none =>
+        match popLane sched.readyLane with
+        | some (t, rest) => some (t, { sched with readyLane := rest })
+        | none => popNext sched
+
+/-- If the cancel streak is below the limit, popNextFair agrees with popNext. -/
+theorem popNextFair_eq_popNext_when_below_limit (sched : SchedulerState)
+    (limit cancelStreak : Nat)
+    (hLimit : cancelStreak < limit) :
+    popNextFair limit cancelStreak sched = popNext sched := by
+  simp [popNextFair, hLimit]
+
+/-- If the limit is reached and the timed lane is nonempty, popNextFair
+    selects from the timed lane. -/
+theorem popNextFair_timed_when_limit_reached (sched : SchedulerState)
+    (limit cancelStreak : Nat)
+    (hLimit : limit ≤ cancelStreak)
+    (hTimed : sched.timedLane ≠ []) :
+    ∃ t rest, popNextFair limit cancelStreak sched =
+      some (t, { sched with timedLane := rest }) := by
+  have hNot : ¬ cancelStreak < limit := by
+    exact not_lt_of_ge hLimit
+  cases h : sched.timedLane with
+  | nil => exact (hTimed (by simpa [h]))
+  | cons t rest =>
+    exact ⟨t, rest, by simp [popNextFair, hNot, popLane, h]⟩
+
+/-- If the limit is reached, timed is empty, and ready is nonempty,
+    popNextFair selects from the ready lane. -/
+theorem popNextFair_ready_when_limit_reached (sched : SchedulerState)
+    (limit cancelStreak : Nat)
+    (hLimit : limit ≤ cancelStreak)
+    (hTimed : sched.timedLane = [])
+    (hReady : sched.readyLane ≠ []) :
+    ∃ t rest, popNextFair limit cancelStreak sched =
+      some (t, { sched with readyLane := rest }) := by
+  have hNot : ¬ cancelStreak < limit := by
+    exact not_lt_of_ge hLimit
+  cases h : sched.readyLane with
+  | nil => exact (hReady (by simpa [h]))
+  | cons t rest =>
+    exact ⟨t, rest, by simp [popNextFair, hNot, popLane, hTimed, h]⟩
+
+/-- If the limit is reached and no non-cancel work exists, popNextFair
+    falls back to the normal priority popNext (cancel-first). -/
+theorem popNextFair_fallback_to_popNext (sched : SchedulerState)
+    (limit cancelStreak : Nat)
+    (hLimit : limit ≤ cancelStreak)
+    (hTimed : sched.timedLane = [])
+    (hReady : sched.readyLane = []) :
+    popNextFair limit cancelStreak sched = popNext sched := by
+  have hNot : ¬ cancelStreak < limit := by
+    exact not_lt_of_ge hLimit
+  simp [popNextFair, hNot, popLane, hTimed, hReady]
+
+/-- Fairness yield: when the cancel streak is at/above the limit and
+    non-cancel work is available, popNextFair selects a non-cancel task. -/
+theorem popNextFair_yields_non_cancel (sched : SchedulerState)
+    (limit cancelStreak : Nat)
+    (hLimit : limit ≤ cancelStreak)
+    (hAvail : nonCancelAvailable sched) :
+    ∃ t sched', popNextFair limit cancelStreak sched = some (t, sched') ∧
+      (t ∈ sched.timedLane ∨ t ∈ sched.readyLane) := by
+  have hNot : ¬ cancelStreak < limit := by
+    exact not_lt_of_ge hLimit
+  cases hTimed : sched.timedLane with
+  | nil =>
+    have hReady : sched.readyLane ≠ [] := by
+      cases hAvail with
+      | inl h => exact (False.elim (h (by simpa [hTimed])))
+      | inr h => exact h
+    cases hReady' : sched.readyLane with
+    | nil => exact (hReady (by simpa [hReady']))
+    | cons t rest =>
+      refine ⟨t, { sched with readyLane := rest }, ?_, ?_⟩
+      · simp [popNextFair, hNot, popLane, hTimed, hReady']
+      · right; simp [hReady']
+  | cons t rest =>
+    refine ⟨t, { sched with timedLane := rest }, ?_, ?_⟩
+    · simp [popNextFair, hNot, popLane, hTimed]
+    · left; simp [hTimed]
+
+-- ==========================================================================
 -- Safety: spawned task is in Created state (bd-330st)
 -- After a spawn step, the newly created task is in Created state.
 -- ==========================================================================
