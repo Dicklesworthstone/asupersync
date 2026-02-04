@@ -307,7 +307,8 @@ impl ObligationMarking {
     /// Increment the count for a dimension (Reserve transition).
     pub fn increment(&mut self, kind: ObligationKind, region: RegionId) {
         let key = DimKey(kind_index(kind), region);
-        *self.counts.entry(key).or_insert(0) += 1;
+        let count = self.counts.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     /// Decrement the count for a dimension (Commit/Abort/Leak transition).
@@ -334,7 +335,7 @@ impl ObligationMarking {
     /// Returns the total pending obligations across all dimensions.
     #[must_use]
     pub fn total_pending(&self) -> u32 {
-        self.counts.values().sum()
+        self.counts.values().fold(0u32, |acc, &v| acc.saturating_add(v))
     }
 
     /// Returns the total pending obligations for a specific region.
@@ -344,7 +345,7 @@ impl ObligationMarking {
             .iter()
             .filter(|(DimKey(_, r), _)| *r == region)
             .map(|(_, count)| *count)
-            .sum()
+            .fold(0u32, |acc, v| acc.saturating_add(v))
     }
 
     /// Returns true if the marking is zero (no pending obligations).
@@ -684,7 +685,7 @@ impl MarkingAnalyzer {
         match &event.kind {
             MarkingEventKind::Reserve { kind, region, .. } => {
                 self.marking.increment(*kind, *region);
-                self.stats.total_reserved += 1;
+                self.stats.total_reserved = self.stats.total_reserved.saturating_add(1);
                 self.all_regions.insert(*region);
                 self.kinds_seen[kind_index(*kind) as usize] = true;
                 self.timeline.snapshots.push(MarkingSnapshot {
@@ -703,7 +704,7 @@ impl MarkingAnalyzer {
                         ),
                     });
                 }
-                self.stats.total_committed += 1;
+                self.stats.total_committed = self.stats.total_committed.saturating_add(1);
                 self.timeline.snapshots.push(MarkingSnapshot {
                     time: event.time,
                     marking: self.marking.snapshot(),
@@ -720,7 +721,7 @@ impl MarkingAnalyzer {
                         ),
                     });
                 }
-                self.stats.total_aborted += 1;
+                self.stats.total_aborted = self.stats.total_aborted.saturating_add(1);
                 self.timeline.snapshots.push(MarkingSnapshot {
                     time: event.time,
                     marking: self.marking.snapshot(),
@@ -738,7 +739,7 @@ impl MarkingAnalyzer {
                         ),
                     });
                 }
-                self.stats.total_leaked += 1;
+                self.stats.total_leaked = self.stats.total_leaked.saturating_add(1);
                 self.timeline.snapshots.push(MarkingSnapshot {
                     time: event.time,
                     marking: self.marking.snapshot(),

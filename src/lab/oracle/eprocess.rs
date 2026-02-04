@@ -162,6 +162,11 @@ impl EProcess {
     /// Creates a new e-process for the given invariant.
     #[must_use]
     pub fn new(invariant: &str, config: EProcessConfig) -> Self {
+        debug_assert!(
+            config.validate().is_ok(),
+            "EProcessConfig validation failed: {}",
+            config.validate().unwrap_err()
+        );
         Self {
             invariant: invariant.to_owned(),
             config,
