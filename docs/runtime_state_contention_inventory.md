@@ -220,6 +220,97 @@ mod lock_order_tests {
 }
 ```
 
+## Trace/Metrics Handle Audit (bd-12389)
+
+### TraceBufferHandle Internals
+
+**Definition:** `src/trace/buffer.rs:110-119`
+
+```
+TraceBufferHandle { inner: Arc<TraceBufferInner> }
+TraceBufferInner  { buffer: Mutex<TraceBuffer>, next_seq: AtomicU64 }
+```
+
+- `next_seq()` (buffer.rs:136) → `fetch_add(1, Ordering::Relaxed)` — **truly lock-free**.
+- `push_event()` (buffer.rs:139-147) → acquires internal `Mutex<TraceBuffer>`.
+- `Clone` is cheap (Arc clone).
+
+### MetricsProvider Internals
+
+**Definition:** `src/observability/metrics.rs:294`
+
+```rust
+pub trait MetricsProvider: Send + Sync + 'static { ... }
+```
+
+Stored as `Arc<dyn MetricsProvider>` in RuntimeState (state.rs:332). Trait contract
+mandates internal thread-safety; implementations use atomics for hot-path counters.
+Access is read-only Arc clone — no external lock needed.
+
+### Current Access Pattern
+
+| Path | What Happens | Lock Cost |
+|------|-------------|-----------|
+| Worker init (worker.rs:64) | `guard.trace_handle()` — Arc clone under lock | One-time |
+| Worker poll (worker.rs:192-196) | `state.metrics_provider()` — Arc clone, then `drop(state)` before use | Minimal |
+| `next_trace_seq()` (state.rs:1426) | `self.trace.next_seq()` — lock-free atomic | **Zero** (but caller holds RuntimeState lock) |
+| `cancel_request` (state.rs:1520-1722) | `next_seq()` + `push_event()` under RuntimeState lock | Nested: RuntimeState → TraceBuffer |
+| `task_completed` path | `push_event()` under RuntimeState lock | Nested: RuntimeState → TraceBuffer |
+| Test snapshots (builder.rs:1403+) | `guard.trace.snapshot()` | Test-only |
+
+### Extraction Recommendation
+
+**Verdict: Both TraceBufferHandle and MetricsProvider CAN be extracted from the Mutex.**
+
+1. **TraceBufferHandle** — Clone once per worker at scheduler init (already done in
+   worker.rs:64). Pass as a standalone field on `ShardedState` or clone into each
+   component that needs it. `next_seq()` calls become fully lock-free. `push_event()`
+   uses its own internal Mutex, independent of any shard lock.
+
+2. **MetricsProvider** — Clone `Arc<dyn MetricsProvider>` once per worker/component.
+   All metric calls are already lock-free via internal atomics. No shard lock needed.
+
+3. **`now` field** — In production mode, `Time` is read-only (set at runtime init).
+   Replace with `AtomicU64` for lock-free reads. Lab mode writes remain sequentially
+   consistent via Lab's single-threaded execution model.
+
+### Determinism Invariants
+
+- **Sequence allocation** is non-deterministic under concurrency (atomic race on
+  `next_seq`). This is acceptable: trace consumers sort by sequence number, and
+  Lab mode runs single-threaded where allocation is deterministic.
+
+- **Buffer insertion order** may differ from sequence order under concurrency
+  (thread A gets seq=100, thread B gets seq=101 and pushes first). Consumers
+  must sort by `seq`, not insertion order. Already the case today.
+
+- **Lab mode** preserves determinism: single-threaded execution means both
+  sequence allocation and buffer insertion are sequential.
+
+### Migration Notes for Shard D
+
+When implementing Shard D (Instrumentation), the extraction is straightforward:
+
+```rust
+pub struct ShardedState {
+    // Shard D: no lock needed — internally synchronized
+    pub trace: TraceBufferHandle,           // Arc<TraceBufferInner>
+    pub metrics: Arc<dyn MetricsProvider>,  // Arc with internal atomics
+    pub now: AtomicU64,                     // read-only in prod
+
+    // Shards A/B/C: locked
+    pub tasks: Mutex<TaskShard>,
+    pub regions: Mutex<RegionShard>,
+    pub obligations: Mutex<ObligationShard>,
+    pub config: Arc<RuntimeConfig>,         // Shard E: read-only
+}
+```
+
+State methods that currently call `self.trace.push_event()` or `self.trace.next_seq()`
+under the RuntimeState lock will instead receive `&TraceBufferHandle` as a parameter
+or access it from the `ShardedState` without locking. This eliminates the nested lock
+pattern (RuntimeState → TraceBuffer) entirely.
+
 ## Expected Contention Reduction
 
 | Scenario | Current | After Sharding |
