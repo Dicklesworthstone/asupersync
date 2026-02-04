@@ -203,13 +203,6 @@ impl AsyncWrite for VirtualTcpStream {
     }
 }
 
-// SAFETY: VirtualTcpStream fields are either Copy types or Arc<Mutex<_>>,
-// all of which are Send.
-// The unsafe impl is required because AsyncRead takes Pin<&mut Self> and
-// the compiler can't automatically derive Send through Pin projections.
-#[allow(unsafe_code)]
-unsafe impl Send for VirtualTcpStream {}
-
 impl Unpin for VirtualTcpStream {}
 
 #[allow(clippy::manual_async_fn)] // trait signature uses `impl Future`, not `async fn`
@@ -454,10 +447,6 @@ impl TcpListenerApi for VirtualTcpListener {
         Ok(())
     }
 }
-
-// SAFETY: VirtualTcpListener contains Arc<Mutex<_>> which is Send + Sync.
-#[allow(unsafe_code)]
-unsafe impl Send for VirtualTcpListener {}
 
 #[cfg(test)]
 mod tests {

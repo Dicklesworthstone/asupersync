@@ -1053,14 +1053,22 @@ impl<Caps> Cx<Caps> {
     {
         {
             let mut inner = self.inner.write().expect("lock poisoned");
-            assert!(
+            debug_assert!(
                 inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
                 "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
                  and prevents cancellation from ever being observed. \
                  Reduce nesting of Cx::masked() sections.",
                 crate::types::task_context::MAX_MASK_DEPTH,
             );
-            inner.mask_depth += 1;
+            if inner.mask_depth >= crate::types::task_context::MAX_MASK_DEPTH {
+                tracing::error!(
+                    depth = inner.mask_depth,
+                    max = crate::types::task_context::MAX_MASK_DEPTH,
+                    "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"
+                );
+            } else {
+                inner.mask_depth += 1;
+            }
         }
 
         let _guard = MaskGuard { inner: &self.inner };

@@ -177,12 +177,20 @@ impl MaskedFinalizer {
             return;
         }
         let mut guard = self.cx_inner.write().expect("lock poisoned");
-        assert!(
+        debug_assert!(
             guard.mask_depth < MAX_MASK_DEPTH,
             "mask depth exceeded MAX_MASK_DEPTH ({MAX_MASK_DEPTH}): this violates INV-MASK-BOUNDED \
              and prevents cancellation from ever being observed. \
              Reduce nesting of masked sections.",
         );
+        if guard.mask_depth >= MAX_MASK_DEPTH {
+            tracing::error!(
+                depth = guard.mask_depth,
+                max = MAX_MASK_DEPTH,
+                "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"
+            );
+            return;
+        }
         guard.mask_depth += 1;
         drop(guard);
         self.entered = true;

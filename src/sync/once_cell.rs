@@ -231,7 +231,7 @@ impl<T> OnceCell<T> {
                 Ok(_) => {
                     // We are the initializer.
                     let f = init_fn.take().expect("init closure available");
-                    let guard = InitGuard {
+                    let mut guard = InitGuard {
                         cell: self,
                         completed: false,
                     };
@@ -241,7 +241,8 @@ impl<T> OnceCell<T> {
                     // Store value and mark complete.
                     let _ = self.value.set(value);
                     self.state.store(INITIALIZED, Ordering::Release);
-                    std::mem::forget(guard); // Don't reset state.
+                    guard.completed = true;
+                    drop(guard); // Guard checks `completed` — won't reset state.
 
                     self.cvar.notify_all();
                     self.wake_all();
@@ -304,7 +305,7 @@ impl<T> OnceCell<T> {
                 Ok(_) => {
                     // We are the initializer.
                     // Create a guard to reset state if we're cancelled or fail.
-                    let guard = InitGuard {
+                    let mut guard = InitGuard {
                         cell: self,
                         completed: false,
                     };
@@ -315,7 +316,8 @@ impl<T> OnceCell<T> {
                             // Store value and mark complete.
                             let _ = self.value.set(value);
                             self.state.store(INITIALIZED, Ordering::Release);
-                            std::mem::forget(guard); // Don't reset state.
+                            guard.completed = true;
+                            drop(guard); // Guard checks `completed` — won't reset state.
 
                             self.cvar.notify_all();
                             self.wake_all();

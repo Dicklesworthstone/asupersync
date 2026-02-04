@@ -75,9 +75,6 @@ pub struct Semaphore {
     max_permits: usize,
 }
 
-unsafe impl Send for Semaphore {}
-unsafe impl Sync for Semaphore {}
-
 #[derive(Debug)]
 struct SemaphoreState {
     /// Number of available permits.
@@ -355,9 +352,6 @@ pub struct OwnedSemaphorePermit {
     semaphore: std::sync::Arc<Semaphore>,
     count: usize,
 }
-
-unsafe impl Send for OwnedSemaphorePermit {}
-unsafe impl Sync for OwnedSemaphorePermit {}
 
 impl OwnedSemaphorePermit {
     /// Acquires an owned permit asynchronously.
