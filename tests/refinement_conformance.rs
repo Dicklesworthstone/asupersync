@@ -42,9 +42,16 @@
 #[macro_use]
 mod common;
 
-use asupersync::lab::oracle::{CancellationProtocolOracle, QuiescenceOracle, TaskLeakOracle};
+use asupersync::cx::Cx;
+use asupersync::lab::oracle::{
+    CancellationProtocolOracle, OracleSuite, QuiescenceOracle, TaskLeakOracle,
+};
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
-use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
+use asupersync::record::{ObligationKind, ObligationState};
+use asupersync::runtime::yield_now;
+use asupersync::trace::trace_fingerprint;
+use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
 use common::*;
 
 fn region(n: u32) -> RegionId {
@@ -55,6 +62,10 @@ fn task(n: u32) -> TaskId {
     TaskId::new_for_test(n, 0)
 }
 
+fn obligation(n: u32) -> ObligationId {
+    ObligationId::new_for_test(n, 0)
+}
+
 fn t(nanos: u64) -> Time {
     Time::from_nanos(nanos)
 }
@@ -63,6 +74,8 @@ fn init_test(test_name: &str) {
     init_test_logging();
     test_phase!(test_name);
 }
+
+const SEMANTICS_TRACE_FINGERPRINT: u64 = 7_089_537_941_211_056_616;
 
 // ============================================================================
 // Spawn Simulation Tests
@@ -462,4 +475,171 @@ fn refinement_stuttering_preserves_invariants() {
     assert_with_log!(ok, "stuttering preserves invariants", true, ok);
 
     test_complete!("refinement_stuttering_preserves_invariants");
+}
+
+// ============================================================================
+// Semantics Conformance Suite (Unit + E2E)
+// Verifies: spawn/cancel/close/obligation lifecycle + trace-logged execution
+// ============================================================================
+
+/// Unit-level conformance: spawn → cancel → close + obligation resolution.
+#[test]
+fn refinement_semantics_spawn_cancel_close_obligation() {
+    init_test("refinement_semantics_spawn_cancel_close_obligation");
+
+    let mut suite = OracleSuite::new();
+    let root = region(0);
+    let worker = task(1);
+    let ob = obligation(0);
+    let reason = CancelReason::timeout();
+    let cleanup = Budget::INFINITE;
+
+    // Region + task setup.
+    suite.region_tree.on_region_create(root, None, t(0));
+    suite.quiescence.on_region_create(root, None);
+    suite.task_leak.on_spawn(worker, root, t(5));
+    suite.quiescence.on_spawn(worker, root);
+
+    suite.cancellation_protocol.on_region_create(root, None);
+    suite.cancellation_protocol.on_task_create(worker, root);
+    suite.cancellation_protocol.on_transition(
+        worker,
+        &TaskState::Created,
+        &TaskState::Running,
+        t(10),
+    );
+
+    // Obligation lifecycle.
+    suite
+        .obligation_leak
+        .on_create(ob, ObligationKind::SendPermit, worker, root);
+
+    // Cancel request + cleanup/finalize path.
+    suite
+        .cancellation_protocol
+        .on_cancel_request(worker, reason.clone(), t(20));
+    suite.cancellation_protocol.on_transition(
+        worker,
+        &TaskState::Running,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(20),
+    );
+    suite
+        .obligation_leak
+        .on_resolve(ob, ObligationState::Aborted);
+    suite.cancellation_protocol.on_transition(
+        worker,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(25),
+    );
+    suite.cancellation_protocol.on_transition(
+        worker,
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(30),
+    );
+    suite.cancellation_protocol.on_transition(
+        worker,
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Completed(Outcome::Cancelled(reason)),
+        t(40),
+    );
+
+    // Close + quiescence.
+    suite.task_leak.on_complete(worker, t(40));
+    suite.quiescence.on_task_complete(worker);
+    suite.obligation_leak.on_region_close(root, t(50));
+    suite.quiescence.on_region_close(root, t(50));
+    suite.task_leak.on_region_close(root, t(50));
+
+    let violations = suite.check_all(t(60));
+    assert_with_log!(
+        violations.is_empty(),
+        "spawn/cancel/close/obligation conformance",
+        "empty",
+        violations
+    );
+
+    test_complete!("refinement_semantics_spawn_cancel_close_obligation");
+}
+
+/// E2E conformance: deterministic lab trace for spawn + cancel + close.
+#[test]
+fn refinement_semantics_trace_golden() {
+    init_test("refinement_semantics_trace_golden");
+
+    let seed = 0x00C0_FFEE_u64;
+    let config = LabConfig::new(seed)
+        .worker_count(2)
+        .trace_capacity(4096)
+        .max_steps(5000);
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("cx");
+            for _ in 0..4 {
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                yield_now().await;
+            }
+        })
+        .expect("create task");
+
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    for _ in 0..4 {
+        runtime.step_for_test();
+    }
+
+    let reason = CancelReason::timeout();
+    let tasks_to_cancel = runtime.state.cancel_request(region, &reason, None);
+    {
+        let mut scheduler = runtime.scheduler.lock().unwrap();
+        for (tid, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(tid, priority);
+        }
+    }
+
+    runtime.run_until_quiescent();
+
+    let violations = runtime.oracles.check_all(runtime.now());
+    assert_with_log!(
+        violations.is_empty(),
+        "lab trace has no oracle violations",
+        "empty",
+        violations
+    );
+
+    let events = runtime.trace().snapshot();
+    let fingerprint = trace_fingerprint(&events);
+    assert_with_log!(
+        fingerprint == SEMANTICS_TRACE_FINGERPRINT,
+        "semantics trace fingerprint",
+        SEMANTICS_TRACE_FINGERPRINT,
+        fingerprint
+    );
+
+    test_complete!("refinement_semantics_trace_golden");
 }
