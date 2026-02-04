@@ -1651,6 +1651,155 @@ theorem reserve_preserves_wellformed {Value Error Panic : Type}
     }
 
 -- ==========================================================================
+-- Preservation: resolving an obligation preserves well-formedness (bd-330st)
+-- Covers commit/abort/leak: remove from ledger and update obligation state.
+-- ==========================================================================
+
+theorem resolve_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId} {ob : ObligationRecord}
+    {region : Region Value Error Panic} {newState : ObligationState}
+    (hWF : WellFormed s)
+    (hOb : getObligation s o = some ob)
+    (hRegion : getRegion s ob.region = some region)
+    (hUpdate :
+      s' =
+        setRegion
+          (setObligation s o { ob with state := newState })
+          ob.region
+          { region with ledger := removeObligationId o region.ledger })
+    : WellFormed s' := by
+  subst hUpdate
+  exact {
+    task_region_exists := fun t task h => by
+      have h' : getTask s t = some task := by
+        simpa using h
+      obtain ⟨region', hReg⟩ := hWF.task_region_exists t task h'
+      by_cases hEq : task.region = ob.region
+      · exact ⟨{ region with ledger := removeObligationId o region.ledger },
+          by simp [getRegion, setRegion, setObligation, hEq]⟩
+      · exact ⟨region', by
+          simpa [getRegion, setRegion, setObligation, hEq] using hReg⟩
+    obligation_region_exists := fun o' ob' h => by
+      by_cases hEq : o' = o
+      · subst hEq
+        simp [getObligation, setRegion, setObligation] at h
+        subst h
+        exact ⟨{ region with ledger := removeObligationId o region.ledger },
+          by simp [getRegion, setRegion, setObligation]⟩
+      · have h' : getObligation s o' = some ob' := by
+          simpa [getObligation, setRegion, setObligation, hEq] using h
+        obtain ⟨region', hReg⟩ := hWF.obligation_region_exists o' ob' h'
+        by_cases hRegEq : ob'.region = ob.region
+        · exact ⟨{ region with ledger := removeObligationId o region.ledger },
+            by simp [getRegion, setRegion, setObligation, hRegEq]⟩
+        · exact ⟨region', by
+            simpa [getRegion, setRegion, setObligation, hRegEq] using hReg⟩
+    obligation_holder_exists := fun o' ob' h => by
+      by_cases hEq : o' = o
+      · subst hEq
+        obtain ⟨task, hTask⟩ := hWF.obligation_holder_exists o ob hOb
+        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
+      · have h' : getObligation s o' = some ob' := by
+          simpa [getObligation, setRegion, setObligation, hEq] using h
+        obtain ⟨task, hTask⟩ := hWF.obligation_holder_exists o' ob' h'
+        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
+    ledger_obligations_reserved := fun r' region' h o' hMem => by
+      by_cases hRegEq : r' = ob.region
+      · subst hRegEq
+        have hEqRegion : region' = { region with ledger := removeObligationId o region.ledger } := by
+          simpa [getRegion, setRegion, setObligation] using h
+        subst hEqRegion
+        have hMem' : o' ∈ region.ledger ∧ o' ≠ o := by
+          simpa [removeObligationId] using hMem
+        rcases hMem' with ⟨hIn, hNe⟩
+        obtain ⟨ob', hOb', hState, hReg⟩ :=
+          hWF.ledger_obligations_reserved ob.region region hRegion o' hIn
+        refine ⟨ob', ?_, hState, hReg⟩
+        simpa [getObligation, setRegion, setObligation, hNe] using hOb'
+      · have h' : getRegion s r' = some region' := by
+          simpa [getRegion, setRegion, setObligation, hRegEq] using h
+        obtain ⟨ob', hOb', hState, hReg⟩ :=
+          hWF.ledger_obligations_reserved r' region' h' o' hMem
+        have hNe : o' ≠ o := by
+          intro hEq
+          subst hEq
+          have hObEq : ob' = ob := by
+            have : some ob' = some ob := by simpa [hOb] using hOb'
+            injection this
+          have : ob.region = r' := by simpa [hObEq] using hReg
+          exact (hRegEq this.symm).elim
+        refine ⟨ob', ?_, hState, hReg⟩
+        simpa [getObligation, setRegion, setObligation, hNe] using hOb'
+    children_exist := fun r' region' h t hMem => by
+      by_cases hRegEq : r' = ob.region
+      · subst hRegEq
+        have hEqRegion : region' = { region with ledger := removeObligationId o region.ledger } := by
+          simpa [getRegion, setRegion, setObligation] using h
+        subst hEqRegion
+        have hMem' : t ∈ region.children := by
+          simpa using hMem
+        obtain ⟨task, hTask⟩ :=
+          hWF.children_exist ob.region region hRegion t hMem'
+        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
+      · have h' : getRegion s r' = some region' := by
+          simpa [getRegion, setRegion, setObligation, hRegEq] using h
+        obtain ⟨task, hTask⟩ := hWF.children_exist r' region' h' t hMem
+        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
+    subregions_exist := fun r' region' h r'' hMem => by
+      by_cases hRegEq : r' = ob.region
+      · subst hRegEq
+        have hEqRegion : region' = { region with ledger := removeObligationId o region.ledger } := by
+          simpa [getRegion, setRegion, setObligation] using h
+        subst hEqRegion
+        have hMem' : r'' ∈ region.subregions := by
+          simpa using hMem
+        obtain ⟨sub, hSub⟩ :=
+          hWF.subregions_exist ob.region region hRegion r'' hMem'
+        by_cases hSubEq : r'' = ob.region
+        · exact ⟨{ region with ledger := removeObligationId o region.ledger },
+            by simp [getRegion, setRegion, setObligation, hSubEq]⟩
+        · exact ⟨sub, by simp [getRegion, setRegion, setObligation, hSubEq]; exact hSub⟩
+      · have h' : getRegion s r' = some region' := by
+          simpa [getRegion, setRegion, setObligation, hRegEq] using h
+        obtain ⟨sub, hSub⟩ := hWF.subregions_exist r' region' h' r'' hMem
+        by_cases hSubEq : r'' = ob.region
+        · exact ⟨{ region with ledger := removeObligationId o region.ledger },
+            by simp [getRegion, setRegion, setObligation, hSubEq]⟩
+        · exact ⟨sub, by simp [getRegion, setRegion, setObligation, hSubEq]; exact hSub⟩
+  }
+
+-- ==========================================================================
+-- Preservation: commit/abort/leak preserve well-formedness (bd-330st)
+-- ==========================================================================
+
+theorem commit_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.commit o) s')
+    : WellFormed s' := by
+  cases hStep with
+  | commit hOb hHolder hState hRegion hUpdate =>
+    exact resolve_preserves_wellformed hWF hOb hRegion hUpdate
+
+theorem abort_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.abort o) s')
+    : WellFormed s' := by
+  cases hStep with
+  | abort hOb hHolder hState hRegion hUpdate =>
+    exact resolve_preserves_wellformed hWF hOb hRegion hUpdate
+
+theorem leak_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.leak o) s')
+    : WellFormed s' := by
+  cases hStep with
+  | leak outcome hTask hTaskState hOb hHolder hState hRegion hUpdate =>
+    exact resolve_preserves_wellformed hWF hOb hRegion hUpdate
+
+-- ==========================================================================
 -- Preservation: cancelRequest preserves well-formedness (bd-330st)
 -- Cancel request only updates region cancel + task state.
 -- ==========================================================================
@@ -1688,6 +1837,9 @@ theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
         hWF1
         hTask1
         hSameRegion
+  | closeCancelChildren hRegion _ _ hUpdate =>
+    subst hUpdate
+    exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
 
 -- ==========================================================================
 -- Safety: Obligation state monotonicity (bd-330st)
@@ -1771,6 +1923,8 @@ theorem committed_obligation_stable {Value Error Panic : Type}
   | closeChildrenDone _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
   | closeRunFinalizer _ _ _ hUpdate =>
+    subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
+  | finalize _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
   | tick hUpdate =>
     subst hUpdate; exact ⟨ob, by simpa [getObligation] using hOb, hCommitted⟩
@@ -2039,6 +2193,8 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
   | closeRunFinalizer _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
+  | finalize _ _ _ hUpdate =>
+    subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
   | tick hUpdate =>
     subst hUpdate; exact ⟨ob, by simpa [getObligation] using hOb, hAborted⟩
 
@@ -2119,6 +2275,8 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
   | closeRunFinalizer _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
+  | finalize _ _ _ hUpdate =>
+    subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
   | tick hUpdate =>
     subst hUpdate; exact ⟨ob, by simpa [getObligation] using hOb, hLeaked⟩
 
@@ -2142,5 +2300,100 @@ theorem resolved_obligation_stable {Value Error Panic : Type}
   | inr hAborted =>
     obtain ⟨ob', hOb', hState'⟩ := aborted_obligation_stable hOb hAborted hStep
     exact ⟨ob', hOb', Or.inr hState'⟩
+
+-- ==========================================================================
+-- Master preservation theorem: every step preserves well-formedness (bd-330st)
+-- This is the core type-safety result for the operational semantics.
+-- ==========================================================================
+
+/-- Every well-formed state remains well-formed after any single step.
+    Dispatches to helper lemmas for each Step constructor category:
+    - scheduler_change_preserves_wellformed (enqueue, scheduleStep)
+    - setTask_same_region_preserves_wellformed (schedule, complete, cancelMasked,
+        cancelAcknowledge, cancelFinalize, cancelComplete, cancelChild)
+    - setRegion_structural_preserves_wellformed (cancelPropagate, closeBegin,
+        closeCancelChildren, closeChildrenDone, closeRunFinalizer, close, finalize)
+    - resolve_preserves_wellformed (commit, abort, leak)
+    - spawn_preserves_wellformed, reserve_preserves_wellformed,
+      cancelRequest_preserves_wellformed, tick_preserves_wellformed -/
+theorem step_preserves_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {l : Label Value Error Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s l s')
+    : WellFormed s' := by
+  cases hStep with
+  -- Scheduler-only changes
+  | enqueue _ _ _ _ hUpdate =>
+    subst hUpdate; exact scheduler_change_preserves_wellformed s hWF _
+  | scheduleStep _ hUpdate =>
+    subst hUpdate; exact scheduler_change_preserves_wellformed s hWF _
+  -- Spawn (complex: adds task + modifies region children)
+  | spawn hRegion hOpen hAbsent hUpdate =>
+    exact spawn_preserves_wellformed hWF (Step.spawn hRegion hOpen hAbsent hUpdate)
+  -- Task-only changes (setTask preserving region field)
+  | schedule hTask _ _ _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  | complete _ hTask _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  -- Obligation lifecycle
+  | reserve hTask hRegion hAbsent hUpdate =>
+    exact reserve_preserves_wellformed hWF (Step.reserve hTask hRegion hAbsent hUpdate)
+  | commit hOb _ _ hRegion hUpdate =>
+    exact resolve_preserves_wellformed hWF hOb hRegion hUpdate
+  | abort hOb _ _ hRegion hUpdate =>
+    exact resolve_preserves_wellformed hWF hOb hRegion hUpdate
+  | leak _ _ _ hOb _ _ hRegion hUpdate =>
+    exact resolve_preserves_wellformed hWF hOb hRegion hUpdate
+  -- Cancel protocol: cancelRequest (setRegion then setTask)
+  | cancelRequest _ _ hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+    subst hUpdate
+    have hWF1 :=
+      setRegion_structural_preserves_wellformed hWF hRegion
+        (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).children = region.children)
+        (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).subregions = region.subregions)
+        (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).ledger = region.ledger)
+    exact setTask_same_region_preserves_wellformed hWF1
+      (by simpa [getTask, setRegion] using hTask)
+      rfl
+  -- Cancel protocol: task-only transitions
+  | cancelMasked hTask _ _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  | cancelAcknowledge hTask _ _ _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  | cancelFinalize hTask _ _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  | cancelComplete hTask _ _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  | cancelChild _ _ _ hTask _ hUpdate =>
+    subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
+  -- Cancel propagation: region-only structural change
+  | cancelPropagate _ _ _ hSub hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hSub rfl rfl rfl
+  -- Region close lifecycle: region-only structural changes
+  | closeBegin hRegion _ hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+  | closeCancelChildren _ hRegion _ _ hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+  | closeChildrenDone hRegion _ _ _ hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+  | closeRunFinalizer hRegion _ _ hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+  | close _ hRegion _ _ hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+  | finalize hRegion _ _ hUpdate =>
+    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
+  -- Time advancement
+  | tick hUpdate =>
+    exact tick_preserves_wellformed hWF (Step.tick hUpdate)
+
+/-- Well-formedness is preserved through any finite sequence of steps. -/
+theorem steps_preserve_wellformed {Value Error Panic : Type}
+    {s s' : State Value Error Panic}
+    (hWF : WellFormed s)
+    (hSteps : Steps s s')
+    : WellFormed s' := by
+  induction hSteps with
+  | refl => exact hWF
+  | step hStep _ ih => exact ih (step_preserves_wellformed hWF hStep)
 
 end Asupersync
