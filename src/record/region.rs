@@ -6,7 +6,7 @@
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
-use crate::types::rref::{RRef, RRefError};
+use crate::types::rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
@@ -794,6 +794,65 @@ impl RegionRecord {
             .ok_or(RRefError::AllocationInvalid)
     }
 
+    /// Returns an access witness for this region if it is in a non-terminal state.
+    ///
+    /// The witness serves as a capability token proving the caller has been
+    /// granted access to the region's heap at a point when the region was alive.
+    ///
+    /// Returns `Err(RegionClosed)` if the region is in `Closed` state.
+    pub fn access_witness(&self) -> Result<RRefAccessWitness, RRefError> {
+        if self.state().is_terminal() {
+            return Err(RRefError::RegionClosed);
+        }
+        Ok(RRefAccessWitness::new(self.id))
+    }
+
+    /// Resolves a `RRef` using a pre-validated access witness.
+    ///
+    /// The witness must have been obtained from this region via [`access_witness`].
+    /// Returns an error if the witness region doesn't match.
+    pub fn rref_get_with<T: Clone + 'static>(
+        &self,
+        rref: &RRef<T>,
+        witness: &RRefAccessWitness,
+    ) -> Result<T, RRefError> {
+        if witness.region() != self.id {
+            return Err(RRefError::WrongRegion);
+        }
+        rref.validate_witness(witness)?;
+        if self.state().is_terminal() {
+            return Err(RRefError::RegionClosed);
+        }
+        let inner = self.inner.read().expect("lock poisoned");
+        inner
+            .heap
+            .get::<T>(rref.heap_index())
+            .cloned()
+            .ok_or(RRefError::AllocationInvalid)
+    }
+
+    /// Executes a closure with a reference via a pre-validated witness.
+    pub fn rref_with_witness<T: 'static, R, F: FnOnce(&T) -> R>(
+        &self,
+        rref: &RRef<T>,
+        witness: &RRefAccessWitness,
+        f: F,
+    ) -> Result<R, RRefError> {
+        if witness.region() != self.id {
+            return Err(RRefError::WrongRegion);
+        }
+        rref.validate_witness(witness)?;
+        if self.state().is_terminal() {
+            return Err(RRefError::RegionClosed);
+        }
+        let inner = self.inner.read().expect("lock poisoned");
+        inner
+            .heap
+            .get::<T>(rref.heap_index())
+            .map(f)
+            .ok_or(RRefError::AllocationInvalid)
+    }
+
     /// Returns true if the region should begin closing (body complete).
     #[must_use]
     pub fn should_begin_close(&self) -> bool {
@@ -846,6 +905,37 @@ impl RegionRecord {
     #[must_use]
     pub fn ready_to_finalize(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
         self.children_closed(&|_region| true) && self.tasks_completed(completed)
+    }
+}
+
+impl RRefAccess for RegionRecord {
+    fn rref_get<T: Clone + 'static>(&self, rref: &RRef<T>) -> Result<T, RRefError> {
+        self.rref_get(rref)
+    }
+
+    fn rref_with<T: 'static, R, F: FnOnce(&T) -> R>(
+        &self,
+        rref: &RRef<T>,
+        f: F,
+    ) -> Result<R, RRefError> {
+        self.rref_with(rref, f)
+    }
+
+    fn rref_get_with<T: Clone + 'static>(
+        &self,
+        rref: &RRef<T>,
+        witness: &RRefAccessWitness,
+    ) -> Result<T, RRefError> {
+        self.rref_get_with(rref, witness)
+    }
+
+    fn rref_with_witness<T: 'static, R, F: FnOnce(&T) -> R>(
+        &self,
+        rref: &RRef<T>,
+        witness: &RRefAccessWitness,
+        f: F,
+    ) -> Result<R, RRefError> {
+        self.rref_with_witness(rref, witness, f)
     }
 }
 

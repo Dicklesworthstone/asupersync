@@ -33,7 +33,7 @@ pub use cancel::{
 pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;
-pub use rref::{RRef, RRefAccess, RRefError};
+pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
 pub use symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind, DEFAULT_SYMBOL_SIZE};
 pub use symbol_set::{
     BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
