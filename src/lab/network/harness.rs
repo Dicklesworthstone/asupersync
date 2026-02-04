@@ -454,6 +454,10 @@ pub struct DistributedHarness {
     tick: Duration,
     /// Execution trace for debugging.
     trace: Vec<HarnessTraceEvent>,
+    /// Next message id for the harness-local side-channel codec.
+    next_msg_id: u64,
+    /// Harness-local message store for side-channel decoding.
+    msg_store: BTreeMap<u64, MessageEnvelope<RemoteMessage>>,
 }
 
 /// A trace event in the harness execution.
@@ -510,6 +514,8 @@ impl DistributedHarness {
             sim_time: Duration::ZERO,
             tick: Duration::from_millis(1),
             trace: Vec::new(),
+            next_msg_id: 1,
+            msg_store: BTreeMap::new(),
         }
     }
 
@@ -586,7 +592,7 @@ impl DistributedHarness {
 
         // Serialize message as opaque bytes for the simulated network.
         // In Phase 0, we use a simple encoding: message type tag + task ID.
-        let encoded = encode_message(&envelope);
+        let encoded = self.encode_message(&envelope);
         self.network.send(src, dst, Bytes::from(encoded));
     }
 
@@ -624,25 +630,30 @@ impl DistributedHarness {
 
     /// Delivers packets from the simulated network to the appropriate nodes.
     fn deliver_packets(&mut self) {
-        // Collect all inbox contents, then dispatch.
-        let mut deliveries: Vec<(NodeId, MessageEnvelope<RemoteMessage>)> = Vec::new();
-
+        // Phase 1: Collect raw payloads without borrowing &mut self.
+        let mut raw_payloads: Vec<(NodeId, Bytes)> = Vec::new();
         for (node_id, node) in &self.nodes {
             if let Some(packets) = self.network.inbox(node.host_id) {
                 for packet in packets {
-                    if let Some(envelope) = decode_message(&packet.payload) {
-                        let src_node = envelope.sender.clone();
-                        self.trace.push(HarnessTraceEvent {
-                            time: self.sim_time,
-                            kind: HarnessTraceKind::MessageDelivered {
-                                from: src_node,
-                                to: node_id.clone(),
-                                msg_type: msg_type_name(&envelope.payload).to_string(),
-                            },
-                        });
-                        deliveries.push((node_id.clone(), envelope));
-                    }
+                    raw_payloads.push((node_id.clone(), packet.payload.clone()));
                 }
+            }
+        }
+
+        // Phase 2: Decode payloads (needs &mut self for msg_store).
+        let mut deliveries: Vec<(NodeId, MessageEnvelope<RemoteMessage>)> = Vec::new();
+        for (node_id, payload) in raw_payloads {
+            if let Some(envelope) = self.decode_message(&payload) {
+                let src_node = envelope.sender.clone();
+                self.trace.push(HarnessTraceEvent {
+                    time: self.sim_time,
+                    kind: HarnessTraceKind::MessageDelivered {
+                        from: src_node,
+                        to: node_id.clone(),
+                        msg_type: msg_type_name(&envelope.payload).to_string(),
+                    },
+                });
+                deliveries.push((node_id, envelope));
             }
         }
 
@@ -676,6 +687,25 @@ impl DistributedHarness {
         for (from, to, msg) in result_messages {
             self.send_message(&from, &to, &msg);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Simple message encoding/decoding for the simulated network.
+    // -----------------------------------------------------------------------
+
+    fn encode_message(&mut self, msg: &MessageEnvelope<RemoteMessage>) -> Vec<u8> {
+        let id = self.next_msg_id;
+        self.next_msg_id = self.next_msg_id.wrapping_add(1);
+        self.msg_store.insert(id, msg.clone());
+        id.to_le_bytes().to_vec()
+    }
+
+    fn decode_message(&mut self, payload: &Bytes) -> Option<MessageEnvelope<RemoteMessage>> {
+        if payload.len() < 8 {
+            return None;
+        }
+        let id = u64::from_le_bytes(payload[..8].try_into().ok()?);
+        self.msg_store.remove(&id)
     }
 
     /// Flushes outgoing messages from all nodes.
@@ -790,44 +820,6 @@ fn msg_type_name(msg: &RemoteMessage) -> &'static str {
         RemoteMessage::ResultDelivery(_) => "ResultDelivery",
         RemoteMessage::LeaseRenewal(_) => "LeaseRenewal",
     }
-}
-
-// Phase 0 encoding: just the tag byte. The harness holds the full messages
-// in a side-channel. For now, we embed the message index in the payload.
-// This is sufficient for deterministic testing.
-static NEXT_MSG_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-// Global message store for the Phase 0 side-channel.
-// In a real implementation, messages would be serialized into the packet payload.
-use std::sync::Mutex;
-static MSG_STORE: Mutex<Option<BTreeMap<u64, MessageEnvelope<RemoteMessage>>>> = Mutex::new(None);
-
-fn init_msg_store() {
-    let mut store = MSG_STORE.lock().unwrap();
-    if store.is_none() {
-        *store = Some(BTreeMap::new());
-    }
-}
-
-fn encode_message(msg: &MessageEnvelope<RemoteMessage>) -> Vec<u8> {
-    init_msg_store();
-    let id = NEXT_MSG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    MSG_STORE
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .insert(id, msg.clone());
-    id.to_le_bytes().to_vec()
-}
-
-fn decode_message(payload: &Bytes) -> Option<MessageEnvelope<RemoteMessage>> {
-    if payload.len() < 8 {
-        return None;
-    }
-    let id = u64::from_le_bytes(payload[..8].try_into().ok()?);
-    let mut store = MSG_STORE.lock().unwrap();
-    store.as_mut().and_then(|s| s.remove(&id))
 }
 
 #[cfg(test)]
@@ -1263,7 +1255,7 @@ mod tests {
             LogicalTime::Vector(skewed.clone()),
             RemoteMessage::SpawnRequest(req),
         );
-        let encoded = encode_message(&envelope);
+        let encoded = harness.encode_message(&envelope);
         harness.network.send(host_a, host_b, Bytes::from(encoded));
 
         harness.run_for(Duration::from_millis(250));
