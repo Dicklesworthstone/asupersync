@@ -34,7 +34,7 @@ use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, ObligationId, Outcome, Policy,
     RegionId, TaskId, Time,
 };
-use crate::util::{Arena, EntropySource, OsEntropy};
+use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use std::backtrace::Backtrace;
 use std::collections::HashMap;
@@ -614,6 +614,48 @@ impl RuntimeState {
     /// Returns a mutable reference to a task record by ID.
     pub fn task_mut(&mut self, task_id: TaskId) -> Option<&mut TaskRecord> {
         self.tasks.get_mut(task_id.arena_index())
+    }
+
+    /// Inserts a new task record into the arena.
+    ///
+    /// Returns the assigned arena index.
+    pub fn insert_task(&mut self, record: TaskRecord) -> ArenaIndex {
+        self.tasks.insert(record)
+    }
+
+    /// Removes a task record from the arena.
+    ///
+    /// Returns the removed record if it existed.
+    pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
+        self.tasks.remove(task_id.arena_index())
+    }
+
+    /// Returns an iterator over all task records.
+    pub fn tasks_iter(&self) -> impl Iterator<Item = (ArenaIndex, &TaskRecord)> {
+        self.tasks.iter()
+    }
+
+    /// Returns `true` if the task arena is empty.
+    #[must_use]
+    pub fn tasks_is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    /// Provides direct access to the tasks arena.
+    ///
+    /// Used by intrusive data structures (LocalQueue) that operate on the arena.
+    #[inline]
+    #[must_use]
+    pub fn tasks_arena(&self) -> &Arena<TaskRecord> {
+        &self.tasks
+    }
+
+    /// Provides mutable access to the tasks arena.
+    ///
+    /// Used by intrusive data structures (LocalQueue) that operate on the arena.
+    #[inline]
+    pub fn tasks_arena_mut(&mut self) -> &mut Arena<TaskRecord> {
+        &mut self.tasks
     }
 
     /// Returns a shared reference to a region record by ID.

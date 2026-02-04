@@ -30,6 +30,7 @@ pub struct TaskTable {
 
 impl TaskTable {
     /// Creates a new empty task table.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tasks: Arena::new(),
@@ -39,6 +40,7 @@ impl TaskTable {
 
     /// Returns a reference to a task record by ID.
     #[inline]
+    #[must_use]
     pub fn task(&self, task_id: TaskId) -> Option<&TaskRecord> {
         self.tasks.get(task_id.arena_index())
     }
@@ -81,11 +83,13 @@ impl TaskTable {
     }
 
     /// Returns the number of live tasks (tasks in the arena).
+    #[must_use]
     pub fn live_task_count(&self) -> usize {
         self.tasks.len()
     }
 
     /// Returns the number of stored futures.
+    #[must_use]
     pub fn stored_future_count(&self) -> usize {
         self.stored_futures.len()
     }
@@ -94,6 +98,7 @@ impl TaskTable {
     ///
     /// Used by intrusive data structures (LocalQueue) that operate on the arena.
     #[inline]
+    #[must_use]
     pub fn tasks_arena(&self) -> &Arena<TaskRecord> {
         &self.tasks
     }

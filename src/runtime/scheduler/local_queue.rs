@@ -73,7 +73,7 @@ impl LocalQueue {
         for id in 0..=max_task_id {
             let task_id = TaskId::new_for_test(id, 0);
             let record = TaskRecord::new(task_id, RegionId::new_for_test(0, 0), Budget::INFINITE);
-            let idx = state.tasks.insert(record);
+            let idx = state.insert_task(record);
             debug_assert_eq!(idx.index(), id);
         }
         Arc::new(ContendedMutex::new("runtime_state", state))
@@ -90,7 +90,7 @@ impl LocalQueue {
     pub fn push(&self, task: TaskId) {
         let mut state = self.state.lock().expect("runtime state lock poisoned");
         let mut stack = self.inner.lock().expect("local queue lock poisoned");
-        stack.push(task, &mut state.tasks);
+        stack.push(task, state.tasks_arena_mut());
     }
 
     /// Pops a task from the local queue (LIFO).
@@ -98,7 +98,7 @@ impl LocalQueue {
     pub fn pop(&self) -> Option<TaskId> {
         let mut state = self.state.lock().expect("runtime state lock poisoned");
         let mut stack = self.inner.lock().expect("local queue lock poisoned");
-        stack.pop(&mut state.tasks)
+        stack.pop(state.tasks_arena_mut())
     }
 
     /// Returns true if the local queue is empty.
@@ -145,18 +145,17 @@ impl Stealer {
     pub fn steal(&self) -> Option<TaskId> {
         let mut state = self.state.lock().expect("runtime state lock poisoned");
         let mut stack = self.inner.lock().expect("local queue lock poisoned");
-        let Some(task_id) = stack.steal_one(&mut state.tasks) else {
+        let Some(task_id) = stack.steal_one(state.tasks_arena_mut()) else {
             drop(stack);
             drop(state);
             return None;
         };
         let is_local = state
-            .tasks
-            .get(task_id.arena_index())
+            .task(task_id)
             .is_some_and(crate::record::task::TaskRecord::is_local);
         let result = if is_local {
             // Local (!Send) tasks must never be stolen; requeue and abort steal.
-            stack.push(task_id, &mut state.tasks);
+            stack.push(task_id, state.tasks_arena_mut());
             None
         } else {
             Some(task_id)
@@ -198,19 +197,18 @@ impl Stealer {
         let mut dest_stack = dest.inner.lock().expect("local queue lock poisoned");
         while stolen < steal_limit && remaining_attempts > 0 {
             remaining_attempts -= 1;
-            let Some(task_id) = src.steal_one(&mut state.tasks) else {
+            let Some(task_id) = src.steal_one(state.tasks_arena_mut()) else {
                 break;
             };
             let is_local = state
-                .tasks
-                .get(task_id.arena_index())
+                .task(task_id)
                 .is_some_and(crate::record::task::TaskRecord::is_local);
             if is_local {
                 // Local (!Send) tasks must not be transferred across workers.
-                src.push(task_id, &mut state.tasks);
+                src.push(task_id, state.tasks_arena_mut());
                 continue;
             }
-            dest_stack.push(task_id, &mut state.tasks);
+            dest_stack.push(task_id, state.tasks_arena_mut());
             stolen += 1;
         }
         drop(dest_stack);
