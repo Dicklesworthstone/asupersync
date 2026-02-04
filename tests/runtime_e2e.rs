@@ -9,15 +9,21 @@
 #[macro_use]
 mod common;
 
+use asupersync::cx::Cx;
+use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::record::task::TaskState;
 use asupersync::record::ObligationKind;
 use asupersync::runtime::state::RuntimeState;
+use asupersync::runtime::yield_now;
 use asupersync::test_logging::TestHarness;
-use asupersync::types::{Budget, CancelReason, RegionId, Time};
+use asupersync::trace::replayer::TraceReplayer;
+use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use common::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -41,6 +47,82 @@ fn create_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
         .add_child(id)
         .expect("add child");
     id
+}
+
+fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> usize {
+    let tasks = runtime.state.cancel_request(region, reason, None);
+    let mut scheduled = 0usize;
+    if let Ok(mut scheduler) = runtime.scheduler.lock() {
+        for (task, priority) in tasks {
+            scheduler.schedule_cancel(task, priority);
+            scheduled += 1;
+        }
+    }
+    scheduled
+}
+
+fn spawn_cancellable_loop(
+    runtime: &mut LabRuntime,
+    region: RegionId,
+    iterations: usize,
+    counter: Option<Arc<AtomicUsize>>,
+) -> TaskId {
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async move {
+            for _ in 0..iterations {
+                let Some(cx) = Cx::current() else {
+                    return;
+                };
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                if let Some(counter) = counter.as_ref() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                yield_now().await;
+            }
+        })
+        .expect("create cancellable task");
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    task_id
+}
+
+fn collect_replay_failure_artifacts(
+    harness: &mut TestHarness,
+    runtime: &mut LabRuntime,
+    label: &str,
+) {
+    let Some(trace) = runtime.finish_replay_trace() else {
+        harness.collect_artifact(
+            &format!("{label}_replay_error.txt"),
+            "replay trace not captured (recording disabled)",
+        );
+        return;
+    };
+
+    if let Ok(json) = serde_json::to_string_pretty(&trace) {
+        harness.collect_artifact(&format!("{label}_replay_trace.json"), &json);
+    }
+
+    let mut replayer = TraceReplayer::new(trace.clone());
+    let mut replay_ok = true;
+    for event in &trace.events {
+        if let Err(err) = replayer.verify_and_advance(event) {
+            replay_ok = false;
+            harness.collect_artifact(
+                &format!("{label}_replay_error.txt"),
+                &format!("replay divergence: {err}"),
+            );
+            break;
+        }
+    }
+    if replay_ok && !replayer.is_completed() {
+        harness.collect_artifact(
+            &format!("{label}_replay_error.txt"),
+            "replayer did not complete",
+        );
+    }
 }
 
 // ============================================================================
@@ -174,6 +256,330 @@ fn e2e_cancellation_storm() {
     let live = runtime.state.live_task_count();
     assert_with_log!(live == 0, "no live tasks", 0, live);
     test_complete!("e2e_cancellation_storm");
+}
+
+// ============================================================================
+// Cancellation Stress Suite (bd-jj62v)
+// ============================================================================
+
+#[test]
+fn e2e_cancellation_storm_with_chaos_replay() {
+    let seed = 0x00C0_FFEE_u64;
+    let ctx = TestContext::new("cancel_storm_chaos", seed)
+        .with_subsystem("cancellation")
+        .with_invariant("quiescence");
+    let mut harness = TestHarness::with_context("e2e_cancellation_storm_with_chaos_replay", ctx);
+    init_test_logging();
+
+    let chaos = ChaosConfig::new(seed)
+        .with_cancel_probability(0.35)
+        .with_delay_probability(0.1)
+        .with_delay_range(Duration::from_micros(1)..Duration::from_micros(50));
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .with_chaos(chaos)
+        .worker_count(4)
+        .trace_capacity(16 * 1024);
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    harness.enter_phase("spawn");
+    let task_count = 80usize;
+    let progress = Arc::new(AtomicUsize::new(0));
+    for _ in 0..task_count {
+        let counter = Some(progress.clone());
+        spawn_cancellable_loop(&mut runtime, root, 32, counter);
+    }
+    harness.exit_phase();
+
+    harness.enter_phase("run");
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    let live = runtime.state.live_task_count();
+    passed &= harness.assert_eq("no_live_tasks", &0usize, &live);
+    let quiescent = runtime.is_quiescent();
+    passed &= harness.assert_true("quiescent", quiescent);
+    let stats = runtime.chaos_stats();
+    passed &= harness.assert_true("chaos_decisions_made", stats.decision_points > 0);
+    passed &= harness.assert_true("chaos_cancellations_injected", stats.cancellations > 0);
+    let progress_count = progress.load(Ordering::SeqCst);
+    passed &= harness.assert_true("some_progress_made", progress_count > 0);
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(&mut harness, &mut runtime, "cancel_storm_chaos");
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "cancel storm chaos failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
+}
+
+#[test]
+fn e2e_timeout_cascade_with_replay() {
+    let seed = 0x51A7_F00Du64;
+    let ctx = TestContext::new("timeout_cascade", seed)
+        .with_subsystem("cancellation")
+        .with_invariant("timeout_cascade");
+    let mut harness = TestHarness::with_context("e2e_timeout_cascade_with_replay", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .worker_count(2)
+        .trace_capacity(16 * 1024);
+    let mut runtime = LabRuntime::new(config);
+
+    let budget = Budget::new().with_deadline(Time::from_millis(25));
+    let root = runtime.state.create_root_region(budget);
+    let child = runtime
+        .state
+        .create_child_region(root, budget)
+        .expect("child region");
+    let grandchild = runtime
+        .state
+        .create_child_region(child, budget)
+        .expect("grandchild region");
+
+    harness.enter_phase("spawn");
+    let mut task_ids = Vec::new();
+    for &region in &[root, child, grandchild] {
+        for _ in 0..3 {
+            task_ids.push(spawn_cancellable_loop(&mut runtime, region, 1024, None));
+        }
+    }
+    harness.exit_phase();
+
+    harness.enter_phase("warmup");
+    for _ in 0..50 {
+        runtime.step_for_test();
+    }
+    runtime.advance_time_to(Time::from_millis(30));
+    harness.exit_phase();
+
+    harness.enter_phase("cancel");
+    let reason = CancelReason::timeout();
+    let scheduled = cancel_region(&mut runtime, root, &reason);
+    harness.assert_true("cancel_scheduled", scheduled > 0);
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    let quiescent = runtime.is_quiescent();
+    passed &= harness.assert_true("quiescent", quiescent);
+    let live = runtime.state.live_task_count();
+    passed &= harness.assert_eq("no_live_tasks", &0usize, &live);
+
+    for region in [root, child, grandchild] {
+        let record = runtime.state.region(region).expect("region record");
+        let Some(reason) = record.cancel_reason() else {
+            passed &= harness.assert_true("region_has_cancel_reason", false);
+            continue;
+        };
+        passed &= harness.assert_eq(
+            "cancel_root_kind_timeout",
+            &CancelKind::Timeout,
+            &reason.root_cause().kind,
+        );
+    }
+
+    for task_id in task_ids {
+        let Some(task) = runtime.state.task(task_id) else {
+            passed &= harness.assert_true("task_record_missing", false);
+            continue;
+        };
+        let cancelled = matches!(
+            &task.state,
+            TaskState::Completed(Outcome::Cancelled(reason))
+                if reason.root_cause().kind == CancelKind::Timeout
+        );
+        passed &= harness.assert_true("task_cancelled_by_timeout", cancelled);
+    }
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(&mut harness, &mut runtime, "timeout_cascade");
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "timeout cascade failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
+}
+
+#[test]
+fn e2e_race_loser_cancellation_drain() {
+    let seed = 0xFACE_FEED_u64;
+    let ctx = TestContext::new("race_loser_drain", seed)
+        .with_subsystem("cancellation")
+        .with_invariant("loser_drain");
+    let mut harness = TestHarness::with_context("e2e_race_loser_cancellation_drain", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .worker_count(2)
+        .trace_capacity(16 * 1024);
+    let mut runtime = LabRuntime::new(config);
+
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let winner_region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("winner region");
+    let loser_region_a = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("loser region a");
+    let loser_region_b = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("loser region b");
+
+    let winner_done = Arc::new(AtomicUsize::new(0));
+    let winner_counter = winner_done.clone();
+
+    harness.enter_phase("spawn");
+    let (winner_task, _winner_handle) = runtime
+        .state
+        .create_task(winner_region, Budget::INFINITE, async move {
+            winner_counter.fetch_add(1, Ordering::SeqCst);
+            yield_now().await;
+        })
+        .expect("winner task");
+    runtime.scheduler.lock().unwrap().schedule(winner_task, 0);
+
+    let loser_task_a = spawn_cancellable_loop(&mut runtime, loser_region_a, 4096, None);
+    let loser_task_b = spawn_cancellable_loop(&mut runtime, loser_region_b, 4096, None);
+    harness.exit_phase();
+
+    harness.enter_phase("run_until_winner");
+    let mut steps = 0u64;
+    while winner_done.load(Ordering::SeqCst) == 0 && steps < 500 {
+        runtime.step_for_test();
+        steps += 1;
+    }
+    let winner_completed = winner_done.load(Ordering::SeqCst) > 0;
+    harness.assert_true("winner_completed", winner_completed);
+    harness.exit_phase();
+
+    harness.enter_phase("cancel_losers");
+    cancel_region(&mut runtime, loser_region_a, &CancelReason::race_loser());
+    cancel_region(&mut runtime, loser_region_b, &CancelReason::race_loser());
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    passed &= harness.assert_true("quiescent", runtime.is_quiescent());
+    passed &= harness.assert_eq("no_live_tasks", &0usize, &runtime.state.live_task_count());
+
+    for task_id in [loser_task_a, loser_task_b] {
+        let Some(task) = runtime.state.task(task_id) else {
+            passed &= harness.assert_true("loser_task_missing", false);
+            continue;
+        };
+        let cancelled = matches!(
+            &task.state,
+            TaskState::Completed(Outcome::Cancelled(reason))
+                if reason.root_cause().kind == CancelKind::RaceLost
+        );
+        passed &= harness.assert_true("loser_cancelled", cancelled);
+    }
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(&mut harness, &mut runtime, "race_loser_drain");
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "race loser drain failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
+}
+
+#[test]
+fn e2e_finalizer_heavy_cancel_workload() {
+    let seed = 0xF17E_BA5Eu64;
+    let ctx = TestContext::new("finalizer_heavy_cancel", seed)
+        .with_subsystem("cancellation")
+        .with_invariant("finalizer");
+    let mut harness = TestHarness::with_context("e2e_finalizer_heavy_cancel_workload", ctx);
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .with_default_replay_recording()
+        .worker_count(2)
+        .trace_capacity(16 * 1024);
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let sync_count = 24usize;
+    let async_count = 24usize;
+    let sync_done = Arc::new(AtomicUsize::new(0));
+    let async_done = Arc::new(AtomicUsize::new(0));
+
+    harness.enter_phase("register_finalizers");
+    for _ in 0..sync_count {
+        let counter = sync_done.clone();
+        let ok = runtime.state.register_sync_finalizer(region, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        harness.assert_true("sync_finalizer_registered", ok);
+    }
+    for _ in 0..async_count {
+        let counter = async_done.clone();
+        let ok = runtime.state.register_async_finalizer(region, async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            yield_now().await;
+        });
+        harness.assert_true("async_finalizer_registered", ok);
+    }
+    harness.exit_phase();
+
+    harness.enter_phase("cancel");
+    cancel_region(&mut runtime, region, &CancelReason::shutdown());
+    runtime.run_until_quiescent();
+    harness.exit_phase();
+
+    harness.enter_phase("verify");
+    let mut passed = true;
+    passed &= harness.assert_eq(
+        "sync_finalizers_ran",
+        &sync_count,
+        &sync_done.load(Ordering::SeqCst),
+    );
+    passed &= harness.assert_eq(
+        "async_finalizers_ran",
+        &async_count,
+        &async_done.load(Ordering::SeqCst),
+    );
+    let record = runtime.state.region(region).expect("region record");
+    passed &= harness.assert_true("finalizers_empty", record.finalizers_empty());
+    passed &= harness.assert_true("quiescent", runtime.is_quiescent());
+    harness.exit_phase();
+
+    if !passed {
+        collect_replay_failure_artifacts(&mut harness, &mut runtime, "finalizer_heavy");
+    }
+
+    let summary = harness.finish();
+    assert!(
+        summary.passed,
+        "finalizer heavy workload failed: {}",
+        serde_json::to_string_pretty(&summary).unwrap()
+    );
 }
 
 // ============================================================================
