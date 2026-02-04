@@ -69,6 +69,8 @@ use std::time::Duration;
 pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
+const DEFAULT_STEAL_BATCH_SIZE: usize = 4;
+const DEFAULT_ENABLE_PARKING: bool = true;
 const SPIN_LIMIT: u32 = 64;
 const YIELD_LIMIT: u32 = 16;
 
@@ -281,6 +283,10 @@ pub struct ThreeLaneScheduler {
     coordinator: Arc<WorkerCoordinator>,
     /// Maximum consecutive cancel-lane dispatches before yielding.
     cancel_streak_limit: usize,
+    /// Maximum number of ready tasks to steal in one batch.
+    steal_batch_size: usize,
+    /// Whether workers are allowed to park when idle.
+    enable_parking: bool,
     /// Timer driver for processing timer wakeups.
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
@@ -317,6 +323,8 @@ impl ThreeLaneScheduler {
     ) -> Self {
         let cancel_streak_limit = cancel_streak_limit.max(1);
         let governor_interval = governor_interval.max(1);
+        let steal_batch_size = DEFAULT_STEAL_BATCH_SIZE;
+        let enable_parking = DEFAULT_ENABLE_PARKING;
         let global = Arc::new(GlobalInjector::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(worker_count);
@@ -386,7 +394,9 @@ impl ThreeLaneScheduler {
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
                 timer_driver: timer_driver.clone(),
-                steal_buffer: Vec::with_capacity(8),
+                steal_buffer: Vec::with_capacity(steal_batch_size.max(1)),
+                steal_batch_size,
+                enable_parking,
                 cancel_streak: 0,
                 cancel_streak_limit,
                 governor: if enable_governor {
@@ -412,6 +422,32 @@ impl ThreeLaneScheduler {
             timer_driver,
             state: Arc::clone(state),
             cancel_streak_limit,
+            steal_batch_size,
+            enable_parking,
+        }
+    }
+
+    /// Sets the maximum number of ready tasks to steal in one batch.
+    ///
+    /// Values less than 1 are clamped to 1 to preserve progress guarantees.
+    pub fn set_steal_batch_size(&mut self, size: usize) {
+        let size = size.max(1);
+        self.steal_batch_size = size;
+        for worker in &mut self.workers {
+            worker.steal_batch_size = size;
+            if worker.steal_buffer.capacity() < size {
+                worker
+                    .steal_buffer
+                    .reserve(size - worker.steal_buffer.capacity());
+            }
+        }
+    }
+
+    /// Enables or disables worker parking when idle.
+    pub fn set_enable_parking(&mut self, enable: bool) {
+        self.enable_parking = enable;
+        for worker in &mut self.workers {
+            worker.enable_parking = enable;
         }
     }
 
@@ -715,6 +751,10 @@ pub struct ThreeLaneWorker {
     pub timer_driver: Option<TimerDriverHandle>,
     /// Scratch buffer for stolen tasks (avoid per-steal allocations).
     steal_buffer: Vec<(TaskId, u8)>,
+    /// Maximum number of ready tasks to steal in one batch.
+    steal_batch_size: usize,
+    /// Whether this worker is allowed to park when idle.
+    enable_parking: bool,
     /// Number of consecutive cancel-lane dispatches.
     cancel_streak: usize,
     /// Maximum consecutive cancel-lane dispatches before yielding.
@@ -824,8 +864,8 @@ impl ThreeLaneWorker {
                 } else if backoff < SPIN_LIMIT + YIELD_LIMIT {
                     std::thread::yield_now();
                     backoff += 1;
-                } else {
-                    // Park with timeout based on next timer deadline
+                } else if self.enable_parking {
+                    // Park with timeout based on next timer deadline.
                     if let Some(timer) = &self.timer_driver {
                         if let Some(next_deadline) = timer.next_deadline() {
                             let now = timer.now();
@@ -833,13 +873,13 @@ impl ThreeLaneWorker {
                                 let nanos = next_deadline.duration_since(now);
                                 self.parker.park_timeout(Duration::from_nanos(nanos));
                             }
-                            // If deadline is due or passed, don't park - loop back to process timers
+                            // If deadline is due or passed, don't park - loop back to process timers.
                         } else {
-                            // No pending timers, park indefinitely
+                            // No pending timers, park indefinitely.
                             self.parker.park();
                         }
                     } else {
-                        // No timer driver, park indefinitely
+                        // No timer driver, park indefinitely.
                         self.parker.park();
                     }
                     // After waking, re-check queues by continuing the loop.
@@ -847,6 +887,9 @@ impl ThreeLaneWorker {
                     // Reset backoff to spin briefly before parking again (spurious wakeups).
                     backoff = 0;
                     // Continue loop to re-check condition (no break!)
+                } else {
+                    // Parking disabled; return to outer loop to keep spinning/yielding.
+                    break;
                 }
             }
 
@@ -1135,7 +1178,8 @@ impl ThreeLaneWorker {
 
             // Try to lock without blocking (skip if contended)
             if let Ok(mut victim) = stealer.try_lock() {
-                let stolen_count = victim.steal_ready_batch_into(4, &mut self.steal_buffer);
+                let stolen_count =
+                    victim.steal_ready_batch_into(self.steal_batch_size, &mut self.steal_buffer);
                 if stolen_count > 0 {
                     // Safety invariant: verify no local tasks were stolen.
                     #[cfg(debug_assertions)]
@@ -3712,6 +3756,7 @@ mod tests {
         // should go to the thief's fast_queue (not PriorityScheduler).
         let state = LocalQueue::test_state(10);
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        scheduler.set_steal_batch_size(2);
 
         // Push 8 tasks to worker 0's PriorityScheduler ready lane.
         for i in 0..8u32 {
@@ -3730,7 +3775,8 @@ mod tests {
         assert!(stolen.is_some(), "should steal at least one task");
 
         // Thief's fast_queue should have the batch remainder.
-        // (steal_ready_batch_into steals up to 4, returns first, pushes rest)
+        // (steal_ready_batch_into steals up to the configured batch size,
+        // returns first, pushes rest)
         let fast_count = {
             let mut count = 0;
             while thief.fast_queue.pop().is_some() {
@@ -3738,8 +3784,8 @@ mod tests {
             }
             count
         };
-        assert!(
-            fast_count > 0,
+        assert_eq!(
+            fast_count, 1,
             "thief's fast_queue should have batch remainder, got {fast_count}"
         );
     }
