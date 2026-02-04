@@ -84,7 +84,8 @@ impl EValue {
 pub struct EProcessConfig {
     /// Null hypothesis violation probability (default: 0.001).
     pub p0: f64,
-    /// Bet size λ. Must satisfy `-1/p₀ < λ < 1/(1−p₀)`.
+    /// Bet size λ. Must satisfy `-1/(1−p₀) < λ < 1/p₀` to keep
+    /// betting factors non-negative for binary observations.
     /// Default: 0.5 (moderate bet).
     pub lambda: f64,
     /// Significance level α for rejection (default: 0.05).
@@ -112,8 +113,11 @@ impl EProcessConfig {
         if self.p0 <= 0.0 || self.p0 >= 1.0 {
             return Err(format!("p0 must be in (0, 1), got {}", self.p0));
         }
-        let lambda_min = -1.0 / self.p0;
-        let lambda_max = 1.0 / (1.0 - self.p0);
+        // For binary X ∈ {0,1}, factor = 1 + λ(X - p0) must be ≥ 0:
+        //   X=0 → 1 - λp0 ≥ 0 → λ < 1/p0
+        //   X=1 → 1 + λ(1-p0) ≥ 0 → λ > -1/(1-p0)
+        let lambda_min = -1.0 / (1.0 - self.p0);
+        let lambda_max = 1.0 / self.p0;
         if self.lambda <= lambda_min || self.lambda >= lambda_max {
             return Err(format!(
                 "lambda must be in ({:.4}, {:.4}), got {}",
@@ -122,6 +126,19 @@ impl EProcessConfig {
         }
         if self.alpha <= 0.0 || self.alpha > 1.0 {
             return Err(format!("alpha must be in (0, 1], got {}", self.alpha));
+        }
+        if !self.max_evalue.is_finite() || self.max_evalue < 1.0 {
+            return Err(format!(
+                "max_evalue must be finite and >= 1.0, got {}",
+                self.max_evalue
+            ));
+        }
+        let threshold = 1.0 / self.alpha;
+        if self.max_evalue < threshold {
+            return Err(format!(
+                "max_evalue ({}) must be >= threshold 1/alpha ({:.1}), otherwise rejection is impossible",
+                self.max_evalue, threshold
+            ));
         }
         Ok(())
     }
@@ -594,6 +611,70 @@ mod tests {
             ..EProcessConfig::default()
         };
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn config_invalid_max_evalue() {
+        // max_evalue must be >= 1.0 and finite
+        let c = EProcessConfig {
+            max_evalue: 0.0,
+            ..EProcessConfig::default()
+        };
+        assert!(c.validate().is_err());
+
+        let c = EProcessConfig {
+            max_evalue: -1.0,
+            ..EProcessConfig::default()
+        };
+        assert!(c.validate().is_err());
+
+        let c = EProcessConfig {
+            max_evalue: f64::NAN,
+            ..EProcessConfig::default()
+        };
+        assert!(c.validate().is_err());
+
+        let c = EProcessConfig {
+            max_evalue: f64::INFINITY,
+            ..EProcessConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn config_max_evalue_below_threshold() {
+        // max_evalue < 1/alpha makes rejection impossible
+        let c = EProcessConfig {
+            alpha: 0.05,
+            max_evalue: 10.0, // threshold is 20
+            ..EProcessConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn config_lambda_bounds_correct_for_large_p0() {
+        // With p0=0.6, correct bounds are (-2.5, 1.667)
+        // lambda=1.5 should be valid (factor at x=0: 1 - 1.5*0.6 = 0.1 > 0)
+        let c = EProcessConfig {
+            p0: 0.6,
+            lambda: 1.5,
+            alpha: 0.05,
+            max_evalue: 1e15,
+        };
+        assert!(c.validate().is_ok());
+
+        // lambda=1.7 should be invalid (factor at x=0: 1 - 1.7*0.6 = -0.02 < 0)
+        let c = EProcessConfig {
+            p0: 0.6,
+            lambda: 1.7,
+            alpha: 0.05,
+            max_evalue: 1e15,
+        };
+        assert!(
+            c.validate().is_err(),
+            "lambda=1.7 with p0=0.6 should be rejected (negative factor)"
+        );
     }
 
     // -- EValue --
