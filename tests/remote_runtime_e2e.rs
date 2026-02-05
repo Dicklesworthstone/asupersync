@@ -989,7 +989,10 @@ fn stress_mixed_workload_lossy_network() {
 
 #[test]
 fn stress_wan_conditions_all_tasks_resolve() {
-    let (mut h, a, b) = harness_two(61, NetworkConditions::wan());
+    let seed = 61;
+    let conditions = NetworkConditions::wan();
+    init_test("stress_wan_conditions_all_tasks_resolve", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let n = 10u64;
 
     for i in 0..n {
@@ -1016,7 +1019,10 @@ fn stress_wan_conditions_all_tasks_resolve() {
 
 #[test]
 fn stress_congested_network_eventual_completion() {
-    let (mut h, a, b) = harness_two(62, NetworkConditions::congested());
+    let seed = 62;
+    let conditions = NetworkConditions::congested();
+    init_test("stress_congested_network_eventual_completion", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let n = 15u64;
 
     for i in 0..n {
@@ -1045,7 +1051,10 @@ fn stress_congested_network_eventual_completion() {
 
 #[test]
 fn metrics_sent_geq_delivered_plus_dropped() {
-    let (mut h, a, b) = harness_two(63, NetworkConditions::lossy());
+    let seed = 63;
+    let conditions = NetworkConditions::lossy();
+    init_test("metrics_sent_geq_delivered_plus_dropped", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
 
     for i in 0..10u64 {
         let tid = RemoteTaskId::from_raw(13_000 + i);
@@ -1071,8 +1080,11 @@ fn metrics_sent_geq_delivered_plus_dropped() {
 
 #[test]
 fn spawn_to_self() {
+    let seed = 64;
+    let conditions = NetworkConditions::local();
+    init_test("spawn_to_self", seed, &conditions);
     // A node spawns a task on itself.
-    let mut h = DistributedHarness::new(make_config(64, NetworkConditions::local()));
+    let mut h = DistributedHarness::new(make_config(seed, conditions));
     let a = h.add_node("self-node");
     let tid = RemoteTaskId::from_raw(14_000);
 
@@ -1090,7 +1102,10 @@ fn spawn_to_self() {
 
 #[test]
 fn many_rapid_cancels_same_task() {
-    let (mut h, a, b) = harness_two(65, NetworkConditions::local());
+    let seed = 65;
+    let conditions = NetworkConditions::local();
+    init_test("many_rapid_cancels_same_task", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(14_100);
 
     h.inject_spawn(&a, &b, tid);
@@ -1112,7 +1127,10 @@ fn many_rapid_cancels_same_task() {
 
 #[test]
 fn cancel_nonexistent_task_is_silent() {
-    let (mut h, a, b) = harness_two(66, NetworkConditions::local());
+    let seed = 66;
+    let conditions = NetworkConditions::local();
+    init_test("cancel_nonexistent_task_is_silent", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(14_200);
 
     // Cancel a task that was never spawned.
@@ -1132,7 +1150,10 @@ fn cancel_nonexistent_task_is_silent() {
 
 #[test]
 fn empty_harness_run_is_no_op() {
-    let mut h = DistributedHarness::new(make_config(67, NetworkConditions::ideal()));
+    let seed = 67;
+    let conditions = NetworkConditions::ideal();
+    init_test("empty_harness_run_is_no_op", seed, &conditions);
+    let mut h = DistributedHarness::new(make_config(seed, conditions));
     let _a = h.add_node("lonely");
 
     h.run_for(Duration::from_millis(100));
