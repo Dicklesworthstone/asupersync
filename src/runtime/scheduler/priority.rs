@@ -9,6 +9,7 @@
 //! Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 
 use crate::types::{TaskId, Time};
+use crate::util::DetHashSet;
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BinaryHeap;
@@ -82,7 +83,7 @@ pub struct Scheduler {
     /// Ready lane: general ready tasks.
     ready_lane: BinaryHeap<SchedulerEntry>,
     /// Set of tasks currently in the scheduler (for dedup).
-    scheduled: std::collections::HashSet<TaskId>,
+    scheduled: DetHashSet<TaskId>,
     /// Next generation number for FIFO ordering.
     next_generation: u64,
     /// Scratch space for RNG tie-breaking (ready/cancel lanes).

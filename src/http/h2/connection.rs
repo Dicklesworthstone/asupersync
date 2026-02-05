@@ -1159,7 +1159,7 @@ mod tests {
         let result = conn.process_frame(frame);
 
         assert!(result.is_err());
-        let err = result.err().expect("flow control error");
+        let err = result.expect_err("flow control error");
         assert_eq!(err.code, ErrorCode::FlowControlError);
     }
 
