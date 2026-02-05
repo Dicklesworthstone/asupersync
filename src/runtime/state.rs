@@ -2213,95 +2213,105 @@ impl RuntimeState {
     ///
     /// This should be called whenever a task completes, a child region closes,
     /// or an obligation is resolved.
-    pub fn advance_region_state(&mut self, region_id: RegionId) {
-        // Get state and parent without holding a long borrow on self.regions
-        let (state, parent) = {
-            let Some(region) = self.regions.get(region_id.arena_index()) else {
-                return;
-            };
-            (region.state(), region.parent)
-        };
+    ///
+    /// Uses an iterative loop instead of recursion to bound stack depth and
+    /// enable future migration to `ShardGuard`-based locking (where recursive
+    /// self-calls would deadlock on non-reentrant mutexes).
+    pub fn advance_region_state(&mut self, initial_region: RegionId) {
+        let mut current = Some(initial_region);
 
-        match state {
-            crate::record::region::RegionState::Closing
-            | crate::record::region::RegionState::Draining => {
-                // Transition to Finalizing only once child regions and tasks are gone.
-                let transition_to_finalizing = {
-                    let Some(region) = self.regions.get(region_id.arena_index()) else {
-                        return;
-                    };
-                    let no_children = region.child_ids().is_empty();
-                    let no_tasks = region.task_ids().is_empty();
-                    if no_children && no_tasks {
-                        region.begin_finalize()
-                    } else {
-                        if !no_children
-                            && region.state() == crate::record::region::RegionState::Closing
-                        {
-                            region.begin_drain();
-                        }
-                        false
-                    }
+        while let Some(region_id) = current.take() {
+            // Get state and parent without holding a long borrow on self.regions
+            let (state, parent) = {
+                let Some(region) = self.regions.get(region_id.arena_index()) else {
+                    break;
                 };
+                (region.state(), region.parent)
+            };
 
-                if transition_to_finalizing {
-                    // Recurse to handle Finalizing immediately
-                    self.advance_region_state(region_id);
-                }
-            }
-            crate::record::region::RegionState::Finalizing => {
-                // Run sync finalizers (requires mut self).
-                // If we hit an async finalizer, reinsert it and wait for a scheduler to run it.
-                if let Some(async_finalizer) = self.run_sync_finalizers(region_id) {
-                    if let Some(region) = self.regions.get(region_id.arena_index()) {
-                        region.add_finalizer(async_finalizer);
-                    }
-                    return;
-                }
-
-                // If we are finalizing and obligations remain with no live tasks, mark leaks.
-                if let Some(region) = self.regions.get(region_id.arena_index()) {
-                    if region.pending_obligations() > 0 {
-                        let tasks_done = region.task_ids().iter().all(|&task_id| {
-                            self.task(task_id).is_none_or(|t| t.state.is_terminal())
-                        });
-                        if tasks_done {
-                            let leaks =
-                                self.collect_obligation_leaks(|record| record.region == region_id);
-                            if !leaks.is_empty() {
-                                self.handle_obligation_leaks(ObligationLeakError {
-                                    task_id: None,
-                                    region_id,
-                                    completion: None,
-                                    leaks,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Check if we can complete close
-                if self.can_region_complete_close(region_id) {
-                    let closed = {
+            match state {
+                crate::record::region::RegionState::Closing
+                | crate::record::region::RegionState::Draining => {
+                    // Transition to Finalizing only once child regions and tasks are gone.
+                    let transition_to_finalizing = {
                         let Some(region) = self.regions.get(region_id.arena_index()) else {
-                            return;
+                            break;
                         };
-                        region.complete_close()
+                        let no_children = region.child_ids().is_empty();
+                        let no_tasks = region.task_ids().is_empty();
+                        if no_children && no_tasks {
+                            region.begin_finalize()
+                        } else {
+                            if !no_children
+                                && region.state() == crate::record::region::RegionState::Closing
+                            {
+                                region.begin_drain();
+                            }
+                            false
+                        }
                     };
 
-                    if closed {
-                        if let Some(parent_id) = parent {
-                            // Remove from parent
-                            if let Some(parent_record) = self.regions.get(parent_id.arena_index()) {
-                                parent_record.remove_child(region_id);
+                    if transition_to_finalizing {
+                        // Re-process same region as Finalizing in next iteration
+                        current = Some(region_id);
+                    }
+                }
+                crate::record::region::RegionState::Finalizing => {
+                    // Run sync finalizers (requires mut self).
+                    // If we hit an async finalizer, reinsert it and wait for a scheduler.
+                    if let Some(async_finalizer) = self.run_sync_finalizers(region_id) {
+                        if let Some(region) = self.regions.get(region_id.arena_index()) {
+                            region.add_finalizer(async_finalizer);
+                        }
+                        break; // Async finalizer pending; stop advancing
+                    }
+
+                    // If finalizing and obligations remain with no live tasks, mark leaks.
+                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        if region.pending_obligations() > 0 {
+                            let tasks_done = region.task_ids().iter().all(|&task_id| {
+                                self.task(task_id).is_none_or(|t| t.state.is_terminal())
+                            });
+                            if tasks_done {
+                                let leaks = self
+                                    .collect_obligation_leaks(|record| record.region == region_id);
+                                if !leaks.is_empty() {
+                                    self.handle_obligation_leaks(ObligationLeakError {
+                                        task_id: None,
+                                        region_id,
+                                        completion: None,
+                                        leaks,
+                                    });
+                                }
                             }
-                            // Recurse to parent
-                            self.advance_region_state(parent_id);
+                        }
+                    }
+
+                    // Check if we can complete close
+                    if self.can_region_complete_close(region_id) {
+                        let closed = {
+                            let Some(region) = self.regions.get(region_id.arena_index()) else {
+                                break;
+                            };
+                            region.complete_close()
+                        };
+
+                        if closed {
+                            if let Some(parent_id) = parent {
+                                // Remove from parent
+                                if let Some(parent_record) =
+                                    self.regions.get(parent_id.arena_index())
+                                {
+                                    parent_record.remove_child(region_id);
+                                }
+                                // Advance parent in next iteration
+                                current = Some(parent_id);
+                            }
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
