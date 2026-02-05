@@ -219,13 +219,13 @@ mod tests {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
 
-        let task_idx = state.tasks.insert(TaskRecord::new(
+        let task_idx = state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        state.task_mut(task_id).unwrap().id = task_id;
 
         let obl_idx = state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),

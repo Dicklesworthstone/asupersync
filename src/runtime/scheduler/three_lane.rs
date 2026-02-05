@@ -466,15 +466,12 @@ impl ThreeLaneScheduler {
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
         let (is_local, pinned_worker) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .map_or((false, None), |record| {
-                    if record.is_local() {
-                        record.wake_state.notify();
-                    }
-                    (record.is_local(), record.pinned_worker())
-                })
+            state.task(task).map_or((false, None), |record| {
+                if record.is_local() {
+                    record.wake_state.notify();
+                }
+                (record.is_local(), record.pinned_worker())
+            })
         };
 
         if is_local {
@@ -551,12 +548,9 @@ impl ThreeLaneScheduler {
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .map_or((true, false), |record| {
-                    (record.wake_state.notify(), record.is_local())
-                })
+            state.task(task).map_or((true, false), |record| {
+                (record.wake_state.notify(), record.is_local())
+            })
         };
 
         // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
@@ -594,12 +588,9 @@ impl ThreeLaneScheduler {
         // Dedup: check wake_state before scheduling anywhere.
         let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .map_or((true, false), |record| {
-                    (record.wake_state.notify(), record.is_local())
-                })
+            state.task(task).map_or((true, false), |record| {
+                (record.wake_state.notify(), record.is_local())
+            })
         };
 
         if !should_schedule {
@@ -665,12 +656,9 @@ impl ThreeLaneScheduler {
         // Dedup check.
         let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .map_or((true, false), |record| {
-                    (record.wake_state.notify(), record.is_local())
-                })
+            state.task(task).map_or((true, false), |record| {
+                (record.wake_state.notify(), record.is_local())
+            })
         };
 
         if !should_schedule {
@@ -1201,8 +1189,7 @@ impl ThreeLaneWorker {
                             .state
                             .lock()
                             .expect("runtime state lock poisoned")
-                            .tasks
-                            .get(task.arena_index())
+                            .task(task)
                             .is_some_and(crate::record::task::TaskRecord::is_local),
                         "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
                     );
@@ -1236,8 +1223,7 @@ impl ThreeLaneWorker {
                                 .state
                                 .lock()
                                 .expect("runtime state lock poisoned")
-                                .tasks
-                                .get(task.arena_index())
+                                .task(task)
                                 .is_some_and(crate::record::task::TaskRecord::is_local);
                             debug_assert!(
                                 !is_local,
@@ -1996,7 +1982,7 @@ mod tests {
 
         {
             let mut guard = state.lock().expect("runtime state lock poisoned");
-            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+            if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
         }
@@ -2009,8 +1995,7 @@ mod tests {
         let completed = state
             .lock()
             .expect("runtime state lock poisoned")
-            .tasks
-            .get(task_id.arena_index())
+            .task(task_id)
             .is_none();
         assert!(completed, "task should be removed after completion");
 
@@ -2672,8 +2657,7 @@ mod tests {
         let wake_state = {
             let guard = state.lock().expect("runtime state lock poisoned");
             guard
-                .tasks
-                .get(task_id.arena_index())
+                .task(task_id)
                 .map(|r| Arc::clone(&r.wake_state))
                 .expect("task should exist")
         };
@@ -4043,7 +4027,7 @@ mod tests {
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
-            if let Some(record) = guard.tasks.get_mut(id.arena_index()) {
+            if let Some(record) = guard.task_mut(id) {
                 record.mark_local();
             }
             drop(guard);
@@ -4052,7 +4036,7 @@ mod tests {
 
         {
             let mut guard = state.lock().expect("lock");
-            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+            if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
         }
@@ -4097,7 +4081,7 @@ mod tests {
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
-            if let Some(record) = guard.tasks.get_mut(id.arena_index()) {
+            if let Some(record) = guard.task_mut(id) {
                 record.pin_to_worker(1);
             }
             drop(guard);
@@ -4106,7 +4090,7 @@ mod tests {
 
         {
             let mut guard = state.lock().expect("lock");
-            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+            if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
         }
@@ -4163,7 +4147,7 @@ mod tests {
 
         {
             let mut guard = state.lock().expect("lock");
-            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+            if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
         }

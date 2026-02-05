@@ -796,7 +796,7 @@ fn execute_plan_in_lab_core(
     while !runtime.is_quiescent() && attempts < 3 {
         {
             let mut sched = runtime.scheduler.lock().expect("scheduler lock");
-            for (_, record) in runtime.state.tasks.iter() {
+            for (_, record) in runtime.state.tasks_iter() {
                 if record.is_runnable() {
                     sched.schedule(record.id, 0);
                 }
@@ -808,12 +808,11 @@ fn execute_plan_in_lab_core(
     if !runtime.is_quiescent() {
         let runnable: Vec<_> = runtime
             .state
-            .tasks
-            .iter()
+            .tasks_iter()
             .filter(|(_, r)| r.is_runnable())
             .map(|(_, r)| format!("{:?}={:?}", r.id, r.state))
             .collect();
-        let total = runtime.state.tasks.iter().count();
+        let total = runtime.state.tasks_iter().count();
         panic!(
             "runtime must be quiescent after {} steps (attempts={}): runnable=[{}], total_tasks={}",
             runtime.steps(),

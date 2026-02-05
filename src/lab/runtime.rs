@@ -328,25 +328,21 @@ impl LabRuntime {
         }
 
         // 3. Prepare context and enforce budget
-        let priority = self
-            .state
-            .tasks
-            .get(task_id.arena_index())
-            .map_or(0, |record| {
-                record.cx_inner.as_ref().map_or(0, |inner| {
-                    let mut guard = inner.write().expect("lock poisoned");
+        let priority = self.state.task(task_id).map_or(0, |record| {
+            record.cx_inner.as_ref().map_or(0, |inner| {
+                let mut guard = inner.write().expect("lock poisoned");
 
-                    // Enforce poll quota
-                    if guard.budget.consume_poll().is_none() {
-                        guard.cancel_requested = true;
-                        if guard.cancel_reason.is_none() {
-                            guard.cancel_reason = Some(crate::types::CancelReason::poll_quota());
-                        }
+                // Enforce poll quota
+                if guard.budget.consume_poll().is_none() {
+                    guard.cancel_requested = true;
+                    if guard.cancel_reason.is_none() {
+                        guard.cancel_reason = Some(crate::types::CancelReason::poll_quota());
                     }
+                }
 
-                    guard.budget.priority
-                })
-            });
+                guard.budget.priority
+            })
+        });
 
         let waker = Waker::from(Arc::new(TaskWaker {
             task_id,
@@ -356,7 +352,7 @@ impl LabRuntime {
         let mut cx = Context::from_waker(&waker);
 
         // Set cancel_waker so abort_with_reason can reschedule cancelled tasks.
-        if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+        if let Some(record) = self.state.task(task_id) {
             if let Some(inner) = record.cx_inner.as_ref() {
                 let cancel_waker = Waker::from(Arc::new(CancelTaskWaker {
                     task_id,
@@ -371,8 +367,7 @@ impl LabRuntime {
 
         let current_cx = self
             .state
-            .tasks
-            .get(task_id.arena_index())
+            .task(task_id)
             .and_then(|record| record.cx.clone());
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
 
@@ -397,7 +392,7 @@ impl LabRuntime {
                     .record_task_completed(task_id, Severity::Ok); // Severity is approx here
 
                 // Update state to Completed if not already terminal
-                if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
+                if let Some(record) = self.state.task_mut(task_id) {
                     if !record.state.is_terminal() {
                         let record_outcome = match outcome {
                             crate::types::Outcome::Ok(()) => crate::types::Outcome::Ok(()),
@@ -441,7 +436,7 @@ impl LabRuntime {
                 }
 
                 if let Some(monitor) = &mut self.deadline_monitor {
-                    if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+                    if let Some(record) = self.state.task(task_id) {
                         let now = self.state.now;
                         let duration =
                             Duration::from_nanos(now.duration_since(record.created_at()));
@@ -473,8 +468,7 @@ impl LabRuntime {
                 for waiter in waiters {
                     let prio = self
                         .state
-                        .tasks
-                        .get(waiter.arena_index())
+                        .task(waiter)
                         .and_then(|t| t.cx_inner.as_ref())
                         .map_or(0, |inner| {
                             inner.read().expect("lock poisoned").budget.priority
@@ -501,7 +495,7 @@ impl LabRuntime {
     fn check_deadline_monitor(&mut self) {
         if let Some(monitor) = &mut self.deadline_monitor {
             let now = self.state.now;
-            monitor.check(now, self.state.tasks.iter().map(|(_, record)| record));
+            monitor.check(now, self.state.tasks_iter().map(|(_, record)| record));
         }
     }
 
@@ -621,7 +615,7 @@ impl LabRuntime {
     }
 
     fn reschedule_after_chaos_skip(&self, task_id: TaskId) {
-        let Some(record) = self.state.tasks.get(task_id.arena_index()) else {
+        let Some(record) = self.state.task(task_id) else {
             return;
         };
         if record.state.is_terminal() {
@@ -648,7 +642,7 @@ impl LabRuntime {
     }
 
     fn consume_cancel_ack(&mut self, task_id: TaskId) -> bool {
-        let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) else {
+        let Some(record) = self.state.task_mut(task_id) else {
             return false;
         };
         let Some(inner) = record.cx_inner.as_ref() else {
@@ -675,7 +669,7 @@ impl LabRuntime {
         self.replay_recorder.record_cancel_injection(task_id);
 
         // Mark the task as cancel-requested with chaos reason
-        if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = self.state.task_mut(task_id) {
             if !record.state.is_terminal() {
                 record
                     .request_cancel_with_budget(CancelReason::user("chaos-injected"), Budget::ZERO);
@@ -703,7 +697,7 @@ impl LabRuntime {
             .record_budget_exhaust_injection(task_id);
 
         // Set the task's budget quotas to zero
-        if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+        if let Some(record) = self.state.task(task_id) {
             if let Some(cx_inner) = &record.cx_inner {
                 if let Ok(mut inner) = cx_inner.write() {
                     inner.budget.poll_quota = 0;
@@ -798,8 +792,7 @@ impl LabRuntime {
 
             let holder_terminal = self
                 .state
-                .tasks
-                .get(obligation.holder.arena_index())
+                .task(obligation.holder)
                 .is_none_or(|t| t.state.is_terminal());
             let region_closed = self
                 .state
@@ -822,8 +815,7 @@ impl LabRuntime {
 
     fn task_leaks(&self) -> usize {
         self.state
-            .tasks
-            .iter()
+            .tasks_iter()
             .filter(|(_, t)| !t.state.is_terminal())
             .count()
     }
@@ -833,12 +825,10 @@ impl LabRuntime {
         for (_, region) in self.state.regions.iter() {
             if region.state().is_terminal() {
                 // Check if any children or tasks are NOT terminal
-                let live_tasks = region.task_ids().iter().any(|&tid| {
-                    self.state
-                        .tasks
-                        .get(tid.arena_index())
-                        .is_some_and(|t| !t.state.is_terminal())
-                });
+                let live_tasks = region
+                    .task_ids()
+                    .iter()
+                    .any(|&tid| self.state.task(tid).is_some_and(|t| !t.state.is_terminal()));
 
                 let live_children = region.child_ids().iter().any(|&rid| {
                     self.state
@@ -864,7 +854,7 @@ impl LabRuntime {
         let current_step = self.steps;
         let mut violations = Vec::new();
 
-        for (_, task) in self.state.tasks.iter() {
+        for (_, task) in self.state.tasks_iter() {
             if task.state.is_terminal() {
                 continue;
             }
@@ -1392,21 +1382,20 @@ mod tests {
         let root = runtime.state.create_root_region(Budget::INFINITE);
         let budget = Budget::new().with_deadline(Time::from_millis(10));
 
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new_with_time(
+        let task_idx = runtime.state.insert_task(TaskRecord::new_with_time(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             budget,
             runtime.state.now,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         let mut inner = CxInner::new(root, task_id, budget);
         inner.checkpoint_state.last_checkpoint = None;
         runtime
             .state
-            .tasks
-            .get_mut(task_idx)
+            .task_mut(task_id)
             .unwrap()
             .set_cx_inner(Arc::new(RwLock::new(inner)));
 
@@ -1463,7 +1452,7 @@ mod tests {
             .expect("create task");
 
         {
-            let task = runtime.state.tasks.get_mut(task_id.arena_index()).unwrap();
+            let task = runtime.state.task_mut(task_id).unwrap();
             let cx = task.cx.as_ref().expect("task cx");
             cx.checkpoint_with("starting work").expect("checkpoint");
         }
@@ -1505,13 +1494,13 @@ mod tests {
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         // Create a task.
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         // Create a pending obligation held by that task.
         let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
@@ -1568,13 +1557,13 @@ mod tests {
 
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -1598,13 +1587,13 @@ mod tests {
         let mut runtime = LabRuntime::with_seed(7);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -1618,8 +1607,7 @@ mod tests {
 
         runtime
             .state
-            .tasks
-            .get_mut(task_idx)
+            .task_mut(task_id)
             .unwrap()
             .complete(Outcome::Ok(()));
 
@@ -1657,13 +1645,13 @@ mod tests {
         let mut runtime = LabRuntime::with_seed(11);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -1684,8 +1672,7 @@ mod tests {
 
         runtime
             .state
-            .tasks
-            .get_mut(task_idx)
+            .task_mut(task_id)
             .unwrap()
             .complete(Outcome::Ok(()));
 
@@ -1704,13 +1691,13 @@ mod tests {
         let mut runtime = LabRuntime::with_seed(21);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         runtime.advance_time_to(Time::from_nanos(10));
         let ob1 = runtime
@@ -1835,13 +1822,13 @@ mod tests {
         let mut runtime = LabRuntime::with_seed(22);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        let task_idx = runtime.state.tasks.insert(TaskRecord::new(
+        let task_idx = runtime.state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             root,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
-        runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         runtime.advance_time_to(Time::from_nanos(100));
         let obligation = runtime
@@ -1852,8 +1839,7 @@ mod tests {
         runtime.advance_time_to(Time::from_nanos(140));
         runtime
             .state
-            .tasks
-            .get_mut(task_idx)
+            .task_mut(task_id)
             .unwrap()
             .complete(Outcome::Ok(()));
 

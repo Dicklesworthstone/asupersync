@@ -141,7 +141,10 @@ mod inner {
         }
 
         /// Attempts to acquire the mutex without blocking.
-        pub fn try_lock(&self) -> Result<ContendedMutexGuard<'_, T>, std::sync::TryLockError<ContendedMutexGuard<'_, T>>> {
+        pub fn try_lock(
+            &self,
+        ) -> Result<ContendedMutexGuard<'_, T>, std::sync::TryLockError<ContendedMutexGuard<'_, T>>>
+        {
             match self.inner.try_lock() {
                 Ok(guard) => {
                     self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);
@@ -154,15 +157,13 @@ mod inner {
                 Err(std::sync::TryLockError::WouldBlock) => {
                     Err(std::sync::TryLockError::WouldBlock)
                 }
-                Err(std::sync::TryLockError::Poisoned(poison)) => {
-                    Err(std::sync::TryLockError::Poisoned(PoisonError::new(
-                        ContendedMutexGuard {
-                            guard: Some(poison.into_inner()),
-                            acquired_at: Instant::now(),
-                            metrics: &self.metrics,
-                        },
-                    )))
-                }
+                Err(std::sync::TryLockError::Poisoned(poison)) => Err(
+                    std::sync::TryLockError::Poisoned(PoisonError::new(ContendedMutexGuard {
+                        guard: Some(poison.into_inner()),
+                        acquired_at: Instant::now(),
+                        metrics: &self.metrics,
+                    })),
+                ),
             }
         }
 
@@ -270,22 +271,18 @@ mod inner {
         /// Attempts to acquire the mutex without blocking.
         pub fn try_lock(
             &self,
-        ) -> Result<
-            ContendedMutexGuard<'_, T>,
-            std::sync::TryLockError<ContendedMutexGuard<'_, T>>,
-        > {
+        ) -> Result<ContendedMutexGuard<'_, T>, std::sync::TryLockError<ContendedMutexGuard<'_, T>>>
+        {
             match self.inner.try_lock() {
                 Ok(guard) => Ok(ContendedMutexGuard { guard }),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     Err(std::sync::TryLockError::WouldBlock)
                 }
-                Err(std::sync::TryLockError::Poisoned(poison)) => {
-                    Err(std::sync::TryLockError::Poisoned(PoisonError::new(
-                        ContendedMutexGuard {
-                            guard: poison.into_inner(),
-                        },
-                    )))
-                }
+                Err(std::sync::TryLockError::Poisoned(poison)) => Err(
+                    std::sync::TryLockError::Poisoned(PoisonError::new(ContendedMutexGuard {
+                        guard: poison.into_inner(),
+                    })),
+                ),
             }
         }
 
@@ -336,6 +333,7 @@ mod inner {
 pub use inner::{ContendedMutex, ContendedMutexGuard};
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     #[cfg(feature = "lock-metrics")]
@@ -355,6 +353,7 @@ mod tests {
         {
             let guard = m.lock().expect("poisoned");
             crate::assert_with_log!(*guard == 42, "value", 42, *guard);
+            drop(guard);
         }
         crate::test_complete!("basic_lock_unlock");
     }
@@ -369,6 +368,7 @@ mod tests {
         }
         let guard = m.lock().expect("poisoned");
         crate::assert_with_log!(*guard == 99, "mutated value", 99, *guard);
+        drop(guard);
         crate::test_complete!("mutate_through_guard");
     }
 
@@ -378,6 +378,7 @@ mod tests {
         let m = ContendedMutex::new("test", 42);
         let guard = m.try_lock().expect("should succeed");
         crate::assert_with_log!(*guard == 42, "try_lock value", 42, *guard);
+        drop(guard);
         crate::test_complete!("try_lock_succeeds_when_free");
     }
 
@@ -386,8 +387,8 @@ mod tests {
         init_test("try_lock_fails_when_held");
         let m = ContendedMutex::new("test", 42);
         let _guard = m.lock().expect("poisoned");
-        let result = m.try_lock();
-        crate::assert_with_log!(result.is_err(), "try_lock fails", true, result.is_err());
+        let is_err = m.try_lock().is_err();
+        crate::assert_with_log!(is_err, "try_lock fails", true, is_err);
         crate::test_complete!("try_lock_fails_when_held");
     }
 
@@ -497,12 +498,7 @@ mod tests {
             true,
             snap.contentions >= 1
         );
-        crate::assert_with_log!(
-            snap.wait_ns > 0,
-            "wait_ns > 0",
-            true,
-            snap.wait_ns > 0
-        );
+        crate::assert_with_log!(snap.wait_ns > 0, "wait_ns > 0", true, snap.wait_ns > 0);
         crate::test_complete!("metrics_track_contention");
     }
 

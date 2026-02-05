@@ -334,10 +334,7 @@ impl<T> Receiver<T> {
     /// Returns `RecvError::Cancelled` if the operation was cancelled.
     pub fn changed<'a, 'b>(&'a mut self, cx: &'b Cx) -> ChangedFuture<'a, 'b, T> {
         cx.trace("watch::changed starting wait");
-        ChangedFuture {
-            receiver: self,
-            cx,
-        }
+        ChangedFuture { receiver: self, cx }
     }
 
     /// Returns a reference to the current value.
@@ -530,7 +527,7 @@ mod tests {
     /// Polls a future that should be immediately ready (e.g., after send).
     fn poll_ready<F: Future + Unpin>(f: &mut F) -> F::Output {
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         match Pin::new(f).poll(&mut cx) {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("expected Ready, got Pending"),
@@ -928,17 +925,18 @@ mod tests {
 
         // No send yet — changed() should return Pending
         let waker = Waker::noop();
-        let mut task_cx = Context::from_waker(&waker);
+        let mut task_cx = Context::from_waker(waker);
 
-        let mut future = rx.changed(&cx);
-        let poll_result = Pin::new(&mut future).poll(&mut task_cx);
-        crate::assert_with_log!(
-            poll_result.is_pending(),
-            "first poll pending",
-            true,
-            poll_result.is_pending()
-        );
-        drop(future);
+        {
+            let mut future = rx.changed(&cx);
+            let poll_result = Pin::new(&mut future).poll(&mut task_cx);
+            crate::assert_with_log!(
+                poll_result.is_pending(),
+                "first poll pending",
+                true,
+                poll_result.is_pending()
+            );
+        }
 
         // Send a value
         tx.send(42).expect("send failed");
@@ -958,16 +956,17 @@ mod tests {
 
         // Poll — should be Pending
         let waker = Waker::noop();
-        let mut task_cx = Context::from_waker(&waker);
-        let mut future = rx.changed(&cx);
-        let poll_result = Pin::new(&mut future).poll(&mut task_cx);
-        crate::assert_with_log!(
-            poll_result.is_pending(),
-            "pending before drop",
-            true,
-            poll_result.is_pending()
-        );
-        drop(future);
+        let mut task_cx = Context::from_waker(waker);
+        {
+            let mut future = rx.changed(&cx);
+            let poll_result = Pin::new(&mut future).poll(&mut task_cx);
+            crate::assert_with_log!(
+                poll_result.is_pending(),
+                "pending before drop",
+                true,
+                poll_result.is_pending()
+            );
+        }
 
         // Drop sender
         drop(tx);
