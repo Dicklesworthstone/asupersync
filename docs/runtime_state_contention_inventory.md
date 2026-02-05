@@ -204,8 +204,8 @@ cargo test --test obligation_lifecycle_e2e -- --nocapture
 | **commit/abort_obligation** | E → D → B → C | Skip A |
 | **advance_region_state** | E → D → B → A → C | Full order (recursive) |
 | **drain_ready_async_finalizers** | E → D → B → A | Skip C |
-| **snapshot / is_quiescent** | Read-lock all: E → D → B → A → C | All shards, read-only |
-| **Lyapunov snapshot** | Read-lock all: E → D → B → A → C | All shards, read-only |
+| **snapshot / is_quiescent** | Lock all: E → D → B → A → C | All shards, read-only |
+| **Lyapunov snapshot** | Lock all: E → D → B → A → C | All shards, read-only |
 
 ### Disallowed Lock Sequences (deadlock risk)
 
@@ -370,7 +370,7 @@ pattern (RuntimeState → TraceBuffer) entirely.
 | N workers polling | All contend on single Mutex | Each touches TaskShard only |
 | Cancel injection during polling | Blocks behind poll lock | Lock-free wake_state check (QW #4) |
 | Obligation commit during polling | Blocks behind poll lock | ObligationShard independent |
-| Lyapunov snapshot during polling | Blocks all polls | RwLock per shard; read-only |
+| Lyapunov snapshot during polling | Blocks all polls | ContendedMutex per shard (exclusive); read-only |
 | Spawn during polling | Blocks behind poll lock | Region check (B) + task insert (A) pipelined |
 
 ## Invariants to Preserve (bd-1tc1m)
@@ -501,7 +501,7 @@ state mutex will need updating. Key categories:
 | Cross-shard task_completed | `shards_held`, `lock_order`, `duration_ns` | Lock acquisition waterfall |
 | Concurrent spawn + cancel | `task_id`, `region_id`, `cancel_seq` | Cancel propagation graph |
 | Obligation commit under load | `obligation_id`, `shard_wait_ns` | Obligation lifecycle timeline |
-| Snapshot during active work | `snapshot_duration_ns`, `stale_reads` | Read-lock contention profile |
+| Snapshot during active work | `snapshot_duration_ns`, `stale_reads` | Lock contention profile |
 
 ### Required Structured Logging Fields
 

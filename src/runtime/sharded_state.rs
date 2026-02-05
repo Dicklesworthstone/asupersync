@@ -36,7 +36,7 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::trace::TraceBufferHandle;
 use crate::types::{CancelAttributionConfig, RegionId, TaskId, Time};
-use crate::util::EntropySource;
+use crate::util::{ArenaIndex, EntropySource};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -125,7 +125,7 @@ pub struct ShardedState {
     pub regions: ContendedMutex<RegionTable>,
 
     /// The root region ID (set once at initialization).
-    pub root_region: Option<RegionId>,
+    root_region: AtomicU64,
 
     // ── Shard C: Obligations (WARM) ────────────────────────────────────
     /// Obligation table: resource tracking and commit/abort.
@@ -160,7 +160,7 @@ impl std::fmt::Debug for ShardedState {
         f.debug_struct("ShardedState")
             .field("tasks", &"<ContendedMutex<TaskTable>>")
             .field("regions", &"<ContendedMutex<RegionTable>>")
-            .field("root_region", &self.root_region)
+            .field("root_region", &self.root_region())
             .field("obligations", &"<ContendedMutex<ObligationTable>>")
             .field("leak_count", &self.leak_count.load(Ordering::Relaxed))
             .field("trace", &self.trace)
@@ -182,7 +182,7 @@ impl ShardedState {
         Self {
             tasks: ContendedMutex::new("tasks", TaskTable::new()),
             regions: ContendedMutex::new("regions", RegionTable::new()),
-            root_region: None,
+            root_region: AtomicU64::new(ROOT_REGION_NONE),
             obligations: ContendedMutex::new("obligations", ObligationTable::new()),
             leak_count: AtomicU64::new(0),
             trace,
@@ -216,6 +216,29 @@ impl ShardedState {
     #[must_use]
     pub fn leak_count(&self) -> u64 {
         self.leak_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the root region ID, if set.
+    #[inline]
+    #[must_use]
+    pub fn root_region(&self) -> Option<RegionId> {
+        decode_root_region(self.root_region.load(Ordering::Acquire))
+    }
+
+    /// Sets the root region ID.
+    ///
+    /// Returns `true` if the root region was set, `false` if it was already set.
+    pub fn set_root_region(&self, region: RegionId) -> bool {
+        let encoded = encode_root_region(region);
+        let result = self.root_region.compare_exchange(
+            ROOT_REGION_NONE,
+            encoded,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let set = result.is_ok();
+        debug_assert!(set, "root region already set");
+        set
     }
 
     /// Returns a clone of the trace handle.
@@ -254,6 +277,26 @@ impl ShardedState {
     }
 }
 
+const ROOT_REGION_NONE: u64 = 0;
+
+#[inline]
+fn encode_root_region(region: RegionId) -> u64 {
+    let arena = region.arena_index();
+    let index = u64::from(arena.index()).saturating_add(1);
+    let generation = u64::from(arena.generation()).saturating_add(1);
+    (generation << 32) | index
+}
+
+#[inline]
+fn decode_root_region(encoded: u64) -> Option<RegionId> {
+    if encoded == ROOT_REGION_NONE {
+        return None;
+    }
+    let index = ((encoded & 0xFFFF_FFFF) as u32).saturating_sub(1);
+    let generation = ((encoded >> 32) as u32).saturating_sub(1);
+    Some(RegionId::from_arena(ArenaIndex::new(index, generation)))
+}
+
 /// Guard for multi-shard operations that enforces canonical lock ordering.
 ///
 /// When operations require multiple shards, use `ShardGuard` to ensure
@@ -275,6 +318,9 @@ pub struct ShardGuard<'a> {
     pub tasks: Option<crate::sync::ContendedMutexGuard<'a, TaskTable>>,
     /// Obligation shard guard (Shard C), if acquired.
     pub obligations: Option<crate::sync::ContendedMutexGuard<'a, ObligationTable>>,
+    /// Number of debug lock entries recorded for this guard.
+    #[cfg(debug_assertions)]
+    debug_locks: usize,
 }
 
 impl<'a> ShardGuard<'a> {
@@ -283,11 +329,18 @@ impl<'a> ShardGuard<'a> {
     /// Use for: poll, push/pop/steal, wake_state operations.
     #[must_use]
     pub fn tasks_only(shards: &'a ShardedState) -> Self {
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Tasks);
+        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Tasks);
         Self {
             config: &shards.config,
             regions: None,
-            tasks: Some(shards.tasks.lock().expect("tasks lock poisoned")),
+            tasks: Some(tasks),
             obligations: None,
+            #[cfg(debug_assertions)]
+            debug_locks: 1,
         }
     }
 
@@ -297,18 +350,32 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_task_completed(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A→C (D is lock-free)
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Tasks);
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Tasks);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .expect("obligations lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Obligations);
 
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: Some(obligations),
+            #[cfg(debug_assertions)]
+            debug_locks: 3,
         }
     }
 
@@ -318,14 +385,24 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_cancel(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A (D is lock-free, C not needed)
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Tasks);
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Tasks);
 
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: None,
+            #[cfg(debug_assertions)]
+            debug_locks: 2,
         }
     }
 
@@ -335,17 +412,27 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_obligation(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→C (D is lock-free, A not needed)
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .expect("obligations lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Obligations);
 
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: None,
             obligations: Some(obligations),
+            #[cfg(debug_assertions)]
+            debug_locks: 2,
         }
     }
 
@@ -355,14 +442,24 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_spawn(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A (E read-only, D lock-free, C not needed)
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Tasks);
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Tasks);
 
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: None,
+            #[cfg(debug_assertions)]
+            debug_locks: 2,
         }
     }
 
@@ -372,19 +469,106 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn all(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A→C
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Tasks);
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Tasks);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .expect("obligations lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Obligations);
 
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: Some(obligations),
+            #[cfg(debug_assertions)]
+            debug_locks: 3,
         }
+    }
+}
+
+impl Drop for ShardGuard<'_> {
+    fn drop(&mut self) {
+        let obligations = self.obligations.take();
+        let tasks = self.tasks.take();
+        let regions = self.regions.take();
+        drop(obligations);
+        drop(tasks);
+        drop(regions);
+        #[cfg(debug_assertions)]
+        {
+            lock_order::unlock_n(self.debug_locks);
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockShard {
+    Regions,
+    Tasks,
+    Obligations,
+}
+
+#[cfg(debug_assertions)]
+impl LockShard {
+    const fn order(self) -> u8 {
+        match self {
+            Self::Regions => 0,
+            Self::Tasks => 1,
+            Self::Obligations => 2,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+mod lock_order {
+    use super::LockShard;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HELD: RefCell<Vec<LockShard>> = RefCell::new(Vec::new());
+    }
+
+    pub fn before_lock(next: LockShard) {
+        HELD.with(|held| {
+            let held = held.borrow();
+            if let Some(last) = held.last() {
+                debug_assert!(
+                    last.order() < next.order(),
+                    "lock order violation: {:?} before {:?}",
+                    last,
+                    next
+                );
+            }
+        });
+    }
+
+    pub fn after_lock(locked: LockShard) {
+        HELD.with(|held| {
+            held.borrow_mut().push(locked);
+        });
+    }
+
+    pub fn unlock_n(count: usize) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            for _ in 0..count {
+                held.pop();
+            }
+        });
     }
 }
 
@@ -415,9 +599,24 @@ mod tests {
         let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
         let state = ShardedState::new(trace, metrics, test_config());
 
-        assert!(state.root_region.is_none());
+        assert!(state.root_region().is_none());
         assert_eq!(state.current_time(), Time::ZERO);
         assert_eq!(state.leak_count(), 0);
+    }
+
+    #[test]
+    fn root_region_set_once() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let first = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let second = RegionId::from_arena(ArenaIndex::new(2, 0));
+
+        assert!(state.set_root_region(first));
+        assert_eq!(state.root_region(), Some(first));
+        assert!(!state.set_root_region(second));
+        assert_eq!(state.root_region(), Some(first));
     }
 
     #[test]

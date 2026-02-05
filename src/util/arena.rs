@@ -11,9 +11,10 @@
 //! - No unsafe code; relies on bounds checking and generation validation
 
 use core::fmt;
+use core::hash::{Hash, Hasher};
 
 /// An index into an arena with a generation counter for ABA safety.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ArenaIndex {
     index: u32,
     generation: u32,
@@ -42,6 +43,13 @@ impl ArenaIndex {
 impl fmt::Debug for ArenaIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ArenaIndex({}:{})", self.index, self.generation)
+    }
+}
+
+impl Hash for ArenaIndex {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let packed = (u64::from(self.index) << 32) | u64::from(self.generation);
+        state.write_u64(packed);
     }
 }
 
