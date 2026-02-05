@@ -117,6 +117,8 @@ impl OwnedReadHalf {
     /// different streams.
     pub fn reunite(self, other: OwnedWriteHalf) -> Result<super::UnixStream, ReuniteError> {
         if Arc::ptr_eq(&self.inner, &other.inner) {
+            let mut other = other;
+            other.shutdown_on_drop = false;
             drop(other);
             // Note: Original registration is lost when splitting; reunited stream gets fresh lazy registration
             Ok(super::UnixStream::from_parts(self.inner))
@@ -152,14 +154,22 @@ impl AsyncRead for OwnedReadHalf {
 /// Created by [`UnixStream::into_split`](super::UnixStream::into_split).
 /// Can be reunited with [`OwnedReadHalf`] using
 /// [`OwnedReadHalf::reunite`](OwnedReadHalf::reunite).
+///
+/// By default, the stream's write direction is shut down when this half
+/// is dropped. Use [`set_shutdown_on_drop(false)`][Self::set_shutdown_on_drop]
+/// to disable this behavior.
 #[derive(Debug)]
 pub struct OwnedWriteHalf {
     pub(crate) inner: Arc<net::UnixStream>,
+    shutdown_on_drop: bool,
 }
 
 impl OwnedWriteHalf {
     pub(crate) fn new(inner: Arc<net::UnixStream>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            shutdown_on_drop: true,
+        }
     }
 
     /// Shuts down the write side of the stream.
@@ -168,6 +178,13 @@ impl OwnedWriteHalf {
     /// original stream.
     pub fn shutdown(&self) -> io::Result<()> {
         self.inner.shutdown(Shutdown::Write)
+    }
+
+    /// Controls whether the write direction is shut down when dropped.
+    ///
+    /// Default is `true`.
+    pub fn set_shutdown_on_drop(&mut self, shutdown: bool) {
+        self.shutdown_on_drop = shutdown;
     }
 }
 
@@ -203,6 +220,14 @@ impl AsyncWrite for OwnedWriteHalf {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.inner.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for OwnedWriteHalf {
+    fn drop(&mut self) {
+        if self.shutdown_on_drop {
+            let _ = self.inner.shutdown(Shutdown::Write);
+        }
     }
 }
 

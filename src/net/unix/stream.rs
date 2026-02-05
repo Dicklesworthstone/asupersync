@@ -778,7 +778,7 @@ fn recv_with_ancillary_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{IoSlice, IoSliceMut, Read};
+    use std::io::{self, IoSlice, IoSliceMut, Read};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -853,6 +853,41 @@ mod tests {
         // into_split should work
         let (_read, _write) = s1.into_split();
         crate::test_complete!("test_into_split");
+    }
+
+    #[test]
+    fn owned_write_half_shutdown_on_drop() {
+        init_test("owned_write_half_shutdown_on_drop");
+        let (s1, mut s2) = UnixStream::pair().expect("pair failed");
+
+        let (_read, write) = s1.into_split();
+        drop(write);
+
+        let mut buf = [0u8; 1];
+        let mut is_shutdown = false;
+        for _ in 0..64 {
+            match s2.read(&mut buf) {
+                Ok(0) | Ok(_) => {
+                    is_shutdown = true;
+                    break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now();
+                }
+                Err(_) => {
+                    is_shutdown = true;
+                    break;
+                }
+            }
+        }
+
+        crate::assert_with_log!(
+            is_shutdown,
+            "write half shutdown on drop",
+            true,
+            is_shutdown
+        );
+        crate::test_complete!("owned_write_half_shutdown_on_drop");
     }
 
     #[test]
