@@ -272,7 +272,7 @@ where
         peer_addr: Option<SocketAddr>,
     ) -> Result<ConnectionState, HttpError>
     where
-        T: AsyncRead + AsyncWrite + Unpin,
+        T: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)

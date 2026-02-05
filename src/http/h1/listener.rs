@@ -233,10 +233,9 @@ where
                 shutdown_signal,
                 runtime,
             ) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to spawn connection task: {err}"),
-                ));
+                return Err(io::Error::other(format!(
+                    "failed to spawn connection task: {err}"
+                )));
             }
         }
 
@@ -259,7 +258,7 @@ enum AcceptOrShutdown {
     Shutdown,
 }
 
-/// Spawn a connection handler on a new thread.
+/// Spawn a connection handler as a runtime task.
 ///
 /// The connection guard is held for the lifetime of the handler,
 /// ensuring proper tracking during drain.
@@ -275,12 +274,11 @@ where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send + 'static,
 {
-    let handler = Arc::clone(&handler);
     runtime.try_spawn(async move {
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal);
-let peer_addr = stream.peer_addr().ok();
+        let peer_addr = stream.peer_addr().ok();
         let _ = server.serve_with_peer_addr(stream, peer_addr).await;
     })?;
     Ok(())

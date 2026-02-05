@@ -2,20 +2,27 @@
 
 ## RuntimeState Struct Definition
 
-**File:** `src/runtime/state.rs` lines 318-364
+**File:** `src/runtime/state.rs` lines 318-372
 
 | # | Field | Type | Hot Path? |
 |---|-------|------|-----------|
-| 1 | `regions` | `Arena<RegionRecord>` | Warm |
-| 2 | `tasks` | `Arena<TaskRecord>` | **HOT** |
-| 3 | `obligations` | `Arena<ObligationRecord>` | Warm |
+| 1 | `regions` | `RegionTable` | Warm |
+| 2 | `tasks` | `TaskTable` (includes stored futures) | **HOT** |
+| 3 | `obligations` | `ObligationTable` | Warm |
 | 4 | `now` | `Time` | Read-only (prod) |
 | 5 | `root_region` | `Option<RegionId>` | Cold |
 | 6 | `trace` | `TraceBufferHandle` | Warm (append-only, internally atomic) |
 | 7 | `metrics` | `Arc<dyn MetricsProvider>` | Hot (Arc clone) |
-| 8 | `stored_futures` | `HashMap<TaskId, StoredTask>` | **HOT** |
-| 9-15 | Config fields | Various | Read-only after init |
-| 16-18 | Leak tracking | Various | Cold |
+| 8 | `io_driver` | `Option<IoDriverHandle>` | Warm |
+| 9 | `timer_driver` | `Option<TimerDriverHandle>` | Warm |
+| 10 | `logical_clock_mode` | `LogicalClockMode` | Read-only after init |
+| 11 | `cancel_attribution` | `CancelAttributionConfig` | Read-only after init |
+| 12 | `entropy_source` | `Arc<dyn EntropySource>` | Read-only after init |
+| 13 | `observability` | `Option<RuntimeObservability>` | Read-only after init |
+| 14 | `blocking_pool` | `Option<BlockingPoolHandle>` | Warm |
+| 15 | `obligation_leak_response` | `ObligationLeakResponse` | Read-only after init |
+| 16 | `leak_escalation` | `Option<LeakEscalation>` | Read-only after init |
+| 17 | `leak_count` | `u64` | Cold |
 
 **Current synchronization:** Single `Arc<Mutex<RuntimeState>>` shared by all workers.
 
@@ -50,10 +57,10 @@
 |-----------|---------------|-----------|
 | `task_completed` | tasks + obligations + regions + trace + metrics + now + leak_count | Per task complete |
 | `cancel_request` | regions + tasks + trace + metrics + now | Per cancellation |
-| `advance_region_state` | regions + tasks + obligations + trace + stored_futures + now | Per region transition |
+| `advance_region_state` | regions + tasks + obligations + trace + now | Per region transition |
 | `create_task` | tasks + regions + now + trace + metrics + config | Per spawn |
 | `create/commit/abort_obligation` | obligations + regions + trace + metrics + now | Per obligation |
-| `drain_ready_async_finalizers` | regions + tasks + stored_futures + now + trace | After task_completed |
+| `drain_ready_async_finalizers` | regions + tasks + now + trace | After task_completed |
 | `snapshot` / `is_quiescent` | ALL arenas + trace + now | Diagnostics only |
 
 ## Proposed Shard Boundaries
@@ -78,13 +85,13 @@
 
 ### Shard E: ConfigShard (io_driver, timer_driver, clock mode, entropy, etc.)
 - Read-only after initialization
-- Should be `Arc<RuntimeConfig>` with no lock needed
+- Should be `Arc<ShardedConfig>` with no lock needed
 
 ## Quick Wins (low risk, high impact)
 
 1. **Extract `trace` + `metrics` from Mutex** — both wrap Arc with internal atomics. Clone once at scheduler init. Removes instrumentation from lock path.
 
-2. **Extract config as `Arc<RuntimeConfig>`** — fields 9-15 are never written after init. Zero-cost reads.
+2. **Extract config as `Arc<ShardedConfig>`** — fields 10-16 are never written after init. Zero-cost reads.
 
 3. **Make `now` an `AtomicU64` in production** — read-only in prod (only Lab writes). Eliminates from lock path.
 
@@ -119,7 +126,7 @@ E (Config) → D (Instrumentation) → B (Regions) → A (Tasks) → C (Obligati
 ### Rationale
 
 1. **E (Config)** first — read-only after init, so locks are brief or zero-cost
-   (`Arc<RuntimeConfig>` needs no lock). Listed first because it's accessed
+   (`Arc<ShardedConfig>` needs no lock). Listed first because it's accessed
    earliest in task creation (building Cx).
 
 2. **D (Instrumentation)** second — trace/metrics are append-only and may
@@ -131,7 +138,7 @@ E (Config) → D (Instrumentation) → B (Regions) → A (Tasks) → C (Obligati
 
 ## Shard Responsibilities (bd-2ijqf)
 
-- **E (Config)**: Immutable `RuntimeConfig` and read-only handles. Prefer `Arc`
+- **E (Config)**: Immutable `ShardedConfig` and read-only handles. Prefer `Arc`
   and avoid locks entirely after initialization.
 - **D (Instrumentation)**: Trace/metrics handles and any structured logging
   buffers. Keep read-mostly and avoid holding across task polling.
@@ -216,8 +223,7 @@ These sequences MUST NOT occur:
 /// Multi-shard lock guard that enforces canonical ordering at the type level.
 /// Fields are Option<MutexGuard> acquired in order during construction.
 pub struct ShardGuard<'a> {
-    config: &'a Arc<RuntimeConfig>,        // E: no lock needed
-    instrumentation: Option<InstrGuard>,   // D: trace + metrics
+    config: &'a Arc<ShardedConfig>,              // E: no lock needed
     regions: Option<MutexGuard<'a, RegionShard>>,     // B
     tasks: Option<MutexGuard<'a, TaskShard>>,         // A
     obligations: Option<MutexGuard<'a, ObligationShard>>, // C
@@ -348,7 +354,7 @@ pub struct ShardedState {
     pub tasks: Mutex<TaskShard>,
     pub regions: Mutex<RegionShard>,
     pub obligations: Mutex<ObligationShard>,
-    pub config: Arc<RuntimeConfig>,         // Shard E: read-only
+    pub config: Arc<ShardedConfig>,         // Shard E: read-only
 }
 ```
 
@@ -402,7 +408,7 @@ created for a dead task.
 
 ### INV-4: Region State Machine
 
-Region transitions (Open → Closing → Closed → Drained) must be
+Region transitions (Open → Closing → Draining → Finalizing → Closed) must be
 monotonic and consistent with child task/obligation counts. The
 `advance_region_state` cascade (B→A→C) must not skip states or
 leave a region stuck in Closing with zero children.

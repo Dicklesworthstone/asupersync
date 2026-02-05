@@ -4,13 +4,14 @@
 //! This module defines the internal record structure for tracking task state.
 
 use crate::cx::Cx;
-use crate::tracing_compat::{debug, trace};
+use crate::tracing_compat::trace;
 use crate::types::{
     Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::Waker;
+#[cfg(feature = "tracing-integration")]
 use std::time::Instant;
 
 /// The concrete outcome type stored in task records (Phase 0).
@@ -280,6 +281,7 @@ pub struct TaskRecord {
     /// Total number of polls executed (for completion metrics).
     pub total_polls: u64,
     /// Wall-clock instant when the task was created (for duration tracking).
+    #[cfg(feature = "tracing-integration")]
     pub created_instant: Instant,
     /// Lab-only: last step this task was polled (for futurelock detection).
     pub last_polled_step: u64,
@@ -339,6 +341,7 @@ impl TaskRecord {
             created_at,
             polls_remaining: budget.poll_quota,
             total_polls: 0,
+            #[cfg(feature = "tracing-integration")]
             created_instant: Instant::now(),
             last_polled_step: 0,
             waiters: Vec::new(),
@@ -527,7 +530,7 @@ impl TaskRecord {
                 } else {
                     self.cancel_epoch = self.cancel_epoch.saturating_add(1);
                 }
-                debug!(
+                crate::tracing_compat::debug!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
                     old_state = _prev_state,
@@ -618,25 +621,28 @@ impl TaskRecord {
         if self.state.is_terminal() {
             return false;
         }
-        let _prev_state = self.state_name();
-        let _outcome_label = match &outcome {
-            Outcome::Ok(()) => "Ok",
-            Outcome::Err(_) => "Err",
-            Outcome::Cancelled(_) => "Cancelled",
-            Outcome::Panicked(_) => "Panicked",
-        };
-        let _duration_us = self.created_instant.elapsed().as_micros() as u64;
-        let _total_polls = self.total_polls;
-        debug!(
-            task_id = ?self.id,
-            region_id = ?self.owner,
-            old_state = _prev_state,
-            new_state = "Completed",
-            outcome_kind = _outcome_label,
-            duration_us = _duration_us,
-            poll_count = _total_polls,
-            "task completed"
-        );
+        #[cfg(feature = "tracing-integration")]
+        {
+            let prev_state = self.state_name();
+            let outcome_label = match &outcome {
+                Outcome::Ok(()) => "Ok",
+                Outcome::Err(_) => "Err",
+                Outcome::Cancelled(_) => "Cancelled",
+                Outcome::Panicked(_) => "Panicked",
+            };
+            let duration_us = self.created_instant.elapsed().as_micros() as u64;
+            let total_polls = self.total_polls;
+            crate::tracing_compat::debug!(
+                task_id = ?self.id,
+                region_id = ?self.owner,
+                old_state = prev_state,
+                new_state = "Completed",
+                outcome_kind = outcome_label,
+                duration_us = duration_us,
+                poll_count = total_polls,
+                "task completed"
+            );
+        }
         self.state = TaskState::Completed(outcome);
         self.phase.store(TaskPhase::Completed);
         true
@@ -760,21 +766,24 @@ impl TaskRecord {
         };
         let reason = reason.clone();
         let budget = *cleanup_budget;
-        let _duration_us = self.created_instant.elapsed().as_micros() as u64;
-        let _total_polls = self.total_polls;
-        debug!(
-            task_id = ?self.id,
-            region_id = ?self.owner,
-            old_state = "Finalizing",
-            new_state = "Completed",
-            outcome_kind = "Cancelled",
-            cancel_kind = ?reason.kind,
-            finalizer_budget_poll_quota = budget.poll_quota,
-            finalizer_budget_priority = budget.priority,
-            duration_us = _duration_us,
-            poll_count = _total_polls,
-            "task finalization done"
-        );
+        #[cfg(feature = "tracing-integration")]
+        {
+            let duration_us = self.created_instant.elapsed().as_micros() as u64;
+            let total_polls = self.total_polls;
+            crate::tracing_compat::debug!(
+                task_id = ?self.id,
+                region_id = ?self.owner,
+                old_state = "Finalizing",
+                new_state = "Completed",
+                outcome_kind = "Cancelled",
+                cancel_kind = ?reason.kind,
+                finalizer_budget_poll_quota = budget.poll_quota,
+                finalizer_budget_priority = budget.priority,
+                duration_us = duration_us,
+                poll_count = total_polls,
+                "task finalization done"
+            );
+        }
         let _ = budget;
         self.state = TaskState::Completed(Outcome::Cancelled(reason.clone()));
         self.phase.store(TaskPhase::Completed);

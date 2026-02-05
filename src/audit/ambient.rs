@@ -106,15 +106,6 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     // ── Spawn ───────────────────────────────────────────────────────────
     AmbientFinding {
-        file: "http/h1/listener.rs",
-        line: 254,
-        category: AmbientCategory::Spawn,
-        severity: Severity::Critical,
-        description: "std::thread::spawn for per-connection handler",
-        exempt: false,
-        exemption_reason: None,
-    },
-    AmbientFinding {
         file: "time/sleep.rs",
         line: 421,
         category: AmbientCategory::Spawn,
@@ -212,11 +203,10 @@ mod tests {
     #[test]
     fn critical_findings_exist() {
         let critical = count_by_severity(Severity::Critical);
-        // Critical: HTTP listener spawn, HTTP stream spawn, connection spawn,
-        // WebSocket frame entropy.
+        // Critical: HTTP/1 stream spawn and WebSocket frame entropy.
         assert!(
-            critical >= 3,
-            "Expected at least 3 non-exempt critical findings, got {critical}"
+            critical >= 2,
+            "Expected at least 2 non-exempt critical findings, got {critical}"
         );
     }
 

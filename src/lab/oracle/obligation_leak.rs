@@ -165,6 +165,7 @@ impl ObligationLeakOracle {
                     });
                 }
             }
+            leaked.sort_by_key(|leak| leak.obligation);
 
             if !leaked.is_empty() {
                 return Err(ObligationLeakViolation {

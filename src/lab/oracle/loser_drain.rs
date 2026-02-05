@@ -153,7 +153,12 @@ impl LoserDrainOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(LoserDrainViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), LoserDrainViolation> {
-        for (&race_id, complete_record) in &self.completed_races {
+        let mut race_ids: Vec<u64> = self.completed_races.keys().copied().collect();
+        race_ids.sort_unstable();
+        for race_id in race_ids {
+            let Some(complete_record) = self.completed_races.get(&race_id) else {
+                continue;
+            };
             let Some(race_record) = self.active_races.get(&race_id) else {
                 continue;
             };

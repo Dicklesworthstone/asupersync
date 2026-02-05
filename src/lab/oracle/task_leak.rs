@@ -102,18 +102,22 @@ impl TaskLeakOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(TaskLeakViolation)` if a violation is detected
     pub fn check(&self, _now: Time) -> Result<(), TaskLeakViolation> {
-        for (&region, &close_time) in &self.region_closes {
+        let mut regions: Vec<RegionId> = self.region_closes.keys().copied().collect();
+        regions.sort();
+        for region in regions {
+            let Some(&close_time) = self.region_closes.get(&region) else {
+                continue;
+            };
             let Some(tasks) = self.tasks_by_region.get(&region) else {
                 continue; // No tasks spawned in this region
             };
 
-            let mut leaked = Vec::new();
-
-            for &task in tasks {
-                if !self.completed_tasks.contains(&task) {
-                    leaked.push(task);
-                }
-            }
+            let mut leaked: Vec<TaskId> = tasks
+                .iter()
+                .copied()
+                .filter(|task| !self.completed_tasks.contains(task))
+                .collect();
+            leaked.sort();
 
             if !leaked.is_empty() {
                 return Err(TaskLeakViolation {
