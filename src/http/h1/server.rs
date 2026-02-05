@@ -6,12 +6,16 @@
 //! and graceful shutdown.
 
 use crate::codec::Framed;
+use crate::cx::Cx;
 use crate::http::h1::codec::{Http1Codec, HttpError};
 use crate::http::h1::types::{Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite};
+use crate::server::shutdown::ShutdownSignal;
 use crate::stream::Stream;
-use std::future::Future;
+use crate::time::{timeout, wall_now};
+use std::future::{poll_fn, Future};
 use std::pin::Pin;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 /// Configuration for HTTP/1.1 server connections.
@@ -108,6 +112,12 @@ pub enum ConnectionPhase {
     Closing,
 }
 
+#[derive(Debug)]
+enum ReadOutcome {
+    Read(Option<Result<Request, HttpError>>),
+    Shutdown,
+}
+
 impl ConnectionState {
     fn new() -> Self {
         let now = Instant::now();
@@ -159,24 +169,86 @@ impl ConnectionState {
 pub struct Http1Server<F> {
     handler: F,
     config: Http1Config,
+    shutdown_signal: Option<ShutdownSignal>,
 }
 
 impl<F, Fut> Http1Server<F>
 where
-    F: Fn(Request) -> Fut,
-    Fut: Future<Output = Response>,
+    F: Fn(Request) -> Fut + Send + Sync,
+    Fut: Future<Output = Response> + Send,
 {
     /// Create a new server with the given handler function.
     pub fn new(handler: F) -> Self {
         Self {
             handler,
             config: Http1Config::default(),
+            shutdown_signal: None,
         }
     }
 
     /// Create a new server with custom configuration.
     pub fn with_config(handler: F, config: Http1Config) -> Self {
-        Self { handler, config }
+        Self {
+            handler,
+            config,
+            shutdown_signal: None,
+        }
+    }
+
+    /// Attach a shutdown signal for graceful drain / force-close coordination.
+    #[must_use]
+    pub fn with_shutdown_signal(mut self, signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = Some(signal);
+        self
+    }
+
+    async fn read_next<T>(
+        &self,
+        framed: &mut Framed<T, Http1Codec>,
+        state: &ConnectionState,
+    ) -> Option<ReadOutcome>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let read_future = Box::pin(async {
+            if let Some(signal) = &self.shutdown_signal {
+                if signal.is_shutting_down() {
+                    return ReadOutcome::Shutdown;
+                }
+
+                let mut read_fut = std::pin::pin!(framed.poll_next_ready());
+                let mut shutdown_fut = std::pin::pin!(signal.phase_changed());
+
+                poll_fn(|cx| {
+                    if signal.is_shutting_down() {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
+                    if shutdown_fut.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
+                    if let Poll::Ready(r) = read_fut.as_mut().poll(cx) {
+                        return Poll::Ready(ReadOutcome::Read(r));
+                    }
+                    Poll::Pending
+                })
+                .await
+            } else {
+                ReadOutcome::Read(framed.poll_next_ready().await)
+            }
+        });
+
+        if state.requests_served > 0 {
+            if let Some(idle_timeout) = self.config.idle_timeout {
+                let now = Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(wall_now, |timer| timer.now());
+                timeout(now, idle_timeout, read_future).await.ok()
+            } else {
+                Some(read_future.await)
+            }
+        } else {
+            Some(read_future.await)
+        }
     }
 
     /// Serve a single connection, processing requests until the connection
@@ -185,7 +257,7 @@ where
     /// Returns the final connection state along with the result.
     pub async fn serve<T>(self, io: T) -> Result<ConnectionState, HttpError>
     where
-        T: AsyncRead + AsyncWrite + Unpin,
+        T: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)
@@ -195,6 +267,15 @@ where
 
         loop {
             state.phase = ConnectionPhase::Idle;
+
+            if self
+                .shutdown_signal
+                .as_ref()
+                .is_some_and(ShutdownSignal::is_shutting_down)
+            {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
 
             // Check request limit before reading next request
             if state.exceeded_request_limit(self.config.max_requests_per_connection) {
@@ -210,8 +291,21 @@ where
 
             state.phase = ConnectionPhase::Reading;
 
+            let Some(read_outcome) = self.read_next(&mut framed, &state).await else {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            };
+
+            let req = match read_outcome {
+                ReadOutcome::Shutdown => {
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+                ReadOutcome::Read(r) => r,
+            };
+
             // Read next request
-            let req = match Pin::new(&mut framed).poll_next_ready().await {
+            let req = match req {
                 Some(Ok(req)) => req,
                 Some(Err(e)) => return Err(e),
                 None => {

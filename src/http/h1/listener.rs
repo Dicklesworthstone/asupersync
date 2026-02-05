@@ -216,7 +216,8 @@ where
             // Spawn connection handler
             let handler = Arc::clone(&self.handler);
             let http_config = self.config.http_config.clone();
-            spawn_connection(stream, guard, handler, http_config);
+            let shutdown_signal = self.shutdown_signal.clone();
+            spawn_connection(stream, guard, handler, http_config, shutdown_signal);
         }
 
         // Drain phase
@@ -247,13 +248,16 @@ fn spawn_connection<F, Fut>(
     guard: ConnectionGuard,
     handler: Arc<F>,
     config: Http1Config,
+    shutdown_signal: ShutdownSignal,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send,
 {
+    // ubs:ignore — intentional per-connection thread; ConnectionGuard tracks lifetime
     std::thread::spawn(move || {
         let _guard = guard;
-        let server = Http1Server::with_config(move |req| handler(req), config);
+        let server = Http1Server::with_config(move |req| handler(req), config)
+            .with_shutdown_signal(shutdown_signal);
         // Drive the server future to completion using a thread-parking waker
         let mut fut = Box::pin(server.serve(stream));
         let thread = std::thread::current();

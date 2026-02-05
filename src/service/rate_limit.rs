@@ -226,7 +226,14 @@ impl<S> RateLimit<S> {
 
         let last_refill = state.last_refill.unwrap_or(now);
         let elapsed_nanos = now.as_nanos().saturating_sub(last_refill.as_nanos());
-        let period_nanos = self.period.as_nanos() as u64;
+        let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
+
+        if period_nanos == 0 {
+            // Zero period means "no throttling": keep the bucket full.
+            state.tokens = self.rate;
+            state.last_refill = Some(now);
+            return;
+        }
 
         if period_nanos > 0 && elapsed_nanos > 0 {
             // Calculate how many periods have passed
@@ -634,6 +641,28 @@ mod tests {
         let available = svc.available_tokens();
         crate::assert_with_log!(available == 4, "available", 4, available);
         crate::test_complete!("poll_ready_uses_time_getter");
+    }
+
+    #[test]
+    fn zero_period_keeps_bucket_full() {
+        init_test("zero_period_keeps_bucket_full");
+        let mut svc = RateLimit::with_time_getter(EchoService, 2, Duration::ZERO, test_time);
+        {
+            let mut state = svc.state.lock().unwrap();
+            state.tokens = 0;
+            state.last_refill = Some(Time::from_secs(0));
+        }
+
+        TEST_NOW.store(1, Ordering::SeqCst);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(first.is_ready(), "first ready", true, first.is_ready());
+
+        let second = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(second.is_ready(), "second ready", true, second.is_ready());
+        crate::test_complete!("zero_period_keeps_bucket_full");
     }
 
     #[test]
