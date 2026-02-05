@@ -559,6 +559,7 @@ impl TokenKind for IoOpKind {
 #[must_use = "obligation tokens must be consumed via commit() or abort()"]
 pub struct ObligationToken<K: TokenKind> {
     description: String,
+    armed: bool,
     _kind: PhantomData<K>,
 }
 
@@ -569,6 +570,7 @@ impl<K: TokenKind> ObligationToken<K> {
     pub fn reserve(description: impl Into<String>) -> Self {
         Self {
             description: description.into(),
+            armed: true,
             _kind: PhantomData,
         }
     }
@@ -576,17 +578,16 @@ impl<K: TokenKind> ObligationToken<K> {
     /// Commit the obligation, consuming the token and returning a
     /// [`CommittedProof`].
     #[must_use]
-    pub fn commit(self) -> CommittedProof<K> {
-        // Disarm the drop bomb by consuming self without running Drop.
-        std::mem::forget(self);
+    pub fn commit(mut self) -> CommittedProof<K> {
+        self.armed = false;
         CommittedProof { _kind: PhantomData }
     }
 
     /// Abort the obligation, consuming the token and returning an
     /// [`AbortedProof`].
     #[must_use]
-    pub fn abort(self) -> AbortedProof<K> {
-        std::mem::forget(self);
+    pub fn abort(mut self) -> AbortedProof<K> {
+        self.armed = false;
         AbortedProof { _kind: PhantomData }
     }
 
@@ -594,13 +595,13 @@ impl<K: TokenKind> ObligationToken<K> {
     ///
     /// Use only for FFI boundaries, test harnesses, or migration paths.
     #[must_use]
-    pub fn into_raw(self) -> RawObligation {
-        let raw = RawObligation {
+    pub fn into_raw(mut self) -> RawObligation {
+        self.armed = false;
+        let description = std::mem::take(&mut self.description);
+        RawObligation {
             kind: K::obligation_kind(),
-            description: self.description.clone(),
-        };
-        std::mem::forget(self);
-        raw
+            description,
+        }
     }
 
     /// Returns the description.
@@ -612,12 +613,14 @@ impl<K: TokenKind> ObligationToken<K> {
 
 impl<K: TokenKind> Drop for ObligationToken<K> {
     fn drop(&mut self) {
-        panic!(
-            "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
-             Call .commit() or .abort() before scope exit.",
-            K::obligation_kind(),
-            self.description,
-        );
+        if self.armed {
+            panic!(
+                "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
+                 Call .commit() or .abort() before scope exit.",
+                K::obligation_kind(),
+                self.description,
+            );
+        }
     }
 }
 
