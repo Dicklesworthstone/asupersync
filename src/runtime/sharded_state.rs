@@ -25,7 +25,9 @@
 //!
 //! See `docs/runtime_state_contention_inventory.md` for the full spec.
 
+use crate::cx::cx::ObservabilityState;
 use crate::observability::metrics::MetricsProvider;
+use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
@@ -33,10 +35,52 @@ use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::trace::TraceBufferHandle;
-use crate::types::{CancelAttributionConfig, RegionId, Time};
+use crate::types::{CancelAttributionConfig, RegionId, TaskId, Time};
 use crate::util::EntropySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Observability configuration wrapper for sharded state.
+///
+/// Stores the observability config and a pre-created log collector
+/// for efficient per-task observability state creation.
+#[derive(Debug, Clone)]
+pub struct ShardedObservability {
+    config: ObservabilityConfig,
+    collector: LogCollector,
+}
+
+impl ShardedObservability {
+    /// Creates a new observability wrapper from the given config.
+    #[must_use]
+    pub fn new(config: ObservabilityConfig) -> Self {
+        let collector = config.create_collector();
+        Self { config, collector }
+    }
+
+    /// Creates an `ObservabilityState` for a specific task.
+    #[must_use]
+    pub fn for_task(&self, region: RegionId, task: TaskId) -> ObservabilityState {
+        ObservabilityState::new_with_config(
+            region,
+            task,
+            &self.config,
+            Some(self.collector.clone()),
+        )
+    }
+
+    /// Returns a reference to the underlying config.
+    #[must_use]
+    pub fn config(&self) -> &ObservabilityConfig {
+        &self.config
+    }
+
+    /// Returns a clone of the log collector.
+    #[must_use]
+    pub fn collector(&self) -> LogCollector {
+        self.collector.clone()
+    }
+}
 
 /// Read-only runtime configuration for sharded state (Shard E).
 ///
@@ -60,6 +104,8 @@ pub struct ShardedConfig {
     pub obligation_leak_response: ObligationLeakResponse,
     /// Optional escalation policy for obligation leaks.
     pub leak_escalation: Option<LeakEscalation>,
+    /// Optional observability configuration for runtime contexts.
+    pub observability: Option<ShardedObservability>,
 }
 
 /// Sharded runtime state with independent locks per shard.
@@ -253,7 +299,10 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A→C (D is lock-free)
         let regions = shards.regions.lock().expect("regions lock poisoned");
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
-        let obligations = shards.obligations.lock().expect("obligations lock poisoned");
+        let obligations = shards
+            .obligations
+            .lock()
+            .expect("obligations lock poisoned");
 
         Self {
             config: &shards.config,
@@ -287,7 +336,10 @@ impl<'a> ShardGuard<'a> {
     pub fn for_obligation(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→C (D is lock-free, A not needed)
         let regions = shards.regions.lock().expect("regions lock poisoned");
-        let obligations = shards.obligations.lock().expect("obligations lock poisoned");
+        let obligations = shards
+            .obligations
+            .lock()
+            .expect("obligations lock poisoned");
 
         Self {
             config: &shards.config,
@@ -322,7 +374,10 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A→C
         let regions = shards.regions.lock().expect("regions lock poisoned");
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
-        let obligations = shards.obligations.lock().expect("obligations lock poisoned");
+        let obligations = shards
+            .obligations
+            .lock()
+            .expect("obligations lock poisoned");
 
         Self {
             config: &shards.config,
@@ -350,6 +405,7 @@ mod tests {
             blocking_pool: None,
             obligation_leak_response: ObligationLeakResponse::Log,
             leak_escalation: None,
+            observability: None,
         }
     }
 

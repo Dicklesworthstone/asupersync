@@ -165,7 +165,7 @@ pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, So
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
 pub use region_table::RegionTable;
 pub use scheduler::Scheduler;
-pub use sharded_state::{ShardedConfig, ShardedState, ShardGuard};
+pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RegionCreateError, RuntimeSnapshot, RuntimeState, SpawnError};
 pub use stored_task::StoredTask;
