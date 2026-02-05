@@ -510,8 +510,10 @@ mod tests {
             let started_signal = Arc::clone(&started);
             let finished_signal = Arc::clone(&finished);
 
-            let mut config = Http1ListenerConfig::default();
-            config.drain_timeout = Duration::from_millis(0);
+            let config = Http1ListenerConfig {
+                drain_timeout: Duration::from_millis(0),
+                ..Default::default()
+            };
 
             let listener = Http1Listener::bind_with_config(
                 "127.0.0.1:0",

@@ -62,7 +62,10 @@ impl ResolverConfig {
     #[must_use]
     pub fn google() -> Self {
         Self {
-            nameservers: vec!["8.8.8.8:53".parse().unwrap(), "8.8.4.4:53".parse().unwrap()],
+            nameservers: vec![
+                SocketAddr::from(([8, 8, 8, 8], 53)),
+                SocketAddr::from(([8, 8, 4, 4], 53)),
+            ],
             ..Default::default()
         }
     }
@@ -71,7 +74,10 @@ impl ResolverConfig {
     #[must_use]
     pub fn cloudflare() -> Self {
         Self {
-            nameservers: vec!["1.1.1.1:53".parse().unwrap(), "1.0.0.1:53".parse().unwrap()],
+            nameservers: vec![
+                SocketAddr::from(([1, 1, 1, 1], 53)),
+                SocketAddr::from(([1, 0, 0, 1], 53)),
+            ],
             ..Default::default()
         }
     }

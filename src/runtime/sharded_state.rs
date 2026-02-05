@@ -236,9 +236,7 @@ impl ShardedState {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        let set = result.is_ok();
-        debug_assert!(set, "root region already set");
-        set
+        result.is_ok()
     }
 
     /// Returns a clone of the trace handle.

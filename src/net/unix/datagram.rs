@@ -963,7 +963,7 @@ mod tests {
                 .expect("peek_from failed");
             crate::assert_with_log!(n == 4, "peek bytes", 4, n);
             crate::assert_with_log!(&peek_buf == b"peek", "peek data", b"peek", peek_buf);
-            let peek_path = addr.as_pathname().map(|p| p.to_path_buf());
+            let peek_path = addr.as_pathname().map(std::path::Path::to_path_buf);
             crate::assert_with_log!(
                 peek_path.as_ref() == Some(&client_path),
                 "peek addr",
@@ -978,7 +978,7 @@ mod tests {
                 .expect("recv_from failed");
             crate::assert_with_log!(n2 == 4, "recv bytes", 4, n2);
             crate::assert_with_log!(&recv_buf == b"peek", "recv data", b"peek", recv_buf);
-            let recv_path = addr2.as_pathname().map(|p| p.to_path_buf());
+            let recv_path = addr2.as_pathname().map(std::path::Path::to_path_buf);
             crate::assert_with_log!(
                 recv_path.as_ref() == Some(&client_path),
                 "recv addr",
