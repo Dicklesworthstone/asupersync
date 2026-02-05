@@ -290,12 +290,30 @@ impl Bulkhead {
         }
 
         // Find first waiting entry that can be granted
-        let available = self.available_permits.load(Ordering::SeqCst);
         for entry in queue.iter_mut() {
-            if entry.result.is_none() && entry.weight <= available {
-                // Grant this entry
-                self.available_permits
-                    .fetch_sub(entry.weight, Ordering::SeqCst);
+            if entry.result.is_none() {
+                // CAS loop to safely consume permits (prevents TOCTOU race with try_acquire)
+                let granted = loop {
+                    let current = self.available_permits.load(Ordering::SeqCst);
+                    if current < entry.weight {
+                        break false;
+                    }
+                    if self
+                        .available_permits
+                        .compare_exchange(
+                            current,
+                            current - entry.weight,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        break true;
+                    }
+                };
+                if !granted {
+                    continue;
+                }
                 entry.result = Some(Ok(()));
 
                 // Record wait time
