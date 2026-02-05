@@ -754,12 +754,7 @@ impl MarkingAnalyzer {
                 let pending = self.marking.region_pending(*region);
                 if pending > 0 {
                     // Check each kind for this region.
-                    for kind in [
-                        ObligationKind::SendPermit,
-                        ObligationKind::Ack,
-                        ObligationKind::Lease,
-                        ObligationKind::IoOp,
-                    ] {
+                    for kind in ALL_KINDS {
                         let count = self.marking.get(kind, *region);
                         if count > 0 {
                             self.leaks.push(LeakViolation {
