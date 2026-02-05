@@ -70,6 +70,78 @@ impl PartialOrd for TimedEntry {
     }
 }
 
+#[derive(Debug, Default)]
+struct ScheduledSet {
+    single: Option<TaskId>,
+    multi: DetHashSet<TaskId>,
+}
+
+impl ScheduledSet {
+    #[inline]
+    fn len(&self) -> usize {
+        if self.single.is_some() {
+            1
+        } else {
+            self.multi.len()
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.single.is_none() && self.multi.is_empty()
+    }
+
+    #[inline]
+    fn insert(&mut self, task: TaskId) -> bool {
+        if let Some(single) = self.single {
+            if single == task {
+                return false;
+            }
+            self.single = None;
+            self.multi.clear();
+            self.multi.reserve(2);
+            self.multi.insert(single);
+            return self.multi.insert(task);
+        }
+
+        if self.multi.is_empty() {
+            self.single = Some(task);
+            return true;
+        }
+
+        self.multi.insert(task)
+    }
+
+    #[inline]
+    fn remove(&mut self, task: TaskId) -> bool {
+        if let Some(single) = self.single {
+            if single == task {
+                self.single = None;
+                return true;
+            }
+            return false;
+        }
+
+        if self.multi.is_empty() {
+            return false;
+        }
+
+        let removed = self.multi.remove(&task);
+        if removed && self.multi.len() == 1 {
+            let remaining = *self.multi.iter().next().expect("len is 1 after removal");
+            self.multi.clear();
+            self.single = Some(remaining);
+        }
+        removed
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.single = None;
+        self.multi.clear();
+    }
+}
+
 /// The three-lane scheduler.
 ///
 /// Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
@@ -83,7 +155,7 @@ pub struct Scheduler {
     /// Ready lane: general ready tasks.
     ready_lane: BinaryHeap<SchedulerEntry>,
     /// Set of tasks currently in the scheduler (for dedup).
-    scheduled: DetHashSet<TaskId>,
+    scheduled: ScheduledSet,
     /// Next generation number for FIFO ordering.
     next_generation: u64,
     /// Scratch space for RNG tie-breaking (ready/cancel lanes).
@@ -172,17 +244,17 @@ impl Scheduler {
     /// O(log n) pop via binary heap.
     pub fn pop(&mut self) -> Option<TaskId> {
         if let Some(entry) = self.cancel_lane.pop() {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
         if let Some(entry) = self.timed_lane.pop() {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
         if let Some(entry) = self.ready_lane.pop() {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
@@ -208,21 +280,21 @@ impl Scheduler {
         if let Some(entry) =
             Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
         {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some((entry.task, DispatchLane::Cancel));
         }
 
         if let Some(entry) =
             Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
         {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some((entry.task, DispatchLane::Timed));
         }
 
         if let Some(entry) =
             Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
         {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some((entry.task, DispatchLane::Ready));
         }
 
@@ -233,7 +305,7 @@ impl Scheduler {
     pub fn pop_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         let entry =
             Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
-        self.scheduled.remove(&entry.task);
+        self.scheduled.remove(entry.task);
         Some((entry.task, DispatchLane::Cancel))
     }
 
@@ -244,14 +316,14 @@ impl Scheduler {
         if let Some(entry) =
             Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
         {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some((entry.task, DispatchLane::Timed));
         }
 
         if let Some(entry) =
             Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
         {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some((entry.task, DispatchLane::Ready));
         }
 
@@ -314,7 +386,7 @@ impl Scheduler {
     /// O(n) rebuild of affected lane. This is acceptable since removal is rare
     /// compared to schedule/pop operations.
     pub fn remove(&mut self, task: TaskId) {
-        if self.scheduled.remove(&task) {
+        if self.scheduled.remove(task) {
             // Rebuild heaps without the removed task
             self.cancel_lane = self
                 .cancel_lane
@@ -416,7 +488,7 @@ impl Scheduler {
     #[must_use]
     pub fn pop_cancel_only(&mut self) -> Option<TaskId> {
         if let Some(entry) = self.cancel_lane.pop() {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
         None
@@ -442,7 +514,7 @@ impl Scheduler {
         if let Some(entry) = self.timed_lane.peek() {
             if entry.deadline <= now {
                 let entry = self.timed_lane.pop().expect("peeked entry should exist");
-                self.scheduled.remove(&entry.task);
+                self.scheduled.remove(entry.task);
                 return Some(entry.task);
             }
         }
@@ -465,7 +537,7 @@ impl Scheduler {
     #[must_use]
     pub fn pop_ready_only(&mut self) -> Option<TaskId> {
         if let Some(entry) = self.ready_lane.pop() {
-            self.scheduled.remove(&entry.task);
+            self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
         None
@@ -510,7 +582,7 @@ impl Scheduler {
 
         for _ in 0..steal_count {
             if let Some(entry) = self.ready_lane.pop() {
-                self.scheduled.remove(&entry.task);
+                self.scheduled.remove(entry.task);
                 out.push((entry.task, entry.priority));
             } else {
                 break;

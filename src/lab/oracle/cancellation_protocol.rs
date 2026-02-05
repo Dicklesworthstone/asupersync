@@ -542,7 +542,9 @@ impl CancellationProtocolOracle {
 
     /// Verifies cancel propagation for all cancelled regions.
     fn check_cancel_propagation(&self) -> Result<(), CancellationProtocolViolation> {
-        for &region in self.cancelled_regions.keys() {
+        let mut regions: Vec<RegionId> = self.cancelled_regions.keys().copied().collect();
+        regions.sort();
+        for region in regions {
             self.verify_descendants_cancelled(region)?;
         }
         Ok(())
@@ -554,7 +556,9 @@ impl CancellationProtocolOracle {
         region: RegionId,
     ) -> Result<(), CancellationProtocolViolation> {
         if let Some(children) = self.region_children.get(&region) {
-            for &child in children {
+            let mut ordered = children.clone();
+            ordered.sort();
+            for child in ordered {
                 if !self.cancelled_regions.contains_key(&child) {
                     return Err(CancellationProtocolViolation::CancelNotPropagated {
                         parent: region,
@@ -571,7 +575,12 @@ impl CancellationProtocolOracle {
     fn check_cancelled_tasks_completed(&self) -> Vec<CancellationProtocolViolation> {
         let mut violations = Vec::new();
 
-        for (&task, record) in &self.tasks {
+        let mut tasks: Vec<TaskId> = self.tasks.keys().copied().collect();
+        tasks.sort();
+        for task in tasks {
+            let Some(record) = self.tasks.get(&task) else {
+                continue;
+            };
             if let Some(ref cancel) = record.cancel_request {
                 if !record.current_state.is_terminal() {
                     violations.push(CancellationProtocolViolation::CancelNotCompleted {
@@ -616,7 +625,9 @@ impl CancellationProtocolOracle {
         let mut all = self.violations.clone();
 
         // Add propagation violations
-        for &region in self.cancelled_regions.keys() {
+        let mut regions: Vec<RegionId> = self.cancelled_regions.keys().copied().collect();
+        regions.sort();
+        for region in regions {
             if let Err(v) = self.verify_descendants_cancelled(region) {
                 all.push(v);
             }

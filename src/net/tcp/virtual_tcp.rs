@@ -41,6 +41,7 @@ struct ChannelHalf {
     buf: VecDeque<u8>,
     waker: Option<Waker>,
     closed: bool,
+    read_shutdown: bool,
 }
 
 impl ChannelHalf {
@@ -49,6 +50,7 @@ impl ChannelHalf {
             buf: VecDeque::new(),
             waker: None,
             closed: false,
+            read_shutdown: false,
         }
     }
 }
@@ -72,7 +74,6 @@ pub struct VirtualTcpStream {
     write_half: Arc<Mutex<ChannelHalf>>,
     nodelay: bool,
     ttl: u32,
-    read_shutdown: bool,
     write_shutdown: bool,
 }
 
@@ -103,7 +104,6 @@ impl VirtualTcpStream {
             write_half: Arc::clone(&a_to_b),
             nodelay: false,
             ttl: 64,
-            read_shutdown: false,
             write_shutdown: false,
         };
 
@@ -114,7 +114,6 @@ impl VirtualTcpStream {
             write_half: b_to_a,
             nodelay: false,
             ttl: 64,
-            read_shutdown: false,
             write_shutdown: false,
         };
 
@@ -129,11 +128,11 @@ impl AsyncRead for VirtualTcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.read_shutdown {
+        let mut half = this.read_half.lock().expect("channel lock poisoned");
+
+        if half.read_shutdown {
             return Poll::Ready(Ok(()));
         }
-
-        let mut half = this.read_half.lock().expect("channel lock poisoned");
 
         if half.buf.is_empty() {
             if half.closed {
@@ -174,6 +173,11 @@ impl AsyncWrite for VirtualTcpStream {
                 io::ErrorKind::BrokenPipe,
                 "peer closed",
             )));
+        }
+
+        if half.read_shutdown {
+            // Peer shut down their read side; accept data but discard it.
+            return Poll::Ready(Ok(buf.len()));
         }
 
         half.buf.extend(buf);
@@ -230,7 +234,11 @@ impl TcpStreamApi for VirtualTcpStream {
         match how {
             Shutdown::Read | Shutdown::Both => {
                 let mut half = self.read_half.lock().expect("lock poisoned");
-                half.closed = true;
+                half.read_shutdown = true;
+                half.buf.clear();
+                if let Some(waker) = half.waker.take() {
+                    waker.wake();
+                }
             }
             Shutdown::Write => {}
         }
@@ -678,6 +686,27 @@ mod tests {
         let mut buf = [0u8; 8];
         let mut read_buf = ReadBuf::new(&mut buf);
         let result = Pin::new(&mut b).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled().len(), 0);
+    }
+
+    #[test]
+    fn virtual_stream_shutdown_read_allows_peer_write() {
+        let (mut a, mut b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
+
+        a.shutdown(Shutdown::Read).unwrap();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Peer write should succeed but be discarded.
+        let result = Pin::new(&mut b).poll_write(&mut cx, b"discarded");
+        assert!(matches!(result, Poll::Ready(Ok(9))));
+
+        // Reader sees EOF immediately.
+        let mut buf = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let result = Pin::new(&mut a).poll_read(&mut cx, &mut read_buf);
         assert!(matches!(result, Poll::Ready(Ok(()))));
         assert_eq!(read_buf.filled().len(), 0);
     }

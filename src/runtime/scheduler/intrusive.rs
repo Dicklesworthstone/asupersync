@@ -154,14 +154,14 @@ impl IntrusiveRing {
         };
 
         // Check for double-enqueue
+        let in_queue = record.is_in_queue();
         debug_assert!(
-            !record.is_in_queue(),
+            !in_queue,
             "task {:?} already in queue (tag={})",
-            task_id,
-            record.queue_tag
+            task_id, record.queue_tag
         );
 
-        if record.is_in_queue() {
+        if in_queue {
             return;
         }
 
