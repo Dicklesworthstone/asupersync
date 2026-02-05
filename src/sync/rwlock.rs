@@ -47,19 +47,22 @@
 //! let lock = RwLock::new(vec![1, 2, 3]);
 //!
 //! // Multiple readers can access concurrently
-//! let read1 = lock.read(&cx)?;
-//! let read2 = lock.read(&cx)?;  // OK: no writers waiting
+//! let read1 = lock.read(&cx).await?;
+//! let read2 = lock.read(&cx).await?;  // OK: no writers waiting
 //!
 //! // Writers get exclusive access
 //! drop((read1, read2));
-//! let mut write = lock.write(&cx)?;
+//! let mut write = lock.write(&cx).await?;
 //! write.push(4);
 //! ```
 
+use std::collections::VecDeque;
+use std::future::Future;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex as StdMutex, RwLock as StdRwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
 
@@ -128,6 +131,14 @@ struct State {
     readers: usize,
     writer_active: bool,
     writer_waiters: usize,
+    reader_waiters: VecDeque<Waiter>,
+    writer_queue: VecDeque<Waiter>,
+}
+
+#[derive(Debug, Clone)]
+struct Waiter {
+    waker: Waker,
+    queued: Arc<AtomicBool>,
 }
 
 /// A cancel-aware read-write lock with writer-preference fairness.
@@ -158,8 +169,6 @@ struct State {
 #[derive(Debug)]
 pub struct RwLock<T> {
     state: StdMutex<State>,
-    reader_cv: Condvar,
-    writer_cv: Condvar,
     data: StdRwLock<T>,
     poisoned: AtomicBool,
 }
@@ -170,8 +179,6 @@ impl<T> RwLock<T> {
     pub fn new(value: T) -> Self {
         Self {
             state: StdMutex::new(State::default()),
-            reader_cv: Condvar::new(),
-            writer_cv: Condvar::new(),
             data: StdRwLock::new(value),
             poisoned: AtomicBool::new(false),
         }
@@ -195,24 +202,15 @@ impl<T> RwLock<T> {
         self.poisoned.load(Ordering::Acquire)
     }
 
-    /// Acquires a read guard, waiting if necessary.
+    /// Acquires a read guard asynchronously, waiting if necessary.
     ///
     /// This is cancel-safe: cancellation while waiting returns an error
     /// without acquiring the lock.
-    pub fn read(&self, cx: &Cx) -> Result<RwLockReadGuard<'_, T>, RwLockError> {
-        self.acquire_read_state(cx)?;
-
-        match self.data.read() {
-            Ok(guard) => Ok(RwLockReadGuard {
-                lock: self,
-                guard: Some(guard),
-            }),
-            Err(poisoned) => {
-                self.poisoned.store(true, Ordering::Release);
-                self.release_reader_on_error();
-                drop(poisoned.into_inner());
-                Err(RwLockError::Poisoned)
-            }
+    pub fn read<'a, 'b>(&'a self, cx: &'b Cx) -> ReadFuture<'a, 'b, T> {
+        ReadFuture {
+            lock: self,
+            cx,
+            waiter: None,
         }
     }
 
@@ -234,24 +232,16 @@ impl<T> RwLock<T> {
         }
     }
 
-    /// Acquires a write guard, waiting if necessary.
+    /// Acquires a write guard asynchronously, waiting if necessary.
     ///
     /// This is cancel-safe: cancellation while waiting returns an error
     /// without acquiring the lock.
-    pub fn write(&self, cx: &Cx) -> Result<RwLockWriteGuard<'_, T>, RwLockError> {
-        self.acquire_write_state(cx)?;
-
-        match self.data.write() {
-            Ok(guard) => Ok(RwLockWriteGuard {
-                lock: self,
-                guard: Some(guard),
-            }),
-            Err(poisoned) => {
-                self.poisoned.store(true, Ordering::Release);
-                self.release_writer_on_error();
-                drop(poisoned.into_inner());
-                Err(RwLockError::Poisoned)
-            }
+    pub fn write<'a, 'b>(&'a self, cx: &'b Cx) -> WriteFuture<'a, 'b, T> {
+        WriteFuture {
+            lock: self,
+            cx,
+            waiter: None,
+            counted: false,
         }
     }
 
@@ -282,39 +272,6 @@ impl<T> RwLock<T> {
         self.data.get_mut().expect("rwlock poisoned")
     }
 
-    fn acquire_read_state(&self, cx: &Cx) -> Result<(), RwLockError> {
-        if self.is_poisoned() {
-            return Err(RwLockError::Poisoned);
-        }
-
-        if cx.checkpoint().is_err() {
-            return Err(RwLockError::Cancelled);
-        }
-
-        let mut state = self.state.lock().expect("rwlock state poisoned");
-
-        loop {
-            if self.is_poisoned() {
-                return Err(RwLockError::Poisoned);
-            }
-
-            if !state.writer_active && state.writer_waiters == 0 {
-                state.readers += 1;
-                return Ok(());
-            }
-
-            if cx.checkpoint().is_err() {
-                return Err(RwLockError::Cancelled);
-            }
-
-            let (guard, _) = self
-                .reader_cv
-                .wait_timeout(state, Duration::from_millis(10))
-                .expect("rwlock state poisoned");
-            state = guard;
-        }
-    }
-
     fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -328,46 +285,6 @@ impl<T> RwLock<T> {
         state.readers += 1;
         drop(state);
         Ok(())
-    }
-
-    fn acquire_write_state(&self, cx: &Cx) -> Result<(), RwLockError> {
-        if self.is_poisoned() {
-            return Err(RwLockError::Poisoned);
-        }
-
-        if cx.checkpoint().is_err() {
-            return Err(RwLockError::Cancelled);
-        }
-
-        let mut state = self.state.lock().expect("rwlock state poisoned");
-        state.writer_waiters += 1;
-
-        loop {
-            if self.is_poisoned() {
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                return Err(RwLockError::Poisoned);
-            }
-
-            if !state.writer_active && state.readers == 0 {
-                state.writer_active = true;
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                return Ok(());
-            }
-
-            if cx.checkpoint().is_err() {
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                if state.writer_waiters == 0 && !state.writer_active {
-                    self.reader_cv.notify_all();
-                }
-                return Err(RwLockError::Cancelled);
-            }
-
-            let (guard, _) = self
-                .writer_cv
-                .wait_timeout(state, Duration::from_millis(10))
-                .expect("rwlock state poisoned");
-            state = guard;
-        }
     }
 
     fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
@@ -385,45 +302,345 @@ impl<T> RwLock<T> {
         Ok(())
     }
 
+    fn pop_writer_waiter(state: &mut State) -> Option<Waker> {
+        loop {
+            match state.writer_queue.pop_front() {
+                Some(waiter) if waiter.queued.swap(false, Ordering::AcqRel) => {
+                    return Some(waiter.waker);
+                }
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    }
+
+    fn drain_reader_waiters(state: &mut State) -> Vec<Waker> {
+        let mut wakers = Vec::new();
+        while let Some(waiter) = state.reader_waiters.pop_front() {
+            if waiter.queued.swap(false, Ordering::AcqRel) {
+                wakers.push(waiter.waker);
+            }
+        }
+        wakers
+    }
+
     fn release_reader_on_error(&self) {
-        let mut state = self.state.lock().expect("rwlock state poisoned");
-        state.readers = state.readers.saturating_sub(1);
-        if state.readers == 0 && state.writer_waiters > 0 {
-            self.writer_cv.notify_one();
+        let waker = {
+            let mut state = self.state.lock().expect("rwlock state poisoned");
+            state.readers = state.readers.saturating_sub(1);
+            if state.readers == 0 && state.writer_waiters > 0 {
+                Self::pop_writer_waiter(&mut state)
+            } else {
+                None
+            }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 
     fn release_writer_on_error(&self) {
-        let mut state = self.state.lock().expect("rwlock state poisoned");
-        state.writer_active = false;
-        if state.writer_waiters > 0 {
-            self.writer_cv.notify_one();
-        } else {
-            self.reader_cv.notify_all();
+        let (writer_waker, reader_wakers) = {
+            let mut state = self.state.lock().expect("rwlock state poisoned");
+            state.writer_active = false;
+            if state.writer_waiters > 0 {
+                (Self::pop_writer_waiter(&mut state), Vec::new())
+            } else {
+                (None, Self::drain_reader_waiters(&mut state))
+            }
+        };
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+        for waker in reader_wakers {
+            waker.wake();
         }
     }
 
     fn release_reader(&self) {
-        let mut state = self.state.lock().expect("rwlock state poisoned");
-        state.readers = state.readers.saturating_sub(1);
-        if state.readers == 0 && state.writer_waiters > 0 {
-            self.writer_cv.notify_one();
+        let waker = {
+            let mut state = self.state.lock().expect("rwlock state poisoned");
+            state.readers = state.readers.saturating_sub(1);
+            if state.readers == 0 && state.writer_waiters > 0 {
+                Self::pop_writer_waiter(&mut state)
+            } else {
+                None
+            }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 
     fn release_writer(&self) {
-        let mut state = self.state.lock().expect("rwlock state poisoned");
-        state.writer_active = false;
-        if state.writer_waiters > 0 {
-            self.writer_cv.notify_one();
-        } else {
-            self.reader_cv.notify_all();
+        let (writer_waker, reader_wakers) = {
+            let mut state = self.state.lock().expect("rwlock state poisoned");
+            state.writer_active = false;
+            if state.writer_waiters > 0 {
+                (Self::pop_writer_waiter(&mut state), Vec::new())
+            } else {
+                (None, Self::drain_reader_waiters(&mut state))
+            }
+        };
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+        for waker in reader_wakers {
+            waker.wake();
         }
     }
 
     #[cfg(test)]
     fn debug_state(&self) -> State {
         self.state.lock().expect("rwlock state poisoned").clone()
+    }
+}
+
+/// Future returned by `RwLock::read`.
+pub struct ReadFuture<'a, 'b, T> {
+    lock: &'a RwLock<T>,
+    cx: &'b Cx,
+    waiter: Option<Arc<AtomicBool>>,
+}
+
+impl<'a, T> Future for ReadFuture<'a, '_, T> {
+    type Output = Result<RwLockReadGuard<'a, T>, RwLockError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
+        if self.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RwLockError::Cancelled));
+        }
+
+        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+
+        if !state.writer_active && state.writer_waiters == 0 {
+            state.readers += 1;
+            if let Some(waiter) = self.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
+            drop(state);
+
+            return match self.lock.data.read() {
+                Ok(guard) => Poll::Ready(Ok(RwLockReadGuard {
+                    lock: self.lock,
+                    guard: Some(guard),
+                })),
+                Err(poisoned) => {
+                    self.lock.poisoned.store(true, Ordering::Release);
+                    self.lock.release_reader_on_error();
+                    drop(poisoned.into_inner());
+                    Poll::Ready(Err(RwLockError::Poisoned))
+                }
+            };
+        }
+
+        let mut new_waiter = None;
+        match self.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                waiter.store(true, Ordering::Release);
+                state.reader_waiters.push_front(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(waiter) => {
+                if let Some(existing) = state
+                    .reader_waiters
+                    .iter_mut()
+                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
+                {
+                    existing.waker.clone_from(context.waker());
+                }
+            }
+            None => {
+                let waiter = Arc::new(AtomicBool::new(true));
+                state.reader_waiters.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        drop(state);
+        if let Some(waiter) = new_waiter {
+            self.waiter = Some(waiter);
+        }
+
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for ReadFuture<'_, '_, T> {
+    fn drop(&mut self) {
+        let mut writer_waker = None;
+        if let Some(waiter) = self.waiter.as_ref() {
+            let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+            let initial_len = state.reader_waiters.len();
+            state
+                .reader_waiters
+                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            let removed = initial_len != state.reader_waiters.len();
+
+            if !removed {
+                let dequeued = !waiter.load(Ordering::Acquire);
+                if dequeued
+                    && state.readers == 0
+                    && !state.writer_active
+                    && state.writer_waiters > 0
+                {
+                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                }
+            }
+        }
+
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+    }
+}
+
+/// Future returned by `RwLock::write`.
+pub struct WriteFuture<'a, 'b, T> {
+    lock: &'a RwLock<T>,
+    cx: &'b Cx,
+    waiter: Option<Arc<AtomicBool>>,
+    counted: bool,
+}
+
+impl<'a, T> Future for WriteFuture<'a, '_, T> {
+    type Output = Result<RwLockWriteGuard<'a, T>, RwLockError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
+        if self.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RwLockError::Cancelled));
+        }
+
+        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        if !self.counted {
+            state.writer_waiters += 1;
+            self.counted = true;
+        }
+
+        let dequeued = self
+            .waiter
+            .as_ref()
+            .is_some_and(|w| !w.load(Ordering::Acquire));
+        let can_acquire =
+            !state.writer_active && state.readers == 0 && (dequeued || state.writer_waiters == 1);
+
+        if can_acquire {
+            state.writer_active = true;
+            if self.counted {
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                self.counted = false;
+            }
+            if let Some(waiter) = self.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
+            drop(state);
+
+            return match self.lock.data.write() {
+                Ok(guard) => Poll::Ready(Ok(RwLockWriteGuard {
+                    lock: self.lock,
+                    guard: Some(guard),
+                })),
+                Err(poisoned) => {
+                    self.lock.poisoned.store(true, Ordering::Release);
+                    self.lock.release_writer_on_error();
+                    drop(poisoned.into_inner());
+                    Poll::Ready(Err(RwLockError::Poisoned))
+                }
+            };
+        }
+
+        let mut new_waiter = None;
+        match self.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                waiter.store(true, Ordering::Release);
+                state.writer_queue.push_front(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(waiter) => {
+                if let Some(existing) = state
+                    .writer_queue
+                    .iter_mut()
+                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
+                {
+                    existing.waker.clone_from(context.waker());
+                }
+            }
+            None => {
+                let waiter = Arc::new(AtomicBool::new(true));
+                state.writer_queue.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        drop(state);
+        if let Some(waiter) = new_waiter {
+            self.waiter = Some(waiter);
+        }
+
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for WriteFuture<'_, '_, T> {
+    fn drop(&mut self) {
+        if !self.counted {
+            return;
+        }
+
+        let mut writer_waker = None;
+        let mut reader_wakers = Vec::new();
+        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+
+        if let Some(waiter) = self.waiter.as_ref() {
+            let initial_len = state.writer_queue.len();
+            state
+                .writer_queue
+                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            let removed = initial_len != state.writer_queue.len();
+
+            state.writer_waiters = state.writer_waiters.saturating_sub(1);
+
+            if !removed {
+                let dequeued = !waiter.load(Ordering::Acquire);
+                if dequeued
+                    && !state.writer_active
+                    && state.readers == 0
+                    && state.writer_waiters > 0
+                {
+                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                }
+            }
+        } else {
+            state.writer_waiters = state.writer_waiters.saturating_sub(1);
+        }
+
+        if state.writer_waiters == 0 && !state.writer_active {
+            reader_wakers = RwLock::<T>::drain_reader_waiters(&mut state);
+        }
+        drop(state);
+
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+        for waker in reader_wakers {
+            waker.wake();
+        }
     }
 }
 
@@ -496,9 +713,12 @@ pub struct OwnedRwLockReadGuard<T> {
 
 impl<T> OwnedRwLockReadGuard<T> {
     /// Acquires an owned read guard from an `Arc<RwLock<T>>`.
-    pub fn read(lock: Arc<RwLock<T>>, cx: &Cx) -> Result<Self, RwLockError> {
-        lock.acquire_read_state(cx)?;
-        Ok(Self { lock })
+    pub fn read(lock: Arc<RwLock<T>>, cx: &Cx) -> OwnedReadFuture<'_, T> {
+        OwnedReadFuture {
+            lock,
+            cx,
+            waiter: None,
+        }
     }
 
     /// Tries to acquire an owned read guard without waiting.
@@ -534,9 +754,13 @@ pub struct OwnedRwLockWriteGuard<T> {
 
 impl<T> OwnedRwLockWriteGuard<T> {
     /// Acquires an owned write guard from an `Arc<RwLock<T>>`.
-    pub fn write(lock: Arc<RwLock<T>>, cx: &Cx) -> Result<Self, RwLockError> {
-        lock.acquire_write_state(cx)?;
-        Ok(Self { lock })
+    pub fn write(lock: Arc<RwLock<T>>, cx: &Cx) -> OwnedWriteFuture<'_, T> {
+        OwnedWriteFuture {
+            lock,
+            cx,
+            waiter: None,
+            counted: false,
+        }
     }
 
     /// Tries to acquire an owned write guard without waiting.
@@ -564,6 +788,233 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
     }
 }
 
+/// Future returned by `OwnedRwLockReadGuard::read`.
+pub struct OwnedReadFuture<'b, T> {
+    lock: Arc<RwLock<T>>,
+    cx: &'b Cx,
+    waiter: Option<Arc<AtomicBool>>,
+}
+
+impl<T> Future for OwnedReadFuture<'_, T> {
+    type Output = Result<OwnedRwLockReadGuard<T>, RwLockError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
+        if self.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RwLockError::Cancelled));
+        }
+
+        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        if !state.writer_active && state.writer_waiters == 0 {
+            state.readers += 1;
+            if let Some(waiter) = self.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
+            drop(state);
+            return Poll::Ready(Ok(OwnedRwLockReadGuard {
+                lock: Arc::clone(&self.lock),
+            }));
+        }
+
+        let mut new_waiter = None;
+        match self.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                waiter.store(true, Ordering::Release);
+                state.reader_waiters.push_front(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(waiter) => {
+                if let Some(existing) = state
+                    .reader_waiters
+                    .iter_mut()
+                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
+                {
+                    existing.waker.clone_from(context.waker());
+                }
+            }
+            None => {
+                let waiter = Arc::new(AtomicBool::new(true));
+                state.reader_waiters.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        drop(state);
+        if let Some(waiter) = new_waiter {
+            self.waiter = Some(waiter);
+        }
+
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for OwnedReadFuture<'_, T> {
+    fn drop(&mut self) {
+        let mut writer_waker = None;
+        if let Some(waiter) = self.waiter.as_ref() {
+            let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+            let initial_len = state.reader_waiters.len();
+            state
+                .reader_waiters
+                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            let removed = initial_len != state.reader_waiters.len();
+
+            if !removed {
+                let dequeued = !waiter.load(Ordering::Acquire);
+                if dequeued
+                    && state.readers == 0
+                    && !state.writer_active
+                    && state.writer_waiters > 0
+                {
+                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                }
+            }
+        }
+
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+    }
+}
+
+/// Future returned by `OwnedRwLockWriteGuard::write`.
+pub struct OwnedWriteFuture<'b, T> {
+    lock: Arc<RwLock<T>>,
+    cx: &'b Cx,
+    waiter: Option<Arc<AtomicBool>>,
+    counted: bool,
+}
+
+impl<T> Future for OwnedWriteFuture<'_, T> {
+    type Output = Result<OwnedRwLockWriteGuard<T>, RwLockError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
+        if self.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(RwLockError::Cancelled));
+        }
+
+        // Clone the Arc to avoid borrow conflict with self.counted
+        let lock = Arc::clone(&self.lock);
+        let mut state = lock.state.lock().expect("rwlock state poisoned");
+        if !self.counted {
+            state.writer_waiters += 1;
+            self.counted = true;
+        }
+
+        let dequeued = self
+            .waiter
+            .as_ref()
+            .is_some_and(|w| !w.load(Ordering::Acquire));
+        let can_acquire =
+            !state.writer_active && state.readers == 0 && (dequeued || state.writer_waiters == 1);
+
+        if can_acquire {
+            state.writer_active = true;
+            if self.counted {
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                self.counted = false;
+            }
+            if let Some(waiter) = self.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
+            drop(state);
+            return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
+        }
+
+        let mut new_waiter = None;
+        match self.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                waiter.store(true, Ordering::Release);
+                state.writer_queue.push_front(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(waiter) => {
+                if let Some(existing) = state
+                    .writer_queue
+                    .iter_mut()
+                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
+                {
+                    existing.waker.clone_from(context.waker());
+                }
+            }
+            None => {
+                let waiter = Arc::new(AtomicBool::new(true));
+                state.writer_queue.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        drop(state);
+        if let Some(waiter) = new_waiter {
+            self.waiter = Some(waiter);
+        }
+
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for OwnedWriteFuture<'_, T> {
+    fn drop(&mut self) {
+        if !self.counted {
+            return;
+        }
+
+        let mut writer_waker = None;
+        let mut reader_wakers = Vec::new();
+        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+
+        if let Some(waiter) = self.waiter.as_ref() {
+            let initial_len = state.writer_queue.len();
+            state
+                .writer_queue
+                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            let removed = initial_len != state.writer_queue.len();
+
+            state.writer_waiters = state.writer_waiters.saturating_sub(1);
+
+            if !removed {
+                let dequeued = !waiter.load(Ordering::Acquire);
+                if dequeued
+                    && !state.writer_active
+                    && state.readers == 0
+                    && state.writer_waiters > 0
+                {
+                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                }
+            }
+        } else {
+            state.writer_waiters = state.writer_waiters.saturating_sub(1);
+        }
+
+        if state.writer_waiters == 0 && !state.writer_active {
+            reader_wakers = RwLock::<T>::drain_reader_waiters(&mut state);
+        }
+        drop(state);
+
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+        for waker in reader_wakers {
+            waker.wake();
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
@@ -577,6 +1028,35 @@ mod tests {
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn poll_once<T>(future: &mut (impl Future<Output = T> + Unpin)) -> Option<T> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match std::pin::Pin::new(future).poll(&mut cx) {
+            Poll::Ready(v) => Some(v),
+            Poll::Pending => None,
+        }
+    }
+
+    fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn read_blocking<'a, T>(lock: &'a RwLock<T>, cx: &Cx) -> RwLockReadGuard<'a, T> {
+        poll_until_ready(lock.read(cx)).expect("read failed")
+    }
+
+    fn write_blocking<'a, T>(lock: &'a RwLock<T>, cx: &Cx) -> RwLockWriteGuard<'a, T> {
+        poll_until_ready(lock.write(cx)).expect("write failed")
     }
 
     fn test_cx() -> Cx {
@@ -593,8 +1073,8 @@ mod tests {
         let cx = test_cx();
         let lock = RwLock::new(42_u32);
 
-        let guard1 = lock.read(&cx).expect("read 1");
-        let guard2 = lock.read(&cx).expect("read 2");
+        let guard1 = read_blocking(&lock, &cx);
+        let guard2 = read_blocking(&lock, &cx);
 
         crate::assert_with_log!(*guard1 == 42, "guard1 value", 42u32, *guard1);
         crate::assert_with_log!(*guard2 == 42, "guard2 value", 42u32, *guard2);
@@ -607,7 +1087,7 @@ mod tests {
         let cx = test_cx();
         let lock = RwLock::new(5_u32);
 
-        let mut write = lock.write(&cx).expect("write");
+        let mut write = write_blocking(&lock, &cx);
         *write = 7;
 
         let read_locked = matches!(lock.try_read(), Err(TryReadError::Locked));
@@ -617,7 +1097,7 @@ mod tests {
 
         drop(write);
 
-        let read = lock.read(&cx).expect("read after write");
+        let read = read_blocking(&lock, &cx);
         crate::assert_with_log!(*read == 7, "read after write", 7u32, *read);
         crate::test_complete!("write_excludes_readers_and_writers");
     }
@@ -627,7 +1107,7 @@ mod tests {
         init_test("writer_waiting_blocks_new_readers");
         let cx = test_cx();
         let lock = StdArc::new(RwLock::new(1_u32));
-        let read_guard = lock.read(&cx).expect("read");
+        let read_guard = read_blocking(&lock, &cx);
 
         let writer_started = StdArc::new(AtomicBool::new(false));
         let writer_lock = StdArc::clone(&lock);
@@ -636,7 +1116,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let cx = test_cx();
             writer_flag.store(true, AtomicOrdering::Release);
-            let _guard = writer_lock.write(&cx).expect("write");
+            let _guard = write_blocking(&writer_lock, &cx);
         });
 
         // Wait until writer is attempting to acquire.
@@ -669,11 +1149,20 @@ mod tests {
         let cx = test_cx();
         let lock = RwLock::new(0_u32);
 
-        let _write = lock.write(&cx).expect("write");
+        let _write = write_blocking(&lock, &cx);
+        let mut fut = lock.read(&cx);
+        let pending = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(pending, "read waits while writer held", true, pending);
+
         cx.set_cancel_requested(true);
 
-        let cancelled = matches!(lock.read(&cx), Err(RwLockError::Cancelled));
+        let cancelled = matches!(poll_once(&mut fut), Some(Err(RwLockError::Cancelled)));
         crate::assert_with_log!(cancelled, "read cancelled", true, cancelled);
+        drop(fut);
+
+        let state = lock.debug_state();
+        let waiters = state.reader_waiters.len();
+        crate::assert_with_log!(waiters == 0, "reader waiters cleaned", 0usize, waiters);
         crate::test_complete!("cancel_during_read_wait");
     }
 
@@ -707,14 +1196,29 @@ mod tests {
         let lock = RwLock::new(0_u32);
 
         // Hold a read lock
-        let _read = lock.read(&cx).expect("read");
+        let _read = read_blocking(&lock, &cx);
+
+        let mut fut = lock.write(&cx);
+        let pending = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(pending, "write waits while reader held", true, pending);
 
         // Request cancellation
         cx.set_cancel_requested(true);
 
         // Write should be cancelled
-        let cancelled = matches!(lock.write(&cx), Err(RwLockError::Cancelled));
+        let cancelled = matches!(poll_once(&mut fut), Some(Err(RwLockError::Cancelled)));
         crate::assert_with_log!(cancelled, "write cancelled", true, cancelled);
+        drop(fut);
+
+        let state = lock.debug_state();
+        let waiters = state.writer_queue.len();
+        let writer_count = state.writer_waiters;
+        crate::assert_with_log!(
+            waiters == 0 && writer_count == 0,
+            "writer waiters cleaned",
+            true,
+            waiters == 0 && writer_count == 0
+        );
         crate::test_complete!("test_rwlock_cancel_during_write_wait");
     }
 
@@ -748,7 +1252,7 @@ mod tests {
 
         // Acquire and drop read
         {
-            let _guard = lock.read(&cx).expect("read");
+            let _guard = read_blocking(&lock, &cx);
         }
 
         // Write should succeed now
@@ -765,7 +1269,7 @@ mod tests {
 
         // Acquire and drop write
         {
-            let _guard = lock.write(&cx).expect("write");
+            let _guard = write_blocking(&lock, &cx);
         }
 
         // Read should succeed now
