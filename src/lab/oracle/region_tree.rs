@@ -197,18 +197,23 @@ impl RegionTreeOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(RegionTreeViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), RegionTreeViolation> {
+        let sorted_regions = self.sorted_region_ids();
         // Empty tree is valid
         if self.regions.is_empty() {
             return Ok(());
         }
 
         // 1. Check for exactly one root
-        let roots: Vec<RegionId> = self
-            .regions
-            .iter()
-            .filter(|(_, entry)| entry.parent.is_none())
-            .map(|(&id, _)| id)
-            .collect();
+        let mut roots: Vec<RegionId> = Vec::new();
+        for region in &sorted_regions {
+            let entry = self
+                .regions
+                .get(region)
+                .expect("region missing from oracle");
+            if entry.parent.is_none() {
+                roots.push(*region);
+            }
+        }
 
         if roots.is_empty() {
             return Err(RegionTreeViolation::NoRoot);
@@ -219,11 +224,15 @@ impl RegionTreeOracle {
         }
 
         // 2. Check that every non-root region has a valid parent
-        for (&region, entry) in &self.regions {
+        for region in &sorted_regions {
+            let entry = self
+                .regions
+                .get(region)
+                .expect("region missing from oracle");
             if let Some(parent) = entry.parent {
                 if !self.regions.contains_key(&parent) {
                     return Err(RegionTreeViolation::InvalidParent {
-                        region,
+                        region: *region,
                         claimed_parent: parent,
                     });
                 }
@@ -231,22 +240,35 @@ impl RegionTreeOracle {
         }
 
         // 3. Check bidirectional consistency (child in parent's subregions)
-        for (&region, entry) in &self.regions {
+        for region in &sorted_regions {
+            let entry = self
+                .regions
+                .get(region)
+                .expect("region missing from oracle");
             if let Some(parent) = entry.parent {
                 if let Some(parent_entry) = self.regions.get(&parent) {
-                    if !parent_entry.subregions.contains(&region) {
-                        return Err(RegionTreeViolation::ParentChildMismatch { region, parent });
+                    if !parent_entry.subregions.contains(region) {
+                        return Err(RegionTreeViolation::ParentChildMismatch {
+                            region: *region,
+                            parent,
+                        });
                     }
                 }
             }
         }
 
         // 4. Reverse check: every subregion reference points to an existing region
-        for (&parent, entry) in &self.regions {
-            for &child in &entry.subregions {
+        for parent in &sorted_regions {
+            let entry = self
+                .regions
+                .get(parent)
+                .expect("region missing from oracle");
+            let mut children: Vec<RegionId> = entry.subregions.iter().copied().collect();
+            children.sort();
+            for child in children {
                 if !self.regions.contains_key(&child) {
                     return Err(RegionTreeViolation::PhantomSubregion {
-                        parent,
+                        parent: *parent,
                         phantom_child: child,
                     });
                 }
@@ -265,7 +287,7 @@ impl RegionTreeOracle {
     ///
     /// Uses tortoise-and-hare algorithm for each region to detect cycles.
     fn find_cycle(&self) -> Option<Vec<RegionId>> {
-        for &start in self.regions.keys() {
+        for start in self.sorted_region_ids() {
             let mut visited = HashSet::new();
             let mut path = Vec::new();
             let mut current = start;
@@ -315,12 +337,16 @@ impl RegionTreeOracle {
     /// Returns the root region, if exactly one exists.
     #[must_use]
     pub fn root(&self) -> Option<RegionId> {
-        let roots: Vec<RegionId> = self
-            .regions
-            .iter()
-            .filter(|(_, entry)| entry.parent.is_none())
-            .map(|(&id, _)| id)
-            .collect();
+        let mut roots: Vec<RegionId> = Vec::new();
+        for region in self.sorted_region_ids() {
+            let entry = self
+                .regions
+                .get(&region)
+                .expect("region missing from oracle");
+            if entry.parent.is_none() {
+                roots.push(region);
+            }
+        }
 
         if roots.len() == 1 {
             Some(roots[0])
@@ -358,6 +384,12 @@ impl RegionTreeOracle {
                 return None;
             }
         }
+    }
+
+    fn sorted_region_ids(&self) -> Vec<RegionId> {
+        let mut ids: Vec<RegionId> = self.regions.keys().copied().collect();
+        ids.sort();
+        ids
     }
 }
 

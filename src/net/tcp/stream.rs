@@ -25,6 +25,7 @@ use std::time::Duration;
 pub struct TcpStream {
     inner: Arc<net::TcpStream>,
     registration: Option<IoRegistration>,
+    shutdown_on_drop: bool,
 }
 
 /// Builder for configuring TCP stream options before connecting.
@@ -116,6 +117,7 @@ impl TcpStream {
         Self {
             inner: Arc::new(stream),
             registration: None,
+            shutdown_on_drop: true,
         }
     }
 
@@ -127,6 +129,7 @@ impl TcpStream {
         Self {
             inner,
             registration,
+            shutdown_on_drop: true,
         }
     }
 
@@ -222,6 +225,7 @@ impl TcpStream {
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
         let mut this = self;
+        this.shutdown_on_drop = false;
         let registration = this.registration.take();
         let inner = this.inner.clone();
         OwnedReadHalf::new_pair(inner, registration)
@@ -467,12 +471,17 @@ impl AsyncWrite for TcpStream {
     }
 }
 
-// ubs:ignore — TcpStream does not have a Drop impl for graceful shutdown because:
-// 1. The crate denies unsafe_code, and into_split() needs to move fields out of self
-//    (which conflicts with a custom Drop without unsafe ManuallyDrop + ptr::read).
-// 2. Callers should use AsyncWrite::poll_shutdown() or TcpStream::shutdown() explicitly.
-// 3. When split via into_split(), OwnedWriteHalf::drop() handles shutdown(Write).
-// Future: wrap inner in Option<Arc<TcpStream>> to enable a safe Drop impl.
+// ubs:ignore — TcpStream performs a best-effort shutdown on drop for deterministic teardown.
+// into_split() disables shutdown_on_drop to avoid closing the shared stream; callers should
+// still prefer explicit shutdown() for protocol-aware half-close behavior.
+
+impl Drop for TcpStream {
+    fn drop(&mut self) {
+        if self.shutdown_on_drop {
+            let _ = self.inner.shutdown(Shutdown::Both);
+        }
+    }
+}
 
 // Implement the TcpStreamApi trait for TcpStream
 impl TcpStreamApi for TcpStream {

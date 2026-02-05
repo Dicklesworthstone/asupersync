@@ -428,7 +428,9 @@ impl std::error::Error for ReuniteError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::tcp::stream::TcpStream;
     use crate::test_utils::init_test_logging;
+    use std::io::Write;
     use std::net::TcpListener;
 
     fn init_test(name: &str) {
@@ -499,6 +501,35 @@ mod tests {
         crate::assert_with_log!(result.is_ok(), "reunite succeeds", true, result.is_ok());
 
         crate::test_complete!("owned_split_reunite_success");
+    }
+
+    #[test]
+    fn into_split_does_not_shutdown_stream() {
+        init_test("into_split_does_not_shutdown_stream");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (mut server, _) = listener.accept().expect("accept");
+
+        let stream = TcpStream::from_std(client);
+        let (_read_half, write_half) = stream.into_split();
+
+        let mut stream_ref = write_half.inner.stream.as_ref();
+        stream_ref.write_all(b"ping").expect("client write");
+
+        let mut buf = [0u8; 4];
+        server.read_exact(&mut buf).expect("server read");
+
+        crate::assert_with_log!(
+            buf == *b"ping",
+            "into_split keeps stream open",
+            *b"ping",
+            buf
+        );
+
+        crate::test_complete!("into_split_does_not_shutdown_stream");
     }
 
     #[test]
