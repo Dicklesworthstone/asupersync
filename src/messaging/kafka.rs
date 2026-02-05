@@ -36,8 +36,7 @@ use rdkafka::{
     config::ClientConfig,
     error::{KafkaError as RdKafkaError, RDKafkaErrorCode},
     message::{BorrowedMessage, DeliveryResult, Header, Message, OwnedHeaders},
-    producer::{BaseRecord, Producer, ProducerContext, ThreadedProducer},
-    util::Timeout,
+    producer::{BaseRecord, ProducerContext, ThreadedProducer},
 };
 #[cfg(feature = "kafka")]
 use std::future::Future;
