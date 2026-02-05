@@ -77,6 +77,41 @@ const fn build_log_table() -> [u8; 256] {
     table
 }
 
+const fn gf256_mul_const(mut a: u8, mut b: u8) -> u8 {
+    let mut acc = 0u8;
+    let mut i = 0u8;
+    while i < 8 {
+        if (b & 1) != 0 {
+            acc ^= a;
+        }
+        let hi = a & 0x80;
+        a <<= 1;
+        if hi != 0 {
+            a ^= POLY as u8;
+        }
+        b >>= 1;
+        i += 1;
+    }
+    acc
+}
+
+#[allow(clippy::large_stack_arrays)]
+const fn build_mul_tables() -> [[u8; 256]; 256] {
+    let mut tables = [[0u8; 256]; 256];
+    let mut c = 0usize;
+    while c < 256 {
+        let mut x = 0usize;
+        while x < 256 {
+            tables[c][x] = gf256_mul_const(x as u8, c as u8);
+            x += 1;
+        }
+        c += 1;
+    }
+    tables
+}
+
+static MUL_TABLES: [[u8; 256]; 256] = build_mul_tables();
+
 // ============================================================================
 // Field element wrapper
 // ============================================================================
@@ -286,17 +321,9 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
 /// up-front cost.
 const MUL_TABLE_THRESHOLD: usize = 64;
 
-/// Build a 256-entry lookup table: `table[x] = x * c` in GF(256).
-///
-/// `log_c` must be `LOG[c]` for a nonzero scalar `c`.
-fn build_mul_table(log_c: usize) -> [u8; 256] {
-    let mut table = [0u8; 256];
-    let mut i = 1usize;
-    while i <= 255 {
-        table[i] = EXP[LOG[i] as usize + log_c];
-        i += 1;
-    }
-    table
+#[inline]
+fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
+    &MUL_TABLES[c.0 as usize]
 }
 
 /// Multiply every element of `dst` by scalar `c` in GF(256).
@@ -314,11 +341,11 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     if c == Gf256::ONE {
         return;
     }
-    let log_c = LOG[c.0 as usize] as usize;
     if dst.len() >= MUL_TABLE_THRESHOLD {
-        let table = build_mul_table(log_c);
-        mul_with_table_wide(dst, &table);
+        let table = mul_table_for(c);
+        mul_with_table_wide(dst, table);
     } else {
+        let log_c = LOG[c.0 as usize] as usize;
         for d in dst.iter_mut() {
             if *d != 0 {
                 *d = EXP[LOG[*d as usize] as usize + log_c];
@@ -406,12 +433,12 @@ pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
         gf256_add_slice(dst, src);
         return;
     }
-    let log_c = LOG[c.0 as usize] as usize;
     if src.len() >= ADDMUL_TABLE_THRESHOLD {
-        let table = build_mul_table(log_c);
-        addmul_with_table_wide(dst, src, &table);
+        let table = mul_table_for(c);
+        addmul_with_table_wide(dst, src, table);
         return;
     }
+    let log_c = LOG[c.0 as usize] as usize;
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         if *s != 0 {
             *d ^= EXP[LOG[*s as usize] as usize + log_c];
