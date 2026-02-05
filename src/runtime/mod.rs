@@ -125,15 +125,17 @@ pub mod deadline_monitor;
 pub mod env_config;
 pub mod io_driver;
 pub mod io_op;
+pub mod obligation_table;
 pub mod reactor;
 pub mod region_heap;
+pub mod region_table;
 pub mod scheduler;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
 pub mod state;
 pub mod stored_task;
-pub mod task_table;
 pub mod task_handle;
+pub mod task_table;
 pub mod timer;
 pub mod waker;
 /// Yield points for cooperative multitasking.
@@ -146,6 +148,7 @@ pub mod yield_now;
 pub mod local;
 
 pub use crate::record::RegionLimits;
+pub use crate::sync::{ContendedMutex, LockMetricsSnapshot};
 pub use blocking_pool::{
     BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingTaskHandle,
 };
@@ -156,13 +159,14 @@ pub use deadline_monitor::{
 };
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use io_op::IoOp;
+pub use obligation_table::ObligationTable;
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
+pub use region_table::RegionTable;
 pub use scheduler::Scheduler;
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
-pub use crate::sync::{ContendedMutex, LockMetricsSnapshot};
 pub use state::{RegionCreateError, RuntimeSnapshot, RuntimeState, SpawnError};
-pub use task_table::TaskTable;
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};
+pub use task_table::TaskTable;
 pub use yield_now::yield_now;

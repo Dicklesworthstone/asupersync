@@ -38,6 +38,46 @@ impl TaskTable {
         }
     }
 
+    /// Returns a reference to a task record by arena index.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, index: ArenaIndex) -> Option<&TaskRecord> {
+        self.tasks.get(index)
+    }
+
+    /// Returns a mutable reference to a task record by arena index.
+    #[inline]
+    pub fn get_mut(&mut self, index: ArenaIndex) -> Option<&mut TaskRecord> {
+        self.tasks.get_mut(index)
+    }
+
+    /// Inserts a task record into the arena (arena-index based).
+    pub fn insert(&mut self, record: TaskRecord) -> ArenaIndex {
+        self.tasks.insert(record)
+    }
+
+    /// Removes a task record by arena index.
+    pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
+        self.tasks.remove(index)
+    }
+
+    /// Returns an iterator over task records.
+    pub fn iter(&self) -> impl Iterator<Item = (ArenaIndex, &TaskRecord)> {
+        self.tasks.iter()
+    }
+
+    /// Returns the number of task records in the arena.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Returns `true` if the task arena is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     /// Returns a reference to a task record by ID.
     #[inline]
     #[must_use]

@@ -22,7 +22,7 @@ use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
 use crate::runtime::task_handle::JoinError;
-use crate::runtime::BlockingPoolHandle;
+use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::trace::event::{TraceData, TraceEventKind};
@@ -317,11 +317,11 @@ impl RuntimeObservability {
 /// `Σ = ⟨R, T, O, τ_now⟩`
 pub struct RuntimeState {
     /// All region records.
-    pub regions: Arena<RegionRecord>,
-    /// All task records.
-    pub tasks: Arena<TaskRecord>,
+    pub regions: RegionTable,
+    /// Task table for hot-path task state + stored futures.
+    pub tasks: TaskTable,
     /// All obligation records.
-    pub obligations: Arena<ObligationRecord>,
+    pub obligations: ObligationTable,
     /// Current logical time.
     pub now: Time,
     /// The root region.
@@ -330,11 +330,6 @@ pub struct RuntimeState {
     pub trace: TraceBufferHandle,
     /// Metrics provider for runtime instrumentation.
     pub metrics: Arc<dyn MetricsProvider>,
-    /// Stored futures for polling.
-    ///
-    /// Maps task IDs to their pollable futures. When a task is created via
-    /// `spawn()`, its wrapped future is stored here for the executor to poll.
-    pub(crate) stored_futures: HashMap<TaskId, StoredTask>,
     /// I/O driver for reactor integration.
     ///
     /// When present, the runtime can wait on I/O events via the reactor.
@@ -373,7 +368,6 @@ impl std::fmt::Debug for RuntimeState {
             .field("root_region", &self.root_region)
             .field("trace", &self.trace)
             .field("metrics", &"<dyn MetricsProvider>")
-            .field("stored_futures", &self.stored_futures)
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
             .field("logical_clock_mode", &self.logical_clock_mode)
@@ -402,14 +396,13 @@ impl RuntimeState {
     #[must_use]
     pub fn new_with_metrics(metrics: Arc<dyn MetricsProvider>) -> Self {
         Self {
-            regions: Arena::new(),
-            tasks: Arena::new(),
-            obligations: Arena::new(),
+            regions: RegionTable::new(),
+            tasks: TaskTable::new(),
+            obligations: ObligationTable::new(),
             now: Time::ZERO,
             root_region: None,
             trace: TraceBufferHandle::new(4096),
             metrics,
-            stored_futures: HashMap::new(),
             io_driver: None,
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
@@ -608,37 +601,37 @@ impl RuntimeState {
     /// Returns a shared reference to a task record by ID.
     #[must_use]
     pub fn task(&self, task_id: TaskId) -> Option<&TaskRecord> {
-        self.tasks.get(task_id.arena_index())
+        self.tasks.task(task_id)
     }
 
     /// Returns a mutable reference to a task record by ID.
     pub fn task_mut(&mut self, task_id: TaskId) -> Option<&mut TaskRecord> {
-        self.tasks.get_mut(task_id.arena_index())
+        self.tasks.task_mut(task_id)
     }
 
     /// Inserts a new task record into the arena.
     ///
     /// Returns the assigned arena index.
     pub fn insert_task(&mut self, record: TaskRecord) -> ArenaIndex {
-        self.tasks.insert(record)
+        self.tasks.insert_task(record)
     }
 
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.
     pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
-        self.tasks.remove(task_id.arena_index())
+        self.tasks.remove_task(task_id)
     }
 
     /// Returns an iterator over all task records.
     pub fn tasks_iter(&self) -> impl Iterator<Item = (ArenaIndex, &TaskRecord)> {
-        self.tasks.iter()
+        self.tasks.tasks_arena().iter()
     }
 
     /// Returns `true` if the task arena is empty.
     #[must_use]
     pub fn tasks_is_empty(&self) -> bool {
-        self.tasks.is_empty()
+        self.tasks.tasks_arena().is_empty()
     }
 
     /// Provides direct access to the tasks arena.
@@ -647,7 +640,7 @@ impl RuntimeState {
     #[inline]
     #[must_use]
     pub fn tasks_arena(&self) -> &Arena<TaskRecord> {
-        &self.tasks
+        self.tasks.tasks_arena()
     }
 
     /// Provides mutable access to the tasks arena.
@@ -655,7 +648,7 @@ impl RuntimeState {
     /// Used by intrusive data structures (LocalQueue) that operate on the arena.
     #[inline]
     pub fn tasks_arena_mut(&mut self) -> &mut Arena<TaskRecord> {
-        &mut self.tasks
+        self.tasks.tasks_arena_mut()
     }
 
     /// Returns a shared reference to a region record by ID.
@@ -701,8 +694,7 @@ impl RuntimeState {
             .collect();
 
         let tasks: Vec<TaskSnapshot> = self
-            .tasks
-            .iter()
+            .tasks_iter()
             .map(|(_, record)| {
                 let task_obligations = obligations_by_task
                     .get(&record.id)
@@ -856,7 +848,7 @@ impl RuntimeState {
             oneshot::channel::<Result<T, crate::runtime::task_handle::JoinError>>();
 
         // Create the TaskRecord
-        let idx = self.tasks.insert(TaskRecord::new_with_time(
+        let idx = self.insert_task(TaskRecord::new_with_time(
             TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
             region,
             budget,
@@ -865,7 +857,7 @@ impl RuntimeState {
         let task_id = TaskId::from_arena(idx);
 
         // Update the record with the correct ID
-        if let Some(record) = self.tasks.get_mut(idx) {
+        if let Some(record) = self.task_mut(task_id) {
             record.id = task_id;
         }
 
@@ -873,7 +865,7 @@ impl RuntimeState {
         if let Some(region_record) = self.regions.get(region.arena_index()) {
             if let Err(err) = region_record.add_task(task_id) {
                 // Rollback task creation
-                self.tasks.remove(idx);
+                let _ = self.remove_task(task_id);
                 return Err(match err {
                     AdmissionError::Closed => SpawnError::RegionClosed(region),
                     AdmissionError::LimitReached { limit, live, .. } => {
@@ -887,7 +879,7 @@ impl RuntimeState {
             }
         } else {
             // Rollback task creation
-            self.tasks.remove(idx);
+            let _ = self.remove_task(task_id);
             return Err(SpawnError::RegionNotFound(region));
         }
 
@@ -916,7 +908,7 @@ impl RuntimeState {
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
         // Link the shared state to the TaskRecord
-        if let Some(record) = self.tasks.get_mut(idx) {
+        if let Some(record) = self.task_mut(task_id) {
             record.set_cx_inner(cx.inner.clone());
             record.set_cx(cx.clone());
         }
@@ -983,14 +975,14 @@ impl RuntimeState {
         };
 
         // Store the wrapped future with task_id for poll tracing
-        self.stored_futures
-            .insert(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+        self.tasks
+            .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
         Ok((task_id, handle))
     }
 
     fn attach_logical_time_for_task(&self, task_id: TaskId, event: TraceEvent) -> TraceEvent {
-        let Some(record) = self.tasks.get(task_id.arena_index()) else {
+        let Some(record) = self.task(task_id) else {
             return event;
         };
         let Some(cx) = record.cx.as_ref() else {
@@ -1433,14 +1425,14 @@ impl RuntimeState {
     ///
     /// Returns `None` if no future is stored for this task.
     pub fn get_stored_future(&mut self, task_id: TaskId) -> Option<&mut StoredTask> {
-        self.stored_futures.get_mut(&task_id)
+        self.tasks.get_stored_future(task_id)
     }
 
     /// Removes and returns a stored future.
     ///
     /// Called when a task completes to clean up the future storage.
     pub fn remove_stored_future(&mut self, task_id: TaskId) -> Option<StoredTask> {
-        self.stored_futures.remove(&task_id)
+        self.tasks.remove_stored_future(task_id)
     }
 
     /// Stores a spawned task's future for execution.
@@ -1459,7 +1451,7 @@ impl RuntimeState {
     /// // Now the executor can poll the task
     /// ```
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {
-        self.stored_futures.insert(task_id, stored);
+        self.tasks.store_spawned_task(task_id, stored);
     }
 
     /// Returns the next trace sequence number and increments it.
@@ -1471,8 +1463,7 @@ impl RuntimeState {
     /// Counts live tasks.
     #[must_use]
     pub fn live_task_count(&self) -> usize {
-        self.tasks
-            .iter()
+        self.tasks_iter()
             .filter(|(_, t)| !t.state.is_terminal())
             .count()
     }
@@ -1550,7 +1541,7 @@ impl RuntimeState {
             }
             let budget = reason.cleanup_budget();
             let (newly_cancelled, is_cancelling) = {
-                let Some(task_record) = self.tasks.get_mut(task_id.arena_index()) else {
+                let Some(task_record) = self.task_mut(task_id) else {
                     continue;
                 };
                 let newly_cancelled =
@@ -1745,7 +1736,7 @@ impl RuntimeState {
                 .unwrap_or_else(|| reason.clone());
 
             for task_id in task_ids {
-                if let Some(task) = self.tasks.get_mut(task_id.arena_index()) {
+                if let Some(task) = self.task_mut(task_id) {
                     let task_budget = task_reason.cleanup_budget();
                     let newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
@@ -1853,11 +1844,10 @@ impl RuntimeState {
         };
 
         // Check all tasks are terminal
-        let all_tasks_done = region.task_ids().iter().all(|&task_id| {
-            self.tasks
-                .get(task_id.arena_index())
-                .is_none_or(|t| t.state.is_terminal())
-        });
+        let all_tasks_done = region
+            .task_ids()
+            .iter()
+            .all(|&task_id| self.task(task_id).is_none_or(|t| t.state.is_terminal()));
 
         // Check all child regions are closed
         let all_children_closed = region.child_ids().iter().all(|&child_id| {
@@ -1876,7 +1866,7 @@ impl RuntimeState {
     #[allow(clippy::used_underscore_binding)]
     pub fn task_completed(&mut self, task_id: TaskId) -> Vec<TaskId> {
         let (owner, completion, _outcome_kind, waiters) = {
-            let Some(task) = self.tasks.get(task_id.arena_index()) else {
+            let Some(task) = self.task(task_id) else {
                 trace!(
                     task_id = ?task_id,
                     "task_completed called for unknown task"
@@ -1908,7 +1898,7 @@ impl RuntimeState {
         let _waiter_count = waiters.len();
 
         // Remove the task record to prevent memory leaks
-        let _ = self.tasks.remove(task_id.arena_index());
+        let _ = self.remove_task(task_id);
 
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks(|record| record.holder == task_id);
@@ -2009,8 +1999,8 @@ impl RuntimeState {
             Outcome::Ok(())
         };
 
-        self.stored_futures
-            .insert(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+        self.tasks
+            .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
         Some((task_id, budget.priority))
     }
@@ -2163,11 +2153,10 @@ impl RuntimeState {
         }
 
         // All tasks must be terminal (including any spawned by finalizers)
-        let all_tasks_done = region.task_ids().iter().all(|&task_id| {
-            self.tasks
-                .get(task_id.arena_index())
-                .is_none_or(|t| t.state.is_terminal())
-        });
+        let all_tasks_done = region
+            .task_ids()
+            .iter()
+            .all(|&task_id| self.task(task_id).is_none_or(|t| t.state.is_terminal()));
 
         if !all_tasks_done {
             return false;
@@ -2240,9 +2229,7 @@ impl RuntimeState {
                 if let Some(region) = self.regions.get(region_id.arena_index()) {
                     if region.pending_obligations() > 0 {
                         let tasks_done = region.task_ids().iter().all(|&task_id| {
-                            self.tasks
-                                .get(task_id.arena_index())
-                                .is_none_or(|t| t.state.is_terminal())
+                            self.task(task_id).is_none_or(|t| t.state.is_terminal())
                         });
                         if tasks_done {
                             let leaks =
@@ -3200,13 +3187,13 @@ mod tests {
     }
 
     fn insert_task(state: &mut RuntimeState, region: RegionId) -> TaskId {
-        let idx = state.tasks.insert(TaskRecord::new(
+        let idx = state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             region,
             Budget::INFINITE,
         ));
         let id = TaskId::from_arena(idx);
-        state.tasks.get_mut(idx).expect("task missing").id = id;
+        state.task_mut(id).expect("task missing").id = id;
         let added = state
             .regions
             .get_mut(region.arena_index())
@@ -3227,8 +3214,7 @@ mod tests {
             .create_task(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
         let cx = state
-            .tasks
-            .get(task_id.arena_index())
+            .task(task_id)
             .and_then(|record| record.cx.clone())
             .expect("cx missing");
 
@@ -3256,8 +3242,7 @@ mod tests {
             .create_task(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
         let cx = state
-            .tasks
-            .get(task_id.arena_index())
+            .task(task_id)
             .and_then(|record| record.cx.clone())
             .expect("cx missing");
 
@@ -3310,8 +3295,7 @@ mod tests {
             .create_task(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
         let cx = state
-            .tasks
-            .get(task_id.arena_index())
+            .task(task_id)
             .and_then(|record| record.cx.clone())
             .expect("cx missing");
 
@@ -3394,7 +3378,7 @@ mod tests {
             .create_task(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
 
-        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+        if let Some(record) = state.task_mut(task_id) {
             record.complete(Outcome::Cancelled(CancelReason::timeout()));
         }
         let _ = state.task_completed(task_id);
@@ -3503,11 +3487,7 @@ mod tests {
 
         // Add a running task (representing an async finalizer)
         let task = insert_task(&mut state, region);
-        state
-            .tasks
-            .get_mut(task.arena_index())
-            .expect("task")
-            .start_running();
+        state.task_mut(task).expect("task").start_running();
 
         // Should NOT be able to close because a task is running
         let can_close = state.can_region_complete_close(region);
@@ -3520,8 +3500,7 @@ mod tests {
 
         // Complete the task
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
 
@@ -3592,7 +3571,7 @@ mod tests {
         crate::assert_with_log!(tasks.len() == 2, "tasks len", 2usize, tasks.len());
 
         for sib in [sib1, sib2] {
-            let record = state.tasks.get(sib.arena_index()).expect("sib missing");
+            let record = state.task(sib).expect("sib missing");
             match &record.state {
                 TaskState::CancelRequested { reason, .. } => {
                     crate::assert_with_log!(
@@ -3605,7 +3584,7 @@ mod tests {
                 other => panic!("expected CancelRequested, got {other:?}"),
             }
         }
-        let child_record = state.tasks.get(child.arena_index()).expect("child missing");
+        let child_record = state.task(child).expect("child missing");
         let is_created = matches!(child_record.state, TaskState::Created);
         crate::assert_with_log!(is_created, "child remains created", true, is_created);
         crate::test_complete!("policy_can_cancel_siblings");
@@ -3630,7 +3609,7 @@ mod tests {
             PolicyAction::Continue,
             action
         );
-        let sib_record = state.tasks.get(sib.arena_index()).expect("sib missing");
+        let sib_record = state.task(sib).expect("sib missing");
         let is_created = matches!(sib_record.state, TaskState::Created);
         crate::assert_with_log!(is_created, "sibling remains created", true, is_created);
         crate::test_complete!("policy_does_not_cancel_siblings_on_cancelled_child");
@@ -3715,10 +3694,7 @@ mod tests {
 
         // Tasks should be in CancelRequested state
         for (task_id, _) in tasks_to_schedule {
-            let task = state
-                .tasks
-                .get(task_id.arena_index())
-                .expect("task missing");
+            let task = state.task(task_id).expect("task missing");
             let is_cancel_requested = matches!(task.state, TaskState::CancelRequested { .. });
             crate::assert_with_log!(
                 is_cancel_requested,
@@ -3788,10 +3764,7 @@ mod tests {
         );
 
         // Root task gets User reason, descendants get ParentCancelled
-        let root_task_record = state
-            .tasks
-            .get(root_task.arena_index())
-            .expect("task missing");
+        let root_task_record = state.task(root_task).expect("task missing");
         match &root_task_record.state {
             TaskState::CancelRequested { reason, .. } => {
                 crate::assert_with_log!(
@@ -3804,10 +3777,7 @@ mod tests {
             other => panic!("expected CancelRequested, got {other:?}"),
         }
 
-        let child_task_record = state
-            .tasks
-            .get(child_task.arena_index())
-            .expect("task missing");
+        let child_task_record = state.task(child_task).expect("task missing");
         match &child_task_record.state {
             TaskState::CancelRequested { reason, .. } => {
                 crate::assert_with_log!(
@@ -3820,10 +3790,7 @@ mod tests {
             other => panic!("expected CancelRequested, got {other:?}"),
         }
 
-        let grandchild_task_record = state
-            .tasks
-            .get(grandchild_task.arena_index())
-            .expect("task missing");
+        let grandchild_task_record = state.task(grandchild_task).expect("task missing");
         match &grandchild_task_record.state {
             TaskState::CancelRequested { reason, .. } => {
                 crate::assert_with_log!(
@@ -3952,10 +3919,7 @@ mod tests {
         );
 
         // Verify tasks also have properly chained reasons
-        let grandchild_task_record = state
-            .tasks
-            .get(grandchild_task.arena_index())
-            .expect("task missing");
+        let grandchild_task_record = state.task(grandchild_task).expect("task missing");
         match &grandchild_task_record.state {
             TaskState::CancelRequested { reason, .. } => {
                 crate::assert_with_log!(
@@ -4088,7 +4052,7 @@ mod tests {
         );
 
         // Task should have Shutdown reason
-        let task_record = state.tasks.get(task.arena_index()).expect("task missing");
+        let task_record = state.task(task).expect("task missing");
         match &task_record.state {
             TaskState::CancelRequested { reason, .. } => {
                 crate::assert_with_log!(
@@ -4121,8 +4085,7 @@ mod tests {
 
         // Complete the task
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task missing")
             .complete(Outcome::Ok(()));
 
@@ -4442,8 +4405,7 @@ mod tests {
 
         // Complete task2 (transition to Completed state first)
         state
-            .tasks
-            .get_mut(task2.arena_index())
+            .task_mut(task2)
             .expect("task2")
             .complete(Outcome::Ok(()));
 
@@ -4475,20 +4437,18 @@ mod tests {
         );
 
         // Verify task2 is removed from the state
-        let removed = state.tasks.get(task2.arena_index()).is_none();
+        let removed = state.task(task2).is_none();
         crate::assert_with_log!(removed, "task2 removed from state", true, removed);
 
         // Complete remaining tasks
         state
-            .tasks
-            .get_mut(task1.arena_index())
+            .task_mut(task1)
             .expect("task1")
             .complete(Outcome::Ok(()));
         let _ = state.task_completed(task1);
 
         state
-            .tasks
-            .get_mut(task3.arena_index())
+            .task_mut(task3)
             .expect("task3")
             .complete(Outcome::Ok(()));
         let _ = state.task_completed(task3);
@@ -4528,10 +4488,10 @@ mod tests {
             tasks.contains(&task_id)
         );
         crate::assert_with_log!(
-            state.tasks.len() == 1,
+            state.tasks_arena().len() == 1,
             "arena len stable",
             1,
-            state.tasks.len()
+            state.tasks_arena().len()
         );
         crate::test_complete!("spawn_rejected_when_task_limit_reached");
     }
@@ -4777,8 +4737,7 @@ mod tests {
 
         // Phase 2: First task completes with Cancelled outcome → still draining
         state
-            .tasks
-            .get_mut(task1.arena_index())
+            .task_mut(task1)
             .expect("task1")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
         let _ = state.task_completed(task1);
@@ -4805,8 +4764,7 @@ mod tests {
         // Phase 3: Second task completes → triggers advance_region_state
         // → Finalizing (no children, no tasks) → runs sync finalizers → Closed
         state
-            .tasks
-            .get_mut(task2.arena_index())
+            .task_mut(task2)
             .expect("task2")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
         let _ = state.task_completed(task2);
@@ -4877,8 +4835,7 @@ mod tests {
 
         // Complete child task first
         state
-            .tasks
-            .get_mut(child_task.arena_index())
+            .task_mut(child_task)
             .expect("child_task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
         let _ = state.task_completed(child_task);
@@ -4916,8 +4873,7 @@ mod tests {
 
         // Complete root task → root should close
         state
-            .tasks
-            .get_mut(root_task.arena_index())
+            .task_mut(root_task)
             .expect("root_task")
             .complete(Outcome::Cancelled(CancelReason::user("stop")));
         let _ = state.task_completed(root_task);
@@ -4968,8 +4924,7 @@ mod tests {
         // Complete task with Cancelled outcome
         // task_completed() should auto-abort orphaned obligations
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
         let _ = state.task_completed(task);
@@ -5034,8 +4989,7 @@ mod tests {
         // Cancel and complete the task
         let _ = state.cancel_request(region, &CancelReason::timeout(), None);
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
         let _ = state.task_completed(task);
@@ -5088,8 +5042,7 @@ mod tests {
 
         // Complete the task to make it terminal
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
 
@@ -5141,8 +5094,7 @@ mod tests {
         // Cancel and complete
         let _ = state.cancel_request(region, &CancelReason::deadline(), None);
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::deadline()));
         let _ = state.task_completed(task);
@@ -5247,8 +5199,7 @@ mod tests {
         // Cancel and complete task (obl_orphaned should be auto-aborted)
         let _ = state.cancel_request(region, &CancelReason::shutdown(), None);
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::shutdown()));
         let _ = state.task_completed(task);
@@ -5317,8 +5268,7 @@ mod tests {
         // Cancel and complete everything
         let _ = state.cancel_request(root, &CancelReason::user("done"), None);
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
         let _ = state.task_completed(task);
@@ -5406,8 +5356,7 @@ mod tests {
         // task_a commits its obligation during cleanup, then completes
         let _ = state.commit_obligation(obl_a).expect("commit obl_a");
         state
-            .tasks
-            .get_mut(task_a.arena_index())
+            .task_mut(task_a)
             .expect("task_a")
             .complete(Outcome::Cancelled(CancelReason::deadline()));
         let _ = state.task_completed(task_a);
@@ -5433,8 +5382,7 @@ mod tests {
 
         // task_b completes → its orphaned obligations auto-aborted
         state
-            .tasks
-            .get_mut(task_b.arena_index())
+            .task_mut(task_b)
             .expect("task_b")
             .complete(Outcome::Cancelled(CancelReason::deadline()));
         let _ = state.task_completed(task_b);
@@ -5595,8 +5543,7 @@ mod tests {
     /// pending obligations, unlike Cancelled which auto-aborts them).
     fn complete_task_ok(state: &mut RuntimeState, task: TaskId) {
         state
-            .tasks
-            .get_mut(task.arena_index())
+            .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
         let _ = state.task_completed(task);

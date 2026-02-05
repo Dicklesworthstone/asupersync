@@ -951,12 +951,15 @@ struct RuntimeInner {
 
 impl RuntimeInner {
     fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> io::Result<Self> {
-        let state = Arc::new(crate::sync::ContendedMutex::new("runtime_state", match reactor {
-            Some(reactor) => {
-                RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
-            }
-            None => RuntimeState::new_with_metrics(config.metrics_provider.clone()),
-        }));
+        let state = Arc::new(crate::sync::ContendedMutex::new(
+            "runtime_state",
+            match reactor {
+                Some(reactor) => {
+                    RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
+                }
+                None => RuntimeState::new_with_metrics(config.metrics_provider.clone()),
+            },
+        ));
         let root_region = {
             let mut guard = state.lock().expect("runtime state lock poisoned");
             if let Some(observability) = config.observability.clone() {
