@@ -575,12 +575,17 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let result = listener.poll_accept(&mut cx);
-        match result {
+        match &result {
             Poll::Ready(Ok((stream, remote_addr))) => {
-                assert_eq!(remote_addr, addr("127.0.0.1:9000"));
+                assert_eq!(*remote_addr, addr("127.0.0.1:9000"));
                 assert_eq!(stream.local_addr().unwrap(), addr("127.0.0.1:8080"));
             }
-            other => panic!("expected Ready(Ok(...)), got: {other:?}"),
+            other => {
+                assert!(
+                    matches!(other, Poll::Ready(Ok(_))),
+                    "expected Ready(Ok(...)), got: {other:?}",
+                );
+            }
         }
     }
 

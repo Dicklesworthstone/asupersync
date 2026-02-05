@@ -135,6 +135,24 @@ impl DnsCache {
 
     /// Inserts an IP address lookup result into the cache.
     pub fn put_ip(&self, host: &str, lookup: &LookupIp) {
+        if self.config.max_entries == 0 {
+            let evicted = {
+                let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+                if cache.is_empty() {
+                    0
+                } else {
+                    let evicted = cache.len();
+                    cache.clear();
+                    evicted
+                }
+            };
+            if evicted > 0 {
+                let mut stats = self.stats.write().expect("stats lock poisoned");
+                stats.evictions += evicted as u64;
+            }
+            return;
+        }
+
         let ttl = self.clamp_ttl(lookup.ttl());
 
         let mut cache = self.ip_cache.write().expect("cache lock poisoned");
@@ -359,5 +377,27 @@ mod tests {
         let result = cache.get_ip("example.com");
         crate::assert_with_log!(result.is_some(), "entry exists", true, result.is_some());
         crate::test_complete!("cache_ttl_clamping");
+    }
+
+    #[test]
+    fn cache_max_entries_zero_disables_inserts() {
+        init_test("cache_max_entries_zero");
+        let config = CacheConfig {
+            max_entries: 0,
+            ..Default::default()
+        };
+        let cache = DnsCache::with_config(config);
+
+        let lookup = LookupIp::new(
+            vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
+            Duration::from_secs(300),
+        );
+        cache.put_ip("example.com", &lookup);
+
+        let result = cache.get_ip("example.com");
+        crate::assert_with_log!(result.is_none(), "no entry", true, result.is_none());
+        let size = cache.stats().size;
+        crate::assert_with_log!(size == 0, "size 0", 0, size);
+        crate::test_complete!("cache_max_entries_zero");
     }
 }
