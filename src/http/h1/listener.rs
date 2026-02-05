@@ -258,8 +258,9 @@ fn spawn_connection<F, Fut>(
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal);
+        let peer_addr = stream.peer_addr().ok();
         // Drive the server future to completion using a thread-parking waker
-        let mut fut = Box::pin(server.serve(stream));
+        let mut fut = Box::pin(server.serve_with_peer_addr(stream, peer_addr));
         let thread = std::thread::current();
         let waker = Arc::new(ThreadWaker(thread)).into();
         let mut cx = std::task::Context::from_waker(&waker);

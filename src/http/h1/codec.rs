@@ -561,6 +561,7 @@ impl Decoder for Http1Codec {
                                 headers,
                                 body: Vec::new(),
                                 trailers: Vec::new(),
+                                peer_addr: None,
                             }));
                         }
                         BodyKind::ContentLength(len) => {
@@ -608,6 +609,7 @@ impl Decoder for Http1Codec {
                         headers,
                         body: body_bytes.to_vec(),
                         trailers: Vec::new(),
+                        peer_addr: None,
                     }));
                 }
 
@@ -626,6 +628,7 @@ impl Decoder for Http1Codec {
                         headers,
                         body,
                         trailers,
+                        peer_addr: None,
                     }));
                 }
             }

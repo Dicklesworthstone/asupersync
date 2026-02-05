@@ -531,6 +531,7 @@ impl HttpClient {
             headers,
             body: body.to_vec(),
             trailers: Vec::new(),
+            peer_addr: None,
         };
 
         // Connect and send
@@ -566,6 +567,7 @@ impl HttpClient {
             headers,
             body: body.to_vec(),
             trailers: Vec::new(),
+            peer_addr: None,
         };
 
         let stream = self.connect_io(parsed).await?;

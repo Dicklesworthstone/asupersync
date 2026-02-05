@@ -14,6 +14,7 @@ use crate::server::shutdown::ShutdownSignal;
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
 use std::future::{poll_fn, Future};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -259,6 +260,20 @@ where
     where
         T: AsyncRead + AsyncWrite + Unpin + Send,
     {
+        self.serve_with_peer_addr(io, None).await
+    }
+
+    /// Serve a single connection with an optional peer address.
+    ///
+    /// When provided, the peer address is attached to each request.
+    pub async fn serve_with_peer_addr<T>(
+        self,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)
             .max_body_size(self.config.max_body_size);
@@ -305,7 +320,7 @@ where
             };
 
             // Read next request
-            let req = match req {
+            let mut req = match req {
                 Some(Ok(req)) => req,
                 Some(Err(e)) => return Err(e),
                 None => {
@@ -314,6 +329,7 @@ where
                     break;
                 }
             };
+            req.peer_addr = peer_addr;
 
             // Determine if we should close after this request
             let close_after = should_close_connection(&req, &self.config, &state);
@@ -417,6 +433,7 @@ mod tests {
             headers,
             body: Vec::new(),
             trailers: Vec::new(),
+            peer_addr: None,
         }
     }
 

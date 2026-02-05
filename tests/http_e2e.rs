@@ -179,6 +179,7 @@ fn e2e_http_codec_request_roundtrip() {
         ],
         body: Vec::new(),
         trailers: Vec::new(),
+        peer_addr: None,
     };
 
     // Manually encode an HTTP/1.1 request into the buffer
