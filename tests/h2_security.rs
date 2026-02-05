@@ -272,11 +272,11 @@ fn stream_store_basic_operations() {
 
     let mut store = StreamStore::new(true, 65535, 16384);
     // get_or_create should create streams on demand
-    let result = store.get_or_create(1);
-    assert!(result.is_ok(), "creating stream 1 should succeed");
+    let result = store.get_or_create(2);
+    assert!(result.is_ok(), "creating stream 2 should succeed");
 
-    let stream = store.get(1);
-    assert!(stream.is_some(), "stream 1 should exist after creation");
+    let stream = store.get(2);
+    assert!(stream.is_some(), "stream 2 should exist after creation");
 
     test_complete!("stream_store_basic");
 }
@@ -287,14 +287,14 @@ fn stream_store_multiple_streams() {
     test_phase!("stream_store_multiple");
 
     let mut store = StreamStore::new(true, 65535, 16384);
-    store.get_or_create(1).expect("create stream 1");
-    store.get_or_create(3).expect("create stream 3");
-    store.get_or_create(5).expect("create stream 5");
+    store.get_or_create(2).expect("create stream 2");
+    store.get_or_create(4).expect("create stream 4");
+    store.get_or_create(6).expect("create stream 6");
 
-    assert!(store.get(1).is_some());
-    assert!(store.get(3).is_some());
-    assert!(store.get(5).is_some());
-    assert!(store.get(7).is_none());
+    assert!(store.get(2).is_some());
+    assert!(store.get(4).is_some());
+    assert!(store.get(6).is_some());
+    assert!(store.get(8).is_none());
 
     test_complete!("stream_store_multiple");
 }

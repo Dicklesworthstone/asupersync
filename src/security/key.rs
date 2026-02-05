@@ -22,8 +22,15 @@ impl AuthKey {
     /// Creates a new key from a 64-bit seed.
     ///
     /// This uses a deterministic expansion to generate 32 bytes from the seed.
+    /// Seed 0 is remapped to a fixed non-zero value to keep seed-to-key
+    /// uniqueness while avoiding the xorshift zero-state lockup.
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
+        let seed = if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        };
         let mut bytes = [0u8; AUTH_KEY_SIZE];
         let mut rng = DetRng::new(seed);
         rng.fill_bytes(&mut bytes);
@@ -99,6 +106,13 @@ mod tests {
         let k1 = AuthKey::from_seed(1);
         let k2 = AuthKey::from_seed(2);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_from_seed_zero_is_distinct() {
+        let k0 = AuthKey::from_seed(0);
+        let k1 = AuthKey::from_seed(1);
+        assert_ne!(k0, k1);
     }
 
     #[test]
