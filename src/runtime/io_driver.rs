@@ -641,7 +641,7 @@ mod tests {
         fn deregister(&self, _token: Token) -> io::Result<()> {
             let call = self.deregister_calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
-                Err(io::Error::new(io::ErrorKind::Other, "injected failure"))
+                Err(io::Error::other("injected failure"))
             } else {
                 Ok(())
             }
