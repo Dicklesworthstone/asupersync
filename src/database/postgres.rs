@@ -1049,7 +1049,7 @@ impl PgConnection {
         let mut buf = MessageBuffer::new();
 
         // Protocol version 3.0
-        buf.write_i32(196608); // 3 << 16
+        buf.write_i32(196_608); // 3 << 16
 
         // Parameters
         buf.write_cstring("user");
