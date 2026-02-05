@@ -170,6 +170,7 @@ where
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         let mut tasks = ConnectionTasks::new();
+        let mut shutdown_rx = self.shutdown_signal.subscribe();
         // Accept loop: keep accepting until shutdown
         loop {
             if self.shutdown_signal.is_shutting_down() {
@@ -179,7 +180,7 @@ where
             // Race accept against shutdown phase change
             let result = {
                 let accept_fut = self.tcp_listener.accept();
-                let shutdown_fut = self.shutdown_signal.phase_changed();
+                let shutdown_fut = shutdown_rx.wait();
                 // Pin both futures on the stack
                 let mut accept_fut = core::pin::pin!(accept_fut);
                 let mut shutdown_fut = core::pin::pin!(shutdown_fut);
