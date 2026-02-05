@@ -49,6 +49,7 @@
 //! will not have its ready tasks stolen.
 
 use crate::obligation::lyapunov::{LyapunovGovernor, SchedulingSuggestion, StateSnapshot};
+use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_injector::GlobalInjector;
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
@@ -334,11 +335,11 @@ impl ThreeLaneScheduler {
             Vec::with_capacity(worker_count);
         let mut local_ready: Vec<Arc<Mutex<Vec<TaskId>>>> = Vec::with_capacity(worker_count);
 
-        // Get timer driver from runtime state
-        let timer_driver = state
-            .lock()
-            .expect("runtime state lock poisoned")
-            .timer_driver_handle();
+        // Get IO driver and timer driver from runtime state
+        let (io_driver, timer_driver) = {
+            let guard = state.lock().expect("runtime state lock poisoned");
+            (guard.io_driver_handle(), guard.timer_driver_handle())
+        };
 
         // Create local schedulers first so we can share references for stealing
         for _ in 0..worker_count {
@@ -394,6 +395,7 @@ impl ThreeLaneScheduler {
                 coordinator: Arc::clone(&coordinator),
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
+                io_driver: io_driver.clone(),
                 timer_driver: timer_driver.clone(),
                 steal_buffer: Vec::with_capacity(steal_batch_size.max(1)),
                 steal_batch_size,
@@ -570,6 +572,9 @@ impl ThreeLaneScheduler {
         if should_schedule {
             self.global.inject_ready(task, priority);
             self.wake_one();
+            trace!(?task, priority, "inject_ready: task injected into global ready queue");
+        } else {
+            trace!(?task, priority, "inject_ready: task NOT scheduled (should_schedule=false)");
         }
     }
 
@@ -775,6 +780,8 @@ pub struct ThreeLaneWorker {
     pub rng: DetRng,
     /// Shutdown signal.
     pub shutdown: Arc<AtomicBool>,
+    /// I/O driver handle for polling the reactor (optional).
+    pub io_driver: Option<IoDriverHandle>,
     /// Timer driver for processing timer wakeups (optional).
     pub timer_driver: Option<TimerDriverHandle>,
     /// Scratch buffer for stolen tasks (avoid per-steal allocations).
@@ -865,7 +872,17 @@ impl ThreeLaneWorker {
                 continue;
             }
 
-            // PHASE 5: Backoff before parking
+            // PHASE 5: Drive I/O (Leader/Follower pattern)
+            // If we can acquire the IO driver lock, we become the I/O leader
+            // and poll the reactor for ready events (e.g. TCP connect completion).
+            if let Some(io) = &self.io_driver {
+                if let Ok(mut driver) = io.try_lock() {
+                    let _ = driver.turn_with(Some(Duration::from_millis(1)), |_, _| {});
+                    continue;
+                }
+            }
+
+            // PHASE 6: Backoff before parking
             let mut backoff = 0;
 
             loop {
@@ -900,7 +917,8 @@ impl ThreeLaneWorker {
                     std::thread::yield_now();
                     backoff += 1;
                 } else if self.enable_parking {
-                    // Park with timeout based on next timer deadline.
+                    // Park with timeout based on next timer deadline or IO polling needs.
+                    let has_io = self.io_driver.is_some();
                     if let Some(timer) = &self.timer_driver {
                         if let Some(next_deadline) = timer.next_deadline() {
                             let now = timer.now();
@@ -909,12 +927,20 @@ impl ThreeLaneWorker {
                                 self.parker.park_timeout(Duration::from_nanos(nanos));
                             }
                             // If deadline is due or passed, don't park - loop back to process timers.
+                        } else if has_io {
+                            // No pending timers but IO driver is active;
+                            // use short timeout so we periodically poll the reactor.
+                            self.parker.park_timeout(Duration::from_millis(1));
                         } else {
-                            // No pending timers, park indefinitely.
+                            // No pending timers and no IO, park indefinitely.
                             self.parker.park();
                         }
+                    } else if has_io {
+                        // No timer driver but IO driver is active;
+                        // use short timeout so we periodically poll the reactor.
+                        self.parker.park_timeout(Duration::from_millis(1));
                     } else {
-                        // No timer driver, park indefinitely.
+                        // No timer driver and no IO, park indefinitely.
                         self.parker.park();
                     }
                     // After waking, re-check queues by continuing the loop.
