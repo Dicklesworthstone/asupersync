@@ -198,10 +198,10 @@ cargo test --test obligation_lifecycle_e2e -- --nocapture
 | **inject_cancel/ready/timed** | (none with QW#4) or A | A only |
 | **spawn/wake** | (none with QW#4) or A | A only |
 | **task_completed** | E → D → B → A → C | Full order |
-| **cancel_request** | E → D → B → A | Skip C |
+| **cancel_request** | E → D → B → A → C | Full order (calls advance_region_state which needs C for obligation leak handling) |
 | **create_task** | E → D → B → A | Skip C |
 | **create_obligation** | E → D → B → C | Skip A (unless logical time from task) |
-| **commit/abort_obligation** | E → D → B → C | Skip A |
+| **commit/abort_obligation** | E → D → B → A → C | Full order (calls advance_region_state which needs A for task terminal checks and C for obligation leak handling) |
 | **advance_region_state** | E → D → B → A → C | Full order (recursive) |
 | **drain_ready_async_finalizers** | E → D → B → A | Skip C |
 | **snapshot / is_quiescent** | Lock all: E → D → B → A → C | All shards, read-only |
