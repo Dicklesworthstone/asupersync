@@ -7,12 +7,14 @@
 use crate::http::h1::server::{Http1Config, Http1Server};
 use crate::http::h1::types::{Request, Response};
 use crate::net::tcp::listener::TcpListener;
-use crate::runtime::{RuntimeHandle, SpawnError};
+use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
+use crate::tracing_compat::error;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -167,6 +169,7 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        let mut tasks = ConnectionTasks::new();
         // Accept loop: keep accepting until shutdown
         loop {
             if self.shutdown_signal.is_shutting_down() {
@@ -225,18 +228,16 @@ where
             let handler = Arc::clone(&self.handler);
             let http_config = self.config.http_config.clone();
             let shutdown_signal = self.shutdown_signal.clone();
-            if let Err(err) = spawn_connection(
+            let handle = spawn_connection(
                 stream,
                 guard,
                 handler,
                 http_config,
                 shutdown_signal,
                 runtime,
-            ) {
-                return Err(io::Error::other(format!(
-                    "failed to spawn connection task: {err}"
-                )));
-            }
+            )
+            .map_err(|err| io::Error::other(format!("failed to spawn connection task: {err}")))?;
+            tasks.push(handle);
         }
 
         // Drain phase
@@ -246,6 +247,7 @@ where
         }
 
         let stats = self.connection_manager.drain_with_stats().await;
+        tasks.join_all().await;
         Ok(stats)
     }
 }
@@ -269,19 +271,72 @@ fn spawn_connection<F, Fut>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     runtime: &RuntimeHandle,
-) -> Result<(), SpawnError>
+) -> Result<JoinHandle<()>, SpawnError>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response> + Send + 'static,
 {
-    runtime.try_spawn(async move {
+    let handle = runtime.try_spawn(async move {
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal);
         let peer_addr = stream.peer_addr().ok();
         let _ = server.serve_with_peer_addr(stream, peer_addr).await;
     })?;
-    Ok(())
+    Ok(handle)
+}
+
+struct ConnectionTasks {
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl ConnectionTasks {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, handle: JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    async fn join_all(&mut self) {
+        for handle in self.handles.drain(..) {
+            let result = CatchUnwind(Box::pin(handle)).await;
+            if let Err(payload) = result {
+                let _ = &payload;
+                error!(
+                    message = %payload_to_string(&payload),
+                    "connection task panicked"
+                );
+            }
+        }
+    }
+}
+
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+        match result {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
+}
+
+fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(ToString::to_string)
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 /// Returns `true` for accept errors that are transient and should be retried.
