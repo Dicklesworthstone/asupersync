@@ -148,7 +148,6 @@ use crate::types::{Budget, CancelAttributionConfig};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -940,7 +939,6 @@ impl<F: Future> Future for CatchUnwind<F> {
 
 struct RuntimeInner {
     config: RuntimeConfig,
-    next_worker_id: AtomicUsize,
     state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
     scheduler: ThreeLaneScheduler,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -1044,18 +1042,12 @@ impl RuntimeInner {
 
         Ok(Self {
             config,
-            next_worker_id: AtomicUsize::new(0),
             state,
             scheduler,
             worker_threads: Mutex::new(worker_threads),
             root_region,
             blocking_pool,
         })
-    }
-
-    fn next_thread_name(&self) -> String {
-        let id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
-        format!("{}-{id}", self.config.thread_name_prefix)
     }
 
     fn spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
