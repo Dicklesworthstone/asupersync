@@ -144,15 +144,6 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     // NOTE: net/websocket/handshake.rs was fixed — now uses EntropySource capability.
     AmbientFinding {
-        file: "server/connection.rs",
-        line: 558,
-        category: AmbientCategory::Spawn,
-        severity: Severity::Critical,
-        description: "std::thread::spawn for connection handler lifecycle",
-        exempt: false,
-        exemption_reason: None,
-    },
-    AmbientFinding {
         file: "http/h1/stream.rs",
         line: 1140,
         category: AmbientCategory::Spawn,

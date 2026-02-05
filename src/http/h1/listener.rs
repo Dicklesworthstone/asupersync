@@ -7,6 +7,7 @@
 use crate::http::h1::server::{Http1Config, Http1Server};
 use crate::http::h1::types::{Request, Response};
 use crate::net::tcp::listener::TcpListener;
+use crate::runtime::{RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
 use std::future::Future;
@@ -70,13 +71,20 @@ impl Http1ListenerConfig {
 /// ```ignore
 /// use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 /// use asupersync::http::h1::types::Response;
+/// use asupersync::runtime::RuntimeBuilder;
 ///
-/// let listener = Http1Listener::bind("127.0.0.1:8080", |req| async {
-///     Response::new(200, "OK", b"Hello".to_vec())
-/// }).await?;
+/// let runtime = RuntimeBuilder::current_thread().build()?;
+/// let handle = runtime.handle();
+/// runtime.block_on(async {
+///     let listener = Http1Listener::bind("127.0.0.1:8080", |req| async {
+///         Response::new(200, "OK", b"Hello".to_vec())
+///     })
+///     .await?;
 ///
-/// // In another task: listener.shutdown_signal().begin_drain(Duration::from_secs(30));
-/// let stats = listener.run().await?;
+///     // In another task: listener.shutdown_signal().begin_drain(Duration::from_secs(30));
+///     let stats = listener.run(&handle).await?;
+///     Ok::<_, std::io::Error>(stats)
+/// })?;
 /// ```
 pub struct Http1Listener<F> {
     tcp_listener: TcpListener,
@@ -89,7 +97,7 @@ pub struct Http1Listener<F> {
 impl<F, Fut> Http1Listener<F>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send,
+    Fut: Future<Output = Response> + Send + 'static,
 {
     /// Bind to the given address with default configuration.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
@@ -158,7 +166,7 @@ where
     /// drains active connections within the configured timeout.
     ///
     /// Returns shutdown statistics upon completion.
-    pub async fn run(self) -> io::Result<ShutdownStats> {
+    pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         // Accept loop: keep accepting until shutdown
         loop {
             if self.shutdown_signal.is_shutting_down() {
@@ -217,7 +225,19 @@ where
             let handler = Arc::clone(&self.handler);
             let http_config = self.config.http_config.clone();
             let shutdown_signal = self.shutdown_signal.clone();
-            spawn_connection(stream, guard, handler, http_config, shutdown_signal);
+            if let Err(err) = spawn_connection(
+                stream,
+                guard,
+                handler,
+                http_config,
+                shutdown_signal,
+                runtime,
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to spawn connection task: {err}"),
+                ));
+            }
         }
 
         // Drain phase
@@ -249,41 +269,21 @@ fn spawn_connection<F, Fut>(
     handler: Arc<F>,
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
-) where
+    runtime: &RuntimeHandle,
+) -> Result<(), SpawnError>
+where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send,
+    Fut: Future<Output = Response> + Send + 'static,
 {
-    // ubs:ignore — intentional per-connection thread; ConnectionGuard tracks lifetime
-    std::thread::spawn(move || {
+    let handler = Arc::clone(&handler);
+    runtime.try_spawn(async move {
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal);
-        let peer_addr = stream.peer_addr().ok();
-        // Drive the server future to completion using a thread-parking waker
-        let mut fut = Box::pin(server.serve_with_peer_addr(stream, peer_addr));
-        let thread = std::thread::current();
-        let waker = Arc::new(ThreadWaker(thread)).into();
-        let mut cx = std::task::Context::from_waker(&waker);
-        loop {
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(_result) => break,
-                Poll::Pending => std::thread::park(),
-            }
-        }
-    });
-}
-
-/// Waker that unparks a thread when woken.
-struct ThreadWaker(std::thread::Thread);
-
-impl std::task::Wake for ThreadWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
+let peer_addr = stream.peer_addr().ok();
+        let _ = server.serve_with_peer_addr(stream, peer_addr).await;
+    })?;
+    Ok(())
 }
 
 /// Returns `true` for accept errors that are transient and should be retried.
@@ -301,6 +301,8 @@ fn is_transient_accept_error(err: &io::Error) -> bool {
 mod tests {
     use super::*;
     use crate::http::h1::types::Response;
+    use crate::runtime::RuntimeBuilder;
+    use crate::test_utils::init_test_logging;
 
     #[test]
     fn default_config() {
@@ -412,7 +414,12 @@ mod tests {
 
     #[test]
     fn immediate_shutdown_returns_stats() {
-        crate::test_utils::run_test(|| async {
+        init_test_logging();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let handle = runtime.handle();
+        runtime.block_on(async {
             let listener = Http1Listener::bind("127.0.0.1:0", |_req| async {
                 Response::new(200, "OK", Vec::new())
             })
@@ -423,7 +430,7 @@ mod tests {
             let signal = listener.shutdown_signal();
             let _ = signal.begin_drain(Duration::from_millis(100));
 
-            let stats = listener.run().await.expect("run");
+            let stats = listener.run(&handle).await.expect("run");
             assert_eq!(stats.drained, 0);
             assert_eq!(stats.force_closed, 0);
         });
