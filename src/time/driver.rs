@@ -166,10 +166,6 @@ pub struct TimerDriver<T: TimeSource = VirtualClock> {
     clock: std::sync::Arc<T>,
     /// Timing wheel (protected by mutex for thread safety).
     wheel: Mutex<TimerWheel>,
-    /// Next timer ID (legacy; wheel also tracks ids internally).
-    next_id: AtomicU64,
-    /// Current generation (legacy; wheel also tracks generations internally).
-    generation: AtomicU64,
 }
 
 impl<T: TimeSource> TimerDriver<T> {
@@ -180,8 +176,6 @@ impl<T: TimeSource> TimerDriver<T> {
         Self {
             clock,
             wheel: Mutex::new(TimerWheel::new_at(now)),
-            next_id: AtomicU64::new(0),
-            generation: AtomicU64::new(0),
         }
     }
 
@@ -197,8 +191,6 @@ impl<T: TimeSource> TimerDriver<T> {
     /// The waker will be called when `process_timers` is called
     /// and the deadline has passed.
     pub fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
-        let _ = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.generation.fetch_add(1, Ordering::Relaxed);
         self.wheel.lock().unwrap().register(deadline, waker)
     }
 
