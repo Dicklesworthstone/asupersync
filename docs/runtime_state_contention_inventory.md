@@ -224,9 +224,9 @@ These sequences MUST NOT occur:
 /// Fields are Option<MutexGuard> acquired in order during construction.
 pub struct ShardGuard<'a> {
     config: &'a Arc<ShardedConfig>,              // E: no lock needed
-    regions: Option<MutexGuard<'a, RegionShard>>,     // B
-    tasks: Option<MutexGuard<'a, TaskShard>>,         // A
-    obligations: Option<MutexGuard<'a, ObligationShard>>, // C
+    regions: Option<ContendedMutexGuard<'a, RegionShard>>,     // B
+    tasks: Option<ContendedMutexGuard<'a, TaskShard>>,         // A
+    obligations: Option<ContendedMutexGuard<'a, ObligationShard>>, // C
 }
 
 impl<'a> ShardGuard<'a> {
