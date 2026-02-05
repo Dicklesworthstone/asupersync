@@ -578,7 +578,12 @@ mod tests {
     struct NotFoundReactor;
 
     impl Reactor for NotFoundReactor {
-        fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
             Ok(())
         }
 
@@ -620,7 +625,12 @@ mod tests {
     }
 
     impl Reactor for FlakyReactor {
-        fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
             Ok(())
         }
 
