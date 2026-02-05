@@ -816,10 +816,7 @@ impl TestHarness {
 
     /// Complete a task with the given outcome.
     pub fn complete_task(&mut self, task: TaskId, outcome: TaskOutcome) {
-        // Get the arena index for this task
-        let arena_idx = ArenaIndex::new(task.new_for_test_index(), task.new_for_test_generation());
-
-        if let Some(record) = self.runtime.state.tasks.get_mut(arena_idx) {
+        if let Some(record) = self.runtime.state.task_mut(task) {
             if !record.state.is_terminal() {
                 let runtime_outcome = match outcome {
                     TaskOutcome::Ok => Outcome::Ok(()),
@@ -887,6 +884,7 @@ impl RegionIdTestExt for RegionId {
 }
 
 // Extension trait for TaskId to access test-only index/generation
+#[allow(dead_code)]
 trait TaskIdTestExt {
     fn new_for_test_index(&self) -> u32;
     fn new_for_test_generation(&self) -> u32;
@@ -1323,12 +1321,7 @@ fn check_no_orphan_tasks(harness: &TestHarness) -> Vec<InvariantViolation> {
     let mut violations = Vec::new();
 
     for task_id in &harness.tasks {
-        let arena_idx = ArenaIndex::new(
-            task_id.new_for_test_index(),
-            task_id.new_for_test_generation(),
-        );
-
-        if let Some(task_record) = harness.runtime.state.tasks.get(arena_idx) {
+        if let Some(task_record) = harness.runtime.state.task(*task_id) {
             let region_id = task_record.owner; // Note: field is `owner` not `region`
             let region_idx = ArenaIndex::new(
                 region_id.new_for_test_index(),

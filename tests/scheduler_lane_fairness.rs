@@ -6,12 +6,12 @@
 
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::runtime::RuntimeState;
+use asupersync::sync::ContendedMutex;
 use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use asupersync::sync::ContendedMutex;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 const MAX_CONSECUTIVE_CANCEL: usize = 16;

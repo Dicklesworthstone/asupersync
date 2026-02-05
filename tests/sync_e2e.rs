@@ -19,13 +19,16 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
-use asupersync::types::Budget;
+use asupersync::sync::{
+    Barrier, LockError, Mutex, Notify, OnceCell, RwLock, RwLockError, Semaphore,
+};
+use asupersync::types::{Budget, CancelReason};
 use asupersync::Cx;
 use common::*;
+use futures_lite::future::poll_fn;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -221,7 +224,7 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
                 // Scope guards so they're dropped before yield_now
                 // (RwLockReadGuard is not Send across await points)
                 {
-                    let guard = rw.read(&cx).expect("read should succeed");
+                    let guard = rw.read(&cx).await.expect("read should succeed");
                     let second = rw.try_read();
                     if let Ok(guard2) = second {
                         multi_ok.store(true, Ordering::SeqCst);
@@ -278,7 +281,7 @@ fn e2e_sync_011_rwlock_writer_exclusivity() {
             .create_task(region, Budget::INFINITE, async move {
                 let cx: Cx = Cx::for_testing();
                 for _ in 0..increments_per_writer {
-                    let mut guard = rw.write(&cx).expect("write should succeed");
+                    let mut guard = rw.write(&cx).await.expect("write should succeed");
                     *guard += 1;
                 }
             })
@@ -292,7 +295,7 @@ fn e2e_sync_011_rwlock_writer_exclusivity() {
 
     test_section!("verify");
     let cx: Cx = Cx::for_testing();
-    let guard = rwlock.read(&cx).unwrap();
+    let guard = futures_lite::future::block_on(rwlock.read(&cx)).unwrap();
     let expected = num_writers * increments_per_writer;
     let actual = *guard;
     assert_with_log!(
@@ -303,6 +306,198 @@ fn e2e_sync_011_rwlock_writer_exclusivity() {
     );
 
     test_complete!("e2e_sync_011_rwlock_writer_exclusivity");
+}
+
+/// E2E-SYNC-012: RwLock mixed wait + cancellation
+///
+/// Verifies mixed readers/writers, cancellation/timeouts, and poll-based wait duration logging.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_sync_012_rwlock_mixed_wait_cancel() {
+    init_test("e2e_sync_012_rwlock_mixed_wait_cancel");
+    test_section!("setup");
+
+    let seed = 4242_u64;
+    let worker_count = 3_usize;
+    let mut runtime = LabRuntime::new(
+        LabConfig::new(seed)
+            .worker_count(worker_count)
+            .max_steps(10_000),
+    );
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let rwlock = Arc::new(RwLock::new(0u64));
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let total_polls = Arc::new(AtomicU64::new(0));
+    let hold_acquired = Arc::new(AtomicBool::new(false));
+    let release_hold = Arc::new(AtomicBool::new(false));
+    let cancel_ready = Arc::new(AtomicUsize::new(0));
+
+    tracing::info!(seed, worker_count, "rwlock mixed wait config");
+
+    // Hold a writer lock to force waiters to queue.
+    let rw_hold = rwlock.clone();
+    let hold_acquired_handle = hold_acquired.clone();
+    let release_for_hold = release_hold.clone();
+    let (hold_task, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async move {
+            let cx: Cx = Cx::for_testing();
+            let mut guard = asupersync::sync::OwnedRwLockWriteGuard::write(rw_hold, &cx)
+                .await
+                .expect("write should succeed");
+            hold_acquired_handle.store(true, Ordering::SeqCst);
+            while !release_for_hold.load(Ordering::SeqCst) {
+                yield_now().await;
+            }
+            guard.with_write(|value| *value += 1);
+        })
+        .unwrap();
+    runtime.scheduler.lock().unwrap().schedule(hold_task, 10);
+
+    let cancel_reason = CancelReason::deadline().with_message("rwlock wait timeout");
+    let waiters: [(bool, Option<u32>); 6] = [
+        (false, Some(2)), // read (cancelled)
+        (true, Some(2)),  // write (cancelled)
+        (false, Some(2)), // read (cancelled)
+        (true, None),     // write (success)
+        (false, None),    // read (success)
+        (true, None),     // write (success)
+    ];
+    let cancel_target = waiters
+        .iter()
+        .filter(|(_, cancel)| cancel.is_some())
+        .count();
+    if cancel_target == 0 {
+        release_hold.store(true, Ordering::SeqCst);
+    }
+
+    for (idx, (is_writer, cancel_after)) in waiters.iter().enumerate() {
+        let rw = rwlock.clone();
+        let cancelled = cancelled.clone();
+        let completed = completed.clone();
+        let total_polls = total_polls.clone();
+        let hold_acquired = hold_acquired.clone();
+        let cancel_ready = cancel_ready.clone();
+        let release_hold = release_hold.clone();
+        let cx = Cx::for_testing();
+        let cx_cancel = cx.clone();
+        let reason = cancel_reason.clone();
+        let is_writer = *is_writer;
+        let cancel_after = *cancel_after;
+
+        let (task_id, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let kind = if is_writer { "write" } else { "read" };
+                let mut polls = 0_u64;
+
+                while !hold_acquired.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+
+                let outcome = if is_writer {
+                    let mut fut = rw.write(&cx);
+                    let result = poll_fn(|task_cx| {
+                        polls += 1;
+                        Pin::new(&mut fut).poll(task_cx)
+                    })
+                    .await;
+                    match result {
+                        Ok(mut guard) => {
+                            *guard += 1;
+                            completed.fetch_add(1, Ordering::SeqCst);
+                            "completed"
+                        }
+                        Err(RwLockError::Cancelled) => {
+                            cancelled.fetch_add(1, Ordering::SeqCst);
+                            "cancelled"
+                        }
+                        Err(err) => panic!("rwlock write error: {err:?}"),
+                    }
+                } else {
+                    let mut fut = rw.read(&cx);
+                    let result = poll_fn(|task_cx| {
+                        polls += 1;
+                        Pin::new(&mut fut).poll(task_cx)
+                    })
+                    .await;
+                    match result {
+                        Ok(guard) => {
+                            let _value = *guard;
+                            completed.fetch_add(1, Ordering::SeqCst);
+                            "completed"
+                        }
+                        Err(RwLockError::Cancelled) => {
+                            cancelled.fetch_add(1, Ordering::SeqCst);
+                            "cancelled"
+                        }
+                        Err(err) => panic!("rwlock read error: {err:?}"),
+                    }
+                };
+
+                total_polls.fetch_add(polls, Ordering::SeqCst);
+                tracing::info!(idx, kind, polls, outcome, "rwlock waiter done");
+            })
+            .unwrap();
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+        if let Some(cancel_after) = cancel_after {
+            let (cancel_task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    for _ in 0..cancel_after {
+                        yield_now().await;
+                    }
+                    cx_cancel.set_cancel_reason(reason);
+                    let ready = cancel_ready.fetch_add(1, Ordering::SeqCst) + 1;
+                    if ready == cancel_target {
+                        release_hold.store(true, Ordering::SeqCst);
+                        tracing::debug!(idx, ready, "rwlock hold released after cancels");
+                    }
+                    tracing::debug!(
+                        idx,
+                        kind = if is_writer { "write" } else { "read" },
+                        "rwlock cancel issued"
+                    );
+                })
+                .unwrap();
+            runtime.scheduler.lock().unwrap().schedule(cancel_task, 0);
+        }
+    }
+
+    test_section!("run");
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let cancelled_count = cancelled.load(Ordering::SeqCst);
+    let completed_count = completed.load(Ordering::SeqCst);
+    let poll_count = total_polls.load(Ordering::SeqCst);
+
+    tracing::info!(
+        seed,
+        worker_count,
+        cancelled_count,
+        completed_count,
+        poll_count,
+        "rwlock mixed wait summary"
+    );
+
+    assert_with_log!(
+        cancelled_count == cancel_target,
+        "cancelled waiters observed",
+        cancel_target,
+        cancelled_count
+    );
+    assert_with_log!(
+        completed_count == waiters.len() - cancel_target,
+        "completed waiters observed",
+        waiters.len() - cancel_target,
+        completed_count
+    );
+
+    test_complete!("e2e_sync_012_rwlock_mixed_wait_cancel");
 }
 
 // ============================================================================

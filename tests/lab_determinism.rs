@@ -829,7 +829,7 @@ fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool,
     let mut non_terminal = 0usize;
     let mut seen_count = 0usize;
 
-    for (_, record) in runtime.state.tasks.iter() {
+    for (_, record) in runtime.state.tasks_iter() {
         if !tracked.contains(&record.id) {
             continue;
         }

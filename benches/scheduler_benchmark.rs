@@ -24,11 +24,11 @@ use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, Scheduler, QUEUE_TAG_READY,
 };
 use asupersync::runtime::RuntimeState;
+use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, ArenaIndex};
 use std::collections::{BinaryHeap, VecDeque};
-use asupersync::sync::ContendedMutex;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 // =============================================================================

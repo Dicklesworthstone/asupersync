@@ -23,10 +23,10 @@ use asupersync::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, State
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::{GlobalInjector, Scheduler, ThreeLaneScheduler};
 use asupersync::runtime::RuntimeState;
+use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
-use asupersync::sync::ContendedMutex;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // =============================================================================
 // HELPER FUNCTIONS

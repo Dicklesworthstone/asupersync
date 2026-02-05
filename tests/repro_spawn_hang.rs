@@ -5,10 +5,10 @@ mod tests {
     use asupersync::cx::Cx;
     use asupersync::runtime::scheduler::ThreeLaneScheduler;
     use asupersync::runtime::RuntimeState;
+    use asupersync::sync::ContendedMutex;
     use asupersync::types::{Budget, TaskId};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use asupersync::sync::ContendedMutex;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]

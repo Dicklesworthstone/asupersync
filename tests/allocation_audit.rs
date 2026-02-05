@@ -114,7 +114,7 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
     for i in 0..=max_task_id {
         let id = task(i);
         let record = TaskRecord::new(id, region(), Budget::INFINITE);
-        let idx = state.tasks.insert(record);
+        let idx = state.insert_task(record);
         assert_eq!(idx.index(), i);
     }
     Arc::new(ContendedMutex::new("runtime_state", state))

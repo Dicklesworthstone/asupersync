@@ -635,7 +635,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag, fixture_name: &str) -> Nod
     let mut attempts = 0;
     while !runtime.is_quiescent() && attempts < 3 {
         let mut sched = runtime.scheduler.lock().expect("scheduler lock");
-        for (_, record) in runtime.state.tasks.iter() {
+        for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
                 let prio = record.cx_inner.as_ref().map_or(0, |inner| {
                     inner.read().expect("lock poisoned").budget.priority

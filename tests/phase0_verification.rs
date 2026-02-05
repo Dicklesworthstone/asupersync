@@ -1022,7 +1022,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
             "plan runtime not quiescent before reschedule"
         );
         let mut sched = runtime.scheduler.lock().expect("scheduler lock");
-        for (_, record) in runtime.state.tasks.iter() {
+        for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
                 let prio = record.cx_inner.as_ref().map_or(0, |inner| {
                     inner.read().expect("lock poisoned").budget.priority
@@ -1036,8 +1036,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         if !quiescent {
             let mut live_tasks: Vec<(TaskId, TaskState, TaskPhase, u64, Option<u64>)> = runtime
                 .state
-                .tasks
-                .iter()
+                .tasks_iter()
                 .map(|(_, record)| {
                     (
                         record.id,

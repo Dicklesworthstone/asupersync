@@ -4,7 +4,7 @@
 use asupersync::runtime::scheduler::WorkStealingScheduler;
 use asupersync::runtime::RuntimeState;
 use asupersync::sync::ContendedMutex;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
