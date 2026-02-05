@@ -376,7 +376,7 @@ impl Connection {
 
     /// Open a new stream and send headers.
     pub fn open_stream(&mut self, headers: Vec<Header>, end_stream: bool) -> Result<u32, H2Error> {
-        if self.goaway_received {
+        if self.goaway_received || self.goaway_sent {
             return Err(H2Error::protocol("cannot open new streams after GOAWAY"));
         }
 
@@ -2215,6 +2215,26 @@ mod tests {
         assert_eq!(conn.state, ConnectionState::Closing);
 
         // Trying to open new streams should fail
+        let err = conn.open_stream(headers, false).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_goaway_sent_rejects_new_streams() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        assert!(conn.goaway_sent);
+        assert_eq!(conn.state, ConnectionState::Closing);
+
         let err = conn.open_stream(headers, false).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
     }
