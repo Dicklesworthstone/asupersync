@@ -867,14 +867,10 @@ mod tests {
         let mut is_shutdown = false;
         for _ in 0..64 {
             match s2.read(&mut buf) {
-                Ok(0) | Ok(_) => {
-                    is_shutdown = true;
-                    break;
-                }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::yield_now();
                 }
-                Err(_) => {
+                Ok(_) | Err(_) => {
                     is_shutdown = true;
                     break;
                 }

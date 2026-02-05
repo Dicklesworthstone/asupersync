@@ -18,6 +18,12 @@ impl DetHasher {
     const SEED: u64 = 0x16f1_1fe8_9b0d_677c;
     /// Prime multiplier for mixing.
     const MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
+
+    #[inline]
+    fn mix_byte(&mut self, byte: u8) {
+        self.state = self.state.wrapping_mul(Self::MULTIPLIER);
+        self.state ^= u64::from(byte);
+    }
 }
 
 impl Default for DetHasher {
@@ -29,8 +35,44 @@ impl Default for DetHasher {
 impl Hasher for DetHasher {
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            self.state = self.state.wrapping_mul(Self::MULTIPLIER);
-            self.state ^= u64::from(byte);
+            self.mix_byte(byte);
+        }
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.mix_byte(i);
+    }
+
+    fn write_u16(&mut self, i: u16) {
+        let bytes = i.to_ne_bytes();
+        self.mix_byte(bytes[0]);
+        self.mix_byte(bytes[1]);
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        let bytes = i.to_ne_bytes();
+        self.mix_byte(bytes[0]);
+        self.mix_byte(bytes[1]);
+        self.mix_byte(bytes[2]);
+        self.mix_byte(bytes[3]);
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        let bytes = i.to_ne_bytes();
+        self.mix_byte(bytes[0]);
+        self.mix_byte(bytes[1]);
+        self.mix_byte(bytes[2]);
+        self.mix_byte(bytes[3]);
+        self.mix_byte(bytes[4]);
+        self.mix_byte(bytes[5]);
+        self.mix_byte(bytes[6]);
+        self.mix_byte(bytes[7]);
+    }
+
+    fn write_u128(&mut self, i: u128) {
+        let bytes = i.to_ne_bytes();
+        for &byte in &bytes {
+            self.mix_byte(byte);
         }
     }
 
