@@ -366,7 +366,7 @@ fn setup_leaked_obligation(state: &mut RuntimeState) -> TaskId {
     state
         .create_obligation(ObligationKind::SendPermit, task_id, region, None)
         .expect("create obligation");
-    if let Some(task) = state.tasks.get_mut(task_id.arena_index()) {
+    if let Some(task) = state.task_mut(task_id) {
         task.complete(Outcome::Ok(()));
     }
     task_id

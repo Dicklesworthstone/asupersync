@@ -195,10 +195,8 @@ fn sync_003_rwlock_reader_writer_priority() {
 
     // Multiple readers can hold the lock simultaneously (same thread)
     {
-        let r1 = rwlock.read(&cx).expect("first read should succeed");
-        let r2 = rwlock
-            .read(&cx)
-            .expect("second concurrent read should succeed");
+        let r1 = block_on(rwlock.read(&cx)).expect("first read should succeed");
+        let r2 = block_on(rwlock.read(&cx)).expect("second concurrent read should succeed");
         assert_with_log!(*r1 == 42, "reader 1 should see initial value", 42, *r1);
         assert_with_log!(*r2 == 42, "reader 2 should see initial value", 42, *r2);
 
@@ -214,7 +212,7 @@ fn sync_003_rwlock_reader_writer_priority() {
 
     // Writer has exclusive access
     {
-        let mut w = rwlock.write(&cx).expect("write should succeed");
+        let mut w = block_on(rwlock.write(&cx)).expect("write should succeed");
         *w = 100;
 
         // try_read should fail while writer is held
@@ -233,7 +231,7 @@ fn sync_003_rwlock_reader_writer_priority() {
 
     // Verify write persisted after guard drop
     {
-        let r = rwlock.read(&cx).expect("read after write should succeed");
+        let r = block_on(rwlock.read(&cx)).expect("read after write should succeed");
         assert_with_log!(*r == 100, "should see written value", 100, *r);
     }
 
@@ -248,7 +246,7 @@ fn sync_003_rwlock_reader_writer_priority() {
             let active_readers = Arc::clone(&active_readers);
             thread::spawn(move || {
                 let cx: Cx = Cx::for_testing();
-                let _guard = rwlock.read(&cx).expect("read should succeed");
+                let _guard = block_on(rwlock.read(&cx)).expect("read should succeed");
                 active_readers.fetch_add(1, Ordering::SeqCst);
                 // Spin until all readers have acquired the lock
                 while active_readers.load(Ordering::SeqCst) < num_readers {
@@ -281,7 +279,7 @@ fn sync_003_rwlock_reader_writer_priority() {
             thread::spawn(move || {
                 let cx: Cx = Cx::for_testing();
                 for _ in 0..iterations {
-                    let mut guard = rwlock.write(&cx).expect("write should succeed");
+                    let mut guard = block_on(rwlock.write(&cx)).expect("write should succeed");
                     *guard += 1;
                 }
             })
@@ -292,7 +290,7 @@ fn sync_003_rwlock_reader_writer_priority() {
         handle.join().expect("writer thread should complete");
     }
 
-    let final_val = *rwlock.read(&cx).expect("final read should succeed");
+    let final_val = *block_on(rwlock.read(&cx)).expect("final read should succeed");
     let expected = i64::from(num_threads) * i64::from(iterations);
     assert_with_log!(
         final_val == expected,

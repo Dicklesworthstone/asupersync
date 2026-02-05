@@ -806,7 +806,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
         );
     }
 
-    if let Some(task) = runtime.state.tasks.get_mut(task_id.arena_index()) {
+    if let Some(task) = runtime.state.task_mut(task_id) {
         task.complete(Outcome::Cancelled(cancel_reason));
     }
 
@@ -894,7 +894,7 @@ fn io_cancel_011_oracle_detects_io_obligation_leak() {
     .expect("submit io op");
 
     let cancel_reason = CancelReason::shutdown();
-    if let Some(task) = runtime.state.tasks.get_mut(task_id.arena_index()) {
+    if let Some(task) = runtime.state.task_mut(task_id) {
         task.complete(Outcome::Cancelled(cancel_reason));
     }
 

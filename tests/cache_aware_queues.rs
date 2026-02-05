@@ -14,10 +14,10 @@
 #[macro_use]
 mod common;
 
+use asupersync::sync::ContendedMutex;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use asupersync::sync::ContendedMutex;
 use std::sync::{Arc, Mutex};
 
 // ── Counting allocator (same pattern as allocation_audit.rs) ──────────

@@ -41,10 +41,7 @@ fn setup_state_with_clock(
     let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(start_nanos)));
     let mut rs = RuntimeState::new();
     rs.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
-    (
-        Arc::new(ContendedMutex::new("runtime_state", rs)),
-        clock,
-    )
+    (Arc::new(ContendedMutex::new("runtime_state", rs)), clock)
 }
 
 fn create_task(

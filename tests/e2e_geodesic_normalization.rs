@@ -219,7 +219,7 @@ fn scenario_cancel_drain() -> ScenarioReport {
 
     // Cancel the first two tasks mid-flight
     for &tid in &task_ids[..2] {
-        if let Some(record) = runtime.state.tasks.get_mut(tid.arena_index()) {
+        if let Some(record) = runtime.state.task_mut(tid) {
             if !record.state.is_terminal() {
                 record.request_cancel_with_budget(
                     CancelReason::user("e2e-cancel-drain"),
