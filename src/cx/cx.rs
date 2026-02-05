@@ -1066,9 +1066,8 @@ impl<Caps> Cx<Caps> {
                     max = crate::types::task_context::MAX_MASK_DEPTH,
                     "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"
                 );
-            } else {
-                inner.mask_depth += 1;
             }
+            inner.mask_depth += 1;
         }
 
         let _guard = MaskGuard { inner: &self.inner };

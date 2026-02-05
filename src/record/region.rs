@@ -904,7 +904,9 @@ impl RegionRecord {
     /// Returns true if the region is ready to finalize (no children/tasks/obligations).
     #[must_use]
     pub fn ready_to_finalize(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
-        self.children_closed(&|_region| true) && self.tasks_completed(completed)
+        self.children_closed(&|_region| true)
+            && self.tasks_completed(completed)
+            && self.obligations_resolved()
     }
 }
 

@@ -9,7 +9,7 @@
 //! Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 
 use crate::types::{TaskId, Time};
-use crate::util::DetHashSet;
+use crate::util::{DetBuildHasher, DetHashSet};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BinaryHeap;
@@ -70,13 +70,23 @@ impl PartialOrd for TimedEntry {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ScheduledSet {
     single: Option<TaskId>,
     multi: DetHashSet<TaskId>,
 }
 
 impl ScheduledSet {
+    #[inline]
+    fn with_capacity(capacity: usize) -> Self {
+        let mut multi = DetHashSet::with_hasher(DetBuildHasher);
+        multi.reserve(capacity);
+        Self {
+            single: None,
+            multi,
+        }
+    }
+
     #[inline]
     fn len(&self) -> usize {
         if self.single.is_some() {
@@ -146,7 +156,7 @@ impl ScheduledSet {
 ///
 /// Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 /// Generation counters provide FIFO ordering within same priority/deadline.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scheduler {
     /// Cancel lane: tasks with pending cancellation (highest priority).
     cancel_lane: BinaryHeap<SchedulerEntry>,
@@ -164,11 +174,37 @@ pub struct Scheduler {
     scratch_timed: Vec<TimedEntry>,
 }
 
+const DEFAULT_SCHEDULER_CAPACITY: usize = 256;
+const DEFAULT_SCRATCH_CAPACITY: usize = 8;
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_SCHEDULER_CAPACITY)
+    }
+}
+
 impl Scheduler {
     /// Creates a new empty scheduler.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a scheduler with pre-allocated capacity for lanes and dedup set.
+    ///
+    /// The capacity is applied per lane to reduce heap growth on bursty workloads.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            cancel_lane: BinaryHeap::with_capacity(capacity),
+            timed_lane: BinaryHeap::with_capacity(capacity),
+            ready_lane: BinaryHeap::with_capacity(capacity),
+            scheduled: ScheduledSet::with_capacity(capacity),
+            next_generation: 0,
+            scratch_entries: Vec::with_capacity(DEFAULT_SCRATCH_CAPACITY),
+            scratch_timed: Vec::with_capacity(DEFAULT_SCRATCH_CAPACITY),
+        }
     }
 
     /// Returns the total number of scheduled tasks.

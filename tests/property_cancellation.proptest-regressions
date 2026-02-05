@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 5f4dc1752b7284c068a9873aa705c9a79798b928b08787db748a723b60072622 # shrinks to (phase1, phase2) = (Requested, Requested), kind1 = RaceLost, kind2 = FailFast, epoch = 0
+cc 5455e78a06acfee71b734e9ea3ac9a280da41715cece6c556fc3e226815889e4 # shrinks to phase = Requested, strong = CostBudget, weak = PollQuota, epoch = 0

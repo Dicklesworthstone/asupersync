@@ -301,11 +301,10 @@ proptest! {
         epoch in 0u64..=1000,
     ) {
         init_test_logging();
-        // Only test when cancellation kind ordering is monotone.
+        // Only test when cancellation severity is monotone.
         //
-        // `CancelWitness::validate_transition` enforces monotonicity using `CancelKind`'s `Ord`,
-        // not the coarser `severity()` buckets.
-        prop_assume!(kind2 >= kind1);
+        // `CancelWitness::validate_transition` enforces monotonicity using severity buckets.
+        prop_assume!(kind2.severity() >= kind1.severity());
 
         let task = TaskId::new_for_test(0, 0);
         let region = RegionId::new_for_test(0, 0);
@@ -353,8 +352,8 @@ proptest! {
         epoch in 0u64..=1000,
     ) {
         init_test_logging();
-        // Witness validation uses Ord on CancelKind (discriminant), not severity()
-        prop_assume!(strong > weak);
+        // Witness validation uses severity buckets, not discriminant order.
+        prop_assume!(strong.severity() > weak.severity());
 
         let task = TaskId::new_for_test(0, 0);
         let region = RegionId::new_for_test(0, 0);

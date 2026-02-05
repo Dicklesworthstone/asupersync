@@ -333,6 +333,12 @@ pub struct VirtualTcpListener {
     state: Arc<Mutex<VirtualListenerState>>,
 }
 
+impl Drop for VirtualTcpListener {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 impl std::fmt::Debug for VirtualTcpListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtualTcpListener")
@@ -657,6 +663,16 @@ mod tests {
         injector.inject(server, addr("127.0.0.1:9000"));
 
         assert_eq!(listener.pending_count(), 1);
+    }
+
+    #[test]
+    fn virtual_listener_drop_marks_closed() {
+        let listener = VirtualTcpListener::new(addr("127.0.0.1:8080"));
+        let state = Arc::clone(&listener.state);
+        drop(listener);
+
+        let closed = state.lock().expect("lock poisoned").closed;
+        assert!(closed);
     }
 
     #[test]

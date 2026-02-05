@@ -34,7 +34,7 @@ use asupersync::combinator::race::{race2_outcomes, RaceWinner};
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::outcome::{join_outcomes, PanicPayload};
-use asupersync::types::{Budget, Outcome, Severity, Time};
+use asupersync::types::{Budget, Outcome, RegionId, Severity, Time};
 use common::*;
 use proptest::prelude::*;
 
@@ -344,16 +344,29 @@ proptest! {
     /// position, not by severity(). FailFast and RaceLost have equal severity
     /// but different PartialOrd ordering.
     #[test]
-    fn cancel_reason_strengthen_takes_max(k1 in arb_cancel_kind(), k2 in arb_cancel_kind()) {
+    fn cancel_reason_strengthen_takes_max(
+        k1 in arb_cancel_kind(),
+        k2 in arb_cancel_kind(),
+        t1 in arb_time(),
+        t2 in arb_time()
+    ) {
         init_test_logging();
         test_phase!("cancel_reason_strengthen_takes_max");
-        let mut a = CancelReason::new(k1);
-        let b = CancelReason::new(k2);
+        let mut a = CancelReason::with_origin(k1, RegionId::testing_default(), t1);
+        let b = CancelReason::with_origin(k2, RegionId::testing_default(), t2);
         a.strengthen(&b);
 
-        // strengthen uses k1 > k2 (PartialOrd), not severity()
-        // So the result is max(k1, k2) by variant order
-        let expected = if k2 > k1 { k2 } else { k1 };
+        let expected = match k2.severity().cmp(&k1.severity()) {
+            std::cmp::Ordering::Greater => k2,
+            std::cmp::Ordering::Less => k1,
+            std::cmp::Ordering::Equal => {
+                if t2 < t1 {
+                    k2
+                } else {
+                    k1
+                }
+            }
+        };
         prop_assert_eq!(a.kind, expected);
     }
 }
