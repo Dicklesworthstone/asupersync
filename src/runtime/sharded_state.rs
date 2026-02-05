@@ -342,6 +342,49 @@ impl<'a> ShardGuard<'a> {
         }
     }
 
+    /// Lock only the region shard.
+    ///
+    /// Use for: read-only region tree queries, region count checks.
+    #[must_use]
+    pub fn regions_only(shards: &'a ShardedState) -> Self {
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
+        let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        Self {
+            config: &shards.config,
+            regions: Some(regions),
+            tasks: None,
+            obligations: None,
+            #[cfg(debug_assertions)]
+            debug_locks: 1,
+        }
+    }
+
+    /// Lock only the obligation shard.
+    ///
+    /// Use for: read-only obligation queries, obligation count checks.
+    #[must_use]
+    pub fn obligations_only(shards: &'a ShardedState) -> Self {
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Obligations);
+        let obligations = shards
+            .obligations
+            .lock()
+            .expect("obligations lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Obligations);
+        Self {
+            config: &shards.config,
+            regions: None,
+            tasks: None,
+            obligations: Some(obligations),
+            #[cfg(debug_assertions)]
+            debug_locks: 1,
+        }
+    }
+
     /// Lock for task_completed: D→B→A→C.
     ///
     /// Use for: completing a task, orphan obligation scan, region state advance.
@@ -522,6 +565,11 @@ enum LockShard {
 
 #[cfg(debug_assertions)]
 impl LockShard {
+    /// Returns the canonical acquisition order index.
+    ///
+    /// Lock order: Regions(0) < Tasks(1) < Obligations(2).
+    /// This matches the documented E→D→B→A→C order where
+    /// B=Regions, A=Tasks, C=Obligations (E and D are lock-free).
     const fn order(self) -> u8 {
         match self {
             Self::Regions => 0,
@@ -529,8 +577,37 @@ impl LockShard {
             Self::Obligations => 2,
         }
     }
+
+    /// Returns a human-readable label for diagnostics.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Regions => "B:Regions",
+            Self::Tasks => "A:Tasks",
+            Self::Obligations => "C:Obligations",
+        }
+    }
 }
 
+#[cfg(debug_assertions)]
+impl std::fmt::Display for LockShard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Debug-only lock ordering enforcement via thread-local state.
+///
+/// Tracks which shard locks the current thread holds and asserts
+/// that new acquisitions follow the canonical order:
+///   Regions (0) → Tasks (1) → Obligations (2)
+///
+/// Violations trigger a `debug_assert!` panic with a diagnostic
+/// message naming both the held lock and the violating acquisition.
+///
+/// # Thread Safety
+///
+/// State is per-thread (thread-local). No cross-thread coordination
+/// is needed because lock ordering is a per-thread property.
 #[cfg(debug_assertions)]
 mod lock_order {
     use super::LockShard;
@@ -540,24 +617,35 @@ mod lock_order {
         static HELD: RefCell<Vec<LockShard>> = const { RefCell::new(Vec::new()) };
     }
 
+    /// Asserts that acquiring `next` does not violate lock ordering.
+    ///
+    /// Panics (debug_assert) if the thread already holds a lock with
+    /// equal or higher order than `next`.
     pub fn before_lock(next: LockShard) {
         HELD.with(|held| {
             let held = held.borrow();
             if let Some(last) = held.last() {
                 debug_assert!(
                     last.order() < next.order(),
-                    "lock order violation: {last:?} before {next:?}"
+                    "lock order violation: holding {} (order {}) then acquiring {} (order {}); \
+                     canonical order is B:Regions(0) → A:Tasks(1) → C:Obligations(2)",
+                    last.label(),
+                    last.order(),
+                    next.label(),
+                    next.order(),
                 );
             }
         });
     }
 
+    /// Records that `locked` has been acquired by this thread.
     pub fn after_lock(locked: LockShard) {
         HELD.with(|held| {
             held.borrow_mut().push(locked);
         });
     }
 
+    /// Releases the most recent `count` lock records (LIFO).
     pub fn unlock_n(count: usize) {
         HELD.with(|held| {
             let mut held = held.borrow_mut();
@@ -565,6 +653,20 @@ mod lock_order {
                 held.pop();
             }
         });
+    }
+
+    /// Returns the number of shard locks currently held by this thread.
+    ///
+    /// Useful in tests to verify guards properly track acquisitions.
+    pub fn held_count() -> usize {
+        HELD.with(|held| held.borrow().len())
+    }
+
+    /// Returns a snapshot of the shard locks currently held by this thread.
+    ///
+    /// Returns labels in acquisition order (earliest first).
+    pub fn held_labels() -> Vec<&'static str> {
+        HELD.with(|held| held.borrow().iter().map(|s| s.label()).collect())
     }
 }
 
@@ -658,5 +760,447 @@ mod tests {
         assert!(guard.tasks.is_some());
         assert!(guard.regions.is_some());
         assert!(guard.obligations.is_some());
+    }
+
+    #[test]
+    fn regions_only_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::regions_only(&state);
+        assert!(guard.regions.is_some());
+        assert!(guard.tasks.is_none());
+        assert!(guard.obligations.is_none());
+    }
+
+    #[test]
+    fn obligations_only_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::obligations_only(&state);
+        assert!(guard.obligations.is_some());
+        assert!(guard.regions.is_none());
+        assert!(guard.tasks.is_none());
+    }
+
+    #[test]
+    fn for_cancel_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::for_cancel(&state);
+        assert!(guard.regions.is_some());
+        assert!(guard.tasks.is_some());
+        assert!(guard.obligations.is_none());
+    }
+
+    #[test]
+    fn for_obligation_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::for_obligation(&state);
+        assert!(guard.regions.is_some());
+        assert!(guard.tasks.is_none());
+        assert!(guard.obligations.is_some());
+    }
+
+    #[test]
+    fn for_spawn_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::for_spawn(&state);
+        assert!(guard.regions.is_some());
+        assert!(guard.tasks.is_some());
+        assert!(guard.obligations.is_none());
+    }
+
+    #[test]
+    fn all_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::all(&state);
+        assert!(guard.regions.is_some());
+        assert!(guard.tasks.is_some());
+        assert!(guard.obligations.is_some());
+    }
+
+    // ── Lock ordering enforcement tests ──────────────────────────────────
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_held_count_tracks_acquisitions() {
+        // Verify held_count is 0 at start, increments on acquire, decrements on drop.
+        assert_eq!(lock_order::held_count(), 0);
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _guard = ShardGuard::for_task_completed(&state);
+            assert_eq!(lock_order::held_count(), 3);
+            assert_eq!(
+                lock_order::held_labels(),
+                vec!["B:Regions", "A:Tasks", "C:Obligations"]
+            );
+        }
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_single_shard_tracking() {
+        assert_eq!(lock_order::held_count(), 0);
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _guard = ShardGuard::tasks_only(&state);
+            assert_eq!(lock_order::held_count(), 1);
+            assert_eq!(lock_order::held_labels(), vec!["A:Tasks"]);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+
+        {
+            let _guard = ShardGuard::regions_only(&state);
+            assert_eq!(lock_order::held_count(), 1);
+            assert_eq!(lock_order::held_labels(), vec!["B:Regions"]);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+
+        {
+            let _guard = ShardGuard::obligations_only(&state);
+            assert_eq!(lock_order::held_count(), 1);
+            assert_eq!(lock_order::held_labels(), vec!["C:Obligations"]);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_spawn_guard_tracking() {
+        assert_eq!(lock_order::held_count(), 0);
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _guard = ShardGuard::for_spawn(&state);
+            assert_eq!(lock_order::held_count(), 2);
+            assert_eq!(lock_order::held_labels(), vec!["B:Regions", "A:Tasks"]);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_cancel_guard_tracking() {
+        assert_eq!(lock_order::held_count(), 0);
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _guard = ShardGuard::for_cancel(&state);
+            assert_eq!(lock_order::held_count(), 2);
+            assert_eq!(lock_order::held_labels(), vec!["B:Regions", "A:Tasks"]);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_obligation_guard_tracking() {
+        assert_eq!(lock_order::held_count(), 0);
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _guard = ShardGuard::for_obligation(&state);
+            assert_eq!(lock_order::held_count(), 2);
+            assert_eq!(
+                lock_order::held_labels(),
+                vec!["B:Regions", "C:Obligations"]
+            );
+        }
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    // ── Lock ordering violation tests (should_panic) ─────────────────────
+    //
+    // These tests verify that debug assertions catch out-of-order
+    // lock acquisitions. Each test directly manipulates the lock_order
+    // module to simulate a violation without needing two ShardedState
+    // instances (which would introduce real deadlock risk).
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "lock order violation")]
+    fn lock_order_violation_tasks_before_regions() {
+        // Holding Tasks (order 1) then acquiring Regions (order 0) is illegal.
+        lock_order::before_lock(LockShard::Tasks);
+        lock_order::after_lock(LockShard::Tasks);
+        lock_order::before_lock(LockShard::Regions); // ← panic
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "lock order violation")]
+    fn lock_order_violation_obligations_before_tasks() {
+        // Holding Obligations (order 2) then acquiring Tasks (order 1) is illegal.
+        lock_order::before_lock(LockShard::Obligations);
+        lock_order::after_lock(LockShard::Obligations);
+        lock_order::before_lock(LockShard::Tasks); // ← panic
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "lock order violation")]
+    fn lock_order_violation_obligations_before_regions() {
+        // Holding Obligations (order 2) then acquiring Regions (order 0) is illegal.
+        lock_order::before_lock(LockShard::Obligations);
+        lock_order::after_lock(LockShard::Obligations);
+        lock_order::before_lock(LockShard::Regions); // ← panic
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "lock order violation")]
+    fn lock_order_violation_duplicate_shard() {
+        // Acquiring the same shard twice is also a violation (order not strictly increasing).
+        lock_order::before_lock(LockShard::Tasks);
+        lock_order::after_lock(LockShard::Tasks);
+        lock_order::before_lock(LockShard::Tasks); // ← panic (1 not < 1)
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_valid_full_sequence() {
+        // Canonical order: Regions → Tasks → Obligations should succeed.
+        lock_order::before_lock(LockShard::Regions);
+        lock_order::after_lock(LockShard::Regions);
+        lock_order::before_lock(LockShard::Tasks);
+        lock_order::after_lock(LockShard::Tasks);
+        lock_order::before_lock(LockShard::Obligations);
+        lock_order::after_lock(LockShard::Obligations);
+
+        assert_eq!(lock_order::held_count(), 3);
+        assert_eq!(
+            lock_order::held_labels(),
+            vec!["B:Regions", "A:Tasks", "C:Obligations"]
+        );
+
+        // Clean up
+        lock_order::unlock_n(3);
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_unlock_then_reacquire() {
+        // After releasing all locks, any shard can be acquired again.
+        lock_order::before_lock(LockShard::Obligations);
+        lock_order::after_lock(LockShard::Obligations);
+        assert_eq!(lock_order::held_count(), 1);
+
+        lock_order::unlock_n(1);
+        assert_eq!(lock_order::held_count(), 0);
+
+        // Now Regions (lower order) is fine because nothing is held.
+        lock_order::before_lock(LockShard::Regions);
+        lock_order::after_lock(LockShard::Regions);
+        assert_eq!(lock_order::held_count(), 1);
+        assert_eq!(lock_order::held_labels(), vec!["B:Regions"]);
+
+        lock_order::unlock_n(1);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_partial_sequence_regions_tasks() {
+        // Regions → Tasks is a valid subsequence.
+        lock_order::before_lock(LockShard::Regions);
+        lock_order::after_lock(LockShard::Regions);
+        lock_order::before_lock(LockShard::Tasks);
+        lock_order::after_lock(LockShard::Tasks);
+
+        assert_eq!(lock_order::held_count(), 2);
+        lock_order::unlock_n(2);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_partial_sequence_regions_obligations() {
+        // Regions → Obligations (skipping Tasks) is valid.
+        lock_order::before_lock(LockShard::Regions);
+        lock_order::after_lock(LockShard::Regions);
+        lock_order::before_lock(LockShard::Obligations);
+        lock_order::after_lock(LockShard::Obligations);
+
+        assert_eq!(lock_order::held_count(), 2);
+        lock_order::unlock_n(2);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_partial_sequence_tasks_obligations() {
+        // Tasks → Obligations is valid.
+        lock_order::before_lock(LockShard::Tasks);
+        lock_order::after_lock(LockShard::Tasks);
+        lock_order::before_lock(LockShard::Obligations);
+        lock_order::after_lock(LockShard::Obligations);
+
+        assert_eq!(lock_order::held_count(), 2);
+        lock_order::unlock_n(2);
+    }
+
+    // ── Concurrent guard tests ───────────────────────────────────────────
+
+    #[test]
+    fn concurrent_guard_access_no_deadlock() {
+        // Multiple threads acquire ShardGuards simultaneously.
+        // This verifies no deadlock occurs when using the guard API correctly.
+        use std::sync::Barrier;
+        use std::thread;
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = Arc::new(ShardedState::new(trace, metrics, test_config()));
+        let barrier = Arc::new(Barrier::new(4));
+        let iterations = 100;
+
+        let handles: Vec<_> = (0..4)
+            .map(|thread_id| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..iterations {
+                        // Each thread cycles through different guard types.
+                        match thread_id % 4 {
+                            0 => {
+                                let _g = ShardGuard::tasks_only(&state);
+                            }
+                            1 => {
+                                let _g = ShardGuard::for_spawn(&state);
+                            }
+                            2 => {
+                                let _g = ShardGuard::for_obligation(&state);
+                            }
+                            3 => {
+                                let _g = ShardGuard::for_task_completed(&state);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+    }
+
+    #[test]
+    fn concurrent_mixed_guards_no_deadlock() {
+        // All threads use ALL guard types in rotation.
+        // This is a stronger test than the above because each thread
+        // exercises all ordering patterns.
+        use std::sync::Barrier;
+        use std::thread;
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = Arc::new(ShardedState::new(trace, metrics, test_config()));
+        let barrier = Arc::new(Barrier::new(4));
+        let iterations = 50;
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..iterations {
+                        match i % 7 {
+                            0 => {
+                                let _g = ShardGuard::tasks_only(&state);
+                            }
+                            1 => {
+                                let _g = ShardGuard::regions_only(&state);
+                            }
+                            2 => {
+                                let _g = ShardGuard::obligations_only(&state);
+                            }
+                            3 => {
+                                let _g = ShardGuard::for_spawn(&state);
+                            }
+                            4 => {
+                                let _g = ShardGuard::for_cancel(&state);
+                            }
+                            5 => {
+                                let _g = ShardGuard::for_obligation(&state);
+                            }
+                            6 => {
+                                let _g = ShardGuard::all(&state);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn guard_drop_cleans_up_lock_order_state() {
+        // Verify that dropping a guard properly cleans up thread-local state
+        // so subsequent guards don't see stale entries.
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        assert_eq!(lock_order::held_count(), 0);
+
+        {
+            let _g = ShardGuard::all(&state);
+            assert_eq!(lock_order::held_count(), 3);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+
+        // After drop, we can acquire in any order (starting fresh).
+        {
+            let _g = ShardGuard::obligations_only(&state);
+            assert_eq!(lock_order::held_count(), 1);
+        }
+        assert_eq!(lock_order::held_count(), 0);
+
+        {
+            let _g = ShardGuard::regions_only(&state);
+            assert_eq!(lock_order::held_count(), 1);
+        }
+        assert_eq!(lock_order::held_count(), 0);
     }
 }

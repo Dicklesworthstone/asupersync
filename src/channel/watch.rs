@@ -40,10 +40,29 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+
+/// Waiter entry with deduplication flag to prevent unbounded growth.
+///
+/// The `queued` flag is shared between the entry and the owning `Receiver`,
+/// so the future can skip re-registration while still queued.
+struct WatchWaiter {
+    waker: Waker,
+    queued: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for WatchWaiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatchWaiter")
+            .field("waker", &self.waker)
+            .field("queued", &self.queued.load(Ordering::Relaxed))
+            .finish()
+    }
+}
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,14 +123,14 @@ struct WatchInner<T> {
     /// Whether the sender has been dropped.
     sender_dropped: Mutex<bool>,
     /// Wakers for receivers waiting on value changes.
-    waiters: Mutex<Vec<Waker>>,
+    waiters: Mutex<Vec<WatchWaiter>>,
 }
 
 impl<T> WatchInner<T> {
     fn new(initial: T) -> Self {
         Self {
             value: RwLock::new((initial, 0)),
-            receiver_count: Mutex::new(1), // Sender starts with one implicit receiver
+            receiver_count: Mutex::new(1), // Counts the Receiver returned by channel()
             sender_dropped: Mutex::new(false),
             waiters: Mutex::new(Vec::new()),
         }
@@ -130,18 +149,19 @@ impl<T> WatchInner<T> {
     }
 
     fn wake_all_waiters(&self) {
-        let waiters: Vec<Waker> = {
+        let waiters: Vec<WatchWaiter> = {
             let mut w = self.waiters.lock().expect("watch lock poisoned");
             std::mem::take(&mut *w)
         };
         for w in waiters {
-            w.wake();
+            w.queued.store(false, Ordering::Release);
+            w.waker.wake();
         }
     }
 
-    fn register_waker(&self, waker: Waker) {
+    fn register_waker(&self, waiter: WatchWaiter) {
         let mut waiters = self.waiters.lock().expect("watch lock poisoned");
-        waiters.push(waker);
+        waiters.push(waiter);
     }
 }
 
@@ -165,6 +185,7 @@ pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
         Receiver {
             inner,
             seen_version: 0,
+            waiter: None,
         },
     )
 }
@@ -273,6 +294,7 @@ impl<T> Sender<T> {
         Receiver {
             inner: Arc::clone(&self.inner),
             seen_version: current_version,
+            waiter: None,
         }
     }
 
@@ -315,6 +337,9 @@ pub struct Receiver<T> {
     inner: Arc<WatchInner<T>>,
     /// The version number last seen by this receiver.
     seen_version: u64,
+    /// Deduplication flag shared with our entry in the waiters vec.
+    /// Prevents unbounded waker growth between sends.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl<T> Receiver<T> {
@@ -334,6 +359,9 @@ impl<T> Receiver<T> {
     /// Returns `RecvError::Cancelled` if the operation was cancelled.
     pub fn changed<'a, 'b>(&'a mut self, cx: &'b Cx) -> ChangedFuture<'a, 'b, T> {
         cx.trace("watch::changed starting wait");
+        // Invalidate any stale waiter from a previous cancelled future so
+        // the new future re-registers with a fresh waker.
+        self.waiter = None;
         ChangedFuture { receiver: self, cx }
     }
 
@@ -426,8 +454,30 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
             return Poll::Ready(Ok(()));
         }
 
-        // Register waker before re-checking (avoids missed notification)
-        this.receiver.inner.register_waker(context.waker().clone());
+        // Register waker before re-checking (avoids missed notification).
+        // Use Arc<AtomicBool> dedup to prevent unbounded Vec growth when
+        // the future is re-polled without an intervening send().
+        match this.receiver.waiter.as_ref() {
+            Some(w) if !w.load(Ordering::Acquire) => {
+                // We were woken (queued=false) but version hasn't changed yet.
+                // Re-register with a fresh waker.
+                w.store(true, Ordering::Release);
+                this.receiver.inner.register_waker(WatchWaiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(w),
+                });
+            }
+            Some(_) => {} // Still queued from a prior poll — skip duplicate
+            None => {
+                // First poll — create a new waiter.
+                let w = Arc::new(AtomicBool::new(true));
+                this.receiver.inner.register_waker(WatchWaiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&w),
+                });
+                this.receiver.waiter = Some(w);
+            }
+        }
 
         // Re-check after registration to close the race window
         let current = this.receiver.inner.current_version();
@@ -464,6 +514,7 @@ impl<T> Clone for Receiver<T> {
         Self {
             inner: Arc::clone(&self.inner),
             seen_version: self.seen_version,
+            waiter: None,
         }
     }
 }
@@ -980,6 +1031,82 @@ mod tests {
             matches!(result, Err(RecvError::Closed))
         );
         crate::test_complete!("sender_drop_wakes_pending_receiver");
+    }
+
+    #[test]
+    fn no_unbounded_waker_growth() {
+        init_test("no_unbounded_waker_growth");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+
+        // Poll the same future many times without any send.
+        // Before the fix, each poll added a waker entry → unbounded growth.
+        {
+            let mut future = rx.changed(&cx);
+            for _ in 0..100 {
+                let result = Pin::new(&mut future).poll(&mut task_cx);
+                assert!(result.is_pending());
+            }
+        }
+
+        // The waiters vec should have exactly 1 entry, not 100.
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "waiter count after repeated polls",
+            1,
+            waiter_count
+        );
+
+        // After send (which drains waiters), re-poll should add at most 1 again.
+        tx.send(42).expect("send failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 42, "value after send", 42, value);
+
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "waiter count after drain",
+            0,
+            waiter_count
+        );
+        crate::test_complete!("no_unbounded_waker_growth");
+    }
+
+    #[test]
+    fn cancel_and_recreate_bounded_waiters() {
+        init_test("cancel_and_recreate_bounded_waiters");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+
+        // Create and drop futures 50 times without sending.
+        // Each cycle adds at most 1 entry (stale entries accumulate
+        // until the next wake_all, matching pre-fix behavior).
+        for _ in 0..50 {
+            let mut future = rx.changed(&cx);
+            let result = Pin::new(&mut future).poll(&mut task_cx);
+            assert!(result.is_pending());
+            // future dropped here
+        }
+
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(
+            waiter_count == 50,
+            "stale entries from cancel cycles",
+            50,
+            waiter_count
+        );
+
+        // A single send drains all stale entries.
+        tx.send(1).expect("send failed");
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(waiter_count == 0, "all drained after send", 0, waiter_count);
+        crate::test_complete!("cancel_and_recreate_bounded_waiters");
     }
 
     #[test]

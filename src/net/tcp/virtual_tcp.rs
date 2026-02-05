@@ -209,6 +209,27 @@ impl AsyncWrite for VirtualTcpStream {
 
 impl Unpin for VirtualTcpStream {}
 
+impl Drop for VirtualTcpStream {
+    fn drop(&mut self) {
+        self.write_shutdown = true;
+
+        if let Ok(mut half) = self.read_half.lock() {
+            half.read_shutdown = true;
+            half.buf.clear();
+            if let Some(waker) = half.waker.take() {
+                waker.wake();
+            }
+        }
+
+        if let Ok(mut half) = self.write_half.lock() {
+            half.closed = true;
+            if let Some(waker) = half.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
 #[allow(clippy::manual_async_fn)] // trait signature uses `impl Future`, not `async fn`
 impl TcpStreamApi for VirtualTcpStream {
     fn connect<A: ToSocketAddrs + Send + 'static>(
@@ -520,6 +541,22 @@ mod tests {
         assert!(matches!(result, Poll::Ready(Ok(()))));
 
         // B should see EOF when reading
+        let mut buf = [0u8; 16];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let result = Pin::new(&mut b).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled().len(), 0); // EOF
+    }
+
+    #[test]
+    fn virtual_stream_eof_on_drop() {
+        let (a, mut b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        drop(a);
+
         let mut buf = [0u8; 16];
         let mut read_buf = ReadBuf::new(&mut buf);
         let result = Pin::new(&mut b).poll_read(&mut cx, &mut read_buf);
