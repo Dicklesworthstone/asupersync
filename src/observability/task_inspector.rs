@@ -317,8 +317,7 @@ impl TaskInspector {
     pub fn list_tasks(&self) -> Vec<TaskDetails> {
         trace!("listing all tasks");
         self.state
-            .tasks
-            .iter()
+            .tasks_iter()
             .filter_map(|(_, task)| self.inspect_task(task.id))
             .collect()
     }

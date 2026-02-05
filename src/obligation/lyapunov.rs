@@ -255,7 +255,7 @@ impl StateSnapshot {
         let mut finalizing_tasks: u32 = 0;
         let mut deadline_pressure = 0.0_f64;
 
-        for (_, task) in state.tasks.iter() {
+        for (_, task) in state.tasks_iter() {
             if task.state.is_terminal() {
                 continue;
             }

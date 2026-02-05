@@ -270,10 +270,7 @@ mod tests {
 
         {
             let mut guard = state.lock().expect("runtime state lock poisoned");
-            let record = guard
-                .tasks
-                .get_mut(task(1).arena_index())
-                .expect("task record missing");
+            let record = guard.task_mut(task(1)).expect("task record missing");
             record.mark_local();
             drop(guard);
         }
@@ -482,7 +479,7 @@ mod tests {
         {
             let mut guard = state.lock().expect("runtime state lock poisoned");
             for id in [0, 1] {
-                if let Some(record) = guard.tasks.get_mut(task(id).arena_index()) {
+                if let Some(record) = guard.task_mut(task(id)) {
                     record.mark_local();
                 }
             }

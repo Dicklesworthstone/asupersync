@@ -579,13 +579,13 @@ mod tests {
     }
 
     fn insert_task(state: &mut RuntimeState, region: RegionId, task_state: TaskState) -> TaskId {
-        let idx = state.tasks.insert(TaskRecord::new(
+        let idx = state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             region,
             Budget::INFINITE,
         ));
         let id = TaskId::from_arena(idx);
-        let record = state.tasks.get_mut(idx).expect("task missing");
+        let record = state.task_mut(id).expect("task missing");
         record.id = id;
         record.state = task_state;
         let added = state
@@ -693,10 +693,7 @@ mod tests {
         let child = insert_child_region(&mut state, root);
 
         let task_id = insert_task(&mut state, root, TaskState::Running);
-        let task = state
-            .tasks
-            .get_mut(task_id.arena_index())
-            .expect("task missing");
+        let task = state.task_mut(task_id).expect("task missing");
         task.total_polls = 7;
 
         let obligation_id = insert_obligation(
@@ -795,10 +792,7 @@ mod tests {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
         let task_id = insert_task(&mut state, root, TaskState::Running);
-        let task = state
-            .tasks
-            .get_mut(task_id.arena_index())
-            .expect("task missing");
+        let task = state.task_mut(task_id).expect("task missing");
         let notified = task.wake_state.notify();
         crate::assert_with_log!(notified, "wake notified", true, notified);
         task.waiters.push(TaskId::new_for_test(77, 0));
