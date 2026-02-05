@@ -675,8 +675,8 @@ impl UnixDatagram {
         }
 
         // SAFETY: sockaddr_storage is large enough for sockaddr_un.
-        let addr_un = unsafe { &*(storage as *const _ as *const libc::sockaddr_un) };
-        if addr_un.sun_family as libc::c_int != libc::AF_UNIX {
+        let addr_un = unsafe { &*std::ptr::from_ref(storage).cast::<libc::sockaddr_un>() };
+        if libc::c_int::from(addr_un.sun_family) != libc::AF_UNIX {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "non-unix sockaddr in unix datagram",
@@ -685,7 +685,7 @@ impl UnixDatagram {
 
         let path_len = len.saturating_sub(family_size);
         let path_bytes =
-            unsafe { std::slice::from_raw_parts(addr_un.sun_path.as_ptr() as *const u8, path_len) };
+            unsafe { std::slice::from_raw_parts(addr_un.sun_path.as_ptr().cast::<u8>(), path_len) };
 
         if path_bytes.is_empty() {
             let empty = std::ffi::OsStr::from_bytes(&[]);
