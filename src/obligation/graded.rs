@@ -613,14 +613,13 @@ impl<K: TokenKind> ObligationToken<K> {
 
 impl<K: TokenKind> Drop for ObligationToken<K> {
     fn drop(&mut self) {
-        if self.armed {
-            panic!(
-                "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
-                 Call .commit() or .abort() before scope exit.",
-                K::obligation_kind(),
-                self.description,
-            );
-        }
+        assert!(
+            !self.armed,
+            "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
+             Call .commit() or .abort() before scope exit.",
+            K::obligation_kind(),
+            self.description,
+        );
     }
 }
 
@@ -629,6 +628,7 @@ impl<K: TokenKind> fmt::Debug for ObligationToken<K> {
         f.debug_struct("ObligationToken")
             .field("kind", &K::obligation_kind())
             .field("description", &self.description)
+            .field("armed", &self.armed)
             .finish()
     }
 }

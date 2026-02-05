@@ -88,19 +88,10 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "server/connection.rs",
-        line: 123,
+        line: 125,
         category: AmbientCategory::Time,
         severity: Severity::Warning,
         description: "Instant::now() in ConnectionManager::accept()",
-        exempt: false,
-        exemption_reason: None,
-    },
-    AmbientFinding {
-        file: "server/shutdown.rs",
-        line: 175,
-        category: AmbientCategory::Time,
-        severity: Severity::Warning,
-        description: "Instant::now() in ShutdownSignal::begin_drain()",
         exempt: false,
         exemption_reason: None,
     },
@@ -154,7 +145,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // NOTE: net/websocket/handshake.rs was fixed — now uses EntropySource capability.
     AmbientFinding {
         file: "server/connection.rs",
-        line: 230,
+        line: 558,
         category: AmbientCategory::Spawn,
         severity: Severity::Critical,
         description: "std::thread::spawn for connection handler lifecycle",
