@@ -642,11 +642,20 @@ impl RecoveryOrchestrator {
 
         // Feed unique symbols to decoder.
         for cs in self.collector.symbols() {
-            self.decoder.add_symbol(&cs.symbol)?;
+            if let Err(e) = self.decoder.add_symbol(&cs.symbol) {
+                self.recovering = false;
+                return Err(e);
+            }
         }
 
         // Decode.
-        let snapshot = self.decoder.decode_snapshot(&params)?;
+        let snapshot = match self.decoder.decode_snapshot(&params) {
+            Ok(s) => s,
+            Err(e) => {
+                self.recovering = false;
+                return Err(e);
+            }
+        };
 
         // Collect contributing replicas.
         let contributing: Vec<String> = symbols
