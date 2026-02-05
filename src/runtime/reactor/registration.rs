@@ -175,13 +175,23 @@ impl Registration {
     /// # Errors
     ///
     /// Returns an error if the reactor is no longer available or if
-    /// the deregister operation fails.
+    /// the deregister operation fails. A `NotFound` error is treated
+    /// as already deregistered.
     pub fn deregister(self) -> io::Result<()> {
         if let Some(reactor) = self.reactor.upgrade() {
-            let result = reactor.deregister_by_token(self.token);
-            // Prevent Drop from running since we've already deregistered
-            std::mem::forget(self);
-            result
+            match reactor.deregister_by_token(self.token) {
+                Ok(()) => {
+                    // Prevent Drop from running since we've already deregistered
+                    std::mem::forget(self);
+                    Ok(())
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    // Token was already deregistered; treat as success.
+                    std::mem::forget(self);
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         } else {
             // Reactor already gone, nothing to do
             std::mem::forget(self);
@@ -255,6 +265,37 @@ mod tests {
         fn modify_interest(&self, token: Token, interest: Interest) -> io::Result<()> {
             *self.last_token.lock().unwrap() = Some(token);
             *self.last_interest.lock().unwrap() = Some(interest);
+            Ok(())
+        }
+    }
+
+    struct FlakyReactor {
+        deregister_count: AtomicUsize,
+    }
+
+    impl FlakyReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                deregister_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn deregister_count(&self) -> usize {
+            self.deregister_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ReactorHandle for FlakyReactor {
+        fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
+            let call = self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Err(io::Error::new(io::ErrorKind::Other, "injected failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
             Ok(())
         }
     }
@@ -419,6 +460,25 @@ mod tests {
         let result = reg.deregister();
         crate::assert_with_log!(result.is_ok(), "deregister ok", true, result.is_ok());
         crate::test_complete!("explicit_deregister_when_reactor_gone");
+    }
+
+    #[test]
+    fn explicit_deregister_error_allows_drop_retry() {
+        init_test("explicit_deregister_error_allows_drop_retry");
+        let reactor = FlakyReactor::new();
+        let token = Token::new(7);
+
+        let reg = Registration::new(
+            token,
+            Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
+            Interest::READABLE,
+        );
+
+        let result = reg.deregister();
+        crate::assert_with_log!(result.is_err(), "deregister fails", true, result.is_err());
+        let count = reactor.deregister_count();
+        crate::assert_with_log!(count == 2, "drop retried deregister", 2usize, count);
+        crate::test_complete!("explicit_deregister_error_allows_drop_retry");
     }
 
     #[test]

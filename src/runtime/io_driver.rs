@@ -213,10 +213,16 @@ impl IoDriver {
     ///
     /// # Errors
     ///
-    /// Returns an error if reactor deregistration fails.
+    /// Returns an error if reactor deregistration fails. A
+    /// `NotFound` error is treated as already deregistered and the
+    /// local waker state is still cleaned up.
     pub fn deregister(&mut self, token: Token) -> io::Result<()> {
-        // Deregister from reactor first
-        self.reactor.deregister(token)?;
+        // Deregister from reactor first, but treat "not found" as already removed.
+        match self.reactor.deregister(token) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
 
         // Remove waker from slab
         let slab_token = SlabToken::from_usize(token.0);
@@ -492,8 +498,13 @@ impl IoRegistration {
                 let mut guard = driver.lock().expect("lock poisoned");
                 guard.deregister(self.token)
             };
-            std::mem::forget(self);
-            result
+            match result {
+                Ok(()) => {
+                    std::mem::forget(self);
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         } else {
             std::mem::forget(self);
             Ok(())
@@ -560,6 +571,81 @@ mod tests {
     struct TestFdSource;
     impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            0
+        }
+    }
+
+    struct NotFoundReactor;
+
+    impl Reactor for NotFoundReactor {
+        fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "not registered"))
+        }
+
+        fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct FlakyReactor {
+        deregister_calls: AtomicUsize,
+    }
+
+    impl FlakyReactor {
+        fn new() -> Self {
+            Self {
+                deregister_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn deregister_calls(&self) -> usize {
+            self.deregister_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Reactor for FlakyReactor {
+        fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            let call = self.deregister_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Err(io::Error::new(io::ErrorKind::Other, "injected failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
             0
         }
     }
@@ -680,6 +766,40 @@ mod tests {
     }
 
     #[test]
+    fn io_driver_deregister_not_found_cleans_waker() {
+        init_test("io_driver_deregister_not_found_cleans_waker");
+        let reactor = Arc::new(NotFoundReactor);
+        let mut driver = IoDriver::new(reactor);
+
+        let (waker, _) = create_test_waker();
+        let token = driver.register_waker(waker);
+
+        crate::assert_with_log!(
+            driver.waker_count() == 1,
+            "waker count",
+            1usize,
+            driver.waker_count()
+        );
+
+        let result = driver.deregister(token);
+        crate::assert_with_log!(result.is_ok(), "deregister ok", true, result.is_ok());
+
+        crate::assert_with_log!(
+            driver.waker_count() == 0,
+            "waker count",
+            0usize,
+            driver.waker_count()
+        );
+        crate::assert_with_log!(
+            driver.stats().deregistrations == 1,
+            "deregistrations",
+            1usize,
+            driver.stats().deregistrations
+        );
+        crate::test_complete!("io_driver_deregister_not_found_cleans_waker");
+    }
+
+    #[test]
     fn io_driver_update_waker() {
         init_test("io_driver_update_waker");
         let reactor = Arc::new(LabReactor::new());
@@ -703,6 +823,28 @@ mod tests {
             updated_missing
         );
         crate::test_complete!("io_driver_update_waker");
+    }
+
+    #[test]
+    fn io_registration_deregister_error_allows_drop_retry() {
+        init_test("io_registration_deregister_error_allows_drop_retry");
+        let reactor = Arc::new(FlakyReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
+
+        let (waker, _) = create_test_waker();
+        let reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+
+        let result = reg.deregister();
+        crate::assert_with_log!(result.is_err(), "deregister fails", true, result.is_err());
+
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
+        let calls = reactor.deregister_calls();
+        crate::assert_with_log!(calls == 2, "deregister retried", 2usize, calls);
+        crate::test_complete!("io_registration_deregister_error_allows_drop_retry");
     }
 
     #[test]

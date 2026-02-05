@@ -129,6 +129,52 @@ E (Config) → D (Instrumentation) → B (Regions) → A (Tasks) → C (Obligati
    gate task and obligation operations (admission checks). Region state
    determines whether a task can be created or an obligation resolved.
 
+## Shard Responsibilities (bd-2ijqf)
+
+- **E (Config)**: Immutable `RuntimeConfig` and read-only handles. Prefer `Arc`
+  and avoid locks entirely after initialization.
+- **D (Instrumentation)**: Trace/metrics handles and any structured logging
+  buffers. Keep read-mostly and avoid holding across task polling.
+- **B (RegionTable)**: Region ownership tree, child lists, cancellation flags,
+  and region-level counters/limits.
+- **A (TaskTable)**: Task records (scheduling state, wake_state, intrusive
+  links) plus stored futures for polling. This is the hot path shard.
+- **C (ObligationTable)**: Obligation records and lifecycle state for permits,
+  acks, leases, and in-flight resource tracking.
+
+## Extending Safely (New Shards / New Ops)
+
+- **Preserve canonical order**: E→D→B→A→C (or a strict prefix) for any
+  multi-shard acquisition.
+- **Minimize hold time**: keep cross-shard windows small; snapshot and release
+  when possible before acquiring the next shard in order.
+- **Avoid reverse edges**: never acquire A before B or C before A/B.
+- **Keep effects explicit**: cancellation, obligation, and region state updates
+  must remain atomic and deterministic.
+
+## Contention Metrics + E2E Harness
+
+Run the contention harness with structured artifacts:
+
+```bash
+cargo test --test contention_e2e --features lock-metrics -- --nocapture
+```
+
+Artifacts are written to `target/contention/` when the directory exists or
+`CI=1` is set. You can also force a custom location:
+
+```bash
+ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention \
+  cargo test --test contention_e2e --features lock-metrics -- --nocapture
+```
+
+Related E2E tests (structured logs + traces):
+
+```bash
+cargo test --test runtime_e2e -- --nocapture
+cargo test --test obligation_lifecycle_e2e -- --nocapture
+```
+
 4. **A (Tasks)** before C — task completion triggers orphan obligation abort.
    The natural flow is: complete task (A) → scan+abort obligations (C).
 
@@ -144,15 +190,15 @@ E (Config) → D (Instrumentation) → B (Regions) → A (Tasks) → C (Obligati
 | **push/pop/steal** | A | A only |
 | **inject_cancel/ready/timed** | (none with QW#4) or A | A only |
 | **spawn/wake** | (none with QW#4) or A | A only |
-| **task_completed** | D → B → A → C | Full order |
-| **cancel_request** | D → B → A | Skip C |
+| **task_completed** | E → D → B → A → C | Full order |
+| **cancel_request** | E → D → B → A | Skip C |
 | **create_task** | E → D → B → A | Skip C |
-| **create_obligation** | D → B → C | Skip A (unless logical time from task) |
-| **commit/abort_obligation** | D → B → C | Skip A |
-| **advance_region_state** | D → B → A → C | Full order (recursive) |
-| **drain_ready_async_finalizers** | D → B → A | Skip C |
-| **snapshot / is_quiescent** | Read-lock all: D → B → A → C | All shards, read-only |
-| **Lyapunov snapshot** | Read-lock all: D → B → A → C | All shards, read-only |
+| **create_obligation** | E → D → B → C | Skip A (unless logical time from task) |
+| **commit/abort_obligation** | E → D → B → C | Skip A |
+| **advance_region_state** | E → D → B → A → C | Full order (recursive) |
+| **drain_ready_async_finalizers** | E → D → B → A | Skip C |
+| **snapshot / is_quiescent** | Read-lock all: E → D → B → A → C | All shards, read-only |
+| **Lyapunov snapshot** | Read-lock all: E → D → B → A → C | All shards, read-only |
 
 ### Disallowed Lock Sequences (deadlock risk)
 
@@ -181,13 +227,13 @@ impl<'a> ShardGuard<'a> {
     /// Lock only the task shard (hot path).
     pub fn tasks_only(shards: &'a ShardedState) -> Self { ... }
 
-    /// Lock for task_completed: D → B → A → C.
+    /// Lock for task_completed: E → D → B → A → C.
     pub fn for_task_completed(shards: &'a ShardedState) -> Self { ... }
 
-    /// Lock for cancel_request: D → B → A.
+    /// Lock for cancel_request: E → D → B → A.
     pub fn for_cancel(shards: &'a ShardedState) -> Self { ... }
 
-    /// Lock for obligation lifecycle: D → B → C.
+    /// Lock for obligation lifecycle: E → D → B → C.
     pub fn for_obligation(shards: &'a ShardedState) -> Self { ... }
 }
 ```
