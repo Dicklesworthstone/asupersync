@@ -4,6 +4,7 @@
 //! protocol handling.
 
 use std::fmt;
+use std::net::SocketAddr;
 
 /// HTTP request method.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -125,6 +126,8 @@ pub struct Request {
     pub body: Vec<u8>,
     /// Trailing headers (only valid for chunked transfer-encoding).
     pub trailers: Vec<(String, String)>,
+    /// Remote peer address for the connection (if known).
+    pub peer_addr: Option<SocketAddr>,
 }
 
 /// Parsed HTTP/1.1 response (status line + headers + body).

@@ -1062,6 +1062,7 @@ mod tests {
             headers: vec![("Host".to_string(), "example.com".to_string())],
             body: Vec::new(),
             trailers: Vec::new(),
+            peer_addr: None,
         };
 
         let mut resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
@@ -1097,6 +1098,7 @@ mod tests {
             headers: vec![("Host".to_string(), "example.com".to_string())],
             body: Vec::new(),
             trailers: Vec::new(),
+            peer_addr: None,
         };
 
         let mut resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
@@ -1154,6 +1156,7 @@ mod tests {
             headers: vec![("Host".into(), "example.com".into())],
             body: Vec::new(),
             trailers: Vec::new(),
+            peer_addr: None,
         };
         let mut buf = BytesMut::with_capacity(256);
         crate::codec::Encoder::encode(&mut codec, req, &mut buf).unwrap();
@@ -1172,6 +1175,7 @@ mod tests {
             headers: vec![("Host".into(), "api.example.com".into())],
             body: b"data".to_vec(),
             trailers: Vec::new(),
+            peer_addr: None,
         };
         let mut buf = BytesMut::with_capacity(256);
         crate::codec::Encoder::encode(&mut codec, req, &mut buf).unwrap();
