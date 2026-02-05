@@ -47,10 +47,9 @@ fn create_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
         Budget::INFINITE,
     ));
     let id = RegionId::from_arena(idx);
-    state.regions.get_mut(idx).expect("region missing").id = id;
+    state.region_mut(id).expect("region missing").id = id;
     state
-        .regions
-        .get_mut(parent.arena_index())
+        .region_mut(parent)
         .expect("parent missing")
         .add_child(id)
         .expect("add child");
@@ -1109,7 +1108,7 @@ fn e2e_leak_regression_obligations_and_heap_limits() {
     let live_tasks = runtime.state.live_task_count();
     assert_with_log!(live_tasks == 0, "no live tasks", 0, live_tasks);
 
-    if let Some(region) = runtime.state.regions.get(root.arena_index()) {
+    if let Some(region) = runtime.state.region(root) {
         let stats = region.heap_stats();
         tracing::info!(stats = ?stats, "heap stats after close");
         assert_with_log!(stats.live == 0, "heap live reclaimed", 0u64, stats.live);

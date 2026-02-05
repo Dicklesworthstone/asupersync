@@ -762,15 +762,12 @@ impl TestHarness {
         let child_id = arena_index_to_region_id(idx);
 
         // Update the record with the correct ID
-        if let Some(record) = self.runtime.state.regions.get_mut(idx) {
+        if let Some(record) = self.runtime.state.region_mut(child_id) {
             record.id = child_id;
         }
 
         // Add to parent's children
-        if let Some(parent_record) = self.runtime.state.regions.get(ArenaIndex::new(
-            parent.new_for_test_index(),
-            parent.new_for_test_generation(),
-        )) {
+        if let Some(parent_record) = self.runtime.state.region(parent) {
             let _ = parent_record.add_child(child_id);
         }
 
@@ -835,13 +832,7 @@ impl TestHarness {
 
     /// Request close of a region.
     pub fn close_region(&mut self, region: RegionId) {
-        // Get the arena index for this region
-        let arena_idx = ArenaIndex::new(
-            region.new_for_test_index(),
-            region.new_for_test_generation(),
-        );
-
-        if let Some(record) = self.runtime.state.regions.get(arena_idx) {
+        if let Some(record) = self.runtime.state.region(region) {
             record.begin_close(None);
         }
     }
@@ -1323,13 +1314,8 @@ fn check_no_orphan_tasks(harness: &TestHarness) -> Vec<InvariantViolation> {
     for task_id in &harness.tasks {
         if let Some(task_record) = harness.runtime.state.task(*task_id) {
             let region_id = task_record.owner; // Note: field is `owner` not `region`
-            let region_idx = ArenaIndex::new(
-                region_id.new_for_test_index(),
-                region_id.new_for_test_generation(),
-            );
-
-            // Check region exists
-            if harness.runtime.state.regions.get(region_idx).is_none() {
+                                               // Check region exists
+            if harness.runtime.state.region(region_id).is_none() {
                 violations.push(InvariantViolation {
                     invariant: "no_orphan_tasks",
                     message: format!(
@@ -1357,12 +1343,7 @@ fn check_valid_tree_structure(harness: &TestHarness) -> Vec<InvariantViolation> 
     // Count roots (regions with no parent)
     let mut roots = Vec::new();
     for region_id in &harness.regions {
-        let arena_idx = ArenaIndex::new(
-            region_id.new_for_test_index(),
-            region_id.new_for_test_generation(),
-        );
-
-        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+        if let Some(region_record) = harness.runtime.state.region(*region_id) {
             if region_record.parent.is_none() {
                 roots.push(*region_id);
             }
@@ -1427,20 +1408,10 @@ fn check_child_tracking_consistent(harness: &TestHarness) -> Vec<InvariantViolat
     let mut violations = Vec::new();
 
     for region_id in &harness.regions {
-        let arena_idx = ArenaIndex::new(
-            region_id.new_for_test_index(),
-            region_id.new_for_test_generation(),
-        );
-
-        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+        if let Some(region_record) = harness.runtime.state.region(*region_id) {
             // Check each child's parent pointer
             for child_id in region_record.child_ids() {
-                let child_idx = ArenaIndex::new(
-                    child_id.new_for_test_index(),
-                    child_id.new_for_test_generation(),
-                );
-
-                if let Some(child_record) = harness.runtime.state.regions.get(child_idx) {
+                if let Some(child_record) = harness.runtime.state.region(child_id) {
                     if child_record.parent != Some(*region_id) {
                         violations.push(InvariantViolation {
                             invariant: "child_tracking_consistent",
@@ -1497,21 +1468,11 @@ fn check_cancel_propagation(harness: &TestHarness) -> Vec<InvariantViolation> {
     let mut violations = Vec::new();
 
     for region_id in &harness.regions {
-        let arena_idx = ArenaIndex::new(
-            region_id.new_for_test_index(),
-            region_id.new_for_test_generation(),
-        );
-
-        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+        if let Some(region_record) = harness.runtime.state.region(*region_id) {
             // If this region has a cancel reason set, check all children
             if region_record.cancel_reason().is_some() {
                 for child_id in region_record.child_ids() {
-                    let child_idx = ArenaIndex::new(
-                        child_id.new_for_test_index(),
-                        child_id.new_for_test_generation(),
-                    );
-
-                    if let Some(child_record) = harness.runtime.state.regions.get(child_idx) {
+                    if let Some(child_record) = harness.runtime.state.region(child_id) {
                         // Child must have cancel reason or be in closing/terminal state
                         let child_state = child_record.state();
                         let child_has_cancel = child_record.cancel_reason().is_some();
@@ -1542,21 +1503,11 @@ fn check_close_ordering(harness: &TestHarness) -> Vec<InvariantViolation> {
     let mut violations = Vec::new();
 
     for region_id in &harness.regions {
-        let arena_idx = ArenaIndex::new(
-            region_id.new_for_test_index(),
-            region_id.new_for_test_generation(),
-        );
-
-        if let Some(region_record) = harness.runtime.state.regions.get(arena_idx) {
+        if let Some(region_record) = harness.runtime.state.region(*region_id) {
             // If this region is closed, all children must be closed
             if region_record.state().is_terminal() {
                 for child_id in region_record.child_ids() {
-                    let child_idx = ArenaIndex::new(
-                        child_id.new_for_test_index(),
-                        child_id.new_for_test_generation(),
-                    );
-
-                    if let Some(child_record) = harness.runtime.state.regions.get(child_idx) {
+                    if let Some(child_record) = harness.runtime.state.region(child_id) {
                         if !child_record.state().is_terminal() {
                             violations.push(InvariantViolation {
                                 invariant: "close_ordering",
