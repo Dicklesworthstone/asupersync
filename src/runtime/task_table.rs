@@ -98,6 +98,16 @@ impl TaskTable {
         self.tasks.insert(record)
     }
 
+    /// Inserts a new task record produced by `f` into the arena.
+    ///
+    /// The closure receives the assigned `ArenaIndex`.
+    pub fn insert_task_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex) -> TaskRecord,
+    {
+        self.tasks.insert_with(f)
+    }
+
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.

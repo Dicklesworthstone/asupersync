@@ -37,6 +37,16 @@ impl RegionTable {
         self.regions.insert(record)
     }
 
+    /// Inserts a new region record produced by `f` into the arena.
+    ///
+    /// The closure receives the assigned `ArenaIndex`.
+    pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex) -> RegionRecord,
+    {
+        self.regions.insert_with(f)
+    }
+
     /// Removes a region record from the arena.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<RegionRecord> {
         self.regions.remove(index)

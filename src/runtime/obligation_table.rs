@@ -37,6 +37,16 @@ impl ObligationTable {
         self.obligations.insert(record)
     }
 
+    /// Inserts a new obligation record produced by `f` into the arena.
+    ///
+    /// The closure receives the assigned `ArenaIndex`.
+    pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex) -> ObligationRecord,
+    {
+        self.obligations.insert_with(f)
+    }
+
     /// Removes an obligation record from the arena.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
         self.obligations.remove(index)

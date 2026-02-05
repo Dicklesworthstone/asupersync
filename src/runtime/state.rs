@@ -184,7 +184,7 @@ impl MaskedFinalizer {
              Reduce nesting of masked sections.",
         );
         if guard.mask_depth >= MAX_MASK_DEPTH {
-            tracing::error!(
+            crate::tracing_compat::error!(
                 depth = guard.mask_depth,
                 max = MAX_MASK_DEPTH,
                 "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"
@@ -616,6 +616,16 @@ impl RuntimeState {
         self.tasks.insert_task(record)
     }
 
+    /// Inserts a new task record produced by `f` into the arena.
+    ///
+    /// The closure receives the assigned `ArenaIndex`.
+    pub fn insert_task_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex) -> TaskRecord,
+    {
+        self.tasks.insert_task_with(f)
+    }
+
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.
@@ -765,18 +775,10 @@ impl RuntimeState {
 
     /// Creates a root region and returns its ID.
     pub fn create_root_region(&mut self, budget: Budget) -> RegionId {
-        let idx = self.regions.insert(RegionRecord::new_with_time(
-            RegionId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
-            None,
-            budget,
-            self.now,
-        ));
+        let idx = self.regions.insert_with(|idx| {
+            RegionRecord::new_with_time(RegionId::from_arena(idx), None, budget, self.now)
+        });
         let id = RegionId::from_arena(idx);
-
-        // Update the record with the correct ID
-        if let Some(record) = self.regions.get_mut(idx) {
-            record.id = id;
-        }
 
         self.root_region = Some(id);
         let seq = self.next_trace_seq();
@@ -803,17 +805,15 @@ impl RuntimeState {
 
         let effective_budget = parent_budget.meet(budget);
 
-        let idx = self.regions.insert(RegionRecord::new_with_time(
-            RegionId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
-            Some(parent),
-            effective_budget,
-            self.now,
-        ));
+        let idx = self.regions.insert_with(|idx| {
+            RegionRecord::new_with_time(
+                RegionId::from_arena(idx),
+                Some(parent),
+                effective_budget,
+                self.now,
+            )
+        });
         let id = RegionId::from_arena(idx);
-
-        if let Some(record) = self.regions.get_mut(idx) {
-            record.id = id;
-        }
 
         let add_result = self
             .regions
@@ -891,18 +891,11 @@ impl RuntimeState {
             oneshot::channel::<Result<T, crate::runtime::task_handle::JoinError>>();
 
         // Create the TaskRecord
-        let idx = self.insert_task(TaskRecord::new_with_time(
-            TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)), // placeholder
-            region,
-            budget,
-            self.now,
-        ));
+        let now = self.now;
+        let idx = self.tasks.insert_task_with(|idx| {
+            TaskRecord::new_with_time(TaskId::from_arena(idx), region, budget, now)
+        });
         let task_id = TaskId::from_arena(idx);
-
-        // Update the record with the correct ID
-        if let Some(record) = self.task_mut(task_id) {
-            record.id = task_id;
-        }
 
         // Add task to the region's task list
         if let Some(region_record) = self.regions.get(region.arena_index()) {
@@ -1194,9 +1187,9 @@ impl RuntimeState {
         let acquire_backtrace = Self::capture_obligation_backtrace();
         let reserved_at = self.now;
         let idx = if let Some(desc) = description {
-            self.obligations
-                .insert(ObligationRecord::with_description_and_context(
-                    ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+            self.obligations.insert_with(|idx| {
+                ObligationRecord::with_description_and_context(
+                    ObligationId::from_arena(idx),
                     kind,
                     holder,
                     region,
@@ -1204,22 +1197,22 @@ impl RuntimeState {
                     desc,
                     acquired_at,
                     acquire_backtrace,
-                ))
+                )
+            })
         } else {
-            self.obligations.insert(ObligationRecord::new_with_context(
-                ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
-                kind,
-                holder,
-                region,
-                reserved_at,
-                acquired_at,
-                acquire_backtrace,
-            ))
+            self.obligations.insert_with(|idx| {
+                ObligationRecord::new_with_context(
+                    ObligationId::from_arena(idx),
+                    kind,
+                    holder,
+                    region,
+                    reserved_at,
+                    acquired_at,
+                    acquire_backtrace,
+                )
+            })
         };
         let obligation_id = ObligationId::from_arena(idx);
-        if let Some(record) = self.obligations.get_mut(idx) {
-            record.id = obligation_id;
-        }
 
         let _guard = crate::tracing_compat::debug_span!(
             "obligation_reserve",

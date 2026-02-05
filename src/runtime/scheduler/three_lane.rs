@@ -58,7 +58,7 @@ use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::RuntimeState;
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
-use crate::tracing_compat::trace;
+use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::DetRng;
 use std::cell::RefCell;
@@ -502,7 +502,7 @@ impl ThreeLaneScheduler {
                 false,
                 "Attempted to inject_cancel local task {task:?} without owner worker"
             );
-            tracing::error!(
+            error!(
                 ?task,
                 "inject_cancel: cannot route local task to owner worker, cancel skipped"
             );
@@ -562,7 +562,7 @@ impl ThreeLaneScheduler {
             "Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread."
         );
         if is_local {
-            tracing::error!(
+            error!(
                 ?task,
                 "inject_ready: refusing to globally inject local task, scheduling skipped"
             );
@@ -572,9 +572,17 @@ impl ThreeLaneScheduler {
         if should_schedule {
             self.global.inject_ready(task, priority);
             self.wake_one();
-            trace!(?task, priority, "inject_ready: task injected into global ready queue");
+            trace!(
+                ?task,
+                priority,
+                "inject_ready: task injected into global ready queue"
+            );
         } else {
-            trace!(?task, priority, "inject_ready: task NOT scheduled (should_schedule=false)");
+            trace!(
+                ?task,
+                priority,
+                "inject_ready: task NOT scheduled (should_schedule=false)"
+            );
         }
     }
 
@@ -614,7 +622,7 @@ impl ThreeLaneScheduler {
                 false,
                 "Attempted to spawn local task {task:?} from non-owner thread or outside worker context"
             );
-            tracing::error!(
+            error!(
                 ?task,
                 "spawn: local task cannot be scheduled from non-owner thread, spawn skipped"
             );
@@ -681,7 +689,7 @@ impl ThreeLaneScheduler {
                 false,
                 "Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead."
             );
-            tracing::error!(
+            error!(
                 ?task,
                 "wake: local task cannot be woken from non-owner thread, wake skipped"
             );
@@ -1541,7 +1549,7 @@ impl ThreeLaneWorker {
                                             false,
                                             "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
                                         );
-                                        tracing::error!(
+                                        error!(
                                             ?waiter,
                                             worker_id,
                                             "execute: pinned local waiter has invalid worker id, wake skipped"
