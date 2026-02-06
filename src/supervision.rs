@@ -38,10 +38,11 @@
 //! let escalate = SupervisionStrategy::Escalate;
 //! ```
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError};
-use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
+use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 
 /// Supervision strategy for handling actor failures.
 ///
@@ -1629,6 +1630,347 @@ impl Supervisor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Monitor + Down Notifications (bd-4r1ep)
+//
+// OTP-style monitors that deliver deterministic `Down` notifications when a
+// monitored task terminates.  Ordering follows the deterministic ordering
+// contracts from bd-12qan:
+//
+//   DOWN-ORDER:  sort by (vt(completion), tid)
+//   DOWN-BATCH:  multiple downs in one quantum are sorted before enqueue
+//   DOWN-CLEANUP: region close releases all monitors held by tasks in region
+// ---------------------------------------------------------------------------
+
+/// Opaque reference to an established monitor.
+///
+/// Returned when a monitor is created and included in the resulting
+/// [`Down`] notification so the watcher can correlate which monitor fired.
+///
+/// `MonitorRef` values are globally unique within a runtime instance
+/// (monotone counter).  They implement `Ord` for deterministic container use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MonitorRef(u64);
+
+impl MonitorRef {
+    /// Create a `MonitorRef` for testing purposes.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new_for_test(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Return the raw id (useful for trace output).
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for MonitorRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mon{}", self.0)
+    }
+}
+
+/// A `Down` notification delivered when a monitored task terminates.
+///
+/// # Deterministic Ordering (DOWN-ORDER)
+///
+/// When multiple downs are produced in the same scheduling quantum the
+/// delivery order is `(completion_vt, monitored)` — virtual-time first,
+/// then `TaskId` (ArenaIndex: generation, then slot) as tie-breaker.
+///
+/// # Fields
+///
+/// * `monitored` — the `TaskId` of the terminated process
+/// * `reason`    — the termination `Outcome` (Ok / Err / Cancelled / Panicked)
+/// * `monitor_ref` — the `MonitorRef` returned when the monitor was established
+/// * `completion_vt` — virtual-time at which the termination was observed
+#[derive(Debug, Clone)]
+pub struct Down {
+    /// The task that terminated.
+    pub monitored: TaskId,
+    /// The termination outcome.
+    pub reason: Outcome<(), ()>,
+    /// Reference identifying which monitor produced this notification.
+    pub monitor_ref: MonitorRef,
+    /// Virtual-time of the completion event (used for deterministic ordering).
+    pub completion_vt: Time,
+}
+
+impl Down {
+    /// Sorting key for deterministic batch delivery (DOWN-ORDER).
+    ///
+    /// Returns `(completion_vt, monitored)` so that `Vec<Down>` can be
+    /// sorted with `.sort_by_key(|d| d.sort_key())`.
+    #[must_use]
+    pub fn sort_key(&self) -> (Time, TaskId) {
+        (self.completion_vt, self.monitored)
+    }
+}
+
+impl PartialEq for Down {
+    fn eq(&self, other: &Self) -> bool {
+        self.monitored == other.monitored
+            && self.monitor_ref == other.monitor_ref
+            && self.completion_vt == other.completion_vt
+    }
+}
+
+impl Eq for Down {}
+
+/// Internal bookkeeping for a single monitor relationship.
+#[derive(Debug, Clone)]
+struct MonitorEntry {
+    /// Unique reference for this monitor.
+    monitor_ref: MonitorRef,
+    /// The watching task.
+    watcher: TaskId,
+    /// Region that owns the watcher (for cleanup on region close).
+    watcher_region: RegionId,
+    /// The monitored task.
+    monitored: TaskId,
+}
+
+/// Table managing all active monitors in a supervision context.
+///
+/// Provides:
+/// - `monitor(watcher, monitored)` → `MonitorRef`
+/// - `demonitor(ref)` — explicit removal
+/// - `notify_down(task, &outcome, vt)` — produces sorted `Down` batch
+/// - `cleanup_region(region)` — releases all monitors held by the region
+///
+/// # Determinism Invariants
+///
+/// - Uses `BTreeMap` keyed by `MonitorRef` for deterministic iteration.
+/// - Down notifications are sorted by `(completion_vt, tid)` before return.
+/// - No `HashMap` iteration order leaks into observable behavior.
+#[derive(Debug)]
+pub struct MonitorTable {
+    /// Monotone counter for generating unique `MonitorRef` values.
+    next_ref: u64,
+    /// Active monitors indexed by `MonitorRef`.
+    monitors: BTreeMap<MonitorRef, MonitorEntry>,
+    /// Reverse index: monitored task → set of `MonitorRef` values watching it.
+    /// Uses `Vec` (sorted on insertion) to avoid `HashSet` iteration order issues.
+    by_monitored: BTreeMap<TaskId, Vec<MonitorRef>>,
+    /// Reverse index: watcher region → set of `MonitorRef` values owned by it.
+    by_region: BTreeMap<RegionId, Vec<MonitorRef>>,
+}
+
+impl Default for MonitorTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonitorTable {
+    /// Create an empty monitor table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            next_ref: 0,
+            monitors: BTreeMap::new(),
+            by_monitored: BTreeMap::new(),
+            by_region: BTreeMap::new(),
+        }
+    }
+
+    /// Establish a monitor: `watcher` will be notified when `monitored` terminates.
+    ///
+    /// Returns a [`MonitorRef`] that uniquely identifies this monitor relationship.
+    /// The same watcher may monitor the same task multiple times; each call
+    /// returns a distinct `MonitorRef` (matching Erlang/OTP semantics).
+    pub fn monitor(
+        &mut self,
+        watcher: TaskId,
+        watcher_region: RegionId,
+        monitored: TaskId,
+    ) -> MonitorRef {
+        let mref = MonitorRef(self.next_ref);
+        self.next_ref += 1;
+
+        let entry = MonitorEntry {
+            monitor_ref: mref,
+            watcher,
+            watcher_region,
+            monitored,
+        };
+        self.monitors.insert(mref, entry);
+
+        // Maintain sorted reverse indices
+        let refs = self.by_monitored.entry(monitored).or_default();
+        let pos = refs.binary_search(&mref).unwrap_or_else(|p| p);
+        refs.insert(pos, mref);
+
+        let region_refs = self.by_region.entry(watcher_region).or_default();
+        let pos = region_refs.binary_search(&mref).unwrap_or_else(|p| p);
+        region_refs.insert(pos, mref);
+
+        mref
+    }
+
+    /// Remove a specific monitor.
+    ///
+    /// Returns `true` if the monitor existed and was removed.
+    pub fn demonitor(&mut self, mref: MonitorRef) -> bool {
+        let Some(entry) = self.monitors.remove(&mref) else {
+            return false;
+        };
+        Self::remove_from_vec(self.by_monitored.get_mut(&entry.monitored), mref);
+        Self::remove_from_vec(self.by_region.get_mut(&entry.watcher_region), mref);
+        true
+    }
+
+    /// Produce [`Down`] notifications for all monitors watching `task`.
+    ///
+    /// The returned `Vec<Down>` is sorted by `(completion_vt, monitored)`
+    /// per the DOWN-BATCH contract.  All matching monitors are removed.
+    pub fn notify_down(
+        &mut self,
+        task: TaskId,
+        reason: &Outcome<(), ()>,
+        completion_vt: Time,
+    ) -> Vec<Down> {
+        let refs = self.by_monitored.remove(&task).unwrap_or_default();
+        let mut downs = Vec::with_capacity(refs.len());
+
+        for mref in refs {
+            if let Some(entry) = self.monitors.remove(&mref) {
+                Self::remove_from_vec(self.by_region.get_mut(&entry.watcher_region), mref);
+                downs.push(Down {
+                    monitored: task,
+                    reason: reason.clone(),
+                    monitor_ref: mref,
+                    completion_vt,
+                });
+            }
+        }
+
+        // DOWN-BATCH: sort by (vt, tid) before return
+        downs.sort_by_key(Down::sort_key);
+        downs
+    }
+
+    /// Produce a sorted batch of [`Down`] notifications for multiple tasks
+    /// that terminated in the same scheduling quantum.
+    ///
+    /// Each `(TaskId, Outcome, Time)` triple is processed and the resulting
+    /// notifications are merged into a single sorted batch (DOWN-BATCH).
+    pub fn notify_down_batch(
+        &mut self,
+        terminations: &[(TaskId, Outcome<(), ()>, Time)],
+    ) -> Vec<Down> {
+        let mut all_downs = Vec::new();
+        for (task, reason, vt) in terminations {
+            all_downs.extend(self.notify_down(*task, reason, *vt));
+        }
+        // Final global sort to merge interleaved per-task batches
+        all_downs.sort_by_key(Down::sort_key);
+        all_downs
+    }
+
+    /// Release all monitors whose **watcher** belongs to `region`.
+    ///
+    /// This implements the DOWN-CLEANUP contract: when a region closes,
+    /// all monitors held by tasks in that region are released.  No further
+    /// `Down` notifications will be delivered for those monitors.
+    ///
+    /// Returns the number of monitors released.
+    pub fn cleanup_region(&mut self, region: RegionId) -> usize {
+        let refs = self.by_region.remove(&region).unwrap_or_default();
+        let count = refs.len();
+        for mref in refs {
+            if let Some(entry) = self.monitors.remove(&mref) {
+                Self::remove_from_vec(self.by_monitored.get_mut(&entry.monitored), mref);
+            }
+        }
+        count
+    }
+
+    /// Number of active monitors.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.monitors.len()
+    }
+
+    /// Returns `true` if there are no active monitors.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.monitors.is_empty()
+    }
+
+    /// Returns all active `MonitorRef` values watching `task`.
+    #[must_use]
+    pub fn watchers_of(&self, task: TaskId) -> &[MonitorRef] {
+        self.by_monitored.get(&task).map_or(&[], Vec::as_slice)
+    }
+
+    /// Look up the watcher for a given monitor reference.
+    #[must_use]
+    pub fn watcher_for(&self, mref: MonitorRef) -> Option<TaskId> {
+        self.monitors.get(&mref).map(|e| e.watcher)
+    }
+
+    /// Look up the monitored task for a given monitor reference.
+    #[must_use]
+    pub fn monitored_for(&self, mref: MonitorRef) -> Option<TaskId> {
+        self.monitors.get(&mref).map(|e| e.monitored)
+    }
+
+    /// Helper: remove a `MonitorRef` from a sorted `Vec`.
+    fn remove_from_vec(vec: Option<&mut Vec<MonitorRef>>, mref: MonitorRef) {
+        if let Some(v) = vec {
+            if let Ok(pos) = v.binary_search(&mref) {
+                v.remove(pos);
+            }
+        }
+    }
+}
+
+/// Trace event for monitor activity.
+///
+/// Extends [`SupervisionEvent`] with monitor-specific events for observability.
+#[derive(Debug, Clone)]
+pub enum MonitorEvent {
+    /// A monitor was established.
+    Established {
+        /// The monitoring task.
+        watcher: TaskId,
+        /// The monitored task.
+        monitored: TaskId,
+        /// The monitor reference.
+        monitor_ref: MonitorRef,
+    },
+
+    /// A monitor was explicitly removed.
+    Demonitored {
+        /// The monitor reference that was removed.
+        monitor_ref: MonitorRef,
+    },
+
+    /// A Down notification was produced.
+    DownProduced {
+        /// The terminated task.
+        monitored: TaskId,
+        /// The watching task that will receive the notification.
+        watcher: TaskId,
+        /// The monitor reference.
+        monitor_ref: MonitorRef,
+        /// Virtual time of the completion.
+        completion_vt: Time,
+    },
+
+    /// Monitors were cleaned up due to region closure.
+    RegionCleanup {
+        /// The region that closed.
+        region: RegionId,
+        /// Number of monitors released.
+        count: usize,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2809,5 +3151,419 @@ mod tests {
         ));
 
         crate::test_complete!("budget_aware_checks_combined");
+    }
+
+    // ---------------------------------------------------------------
+    // Monitor + Down Notification tests (bd-4r1ep)
+    // ---------------------------------------------------------------
+
+    fn task_id(index: u32, gen: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(index, gen))
+    }
+
+    fn region_id(index: u32, gen: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(index, gen))
+    }
+
+    #[test]
+    fn monitor_ref_display() {
+        init_test("monitor_ref_display");
+        let mref = MonitorRef::new_for_test(42);
+        assert_eq!(format!("{mref}"), "Mon42");
+        assert_eq!(mref.as_u64(), 42);
+        crate::test_complete!("monitor_ref_display");
+    }
+
+    #[test]
+    fn monitor_table_basic_lifecycle() {
+        init_test("monitor_table_basic_lifecycle");
+
+        let mut table = MonitorTable::new();
+        assert!(table.is_empty());
+
+        let watcher = task_id(1, 0);
+        let monitored = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        let mref = table.monitor(watcher, region, monitored);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.watchers_of(monitored), &[mref]);
+        assert_eq!(table.watcher_for(mref), Some(watcher));
+        assert_eq!(table.monitored_for(mref), Some(monitored));
+
+        // Demonitor
+        assert!(table.demonitor(mref));
+        assert!(table.is_empty());
+        assert!(table.watchers_of(monitored).is_empty());
+        assert_eq!(table.watcher_for(mref), None);
+
+        // Double demonitor is a no-op
+        assert!(!table.demonitor(mref));
+
+        crate::test_complete!("monitor_table_basic_lifecycle");
+    }
+
+    #[test]
+    fn monitor_multiple_watchers_single_target() {
+        init_test("monitor_multiple_watchers_single_target");
+
+        let mut table = MonitorTable::new();
+        let monitored = task_id(10, 0);
+        let watcher_a = task_id(1, 0);
+        let watcher_b = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        let ref_a = table.monitor(watcher_a, region, monitored);
+        let ref_b = table.monitor(watcher_b, region, monitored);
+        assert_eq!(table.len(), 2);
+
+        let watchers = table.watchers_of(monitored);
+        assert_eq!(watchers.len(), 2);
+        assert!(watchers.contains(&ref_a));
+        assert!(watchers.contains(&ref_b));
+
+        crate::test_complete!("monitor_multiple_watchers_single_target");
+    }
+
+    #[test]
+    fn monitor_same_pair_multiple_times() {
+        init_test("monitor_same_pair_multiple_times");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(1, 0);
+        let monitored = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        let ref1 = table.monitor(watcher, region, monitored);
+        let ref2 = table.monitor(watcher, region, monitored);
+        assert_ne!(ref1, ref2);
+        assert_eq!(table.len(), 2);
+
+        crate::test_complete!("monitor_same_pair_multiple_times");
+    }
+
+    #[test]
+    fn notify_down_basic() {
+        init_test("notify_down_basic");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(1, 0);
+        let monitored = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        let mref = table.monitor(watcher, region, monitored);
+
+        let downs = table.notify_down(monitored, &Outcome::Ok(()), Time::from_secs(5));
+        assert_eq!(downs.len(), 1);
+        assert_eq!(downs[0].monitored, monitored);
+        assert_eq!(downs[0].monitor_ref, mref);
+        assert_eq!(downs[0].completion_vt, Time::from_secs(5));
+
+        assert!(table.is_empty());
+
+        crate::test_complete!("notify_down_basic");
+    }
+
+    #[test]
+    fn notify_down_multiple_watchers() {
+        init_test("notify_down_multiple_watchers");
+
+        let mut table = MonitorTable::new();
+        let monitored = task_id(10, 0);
+        let watcher_a = task_id(1, 0);
+        let watcher_b = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        let _ref_a = table.monitor(watcher_a, region, monitored);
+        let _ref_b = table.monitor(watcher_b, region, monitored);
+
+        let downs = table.notify_down(monitored, &Outcome::Err(()), Time::from_secs(1));
+        assert_eq!(downs.len(), 2);
+        assert!(table.is_empty());
+
+        crate::test_complete!("notify_down_multiple_watchers");
+    }
+
+    #[test]
+    fn notify_down_ordering_by_vt_then_tid() {
+        init_test("notify_down_ordering_by_vt_then_tid");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(0, 0);
+        let region = region_id(0, 0);
+
+        let t_low = task_id(1, 0);
+        let t_high = task_id(5, 0);
+        let t_mid = task_id(3, 0);
+
+        table.monitor(watcher, region, t_low);
+        table.monitor(watcher, region, t_high);
+        table.monitor(watcher, region, t_mid);
+
+        let terminations = vec![
+            (t_high, Outcome::Ok(()), Time::from_secs(10)),
+            (t_low, Outcome::Ok(()), Time::from_secs(10)),
+            (t_mid, Outcome::Ok(()), Time::from_secs(10)),
+        ];
+        let downs = table.notify_down_batch(&terminations);
+        assert_eq!(downs.len(), 3);
+
+        assert_eq!(downs[0].monitored, t_low);
+        assert_eq!(downs[1].monitored, t_mid);
+        assert_eq!(downs[2].monitored, t_high);
+
+        crate::test_complete!("notify_down_ordering_by_vt_then_tid");
+    }
+
+    #[test]
+    fn notify_down_ordering_vt_primary() {
+        init_test("notify_down_ordering_vt_primary");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(0, 0);
+        let region = region_id(0, 0);
+
+        let t_early_high_id = task_id(99, 0);
+        let t_late_low_id = task_id(1, 0);
+
+        table.monitor(watcher, region, t_early_high_id);
+        table.monitor(watcher, region, t_late_low_id);
+
+        let terminations = vec![
+            (t_late_low_id, Outcome::Ok(()), Time::from_secs(20)),
+            (t_early_high_id, Outcome::Err(()), Time::from_secs(10)),
+        ];
+        let downs = table.notify_down_batch(&terminations);
+        assert_eq!(downs.len(), 2);
+
+        assert_eq!(downs[0].monitored, t_early_high_id);
+        assert_eq!(downs[0].completion_vt, Time::from_secs(10));
+        assert_eq!(downs[1].monitored, t_late_low_id);
+        assert_eq!(downs[1].completion_vt, Time::from_secs(20));
+
+        crate::test_complete!("notify_down_ordering_vt_primary");
+    }
+
+    #[test]
+    fn cleanup_region_releases_monitors() {
+        init_test("cleanup_region_releases_monitors");
+
+        let mut table = MonitorTable::new();
+        let region_a = region_id(1, 0);
+        let region_b = region_id(2, 0);
+
+        let watcher_a = task_id(1, 0);
+        let watcher_b = task_id(2, 0);
+        let monitored = task_id(10, 0);
+
+        table.monitor(watcher_a, region_a, monitored);
+        table.monitor(watcher_b, region_b, monitored);
+        assert_eq!(table.len(), 2);
+
+        let released = table.cleanup_region(region_a);
+        assert_eq!(released, 1);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.watchers_of(monitored).len(), 1);
+
+        let released = table.cleanup_region(region_b);
+        assert_eq!(released, 1);
+        assert!(table.is_empty());
+
+        crate::test_complete!("cleanup_region_releases_monitors");
+    }
+
+    #[test]
+    fn cleanup_region_idempotent() {
+        init_test("cleanup_region_idempotent");
+
+        let mut table = MonitorTable::new();
+        let region = region_id(1, 0);
+        let watcher = task_id(1, 0);
+        let monitored = task_id(2, 0);
+
+        table.monitor(watcher, region, monitored);
+        assert_eq!(table.cleanup_region(region), 1);
+        assert_eq!(table.cleanup_region(region), 0);
+
+        crate::test_complete!("cleanup_region_idempotent");
+    }
+
+    #[test]
+    fn notify_down_no_monitors_returns_empty() {
+        init_test("notify_down_no_monitors_returns_empty");
+
+        let mut table = MonitorTable::new();
+        let task = task_id(99, 0);
+
+        let downs = table.notify_down(task, &Outcome::Ok(()), Time::ZERO);
+        assert!(downs.is_empty());
+
+        crate::test_complete!("notify_down_no_monitors_returns_empty");
+    }
+
+    #[test]
+    fn demonitor_prevents_down_delivery() {
+        init_test("demonitor_prevents_down_delivery");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(1, 0);
+        let monitored = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        let mref = table.monitor(watcher, region, monitored);
+        assert!(table.demonitor(mref));
+
+        let downs = table.notify_down(monitored, &Outcome::Ok(()), Time::from_secs(1));
+        assert!(downs.is_empty());
+
+        crate::test_complete!("demonitor_prevents_down_delivery");
+    }
+
+    #[test]
+    fn region_cleanup_prevents_down_delivery() {
+        init_test("region_cleanup_prevents_down_delivery");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(1, 0);
+        let monitored = task_id(2, 0);
+        let region = region_id(0, 0);
+
+        table.monitor(watcher, region, monitored);
+        table.cleanup_region(region);
+
+        let downs = table.notify_down(monitored, &Outcome::Ok(()), Time::from_secs(1));
+        assert!(downs.is_empty());
+
+        crate::test_complete!("region_cleanup_prevents_down_delivery");
+    }
+
+    #[test]
+    fn down_sort_key_matches_contract() {
+        init_test("down_sort_key_matches_contract");
+
+        let d = Down {
+            monitored: task_id(5, 2),
+            reason: Outcome::Ok(()),
+            monitor_ref: MonitorRef::new_for_test(0),
+            completion_vt: Time::from_secs(42),
+        };
+
+        let (vt, tid) = d.sort_key();
+        assert_eq!(vt, Time::from_secs(42));
+        assert_eq!(tid, task_id(5, 2));
+
+        crate::test_complete!("down_sort_key_matches_contract");
+    }
+
+    #[test]
+    fn monitor_event_variants() {
+        init_test("monitor_event_variants");
+
+        let _established = MonitorEvent::Established {
+            watcher: task_id(1, 0),
+            monitored: task_id(2, 0),
+            monitor_ref: MonitorRef::new_for_test(0),
+        };
+        let _demonitored = MonitorEvent::Demonitored {
+            monitor_ref: MonitorRef::new_for_test(0),
+        };
+        let _down_produced = MonitorEvent::DownProduced {
+            monitored: task_id(2, 0),
+            watcher: task_id(1, 0),
+            monitor_ref: MonitorRef::new_for_test(0),
+            completion_vt: Time::from_secs(1),
+        };
+        let _cleanup = MonitorEvent::RegionCleanup {
+            region: region_id(0, 0),
+            count: 5,
+        };
+
+        crate::test_complete!("monitor_event_variants");
+    }
+
+    #[test]
+    fn notify_down_batch_merges_and_sorts() {
+        init_test("notify_down_batch_merges_and_sorts");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(0, 0);
+        let region = region_id(0, 0);
+
+        let tasks: Vec<TaskId> = (1..=5).map(|i| task_id(i, 0)).collect();
+        for &t in &tasks {
+            table.monitor(watcher, region, t);
+        }
+
+        let terminations = vec![
+            (tasks[4], Outcome::Ok(()), Time::from_secs(3)),
+            (tasks[0], Outcome::Err(()), Time::from_secs(1)),
+            (tasks[2], Outcome::Ok(()), Time::from_secs(1)),
+            (tasks[1], Outcome::Ok(()), Time::from_secs(2)),
+            (tasks[3], Outcome::Err(()), Time::from_secs(1)),
+        ];
+
+        let downs = table.notify_down_batch(&terminations);
+        assert_eq!(downs.len(), 5);
+
+        // Expected order by (vt, tid):
+        // vt=1: tid=1, tid=3, tid=4
+        // vt=2: tid=2
+        // vt=3: tid=5
+        assert_eq!(downs[0].monitored, tasks[0]);
+        assert_eq!(downs[1].monitored, tasks[2]);
+        assert_eq!(downs[2].monitored, tasks[3]);
+        assert_eq!(downs[3].monitored, tasks[1]);
+        assert_eq!(downs[4].monitored, tasks[4]);
+
+        assert!(table.is_empty());
+
+        crate::test_complete!("notify_down_batch_merges_and_sorts");
+    }
+
+    #[test]
+    fn monitor_ref_ordering_is_monotone() {
+        init_test("monitor_ref_ordering_is_monotone");
+
+        let mut table = MonitorTable::new();
+        let watcher = task_id(0, 0);
+        let region = region_id(0, 0);
+
+        let ref1 = table.monitor(watcher, region, task_id(1, 0));
+        let ref2 = table.monitor(watcher, region, task_id(2, 0));
+        let ref3 = table.monitor(watcher, region, task_id(3, 0));
+
+        assert!(ref1 < ref2);
+        assert!(ref2 < ref3);
+
+        crate::test_complete!("monitor_ref_ordering_is_monotone");
+    }
+
+    #[test]
+    fn down_equality() {
+        init_test("down_equality");
+
+        let d1 = Down {
+            monitored: task_id(1, 0),
+            reason: Outcome::Ok(()),
+            monitor_ref: MonitorRef::new_for_test(5),
+            completion_vt: Time::from_secs(10),
+        };
+        let d2 = Down {
+            monitored: task_id(1, 0),
+            reason: Outcome::Err(()),
+            monitor_ref: MonitorRef::new_for_test(5),
+            completion_vt: Time::from_secs(10),
+        };
+        assert_eq!(d1, d2);
+
+        let d3 = Down {
+            monitored: task_id(2, 0),
+            reason: Outcome::Ok(()),
+            monitor_ref: MonitorRef::new_for_test(5),
+            completion_vt: Time::from_secs(10),
+        };
+        assert_ne!(d1, d3);
+
+        crate::test_complete!("down_equality");
     }
 }
