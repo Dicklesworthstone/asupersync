@@ -207,6 +207,8 @@ pub enum CancelKind {
     ResourceUnavailable,
     /// Cancellation due to runtime shutdown.
     Shutdown,
+    /// Cancellation due to a linked task's abnormal exit (Spork link propagation).
+    LinkedExit,
 }
 
 // ========================================================================
@@ -352,7 +354,7 @@ impl CancelKind {
             Self::User => 0,
             Self::Timeout | Self::Deadline => 1,
             Self::PollQuota | Self::CostBudget => 2,
-            Self::FailFast | Self::RaceLost => 3,
+            Self::FailFast | Self::RaceLost | Self::LinkedExit => 3,
             Self::ParentCancelled | Self::ResourceUnavailable => 4,
             Self::Shutdown => 5,
         }
@@ -372,6 +374,7 @@ impl fmt::Display for CancelKind {
             Self::ParentCancelled => write!(f, "parent cancelled"),
             Self::ResourceUnavailable => write!(f, "resource unavailable"),
             Self::Shutdown => write!(f, "shutdown"),
+            Self::LinkedExit => write!(f, "linked exit"),
         }
     }
 }
@@ -537,6 +540,12 @@ impl CancelReason {
     #[must_use]
     pub const fn shutdown() -> Self {
         Self::new(CancelKind::Shutdown)
+    }
+
+    /// Creates a linked-exit cancellation reason (Spork link propagation).
+    #[must_use]
+    pub const fn linked_exit() -> Self {
+        Self::new(CancelKind::LinkedExit)
     }
 
     // ========================================================================
@@ -781,6 +790,7 @@ impl CancelReason {
                     CancelKind::ResourceUnavailable,
                     CancelKind::ResourceUnavailable
                 )
+                | (CancelKind::LinkedExit, CancelKind::LinkedExit)
                 | (CancelKind::Shutdown, CancelKind::Shutdown)
         )
     }
@@ -895,9 +905,8 @@ impl CancelReason {
             CancelKind::FailFast
             | CancelKind::RaceLost
             | CancelKind::ParentCancelled
-            | CancelKind::ResourceUnavailable => {
-                Budget::new().with_poll_quota(200).with_priority(220)
-            }
+            | CancelKind::ResourceUnavailable
+            | CancelKind::LinkedExit => Budget::new().with_poll_quota(200).with_priority(220),
             CancelKind::Shutdown => Budget::new().with_poll_quota(50).with_priority(255),
         }
     }

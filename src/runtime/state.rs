@@ -2469,6 +2469,8 @@ pub enum CancelKindSnapshot {
     ResourceUnavailable,
     /// Runtime shutdown cancellation.
     Shutdown,
+    /// Linked task exit propagation (Spork).
+    LinkedExit,
 }
 
 impl From<CancelKind> for CancelKindSnapshot {
@@ -2484,6 +2486,7 @@ impl From<CancelKind> for CancelKindSnapshot {
             CancelKind::ParentCancelled => Self::ParentCancelled,
             CancelKind::ResourceUnavailable => Self::ResourceUnavailable,
             CancelKind::Shutdown => Self::Shutdown,
+            CancelKind::LinkedExit => Self::LinkedExit,
         }
     }
 }

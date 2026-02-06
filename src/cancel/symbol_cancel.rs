@@ -30,6 +30,7 @@ fn cancel_kind_to_u8(kind: CancelKind) -> u8 {
         CancelKind::ParentCancelled => 7,
         CancelKind::ResourceUnavailable => 8,
         CancelKind::Shutdown => 9,
+        CancelKind::LinkedExit => 10,
     }
 }
 
@@ -45,6 +46,7 @@ fn cancel_kind_from_u8(b: u8) -> Option<CancelKind> {
         7 => Some(CancelKind::ParentCancelled),
         8 => Some(CancelKind::ResourceUnavailable),
         9 => Some(CancelKind::Shutdown),
+        10 => Some(CancelKind::LinkedExit),
         _ => None,
     }
 }

@@ -1047,6 +1047,7 @@ const fn cancel_kind_label(kind: CancelKind) -> &'static str {
         CancelKind::ParentCancelled => "parent_cancelled",
         CancelKind::ResourceUnavailable => "resource_unavailable",
         CancelKind::Shutdown => "shutdown",
+        CancelKind::LinkedExit => "linked_exit",
     }
 }
 

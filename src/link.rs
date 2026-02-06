@@ -151,7 +151,7 @@ impl std::fmt::Display for LinkRef {
 ///
 /// **Contract (EXIT-MONOTONE)**: The `reason` preserves the severity of the
 /// original failure. It is never downgraded during propagation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitSignal {
     /// The task that terminated (source of the exit).
     pub from: TaskId,
@@ -240,9 +240,7 @@ impl LinkExitBatch {
         });
     }
 
-    /// Sorts the batch into deterministic delivery order.
-    #[must_use]
-    pub fn into_sorted(mut self) -> Vec<LinkExitAction> {
+    fn sort_in_place(&mut self) {
         self.entries.sort_by(|a, b| {
             a.exit_vt
                 .cmp(&b.exit_vt)
@@ -251,6 +249,12 @@ impl LinkExitBatch {
                 .then_with(|| a.link_ref.cmp(&b.link_ref))
                 .then_with(|| action_kind_rank(&a.action).cmp(&action_kind_rank(&b.action)))
         });
+    }
+
+    /// Sorts the batch into deterministic delivery order.
+    #[must_use]
+    pub fn into_sorted(mut self) -> Vec<LinkExitAction> {
+        self.sort_in_place();
         self.entries.into_iter().map(|e| e.action).collect()
     }
 }
@@ -583,6 +587,67 @@ impl LinkSet {
             .collect()
     }
 
+    /// Resolve exit signals for a crashed task into policy-aware actions.
+    ///
+    /// When `crashed_task` terminates abnormally at `exit_vt` with `reason`,
+    /// this method inspects each link partner's [`ExitPolicy`] and produces
+    /// the appropriate [`LinkExitAction`]:
+    ///
+    /// - [`ExitPolicy::Propagate`] → [`LinkExitAction::CancelPeer`]
+    /// - [`ExitPolicy::Trap`] → [`LinkExitAction::DeliverExit`]
+    /// - [`ExitPolicy::Ignore`] → [`LinkExitAction::Ignored`]
+    ///
+    /// The returned [`LinkExitBatch`] is sorted deterministically.
+    #[must_use]
+    pub fn resolve_exits(
+        &self,
+        crashed_task: TaskId,
+        exit_vt: Time,
+        reason: &DownReason,
+    ) -> LinkExitBatch {
+        // OTP semantics: normal completion silently removes links.
+        if matches!(reason, DownReason::Normal) {
+            return LinkExitBatch::new();
+        }
+
+        let mut batch = LinkExitBatch::new();
+        let Some(refs) = self.task_index.get(&crashed_task) else {
+            return batch;
+        };
+        for lref in refs {
+            let Some(rec) = self.records.get(lref) else {
+                continue;
+            };
+            let (peer, policy) = if rec.task_a == crashed_task {
+                (rec.task_b, rec.policy_b)
+            } else {
+                (rec.task_a, rec.policy_a)
+            };
+            let action = match policy {
+                ExitPolicy::Propagate => LinkExitAction::CancelPeer {
+                    to: peer,
+                    reason: linked_exit_cancel_reason(reason),
+                    link_ref: *lref,
+                },
+                ExitPolicy::Trap => LinkExitAction::DeliverExit {
+                    to: peer,
+                    signal: ExitSignal {
+                        from: crashed_task,
+                        reason: reason.clone(),
+                        link_ref: *lref,
+                    },
+                },
+                ExitPolicy::Ignore => LinkExitAction::Ignored {
+                    to: peer,
+                    link_ref: *lref,
+                },
+            };
+            batch.push(exit_vt, crashed_task, peer, *lref, action);
+        }
+        batch.sort_in_place();
+        batch
+    }
+
     // -- private helpers --
 
     fn remove_from_task_index(&mut self, task: TaskId, link_ref: LinkRef) {
@@ -607,6 +672,14 @@ impl LinkSet {
 impl Default for LinkSet {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn linked_exit_cancel_reason(exit_reason: &DownReason) -> CancelReason {
+    let base = CancelReason::new(CancelKind::LinkedExit).with_message("link exit");
+    match exit_reason {
+        DownReason::Cancelled(r) => base.with_cause(r.clone()),
+        DownReason::Normal | DownReason::Error(_) | DownReason::Panicked(_) => base,
     }
 }
 
@@ -823,6 +896,176 @@ mod tests {
         assert_eq!(set.len(), 1);
         assert_eq!(set.peers_of(t1).len(), 1);
         assert_eq!(set.peers_of(t1)[0].1, t3);
+    }
+
+    // ── LinkSet: resolve_exits (bd-khkw7) ──────────────────────────────
+
+    #[test]
+    fn resolve_exits_normal_is_silent() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let b = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        set.establish(a, r1, b, r1);
+
+        let batch = set.resolve_exits(a, Time::from_secs(1), &DownReason::Normal);
+        assert!(batch.into_sorted().is_empty());
+    }
+
+    #[test]
+    fn resolve_exits_propagate_cancels_peer_with_linked_exit_kind() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let b = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref =
+            set.establish_with_policy(a, r1, ExitPolicy::Propagate, b, r1, ExitPolicy::Propagate);
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Error("boom".to_string()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::CancelPeer {
+                to,
+                reason,
+                link_ref,
+            } => {
+                assert_eq!(*to, b);
+                assert_eq!(reason.kind, CancelKind::LinkedExit);
+                assert_eq!(reason.message, Some("link exit"));
+                assert_eq!(*link_ref, lref);
+            }
+            other => panic!("expected CancelPeer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exits_trap_delivers_exit_message() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let b = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref = set.establish_with_policy(a, r1, ExitPolicy::Propagate, b, r1, ExitPolicy::Trap);
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Panicked(PanicPayload::new("kaput")),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::DeliverExit { to, signal } => {
+                assert_eq!(*to, b);
+                assert_eq!(signal.from, a);
+                assert_eq!(signal.link_ref, lref);
+                assert!(matches!(signal.reason, DownReason::Panicked(_)));
+            }
+            other => panic!("expected DeliverExit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exits_ignore_suppresses_exit() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let b = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref =
+            set.establish_with_policy(a, r1, ExitPolicy::Propagate, b, r1, ExitPolicy::Ignore);
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Error("boom".to_string()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::Ignored { to, link_ref } => {
+                assert_eq!(*to, b);
+                assert_eq!(*link_ref, lref);
+            }
+            other => panic!("expected Ignored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exits_cancellation_attaches_cause_chain() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let b = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        set.establish_with_policy(a, r1, ExitPolicy::Propagate, b, r1, ExitPolicy::Propagate);
+
+        let source_cancel = CancelReason::timeout();
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Cancelled(source_cancel.clone()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::CancelPeer { to, reason, .. } => {
+                assert_eq!(*to, b);
+                assert_eq!(reason.kind, CancelKind::LinkedExit);
+                assert!(reason.cause.is_some());
+                assert_eq!(reason.cause.as_deref(), Some(&source_cancel));
+            }
+            other => panic!("expected CancelPeer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exits_ordering_is_deterministic() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let b = test_task_id(4, 0);
+        let c = test_task_id(3, 0);
+        let r1 = test_region_id(0, 0);
+
+        // Establish in reverse target order (b first, then c).
+        set.establish_with_policy(a, r1, ExitPolicy::Propagate, b, r1, ExitPolicy::Trap);
+        set.establish_with_policy(a, r1, ExitPolicy::Propagate, c, r1, ExitPolicy::Propagate);
+
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Error("boom".to_string()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 2);
+
+        // Sorted by target TaskId (c=3) before (b=4), regardless of insertion order.
+        let to0 = match &actions[0] {
+            LinkExitAction::CancelPeer { to, .. } => *to,
+            LinkExitAction::DeliverExit { to, .. } => *to,
+            LinkExitAction::Ignored { to, .. } => *to,
+        };
+        let to1 = match &actions[1] {
+            LinkExitAction::CancelPeer { to, .. } => *to,
+            LinkExitAction::DeliverExit { to, .. } => *to,
+            LinkExitAction::Ignored { to, .. } => *to,
+        };
+        assert_eq!(to0, c);
+        assert_eq!(to1, b);
     }
 
     // ── LinkSet: peers_of ──────────────────────────────────────────────
