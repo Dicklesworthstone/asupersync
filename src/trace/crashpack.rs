@@ -1790,9 +1790,7 @@ mod tests {
         init_test("golden_minimization_integration");
 
         use crate::trace::divergence::{minimize_divergent_prefix, MinimizationConfig};
-        use crate::trace::replay::{
-            CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata,
-        };
+        use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 
         // Build a replay prefix: the failure "happens" at event index 5+.
         let replay_events: Vec<_> = (0..20)
