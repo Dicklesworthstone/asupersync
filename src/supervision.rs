@@ -3630,6 +3630,7 @@ mod tests {
     /// - Only `Err` may restart (under `Restart`) or escalate (under `Escalate`).
     /// - `Ok` should not be routed into `on_failure`; we treat it as `Stop(ExplicitStop)`
     ///   as a deterministic fallback.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn conformance_monotone_severity_cross_product() {
         init_test("conformance_monotone_severity_cross_product");
@@ -4274,8 +4275,6 @@ mod tests {
     /// Required child failure does fail the supervisor.
     #[test]
     fn conformance_spawn_required_vs_optional_child_failure() {
-        init_test("conformance_spawn_required_vs_optional_child_failure");
-
         #[allow(clippy::unnecessary_wraps)]
         fn failing_start(
             _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
@@ -4284,6 +4283,8 @@ mod tests {
         ) -> Result<TaskId, SpawnError> {
             Err(SpawnError::RegionClosed(test_region_id()))
         }
+
+        init_test("conformance_spawn_required_vs_optional_child_failure");
 
         // Optional child failure: supervisor succeeds
         {
@@ -4329,7 +4330,9 @@ mod tests {
                 SupervisorSpawnError::ChildStartFailed { child, .. } => {
                     assert_eq!(child, "required_fail");
                 }
-                other => panic!("expected ChildStartFailed, got {other:?}"),
+                other @ SupervisorSpawnError::RegionCreate(_) => {
+                    panic!("expected ChildStartFailed, got {other:?}")
+                }
             }
         }
 
