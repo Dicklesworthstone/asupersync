@@ -22,7 +22,9 @@ use crate::time::VirtualClock;
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
 use crate::trace::replay::{ReplayTrace, TraceMetadata};
+use crate::trace::scoring::seed_fingerprint;
 use crate::trace::TraceBufferHandle;
+use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::trace::{TraceData, TraceEvent};
 use crate::types::{ObligationId, TaskId};
 use crate::types::{Severity, Time};
@@ -31,6 +33,76 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
+
+/// Summary of a trace certificate built from the current trace buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabTraceCertificateSummary {
+    /// Incremental hash of witnessed events.
+    pub event_hash: u64,
+    /// Total number of events witnessed.
+    pub event_count: u64,
+    /// Hash of scheduling decisions (from [`ScheduleCertificate`]).
+    pub schedule_hash: u64,
+}
+
+/// Structured report for a single lab runtime run.
+///
+/// This is intended as a low-level building block for Spork app harnesses.
+/// It contains canonical trace fingerprints and oracle outcomes, but it does
+/// not write to stdout/stderr or persist artifacts.
+#[derive(Debug, Clone)]
+pub struct LabRunReport {
+    /// Lab seed driving scheduling determinism.
+    pub seed: u64,
+    /// Steps executed during the `run_until_quiescent()` call that produced this report.
+    pub steps_delta: u64,
+    /// Total steps executed by the runtime so far.
+    pub steps_total: u64,
+    /// Whether the runtime is quiescent at report time.
+    pub quiescent: bool,
+    /// Virtual time (nanoseconds since epoch) at report time.
+    pub now_nanos: u64,
+    /// Number of events in the current trace buffer snapshot.
+    pub trace_len: usize,
+    /// Canonical fingerprint of the trace equivalence class (Foata / Mazurkiewicz).
+    pub trace_fingerprint: u64,
+    /// Trace certificate summary (event hash/count + schedule hash).
+    pub trace_certificate: LabTraceCertificateSummary,
+    /// Unified oracle report (stable ordering, serializable).
+    pub oracle_report: crate::lab::oracle::OracleReport,
+    /// Runtime invariant violations detected by `LabRuntime::check_invariants()`.
+    ///
+    /// This is distinct from the oracle suite: it's a small set of runtime-level
+    /// checks (e.g., obligation leaks, futurelocks, quiescence violations).
+    pub invariant_violations: Vec<String>,
+}
+
+impl LabRunReport {
+    /// Convert to JSON for artifact storage.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        json!({
+            "seed": self.seed,
+            "steps_delta": self.steps_delta,
+            "steps_total": self.steps_total,
+            "quiescent": self.quiescent,
+            "now_nanos": self.now_nanos,
+            "trace": {
+                "len": self.trace_len,
+                "fingerprint": self.trace_fingerprint,
+                "certificate": {
+                    "event_hash": self.trace_certificate.event_hash,
+                    "event_count": self.trace_certificate.event_count,
+                    "schedule_hash": self.trace_certificate.schedule_hash,
+                }
+            },
+            "oracles": self.oracle_report.to_json(),
+            "invariants": self.invariant_violations,
+        })
+    }
+}
 
 /// The deterministic lab runtime.
 ///
@@ -262,6 +334,69 @@ impl LabRuntime {
         }
 
         self.steps - start_steps
+    }
+
+    /// Runs until quiescent (or `max_steps` is reached) and returns a structured report.
+    #[must_use]
+    pub fn run_until_quiescent_with_report(&mut self) -> LabRunReport {
+        let steps_delta = self.run_until_quiescent();
+        self.report_with_steps_delta(steps_delta)
+    }
+
+    /// Build a structured report for the current runtime state.
+    ///
+    /// This does not advance execution.
+    #[must_use]
+    pub fn report(&mut self) -> LabRunReport {
+        self.report_with_steps_delta(0)
+    }
+
+    fn report_with_steps_delta(&mut self, steps_delta: u64) -> LabRunReport {
+        let seed = self.config.seed;
+        let quiescent = self.is_quiescent();
+        let now = self.now();
+
+        let trace_events = self.trace().snapshot();
+        let trace_len = trace_events.len();
+
+        let trace_fingerprint = if trace_events.is_empty() {
+            // Mirror explorer behavior: ensure the report fingerprint varies by seed
+            // even if trace capture is effectively disabled / empty.
+            seed_fingerprint(seed)
+        } else {
+            trace_fingerprint(&trace_events)
+        };
+
+        let schedule_hash = self.certificate().hash();
+        let mut certificate = TraceCertificate::new();
+        for e in &trace_events {
+            certificate.record_event(e);
+        }
+        certificate.set_schedule_hash(schedule_hash);
+
+        let oracle_report = self.oracles.report(now);
+        let invariant_violations = self
+            .check_invariants()
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>();
+
+        LabRunReport {
+            seed,
+            steps_delta,
+            steps_total: self.steps(),
+            quiescent,
+            now_nanos: now.as_nanos(),
+            trace_len,
+            trace_fingerprint,
+            trace_certificate: LabTraceCertificateSummary {
+                event_hash: certificate.event_hash(),
+                event_count: certificate.event_count(),
+                schedule_hash: certificate.schedule_hash(),
+            },
+            oracle_report,
+            invariant_violations,
+        }
     }
 
     /// Enable deadline monitoring with the default warning handler.
@@ -1355,6 +1490,57 @@ mod tests {
         });
 
         crate::test_complete!("deterministic_multiworker_schedule");
+    }
+
+    #[test]
+    fn run_until_quiescent_with_report_is_deterministic() {
+        init_test("run_until_quiescent_with_report_is_deterministic");
+
+        let config = LabConfig::new(123).worker_count(4).max_steps(10_000);
+        let mut r1 = LabRuntime::new(config.clone());
+        let mut r2 = LabRuntime::new(config);
+
+        let setup = |runtime: &mut LabRuntime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            for _ in 0..4 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async {
+                        crate::runtime::yield_now::yield_now().await;
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            }
+        };
+
+        setup(&mut r1);
+        setup(&mut r2);
+
+        let rep1 = r1.run_until_quiescent_with_report();
+        let rep2 = r2.run_until_quiescent_with_report();
+
+        crate::assert_with_log!(rep1.quiescent, "quiescent", true, rep1.quiescent);
+        crate::assert_with_log!(rep2.quiescent, "quiescent", true, rep2.quiescent);
+
+        assert_eq!(rep1.trace_fingerprint, rep2.trace_fingerprint);
+        assert_eq!(rep1.trace_certificate, rep2.trace_certificate);
+        assert_eq!(rep1.oracle_report.to_json(), rep2.oracle_report.to_json());
+        assert_eq!(rep1.invariant_violations, rep2.invariant_violations);
+
+        crate::assert_with_log!(
+            rep1.oracle_report.all_passed(),
+            "oracles passed",
+            true,
+            rep1.oracle_report.all_passed()
+        );
+        crate::assert_with_log!(
+            rep2.oracle_report.all_passed(),
+            "oracles passed",
+            true,
+            rep2.oracle_report.all_passed()
+        );
+
+        crate::test_complete!("run_until_quiescent_with_report_is_deterministic");
     }
 
     #[test]

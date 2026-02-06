@@ -253,6 +253,41 @@ impl<T> Sender<T> {
             .capacity
     }
 
+    /// Sends a value, evicting the oldest queued message if the channel is full.
+    ///
+    /// Returns `Ok(None)` if the value was sent without eviction,
+    /// `Ok(Some(evicted))` if the oldest message was evicted to make room,
+    /// or `Err(SendError::Disconnected(value))` if the receiver has dropped.
+    ///
+    /// This is used by the `DropOldest` backpressure policy. The evicted
+    /// message is returned so callers can trace or log the drop.
+    pub fn send_evict_oldest(&self, value: T) -> Result<Option<T>, SendError<T>> {
+        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+
+        if inner.receiver_dropped {
+            return Err(SendError::Disconnected(value));
+        }
+
+        let evicted = if inner.has_capacity() {
+            None
+        } else {
+            // Evict the oldest committed message (not a reserved slot).
+            inner.queue.pop_front()
+        };
+
+        inner.queue.push_back(value);
+
+        let waker = inner.recv_waker.take();
+        drop(inner);
+
+        // Wake receiver if waiting. Drop the lock first to avoid contention/deadlocks.
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+
+        Ok(evicted)
+    }
+
     /// Returns a weak reference to this sender.
     #[must_use]
     pub fn downgrade(&self) -> WeakSender<T> {

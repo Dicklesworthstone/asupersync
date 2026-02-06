@@ -5,6 +5,7 @@
 
 use crate::util::ArenaIndex;
 use core::fmt;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Add;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -83,6 +84,46 @@ impl fmt::Display for RegionId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct SerdeArenaIndex {
+    index: u32,
+    generation: u32,
+}
+
+impl SerdeArenaIndex {
+    const fn to_arena(self) -> ArenaIndex {
+        ArenaIndex::new(self.index, self.generation)
+    }
+}
+
+impl From<ArenaIndex> for SerdeArenaIndex {
+    fn from(value: ArenaIndex) -> Self {
+        Self {
+            index: value.index(),
+            generation: value.generation(),
+        }
+    }
+}
+
+impl Serialize for RegionId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerdeArenaIndex::from(self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RegionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let idx = SerdeArenaIndex::deserialize(deserializer)?;
+        Ok(Self(idx.to_arena()))
+    }
+}
+
 /// A unique identifier for a task in the runtime.
 ///
 /// Tasks are units of concurrent execution owned by regions.
@@ -152,6 +193,25 @@ impl fmt::Display for TaskId {
     }
 }
 
+impl Serialize for TaskId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerdeArenaIndex::from(self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let idx = SerdeArenaIndex::deserialize(deserializer)?;
+        Ok(Self(idx.to_arena()))
+    }
+}
+
 /// A unique identifier for an obligation in the runtime.
 ///
 /// Obligations represent resources that must be resolved (commit, abort, ack, etc.)
@@ -208,11 +268,30 @@ impl fmt::Display for ObligationId {
     }
 }
 
+impl Serialize for ObligationId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerdeArenaIndex::from(self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObligationId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let idx = SerdeArenaIndex::deserialize(deserializer)?;
+        Ok(Self(idx.to_arena()))
+    }
+}
+
 /// A logical timestamp for the runtime.
 ///
 /// In the production runtime, this corresponds to wall-clock time.
 /// In the lab runtime, this is virtual time controlled by the scheduler.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct Time(u64);
 
 impl Time {

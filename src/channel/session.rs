@@ -280,6 +280,12 @@ impl<T> TrackedOneshotPermit<T> {
         permit.abort();
         obligation.abort()
     }
+
+    /// Returns `true` if the receiver has been dropped.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.permit.is_closed()
+    }
 }
 
 impl<T> std::fmt::Debug for TrackedOneshotPermit<T> {
