@@ -1119,12 +1119,12 @@ mod tests {
         let result =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
         match result {
-            Ok(_) => panic!("expected cancellation, got Ok"),
+            Ok(_) => unreachable!("expected cancellation, got Ok"),
             Err(CallError::Cancelled(reason)) => {
                 assert_eq!(reason.kind, CancelKind::User);
                 assert_eq!(reason.message, Some("gen_server call cancelled"));
             }
-            Err(other) => panic!("expected CallError::Cancelled, got {other:?}"),
+            Err(other) => unreachable!("expected CallError::Cancelled, got {other:?}"),
         }
 
         // Cleanup: disconnect the server and let it drain the queued call.
@@ -1200,12 +1200,12 @@ mod tests {
         let result =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
         match result {
-            Ok(()) => panic!("expected cancellation, got Ok"),
+            Ok(()) => unreachable!("expected cancellation, got Ok"),
             Err(CastError::Cancelled(reason)) => {
                 assert_eq!(reason.kind, CancelKind::User);
                 assert_eq!(reason.message, Some("gen_server cast cancelled"));
             }
-            Err(other) => panic!("expected CastError::Cancelled, got {other:?}"),
+            Err(other) => unreachable!("expected CastError::Cancelled, got {other:?}"),
         }
 
         // Cleanup: disconnect the server and let it drain the mailbox.
