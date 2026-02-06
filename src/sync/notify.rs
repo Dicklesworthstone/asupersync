@@ -162,7 +162,10 @@ impl Notify {
         }
 
         // No waiters found, store the notification.
-        drop(waiters);
+        //
+        // Important: keep the waiter lock held while incrementing `stored_notifications` so a
+        // waiter can't observe `stored_notifications == 0`, then register, and miss the stored
+        // notification (lost wakeup).
         self.stored_notifications.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -279,6 +282,34 @@ impl Future for Notified<'_> {
                     Err(poisoned) => poisoned.into_inner(),
                 };
 
+                // Re-check stored notifications and generation while holding the waiter lock.
+                // This closes races where a notifier runs between the lock-free checks above and
+                // the waiter registration below.
+                loop {
+                    let stored = self.notify.stored_notifications.load(Ordering::SeqCst);
+                    if stored == 0 {
+                        break;
+                    }
+
+                    if self
+                        .notify
+                        .stored_notifications
+                        .compare_exchange(stored, stored - 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        drop(waiters);
+                        self.state = NotifiedState::Done;
+                        return Poll::Ready(());
+                    }
+                }
+
+                let current_gen = self.notify.generation.load(Ordering::Acquire);
+                if current_gen != self.initial_generation {
+                    drop(waiters);
+                    self.state = NotifiedState::Done;
+                    return Poll::Ready(());
+                }
+
                 let index = waiters.insert(WaiterEntry {
                     waker: Some(cx.waker().clone()),
                     notified: false,
@@ -360,6 +391,7 @@ impl Drop for Notified<'_> {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::task::Wake;
     use std::thread;
@@ -624,5 +656,67 @@ mod tests {
         crate::assert_with_log!(entries_len == 0, "no growth", 0usize, entries_len);
 
         crate::test_complete!("test_repeated_cancel_no_growth");
+    }
+
+    #[test]
+    fn notify_one_does_not_lose_wakeup_during_registration_race() {
+        init_test("notify_one_does_not_lose_wakeup_during_registration_race");
+
+        let notify = Arc::new(Notify::new());
+
+        // Hold the waiter lock so we can queue up both the notifier and the waiter registration.
+        let gate = notify.waiters.lock().expect("lock poisoned");
+
+        // Start the notifier first so it is likely to acquire the waiter lock first once we drop
+        // `gate`. This makes the pre-fix lost-wakeup interleaving reproducible.
+        let notify_for_notifier = Arc::clone(&notify);
+        let notifier = thread::spawn(move || {
+            notify_for_notifier.notify_one();
+        });
+
+        // Give the notifier thread time to block on the waiter lock.
+        thread::sleep(Duration::from_millis(10));
+
+        let (tx_ready, rx_ready) = mpsc::channel::<bool>();
+        let (tx_poll, rx_poll) = mpsc::channel::<()>();
+
+        let notify_for_poller = Arc::clone(&notify);
+        let poller = thread::spawn(move || {
+            let mut fut = notify_for_poller.notified();
+
+            // First poll will either:
+            // - complete immediately by consuming a stored notification, or
+            // - register a waiter and return Pending.
+            let first_ready = poll_once(&mut fut).is_ready();
+            tx_ready.send(first_ready).expect("send first_ready");
+
+            // Wait for the main thread to run notify_one and then poll again.
+            rx_poll.recv().expect("recv poll signal");
+
+            let second_ready = poll_once(&mut fut).is_ready();
+            tx_ready.send(second_ready).expect("send second_ready");
+        });
+
+        // Release the gate so the notifier and poller can proceed.
+        drop(gate);
+
+        notifier.join().expect("notifier thread panicked");
+
+        let first_ready = rx_ready.recv().expect("recv first_ready");
+        tx_poll.send(()).expect("send poll signal");
+        let second_ready = rx_ready.recv().expect("recv second_ready");
+
+        poller.join().expect("poller thread panicked");
+
+        // Regardless of interleaving, a single notify_one must be enough for a single Notified
+        // future to become Ready once it is polled again.
+        crate::assert_with_log!(
+            first_ready || second_ready,
+            "notify_one eventually makes notified() ready",
+            true,
+            first_ready || second_ready
+        );
+
+        crate::test_complete!("notify_one_does_not_lose_wakeup_during_registration_race");
     }
 }

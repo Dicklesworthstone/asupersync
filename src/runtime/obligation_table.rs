@@ -8,7 +8,9 @@ use crate::error::{Error, ErrorKind};
 use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord, SourceLocation};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::{Arena, ArenaIndex};
+use smallvec::SmallVec;
 use std::backtrace::Backtrace;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Information returned when an obligation is committed.
@@ -91,9 +93,15 @@ pub struct ObligationCreateArgs {
 /// Provides both low-level arena access and domain-level methods for
 /// obligation lifecycle management (create, commit, abort, leak).
 /// Cross-cutting concerns (tracing, metrics) remain in RuntimeState.
+///
+/// Maintains a secondary index (`by_holder`) mapping each `TaskId` to its
+/// obligation IDs. This turns holder-based lookups (leak detection, orphan
+/// abort) from O(arena_capacity) scans to O(obligations_per_task).
 #[derive(Debug, Default)]
 pub struct ObligationTable {
     obligations: Arena<ObligationRecord>,
+    /// Secondary index: task → obligation IDs held by that task.
+    by_holder: HashMap<TaskId, SmallVec<[ObligationId; 4]>>,
 }
 
 impl ObligationTable {
@@ -102,6 +110,7 @@ impl ObligationTable {
     pub fn new() -> Self {
         Self {
             obligations: Arena::new(),
+            by_holder: HashMap::new(),
         }
     }
 
@@ -122,7 +131,13 @@ impl ObligationTable {
 
     /// Inserts a new obligation record into the arena.
     pub fn insert(&mut self, record: ObligationRecord) -> ArenaIndex {
-        self.obligations.insert(record)
+        let holder = record.holder;
+        let idx = self.obligations.insert(record);
+        self.by_holder
+            .entry(holder)
+            .or_default()
+            .push(ObligationId::from_arena(idx));
+        idx
     }
 
     /// Inserts a new obligation record produced by `f` into the arena.
@@ -132,12 +147,27 @@ impl ObligationTable {
     where
         F: FnOnce(ArenaIndex) -> ObligationRecord,
     {
-        self.obligations.insert_with(f)
+        let idx = self.obligations.insert_with(f);
+        if let Some(record) = self.obligations.get(idx) {
+            self.by_holder
+                .entry(record.holder)
+                .or_default()
+                .push(ObligationId::from_arena(idx));
+        }
+        idx
     }
 
     /// Removes an obligation record from the arena.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
-        self.obligations.remove(index)
+        let record = self.obligations.remove(index)?;
+        let ob_id = ObligationId::from_arena(index);
+        if let Some(ids) = self.by_holder.get_mut(&record.holder) {
+            ids.retain(|id| *id != ob_id);
+            if ids.is_empty() {
+                self.by_holder.remove(&record.holder);
+            }
+        }
+        Some(record)
     }
 
     /// Returns an iterator over all obligation records.
@@ -309,6 +339,39 @@ impl ObligationTable {
         })
     }
 
+    /// Returns obligation IDs held by a specific task (O(1) lookup via index).
+    ///
+    /// Returns all obligation IDs for the task, including resolved ones.
+    /// Callers should filter by `is_pending()` if only active obligations are needed.
+    #[must_use]
+    pub fn ids_for_holder(&self, task_id: TaskId) -> &[ObligationId] {
+        self.by_holder
+            .get(&task_id)
+            .map_or(&[], SmallVec::as_slice)
+    }
+
+    /// Collects pending obligation IDs for a task using the holder index.
+    ///
+    /// Sorted by `ObligationId` for deterministic processing order.
+    #[must_use]
+    pub fn sorted_pending_ids_for_holder(
+        &self,
+        task_id: TaskId,
+    ) -> SmallVec<[ObligationId; 4]> {
+        let mut result: SmallVec<[ObligationId; 4]> = self
+            .ids_for_holder(task_id)
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.obligations
+                    .get(id.arena_index())
+                    .is_some_and(|r| r.is_pending())
+            })
+            .collect();
+        result.sort_unstable();
+        result
+    }
+
     /// Returns an iterator over obligations held by a specific task.
     pub fn for_task(
         &self,
@@ -361,10 +424,14 @@ impl ObligationTable {
     /// Collects IDs of pending obligations held by a specific task.
     #[must_use]
     pub fn pending_obligation_ids_for_task(&self, task_id: TaskId) -> Vec<ObligationId> {
-        self.obligations
+        self.ids_for_holder(task_id)
             .iter()
-            .filter(|(_, r)| r.holder == task_id && r.is_pending())
-            .map(|(idx, _)| ObligationId::from_arena(idx))
+            .copied()
+            .filter(|id| {
+                self.obligations
+                    .get(id.arena_index())
+                    .is_some_and(|r| r.is_pending())
+            })
             .collect()
     }
 

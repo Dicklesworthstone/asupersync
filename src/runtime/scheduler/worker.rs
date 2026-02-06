@@ -11,6 +11,7 @@ use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::trace;
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -21,7 +22,6 @@ use std::time::{Duration, Instant};
 pub type WorkerId = usize;
 
 /// A worker thread that executes tasks.
-#[derive(Debug)]
 pub struct Worker {
     /// Unique worker ID.
     pub id: WorkerId,
@@ -47,6 +47,18 @@ pub struct Worker {
     pub timer_driver: Option<TimerDriverHandle>,
     /// Tokens seen for I/O trace emission.
     seen_io_tokens: HashSet<u64>,
+    /// Pre-allocated scratch vec for local waiters (reused across polls).
+    scratch_local: Cell<Vec<TaskId>>,
+    /// Pre-allocated scratch vec for global waiters (reused across polls).
+    scratch_global: Cell<Vec<TaskId>>,
+}
+
+impl std::fmt::Debug for Worker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Worker")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Worker {
@@ -80,6 +92,8 @@ impl Worker {
             trace,
             timer_driver,
             seen_io_tokens: HashSet::new(),
+            scratch_local: Cell::new(Vec::new()),
+            scratch_global: Cell::new(Vec::new()),
         }
     }
 
@@ -301,8 +315,10 @@ impl Worker {
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
-                let mut local_waiters = Vec::new();
-                let mut global_waiters = Vec::new();
+                let mut local_waiters = self.scratch_local.take();
+                let mut global_waiters = self.scratch_global.take();
+                local_waiters.clear();
+                global_waiters.clear();
 
                 for waiter in waiters {
                     if let Some(record) = state.task(waiter) {
@@ -323,12 +339,14 @@ impl Worker {
                 }
                 drop(state);
 
-                for waiter in global_waiters {
-                    self.global.push(waiter);
+                for waiter in &global_waiters {
+                    self.global.push(*waiter);
                 }
-                for waiter in local_waiters {
-                    self.local.push(waiter);
+                for waiter in &local_waiters {
+                    self.local.push(*waiter);
                 }
+                self.scratch_local.set(local_waiters);
+                self.scratch_global.set(global_waiters);
                 for (finalizer_task, _) in finalizers {
                     self.global.push(finalizer_task);
                 }
