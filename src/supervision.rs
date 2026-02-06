@@ -1817,7 +1817,9 @@ impl Supervisor {
     }
 
     fn record_evidence(&mut self, entry: EvidenceEntry) {
+        let generalized_record = entry.to_evidence_record();
         self.evidence.push(entry);
+        self.generalized_evidence.push(generalized_record);
     }
 
     fn decide_err_with_budget(
@@ -5652,7 +5654,7 @@ mod tests {
         assert_eq!(gen.len(), 1);
 
         let record = &gen.entries()[0];
-        assert_eq!(record.subsystem, Subsystem::Supervision);
+        assert_eq!(record.subsystem, crate::evidence::Subsystem::Supervision);
         assert_eq!(record.verdict, Verdict::Restart);
         assert_eq!(record.task_id, task);
         assert_eq!(record.region_id, region);
