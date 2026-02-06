@@ -300,6 +300,20 @@ pub struct Recv<'a, T> {
     waiter: Option<Arc<AtomicBool>>,
 }
 
+impl<T> Recv<'_, T> {
+    fn clear_waiter_registration(&mut self) {
+        let Some(waiter) = self.waiter.take() else {
+            return;
+        };
+
+        // Mark as no longer queued (idempotent) and remove any stale waiter entries.
+        waiter.store(false, Ordering::Release);
+        if let Ok(mut inner) = self.receiver.channel.inner.lock() {
+            inner.wakers.retain(|w| !Arc::ptr_eq(&w.queued, &waiter));
+        }
+    }
+}
+
 impl<T: Clone> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
@@ -308,6 +322,7 @@ impl<T: Clone> Future for Recv<'_, T> {
 
         if this.cx.checkpoint().is_err() {
             this.cx.trace("broadcast::recv cancelled");
+            this.clear_waiter_registration();
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
@@ -376,6 +391,14 @@ impl<T: Clone> Future for Recv<'_, T> {
         }
 
         Poll::Pending
+    }
+}
+
+impl<T> Drop for Recv<'_, T> {
+    fn drop(&mut self) {
+        // If the future is dropped while Pending (e.g. select/race loser),
+        // ensure we don't leave stale waiters behind.
+        self.clear_waiter_registration();
     }
 }
 
@@ -691,6 +714,113 @@ mod tests {
         crate::assert_with_log!(got == 7, "received after cancel", 7, got);
 
         crate::test_complete!("recv_cancelled_does_not_advance_cursor");
+    }
+
+    #[test]
+    fn recv_cancelled_clears_waiter_registration() {
+        init_test("recv_cancelled_clears_waiter_registration");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        // No message yet: should pend and register exactly one waiter.
+        crate::assert_with_log!(
+            matches!(fut.as_mut().poll(&mut ctx), Poll::Pending),
+            "poll pending",
+            true,
+            true
+        );
+        {
+            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            crate::assert_with_log!(
+                inner.wakers.len() == 1,
+                "one waiter registered",
+                1usize,
+                inner.wakers.len()
+            );
+        }
+
+        // Cancel: poll should return Cancelled and clear the waiter entry.
+        cx.set_cancel_requested(true);
+        let res = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(res, Poll::Ready(Err(RecvError::Cancelled))),
+            "cancelled",
+            "Ready(Err(Cancelled))",
+            format!("{res:?}")
+        );
+        {
+            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            crate::assert_with_log!(
+                inner.wakers.is_empty(),
+                "waiter cleared",
+                true,
+                inner.wakers.is_empty()
+            );
+        }
+
+        drop(fut);
+
+        // Cursor must not have advanced.
+        cx.set_cancel_requested(false);
+        tx.send(&cx, 7).expect("send failed");
+        let got = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 7, "received after cancel", 7, got);
+
+        crate::test_complete!("recv_cancelled_clears_waiter_registration");
+    }
+
+    #[test]
+    fn recv_drop_clears_waiter_registration() {
+        init_test("recv_drop_clears_waiter_registration");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        {
+            let mut fut = Box::pin(rx.recv(&cx));
+
+            // No message yet: should pend and register exactly one waiter.
+            crate::assert_with_log!(
+                matches!(fut.as_mut().poll(&mut ctx), Poll::Pending),
+                "poll pending",
+                true,
+                true
+            );
+
+            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            crate::assert_with_log!(
+                inner.wakers.len() == 1,
+                "one waiter registered",
+                1usize,
+                inner.wakers.len()
+            );
+        } // drop fut
+
+        {
+            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            crate::assert_with_log!(
+                inner.wakers.is_empty(),
+                "waiter cleared on drop",
+                true,
+                inner.wakers.is_empty()
+            );
+        }
+
+        // Cursor must not have advanced.
+        tx.send(&cx, 7).expect("send failed");
+        let got = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 7, "received after drop", 7, got);
+
+        crate::test_complete!("recv_drop_clears_waiter_registration");
     }
 
     #[test]
