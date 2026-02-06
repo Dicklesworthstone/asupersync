@@ -1752,6 +1752,76 @@ mod tests {
         crate::test_complete!("gen_server_stop_transitions");
     }
 
+    #[test]
+    fn gen_server_stop_wakes_blocked_mailbox_recv() {
+        #[allow(clippy::items_after_statements)]
+        struct StopWakeProbe {
+            stop_ran: Arc<AtomicU8>,
+        }
+
+        #[allow(clippy::items_after_statements)]
+        impl GenServer for StopWakeProbe {
+            type Call = CounterCall;
+            type Reply = u64;
+            type Cast = CounterCast;
+            type Info = SystemMsg;
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.stop_ran.store(1, Ordering::SeqCst);
+                Box::pin(async {})
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: CounterCall,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(0);
+                Box::pin(async {})
+            }
+        }
+
+        init_test("gen_server_stop_wakes_blocked_mailbox_recv");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let stop_ran = Arc::new(AtomicU8::new(0));
+        let server = StopWakeProbe {
+            stop_ran: Arc::clone(&stop_ran),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        // Start server and let it park waiting on mailbox.recv().
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_idle();
+
+        // Stop should wake the blocked recv waiter. No manual reschedule here.
+        handle.stop();
+        runtime.run_until_quiescent();
+
+        assert_eq!(
+            stop_ran.load(Ordering::SeqCst),
+            1,
+            "on_stop should run after stop wakes blocked recv"
+        );
+        assert!(handle.is_finished(), "server should finish after stop");
+
+        crate::test_complete!("gen_server_stop_wakes_blocked_mailbox_recv");
+    }
+
     // ---- Observable GenServer for E2E ----
 
     struct ObservableCounter {
