@@ -9,7 +9,7 @@
 //! Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 
 use crate::types::{TaskId, Time};
-use crate::util::{DetBuildHasher, DetHashSet};
+use crate::util::{ArenaIndex, DetBuildHasher, DetHashSet};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BinaryHeap;
@@ -72,83 +72,155 @@ impl PartialOrd for TimedEntry {
 
 #[derive(Debug)]
 struct ScheduledSet {
-    single: Option<TaskId>,
-    multi: DetHashSet<TaskId>,
+    // Fast path: for the common case where task IDs are dense (arena-backed),
+    // store a generation tag per index to avoid hashing.
+    //
+    // Tag encoding:
+    // - 0 => not scheduled
+    // - (gen as u64) + 1 => scheduled with that generation
+    // - DENSE_COLLISION => membership tracked in `overflow`
+    dense: Vec<u64>,
+    overflow: DetHashSet<TaskId>,
+    len: usize,
 }
 
 impl ScheduledSet {
+    const DENSE_COLLISION: u64 = u64::MAX;
+    // Hard cap to avoid pathological allocations if someone schedules a very high-index TaskId.
+    const MAX_DENSE_LEN: usize = 1 << 20; // 1,048,576 slots => 8 MiB
+    const MIN_DENSE_LEN: usize = 1024;
+
     #[inline]
     fn with_capacity(capacity: usize) -> Self {
-        let mut multi = DetHashSet::with_hasher(DetBuildHasher);
-        multi.reserve(capacity);
+        let mut overflow = DetHashSet::with_hasher(DetBuildHasher);
+        overflow.reserve(capacity);
+
+        let dense_len = capacity
+            .max(1)
+            .next_power_of_two()
+            .clamp(Self::MIN_DENSE_LEN, Self::MAX_DENSE_LEN);
         Self {
-            single: None,
-            multi,
+            dense: vec![0; dense_len],
+            overflow,
+            len: 0,
         }
     }
 
     #[inline]
     fn len(&self) -> usize {
-        if self.single.is_some() {
-            1
-        } else {
-            self.multi.len()
-        }
+        self.len
     }
 
     #[inline]
     fn is_empty(&self) -> bool {
-        self.single.is_none() && self.multi.is_empty()
+        self.len == 0
     }
 
     #[inline]
     fn insert(&mut self, task: TaskId) -> bool {
-        if let Some(single) = self.single {
-            if single == task {
-                return false;
+        let idx = task.0.index() as usize;
+        let tag = u64::from(task.0.generation()) + 1;
+
+        if idx < Self::MAX_DENSE_LEN && idx >= self.dense.len() {
+            self.grow_dense_to_fit(idx);
+        }
+
+        if idx >= self.dense.len() {
+            // Out of dense range: fall back to deterministic hashing.
+            let inserted = self.overflow.insert(task);
+            if inserted {
+                self.len += 1;
             }
-            self.single = None;
-            self.multi.clear();
-            self.multi.reserve(2);
-            self.multi.insert(single);
-            return self.multi.insert(task);
+            return inserted;
         }
 
-        if self.multi.is_empty() {
-            self.single = Some(task);
-            return true;
-        }
+        match self.dense[idx] {
+            0 => {
+                self.dense[idx] = tag;
+                self.len += 1;
+                true
+            }
+            existing if existing == tag => false,
+            Self::DENSE_COLLISION => {
+                let inserted = self.overflow.insert(task);
+                if inserted {
+                    self.len += 1;
+                }
+                inserted
+            }
+            existing => {
+                // Collision on arena index across generations. This should be extremely rare in a
+                // correct runtime (it implies re-use while still scheduled), but we preserve exact
+                // set semantics by moving this index to overflow tracking.
+                self.dense[idx] = Self::DENSE_COLLISION;
+                let old_gen = u32::try_from(existing - 1).expect("dense tag fits u32");
+                let old_task = TaskId(ArenaIndex::new(
+                    u32::try_from(idx).expect("idx fits u32"),
+                    old_gen,
+                ));
+                debug_assert!(self.overflow.insert(old_task));
 
-        self.multi.insert(task)
+                let inserted = self.overflow.insert(task);
+                if inserted {
+                    self.len += 1;
+                }
+                inserted
+            }
+        }
     }
 
     #[inline]
     fn remove(&mut self, task: TaskId) -> bool {
-        if let Some(single) = self.single {
-            if single == task {
-                self.single = None;
-                return true;
+        let idx = task.0.index() as usize;
+        let tag = u64::from(task.0.generation()) + 1;
+
+        if idx >= self.dense.len() {
+            let removed = self.overflow.remove(&task);
+            if removed {
+                self.len -= 1;
             }
-            return false;
+            return removed;
         }
 
-        if self.multi.is_empty() {
-            return false;
+        match self.dense[idx] {
+            0 => false,
+            existing if existing == tag => {
+                self.dense[idx] = 0;
+                self.len -= 1;
+                true
+            }
+            Self::DENSE_COLLISION => {
+                let removed = self.overflow.remove(&task);
+                if removed {
+                    self.len -= 1;
+                }
+                removed
+            }
+            _ => false,
         }
-
-        let removed = self.multi.remove(&task);
-        if removed && self.multi.len() == 1 {
-            let remaining = *self.multi.iter().next().expect("len is 1 after removal");
-            self.multi.clear();
-            self.single = Some(remaining);
-        }
-        removed
     }
 
     #[inline]
     fn clear(&mut self) {
-        self.single = None;
-        self.multi.clear();
+        for slot in &mut self.dense {
+            *slot = 0;
+        }
+        self.overflow.clear();
+        self.len = 0;
+    }
+
+    #[inline]
+    fn grow_dense_to_fit(&mut self, idx: usize) {
+        debug_assert!(idx < Self::MAX_DENSE_LEN);
+        let needed = idx + 1;
+        let mut new_len = self.dense.len().max(1);
+        while new_len < needed {
+            new_len = new_len.saturating_mul(2);
+        }
+        new_len = new_len.clamp(Self::MIN_DENSE_LEN, Self::MAX_DENSE_LEN);
+        if new_len > self.dense.len() {
+            self.dense.resize(new_len, 0);
+        }
     }
 }
 
