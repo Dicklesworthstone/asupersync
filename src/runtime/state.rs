@@ -3033,6 +3033,7 @@ pub enum EventDataSnapshot {
 }
 
 impl EventDataSnapshot {
+    #[allow(clippy::too_many_lines)]
     fn from_trace_data(data: &TraceData) -> Self {
         match data {
             TraceData::None => Self::None,

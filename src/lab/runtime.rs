@@ -138,6 +138,7 @@ pub struct LabConfigSummary {
 }
 
 impl LabConfigSummary {
+    /// Build a config summary from the full [`LabConfig`].
     #[must_use]
     pub fn from_config(config: &LabConfig) -> Self {
         Self {
@@ -192,6 +193,7 @@ pub struct ChaosConfigSummary {
 }
 
 impl ChaosConfigSummary {
+    /// Build a chaos summary from the full chaos configuration.
     #[must_use]
     pub fn from_config(config: &super::chaos::ChaosConfig) -> Self {
         Self {
@@ -204,6 +206,7 @@ impl ChaosConfigSummary {
         }
     }
 
+    /// Convert to JSON for artifact storage.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
@@ -256,6 +259,7 @@ pub struct HarnessAttachmentRef {
 }
 
 impl HarnessAttachmentRef {
+    /// Convenience constructor for crash pack attachments.
     #[must_use]
     pub fn crashpack(path: impl Into<String>) -> Self {
         Self {
@@ -264,6 +268,7 @@ impl HarnessAttachmentRef {
         }
     }
 
+    /// Convenience constructor for replay trace attachments.
     #[must_use]
     pub fn replay_trace(path: impl Into<String>) -> Self {
         Self {
@@ -272,6 +277,7 @@ impl HarnessAttachmentRef {
         }
     }
 
+    /// Convenience constructor for generic trace attachments.
     #[must_use]
     pub fn trace(path: impl Into<String>) -> Self {
         Self {
@@ -280,6 +286,7 @@ impl HarnessAttachmentRef {
         }
     }
 
+    /// Convert to JSON for artifact storage.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
@@ -312,8 +319,10 @@ pub struct SporkHarnessReport {
 }
 
 impl SporkHarnessReport {
+    /// Current stable schema version.
     pub const SCHEMA_VERSION: u32 = 1;
 
+    /// Create a new harness report from a low-level lab run report.
     #[must_use]
     pub fn new(
         app: impl Into<String>,

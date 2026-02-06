@@ -844,6 +844,7 @@ impl TraceEvent {
 }
 
 impl fmt::Display for TraceEvent {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{:06}] {} {:?}", self.seq, self.time, self.kind)?;
         if let Some(ref lt) = self.logical_time {
