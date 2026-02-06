@@ -811,6 +811,9 @@ impl<S: GenServer> GenServerHandle<S> {
                 guard.cancel_requested = true;
             }
         }
+        // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
+        // the cancellation request and run drain/on_stop deterministically.
+        self.sender.wake_receiver();
     }
 
     /// Wait for the server to finish and return its final state.
@@ -2686,13 +2689,13 @@ mod tests {
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        // Schedule the server so init runs
+        // Schedule the server so init runs, then idle on recv
         runtime
             .scheduler
             .lock()
             .unwrap()
             .schedule(server_task_id, 0);
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Stop the server and reschedule so on_stop runs
         let phases_clone = Arc::clone(&phases);
@@ -2702,7 +2705,7 @@ mod tests {
             .lock()
             .unwrap()
             .schedule(server_task_id, 0);
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         {
             let recorded = phases_clone.lock().unwrap();

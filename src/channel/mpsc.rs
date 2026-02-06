@@ -243,6 +243,19 @@ impl<T> Sender<T> {
             .receiver_dropped
     }
 
+    /// Wakes the receiver if it is currently waiting in `recv()`.
+    ///
+    /// This does not enqueue a message. It's intended for out-of-band protocols
+    /// (like cancellation) that need to interrupt a blocked receiver.
+    pub fn wake_receiver(&self) {
+        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+        let waker = inner.recv_waker.take();
+        drop(inner);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
     /// Returns the channel's capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
