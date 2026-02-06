@@ -35,6 +35,78 @@ use crate::supervision::{
 use crate::types::{Budget, CancelKind, CancelReason, RegionId};
 
 // ---------------------------------------------------------------------------
+// CompiledApp
+// ---------------------------------------------------------------------------
+
+/// A compiled application: topology validated, start order computed, ready to spawn.
+///
+/// Produced by [`AppSpec::compile`]. The compilation step validates the child DAG
+/// (no cycles, no duplicate names) and computes the deterministic start order —
+/// all without touching runtime state.
+pub struct CompiledApp {
+    /// Application name.
+    name: String,
+    /// Optional budget override.
+    budget: Option<Budget>,
+    /// Compiled supervisor (validated DAG, computed start order).
+    compiled_supervisor: CompiledSupervisor,
+}
+
+impl std::fmt::Debug for CompiledApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledApp")
+            .field("name", &self.name)
+            .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CompiledApp {
+    /// Application name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The compiled supervisor for the app's root supervisor.
+    #[must_use]
+    pub fn compiled_supervisor(&self) -> &CompiledSupervisor {
+        &self.compiled_supervisor
+    }
+
+    /// Allocate a root region and spawn the compiled application.
+    pub fn start(
+        self,
+        state: &mut RuntimeState,
+        cx: &Cx,
+        parent_region: RegionId,
+    ) -> Result<AppHandle, AppSpawnError> {
+        let parent_budget = self.budget.unwrap_or(Budget::INFINITE);
+        let root_region = state
+            .create_child_region(parent_region, parent_budget)
+            .map_err(AppSpawnError::RegionCreate)?;
+
+        let effective_budget = state
+            .region(root_region)
+            .map_or(parent_budget, crate::record::RegionRecord::budget);
+
+        let supervisor = self
+            .compiled_supervisor
+            .spawn(state, cx, root_region, effective_budget)
+            .map_err(AppSpawnError::SpawnFailed)?;
+
+        cx.trace("app_started");
+
+        Ok(AppHandle {
+            name: self.name,
+            root_region,
+            supervisor,
+            resolved: false,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AppSpec (builder)
 // ---------------------------------------------------------------------------
 
@@ -104,45 +176,36 @@ impl AppSpec {
         self
     }
 
+    /// Compile the application spec into a [`CompiledApp`].
+    ///
+    /// Validates the child DAG, computes deterministic start order.
+    /// No runtime state is touched.
+    pub fn compile(self) -> Result<CompiledApp, AppCompileError> {
+        let compiled_supervisor = self
+            .supervisor
+            .compile()
+            .map_err(AppCompileError::SupervisorCompile)?;
+
+        Ok(CompiledApp {
+            name: self.name,
+            budget: self.budget,
+            compiled_supervisor,
+        })
+    }
+
     /// Compile, allocate a root region, and spawn the application supervisor.
     ///
-    /// On success returns an [`AppHandle`] that owns the root region and must
-    /// be explicitly stopped or joined before drop.
+    /// Convenience method that chains [`AppSpec::compile`] and [`CompiledApp::start`].
     pub fn start(
         self,
         state: &mut RuntimeState,
         cx: &Cx,
         parent_region: RegionId,
     ) -> Result<AppHandle, AppStartError> {
-        // 1. Compile the supervisor (validates DAG, computes start order).
-        let compiled: CompiledSupervisor = self
-            .supervisor
-            .compile()
-            .map_err(AppStartError::CompileFailed)?;
-
-        // 2. Create the app root region under the parent.
-        let parent_budget = self.budget.unwrap_or(Budget::INFINITE);
-        let root_region = state
-            .create_child_region(parent_region, parent_budget)
-            .map_err(AppStartError::RegionCreate)?;
-
-        let effective_budget = state
-            .region(root_region)
-            .map_or(parent_budget, crate::record::RegionRecord::budget);
-
-        // 3. Spawn the compiled supervisor inside the root region.
-        let supervisor = compiled
-            .spawn(state, cx, root_region, effective_budget)
-            .map_err(AppStartError::SpawnFailed)?;
-
-        cx.trace("app_started");
-
-        Ok(AppHandle {
-            name: self.name,
-            root_region,
-            supervisor,
-            resolved: false,
-        })
+        let compiled = self.compile().map_err(AppStartError::CompileFailed)?;
+        compiled
+            .start(state, cx, parent_region)
+            .map_err(AppStartError::SpawnFailed)
     }
 }
 
@@ -338,23 +401,70 @@ pub struct RawAppHandle {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Error starting an application.
+/// Error compiling an application spec.
 #[derive(Debug)]
-pub enum AppStartError {
-    /// Supervisor topology compilation failed (duplicate names, cycles, etc.).
-    CompileFailed(SupervisorCompileError),
+pub enum AppCompileError {
+    /// Supervisor topology validation failed (duplicate names, cycles, etc.).
+    SupervisorCompile(SupervisorCompileError),
+}
+
+impl std::fmt::Display for AppCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SupervisorCompile(e) => write!(f, "app compile failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AppCompileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SupervisorCompile(e) => Some(e),
+        }
+    }
+}
+
+/// Error spawning a compiled application into the runtime.
+#[derive(Debug)]
+pub enum AppSpawnError {
     /// Root region creation failed.
     RegionCreate(RegionCreateError),
     /// Supervisor spawn failed (child start error, etc.).
     SpawnFailed(SupervisorSpawnError),
 }
 
+impl std::fmt::Display for AppSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RegionCreate(e) => write!(f, "app root region create failed: {e}"),
+            Self::SpawnFailed(e) => write!(f, "app spawn failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AppSpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::RegionCreate(e) => Some(e),
+            Self::SpawnFailed(e) => Some(e),
+        }
+    }
+}
+
+/// Error starting an application (convenience wrapper for compile + spawn).
+#[derive(Debug)]
+pub enum AppStartError {
+    /// Compilation phase failed.
+    CompileFailed(AppCompileError),
+    /// Spawn phase failed.
+    SpawnFailed(AppSpawnError),
+}
+
 impl std::fmt::Display for AppStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CompileFailed(e) => write!(f, "app compile failed: {e}"),
-            Self::RegionCreate(e) => write!(f, "app root region create failed: {e}"),
-            Self::SpawnFailed(e) => write!(f, "app spawn failed: {e}"),
+            Self::CompileFailed(e) => write!(f, "{e}"),
+            Self::SpawnFailed(e) => write!(f, "{e}"),
         }
     }
 }
@@ -363,7 +473,6 @@ impl std::error::Error for AppStartError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::CompileFailed(e) => Some(e),
-            Self::RegionCreate(e) => Some(e),
             Self::SpawnFailed(e) => Some(e),
         }
     }
@@ -611,7 +720,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                AppStartError::CompileFailed(SupervisorCompileError::DuplicateChildName(_))
+                AppStartError::CompileFailed(AppCompileError::SupervisorCompile(
+                    SupervisorCompileError::DuplicateChildName(_)
+                ))
             ),
             "expected DuplicateChildName, got {err:?}"
         );
@@ -673,6 +784,114 @@ mod tests {
 
         let _raw = handle.into_raw();
         crate::test_complete!("app_with_budget_propagates_to_region");
+    }
+
+    // --- Compile + Spawn tests (bd-32w45) ---
+
+    #[test]
+    fn app_compile_produces_compiled_app() {
+        init_test("app_compile_produces_compiled_app");
+        let compiled = AppSpec::new("compiled_test")
+            .child(make_child("a"))
+            .child(make_child("b"))
+            .compile()
+            .expect("compile ok");
+        assert_eq!(compiled.name(), "compiled_test");
+        crate::test_complete!("app_compile_produces_compiled_app");
+    }
+
+    #[test]
+    fn app_compile_detects_duplicate_names() {
+        init_test("app_compile_detects_duplicate_names");
+        let err = AppSpec::new("dup_compile")
+            .child(make_child("same"))
+            .child(make_child("same"))
+            .compile()
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppCompileError::SupervisorCompile(SupervisorCompileError::DuplicateChildName(_))
+            ),
+            "expected DuplicateChildName, got {err:?}"
+        );
+        crate::test_complete!("app_compile_detects_duplicate_names");
+    }
+
+    #[test]
+    fn app_compiled_start_creates_region_and_spawns() {
+        init_test("app_compiled_start_creates_region_and_spawns");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let compiled = AppSpec::new("two_phase")
+            .child(make_child("w1"))
+            .child(make_child("w2"))
+            .compile()
+            .expect("compile ok");
+        let handle = compiled.start(&mut state, &cx, root).expect("start ok");
+        assert_eq!(handle.name(), "two_phase");
+        assert_eq!(handle.supervisor().started.len(), 2);
+        let _raw = handle.into_raw();
+        crate::test_complete!("app_compiled_start_creates_region_and_spawns");
+    }
+
+    #[test]
+    fn app_compile_is_deterministic() {
+        init_test("app_compile_is_deterministic");
+        let build = || {
+            AppSpec::new("det")
+                .child(make_child("c"))
+                .child(make_child("a"))
+                .child(make_child("b"))
+        };
+        let c1 = build().compile().unwrap();
+        let c2 = build().compile().unwrap();
+        assert_eq!(
+            c1.compiled_supervisor().start_order,
+            c2.compiled_supervisor().start_order,
+            "compile must produce identical start orders"
+        );
+        crate::test_complete!("app_compile_is_deterministic");
+    }
+
+    #[test]
+    fn app_compile_with_dependencies_is_deterministic() {
+        init_test("app_compile_with_dependencies_is_deterministic");
+        let build = || {
+            let mut b = make_child("b");
+            b.depends_on = vec!["a".to_string()];
+            let mut c = make_child("c");
+            c.depends_on = vec!["b".to_string()];
+            AppSpec::new("dep_det")
+                .child(c)
+                .child(make_child("a"))
+                .child(b)
+        };
+        let c1 = build().compile().unwrap();
+        let c2 = build().compile().unwrap();
+        assert_eq!(
+            c1.compiled_supervisor().start_order,
+            c2.compiled_supervisor().start_order
+        );
+        crate::test_complete!("app_compile_with_dependencies_is_deterministic");
+    }
+
+    #[test]
+    fn app_compile_budget_propagates() {
+        init_test("app_compile_budget_propagates");
+        let budget = Budget::new().with_poll_quota(99);
+        let compiled = AppSpec::new("budgeted_compile")
+            .with_budget(budget)
+            .compile()
+            .unwrap();
+        assert_eq!(compiled.budget, Some(budget));
+        crate::test_complete!("app_compile_budget_propagates");
     }
 
     // --- Conformance tests ---
@@ -862,5 +1081,102 @@ mod tests {
 
         let _raw = handle.into_raw();
         crate::test_complete!("conformance_deterministic_child_start_order");
+    }
+
+    #[test]
+    fn conformance_compiled_app_starts_and_closes() {
+        init_test("conformance_compiled_app_starts_and_closes");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let compiled = AppSpec::new("quiesce")
+            .child(make_child("w1"))
+            .compile()
+            .expect("compile ok");
+        let handle = compiled.start(&mut state, &cx, root).expect("start ok");
+        let app_region = handle.root_region();
+        let _stopped = handle.stop(&mut state).expect("stop ok");
+
+        if let Some(r) = state.region(app_region) {
+            if r.state() == RegionState::Closing {
+                r.begin_drain();
+            }
+            if r.state() == RegionState::Draining {
+                r.begin_finalize();
+            }
+            if r.state() == RegionState::Finalizing {
+                r.complete_close();
+            }
+        }
+
+        assert_eq!(
+            state.region(app_region).unwrap().state(),
+            RegionState::Closed,
+        );
+        crate::test_complete!("conformance_compiled_app_starts_and_closes");
+    }
+
+    #[test]
+    fn conformance_compile_errors_are_explicit() {
+        init_test("conformance_compile_errors_are_explicit");
+        let err = AppSpec::new("errs")
+            .child(make_child("dup"))
+            .child(make_child("dup"))
+            .compile()
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("compile failed"),
+            "error should mention compile: {msg}"
+        );
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "AppCompileError must have a source"
+        );
+        crate::test_complete!("conformance_compile_errors_are_explicit");
+    }
+
+    #[test]
+    fn conformance_compile_then_start_matches_direct() {
+        init_test("conformance_compile_then_start_matches_direct");
+
+        let mut s1 = RuntimeState::new();
+        let r1 = s1.create_root_region(Budget::INFINITE);
+        let cx1 = Cx::new(
+            r1,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let mut s2 = RuntimeState::new();
+        let r2 = s2.create_root_region(Budget::INFINITE);
+        let cx2 = Cx::new(
+            r2,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let h1 = AppSpec::new("direct")
+            .child(make_child("w"))
+            .start(&mut s1, &cx1, r1)
+            .unwrap();
+        let compiled = AppSpec::new("compiled")
+            .child(make_child("w"))
+            .compile()
+            .unwrap();
+        let h2 = compiled.start(&mut s2, &cx2, r2).unwrap();
+
+        assert_eq!(h1.supervisor().started.len(), h2.supervisor().started.len());
+        assert_ne!(h1.root_region(), r1);
+        assert_ne!(h2.root_region(), r2);
+
+        let _raw1 = h1.into_raw();
+        let _raw2 = h2.into_raw();
+        crate::test_complete!("conformance_compile_then_start_matches_direct");
     }
 }
