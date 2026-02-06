@@ -1765,6 +1765,7 @@ mod tests {
 
         // For each peer of the crashing worker, check their policy
         for (link, peer) in set.peers_of(worker) {
+            assert_eq!(link, lref);
             let policy = set.exit_policy_for(link, peer).unwrap();
             let signal = ExitSignal {
                 from: worker,
