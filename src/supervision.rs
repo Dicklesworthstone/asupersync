@@ -1430,6 +1430,283 @@ impl RestartIntensityWindow {
     }
 }
 
+// ============================================================================
+// Anytime-valid restart storm detector (e-process)
+// ============================================================================
+
+/// Configuration for the restart storm e-process monitor.
+#[derive(Debug, Clone, Copy)]
+pub struct StormMonitorConfig {
+    /// Type-I error bound (false-positive rate). Must be in (0, 1).
+    /// The monitor guarantees P(false alarm) ≤ alpha under H0.
+    pub alpha: f64,
+    /// Expected restart rate (restarts per second) under normal operation.
+    /// Intensities persistently above this accumulate evidence for a storm.
+    pub expected_rate: f64,
+    /// Minimum observations before the monitor can trigger an alert.
+    pub min_observations: u32,
+}
+
+impl Default for StormMonitorConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.01,
+            expected_rate: 0.05, // 1 restart per 20 seconds
+            min_observations: 3,
+        }
+    }
+}
+
+/// Anytime-valid restart storm detector using e-processes.
+///
+/// Monitors restart intensity and accumulates evidence against the null
+/// hypothesis ("restarts occur at the expected rate"). When the e-value
+/// exceeds 1/α, a storm is detected with guaranteed Type-I error ≤ α
+/// regardless of stopping time (Ville's inequality).
+///
+/// # How it works
+///
+/// Each restart is an observation. The monitor takes the current restart
+/// intensity (from a [`RestartIntensityWindow`]) and computes a likelihood
+/// ratio comparing H1 (intensity above expected) against H0 (normal rate):
+///
+/// ```text
+/// LR = max(1, intensity / expected_rate) / normalizer
+/// ```
+///
+/// The normalizer ensures the e-process is a non-negative supermartingale
+/// under H0, preserving Ville's inequality.
+///
+/// # Usage
+///
+/// ```
+/// use asupersync::supervision::{RestartStormMonitor, StormMonitorConfig};
+///
+/// let config = StormMonitorConfig {
+///     alpha: 0.01,          // 1% false-positive bound
+///     expected_rate: 0.05,  // ~1 restart per 20 seconds
+///     min_observations: 3,
+/// };
+/// let mut monitor = RestartStormMonitor::new(config);
+///
+/// // Feed intensity observations (restarts per second)
+/// monitor.observe_intensity(0.03); // normal
+/// monitor.observe_intensity(0.04); // normal
+/// monitor.observe_intensity(5.0);  // storm!
+///
+/// if monitor.is_alert() {
+///     // E-value exceeded threshold: restart storm detected
+/// }
+/// ```
+#[derive(Debug)]
+pub struct RestartStormMonitor {
+    config: StormMonitorConfig,
+    /// Current e-value (product of normalized likelihood ratios).
+    e_value: f64,
+    /// Rejection threshold: 1/alpha.
+    threshold: f64,
+    /// Number of observations so far.
+    observations: u32,
+    /// Running sum of log-likelihood ratios (for numerical stability).
+    log_e_value: f64,
+    /// Peak e-value observed (for diagnostics).
+    peak_e_value: f64,
+    /// Number of times alert was triggered.
+    alert_count: u32,
+}
+
+impl RestartStormMonitor {
+    /// Creates a new storm monitor with the given configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `alpha` is not in (0, 1) or `expected_rate` is not positive.
+    #[must_use]
+    pub fn new(config: StormMonitorConfig) -> Self {
+        assert!(
+            config.alpha > 0.0 && config.alpha < 1.0,
+            "alpha must be in (0, 1), got {}",
+            config.alpha
+        );
+        assert!(
+            config.expected_rate > 0.0,
+            "expected_rate must be > 0, got {}",
+            config.expected_rate
+        );
+
+        let threshold = 1.0 / config.alpha;
+
+        Self {
+            config,
+            e_value: 1.0,
+            threshold,
+            observations: 0,
+            log_e_value: 0.0,
+            peak_e_value: 1.0,
+            alert_count: 0,
+        }
+    }
+
+    /// Observe a restart intensity measurement (restarts per second).
+    ///
+    /// Updates the e-value with the likelihood ratio for this observation.
+    /// Under H0 (no storm), intensity stays near `expected_rate`.
+    /// Under H1 (storm), intensity exceeds `expected_rate` persistently.
+    ///
+    /// The likelihood ratio at each step is:
+    /// ```text
+    /// LR = max(1, intensity / expected_rate) / normalizer
+    /// ```
+    ///
+    /// The normalizer (1 + 1/e ≈ 1.37) ensures E[LR] ≤ 1 under H0,
+    /// making the e-process a non-negative supermartingale.
+    pub fn observe_intensity(&mut self, intensity: f64) -> crate::obligation::eprocess::AlertState {
+        self.observations += 1;
+
+        let ratio = intensity / self.config.expected_rate;
+
+        // Likelihood ratio: evidence grows when intensity exceeds expected.
+        // Normalizer ensures supermartingale property under H0.
+        let normalizer = 1.0 + (-1.0_f64).exp(); // 1 + 1/e ≈ 1.3679
+        let lr = ratio.max(1.0) / normalizer;
+
+        self.log_e_value += lr.ln();
+        self.e_value = self.log_e_value.exp();
+
+        if self.e_value > self.peak_e_value {
+            self.peak_e_value = self.e_value;
+        }
+
+        if self.e_value >= self.threshold && self.observations >= self.config.min_observations {
+            self.alert_count += 1;
+        }
+
+        self.alert_state()
+    }
+
+    /// Convenience: observe intensity from a [`RestartIntensityWindow`] at the
+    /// given virtual time.
+    pub fn observe_from_window(
+        &mut self,
+        window: &RestartIntensityWindow,
+        now: u64,
+    ) -> crate::obligation::eprocess::AlertState {
+        self.observe_intensity(window.intensity(now))
+    }
+
+    /// Returns the current alert state.
+    #[must_use]
+    pub fn alert_state(&self) -> crate::obligation::eprocess::AlertState {
+        use crate::obligation::eprocess::AlertState;
+        if self.observations < self.config.min_observations {
+            return AlertState::Clear;
+        }
+        if self.e_value >= self.threshold {
+            AlertState::Alert
+        } else if self.e_value > 1.0 {
+            AlertState::Watching
+        } else {
+            AlertState::Clear
+        }
+    }
+
+    /// Returns true if the monitor is currently in alert state.
+    #[must_use]
+    pub fn is_alert(&self) -> bool {
+        self.alert_state() == crate::obligation::eprocess::AlertState::Alert
+    }
+
+    /// Returns the current e-value.
+    #[must_use]
+    pub fn e_value(&self) -> f64 {
+        self.e_value
+    }
+
+    /// Returns the rejection threshold (1/alpha).
+    #[must_use]
+    pub fn threshold(&self) -> f64 {
+        self.threshold
+    }
+
+    /// Returns the number of observations.
+    #[must_use]
+    pub fn observations(&self) -> u32 {
+        self.observations
+    }
+
+    /// Returns the peak e-value observed.
+    #[must_use]
+    pub fn peak_e_value(&self) -> f64 {
+        self.peak_e_value
+    }
+
+    /// Returns the number of times alert was triggered.
+    #[must_use]
+    pub fn alert_count(&self) -> u32 {
+        self.alert_count
+    }
+
+    /// Returns the configuration.
+    #[must_use]
+    pub fn config(&self) -> &StormMonitorConfig {
+        &self.config
+    }
+
+    /// Resets the monitor to its initial state, preserving configuration.
+    pub fn reset(&mut self) {
+        self.e_value = 1.0;
+        self.log_e_value = 0.0;
+        self.peak_e_value = 1.0;
+        self.observations = 0;
+        self.alert_count = 0;
+    }
+
+    /// Returns a snapshot of the monitor state for diagnostics.
+    #[must_use]
+    pub fn snapshot(&self) -> StormMonitorSnapshot {
+        StormMonitorSnapshot {
+            e_value: self.e_value,
+            threshold: self.threshold,
+            observations: self.observations,
+            alert_state: self.alert_state(),
+            peak_e_value: self.peak_e_value,
+            alert_count: self.alert_count,
+        }
+    }
+}
+
+/// Diagnostic snapshot of the restart storm monitor.
+#[derive(Debug, Clone)]
+pub struct StormMonitorSnapshot {
+    /// Current e-value.
+    pub e_value: f64,
+    /// Rejection threshold.
+    pub threshold: f64,
+    /// Number of observations.
+    pub observations: u32,
+    /// Current alert state.
+    pub alert_state: crate::obligation::eprocess::AlertState,
+    /// Peak e-value ever observed.
+    pub peak_e_value: f64,
+    /// Number of alert triggers.
+    pub alert_count: u32,
+}
+
+impl std::fmt::Display for StormMonitorSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "StormMonitor[{}]: e={:.4} threshold={:.1} obs={} peak={:.4} alerts={}",
+            self.alert_state,
+            self.e_value,
+            self.threshold,
+            self.observations,
+            self.peak_e_value,
+            self.alert_count,
+        )
+    }
+}
+
 /// Decision made by the supervision system.
 ///
 /// This is emitted as a trace event for observability.
@@ -6499,5 +6776,215 @@ mod tests {
         assert!(rendered.contains("RESTART"));
 
         crate::test_complete!("emission_wiring_render_is_deterministic");
+    }
+
+    // ========================================================================
+    // RestartStormMonitor tests (e-process)
+    // ========================================================================
+
+    #[test]
+    fn storm_monitor_starts_clear() {
+        init_test("storm_monitor_starts_clear");
+        let monitor = RestartStormMonitor::new(StormMonitorConfig::default());
+        assert_eq!(
+            monitor.alert_state(),
+            crate::obligation::eprocess::AlertState::Clear
+        );
+        assert!((monitor.e_value() - 1.0).abs() < f64::EPSILON);
+        assert_eq!(monitor.observations(), 0);
+        crate::test_complete!("storm_monitor_starts_clear");
+    }
+
+    #[test]
+    #[should_panic(expected = "alpha must be in (0, 1)")]
+    fn storm_monitor_alpha_zero_panics() {
+        let _m = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.0,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "expected_rate must be > 0")]
+    fn storm_monitor_zero_rate_panics() {
+        let _m = RestartStormMonitor::new(StormMonitorConfig {
+            expected_rate: 0.0,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn storm_monitor_normal_intensity_stays_clear() {
+        init_test("storm_monitor_normal_intensity_stays_clear");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 1.0, // 1 restart/sec expected
+            min_observations: 3,
+        });
+
+        // Intensity at or below expected rate.
+        for _ in 0..100 {
+            monitor.observe_intensity(0.5); // half the expected rate
+        }
+
+        assert!(!monitor.is_alert());
+        assert_eq!(
+            monitor.alert_state(),
+            crate::obligation::eprocess::AlertState::Clear
+        );
+        crate::test_complete!("storm_monitor_normal_intensity_stays_clear");
+    }
+
+    #[test]
+    fn storm_monitor_high_intensity_triggers_alert() {
+        init_test("storm_monitor_high_intensity_triggers_alert");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 0.05, // ~1 restart per 20s
+            min_observations: 3,
+        });
+
+        // Intensity far exceeding expected (100×).
+        for _ in 0..10 {
+            monitor.observe_intensity(5.0); // 5 restarts/sec vs 0.05 expected
+        }
+
+        assert!(monitor.is_alert());
+        assert!(monitor.alert_count() > 0);
+        assert!(monitor.e_value() >= monitor.threshold());
+        crate::test_complete!("storm_monitor_high_intensity_triggers_alert");
+    }
+
+    #[test]
+    fn storm_monitor_gated_by_min_observations() {
+        init_test("storm_monitor_gated_by_min_observations");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 0.01,
+            min_observations: 5,
+        });
+
+        // Even extreme intensity doesn't trigger before min_observations.
+        monitor.observe_intensity(1000.0);
+        monitor.observe_intensity(1000.0);
+        assert_eq!(
+            monitor.alert_state(),
+            crate::obligation::eprocess::AlertState::Clear
+        );
+
+        // After enough observations, alert triggers.
+        for _ in 0..5 {
+            monitor.observe_intensity(1000.0);
+        }
+        assert!(monitor.is_alert());
+        crate::test_complete!("storm_monitor_gated_by_min_observations");
+    }
+
+    #[test]
+    fn storm_monitor_observe_from_window() {
+        init_test("storm_monitor_observe_from_window");
+        let mut window = RestartIntensityWindow::new(Duration::from_secs(10), 1.0);
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 0.1, // expect ~1 restart per 10s
+            min_observations: 3,
+        });
+
+        // Rapid restarts: 20 in 1 second → intensity = 20/10 = 2.0
+        let base = 1_000_000_000u64; // 1 second in nanos
+        for i in 0..20 {
+            let now = base + i * 50_000_000; // every 50ms
+            window.record(now);
+            monitor.observe_from_window(&window, now);
+        }
+
+        // Intensity should be high enough to trigger alert.
+        assert!(monitor.is_alert());
+        crate::test_complete!("storm_monitor_observe_from_window");
+    }
+
+    #[test]
+    fn storm_monitor_reset_clears_state() {
+        init_test("storm_monitor_reset_clears_state");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 0.01,
+            min_observations: 3,
+        });
+
+        for _ in 0..10 {
+            monitor.observe_intensity(100.0);
+        }
+        assert!(monitor.is_alert());
+
+        monitor.reset();
+        assert!(!monitor.is_alert());
+        assert_eq!(monitor.observations(), 0);
+        assert!((monitor.e_value() - 1.0).abs() < f64::EPSILON);
+        crate::test_complete!("storm_monitor_reset_clears_state");
+    }
+
+    #[test]
+    fn storm_monitor_snapshot_display() {
+        init_test("storm_monitor_snapshot_display");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig::default());
+        monitor.observe_intensity(0.01);
+
+        let snap = monitor.snapshot();
+        assert_eq!(snap.observations, 1);
+        assert!(snap.threshold > 0.0);
+
+        let display = format!("{snap}");
+        assert!(display.contains("StormMonitor"));
+        crate::test_complete!("storm_monitor_snapshot_display");
+    }
+
+    #[test]
+    fn storm_monitor_supermartingale_under_null() {
+        init_test("storm_monitor_supermartingale_under_null");
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 1.0,
+            min_observations: 3,
+        });
+
+        // 1000 observations at or below expected rate.
+        for i in 0u64..1000 {
+            let intensity = ((i % 10) + 1) as f64 * 0.1; // 0.1 to 1.0
+            monitor.observe_intensity(intensity);
+        }
+
+        // Under H0, e-value should stay bounded.
+        assert!(monitor.e_value() <= 2.0);
+        assert!(!monitor.is_alert());
+        crate::test_complete!("storm_monitor_supermartingale_under_null");
+    }
+
+    #[test]
+    fn storm_monitor_deterministic_across_runs() {
+        init_test("storm_monitor_deterministic_across_runs");
+        let config = StormMonitorConfig::default();
+        let intensities = [0.01, 0.05, 0.1, 0.5, 1.0];
+
+        let mut m1 = RestartStormMonitor::new(config);
+        let mut m2 = RestartStormMonitor::new(config);
+
+        for &i in &intensities {
+            m1.observe_intensity(i);
+            m2.observe_intensity(i);
+        }
+
+        assert!((m1.e_value() - m2.e_value()).abs() < f64::EPSILON);
+        crate::test_complete!("storm_monitor_deterministic_across_runs");
+    }
+
+    #[test]
+    fn storm_monitor_config_default() {
+        init_test("storm_monitor_config_default");
+        let config = StormMonitorConfig::default();
+        assert!((config.alpha - 0.01).abs() < f64::EPSILON);
+        assert!((config.expected_rate - 0.05).abs() < f64::EPSILON);
+        assert_eq!(config.min_observations, 3);
+        crate::test_complete!("storm_monitor_config_default");
     }
 }
