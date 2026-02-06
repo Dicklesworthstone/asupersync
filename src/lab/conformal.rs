@@ -525,6 +525,334 @@ fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
     sorted[idx]
 }
 
+// ============================================================================
+// Health threshold conformal calibration
+// ============================================================================
+
+/// How the threshold bounds anomalous values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdMode {
+    /// Only values above the threshold are anomalous (e.g., queue depth,
+    /// restart intensity). Uses the (1-α)(n+1)-th order statistic directly.
+    Upper,
+    /// Both unusually high and unusually low values are anomalous.
+    /// Uses |value - median| as the nonconformity score.
+    TwoSided,
+}
+
+/// Configuration for health threshold calibration.
+#[derive(Debug, Clone)]
+pub struct HealthThresholdConfig {
+    /// Target miscoverage rate (e.g., 0.05 for 95% coverage).
+    pub alpha: f64,
+    /// Minimum calibration samples before producing thresholds.
+    pub min_calibration_samples: usize,
+    /// Threshold direction.
+    pub mode: ThresholdMode,
+}
+
+impl Default for HealthThresholdConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 0.05,
+            min_calibration_samples: 5,
+            mode: ThresholdMode::Upper,
+        }
+    }
+}
+
+impl HealthThresholdConfig {
+    /// Create a config with the given miscoverage rate and mode.
+    #[must_use]
+    pub fn new(alpha: f64, mode: ThresholdMode) -> Self {
+        Self {
+            alpha,
+            mode,
+            ..Default::default()
+        }
+    }
+
+    /// Set the minimum calibration samples.
+    #[must_use]
+    pub fn min_samples(mut self, n: usize) -> Self {
+        self.min_calibration_samples = n;
+        self
+    }
+}
+
+/// Result of checking a health metric against a conformal threshold.
+#[derive(Debug, Clone)]
+pub struct ThresholdCheck {
+    /// The metric name.
+    pub metric: String,
+    /// The observed value.
+    pub value: f64,
+    /// The conformal threshold.
+    pub threshold: f64,
+    /// Whether the observation is within the prediction set (conforming).
+    pub conforming: bool,
+    /// The nonconformity score.
+    pub nonconformity_score: f64,
+    /// Number of calibration samples used.
+    pub calibration_n: usize,
+    /// Target coverage level (1 - alpha).
+    pub coverage_target: f64,
+}
+
+/// Per-metric calibration state.
+#[derive(Debug, Clone)]
+struct MetricCalibration {
+    /// Raw observations for direct upper-bound thresholding.
+    values: Vec<f64>,
+    /// Nonconformity scores for two-sided mode (|value - median|).
+    nonconformity_scores: Vec<f64>,
+}
+
+impl MetricCalibration {
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            nonconformity_scores: Vec::new(),
+        }
+    }
+
+    fn n(&self) -> usize {
+        self.values.len()
+    }
+
+    fn median(&self) -> f64 {
+        if self.values.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = self.values.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) && sorted.len() >= 2 {
+            (sorted[mid - 1]).midpoint(sorted[mid])
+        } else {
+            sorted[mid]
+        }
+    }
+}
+
+/// Conformal calibrator for health metrics (queue depth, restart latency, etc.).
+///
+/// Accumulates observations during a calibration phase, then produces
+/// adaptive thresholds with finite-sample, distribution-free coverage
+/// guarantees.
+///
+/// # Coverage Guarantee
+///
+/// For exchangeable observations, P(new observation conforming) ≥ 1 - alpha.
+/// This holds without distributional assumptions (Vovk et al. 2005).
+///
+/// # Modes
+///
+/// - [`ThresholdMode::Upper`]: Flags values above the conformal quantile.
+///   Good for metrics where only high values are problematic (queue depth,
+///   restart intensity).
+///
+/// - [`ThresholdMode::TwoSided`]: Uses |value - median| as the nonconformity
+///   score. Flags observations that deviate from the calibration distribution
+///   in either direction.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::lab::conformal::{
+///     HealthThresholdCalibrator, HealthThresholdConfig, ThresholdMode,
+/// };
+///
+/// let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(5);
+/// let mut cal = HealthThresholdCalibrator::new(config);
+///
+/// // Calibrate with normal observations
+/// for depth in [3.0, 5.0, 4.0, 6.0, 3.0, 5.0, 4.0] {
+///     cal.calibrate("queue_depth", depth);
+/// }
+///
+/// // Check a new observation
+/// let result = cal.check("queue_depth", 100.0).unwrap();
+/// assert!(!result.conforming); // queue depth 100 is anomalous
+/// ```
+#[derive(Debug, Clone)]
+pub struct HealthThresholdCalibrator {
+    config: HealthThresholdConfig,
+    metrics: BTreeMap<String, MetricCalibration>,
+    coverage_trackers: BTreeMap<String, CoverageTracker>,
+    n_calibration: usize,
+}
+
+impl HealthThresholdCalibrator {
+    /// Create a new calibrator with the given config.
+    #[must_use]
+    pub fn new(config: HealthThresholdConfig) -> Self {
+        Self {
+            config,
+            metrics: BTreeMap::new(),
+            coverage_trackers: BTreeMap::new(),
+            n_calibration: 0,
+        }
+    }
+
+    /// Number of calibration observations accumulated (total across all metrics).
+    #[must_use]
+    pub fn calibration_samples(&self) -> usize {
+        self.n_calibration
+    }
+
+    /// Whether a named metric has enough samples for prediction.
+    #[must_use]
+    pub fn is_metric_calibrated(&self, metric: &str) -> bool {
+        self.metrics
+            .get(metric)
+            .is_some_and(|m| m.n() >= self.config.min_calibration_samples)
+    }
+
+    /// Add a calibration observation for a named metric.
+    pub fn calibrate(&mut self, metric: &str, value: f64) {
+        let cal = self
+            .metrics
+            .entry(metric.to_string())
+            .or_insert_with(MetricCalibration::new);
+
+        // For two-sided mode, compute nonconformity before adding this value.
+        if self.config.mode == ThresholdMode::TwoSided && !cal.values.is_empty() {
+            let median = cal.median();
+            cal.nonconformity_scores.push((value - median).abs());
+        }
+
+        cal.values.push(value);
+
+        // Recompute nonconformity scores if this is the first observation
+        // (for two-sided, the first observation has score 0 by definition).
+        if self.config.mode == ThresholdMode::TwoSided && cal.values.len() == 1 {
+            cal.nonconformity_scores.push(0.0);
+        }
+
+        self.n_calibration += 1;
+    }
+
+    /// Check if a new observation exceeds the conformal threshold.
+    ///
+    /// Returns `None` if the metric is not yet calibrated.
+    #[must_use]
+    pub fn check(&self, metric: &str, value: f64) -> Option<ThresholdCheck> {
+        let cal = self.metrics.get(metric)?;
+        if cal.n() < self.config.min_calibration_samples {
+            return None;
+        }
+
+        let (nonconformity_score, threshold) = match self.config.mode {
+            ThresholdMode::Upper => {
+                let score = value;
+                let threshold = conformal_quantile(&cal.values, self.config.alpha);
+                (score, threshold)
+            }
+            ThresholdMode::TwoSided => {
+                let median = cal.median();
+                let score = (value - median).abs();
+                let threshold = conformal_quantile(&cal.nonconformity_scores, self.config.alpha);
+                (score, threshold)
+            }
+        };
+
+        let conforming = nonconformity_score <= threshold;
+
+        Some(ThresholdCheck {
+            metric: metric.to_string(),
+            value,
+            threshold,
+            conforming,
+            nonconformity_score,
+            calibration_n: cal.n(),
+            coverage_target: 1.0 - self.config.alpha,
+        })
+    }
+
+    /// Check a metric and update coverage tracking.
+    pub fn check_and_track(&mut self, metric: &str, value: f64) -> Option<ThresholdCheck> {
+        let result = self.check(metric, value)?;
+
+        let tracker = self
+            .coverage_trackers
+            .entry(metric.to_string())
+            .or_insert_with(CoverageTracker::new);
+        tracker.total += 1;
+        if result.conforming {
+            tracker.covered += 1;
+        }
+
+        Some(result)
+    }
+
+    /// Get the current adaptive threshold for a metric.
+    ///
+    /// Returns `None` if not yet calibrated.
+    #[must_use]
+    pub fn threshold(&self, metric: &str) -> Option<f64> {
+        let cal = self.metrics.get(metric)?;
+        if cal.n() < self.config.min_calibration_samples {
+            return None;
+        }
+
+        match self.config.mode {
+            ThresholdMode::Upper => Some(conformal_quantile(&cal.values, self.config.alpha)),
+            ThresholdMode::TwoSided => Some(conformal_quantile(
+                &cal.nonconformity_scores,
+                self.config.alpha,
+            )),
+        }
+    }
+
+    /// Per-metric coverage rates from prediction tracking.
+    #[must_use]
+    pub fn coverage_rates(&self) -> BTreeMap<String, f64> {
+        self.coverage_trackers
+            .iter()
+            .map(|(name, tracker)| (name.clone(), tracker.rate()))
+            .collect()
+    }
+
+    /// Per-metric calibration sample counts.
+    #[must_use]
+    pub fn metric_counts(&self) -> BTreeMap<String, usize> {
+        self.metrics
+            .iter()
+            .map(|(name, cal)| (name.clone(), cal.n()))
+            .collect()
+    }
+
+    /// Check multiple metrics at once and return all results.
+    #[must_use]
+    pub fn check_all(&self, observations: &[(&str, f64)]) -> Vec<ThresholdCheck> {
+        observations
+            .iter()
+            .filter_map(|(metric, value)| self.check(metric, *value))
+            .collect()
+    }
+
+    /// Returns true if any checked metric is non-conforming.
+    #[must_use]
+    pub fn any_anomalous(&self, observations: &[(&str, f64)]) -> bool {
+        observations
+            .iter()
+            .filter_map(|(metric, value)| self.check(metric, *value))
+            .any(|r| !r.conforming)
+    }
+}
+
+impl std::fmt::Display for ThresholdCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let status = if self.conforming { "OK" } else { "ANOMALOUS" };
+        write!(
+            f,
+            "{}: value={:.4} threshold={:.4} [{}] (n={})",
+            self.metric, self.value, self.threshold, status, self.calibration_n
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,5 +1131,208 @@ mod tests {
             assert!((a.threshold - b.threshold).abs() < f64::EPSILON);
             assert_eq!(a.conforming, b.conforming);
         }
+    }
+
+    // ========================================================================
+    // HealthThresholdCalibrator tests
+    // ========================================================================
+
+    #[test]
+    fn health_threshold_uncalibrated_returns_none() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(5);
+        let cal = HealthThresholdCalibrator::new(config);
+        assert!(cal.check("queue_depth", 10.0).is_none());
+        assert!(!cal.is_metric_calibrated("queue_depth"));
+    }
+
+    #[test]
+    fn health_threshold_upper_normal_conforming() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(5);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        // Calibrate with queue depths 1..=10.
+        for i in 1..=10 {
+            cal.calibrate("queue_depth", i as f64);
+        }
+        assert!(cal.is_metric_calibrated("queue_depth"));
+
+        // A value within the calibration range should be conforming.
+        let result = cal.check("queue_depth", 5.0).unwrap();
+        assert!(result.conforming, "normal depth should be conforming");
+    }
+
+    #[test]
+    fn health_threshold_upper_extreme_anomalous() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(5);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        // Calibrate with small queue depths.
+        for i in 1..=20 {
+            cal.calibrate("queue_depth", i as f64);
+        }
+
+        // A value far above the calibration range should be anomalous.
+        let result = cal.check("queue_depth", 1000.0).unwrap();
+        assert!(
+            !result.conforming,
+            "extreme depth should be anomalous, got threshold={:.2}",
+            result.threshold
+        );
+    }
+
+    #[test]
+    fn health_threshold_two_sided_normal_conforming() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::TwoSided).min_samples(5);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        // Calibrate with values centered around 50.
+        for v in [48.0, 50.0, 52.0, 49.0, 51.0, 50.0, 48.0, 52.0, 49.0, 51.0] {
+            cal.calibrate("latency", v);
+        }
+
+        // A value near the median should be conforming.
+        let result = cal.check("latency", 50.0).unwrap();
+        assert!(result.conforming, "near-median value should be conforming");
+    }
+
+    #[test]
+    fn health_threshold_two_sided_extreme_anomalous() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::TwoSided).min_samples(5);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        // Calibrate with values centered around 50.
+        for v in [48.0, 50.0, 52.0, 49.0, 51.0, 50.0, 48.0, 52.0, 49.0, 51.0] {
+            cal.calibrate("latency", v);
+        }
+
+        // A value far from the median should be anomalous.
+        let result = cal.check("latency", 500.0).unwrap();
+        assert!(
+            !result.conforming,
+            "far-from-median value should be anomalous"
+        );
+    }
+
+    #[test]
+    fn health_threshold_adaptive_grows_with_data() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(5);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        // Phase 1: calibrate with small values.
+        for i in 1..=10 {
+            cal.calibrate("metric", i as f64);
+        }
+        let t1 = cal.threshold("metric").unwrap();
+
+        // Phase 2: add larger values.
+        for i in 11..=20 {
+            cal.calibrate("metric", i as f64);
+        }
+        let t2 = cal.threshold("metric").unwrap();
+
+        assert!(
+            t2 >= t1,
+            "threshold should grow as calibration expands, t1={t1}, t2={t2}"
+        );
+    }
+
+    #[test]
+    fn health_threshold_coverage_tracking() {
+        let config = HealthThresholdConfig::new(0.10, ThresholdMode::Upper).min_samples(5);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        for i in 1..=20 {
+            cal.calibrate("depth", i as f64);
+        }
+
+        // Check several normal values.
+        for i in 1..=10 {
+            let _ = cal.check_and_track("depth", i as f64);
+        }
+
+        let rates = cal.coverage_rates();
+        let rate = rates.get("depth").copied().unwrap_or(0.0);
+        assert!(
+            rate >= 0.8,
+            "coverage rate for normal data should be high, got {rate:.2}"
+        );
+    }
+
+    #[test]
+    fn health_threshold_multiple_metrics() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        for i in 1..=10 {
+            cal.calibrate("queue_depth", i as f64);
+            cal.calibrate("restart_rate", i as f64 * 0.01);
+        }
+
+        assert!(cal.is_metric_calibrated("queue_depth"));
+        assert!(cal.is_metric_calibrated("restart_rate"));
+
+        let results = cal.check_all(&[("queue_depth", 5.0), ("restart_rate", 0.05)]);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.conforming));
+    }
+
+    #[test]
+    fn health_threshold_any_anomalous() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        for i in 1..=10 {
+            cal.calibrate("queue_depth", i as f64);
+        }
+
+        assert!(!cal.any_anomalous(&[("queue_depth", 5.0)]));
+        assert!(cal.any_anomalous(&[("queue_depth", 10000.0)]));
+    }
+
+    #[test]
+    fn health_threshold_display() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        for i in 1..=10 {
+            cal.calibrate("queue_depth", i as f64);
+        }
+
+        let result = cal.check("queue_depth", 5.0).unwrap();
+        let display = format!("{result}");
+        assert!(display.contains("queue_depth"));
+        assert!(display.contains("OK") || display.contains("ANOMALOUS"));
+    }
+
+    #[test]
+    fn health_threshold_deterministic() {
+        let run = || {
+            let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+            let mut cal = HealthThresholdCalibrator::new(config);
+            for i in 1..=10 {
+                cal.calibrate("m", i as f64);
+            }
+            cal.check("m", 7.5).unwrap()
+        };
+
+        let r1 = run();
+        let r2 = run();
+        assert!((r1.threshold - r2.threshold).abs() < f64::EPSILON);
+        assert!((r1.nonconformity_score - r2.nonconformity_score).abs() < f64::EPSILON);
+        assert_eq!(r1.conforming, r2.conforming);
+    }
+
+    #[test]
+    fn health_threshold_metric_counts() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        cal.calibrate("a", 1.0);
+        cal.calibrate("a", 2.0);
+        cal.calibrate("b", 10.0);
+
+        let counts = cal.metric_counts();
+        assert_eq!(counts.get("a"), Some(&2));
+        assert_eq!(counts.get("b"), Some(&1));
     }
 }

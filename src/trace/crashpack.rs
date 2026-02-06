@@ -2770,4 +2770,345 @@ mod tests {
 
         crate::test_complete!("golden_minimization_integration");
     }
+
+    // =========================================================================
+    // Crash Pack Walkthrough (bd-16jzr)
+    //
+    // A self-contained walkthrough that demonstrates the crash pack lifecycle:
+    //
+    //   1. Forced failure    — a task panics during execution
+    //   2. Crash pack emit   — build & write the repro artifact
+    //   3. Fingerprint       — canonical fingerprint is schedule-independent
+    //   4. Replay command    — copy-paste one-liner for reproduction
+    //   5. Minimization      — shrink the divergent prefix
+    //
+    // Run with:  cargo test --lib crashpack::tests::walkthrough
+    // =========================================================================
+
+    /// Step 1: Build a crash pack from a simulated failure.
+    ///
+    /// A supervised task panics at virtual time 200ns. We record the
+    /// deterministic seed, config hash, and trace events into a crash pack.
+    #[test]
+    fn walkthrough_01_forced_failure_and_emission() {
+        init_test("walkthrough_01_forced_failure_and_emission");
+
+        // -- Simulate execution producing trace events --
+        //
+        // In a real Spork app, these events are emitted by the LabRuntime.
+        // Here we construct them directly to show the data flow.
+        let events = vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(100), tid(1), rid(1)),
+            TraceEvent::poll(5, Time::from_nanos(100), tid(2), rid(1)),
+            // Task 1 completes normally; task 2 will panic.
+            TraceEvent::complete(6, Time::from_nanos(200), tid(1), rid(1)),
+        ];
+
+        // -- Record the failure --
+        let failure = FailureInfo {
+            task: tid(2),
+            region: rid(1),
+            outcome: FailureOutcome::Panicked {
+                message: "assertion failed: balance >= 0".to_string(),
+            },
+            virtual_time: Time::from_nanos(200),
+        };
+
+        // -- Build the crash pack --
+        //
+        // The builder computes the canonical prefix (Foata normal form),
+        // fingerprint, and event count from the raw trace.
+        let config = CrashPackConfig {
+            seed: 42,
+            config_hash: 0xCAFE,
+            worker_count: 2,
+            max_steps: Some(500),
+            commit_hash: Some("a1b2c3d".to_string()),
+        };
+
+        let pack = CrashPack::builder(config)
+            .failure(failure)
+            .from_trace(&events)
+            .oracle_violations(vec!["balance-invariant".to_string()])
+            .build();
+
+        // -- Verify the crash pack --
+        assert_eq!(pack.seed(), 42);
+        assert_eq!(pack.manifest.schema_version, CRASHPACK_SCHEMA_VERSION);
+        assert_eq!(pack.manifest.event_count, 6);
+        assert!(pack.manifest.fingerprint != 0, "fingerprint should be non-zero");
+        assert!(pack.has_violations());
+        assert_eq!(pack.oracle_violations, vec!["balance-invariant"]);
+
+        // The canonical prefix is non-empty (Foata layers).
+        assert!(
+            !pack.canonical_prefix.is_empty(),
+            "canonical prefix should have Foata layers"
+        );
+
+        // Manifest auto-populates the attachment table.
+        assert!(pack.manifest.has_attachment(&AttachmentKind::CanonicalPrefix));
+        assert!(pack.manifest.has_attachment(&AttachmentKind::OracleViolations));
+
+        crate::test_complete!("walkthrough_01_forced_failure_and_emission");
+    }
+
+    /// Step 2: Write the crash pack to storage and read it back.
+    ///
+    /// The artifact filename is deterministic: same seed + fingerprint
+    /// always produces the same path.
+    #[test]
+    fn walkthrough_02_write_and_read_artifact() {
+        init_test("walkthrough_02_write_and_read_artifact");
+
+        let pack = walkthrough_pack();
+
+        // -- Write using the in-memory writer --
+        let writer = MemoryCrashPackWriter::new();
+        let artifact = writer.write(&pack).expect("write should succeed");
+
+        // Deterministic filename: crashpack-{seed:016x}-{fingerprint:016x}-v{ver}.json
+        assert!(
+            artifact.path().starts_with("crashpack-000000000000002a-"),
+            "path should encode seed 42 (0x2a): {}",
+            artifact.path()
+        );
+        assert!(
+            artifact.path().ends_with("-v1.json"),
+            "path should end with schema version: {}",
+            artifact.path()
+        );
+
+        // -- Read back and verify round-trip --
+        let written = writer.written();
+        assert_eq!(written.len(), 1);
+        let json = &written[0].1;
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+
+        // The manifest is at the top level.
+        assert_eq!(parsed["manifest"]["config"]["seed"], 42);
+        assert_eq!(parsed["manifest"]["schema_version"], 1);
+
+        // The failure info is present.
+        assert!(
+            parsed["failure"]["outcome"]["Panicked"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("balance >= 0"),
+            "failure message should be preserved"
+        );
+
+        crate::test_complete!("walkthrough_02_write_and_read_artifact");
+    }
+
+    /// Step 3: Canonical fingerprint is schedule-independent.
+    ///
+    /// Two schedules that differ only in the order of independent events
+    /// produce the same fingerprint (same Foata normal form).
+    #[test]
+    fn walkthrough_03_fingerprint_interpretation() {
+        use crate::trace::canonicalize::trace_fingerprint;
+
+        init_test("walkthrough_03_fingerprint_interpretation");
+
+        // Schedule A: task 1 polled before task 2
+        let schedule_a = vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(100), tid(1), rid(1)),
+            TraceEvent::poll(5, Time::from_nanos(100), tid(2), rid(1)),
+            TraceEvent::complete(6, Time::from_nanos(200), tid(1), rid(1)),
+        ];
+
+        // Schedule B: task 2 polled before task 1 (commuted independent events)
+        let schedule_b = vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(100), tid(2), rid(1)), // swapped
+            TraceEvent::poll(5, Time::from_nanos(100), tid(1), rid(1)), // swapped
+            TraceEvent::complete(6, Time::from_nanos(200), tid(1), rid(1)),
+        ];
+
+        let fp_a = trace_fingerprint(&schedule_a);
+        let fp_b = trace_fingerprint(&schedule_b);
+
+        // Same fingerprint: the two schedules are equivalent modulo
+        // commutation of independent events (polls at the same virtual time
+        // on different tasks in the same region).
+        assert_eq!(
+            fp_a, fp_b,
+            "equivalent schedules should have the same canonical fingerprint"
+        );
+
+        crate::test_complete!("walkthrough_03_fingerprint_interpretation");
+    }
+
+    /// Step 4: Replay command generation.
+    ///
+    /// The crash pack generates a shell one-liner that reproduces the failure.
+    /// Two modes: `cargo test` (development) and `asupersync trace replay` (CLI).
+    #[test]
+    fn walkthrough_04_replay_command() {
+        init_test("walkthrough_04_replay_command");
+
+        let pack = walkthrough_pack();
+
+        // -- cargo test mode --
+        let replay = pack.replay_command(None);
+        assert_eq!(replay.program, "cargo");
+        assert!(replay.args.contains(&"--seed".to_string()));
+        assert!(replay.args.contains(&"42".to_string()));
+
+        // The command_line is a shell-ready string.
+        assert!(
+            replay.command_line.contains("cargo test"),
+            "command line should contain cargo test: {}",
+            replay.command_line
+        );
+        assert!(
+            replay.command_line.contains("--seed 42"),
+            "command line should contain seed: {}",
+            replay.command_line
+        );
+
+        // -- With artifact path --
+        let replay_with_path = pack.replay_command(Some("/tmp/crashpacks/my_pack.json"));
+        assert!(
+            replay_with_path
+                .command_line
+                .contains("/tmp/crashpacks/my_pack.json"),
+            "command line should reference artifact: {}",
+            replay_with_path.command_line
+        );
+
+        // -- CLI mode --
+        let cli_replay =
+            ReplayCommand::from_config_cli(&pack.manifest.config, "/tmp/crashpack.json");
+        assert_eq!(cli_replay.program, "asupersync");
+        assert!(
+            cli_replay.command_line.contains("trace replay"),
+            "CLI mode should use 'trace replay' subcommand: {}",
+            cli_replay.command_line
+        );
+
+        // -- Display shows the one-liner --
+        let display = format!("{replay}");
+        assert_eq!(display, replay.command_line);
+
+        crate::test_complete!("walkthrough_04_replay_command");
+    }
+
+    /// Step 5: Prefix minimization shrinks the divergent prefix.
+    ///
+    /// Given a long replay trace, minimization finds the shortest prefix
+    /// that still reproduces the failure. This is the "bisect" phase.
+    #[test]
+    fn walkthrough_05_minimization() {
+        use crate::trace::divergence::{minimize_divergent_prefix, MinimizationConfig};
+        use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
+
+        init_test("walkthrough_05_minimization");
+
+        // -- Simulate a long replay trace (50 events) --
+        let replay_events: Vec<_> = (0..50)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+
+        let trace = ReplayTrace {
+            metadata: TraceMetadata::new(42),
+            events: replay_events,
+            cursor: 0,
+        };
+
+        // Oracle: the failure reproduces when prefix length >= 15.
+        let failure_threshold = 15;
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |prefix| {
+            prefix.len() >= failure_threshold
+        });
+
+        assert_eq!(result.minimized_len, failure_threshold);
+        assert_eq!(result.original_len, 50);
+
+        // -- Embed the minimized prefix into a crash pack --
+        let config = CrashPackConfig {
+            seed: 42,
+            config_hash: 0xCAFE,
+            worker_count: 2,
+            max_steps: Some(500),
+            commit_hash: Some("a1b2c3d".to_string()),
+        };
+
+        let failure = FailureInfo {
+            task: tid(2),
+            region: rid(1),
+            outcome: FailureOutcome::Panicked {
+                message: "assertion failed: balance >= 0".to_string(),
+            },
+            virtual_time: Time::from_nanos(200),
+        };
+
+        let pack = CrashPack::builder(config)
+            .failure(failure)
+            .divergent_prefix(result.prefix.events)
+            .fingerprint(0xABCD)
+            .build();
+
+        assert!(pack.has_divergent_prefix());
+        assert_eq!(
+            pack.divergent_prefix.len(),
+            failure_threshold,
+            "minimized prefix should be {failure_threshold} events, not {}",
+            pack.divergent_prefix.len()
+        );
+
+        // Attachment table reflects the divergent prefix.
+        assert!(pack.manifest.has_attachment(&AttachmentKind::DivergentPrefix));
+        let att = pack
+            .manifest
+            .attachment(&AttachmentKind::DivergentPrefix)
+            .unwrap();
+        assert_eq!(att.item_count, failure_threshold as u64);
+
+        crate::test_complete!("walkthrough_05_minimization");
+    }
+
+    /// Helper: build the walkthrough crash pack used by multiple steps.
+    fn walkthrough_pack() -> CrashPack {
+        let events = vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(100), tid(1), rid(1)),
+            TraceEvent::poll(5, Time::from_nanos(100), tid(2), rid(1)),
+            TraceEvent::complete(6, Time::from_nanos(200), tid(1), rid(1)),
+        ];
+
+        let config = CrashPackConfig {
+            seed: 42,
+            config_hash: 0xCAFE,
+            worker_count: 2,
+            max_steps: Some(500),
+            commit_hash: Some("a1b2c3d".to_string()),
+        };
+
+        let failure = FailureInfo {
+            task: tid(2),
+            region: rid(1),
+            outcome: FailureOutcome::Panicked {
+                message: "assertion failed: balance >= 0".to_string(),
+            },
+            virtual_time: Time::from_nanos(200),
+        };
+
+        CrashPack::builder(config)
+            .failure(failure)
+            .from_trace(&events)
+            .oracle_violations(vec!["balance-invariant".to_string()])
+            .build()
+    }
 }
