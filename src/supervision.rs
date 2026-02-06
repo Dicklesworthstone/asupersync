@@ -6987,4 +6987,275 @@ mod tests {
         assert_eq!(config.min_observations, 3);
         crate::test_complete!("storm_monitor_config_default");
     }
+
+    // ========================================================================
+    // Deterministic observability tests (bd-npn8e)
+    // Cross-component: evidence ledger + e-process + intensity window
+    // ========================================================================
+
+    #[test]
+    fn obs_evidence_ledger_determinism_mixed_outcomes() {
+        init_test("obs_evidence_ledger_determinism_mixed_outcomes");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let task = test_task_id();
+        let region = test_region_id();
+
+        // Run the same mixed outcome sequence on two independent supervisors.
+        let run = || {
+            let mut sup = Supervisor::new(SupervisionStrategy::Restart(config.clone()));
+            let outcomes = [
+                Outcome::Err(()),
+                Outcome::Err(()),
+                Outcome::Ok(()),
+                Outcome::Cancelled(CancelReason::user("test")),
+                Outcome::Err(()),
+                Outcome::Panicked(PanicPayload::new("boom")),
+            ];
+            let mut decisions = Vec::new();
+            for (i, outcome) in outcomes.iter().enumerate() {
+                let t = (i as u64 + 1) * 1_000;
+                decisions.push(sup.on_failure(task, region, None, outcome, t));
+            }
+            (sup, decisions)
+        };
+
+        let (sup_a, dec_a) = run();
+        let (sup_b, dec_b) = run();
+
+        // Decisions must be identical.
+        assert_eq!(dec_a.len(), dec_b.len());
+        for (a, b) in dec_a.iter().zip(dec_b.iter()) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        }
+
+        // Evidence ledgers must be identical.
+        let ev_a = sup_a.evidence();
+        let ev_b = sup_b.evidence();
+        assert_eq!(ev_a.len(), ev_b.len());
+        for (a, b) in ev_a.entries().iter().zip(ev_b.entries().iter()) {
+            assert_eq!(a.timestamp, b.timestamp);
+            assert_eq!(
+                format!("{:?}", a.binding_constraint),
+                format!("{:?}", b.binding_constraint)
+            );
+        }
+
+        // Generalized ledger renders must be byte-for-byte identical.
+        assert_eq!(
+            sup_a.generalized_evidence().render(),
+            sup_b.generalized_evidence().render()
+        );
+
+        crate::test_complete!("obs_evidence_ledger_determinism_mixed_outcomes");
+    }
+
+    #[test]
+    fn obs_storm_monitor_intensity_window_integration_deterministic() {
+        init_test("obs_storm_monitor_intensity_window_integration_deterministic");
+
+        let run = || {
+            let mut window = RestartIntensityWindow::new(Duration::from_secs(10), 1.0);
+            let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+                alpha: 0.01,
+                expected_rate: 0.1,
+                min_observations: 3,
+            });
+
+            let base = 1_000_000_000u64;
+            let mut states = Vec::new();
+            // Simulate bursts and calm periods.
+            for i in 0..30 {
+                let now = base + i * 100_000_000; // every 100ms
+                window.record(now);
+                let state = monitor.observe_from_window(&window, now);
+                states.push((monitor.e_value(), state));
+            }
+            states
+        };
+
+        let run_a = run();
+        let run_b = run();
+
+        assert_eq!(run_a.len(), run_b.len());
+        for ((e_a, s_a), (e_b, s_b)) in run_a.iter().zip(run_b.iter()) {
+            assert!((e_a - e_b).abs() < f64::EPSILON, "e-values diverged");
+            assert_eq!(s_a, s_b, "alert states diverged");
+        }
+
+        crate::test_complete!("obs_storm_monitor_intensity_window_integration_deterministic");
+    }
+
+    #[test]
+    fn obs_eprocess_alert_transitions_monotone() {
+        init_test("obs_eprocess_alert_transitions_monotone");
+        use crate::obligation::eprocess::AlertState;
+
+        let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+            alpha: 0.01,
+            expected_rate: 0.05,
+            min_observations: 3,
+        });
+
+        // Track transitions: Clear → Watching → Alert.
+        let mut saw_watching = false;
+        let mut saw_alert = false;
+        let mut transitions = Vec::new();
+
+        for i in 0..50 {
+            // Gradually increasing intensity simulates escalation.
+            let intensity = 0.01 + (i as f64 * 0.1);
+            let state = monitor.observe_intensity(intensity);
+
+            match state {
+                AlertState::Watching if !saw_watching => {
+                    saw_watching = true;
+                    transitions.push("watching");
+                }
+                AlertState::Alert if !saw_alert => {
+                    saw_alert = true;
+                    transitions.push("alert");
+                }
+                _ => {}
+            }
+        }
+
+        // With escalating intensity, should eventually reach alert.
+        assert!(saw_alert, "monitor should reach alert state");
+
+        // Watching should appear before alert (monotone escalation).
+        if saw_watching {
+            let w_pos = transitions.iter().position(|t| *t == "watching");
+            let a_pos = transitions.iter().position(|t| *t == "alert");
+            if let (Some(w), Some(a)) = (w_pos, a_pos) {
+                assert!(w < a, "watching must precede alert");
+            }
+        }
+
+        crate::test_complete!("obs_eprocess_alert_transitions_monotone");
+    }
+
+    #[test]
+    fn obs_supervisor_storm_combined_determinism() {
+        init_test("obs_supervisor_storm_combined_determinism");
+
+        let run = || {
+            let config = RestartConfig::new(5, Duration::from_secs(10));
+            let mut sup = Supervisor::new(SupervisionStrategy::Restart(config));
+            let mut window = RestartIntensityWindow::new(Duration::from_secs(10), 1.0);
+            let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
+                alpha: 0.05,
+                expected_rate: 0.5,
+                min_observations: 3,
+            });
+
+            let task = test_task_id();
+            let region = test_region_id();
+
+            let mut snapshots = Vec::new();
+
+            for i in 0..8u64 {
+                let now = i * 500_000_000; // every 500ms
+                let decision = sup.on_failure(task, region, None, &Outcome::Err(()), now);
+                window.record(now);
+                let alert = monitor.observe_from_window(&window, now);
+                snapshots.push((
+                    format!("{decision:?}"),
+                    monitor.e_value(),
+                    alert,
+                    window.intensity(now),
+                ));
+            }
+
+            (sup.evidence().len(), snapshots)
+        };
+
+        let (len_a, snap_a) = run();
+        let (len_b, snap_b) = run();
+
+        assert_eq!(len_a, len_b);
+        assert_eq!(snap_a.len(), snap_b.len());
+        for ((dec_a, e_a, alert_a, int_a), (dec_b, e_b, alert_b, int_b)) in
+            snap_a.iter().zip(snap_b.iter())
+        {
+            assert_eq!(dec_a, dec_b, "decisions diverged");
+            assert!((e_a - e_b).abs() < f64::EPSILON, "e-values diverged");
+            assert_eq!(alert_a, alert_b, "alerts diverged");
+            assert!((int_a - int_b).abs() < f64::EPSILON, "intensities diverged");
+        }
+
+        crate::test_complete!("obs_supervisor_storm_combined_determinism");
+    }
+
+    #[test]
+    fn obs_evidence_ledger_binding_constraints_cover_all_paths() {
+        init_test("obs_evidence_ledger_binding_constraints_cover_all_paths");
+
+        let task = test_task_id();
+        let region = test_region_id();
+
+        // Strategy: Restart with tight budget to hit multiple constraint types.
+        let config = RestartConfig::new(2, Duration::from_secs(60)).with_restart_cost(100);
+        let mut sup = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Err → RestartAllowed
+        sup.on_failure(task, region, None, &Outcome::Err(()), 1_000);
+        // Err → RestartAllowed (attempt 2)
+        sup.on_failure(task, region, None, &Outcome::Err(()), 2_000);
+        // Err → WindowExhausted (3rd err, max_restarts=2)
+        sup.on_failure(task, region, None, &Outcome::Err(()), 3_000);
+        // Ok → MonotoneSeverity
+        sup.on_failure(task, region, None, &Outcome::Ok(()), 4_000);
+        // Cancelled → MonotoneSeverity
+        sup.on_failure(
+            task,
+            region,
+            None,
+            &Outcome::Cancelled(CancelReason::user("test")),
+            5_000,
+        );
+        // Panicked → MonotoneSeverity
+        sup.on_failure(
+            task,
+            region,
+            None,
+            &Outcome::Panicked(PanicPayload::new("x")),
+            6_000,
+        );
+
+        let entries = sup.evidence().entries();
+        assert_eq!(entries.len(), 6);
+
+        // Verify specific constraint types.
+        assert!(matches!(
+            entries[0].binding_constraint,
+            BindingConstraint::RestartAllowed { attempt: 1 }
+        ));
+        assert!(matches!(
+            entries[1].binding_constraint,
+            BindingConstraint::RestartAllowed { attempt: 2 }
+        ));
+        assert!(matches!(
+            entries[2].binding_constraint,
+            BindingConstraint::WindowExhausted { .. }
+        ));
+        assert!(matches!(
+            entries[3].binding_constraint,
+            BindingConstraint::MonotoneSeverity { outcome_kind: "Ok" }
+        ));
+        assert!(matches!(
+            entries[4].binding_constraint,
+            BindingConstraint::MonotoneSeverity {
+                outcome_kind: "Cancelled"
+            }
+        ));
+        assert!(matches!(
+            entries[5].binding_constraint,
+            BindingConstraint::MonotoneSeverity {
+                outcome_kind: "Panicked"
+            }
+        ));
+
+        crate::test_complete!("obs_evidence_ledger_binding_constraints_cover_all_paths");
+    }
 }

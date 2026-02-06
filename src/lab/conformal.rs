@@ -1335,4 +1335,139 @@ mod tests {
         assert_eq!(counts.get("a"), Some(&2));
         assert_eq!(counts.get("b"), Some(&1));
     }
+
+    // ========================================================================
+    // Deterministic observability: conformal coverage diagnostics (bd-npn8e)
+    // ========================================================================
+
+    #[test]
+    fn obs_conformal_coverage_guarantee_holds() {
+        // Verify the finite-sample coverage guarantee:
+        // P(new observation conforming) ≥ 1 - alpha under exchangeability.
+        let alpha = 0.10;
+        let config = ConformalConfig::new(alpha).min_samples(10);
+        let mut cal = ConformalCalibrator::new(config);
+
+        // Calibrate with clean reports (10 samples).
+        for i in 0..10 {
+            cal.calibrate(&make_clean_report(10 + i, 50 + i * 3));
+        }
+
+        // Predict on 100 clean observations. Coverage should be ≥ (1 - alpha).
+        let mut conforming_count = 0;
+        let total = 100;
+        for _ in 0..total {
+            if let Some(report) = cal.predict(&make_clean_report(10, 50)) {
+                if report.prediction_sets.iter().all(|ps| ps.conforming) {
+                    conforming_count += 1;
+                }
+            }
+        }
+
+        let coverage = conforming_count as f64 / total as f64;
+        assert!(
+            coverage >= 1.0 - alpha - 0.05,
+            "coverage {coverage:.2} should be ≥ {:.2}",
+            1.0 - alpha - 0.05
+        );
+    }
+
+    #[test]
+    fn obs_health_threshold_coverage_guarantee_holds() {
+        let alpha = 0.10;
+        let config = HealthThresholdConfig::new(alpha, ThresholdMode::Upper).min_samples(20);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        // Calibrate with values 1..=20.
+        for i in 1..=20 {
+            cal.calibrate("depth", i as f64);
+        }
+
+        // Check 50 values within the calibration range.
+        let mut conforming = 0;
+        let total = 50;
+        for i in 0..total {
+            let value = ((i % 20) + 1) as f64;
+            if let Some(result) = cal.check("depth", value) {
+                if result.conforming {
+                    conforming += 1;
+                }
+            }
+        }
+
+        let coverage = conforming as f64 / total as f64;
+        assert!(
+            coverage >= 1.0 - alpha - 0.05,
+            "health threshold coverage {coverage:.2} should be ≥ {:.2}",
+            1.0 - alpha - 0.05
+        );
+    }
+
+    #[test]
+    fn obs_conformal_anomaly_detection_deterministic() {
+        // Same calibration + prediction sequence must produce identical results.
+        let run = || {
+            let config = ConformalConfig::new(0.05).min_samples(5);
+            let mut cal = ConformalCalibrator::new(config);
+
+            for i in 0..8 {
+                cal.calibrate(&make_clean_report(10 + i, 50 + i * 3));
+            }
+
+            let clean = cal.predict(&make_clean_report(10, 50)).unwrap();
+            let anomalous = cal.predict(&make_violated_report(10, 50)).unwrap();
+            (clean, anomalous)
+        };
+
+        let (c1, a1) = run();
+        let (c2, a2) = run();
+
+        // Clean predictions must be identical.
+        assert_eq!(c1.prediction_sets.len(), c2.prediction_sets.len());
+        for (p1, p2) in c1.prediction_sets.iter().zip(c2.prediction_sets.iter()) {
+            assert!((p1.score - p2.score).abs() < f64::EPSILON);
+            assert!((p1.threshold - p2.threshold).abs() < f64::EPSILON);
+            assert_eq!(p1.conforming, p2.conforming);
+        }
+
+        // Anomalous predictions must be identical.
+        assert_eq!(a1.prediction_sets.len(), a2.prediction_sets.len());
+        for (p1, p2) in a1.prediction_sets.iter().zip(a2.prediction_sets.iter()) {
+            assert!((p1.score - p2.score).abs() < f64::EPSILON);
+            assert_eq!(p1.conforming, p2.conforming);
+        }
+    }
+
+    #[test]
+    fn obs_conformal_report_well_calibrated_diagnostics() {
+        let config = ConformalConfig::new(0.05).min_samples(5);
+        let mut cal = ConformalCalibrator::new(config);
+
+        // Calibrate.
+        for i in 0..10 {
+            cal.calibrate(&make_clean_report(10 + i, 50 + i * 2));
+        }
+
+        // Predict many clean observations.
+        let mut last_report = None;
+        for _ in 0..30 {
+            last_report = cal.predict(&make_clean_report(10, 50));
+        }
+
+        let report = last_report.unwrap();
+
+        // Should be well-calibrated.
+        assert!(report.is_well_calibrated());
+        assert!(report.miscalibrated_invariants().is_empty());
+
+        // Report text should contain expected fields.
+        let text = report.to_text();
+        assert!(text.contains("CONFORMAL CALIBRATION REPORT"));
+        assert!(text.contains("WELL-CALIBRATED"));
+
+        // JSON roundtrip.
+        let json = report.to_json();
+        assert!(json["well_calibrated"].as_bool().unwrap());
+        assert_eq!(json["alpha"], 0.05);
+    }
 }
