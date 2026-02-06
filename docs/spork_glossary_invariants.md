@@ -197,6 +197,99 @@ A supervision decision cannot downgrade severity:
 
 Mapped to: `Supervisor::on_failure` in `src/supervision.rs` lines 655-712.
 
+### INV-6A: Outcome Mapping Tables (Spork)
+
+Spork builds new OTP-grade surfaces (GenServer, Supervisor, Link/Monitor, Registry) on top of
+Asupersync's 4-valued `Outcome` lattice:
+
+```text
+Ok < Err < Cancelled < Panicked
+```
+
+This section specifies the mapping from common Spork events and API results into that lattice.
+The guiding rule is: the lattice is for immutable facts about completed executions. Recovery is
+modeled by spawning new executions (restarts), not by rewriting old outcomes.
+
+#### Mapping: Task Completion -> Outcome
+
+| Observed Completion | Maps To | Notes |
+|---|---|---|
+| Task returns successfully | `Outcome::Ok(_)` | Normal completion. |
+| Task returns application error | `Outcome::Err(_)` | Potentially restartable (policy-dependent). |
+| Task is cancelled | `Outcome::Cancelled(reason)` | External directive; not restartable by default. |
+| Task panics | `Outcome::Panicked(payload)` | Programming error; never restartable. |
+
+#### Mapping: `TaskHandle::join()` / `JoinError` -> Outcome
+
+| Join Result | Maps To | Notes |
+|---|---|---|
+| `Ok(value)` | `Outcome::Ok(value)` | The task produced `value`. |
+| `Err(JoinError::Cancelled(r))` | `Outcome::Cancelled(r)` | Join observes task cancellation. |
+| `Err(JoinError::Panicked(p))` | `Outcome::Panicked(p)` | Join observes task panic. |
+
+#### Mapping: GenServer `call` / `cast` -> Outcome (Severity)
+
+GenServer surfaces are `Result`-typed for ergonomics. When a caller or supervisor needs to reason
+in lattice terms, use this mapping:
+
+| API Result | Maps To | Notes |
+|---|---|---|
+| `Ok(reply)` (call) | `Outcome::Ok(reply)` | Normal reply delivery. |
+| `Err(CallError::Cancelled(r))` | `Outcome::Cancelled(r)` | Caller-side cancellation. |
+| `Err(CallError::ServerStopped)` | `Outcome::Err(CallError::ServerStopped)` | Deterministic stop signal; not a panic. |
+| `Err(CallError::NoReply)` | `Outcome::Panicked(_)` | Protocol violation. Treat as panicked severity (must be trace-visible). |
+| `Ok(())` (cast) | `Outcome::Ok(())` | Cast enqueued/processed normally. |
+| `Err(CastError::Cancelled(r))` | `Outcome::Cancelled(r)` | Caller-side cancellation. |
+| `Err(CastError::ServerStopped)` | `Outcome::Err(CastError::ServerStopped)` | Server not running / mailbox disconnected. |
+| `Err(CastError::Full)` | `Outcome::Err(CastError::Full)` | Backpressure outcome; deterministic and explicit (never silent drop). |
+
+Note: `CallError::NoReply` is expected to be structurally prevented by reply-obligation linearity.
+If it occurs, treat it as a correctness violation at the panicked level and escalate.
+
+#### Mapping: Supervision Decision -> Supervisor Outcome
+
+Supervisor decisions are actions; they do not rewrite the child's outcome. The supervisor's own
+`Outcome` depends on whether the failure was handled locally or escalated:
+
+| Child Outcome | Local Decision | Supervisor Outcome | Notes |
+|---|---|---|---|
+| `Ok` | (none) | `Ok` | Normal steady-state. |
+| `Err` | `Restart` | `Ok` | Recovery via fresh child instance; old `Err` remains in trace. |
+| `Err` | `Stop` | `Ok` or `Err` (policy-specific) | If stopping is an acceptable terminal for a child, supervisor can remain `Ok`. If child is required, supervisor may fail with `Err`. |
+| `Err` | `Escalate` | `Err` | Escalation propagates failure upward. |
+| `Cancelled` | `Stop` | `Cancelled` (or `Ok` if fully contained) | Cancellation is an external directive; default is to stop and propagate unless explicitly contained. |
+| `Panicked` | `Stop`/`Escalate` | `Panicked` | Panic is not recoverable; treat as fatal. |
+
+The exact policy choice for "stop child but supervisor continues Ok" must be explicit per child
+spec (`ChildSpec`) and deterministic.
+
+### INV-6B: Monotone Severity Rules (Spork)
+
+Severity monotonicity has two layers:
+
+1. Within a single execution (a single task/server instance):
+- A completed `Outcome` is immutable.
+- Cancellation reasons are monotone: if multiple cancellations race, the strongest reason wins.
+
+2. Across supervision and restart (multiple executions over time):
+- A restart creates a fresh child instance; it does not "heal" the failed one.
+- Panics are never treated as restartable.
+- Cancellation is never treated as a transient error; default is stop and drain.
+- Any externally reported aggregate outcome (region close, supervisor join) must be computed as a
+  monotone function over observed outcomes (e.g., max severity) plus explicit containment rules.
+
+### INV-6C: Unit-Test Checklist (Spec)
+
+These are the minimum tests that should exist alongside the eventual code implementing this spec:
+
+- `join_outcomes` is monotone and selects the worst outcome by `Severity`.
+- GenServer `call()` maps cancellation to `CallError::Cancelled` deterministically (no spurious `ServerStopped`).
+- GenServer `CallError::NoReply` never occurs in normal operation; if forced, it is trace-visible and treated as panicked severity.
+- Supervisor never restarts a `Panicked` child outcome.
+- Supervisor never treats `Cancelled` as restartable; it stops/drains deterministically.
+- Restart does not mutate the prior child's outcome; traces show both the failure and the new instance start.
+- Any "containment" rule (child stop while supervisor remains `Ok`) is explicitly encoded in child specs and is deterministic under lab seeds.
+
 ### INV-7: Mailbox Drain Guarantee
 
 When an actor stops (normally or via cancellation), all messages that were successfully committed into the mailbox are processed during the drain phase before `on_stop` runs. The drain is bounded by mailbox capacity to prevent unbounded work during shutdown.
