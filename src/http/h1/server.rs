@@ -348,6 +348,10 @@ where
 
             // Write response
             framed.send(resp)?;
+            // `Framed::send` only encodes into the internal write buffer; flush to the socket.
+            poll_fn(|cx| framed.poll_flush(cx))
+                .await
+                .map_err(HttpError::Io)?;
 
             state.requests_served += 1;
             state.last_request_at = Instant::now();
