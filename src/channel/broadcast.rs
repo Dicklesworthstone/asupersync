@@ -735,15 +735,11 @@ mod tests {
             true,
             true
         );
-        {
+        let wakers_len = {
             let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
-            crate::assert_with_log!(
-                inner.wakers.len() == 1,
-                "one waiter registered",
-                1usize,
-                inner.wakers.len()
-            );
-        }
+            inner.wakers.len()
+        };
+        crate::assert_with_log!(wakers_len == 1, "one waiter registered", 1usize, wakers_len);
 
         // Cancel: poll should return Cancelled and clear the waiter entry.
         cx.set_cancel_requested(true);
@@ -754,15 +750,11 @@ mod tests {
             "Ready(Err(Cancelled))",
             format!("{res:?}")
         );
-        {
+        let cleared = {
             let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
-            crate::assert_with_log!(
-                inner.wakers.is_empty(),
-                "waiter cleared",
-                true,
-                inner.wakers.is_empty()
-            );
-        }
+            inner.wakers.is_empty()
+        };
+        crate::assert_with_log!(cleared, "waiter cleared", true, cleared);
 
         drop(fut);
 
@@ -796,24 +788,18 @@ mod tests {
                 true
             );
 
-            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
-            crate::assert_with_log!(
-                inner.wakers.len() == 1,
-                "one waiter registered",
-                1usize,
+            let wakers_len = {
+                let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
                 inner.wakers.len()
-            );
+            };
+            crate::assert_with_log!(wakers_len == 1, "one waiter registered", 1usize, wakers_len);
         } // drop fut
 
-        {
+        let cleared = {
             let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
-            crate::assert_with_log!(
-                inner.wakers.is_empty(),
-                "waiter cleared on drop",
-                true,
-                inner.wakers.is_empty()
-            );
-        }
+            inner.wakers.is_empty()
+        };
+        crate::assert_with_log!(cleared, "waiter cleared on drop", true, cleared);
 
         // Cursor must not have advanced.
         tx.send(&cx, 7).expect("send failed");
