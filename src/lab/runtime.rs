@@ -30,6 +30,7 @@ use crate::types::{ObligationId, TaskId};
 use crate::types::{Severity, Time};
 use crate::util::{DetEntropy, DetRng};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -100,6 +101,259 @@ impl LabRunReport {
             },
             "oracles": self.oracle_report.to_json(),
             "invariants": self.invariant_violations,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spork app harness report schema (bd-11dm5)
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a [`LabConfig`] captured into a stable, JSON-friendly schema.
+///
+/// This is intentionally a *summary* (not the raw config), so downstream tools
+/// can depend on a stable field set without pulling in internal config types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabConfigSummary {
+    /// Random seed for deterministic scheduling.
+    pub seed: u64,
+    /// Seed for capability entropy sources (may be decoupled from `seed`).
+    pub entropy_seed: u64,
+    /// Number of modeled workers in the deterministic multi-worker simulation.
+    pub worker_count: usize,
+    /// Whether the runtime panics on obligation leaks in lab mode.
+    pub panic_on_obligation_leak: bool,
+    /// Capacity of the trace buffer.
+    pub trace_capacity: usize,
+    /// Maximum steps a task may remain unpolled while holding obligations before futurelock triggers.
+    pub futurelock_max_idle_steps: u64,
+    /// Whether the runtime panics when a futurelock is detected.
+    pub panic_on_futurelock: bool,
+    /// Optional maximum step limit for a run.
+    pub max_steps: Option<u64>,
+    /// Chaos configuration summary, when enabled.
+    pub chaos: Option<ChaosConfigSummary>,
+    /// Whether replay recording is enabled.
+    pub replay_recording_enabled: bool,
+}
+
+impl LabConfigSummary {
+    #[must_use]
+    pub fn from_config(config: &LabConfig) -> Self {
+        Self {
+            seed: config.seed,
+            entropy_seed: config.entropy_seed,
+            worker_count: config.worker_count,
+            panic_on_obligation_leak: config.panic_on_obligation_leak,
+            trace_capacity: config.trace_capacity,
+            futurelock_max_idle_steps: config.futurelock_max_idle_steps,
+            panic_on_futurelock: config.panic_on_futurelock,
+            max_steps: config.max_steps,
+            chaos: config.chaos.as_ref().map(ChaosConfigSummary::from_config),
+            replay_recording_enabled: config.replay_recording.is_some(),
+        }
+    }
+
+    /// Convert to JSON for artifact storage.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        json!({
+            "seed": self.seed,
+            "entropy_seed": self.entropy_seed,
+            "worker_count": self.worker_count,
+            "panic_on_obligation_leak": self.panic_on_obligation_leak,
+            "trace_capacity": self.trace_capacity,
+            "futurelock_max_idle_steps": self.futurelock_max_idle_steps,
+            "panic_on_futurelock": self.panic_on_futurelock,
+            "max_steps": self.max_steps,
+            "chaos": self.chaos.as_ref().map(ChaosConfigSummary::to_json),
+            "replay_recording_enabled": self.replay_recording_enabled,
+        })
+    }
+}
+
+/// JSON-friendly summary of chaos settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChaosConfigSummary {
+    /// Seed for deterministic chaos injection.
+    pub seed: u64,
+    /// Probability of injecting cancellation at each poll point.
+    pub cancel_probability: f64,
+    /// Probability of injecting delay at each poll point.
+    pub delay_probability: f64,
+    /// Probability of injecting an I/O error.
+    pub io_error_probability: f64,
+    /// Probability of triggering a spurious wakeup storm.
+    pub wakeup_storm_probability: f64,
+    /// Probability of injecting budget exhaustion.
+    pub budget_exhaust_probability: f64,
+}
+
+impl ChaosConfigSummary {
+    #[must_use]
+    pub fn from_config(config: &super::chaos::ChaosConfig) -> Self {
+        Self {
+            seed: config.seed,
+            cancel_probability: config.cancel_probability,
+            delay_probability: config.delay_probability,
+            io_error_probability: config.io_error_probability,
+            wakeup_storm_probability: config.wakeup_storm_probability,
+            budget_exhaust_probability: config.budget_exhaust_probability,
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        json!({
+            "seed": self.seed,
+            "cancel_probability": self.cancel_probability,
+            "delay_probability": self.delay_probability,
+            "io_error_probability": self.io_error_probability,
+            "wakeup_storm_probability": self.wakeup_storm_probability,
+            "budget_exhaust_probability": self.budget_exhaust_probability,
+        })
+    }
+}
+
+/// Attachment kind for Spork harness reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HarnessAttachmentKind {
+    /// Crash pack artifact (minimal repro pack).
+    CrashPack,
+    /// Replay trace artifact (recorded non-determinism for replay).
+    ReplayTrace,
+    /// Generic trace artifact (e.g., NDJSON/JSON trace snapshot).
+    Trace,
+    /// Other harness-defined artifact.
+    Other,
+}
+
+impl fmt::Display for HarnessAttachmentKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CrashPack => write!(f, "crashpack"),
+            Self::ReplayTrace => write!(f, "replay_trace"),
+            Self::Trace => write!(f, "trace"),
+            Self::Other => write!(f, "other"),
+        }
+    }
+}
+
+/// Report attachment reference (path-only).
+///
+/// The lab runtime does not write artifacts; this is a schema hook that a harness
+/// can fill in when it persists crash packs, replay traces, etc.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HarnessAttachmentRef {
+    /// Attachment kind (used for deterministic ordering and downstream routing).
+    pub kind: HarnessAttachmentKind,
+    /// Artifact path (relative or absolute; interpreted by the harness).
+    pub path: String,
+}
+
+impl HarnessAttachmentRef {
+    #[must_use]
+    pub fn crashpack(path: impl Into<String>) -> Self {
+        Self {
+            kind: HarnessAttachmentKind::CrashPack,
+            path: path.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn replay_trace(path: impl Into<String>) -> Self {
+        Self {
+            kind: HarnessAttachmentKind::ReplayTrace,
+            path: path.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn trace(path: impl Into<String>) -> Self {
+        Self {
+            kind: HarnessAttachmentKind::Trace,
+            path: path.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        json!({
+            "kind": self.kind.to_string(),
+            "path": self.path,
+        })
+    }
+}
+
+/// Stable, JSON-first report schema for Spork app harness runs.
+///
+/// This wraps [`LabRunReport`] and adds:
+/// - config snapshot (lab-side)
+/// - stable fingerprint extraction points
+/// - optional artifact attachment references (crash packs, replay traces, ...)
+#[derive(Debug, Clone)]
+pub struct SporkHarnessReport {
+    /// Schema version for stable downstream parsing.
+    pub schema_version: u32,
+    /// Application identifier/name for the harness run.
+    pub app: String,
+    /// Lab configuration snapshot used for the run.
+    pub config: LabConfigSummary,
+    /// Low-level lab run report (trace fingerprints + oracles + invariants).
+    pub run: LabRunReport,
+    /// Optional attachment references (crash packs, replay traces, etc.).
+    pub attachments: Vec<HarnessAttachmentRef>,
+}
+
+impl SporkHarnessReport {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    #[must_use]
+    pub fn new(
+        app: impl Into<String>,
+        config: &LabConfig,
+        run: LabRunReport,
+        attachments: Vec<HarnessAttachmentRef>,
+    ) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            app: app.into(),
+            config: LabConfigSummary::from_config(config),
+            run,
+            attachments,
+        }
+    }
+
+    /// Convert to JSON for artifact storage.
+    ///
+    /// Field semantics are intentionally stable: downstream tools should be able
+    /// to depend on key locations without chasing internal lab structs.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        // Ensure stable ordering regardless of insertion order.
+        let mut attachments = self.attachments.clone();
+        attachments.sort_by(|a, b| (a.kind, &a.path).cmp(&(b.kind, &b.path)));
+
+        json!({
+            "schema_version": self.schema_version,
+            "app": { "name": self.app },
+            "lab": { "config": self.config.to_json() },
+            "fingerprints": {
+                "trace": self.run.trace_fingerprint,
+                "event_hash": self.run.trace_certificate.event_hash,
+                "event_count": self.run.trace_certificate.event_count,
+                "schedule_hash": self.run.trace_certificate.schedule_hash,
+            },
+            "run": self.run.to_json(),
+            "attachments": attachments.iter().map(HarnessAttachmentRef::to_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -379,6 +633,30 @@ impl LabRuntime {
     #[must_use]
     pub fn report(&mut self) -> LabRunReport {
         self.report_with_steps_delta(0)
+    }
+
+    /// Runs until quiescent (or `max_steps` is reached) and returns a Spork harness report.
+    #[must_use]
+    pub fn run_until_quiescent_spork_report(
+        &mut self,
+        app: impl Into<String>,
+        attachments: Vec<HarnessAttachmentRef>,
+    ) -> SporkHarnessReport {
+        let run = self.run_until_quiescent_with_report();
+        SporkHarnessReport::new(app, &self.config, run, attachments)
+    }
+
+    /// Build a Spork harness report for the current runtime state.
+    ///
+    /// This does not advance execution.
+    #[must_use]
+    pub fn spork_report(
+        &mut self,
+        app: impl Into<String>,
+        attachments: Vec<HarnessAttachmentRef>,
+    ) -> SporkHarnessReport {
+        let run = self.report();
+        SporkHarnessReport::new(app, &self.config, run, attachments)
     }
 
     fn report_with_steps_delta(&mut self, steps_delta: u64) -> LabRunReport {
