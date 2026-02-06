@@ -6094,4 +6094,402 @@ mod tests {
 
         crate::test_complete!("shardguard_locking_patterns_exercised");
     }
+
+    #[test]
+    fn task_completed_ok_with_leaked_obligations_closes_region() {
+        // Verifies: non-cancelled task completing with pending obligations
+        // triggers the leak handling path (not the auto-abort path).
+        // mark_obligation_leaked must call resolve_obligation() so the
+        // region's pending_obligations counter is decremented. Without this,
+        // the region would be stuck in Finalizing with a desynchronized counter.
+        // This exercises the B→A→C path through handle_obligation_leaks.
+        init_test("task_completed_ok_with_leaked_obligations_closes_region");
+        let mut state = RuntimeState::new();
+        state.obligation_leak_response = ObligationLeakResponse::Silent;
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create obligations but DO NOT commit/abort them
+        let _obl1 = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("obl1");
+        let _obl2 = state
+            .create_obligation(ObligationKind::Ack, task, region, None)
+            .expect("obl2");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 2,
+            "two pending obligations",
+            2usize,
+            state.pending_obligation_count()
+        );
+
+        // Complete the task with Ok (NOT Cancelled) — this triggers the leak
+        // handling path at task_completed:1831-1841 instead of the auto-abort.
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task);
+
+        // Region should still close because mark_obligation_leaked resolves
+        // the obligation from the region's perspective.
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == RegionState::Closed,
+            "region closed despite leaked obligations (Silent mode)",
+            RegionState::Closed,
+            region_state
+        );
+
+        // Verify leak trace events were emitted
+        let events = state.trace.snapshot();
+        let leak_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationLeak)
+            .count();
+        crate::assert_with_log!(
+            leak_events == 2,
+            "two obligation leak trace events",
+            2usize,
+            leak_events
+        );
+        crate::test_complete!("task_completed_ok_with_leaked_obligations_closes_region");
+    }
+
+    #[test]
+    fn cancel_sibling_tasks_preserves_triggering_child() {
+        // Verifies: cancel_sibling_tasks cancels all siblings in a region
+        // EXCEPT the triggering child. This exercises the B→A path through
+        // the sibling cancellation flow.
+        init_test("cancel_sibling_tasks_preserves_triggering_child");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Insert 4 tasks in the same region
+        let task_a = insert_task(&mut state, region);
+        let task_b = insert_task(&mut state, region);
+        let task_c = insert_task(&mut state, region);
+        let task_d = insert_task(&mut state, region);
+
+        // Cancel siblings of task_b (should cancel a, c, d but not b)
+        let reason = CancelReason::new(CancelKind::FailFast, "sibling failed");
+        let to_cancel = state.cancel_sibling_tasks(region, task_b, &reason);
+
+        // task_b should NOT appear in the cancellation list
+        let cancelled_ids: Vec<TaskId> = to_cancel.iter().map(|(id, _)| *id).collect();
+        crate::assert_with_log!(
+            !cancelled_ids.contains(&task_b),
+            "triggering child not cancelled",
+            false,
+            cancelled_ids.contains(&task_b)
+        );
+
+        // All other tasks should be cancelled
+        crate::assert_with_log!(
+            cancelled_ids.len() == 3,
+            "three siblings cancelled",
+            3usize,
+            cancelled_ids.len()
+        );
+        for &expected in &[task_a, task_c, task_d] {
+            crate::assert_with_log!(
+                cancelled_ids.contains(&expected),
+                "sibling in cancel list",
+                true,
+                cancelled_ids.contains(&expected)
+            );
+        }
+
+        // Verify task_b's state is unchanged (still Created)
+        let b_record = state.task(task_b).expect("task_b");
+        crate::assert_with_log!(
+            matches!(b_record.state, TaskState::Created),
+            "triggering child state unchanged",
+            true,
+            matches!(b_record.state, TaskState::Created)
+        );
+
+        // Verify cancelled siblings have CancelRequested state
+        for &sib in &[task_a, task_c, task_d] {
+            let record = state.task(sib).expect("sibling");
+            let is_cancel_requested = record.state.is_cancelling();
+            crate::assert_with_log!(
+                is_cancel_requested,
+                "sibling is cancelling",
+                true,
+                is_cancel_requested
+            );
+        }
+        crate::test_complete!("cancel_sibling_tasks_preserves_triggering_child");
+    }
+
+    #[test]
+    fn bottom_up_cascade_without_cancel() {
+        // Verifies: regions close bottom-up via advance_region_state when
+        // tasks complete naturally (no cancellation involved). This tests
+        // the iterative parent advancement in advance_region_state.
+        init_test("bottom_up_cascade_without_cancel");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let grandchild = create_child_region(&mut state, child);
+
+        // One task in each region
+        let gc_task = insert_task(&mut state, grandchild);
+        let child_task = insert_task(&mut state, child);
+        let root_task = insert_task(&mut state, root);
+
+        // Request close on root (sets Closing, but doesn't cancel tasks)
+        {
+            let region = state.regions.get(root.arena_index()).expect("root");
+            region.begin_close(None);
+        }
+        {
+            let region = state.regions.get(child.arena_index()).expect("child");
+            region.begin_close(None);
+        }
+        {
+            let region = state
+                .regions
+                .get(grandchild.arena_index())
+                .expect("grandchild");
+            region.begin_close(None);
+        }
+
+        // Complete grandchild task → grandchild region should cascade to Closed
+        state
+            .task_mut(gc_task)
+            .expect("gc_task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(gc_task);
+
+        let gc_state = state
+            .regions
+            .get(grandchild.arena_index())
+            .expect("grandchild")
+            .state();
+        crate::assert_with_log!(
+            gc_state == RegionState::Closed,
+            "grandchild closed after task done",
+            RegionState::Closed,
+            gc_state
+        );
+
+        // Child should NOT be closed yet (child_task still alive)
+        let child_state = state
+            .regions
+            .get(child.arena_index())
+            .expect("child")
+            .state();
+        let child_not_closed = !matches!(child_state, RegionState::Closed);
+        crate::assert_with_log!(
+            child_not_closed,
+            "child not closed (task alive)",
+            true,
+            child_not_closed
+        );
+
+        // Complete child task → child region should cascade to Closed
+        state
+            .task_mut(child_task)
+            .expect("child_task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(child_task);
+
+        let child_state_final = state
+            .regions
+            .get(child.arena_index())
+            .expect("child")
+            .state();
+        crate::assert_with_log!(
+            child_state_final == RegionState::Closed,
+            "child closed after task done + grandchild closed",
+            RegionState::Closed,
+            child_state_final
+        );
+
+        // Root should NOT be closed yet (root_task still alive)
+        let root_state = state.regions.get(root.arena_index()).expect("root").state();
+        let root_not_closed = !matches!(root_state, RegionState::Closed);
+        crate::assert_with_log!(
+            root_not_closed,
+            "root not closed (task alive)",
+            true,
+            root_not_closed
+        );
+
+        // Complete root task → root should cascade to Closed
+        state
+            .task_mut(root_task)
+            .expect("root_task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(root_task);
+
+        let root_state_final = state.regions.get(root.arena_index()).expect("root").state();
+        crate::assert_with_log!(
+            root_state_final == RegionState::Closed,
+            "root closed after full cascade",
+            RegionState::Closed,
+            root_state_final
+        );
+        crate::test_complete!("bottom_up_cascade_without_cancel");
+    }
+
+    #[test]
+    fn obligation_leak_recover_mode_allows_region_close() {
+        // Verifies: Recover mode aborts leaked obligations (via abort_obligation)
+        // so the region's pending_obligations counter is decremented and the
+        // region can complete close. This exercises the B→A→C path through
+        // handle_obligation_leaks → abort_obligation → resolve_obligation →
+        // advance_region_state.
+        init_test("obligation_leak_recover_mode_allows_region_close");
+        let mut state = RuntimeState::new();
+        state.obligation_leak_response = ObligationLeakResponse::Recover;
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create obligations that will be leaked
+        let _obl1 = state
+            .create_obligation(ObligationKind::Lease, task, region, None)
+            .expect("lease");
+        let _obl2 = state
+            .create_obligation(ObligationKind::IoOp, task, region, None)
+            .expect("io_op");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 2,
+            "two pending obligations",
+            2usize,
+            state.pending_obligation_count()
+        );
+
+        // Complete task with Err (non-cancelled) → triggers leak handler
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Err(Error::new(ErrorKind::Unknown)));
+        let _ = state.task_completed(task);
+
+        // In Recover mode, leaked obligations are aborted, so region should close
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == RegionState::Closed,
+            "region closed in Recover mode",
+            RegionState::Closed,
+            region_state
+        );
+
+        // Verify abort events (Recover mode aborts, doesn't just mark leaked)
+        let events = state.trace.snapshot();
+        let abort_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationAbort)
+            .count();
+        crate::assert_with_log!(
+            abort_events == 2,
+            "two obligation aborts in recover mode",
+            2usize,
+            abort_events
+        );
+        crate::test_complete!("obligation_leak_recover_mode_allows_region_close");
+    }
+
+    #[test]
+    fn mixed_obligation_resolution_during_cancel_cascade() {
+        // Verifies: a mix of committed, aborted, and orphaned obligations
+        // during a cancel cascade all resolve correctly, allowing the region
+        // tree to close. Exercises the full B→A→C cross-entity path with
+        // interleaved obligation state changes.
+        init_test("mixed_obligation_resolution_during_cancel_cascade");
+        let mut state = RuntimeState::new();
+        state.obligation_leak_response = ObligationLeakResponse::Silent;
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+
+        let root_task = insert_task(&mut state, root);
+        let child_task1 = insert_task(&mut state, child);
+        let child_task2 = insert_task(&mut state, child);
+
+        // Create obligations on different tasks
+        let root_obl = state
+            .create_obligation(ObligationKind::SendPermit, root_task, root, None)
+            .expect("root obl");
+        let child_obl1 = state
+            .create_obligation(ObligationKind::Ack, child_task1, child, None)
+            .expect("child obl1");
+        let _child_obl2 = state
+            .create_obligation(ObligationKind::IoOp, child_task2, child, None)
+            .expect("child obl2");
+
+        // Commit root obligation BEFORE cancel
+        let _ = state.commit_obligation(root_obl).expect("commit root obl");
+
+        // Cancel the root (cascades to child)
+        let _ = state.cancel_request(root, &CancelReason::user("test"), None);
+
+        // Abort child_obl1 explicitly during cancellation
+        let _ = state
+            .abort_obligation(child_obl1, ObligationAbortReason::Cancel)
+            .expect("abort child obl1");
+
+        // Complete child tasks (child_obl2 will be orphaned → auto-aborted)
+        state
+            .task_mut(child_task1)
+            .expect("child_task1")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(child_task1);
+
+        state
+            .task_mut(child_task2)
+            .expect("child_task2")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(child_task2);
+
+        // Child should be closed
+        let child_state = state
+            .regions
+            .get(child.arena_index())
+            .expect("child")
+            .state();
+        crate::assert_with_log!(
+            child_state == RegionState::Closed,
+            "child closed",
+            RegionState::Closed,
+            child_state
+        );
+
+        // Complete root task
+        state
+            .task_mut(root_task)
+            .expect("root_task")
+            .complete(Outcome::Cancelled(CancelReason::user("test")));
+        let _ = state.task_completed(root_task);
+
+        // Root should close (all children closed, tasks done, obligations resolved)
+        let root_state = state.regions.get(root.arena_index()).expect("root").state();
+        crate::assert_with_log!(
+            root_state == RegionState::Closed,
+            "root closed after mixed resolution",
+            RegionState::Closed,
+            root_state
+        );
+
+        // No pending obligations
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "zero pending",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("mixed_obligation_resolution_during_cancel_cascade");
+    }
 }
