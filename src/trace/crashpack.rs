@@ -1576,8 +1576,7 @@ mod tests {
         assert_eq!(fp, fp2);
 
         // Independently compute via trace_fingerprint().
-        use crate::trace::canonicalize::trace_fingerprint;
-        assert_eq!(fp, trace_fingerprint(&events));
+        assert_eq!(fp, crate::trace::canonicalize::trace_fingerprint(&events));
 
         crate::test_complete!("golden_fingerprint_stability");
     }
@@ -1649,12 +1648,12 @@ mod tests {
 
     #[test]
     fn golden_replay_prefix_round_trip() {
-        init_test("golden_replay_prefix_round_trip");
-
         use crate::trace::replay::{
             CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata,
         };
         use crate::trace::replayer::TraceReplayer;
+
+        init_test("golden_replay_prefix_round_trip");
 
         // Build a ReplayTrace matching the golden scenario.
         let replay_events = vec![
@@ -1718,11 +1717,11 @@ mod tests {
 
     #[test]
     fn golden_replay_serialization_round_trip() {
-        init_test("golden_replay_serialization_round_trip");
-
         use crate::trace::replay::{
             CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata,
         };
+
+        init_test("golden_replay_serialization_round_trip");
 
         let replay_events = vec![
             ReplayEvent::RngSeed { seed: 42 },
@@ -1787,10 +1786,10 @@ mod tests {
 
     #[test]
     fn golden_minimization_integration() {
-        init_test("golden_minimization_integration");
-
         use crate::trace::divergence::{minimize_divergent_prefix, MinimizationConfig};
         use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
+
+        init_test("golden_minimization_integration");
 
         // Build a replay prefix: the failure "happens" at event index 5+.
         let replay_events: Vec<_> = (0..20)
