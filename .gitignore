@@ -50,3 +50,16 @@ criterion/
 # Agent artifact reports (keep local, don't commit)
 /exploration_report.md
 /final_summary.txt
+
+# Local perf/profiling artifacts (keep local)
+/perf.data*
+/perf_*.data*
+/callgrind.out.*
+/flamegraph*.svg
+
+# Lean build artifacts (keep local)
+**/.lake/
+
+# Local scratch / build outputs
+/tmp/
+**/a.out
