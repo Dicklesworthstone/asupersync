@@ -48,7 +48,9 @@ pub use cap::{
     SubsetOf,
 };
 pub use cx::{Cx, SpanGuard};
-pub use registry::{RegistryCap, RegistryHandle};
+pub use registry::{
+    NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
+};
 pub use scope::Scope;
 pub use wrappers::{
     narrow, BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps,
