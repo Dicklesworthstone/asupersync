@@ -308,7 +308,7 @@ impl TaskInspector {
             time_since_last_poll: None, // Would need wall-clock tracking
             wake_pending: task.wake_state.is_notified(),
             obligations,
-            waiters: task.waiters.clone(),
+            waiters: task.waiters.to_vec(),
         })
     }
 

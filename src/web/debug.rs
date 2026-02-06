@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::runtime::RuntimeSnapshot;
+use crate::tracing_compat::info;
 
 /// Function that produces a runtime snapshot on demand.
 pub type SnapshotFn = Arc<dyn Fn() -> RuntimeSnapshot + Send + Sync>;
@@ -135,7 +136,10 @@ impl DebugServer {
         self.running.store(true, Ordering::Relaxed);
 
         if self.config.print_url {
-            eprintln!("Debug dashboard: http://{local_addr}/debug");
+            info!(
+                url = %format!("http://{local_addr}/debug"),
+                "debug dashboard started"
+            );
         }
 
         let snapshot_fn = Arc::clone(&self.snapshot_fn);
