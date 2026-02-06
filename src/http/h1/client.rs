@@ -459,8 +459,14 @@ impl Http1Client {
         // Encode and buffer the request
         framed.send(req)?;
 
+        // IMPORTANT: `Framed::send` only buffers. We must flush before waiting on a response,
+        // otherwise the server may never receive the request (and we hang until timeout).
+        poll_fn(|cx| framed.poll_flush(cx))
+            .await
+            .map_err(HttpError::Io)?;
+
         // Read response
-        match std::future::poll_fn(|cx| Pin::new(&mut framed).poll_next(cx)).await {
+        match poll_fn(|cx| Pin::new(&mut framed).poll_next(cx)).await {
             Some(Ok(resp)) => Ok(resp),
             Some(Err(e)) => Err(e),
             None => Err(HttpError::Io(std::io::Error::new(
