@@ -336,6 +336,36 @@ impl LabRuntime {
         self.steps - start_steps
     }
 
+    /// Runs until there are no runnable tasks in the scheduler.
+    ///
+    /// This is intentionally weaker than [`Self::run_until_quiescent`]:
+    /// - It does **not** require all tasks to complete.
+    /// - It does **not** require all obligations to be resolved.
+    ///
+    /// Use this when a test wants to "poll once" until the system is *idle*
+    /// (e.g. a task is blocked on a channel receive) without forcing full
+    /// completion and drain.
+    pub fn run_until_idle(&mut self) -> u64 {
+        let start_steps = self.steps;
+
+        loop {
+            if let Some(max) = self.config.max_steps {
+                if self.steps >= max {
+                    break;
+                }
+            }
+
+            let is_empty = self.scheduler.lock().unwrap().is_empty();
+            if is_empty {
+                break;
+            }
+
+            self.step();
+        }
+
+        self.steps - start_steps
+    }
+
     /// Runs until quiescent (or `max_steps` is reached) and returns a structured report.
     #[must_use]
     pub fn run_until_quiescent_with_report(&mut self) -> LabRunReport {
@@ -1099,6 +1129,12 @@ impl LabScheduler {
 
     fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+
+    /// Returns true if no tasks are currently scheduled.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.scheduled.is_empty()
     }
 
     /// Returns the configured cancel streak limit for lab scheduling.

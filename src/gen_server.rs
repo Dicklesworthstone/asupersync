@@ -65,7 +65,7 @@ use crate::channel::session::{self, TrackedOneshotPermit};
 use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::{CxInner, Outcome, TaskId};
+use crate::types::{CancelReason, CxInner, Outcome, TaskId};
 
 // ============================================================================
 // Cast overflow policy
@@ -82,12 +82,13 @@ use crate::types::{CxInner, Outcome, TaskId};
 /// The default policy is `Reject`, which returns `CastError::Full` to the
 /// sender. This is the safest option and forces callers to handle backpressure
 /// explicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CastOverflowPolicy {
     /// Reject the new cast when the mailbox is full.
     ///
     /// The sender receives `CastError::Full` and can decide what to do
     /// (retry, drop, log, etc.). No messages are lost silently.
+    #[default]
     Reject,
 
     /// Drop the oldest unprocessed message to make room for the new one.
@@ -96,12 +97,6 @@ pub enum CastOverflowPolicy {
     /// "latest-value-wins" patterns (e.g., sensor readings, UI state updates)
     /// where stale data is less valuable than fresh data.
     DropOldest,
-}
-
-impl Default for CastOverflowPolicy {
-    fn default() -> Self {
-        Self::Reject
-    }
 }
 
 impl std::fmt::Display for CastOverflowPolicy {
@@ -353,6 +348,8 @@ pub enum CallError {
     ServerStopped,
     /// The server did not reply (oneshot dropped).
     NoReply,
+    /// The call was cancelled.
+    Cancelled(CancelReason),
 }
 
 impl std::fmt::Display for CallError {
@@ -360,6 +357,7 @@ impl std::fmt::Display for CallError {
         match self {
             Self::ServerStopped => write!(f, "GenServer has stopped"),
             Self::NoReply => write!(f, "GenServer did not reply"),
+            Self::Cancelled(reason) => write!(f, "GenServer call cancelled: {reason}"),
         }
     }
 }
@@ -373,6 +371,8 @@ pub enum CastError {
     ServerStopped,
     /// The mailbox is full.
     Full,
+    /// The cast was cancelled.
+    Cancelled(CancelReason),
 }
 
 impl std::fmt::Display for CastError {
@@ -380,6 +380,7 @@ impl std::fmt::Display for CastError {
         match self {
             Self::ServerStopped => write!(f, "GenServer has stopped"),
             Self::Full => write!(f, "GenServer mailbox full"),
+            Self::Cancelled(reason) => write!(f, "GenServer cast cancelled: {reason}"),
         }
     }
 }
@@ -394,6 +395,13 @@ impl<S: GenServer> GenServerHandle<S> {
     /// if the server drops the reply without sending, the obligation token
     /// panics rather than silently losing the reply.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
+        if cx.checkpoint().is_err() {
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            return Err(CallError::Cancelled(reason));
+        }
+
         if matches!(
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
@@ -411,22 +419,43 @@ impl<S: GenServer> GenServerHandle<S> {
         if let Err(e) = self.sender.send(cx, envelope).await {
             // If the envelope couldn't be enqueued, we must abort the reply
             // obligation to avoid an obligation-token leak.
-            let envelope = match e {
-                mpsc::SendError::Disconnected(v)
-                | mpsc::SendError::Cancelled(v)
-                | mpsc::SendError::Full(v) => v,
+            let (envelope, was_cancelled) = match e {
+                mpsc::SendError::Cancelled(v) => (v, true),
+                mpsc::SendError::Disconnected(v) | mpsc::SendError::Full(v) => (v, false),
             };
             if let Envelope::Call { reply_permit, .. } = envelope {
                 let _aborted = reply_permit.abort();
             }
+            if was_cancelled {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                return Err(CallError::Cancelled(reason));
+            }
             return Err(CallError::ServerStopped);
         }
 
-        reply_rx.recv(cx).await.map_err(|_| CallError::NoReply)
+        match reply_rx.recv(cx).await {
+            Ok(v) => Ok(v),
+            Err(oneshot::RecvError::Closed) => Err(CallError::NoReply),
+            Err(oneshot::RecvError::Cancelled) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                Err(CallError::Cancelled(reason))
+            }
+        }
     }
 
     /// Send a cast (fire-and-forget) to the server.
     pub async fn cast(&self, cx: &Cx, msg: S::Cast) -> Result<(), CastError> {
+        if cx.checkpoint().is_err() {
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            return Err(CastError::Cancelled(reason));
+        }
+
         if matches!(
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
@@ -434,10 +463,15 @@ impl<S: GenServer> GenServerHandle<S> {
             return Err(CastError::ServerStopped);
         }
         let envelope = Envelope::Cast { msg };
-        self.sender
-            .send(cx, envelope)
-            .await
-            .map_err(|_| CastError::ServerStopped)
+        self.sender.send(cx, envelope).await.map_err(|e| match e {
+            mpsc::SendError::Cancelled(_) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                CastError::Cancelled(reason)
+            }
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => CastError::ServerStopped,
+        })
     }
 
     /// Try to send a cast without blocking.
@@ -454,14 +488,12 @@ impl<S: GenServer> GenServerHandle<S> {
         }
         let envelope = Envelope::Cast { msg };
         match self.overflow_policy {
-            CastOverflowPolicy::Reject => {
-                self.sender.try_send(envelope).map_err(|e| match e {
-                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
-                        CastError::ServerStopped
-                    }
-                    mpsc::SendError::Full(_) => CastError::Full,
-                })
-            }
+            CastOverflowPolicy::Reject => self.sender.try_send(envelope).map_err(|e| match e {
+                mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                    CastError::ServerStopped
+                }
+                mpsc::SendError::Full(_) => CastError::Full,
+            }),
             CastOverflowPolicy::DropOldest => {
                 match self.sender.send_evict_oldest(envelope) {
                     Ok(Some(_evicted)) => {
@@ -548,8 +580,21 @@ impl<S: GenServer> Clone for GenServerRef<S> {
 }
 
 impl<S: GenServer> GenServerRef<S> {
+    /// Returns the configured cast overflow policy for this server.
+    #[must_use]
+    pub const fn cast_overflow_policy(&self) -> CastOverflowPolicy {
+        self.overflow_policy
+    }
+
     /// Send a call to the server.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
+        if cx.checkpoint().is_err() {
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            return Err(CallError::Cancelled(reason));
+        }
+
         if matches!(
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
@@ -565,22 +610,43 @@ impl<S: GenServer> GenServerRef<S> {
         };
 
         if let Err(e) = self.sender.send(cx, envelope).await {
-            let envelope = match e {
-                mpsc::SendError::Disconnected(v)
-                | mpsc::SendError::Cancelled(v)
-                | mpsc::SendError::Full(v) => v,
+            let (envelope, was_cancelled) = match e {
+                mpsc::SendError::Cancelled(v) => (v, true),
+                mpsc::SendError::Disconnected(v) | mpsc::SendError::Full(v) => (v, false),
             };
             if let Envelope::Call { reply_permit, .. } = envelope {
                 let _aborted = reply_permit.abort();
             }
+            if was_cancelled {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                return Err(CallError::Cancelled(reason));
+            }
             return Err(CallError::ServerStopped);
         }
 
-        reply_rx.recv(cx).await.map_err(|_| CallError::NoReply)
+        match reply_rx.recv(cx).await {
+            Ok(v) => Ok(v),
+            Err(oneshot::RecvError::Closed) => Err(CallError::NoReply),
+            Err(oneshot::RecvError::Cancelled) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                Err(CallError::Cancelled(reason))
+            }
+        }
     }
 
     /// Send a cast to the server.
     pub async fn cast(&self, cx: &Cx, msg: S::Cast) -> Result<(), CastError> {
+        if cx.checkpoint().is_err() {
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            return Err(CastError::Cancelled(reason));
+        }
+
         if matches!(
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
@@ -588,10 +654,15 @@ impl<S: GenServer> GenServerRef<S> {
             return Err(CastError::ServerStopped);
         }
         let envelope = Envelope::Cast { msg };
-        self.sender
-            .send(cx, envelope)
-            .await
-            .map_err(|_| CastError::ServerStopped)
+        self.sender.send(cx, envelope).await.map_err(|e| match e {
+            mpsc::SendError::Cancelled(_) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                CastError::Cancelled(reason)
+            }
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => CastError::ServerStopped,
+        })
     }
 
     /// Try to send a cast without blocking.
@@ -606,24 +677,20 @@ impl<S: GenServer> GenServerRef<S> {
         }
         let envelope = Envelope::Cast { msg };
         match self.overflow_policy {
-            CastOverflowPolicy::Reject => {
-                self.sender.try_send(envelope).map_err(|e| match e {
-                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
-                        CastError::ServerStopped
-                    }
-                    mpsc::SendError::Full(_) => CastError::Full,
-                })
-            }
-            CastOverflowPolicy::DropOldest => {
-                match self.sender.send_evict_oldest(envelope) {
-                    Ok(Some(_evicted)) => Ok(()),
-                    Ok(None) => Ok(()),
-                    Err(mpsc::SendError::Disconnected(_)) => Err(CastError::ServerStopped),
-                    Err(mpsc::SendError::Full(_) | mpsc::SendError::Cancelled(_)) => {
-                        unreachable!("send_evict_oldest never returns Full or Cancelled")
-                    }
+            CastOverflowPolicy::Reject => self.sender.try_send(envelope).map_err(|e| match e {
+                mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                    CastError::ServerStopped
                 }
-            }
+                mpsc::SendError::Full(_) => CastError::Full,
+            }),
+            CastOverflowPolicy::DropOldest => match self.sender.send_evict_oldest(envelope) {
+                Ok(Some(_evicted)) => Ok(()),
+                Ok(None) => Ok(()),
+                Err(mpsc::SendError::Disconnected(_)) => Err(CastError::ServerStopped),
+                Err(mpsc::SendError::Full(_) | mpsc::SendError::Cancelled(_)) => {
+                    unreachable!("send_evict_oldest never returns Full or Cancelled")
+                }
+            },
         }
     }
 
@@ -855,7 +922,9 @@ mod tests {
     use crate::runtime::state::RuntimeState;
     use crate::types::policy::FailFast;
     use crate::types::Budget;
+    use crate::types::CancelKind;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -991,6 +1060,164 @@ mod tests {
         assert_eq!(result, 5);
 
         crate::test_complete!("gen_server_spawn_and_call");
+    }
+
+    #[test]
+    fn gen_server_call_cancellation_is_deterministic() {
+        init_test("gen_server_call_cancellation_is_deterministic");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+
+        let client_cx_cell: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
+        let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
+
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                *client_cx_cell_for_task.lock().expect("lock poisoned") = Some(cx.clone());
+                server_ref.call(&cx, CounterCall::Get).await
+            })
+            .unwrap();
+        let client_task_id = client_handle.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, client_stored);
+
+        // Poll the client once: it should enqueue the call and then block waiting for reply.
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_idle();
+
+        // Cancel the client deterministically, then poll it again to observe the cancellation.
+        let client_cx = client_cx_cell
+            .lock()
+            .expect("lock poisoned")
+            .clone()
+            .expect("client cx published");
+        client_cx.cancel_with(CancelKind::User, Some("gen_server call cancelled"));
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_idle();
+
+        let result =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        match result {
+            Ok(_) => panic!("expected cancellation, got Ok"),
+            Err(CallError::Cancelled(reason)) => {
+                assert_eq!(reason.kind, CancelKind::User);
+                assert_eq!(reason.message, Some("gen_server call cancelled"));
+            }
+            Err(other) => panic!("expected CallError::Cancelled, got {other:?}"),
+        }
+
+        // Cleanup: disconnect the server and let it drain the queued call.
+        drop(handle);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("gen_server_call_cancellation_is_deterministic");
+    }
+
+    #[test]
+    fn gen_server_cast_cancellation_is_deterministic() {
+        init_test("gen_server_cast_cancellation_is_deterministic");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        // Use a capacity-1 mailbox so we can deterministically block a second cast.
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 1)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        server_ref
+            .try_cast(CounterCast::Reset)
+            .expect("pre-fill cast");
+
+        let client_cx_cell: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
+        let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
+        let server_ref_for_task = server_ref;
+
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                *client_cx_cell_for_task.lock().expect("lock poisoned") = Some(cx.clone());
+                server_ref_for_task.cast(&cx, CounterCast::Reset).await
+            })
+            .unwrap();
+        let client_task_id = client_handle.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, client_stored);
+
+        // Poll the client once: it should block waiting for mailbox capacity.
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_idle();
+
+        let client_cx = client_cx_cell
+            .lock()
+            .expect("lock poisoned")
+            .clone()
+            .expect("client cx published");
+        client_cx.cancel_with(CancelKind::User, Some("gen_server cast cancelled"));
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_idle();
+
+        let result =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        match result {
+            Ok(()) => panic!("expected cancellation, got Ok"),
+            Err(CastError::Cancelled(reason)) => {
+                assert_eq!(reason.kind, CancelKind::User);
+                assert_eq!(reason.message, Some("gen_server cast cancelled"));
+            }
+            Err(other) => panic!("expected CastError::Cancelled, got {other:?}"),
+        }
+
+        // Cleanup: disconnect the server and let it drain the mailbox.
+        drop(handle);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("gen_server_cast_cancellation_is_deterministic");
     }
 
     #[test]
@@ -1203,6 +1430,181 @@ mod tests {
         assert_eq!(result1, result2, "deterministic replay");
 
         crate::test_complete!("gen_server_deterministic_replay");
+    }
+
+    // ---- DropOldest GenServer for backpressure tests ----
+
+    /// A counter that uses DropOldest overflow policy.
+    struct DropOldestCounter {
+        count: u64,
+    }
+
+    /// Cast type that carries an identifiable value for eviction testing.
+    #[derive(Debug, Clone)]
+    enum TaggedCast {
+        Set(u64),
+    }
+
+    impl GenServer for DropOldestCounter {
+        type Call = CounterCall;
+        type Reply = u64;
+        type Cast = TaggedCast;
+
+        fn cast_overflow_policy(&self) -> CastOverflowPolicy {
+            CastOverflowPolicy::DropOldest
+        }
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            request: CounterCall,
+            reply: Reply<u64>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            match request {
+                CounterCall::Get => {
+                    let _ = reply.send(self.count);
+                }
+                CounterCall::Add(n) => {
+                    self.count += n;
+                    let _ = reply.send(self.count);
+                }
+            }
+            Box::pin(async {})
+        }
+
+        fn handle_cast(
+            &mut self,
+            _cx: &Cx,
+            msg: TaggedCast,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            match msg {
+                TaggedCast::Set(v) => self.count = v,
+            }
+            Box::pin(async {})
+        }
+    }
+
+    #[test]
+    fn gen_server_drop_oldest_policy_accessor() {
+        init_test("gen_server_drop_oldest_policy_accessor");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut state, &cx, DropOldestCounter { count: 0 }, 4)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        assert_eq!(
+            handle.cast_overflow_policy(),
+            CastOverflowPolicy::DropOldest
+        );
+
+        let server_ref = handle.server_ref();
+        assert_eq!(
+            server_ref.cast_overflow_policy(),
+            CastOverflowPolicy::DropOldest
+        );
+
+        crate::test_complete!("gen_server_drop_oldest_policy_accessor");
+    }
+
+    #[test]
+    fn gen_server_drop_oldest_evicts_when_full() {
+        init_test("gen_server_drop_oldest_evicts_when_full");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        // Mailbox capacity = 2
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut state, &cx, DropOldestCounter { count: 0 }, 2)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        // Fill the mailbox (capacity 2)
+        handle.try_cast(TaggedCast::Set(10)).unwrap();
+        handle.try_cast(TaggedCast::Set(20)).unwrap();
+
+        // This should succeed by evicting the oldest (Set(10))
+        handle.try_cast(TaggedCast::Set(30)).unwrap();
+
+        // And again — evicts Set(20), mailbox now has [Set(30), Set(40)]
+        handle.try_cast(TaggedCast::Set(40)).unwrap();
+
+        crate::test_complete!("gen_server_drop_oldest_evicts_when_full");
+    }
+
+    #[test]
+    fn gen_server_reject_policy_returns_full() {
+        init_test("gen_server_reject_policy_returns_full");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        // Default policy (Reject), capacity = 2
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut state, &cx, Counter { count: 0 }, 2)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        assert_eq!(handle.cast_overflow_policy(), CastOverflowPolicy::Reject);
+
+        // Fill the mailbox
+        handle.try_cast(CounterCast::Reset).unwrap();
+        handle.try_cast(CounterCast::Reset).unwrap();
+
+        // Third should fail with Full
+        let err = handle.try_cast(CounterCast::Reset).unwrap_err();
+        assert!(matches!(err, CastError::Full), "expected Full, got {err:?}");
+
+        crate::test_complete!("gen_server_reject_policy_returns_full");
+    }
+
+    #[test]
+    fn gen_server_drop_oldest_ref_also_evicts() {
+        init_test("gen_server_drop_oldest_ref_also_evicts");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut state, &cx, DropOldestCounter { count: 0 }, 2)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        let server_ref = handle.server_ref();
+
+        // Fill via ref
+        server_ref.try_cast(TaggedCast::Set(1)).unwrap();
+        server_ref.try_cast(TaggedCast::Set(2)).unwrap();
+
+        // Evict oldest via ref — should succeed
+        server_ref.try_cast(TaggedCast::Set(3)).unwrap();
+
+        crate::test_complete!("gen_server_drop_oldest_ref_also_evicts");
+    }
+
+    #[test]
+    fn gen_server_default_overflow_policy_is_reject() {
+        init_test("gen_server_default_overflow_policy_is_reject");
+
+        assert_eq!(CastOverflowPolicy::default(), CastOverflowPolicy::Reject);
+
+        // Verify Counter (which doesn't override) uses Reject
+        let counter = Counter { count: 0 };
+        assert_eq!(counter.cast_overflow_policy(), CastOverflowPolicy::Reject);
+
+        crate::test_complete!("gen_server_default_overflow_policy_is_reject");
     }
 
     #[test]

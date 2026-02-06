@@ -532,7 +532,7 @@ impl TokenKind for AckKind {
 }
 
 /// Marker type for [`ObligationKind::Lease`].
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum LeaseKind {}
 impl sealed::Sealed for LeaseKind {}
 impl TokenKind for LeaseKind {
