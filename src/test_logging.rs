@@ -1382,6 +1382,73 @@ impl ReproManifest {
         self
     }
 
+    /// Set the entropy seed derived from the root seed.
+    #[must_use]
+    pub fn with_entropy_seed(mut self, entropy_seed: u64) -> Self {
+        self.entropy_seed = Some(entropy_seed);
+        self
+    }
+
+    /// Set the configuration hash used for this run.
+    #[must_use]
+    pub fn with_config_hash(mut self, config_hash: &str) -> Self {
+        self.config_hash = Some(config_hash.to_string());
+        self
+    }
+
+    /// Set the trace fingerprint for this run.
+    #[must_use]
+    pub fn with_trace_fingerprint(mut self, trace_fingerprint: &str) -> Self {
+        self.trace_fingerprint = Some(trace_fingerprint.to_string());
+        self
+    }
+
+    /// Set the input digest for this run.
+    #[must_use]
+    pub fn with_input_digest(mut self, input_digest: &str) -> Self {
+        self.input_digest = Some(input_digest.to_string());
+        self
+    }
+
+    /// Set oracle violations recorded during this run.
+    #[must_use]
+    pub fn with_oracle_violations<I, S>(mut self, violations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.oracle_violations = violations.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the subsystem under test.
+    #[must_use]
+    pub fn with_subsystem(mut self, subsystem: &str) -> Self {
+        self.subsystem = Some(subsystem.to_string());
+        self
+    }
+
+    /// Set the invariant under test.
+    #[must_use]
+    pub fn with_invariant(mut self, invariant: &str) -> Self {
+        self.invariant = Some(invariant.to_string());
+        self
+    }
+
+    /// Set the relative path to the trace file.
+    #[must_use]
+    pub fn with_trace_file(mut self, trace_file: &str) -> Self {
+        self.trace_file = Some(trace_file.to_string());
+        self
+    }
+
+    /// Set the relative path to the input file.
+    #[must_use]
+    pub fn with_input_file(mut self, input_file: &str) -> Self {
+        self.input_file = Some(input_file.to_string());
+        self
+    }
+
     /// Serialize to pretty-printed JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
@@ -3547,6 +3614,32 @@ mod tests {
         assert_eq!(manifest.subsystem.as_deref(), Some("obligation"));
         assert!(!manifest.passed);
         crate::test_complete!("test_repro_manifest_from_context");
+    }
+
+    #[test]
+    fn test_repro_manifest_helper_setters() {
+        init_test("test_repro_manifest_helper_setters");
+        let manifest = ReproManifest::new(0xBEEF, "helper_test", false)
+            .with_entropy_seed(0xCAFE)
+            .with_config_hash("cfg_hash")
+            .with_trace_fingerprint("trace_fp")
+            .with_input_digest("input_digest")
+            .with_oracle_violations(["oracle_a", "oracle_b"])
+            .with_subsystem("scheduler")
+            .with_invariant("no_leaks")
+            .with_trace_file("traces/run.jsonl")
+            .with_input_file("inputs/failing.json");
+
+        assert_eq!(manifest.entropy_seed, Some(0xCAFE));
+        assert_eq!(manifest.config_hash.as_deref(), Some("cfg_hash"));
+        assert_eq!(manifest.trace_fingerprint.as_deref(), Some("trace_fp"));
+        assert_eq!(manifest.input_digest.as_deref(), Some("input_digest"));
+        assert_eq!(manifest.oracle_violations.len(), 2);
+        assert_eq!(manifest.subsystem.as_deref(), Some("scheduler"));
+        assert_eq!(manifest.invariant.as_deref(), Some("no_leaks"));
+        assert_eq!(manifest.trace_file.as_deref(), Some("traces/run.jsonl"));
+        assert_eq!(manifest.input_file.as_deref(), Some("inputs/failing.json"));
+        crate::test_complete!("test_repro_manifest_helper_setters");
     }
 
     #[test]

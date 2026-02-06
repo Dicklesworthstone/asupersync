@@ -256,6 +256,29 @@ save dir, comparison settings).
 }
 ```
 
+### Sample Smoke Report (Criterion)
+
+```json
+{
+  "generated_at": "2026-02-03T19:00:00Z",
+  "command": "cargo bench --bench phase0_baseline",
+  "seed": "3735928559",
+  "criterion_dir": "target/criterion",
+  "baseline_path": "baselines/criterion/baseline_20260203_190000.json",
+  "latest_path": "baselines/criterion/baseline_latest.json",
+  "git_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "env": {
+    "CI": "true",
+    "RUSTFLAGS": "-C force-frame-pointers=yes"
+  },
+  "system": {
+    "os": "linux",
+    "arch": "x86_64",
+    "platform": "Linux-6.x-x86_64"
+  }
+}
+```
+
 ### Perf Notes Checklist
 
 Always attach:

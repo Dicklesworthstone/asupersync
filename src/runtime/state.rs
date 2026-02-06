@@ -4149,6 +4149,124 @@ mod tests {
     }
 
     #[test]
+    fn cancel_request_respects_chain_depth_limit() {
+        init_test("cancel_request_respects_chain_depth_limit");
+        let mut state = RuntimeState::new();
+        state.set_cancel_attribution_config(CancelAttributionConfig::new(2, usize::MAX));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let mut current = root;
+        for _ in 0..4 {
+            current = create_child_region(&mut state, current);
+        }
+        let leaf_task = insert_task(&mut state, current);
+
+        let _ = state.cancel_request(root, &CancelReason::timeout(), None);
+
+        let leaf_record = state
+            .regions
+            .get(current.arena_index())
+            .expect("leaf missing");
+        let binding = leaf_record.cancel_reason();
+        let leaf_reason = binding.as_ref().expect("reason missing");
+        crate::assert_with_log!(
+            leaf_reason.chain_depth() <= 2,
+            "leaf chain depth bounded",
+            2,
+            leaf_reason.chain_depth()
+        );
+        crate::assert_with_log!(
+            leaf_reason.any_truncated(),
+            "leaf reason truncated",
+            true,
+            leaf_reason.any_truncated()
+        );
+
+        let leaf_task_record = state
+            .tasks
+            .get(leaf_task.arena_index())
+            .expect("task missing");
+        match &leaf_task_record.state {
+            TaskState::CancelRequested { reason, .. } => {
+                crate::assert_with_log!(
+                    reason.chain_depth() <= 2,
+                    "leaf task chain depth bounded",
+                    2,
+                    reason.chain_depth()
+                );
+                crate::assert_with_log!(
+                    reason.any_truncated(),
+                    "leaf task reason truncated",
+                    true,
+                    reason.any_truncated()
+                );
+            }
+            other => panic!("expected CancelRequested, got {other:?}"),
+        }
+
+        crate::test_complete!("cancel_request_respects_chain_depth_limit");
+    }
+
+    #[test]
+    fn cancel_request_truncates_large_tree() {
+        init_test("cancel_request_truncates_large_tree");
+        let mut state = RuntimeState::new();
+        state.set_cancel_attribution_config(CancelAttributionConfig::new(4, 256));
+
+        let root = state.create_root_region(Budget::INFINITE);
+        let mut current = root;
+        for _ in 0..64 {
+            current = create_child_region(&mut state, current);
+        }
+        let leaf_task = insert_task(&mut state, current);
+
+        let _ = state.cancel_request(root, &CancelReason::shutdown(), None);
+
+        let leaf_record = state
+            .regions
+            .get(current.arena_index())
+            .expect("leaf missing");
+        let binding = leaf_record.cancel_reason();
+        let leaf_reason = binding.as_ref().expect("reason missing");
+        crate::assert_with_log!(
+            leaf_reason.chain_depth() <= 4,
+            "large tree chain depth bounded",
+            4,
+            leaf_reason.chain_depth()
+        );
+        crate::assert_with_log!(
+            leaf_reason.any_truncated(),
+            "large tree reason truncated",
+            true,
+            leaf_reason.any_truncated()
+        );
+
+        let leaf_task_record = state
+            .tasks
+            .get(leaf_task.arena_index())
+            .expect("task missing");
+        match &leaf_task_record.state {
+            TaskState::CancelRequested { reason, .. } => {
+                crate::assert_with_log!(
+                    reason.chain_depth() <= 4,
+                    "large tree task chain depth bounded",
+                    4,
+                    reason.chain_depth()
+                );
+                crate::assert_with_log!(
+                    reason.any_truncated(),
+                    "large tree task reason truncated",
+                    true,
+                    reason.any_truncated()
+                );
+            }
+            other => panic!("expected CancelRequested, got {other:?}"),
+        }
+
+        crate::test_complete!("cancel_request_truncates_large_tree");
+    }
+
+    #[test]
     fn cancel_request_strengthens_existing_reason() {
         init_test("cancel_request_strengthens_existing_reason");
         let mut state = RuntimeState::new();

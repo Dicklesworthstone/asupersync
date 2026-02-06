@@ -29,6 +29,82 @@ cargo test cancellation_conformance
 - Fuzz tests: `fuzz/` (cargo-fuzz targets + corpora)
 - Property tests: see `property-tests.yml` CI workflow and `tests/*.rs` files
 
+## Artifact Bundle Layout + Samples (bd-1t58q)
+
+When `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set, failed tests emit a deterministic
+artifact bundle under a sanitized test name directory. The harness also writes
+a per-test JSON summary into the root artifact directory.
+
+Failure artifacts (from `TestHarness::finish`):
+- `event_log.txt`: human-readable event log summary
+- `failed_assertions.json`: serialized list of failed assertions
+- `repro_manifest.json`: deterministic repro manifest (see schema below)
+
+Environment metadata (optional, from `TestEnvironment::write_metadata_artifact`):
+- `environment.json`: OS/arch/seed/ports/services snapshot
+
+Summary (always written when artifacts are enabled):
+- `<test_name>_summary.json`: per-test summary and event stats
+
+Example bundle layout:
+
+```text
+$ASUPERSYNC_TEST_ARTIFACTS_DIR/
+  cancellation_conformance/
+    event_log.txt
+    failed_assertions.json
+    repro_manifest.json
+    environment.json
+  cancellation_conformance_summary.json
+```
+
+Example structured log entry (start/end markers include the same context):
+
+```text
+INFO test_start test_id="cancellation_conformance" seed=0xDEADBEEF subsystem="cancellation" invariant="losers_drained"
+```
+
+Repro manifest schema (current fields):
+- `schema_version` (u32)
+- `seed` (u64, root seed)
+- `scenario_id` (string)
+- `entropy_seed` (optional u64)
+- `config_hash` (optional string)
+- `trace_fingerprint` (optional string)
+- `input_digest` (optional string)
+- `oracle_violations` (string array)
+- `passed` (bool)
+- `subsystem` (optional string)
+- `invariant` (optional string)
+- `trace_file` (optional string)
+- `input_file` (optional string)
+- `env_snapshot` (array of key/value tuples)
+- `phases_executed` (string array)
+- `failure_reason` (optional string)
+
+Sample `repro_manifest.json`:
+
+```json
+{
+  "schema_version": 1,
+  "seed": 57005,
+  "scenario_id": "cancellation_conformance",
+  "entropy_seed": 48879,
+  "config_hash": "cfg_hash_v1",
+  "trace_fingerprint": "trace_fp_v1",
+  "input_digest": "input_digest_v1",
+  "oracle_violations": ["losers_drained", "no_obligation_leaks"],
+  "passed": false,
+  "subsystem": "cancellation",
+  "invariant": "losers_drained",
+  "trace_file": "traces/run.jsonl",
+  "input_file": "inputs/failing.json",
+  "env_snapshot": [["ASUPERSYNC_LAB", "1"], ["RUST_LOG", "info"]],
+  "phases_executed": ["setup", "execute", "verify"],
+  "failure_reason": "losers_drained: expected=true, actual=false"
+}
+```
+
 ## Coverage Completeness Plan (bd-2c7u)
 
 This section defines what "complete" means for testing coverage and logging.
