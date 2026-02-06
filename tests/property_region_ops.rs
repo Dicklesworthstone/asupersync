@@ -1226,8 +1226,7 @@ pub fn assert_all_invariants(harness: &TestHarness) {
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        assert!(
-            false,
+        panic!(
             "Region tree invariant violations detected:\n{}",
             messages.join("\n")
         );
@@ -1291,8 +1290,7 @@ pub fn assert_all_invariants_tracked(harness: &TestHarness, tracker: &mut Invari
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-        assert!(
-            false,
+        panic!(
             "Region tree invariant violations detected:\n{}",
             messages.join("\n")
         );
