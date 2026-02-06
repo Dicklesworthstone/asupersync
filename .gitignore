@@ -2,6 +2,7 @@
 /target/
 **/target/
 target-*/
+target_*/
 Cargo.lock
 
 # IDE

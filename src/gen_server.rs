@@ -1735,6 +1735,7 @@ mod tests {
         assert!(seen[0].contains("Down"));
         assert!(seen[1].contains("Exit"));
         assert!(seen[2].contains("Timeout"));
+        drop(seen);
 
         crate::test_complete!("gen_server_handle_info_receives_system_messages");
     }
@@ -1748,9 +1749,9 @@ mod tests {
             let cx = Cx::for_testing();
             let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
-            let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             let server = InfoRecorder {
-                seen: Arc::clone(&seen),
+                seen: Arc::clone(&events),
             };
 
             let (handle, stored) = scope
@@ -1775,8 +1776,8 @@ mod tests {
                         .unwrap();
                 })
                 .unwrap();
-            let client_a_id = client_a.task_id();
-            runtime.state.store_spawned_task(client_a_id, stored_a);
+            let task_id_a = client_a.task_id();
+            runtime.state.store_spawned_task(task_id_a, stored_a);
 
             let server_ref_b = handle.server_ref();
             let (client_b, stored_b) = scope
@@ -1793,12 +1794,12 @@ mod tests {
                         .unwrap();
                 })
                 .unwrap();
-            let client_b_id = client_b.task_id();
-            runtime.state.store_spawned_task(client_b_id, stored_b);
+            let task_id_b = client_b.task_id();
+            runtime.state.store_spawned_task(task_id_b, stored_b);
 
             // Let clients enqueue, then let the server drain.
-            runtime.scheduler.lock().unwrap().schedule(client_a_id, 0);
-            runtime.scheduler.lock().unwrap().schedule(client_b_id, 0);
+            runtime.scheduler.lock().unwrap().schedule(task_id_a, 0);
+            runtime.scheduler.lock().unwrap().schedule(task_id_b, 0);
             runtime
                 .scheduler
                 .lock()
@@ -1814,7 +1815,7 @@ mod tests {
                 .schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let out = seen.lock().expect("lock poisoned").clone();
+            let out = events.lock().expect("lock poisoned").clone();
             out
         }
 
