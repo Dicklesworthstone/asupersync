@@ -211,6 +211,10 @@ fn per_worker_metrics_all_workers_active() {
     let tasks_per_lane = 200;
     let mut scheduler = ThreeLaneScheduler::new(num_workers, &state);
 
+    // Start workers first, then inject work. Inject-before-spawn can be drained
+    // by whichever worker happens to start first, leaving others with 0 dispatches.
+    let handles = spawn_workers(&mut scheduler);
+
     let cancel_ids = create_n_tasks(&state, region, tasks_per_lane);
     let ready_ids = create_n_tasks(&state, region, tasks_per_lane);
 
@@ -221,7 +225,9 @@ fn per_worker_metrics_all_workers_active() {
         scheduler.inject_ready(*id, 50);
     }
 
-    let handles = spawn_workers(&mut scheduler);
+    // Ensure any parked workers observe the backlog promptly.
+    scheduler.wake_all();
+
     std::thread::sleep(Duration::from_secs(2));
     scheduler.shutdown();
 
