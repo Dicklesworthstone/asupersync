@@ -308,6 +308,12 @@ pub struct SupervisionConfig {
 
     /// What to do when restart budget is exhausted.
     pub escalation: EscalationPolicy,
+
+    /// Optional storm detection threshold (restarts/second).
+    ///
+    /// When set, a [`RestartTracker`] created from this config will include
+    /// intensity monitoring and e-process-based storm detection.
+    pub storm_threshold: Option<f64>,
 }
 
 impl Default for SupervisionConfig {
@@ -318,6 +324,7 @@ impl Default for SupervisionConfig {
             restart_window: Duration::from_secs(60),
             backoff: BackoffStrategy::default(),
             escalation: EscalationPolicy::Stop,
+            storm_threshold: None,
         }
     }
 }
@@ -332,7 +339,15 @@ impl SupervisionConfig {
             restart_window,
             backoff: BackoffStrategy::default(),
             escalation: EscalationPolicy::Stop,
+            storm_threshold: None,
         }
+    }
+
+    /// Enable storm detection with the given threshold (restarts/second).
+    #[must_use]
+    pub fn with_storm_threshold(mut self, threshold: f64) -> Self {
+        self.storm_threshold = Some(threshold);
+        self
     }
 
     /// Set the restart policy.
@@ -366,6 +381,21 @@ impl SupervisionConfig {
     #[must_use]
     pub fn rest_for_one(max_restarts: u32, restart_window: Duration) -> Self {
         Self::new(max_restarts, restart_window).with_restart_policy(RestartPolicy::RestForOne)
+    }
+
+    /// Build a [`RestartTracker`] from this supervision config.
+    ///
+    /// The tracker combines sliding-window counting, backoff, and optional
+    /// storm detection into a single coordinator.
+    #[must_use]
+    pub fn restart_tracker(&self) -> RestartTracker {
+        let restart = RestartConfig::new(self.max_restarts, self.restart_window)
+            .with_backoff(self.backoff.clone());
+        let mut tracker_config = RestartTrackerConfig::from_restart(restart);
+        if let Some(threshold) = self.storm_threshold {
+            tracker_config = tracker_config.with_storm_detection(threshold);
+        }
+        RestartTracker::new(tracker_config)
     }
 }
 
@@ -1704,6 +1734,241 @@ impl std::fmt::Display for StormMonitorSnapshot {
             self.peak_e_value,
             self.alert_count,
         )
+    }
+}
+
+// =============================================================================
+// Integrated Restart Tracker (bd-2106k)
+//
+// Combines RestartHistory (sliding-window + budget checks),
+// RestartIntensityWindow (restarts/second), and RestartStormMonitor
+// (e-process alerting) into a single coordinator that the supervisor
+// runtime can use as one unit.
+//
+// All timestamps are virtual (nanosecond u64), making the tracker fully
+// deterministic under lab-time scheduling.
+// =============================================================================
+
+/// Configuration for the integrated restart tracker.
+///
+/// Bundles `RestartConfig` (window + budget integration) with optional
+/// storm detection parameters.
+#[derive(Debug, Clone)]
+pub struct RestartTrackerConfig {
+    /// Core restart config (max_restarts, window, backoff, budget fields).
+    pub restart: RestartConfig,
+    /// Storm detection threshold in restarts/second.
+    ///
+    /// When `Some`, a [`RestartIntensityWindow`] and [`RestartStormMonitor`]
+    /// are created and fed on every recorded restart.
+    pub storm_threshold: Option<f64>,
+    /// E-process monitor config (only used when `storm_threshold` is set).
+    pub storm_monitor: StormMonitorConfig,
+}
+
+impl RestartTrackerConfig {
+    /// Create a tracker config from a restart config with no storm detection.
+    #[must_use]
+    pub fn from_restart(restart: RestartConfig) -> Self {
+        Self {
+            restart,
+            storm_threshold: None,
+            storm_monitor: StormMonitorConfig::default(),
+        }
+    }
+
+    /// Enable storm detection with the given threshold and default e-process config.
+    #[must_use]
+    pub fn with_storm_detection(mut self, threshold: f64) -> Self {
+        self.storm_threshold = Some(threshold);
+        self
+    }
+
+    /// Set a custom e-process monitor config for storm detection.
+    #[must_use]
+    pub fn with_storm_monitor(mut self, config: StormMonitorConfig) -> Self {
+        self.storm_monitor = config;
+        self
+    }
+}
+
+/// Outcome of a restart evaluation by the [`RestartTracker`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum RestartVerdict {
+    /// Restart is allowed. Includes the backoff delay (if any) and
+    /// which attempt this represents.
+    Allowed {
+        /// 1-indexed attempt number within the current window.
+        attempt: u32,
+        /// Backoff delay before the restart should begin.
+        delay: Option<Duration>,
+    },
+    /// Restart was denied by the sliding window or budget.
+    Denied {
+        /// The reason the restart was denied.
+        refusal: BudgetRefusal,
+    },
+}
+
+impl RestartVerdict {
+    /// Returns `true` if the restart was allowed.
+    #[must_use]
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed { .. })
+    }
+}
+
+impl Eq for RestartVerdict {}
+
+/// Integrated restart tracker combining window counting, budget checks,
+/// intensity monitoring, and e-process storm detection.
+///
+/// This is the primary interface a supervisor uses to record restarts
+/// and evaluate whether a new restart should be allowed.
+///
+/// # Determinism
+///
+/// All timestamps are virtual (`u64` nanoseconds). The tracker produces
+/// identical verdicts given identical event sequences, regardless of
+/// wall-clock timing. Safe for use under `LabRuntime`.
+///
+/// # Bead
+///
+/// bd-2106k | Parent: bd-h9lhl
+#[derive(Debug)]
+pub struct RestartTracker {
+    /// Core sliding-window history + budget evaluation.
+    history: RestartHistory,
+    /// Intensity monitor (present when storm detection enabled).
+    intensity: Option<RestartIntensityWindow>,
+    /// E-process storm monitor (present when storm detection enabled).
+    storm: Option<RestartStormMonitor>,
+}
+
+impl RestartTracker {
+    /// Create a new tracker from the given config.
+    #[must_use]
+    pub fn new(config: RestartTrackerConfig) -> Self {
+        let window = config.restart.window;
+        let (intensity, storm) = match config.storm_threshold {
+            Some(threshold) => (
+                Some(RestartIntensityWindow::new(window, threshold)),
+                Some(RestartStormMonitor::new(config.storm_monitor)),
+            ),
+            None => (None, None),
+        };
+        let history = RestartHistory::new(config.restart);
+        Self {
+            history,
+            intensity,
+            storm,
+        }
+    }
+
+    /// Create a tracker from just a `RestartConfig` (no storm detection).
+    #[must_use]
+    pub fn from_restart_config(config: RestartConfig) -> Self {
+        Self::new(RestartTrackerConfig::from_restart(config))
+    }
+
+    /// Evaluate whether a restart is allowed at the given virtual time.
+    ///
+    /// Does **not** record the restart — call [`record`](Self::record)
+    /// after the restart actually begins.
+    #[must_use]
+    pub fn evaluate(&self, now: u64) -> RestartVerdict {
+        if !self.history.can_restart(now) {
+            return RestartVerdict::Denied {
+                refusal: BudgetRefusal::WindowExhausted {
+                    max_restarts: self.history.config().max_restarts,
+                    window: self.history.config().window,
+                },
+            };
+        }
+        let attempt = self.history.recent_restart_count(now) as u32 + 1;
+        let delay = self.history.next_delay(now);
+        RestartVerdict::Allowed { attempt, delay }
+    }
+
+    /// Evaluate whether a restart is allowed, considering budget constraints.
+    #[must_use]
+    pub fn evaluate_with_budget(&self, now: u64, budget: &Budget) -> RestartVerdict {
+        if let Err(refusal) = self.history.can_restart_with_budget(now, budget) {
+            return RestartVerdict::Denied { refusal };
+        }
+        let attempt = self.history.recent_restart_count(now) as u32 + 1;
+        let delay = self.history.next_delay(now);
+        RestartVerdict::Allowed { attempt, delay }
+    }
+
+    /// Record a restart at the given virtual time.
+    ///
+    /// Updates the sliding window, intensity monitor, and storm detector.
+    pub fn record(&mut self, now: u64) {
+        self.history.record_restart(now);
+        if let Some(ref mut intensity) = self.intensity {
+            intensity.record(now);
+            if let Some(ref mut storm) = self.storm {
+                storm.observe_from_window(intensity, now);
+            }
+        }
+    }
+
+    /// Number of restarts within the current window.
+    #[must_use]
+    pub fn recent_count(&self, now: u64) -> usize {
+        self.history.recent_restart_count(now)
+    }
+
+    /// Restart intensity (restarts per second) over the window.
+    ///
+    /// Returns `None` if storm detection is not enabled.
+    #[must_use]
+    pub fn intensity(&self, now: u64) -> Option<f64> {
+        self.intensity.as_ref().map(|w| w.intensity(now))
+    }
+
+    /// Whether a restart storm is currently detected.
+    ///
+    /// Returns `false` if storm detection is not enabled.
+    #[must_use]
+    pub fn is_storm(&self) -> bool {
+        self.storm
+            .as_ref()
+            .is_some_and(RestartStormMonitor::is_alert)
+    }
+
+    /// Whether a storm is detected by the intensity window threshold.
+    ///
+    /// This is the simpler threshold check (not the e-process).
+    /// Returns `false` if storm detection is not enabled.
+    #[must_use]
+    pub fn is_intensity_storm(&self, now: u64) -> bool {
+        self.intensity.as_ref().is_some_and(|w| w.is_storm(now))
+    }
+
+    /// Access the underlying restart history.
+    #[must_use]
+    pub fn history(&self) -> &RestartHistory {
+        &self.history
+    }
+
+    /// Access the storm monitor snapshot (if enabled).
+    #[must_use]
+    pub fn storm_snapshot(&self) -> Option<StormMonitorSnapshot> {
+        self.storm.as_ref().map(RestartStormMonitor::snapshot)
+    }
+
+    /// Reset all state (useful after escalation/recovery).
+    pub fn reset(&mut self) {
+        self.history = RestartHistory::new(self.history.config().clone());
+        if let Some(ref mut intensity) = self.intensity {
+            *intensity =
+                RestartIntensityWindow::new(intensity.window(), intensity.storm_threshold());
+        }
+        if let Some(ref mut storm) = self.storm {
+            storm.reset();
+        }
     }
 }
 
@@ -6949,8 +7214,8 @@ mod tests {
         });
 
         // 1000 observations at or below expected rate.
-        for i in 0u64..1000 {
-            let intensity = ((i % 10) + 1) as f64 * 0.1; // 0.1 to 1.0
+        for i in 0u32..1000 {
+            let intensity = f64::from((i % 10) + 1) * 0.1; // 0.1 to 1.0
             monitor.observe_intensity(intensity);
         }
 
@@ -7089,7 +7354,6 @@ mod tests {
     #[test]
     fn obs_eprocess_alert_transitions_monotone() {
         init_test("obs_eprocess_alert_transitions_monotone");
-        use crate::obligation::eprocess::AlertState;
 
         let mut monitor = RestartStormMonitor::new(StormMonitorConfig {
             alpha: 0.01,
@@ -7104,15 +7368,15 @@ mod tests {
 
         for i in 0..50 {
             // Gradually increasing intensity simulates escalation.
-            let intensity = 0.01 + (i as f64 * 0.1);
+            let intensity = f64::from(i).mul_add(0.1, 0.01);
             let state = monitor.observe_intensity(intensity);
 
             match state {
-                AlertState::Watching if !saw_watching => {
+                crate::obligation::eprocess::AlertState::Watching if !saw_watching => {
                     saw_watching = true;
                     transitions.push("watching");
                 }
-                AlertState::Alert if !saw_alert => {
+                crate::obligation::eprocess::AlertState::Alert if !saw_alert => {
                     saw_alert = true;
                     transitions.push("alert");
                 }
