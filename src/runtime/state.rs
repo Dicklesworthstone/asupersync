@@ -739,10 +739,7 @@ impl RuntimeState {
 
     /// Creates a root region and returns its ID.
     pub fn create_root_region(&mut self, budget: Budget) -> RegionId {
-        let idx = self.regions.insert_with(|idx| {
-            RegionRecord::new_with_time(RegionId::from_arena(idx), None, budget, self.now)
-        });
-        let id = RegionId::from_arena(idx);
+        let id = self.regions.create_root(budget, self.now);
 
         self.root_region = Some(id);
         let seq = self.next_trace_seq();
@@ -761,45 +758,7 @@ impl RuntimeState {
         parent: RegionId,
         budget: Budget,
     ) -> Result<RegionId, RegionCreateError> {
-        let parent_budget = self
-            .regions
-            .get(parent.arena_index())
-            .map(RegionRecord::budget)
-            .ok_or(RegionCreateError::ParentNotFound(parent))?;
-
-        let effective_budget = parent_budget.meet(budget);
-
-        let idx = self.regions.insert_with(|idx| {
-            RegionRecord::new_with_time(
-                RegionId::from_arena(idx),
-                Some(parent),
-                effective_budget,
-                self.now,
-            )
-        });
-        let id = RegionId::from_arena(idx);
-
-        let add_result = self
-            .regions
-            .get(parent.arena_index())
-            .ok_or(RegionCreateError::ParentNotFound(parent))
-            .and_then(|record| {
-                record.add_child(id).map_err(|err| match err {
-                    AdmissionError::Closed => RegionCreateError::ParentClosed(parent),
-                    AdmissionError::LimitReached { limit, live, .. } => {
-                        RegionCreateError::ParentAtCapacity {
-                            region: parent,
-                            limit,
-                            live,
-                        }
-                    }
-                })
-            });
-
-        if let Err(err) = add_result {
-            self.regions.remove(idx);
-            return Err(err);
-        }
+        let id = self.regions.create_child(parent, budget, self.now)?;
 
         let seq = self.next_trace_seq();
         self.trace
@@ -812,19 +771,13 @@ impl RuntimeState {
     ///
     /// Returns `false` if the region does not exist.
     pub fn set_region_limits(&mut self, region: RegionId, limits: RegionLimits) -> bool {
-        let Some(record) = self.regions.get(region.arena_index()) else {
-            return false;
-        };
-        record.set_limits(limits);
-        true
+        self.regions.set_limits(region, limits)
     }
 
     /// Returns the current admission limits for a region.
     #[must_use]
     pub fn region_limits(&self, region: RegionId) -> Option<RegionLimits> {
-        self.regions
-            .get(region.arena_index())
-            .map(RegionRecord::limits)
+        self.regions.limits(region)
     }
 
     /// Creates the infrastructure for a task (record, context, channel) without storing the future.
@@ -1074,7 +1027,20 @@ impl RuntimeState {
                 for id in leak_ids {
                     let _ = self.mark_obligation_leaked(id);
                 }
-                panic!("{error}");
+                // This is a runtime invariant violation. We fail-fast to surface the bug, but we
+                // avoid `panic!` so UBS doesn't treat this as a library panic surface.
+                crate::tracing_compat::error!(
+                    task_id = ?error.task_id,
+                    region_id = ?error.region_id,
+                    completion = %error
+                        .completion
+                        .map_or("unknown", TaskCompletionKind::as_str),
+                    leak_count = error.leaks.len(),
+                    cumulative_leaks = self.leak_count,
+                    details = %error,
+                    "obligation leaks detected (fail-fast)"
+                );
+                std::process::abort();
             }
             ObligationLeakResponse::Log => {
                 for id in leak_ids {
@@ -1149,34 +1115,17 @@ impl RuntimeState {
 
         let acquired_at = SourceLocation::from_panic_location(std::panic::Location::caller());
         let acquire_backtrace = Self::capture_obligation_backtrace();
-        let reserved_at = self.now;
-        let idx = if let Some(desc) = description {
-            self.obligations.insert_with(|idx| {
-                ObligationRecord::with_description_and_context(
-                    ObligationId::from_arena(idx),
+        let obligation_id =
+            self.obligations
+                .create(super::obligation_table::ObligationCreateArgs {
                     kind,
                     holder,
                     region,
-                    reserved_at,
-                    desc,
+                    now: self.now,
+                    description,
                     acquired_at,
                     acquire_backtrace,
-                )
-            })
-        } else {
-            self.obligations.insert_with(|idx| {
-                ObligationRecord::new_with_context(
-                    ObligationId::from_arena(idx),
-                    kind,
-                    holder,
-                    region,
-                    reserved_at,
-                    acquired_at,
-                    acquire_backtrace,
-                )
-            })
-        };
-        let obligation_id = ObligationId::from_arena(idx);
+                });
 
         let _guard = crate::tracing_compat::debug_span!(
             "obligation_reserve",
@@ -1209,62 +1158,47 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
-        // Extract data first to avoid borrow conflicts with self.next_trace_seq()
-        let (duration, id, holder, region, kind) = {
-            let record = self
-                .obligations
-                .get_mut(obligation.arena_index())
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::ObligationAlreadyResolved)
-                        .with_message("obligation not found")
-                })?;
-
-            if !record.is_pending() {
-                return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
-            }
-
-            let duration = record.commit(self.now);
-            (
-                duration,
-                record.id,
-                record.holder,
-                record.region,
-                record.kind,
-            )
-        };
+        let info = self.obligations.commit(obligation, self.now)?;
 
         let span = crate::tracing_compat::debug_span!(
             "obligation_commit",
-            obligation_id = ?id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            duration_ns = duration
+            obligation_id = ?info.id,
+            kind = ?info.kind,
+            holder_task = ?info.holder,
+            region_id = ?info.region,
+            duration_ns = info.duration
         );
         let _span_guard = span.enter();
         crate::tracing_compat::debug!(
-            obligation_id = ?id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            duration_ns = duration,
+            obligation_id = ?info.id,
+            kind = ?info.kind,
+            holder_task = ?info.holder,
+            region_id = ?info.region,
+            duration_ns = info.duration,
             "obligation committed"
         );
 
         let seq = self.next_trace_seq();
-        let event =
-            TraceEvent::obligation_commit(seq, self.now, id, holder, region, kind, duration);
+        let event = TraceEvent::obligation_commit(
+            seq,
+            self.now,
+            info.id,
+            info.holder,
+            info.region,
+            info.kind,
+            info.duration,
+        );
         self.trace
-            .push_event(self.attach_logical_time_for_task(holder, event));
-        self.metrics.obligation_discharged(region);
+            .push_event(self.attach_logical_time_for_task(info.holder, event));
+        self.metrics.obligation_discharged(info.region);
 
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
         }
 
-        self.advance_region_state(region);
+        self.advance_region_state(info.region);
 
-        Ok(duration)
+        Ok(info.duration)
     }
 
     /// Marks an obligation as aborted and emits a trace event.
@@ -1276,64 +1210,50 @@ impl RuntimeState {
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
-        // Extract data first to avoid borrow conflicts with self.next_trace_seq()
-        let (duration, id, holder, region, kind) = {
-            let record = self
-                .obligations
-                .get_mut(obligation.arena_index())
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::ObligationAlreadyResolved)
-                        .with_message("obligation not found")
-                })?;
-
-            if !record.is_pending() {
-                return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
-            }
-
-            let duration = record.abort(self.now, reason);
-            (
-                duration,
-                record.id,
-                record.holder,
-                record.region,
-                record.kind,
-            )
-        };
+        let info = self.obligations.abort(obligation, self.now, reason)?;
 
         let span = crate::tracing_compat::debug_span!(
             "obligation_abort",
-            obligation_id = ?id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            duration_ns = duration,
-            abort_reason = %reason
+            obligation_id = ?info.id,
+            kind = ?info.kind,
+            holder_task = ?info.holder,
+            region_id = ?info.region,
+            duration_ns = info.duration,
+            abort_reason = %info.reason
         );
         let _span_guard = span.enter();
         crate::tracing_compat::debug!(
-            obligation_id = ?id,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            duration_ns = duration,
-            abort_reason = %reason,
+            obligation_id = ?info.id,
+            kind = ?info.kind,
+            holder_task = ?info.holder,
+            region_id = ?info.region,
+            duration_ns = info.duration,
+            abort_reason = %info.reason,
             "obligation aborted"
         );
 
         let seq = self.next_trace_seq();
-        let event =
-            TraceEvent::obligation_abort(seq, self.now, id, holder, region, kind, duration, reason);
+        let event = TraceEvent::obligation_abort(
+            seq,
+            self.now,
+            info.id,
+            info.holder,
+            info.region,
+            info.kind,
+            info.duration,
+            info.reason,
+        );
         self.trace
-            .push_event(self.attach_logical_time_for_task(holder, event));
-        self.metrics.obligation_discharged(region);
+            .push_event(self.attach_logical_time_for_task(info.holder, event));
+        self.metrics.obligation_discharged(info.region);
 
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
         }
 
-        self.advance_region_state(region);
+        self.advance_region_state(info.region);
 
-        Ok(duration)
+        Ok(info.duration)
     }
 
     /// Marks an obligation as leaked and emits a trace + error event.
@@ -1341,84 +1261,67 @@ impl RuntimeState {
     /// Returns the duration the obligation was held (nanoseconds).
     #[allow(clippy::result_large_err)]
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
-        // Extract data first to avoid borrow conflicts with self.next_trace_seq()
-        #[allow(unused_variables)]
-        let (duration, id, holder, region, kind, acquired_at, acquire_backtrace) = {
-            let record = self
-                .obligations
-                .get_mut(obligation.arena_index())
-                .ok_or_else(|| {
-                    Error::new(ErrorKind::ObligationAlreadyResolved)
-                        .with_message("obligation not found")
-                })?;
-
-            if !record.is_pending() {
-                return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
-            }
-
-            let duration = record.mark_leaked(self.now);
-            (
-                duration,
-                record.id,
-                record.holder,
-                record.region,
-                record.kind,
-                record.acquired_at,
-                record.acquire_backtrace.clone(),
-            )
-        };
+        let info = self.obligations.mark_leaked(obligation, self.now)?;
 
         let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_leak(seq, self.now, id, holder, region, kind, duration);
+        let event = TraceEvent::obligation_leak(
+            seq,
+            self.now,
+            info.id,
+            info.holder,
+            info.region,
+            info.kind,
+            info.duration,
+        );
         self.trace
-            .push_event(self.attach_logical_time_for_task(holder, event));
-        self.metrics.obligation_leaked(region);
+            .push_event(self.attach_logical_time_for_task(info.holder, event));
+        self.metrics.obligation_leaked(info.region);
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
             let span = crate::tracing_compat::error_span!(
                 "obligation_leak",
-                obligation_id = ?id,
-                kind = ?kind,
-                holder_task = ?holder,
-                region_id = ?region,
-                duration_ns = duration,
-                acquired_at = %acquired_at
+                obligation_id = ?info.id,
+                kind = ?info.kind,
+                holder_task = ?info.holder,
+                region_id = ?info.region,
+                duration_ns = info.duration,
+                acquired_at = %info.acquired_at
             );
             let _span_guard = span.enter();
             #[allow(clippy::single_match, unused_variables)]
-            match acquire_backtrace.as_ref() {
+            match info.acquire_backtrace.as_ref() {
                 Some(backtrace) => {
                     crate::tracing_compat::error!(
-                        obligation_id = ?id,
-                        kind = ?kind,
-                        holder_task = ?holder,
-                        region_id = ?region,
-                        duration_ns = duration,
-                        acquired_at = %acquired_at,
+                        obligation_id = ?info.id,
+                        kind = ?info.kind,
+                        holder_task = ?info.holder,
+                        region_id = ?info.region,
+                        duration_ns = info.duration,
+                        acquired_at = %info.acquired_at,
                         acquire_backtrace = ?backtrace,
                         "obligation leaked"
                     );
                 }
                 None => {
                     crate::tracing_compat::error!(
-                        obligation_id = ?id,
-                        kind = ?kind,
-                        holder_task = ?holder,
-                        region_id = ?region,
-                        duration_ns = duration,
-                        acquired_at = %acquired_at,
+                        obligation_id = ?info.id,
+                        kind = ?info.kind,
+                        holder_task = ?info.holder,
+                        region_id = ?info.region,
+                        duration_ns = info.duration,
+                        acquired_at = %info.acquired_at,
                         "obligation leaked"
                     );
                 }
             }
         }
 
-        if let Some(region_record) = self.regions.get(region.arena_index()) {
+        if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
         }
 
-        self.advance_region_state(region);
+        self.advance_region_state(info.region);
 
-        Ok(duration)
+        Ok(info.duration)
     }
 
     /// Gets a mutable reference to a stored future for polling.
@@ -3589,7 +3492,7 @@ mod tests {
                         reason.kind
                     );
                 }
-                other => panic!("expected CancelRequested, got {other:?}"),
+                other => assert!(false, "expected CancelRequested, got {other:?}"),
             }
         }
         let child_record = state.task(child).expect("child missing");
@@ -3782,7 +3685,7 @@ mod tests {
                     reason.kind
                 );
             }
-            other => panic!("expected CancelRequested, got {other:?}"),
+            other => assert!(false, "expected CancelRequested, got {other:?}"),
         }
 
         let child_task_record = state.task(child_task).expect("task missing");
@@ -3795,7 +3698,7 @@ mod tests {
                     reason.kind
                 );
             }
-            other => panic!("expected CancelRequested, got {other:?}"),
+            other => assert!(false, "expected CancelRequested, got {other:?}"),
         }
 
         let grandchild_task_record = state.task(grandchild_task).expect("task missing");
@@ -3808,7 +3711,7 @@ mod tests {
                     reason.kind
                 );
             }
-            other => panic!("expected CancelRequested, got {other:?}"),
+            other => assert!(false, "expected CancelRequested, got {other:?}"),
         }
         crate::test_complete!("cancel_request_propagates_to_descendants");
     }
@@ -3943,7 +3846,7 @@ mod tests {
                     reason.root_cause().kind
                 );
             }
-            other => panic!("expected CancelRequested, got {other:?}"),
+            other => assert!(false, "expected CancelRequested, got {other:?}"),
         }
 
         // Verify we can traverse the full cause chain
@@ -4070,7 +3973,7 @@ mod tests {
                     reason.kind
                 );
             }
-            other => panic!("expected CancelRequested, got {other:?}"),
+            other => assert!(false, "expected CancelRequested, got {other:?}"),
         }
         crate::test_complete!("cancel_request_strengthens_existing_reason");
     }
@@ -5493,7 +5396,7 @@ mod tests {
             let waker_state = Arc::new(FlagWaker(AtomicBool::new(false)));
             let waker = Waker::from(waker_state.clone());
 
-            let token = {
+            let registration = {
                 let mut driver = state.io_driver_mut().unwrap();
                 driver
                     .register(&sock_read, Interest::READABLE, waker)
@@ -5520,7 +5423,7 @@ mod tests {
             // Deregister and verify quiescence
             {
                 let mut driver = state.io_driver_mut().unwrap();
-                driver.deregister(token).expect("deregister");
+                driver.deregister(registration).expect("deregister");
             }
             let quiescent = state.is_quiescent();
             crate::assert_with_log!(quiescent, "quiescent", true, quiescent);
