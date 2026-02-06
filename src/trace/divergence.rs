@@ -1550,11 +1550,9 @@ mod tests {
         let trace = make_trace(42, events);
 
         let threshold = 6;
-        let result = minimize_divergent_prefix(
-            &trace,
-            &MinimizationConfig::default(),
-            |prefix| prefix.len() >= threshold,
-        );
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |prefix| {
+            prefix.len() >= threshold
+        });
 
         assert_eq!(result.minimized_len, threshold);
         assert_eq!(result.original_len, 10);
@@ -1567,11 +1565,7 @@ mod tests {
         // Single event — already minimal.
         let trace = make_trace(42, vec![ReplayEvent::RngSeed { seed: 42 }]);
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &MinimizationConfig::default(),
-            |_| true,
-        );
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |_| true);
 
         assert_eq!(result.minimized_len, 1);
         assert_eq!(result.evaluations, 0);
@@ -1586,11 +1580,9 @@ mod tests {
             .collect();
         let trace = make_trace(42, events);
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &MinimizationConfig::default(),
-            |prefix| prefix.len() >= 10,
-        );
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |prefix| {
+            prefix.len() >= 10
+        });
 
         assert_eq!(result.minimized_len, 10);
         assert!(!result.truncated);
@@ -1609,11 +1601,7 @@ mod tests {
             max_evaluations: 0,
         };
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &config,
-            |prefix| prefix.len() >= 3,
-        );
+        let result = minimize_divergent_prefix(&trace, &config, |prefix| prefix.len() >= 3);
 
         // Search starts at min_prefix_len=5, and oracle is true at 5,
         // so result is 5.
@@ -1634,11 +1622,7 @@ mod tests {
             max_evaluations: 2,
         };
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &config,
-            |prefix| prefix.len() >= 500,
-        );
+        let result = minimize_divergent_prefix(&trace, &config, |prefix| prefix.len() >= 500);
 
         assert!(result.truncated);
         assert_eq!(result.evaluations, 2);
@@ -1655,11 +1639,9 @@ mod tests {
             .collect();
         let trace = make_trace(0xBEEF, events);
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &MinimizationConfig::default(),
-            |prefix| prefix.len() >= 5,
-        );
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |prefix| {
+            prefix.len() >= 5
+        });
 
         assert_eq!(result.prefix.metadata.seed, 0xBEEF);
     }
@@ -1672,14 +1654,16 @@ mod tests {
             .collect();
         let trace = make_trace(42, events);
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &MinimizationConfig::default(),
-            |prefix| prefix.len() >= 300,
-        );
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |prefix| {
+            prefix.len() >= 300
+        });
 
         assert_eq!(result.minimized_len, 300);
-        assert!(result.evaluations <= 10, "evaluations={}", result.evaluations);
+        assert!(
+            result.evaluations <= 10,
+            "evaluations={}",
+            result.evaluations
+        );
     }
 
     #[test]
@@ -1690,11 +1674,7 @@ mod tests {
             .collect();
         let trace = make_trace(42, events);
 
-        let result = minimize_divergent_prefix(
-            &trace,
-            &MinimizationConfig::default(),
-            |_| true,
-        );
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |_| true);
 
         assert_eq!(result.minimized_len, 1);
     }
