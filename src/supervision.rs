@@ -1624,9 +1624,7 @@ impl EvidenceEntry {
         let (verdict, detail) = match &self.binding_constraint {
             BindingConstraint::MonotoneSeverity { outcome_kind } => (
                 Verdict::Stop,
-                SupervisionDetail::MonotoneSeverity {
-                    outcome_kind: *outcome_kind,
-                },
+                SupervisionDetail::MonotoneSeverity { outcome_kind },
             ),
             BindingConstraint::ExplicitStopStrategy => {
                 (Verdict::Stop, SupervisionDetail::ExplicitStop)
@@ -5623,5 +5621,310 @@ mod tests {
         );
 
         crate::test_complete!("evidence_window_exhaustion_with_budget_vs_without");
+    }
+
+    // -----------------------------------------------------------------------
+    // Evidence Emission Wiring tests (bd-a7etx)
+    //
+    // Verify that every supervision decision also produces a generalized
+    // EvidenceRecord consistent with the domain-specific EvidenceEntry.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn emission_wiring_restart_produces_generalized_record() {
+        init_test("emission_wiring_restart_produces_generalized_record");
+        use crate::evidence::{EvidenceDetail, Subsystem, SupervisionDetail, Verdict};
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 3,
+            window: Duration::from_secs(60),
+            ..Default::default()
+        }));
+
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 1_000);
+
+        // Domain-specific ledger should have the entry.
+        assert_eq!(supervisor.evidence().len(), 1);
+        // Generalized ledger should also have the entry.
+        let gen = supervisor.generalized_evidence();
+        assert_eq!(gen.len(), 1);
+
+        let record = &gen.entries()[0];
+        assert_eq!(record.subsystem, crate::evidence::Subsystem::Supervision);
+        assert_eq!(record.verdict, Verdict::Restart);
+        assert_eq!(record.task_id, task);
+        assert_eq!(record.region_id, region);
+        assert_eq!(record.timestamp, 1_000);
+        assert!(matches!(
+            record.detail,
+            EvidenceDetail::Supervision(SupervisionDetail::RestartAllowed { attempt: 1, .. })
+        ));
+
+        crate::test_complete!("emission_wiring_restart_produces_generalized_record");
+    }
+
+    #[test]
+    fn emission_wiring_stop_produces_generalized_record() {
+        init_test("emission_wiring_stop_produces_generalized_record");
+        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 2_000);
+
+        let gen = supervisor.generalized_evidence();
+        assert_eq!(gen.len(), 1);
+
+        let record = &gen.entries()[0];
+        assert_eq!(record.verdict, Verdict::Stop);
+        assert!(matches!(
+            record.detail,
+            EvidenceDetail::Supervision(SupervisionDetail::ExplicitStop)
+        ));
+
+        crate::test_complete!("emission_wiring_stop_produces_generalized_record");
+    }
+
+    #[test]
+    fn emission_wiring_escalate_produces_generalized_record() {
+        init_test("emission_wiring_escalate_produces_generalized_record");
+        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Escalate);
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 3_000);
+
+        let gen = supervisor.generalized_evidence();
+        assert_eq!(gen.len(), 1);
+
+        let record = &gen.entries()[0];
+        assert_eq!(record.verdict, Verdict::Escalate);
+        assert!(matches!(
+            record.detail,
+            EvidenceDetail::Supervision(SupervisionDetail::ExplicitEscalate)
+        ));
+
+        crate::test_complete!("emission_wiring_escalate_produces_generalized_record");
+    }
+
+    #[test]
+    fn emission_wiring_monotone_severity_produces_generalized_record() {
+        init_test("emission_wiring_monotone_severity_produces_generalized_record");
+        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 3,
+            window: Duration::from_secs(60),
+            ..Default::default()
+        }));
+
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+
+        // Panicked — should produce Stop with MonotoneSeverity.
+        supervisor.on_failure(
+            task,
+            region,
+            None,
+            &Outcome::Panicked(PanicPayload::new("oops")),
+            4_000,
+        );
+
+        let gen = supervisor.generalized_evidence();
+        let record = &gen.entries()[0];
+        assert_eq!(record.verdict, Verdict::Stop);
+        assert!(matches!(
+            record.detail,
+            EvidenceDetail::Supervision(SupervisionDetail::MonotoneSeverity {
+                outcome_kind: "Panicked"
+            })
+        ));
+
+        crate::test_complete!("emission_wiring_monotone_severity_produces_generalized_record");
+    }
+
+    #[test]
+    fn emission_wiring_window_exhaustion_produces_generalized_record() {
+        init_test("emission_wiring_window_exhaustion_produces_generalized_record");
+        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 1,
+            window: Duration::from_secs(60),
+            ..Default::default()
+        }));
+
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+
+        // First failure: restart allowed.
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 5_000);
+        // Second failure: window exhausted.
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 6_000);
+
+        let gen = supervisor.generalized_evidence();
+        assert_eq!(gen.len(), 2);
+
+        // First: restart.
+        assert_eq!(gen.entries()[0].verdict, Verdict::Restart);
+
+        // Second: stop due to window exhaustion.
+        let record = &gen.entries()[1];
+        assert_eq!(record.verdict, Verdict::Stop);
+        assert!(matches!(
+            record.detail,
+            EvidenceDetail::Supervision(SupervisionDetail::WindowExhausted {
+                max_restarts: 1,
+                ..
+            })
+        ));
+
+        crate::test_complete!("emission_wiring_window_exhaustion_produces_generalized_record");
+    }
+
+    #[test]
+    fn emission_wiring_budget_refused_produces_generalized_record() {
+        init_test("emission_wiring_budget_refused_produces_generalized_record");
+        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 5,
+            window: Duration::from_secs(60),
+            restart_cost: 100,
+            ..Default::default()
+        }));
+
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+
+        // Budget with only 10 cost remaining — insufficient for restart_cost=100.
+        let budget = Budget::new().with_cost_quota(10);
+        supervisor.on_failure_with_budget(
+            task,
+            region,
+            None,
+            &Outcome::Err(()),
+            7_000,
+            Some(&budget),
+        );
+
+        let gen = supervisor.generalized_evidence();
+        assert_eq!(gen.len(), 1);
+
+        let record = &gen.entries()[0];
+        assert_eq!(record.verdict, Verdict::Stop);
+        assert!(matches!(
+            record.detail,
+            EvidenceDetail::Supervision(SupervisionDetail::BudgetRefused { .. })
+        ));
+
+        // Verify the constraint message contains useful info.
+        if let EvidenceDetail::Supervision(SupervisionDetail::BudgetRefused { constraint }) =
+            &record.detail
+        {
+            assert!(constraint.contains("insufficient cost"));
+        }
+
+        crate::test_complete!("emission_wiring_budget_refused_produces_generalized_record");
+    }
+
+    #[test]
+    fn emission_wiring_ledgers_stay_in_sync() {
+        init_test("emission_wiring_ledgers_stay_in_sync");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 5,
+            window: Duration::from_secs(60),
+            ..Default::default()
+        }));
+
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+
+        // Multiple decisions.
+        for i in 0..3 {
+            supervisor.on_failure(task, region, None, &Outcome::Err(()), (i + 1) * 1_000);
+        }
+
+        // Both ledgers should have the same count.
+        assert_eq!(supervisor.evidence().len(), 3);
+        assert_eq!(supervisor.generalized_evidence().len(), 3);
+
+        // Timestamps should match entry-by-entry.
+        for (domain, generalized) in supervisor
+            .evidence()
+            .entries()
+            .iter()
+            .zip(supervisor.generalized_evidence().entries().iter())
+        {
+            assert_eq!(domain.timestamp, generalized.timestamp);
+            assert_eq!(domain.task_id, generalized.task_id);
+            assert_eq!(domain.region_id, generalized.region_id);
+        }
+
+        crate::test_complete!("emission_wiring_ledgers_stay_in_sync");
+    }
+
+    #[test]
+    fn emission_wiring_take_generalized_drains() {
+        init_test("emission_wiring_take_generalized_drains");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+
+        supervisor.on_failure(task, region, None, &Outcome::Err(()), 8_000);
+        assert_eq!(supervisor.generalized_evidence().len(), 1);
+
+        let taken = supervisor.take_generalized_evidence();
+        assert_eq!(taken.len(), 1);
+        assert!(supervisor.generalized_evidence().is_empty());
+
+        // Domain-specific ledger is independent — still has its entry.
+        assert_eq!(supervisor.evidence().len(), 1);
+
+        crate::test_complete!("emission_wiring_take_generalized_drains");
+    }
+
+    #[test]
+    fn emission_wiring_render_is_deterministic() {
+        init_test("emission_wiring_render_is_deterministic");
+
+        let mut sup_a = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 2,
+            window: Duration::from_secs(60),
+            ..Default::default()
+        }));
+        let mut sup_b = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
+            max_restarts: 2,
+            window: Duration::from_secs(60),
+            ..Default::default()
+        }));
+
+        let task = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+
+        // Same sequence of decisions on both supervisors.
+        for t in [1_000u64, 2_000, 3_000] {
+            sup_a.on_failure(task, region, None, &Outcome::Err(()), t);
+            sup_b.on_failure(task, region, None, &Outcome::Err(()), t);
+        }
+
+        // Generalized ledger render is byte-for-byte identical.
+        assert_eq!(
+            sup_a.generalized_evidence().render(),
+            sup_b.generalized_evidence().render()
+        );
+
+        // Render is non-empty and contains expected markers.
+        let rendered = sup_a.generalized_evidence().render();
+        assert!(rendered.contains("supervision"));
+        assert!(rendered.contains("RESTART"));
+
+        crate::test_complete!("emission_wiring_render_is_deterministic");
     }
 }
