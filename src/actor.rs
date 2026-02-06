@@ -1025,7 +1025,7 @@ where
 
                 let outcome = Outcome::err(());
                 let now = cx.timer_driver().map_or(0, |td| td.now().as_nanos());
-                let decision = supervisor.on_failure(task_id, region_id, None, outcome, now);
+                let decision = supervisor.on_failure(task_id, region_id, None, &outcome, now);
 
                 match decision {
                     SupervisionDecision::Restart { .. } => {

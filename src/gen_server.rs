@@ -1,11 +1,13 @@
-//! GenServer: typed request-response and fire-and-forget actor pattern.
+//! GenServer: typed request-response and actor-adjacent message loop.
 //!
-//! GenServer extends the actor model with two message types:
+//! GenServer extends the actor model with three message types:
 //!
 //! - **Call**: synchronous request-response. The caller blocks until the server
 //!   replies. A reply obligation is created: the server *must* reply or the
 //!   obligation is detected as leaked.
 //! - **Cast**: asynchronous fire-and-forget. The sender does not wait for a reply.
+//! - **Info**: system/out-of-band notifications (Down/Exit/Timeout), delivered
+//!   via [`GenServer::handle_info`].
 //!
 //! GenServers are region-owned, cancel-safe, and deterministic under the lab
 //! runtime. They build on the same two-phase mailbox and supervision infrastructure
@@ -63,9 +65,10 @@ use crate::channel::mpsc;
 use crate::channel::oneshot;
 use crate::channel::session::{self, TrackedOneshotPermit};
 use crate::cx::Cx;
+use crate::monitor::{DownNotification, DownReason};
 use crate::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::{CancelReason, CxInner, Outcome, TaskId};
+use crate::types::{CancelReason, CxInner, Outcome, TaskId, Time};
 
 // ============================================================================
 // Cast overflow policy
@@ -108,6 +111,53 @@ impl std::fmt::Display for CastOverflowPolicy {
     }
 }
 
+// ============================================================================
+// System messages (bd-188ey)
+// ============================================================================
+
+/// Typed system messages delivered to a GenServer via [`GenServer::handle_info`].
+///
+/// These messages are intended to model OTP-style "out-of-band" notifications
+/// (Down/Exit/Timeout) in a cancel-correct, deterministic way.
+#[derive(Debug, Clone)]
+pub enum SystemMsg {
+    /// OTP-style `Down` notification (monitor fired).
+    Down {
+        /// Virtual time at which the monitored task completed (for deterministic ordering).
+        completion_vt: Time,
+        /// The notification payload.
+        notification: DownNotification,
+    },
+
+    /// OTP-style exit signal (link propagation).
+    Exit {
+        /// Virtual time at which the exit was observed/emitted.
+        exit_vt: Time,
+        /// The task that triggered the exit.
+        from: TaskId,
+        /// Why it exited.
+        reason: DownReason,
+    },
+
+    /// A deterministic timeout tick.
+    Timeout {
+        /// Virtual time of the tick.
+        tick_vt: Time,
+        /// Timeout identifier (user-defined semantics).
+        id: u64,
+    },
+}
+
+impl SystemMsg {
+    fn vt(&self) -> Time {
+        match self {
+            Self::Down { completion_vt, .. } => *completion_vt,
+            Self::Exit { exit_vt, .. } => *exit_vt,
+            Self::Timeout { tick_vt, .. } => *tick_vt,
+        }
+    }
+}
+
 /// A GenServer processes calls (request-response) and casts (fire-and-forget).
 ///
 /// # Cancel Safety
@@ -127,6 +177,15 @@ pub trait GenServer: Send + 'static {
     /// Message type for casts (asynchronous fire-and-forget).
     type Cast: Send + 'static;
 
+    /// Message type for `info` (system/out-of-band notifications).
+    ///
+    /// Recommended default is [`SystemMsg`]. Servers that want their own info messages
+    /// can define an enum that contains `SystemMsg` plus app-specific variants.
+    ///
+    /// Note: associated type defaults are unstable on Rust stable; implementors
+    /// should write `type Info = SystemMsg;` if they only need system messages.
+    type Info: Send + 'static;
+
     /// Handle a call (request-response).
     ///
     /// The `reply` handle **must** be consumed by calling `reply.send(value)`.
@@ -145,6 +204,17 @@ pub trait GenServer: Send + 'static {
         &mut self,
         _cx: &Cx,
         _msg: Self::Cast,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+
+    /// Handle an info message (system/out-of-band).
+    ///
+    /// Defaults to a no-op.
+    fn handle_info(
+        &mut self,
+        _cx: &Cx,
+        _msg: Self::Info,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
@@ -253,7 +323,7 @@ impl std::fmt::Debug for ReplyOutcome {
 // Internal message envelope
 // ============================================================================
 
-/// Internal message type wrapping calls and casts.
+/// Internal message type wrapping calls/casts/info.
 enum Envelope<S: GenServer> {
     Call {
         request: S::Call,
@@ -262,6 +332,9 @@ enum Envelope<S: GenServer> {
     Cast {
         msg: S::Cast,
     },
+    Info {
+        msg: S::Info,
+    },
 }
 
 impl<S: GenServer> std::fmt::Debug for Envelope<S> {
@@ -269,6 +342,7 @@ impl<S: GenServer> std::fmt::Debug for Envelope<S> {
         match self {
             Self::Call { .. } => f.debug_struct("Envelope::Call").finish_non_exhaustive(),
             Self::Cast { .. } => f.debug_struct("Envelope::Cast").finish_non_exhaustive(),
+            Self::Info { .. } => f.debug_struct("Envelope::Info").finish_non_exhaustive(),
         }
     }
 }
@@ -386,6 +460,29 @@ impl std::fmt::Display for CastError {
 }
 
 impl std::error::Error for CastError {}
+
+/// Error returned when sending an info message fails.
+#[derive(Debug)]
+pub enum InfoError {
+    /// The server has stopped (mailbox disconnected).
+    ServerStopped,
+    /// The mailbox is full.
+    Full,
+    /// The send was cancelled.
+    Cancelled(CancelReason),
+}
+
+impl std::fmt::Display for InfoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ServerStopped => write!(f, "GenServer has stopped"),
+            Self::Full => write!(f, "GenServer mailbox full"),
+            Self::Cancelled(reason) => write!(f, "GenServer info cancelled: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for InfoError {}
 
 impl<S: GenServer> GenServerHandle<S> {
     /// Send a call (request-response) to the server.
@@ -509,6 +606,53 @@ impl<S: GenServer> GenServerHandle<S> {
                 }
             }
         }
+    }
+
+    /// Send an info message (system/out-of-band) to the server.
+    pub async fn info(&self, cx: &Cx, msg: S::Info) -> Result<(), InfoError> {
+        if cx.checkpoint().is_err() {
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            return Err(InfoError::Cancelled(reason));
+        }
+
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(InfoError::ServerStopped);
+        }
+
+        let envelope = Envelope::Info { msg };
+        self.sender.send(cx, envelope).await.map_err(|e| match e {
+            mpsc::SendError::Cancelled(_) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                InfoError::Cancelled(reason)
+            }
+            mpsc::SendError::Disconnected(_) => InfoError::ServerStopped,
+            mpsc::SendError::Full(_) => InfoError::Full,
+        })
+    }
+
+    /// Try to send an info message without blocking.
+    pub fn try_info(&self, msg: S::Info) -> Result<(), InfoError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(InfoError::ServerStopped);
+        }
+
+        let envelope = Envelope::Info { msg };
+        self.sender.try_send(envelope).map_err(|e| match e {
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                InfoError::ServerStopped
+            }
+            mpsc::SendError::Full(_) => InfoError::Full,
+        })
     }
 
     /// Returns the server's overflow policy for cast messages.
@@ -694,6 +838,53 @@ impl<S: GenServer> GenServerRef<S> {
         }
     }
 
+    /// Send an info message (system/out-of-band) to the server.
+    pub async fn info(&self, cx: &Cx, msg: S::Info) -> Result<(), InfoError> {
+        if cx.checkpoint().is_err() {
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            return Err(InfoError::Cancelled(reason));
+        }
+
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(InfoError::ServerStopped);
+        }
+
+        let envelope = Envelope::Info { msg };
+        self.sender.send(cx, envelope).await.map_err(|e| match e {
+            mpsc::SendError::Cancelled(_) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                InfoError::Cancelled(reason)
+            }
+            mpsc::SendError::Disconnected(_) => InfoError::ServerStopped,
+            mpsc::SendError::Full(_) => InfoError::Full,
+        })
+    }
+
+    /// Try to send an info message without blocking.
+    pub fn try_info(&self, msg: S::Info) -> Result<(), InfoError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(InfoError::ServerStopped);
+        }
+
+        let envelope = Envelope::Info { msg };
+        self.sender.try_send(envelope).map_err(|e| match e {
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                InfoError::ServerStopped
+            }
+            mpsc::SendError::Full(_) => InfoError::Full,
+        })
+    }
+
     /// Returns true if the server has stopped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -806,6 +997,9 @@ async fn dispatch_envelope<S: GenServer>(server: &mut S, cx: &Cx, envelope: Enve
         }
         Envelope::Cast { msg } => {
             server.handle_cast(cx, msg).await;
+        }
+        Envelope::Info { msg } => {
+            server.handle_info(cx, msg).await;
         }
     }
 }
@@ -923,6 +1117,7 @@ mod tests {
     use crate::types::policy::FailFast;
     use crate::types::Budget;
     use crate::types::CancelKind;
+    use crate::util::ArenaIndex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -950,6 +1145,7 @@ mod tests {
         type Call = CounterCall;
         type Reply = u64;
         type Cast = CounterCast;
+        type Info = SystemMsg;
 
         fn handle_call(
             &mut self,
@@ -1307,6 +1503,7 @@ mod tests {
         type Call = CounterCall;
         type Reply = u64;
         type Cast = CounterCast;
+        type Info = SystemMsg;
 
         fn handle_call(
             &mut self,
@@ -1432,6 +1629,207 @@ mod tests {
         crate::test_complete!("gen_server_deterministic_replay");
     }
 
+    // ---- System/info message tests (bd-188ey) ----
+
+    #[derive(Default)]
+    struct InfoRecorder {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl GenServer for InfoRecorder {
+        type Call = ();
+        type Reply = ();
+        type Cast = ();
+        type Info = SystemMsg;
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            _request: (),
+            reply: Reply<()>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let _ = reply.send(());
+            Box::pin(async {})
+        }
+
+        fn handle_info(
+            &mut self,
+            _cx: &Cx,
+            msg: Self::Info,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let seen = Arc::clone(&self.seen);
+            Box::pin(async move {
+                seen.lock().expect("lock poisoned").push(format!("{msg:?}"));
+            })
+        }
+    }
+
+    fn tid(n: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn rid(n: u32) -> crate::types::RegionId {
+        crate::types::RegionId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    #[test]
+    fn gen_server_handle_info_receives_system_messages() {
+        init_test("gen_server_handle_info_receives_system_messages");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let server = InfoRecorder {
+            seen: Arc::clone(&seen),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(10), rid(0), tid(11));
+
+        handle
+            .try_info(SystemMsg::Down {
+                completion_vt: Time::from_secs(5),
+                notification: DownNotification {
+                    monitored: tid(11),
+                    reason: DownReason::Normal,
+                    monitor_ref: mref,
+                },
+            })
+            .unwrap();
+
+        handle
+            .try_info(SystemMsg::Exit {
+                exit_vt: Time::from_secs(6),
+                from: tid(12),
+                reason: DownReason::Error("boom".into()),
+            })
+            .unwrap();
+
+        handle
+            .try_info(SystemMsg::Timeout {
+                tick_vt: Time::from_secs(7),
+                id: 123,
+            })
+            .unwrap();
+
+        drop(handle);
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        let seen = seen.lock().expect("lock poisoned");
+        assert_eq!(seen.len(), 3);
+        assert!(seen[0].contains("Down"));
+        assert!(seen[1].contains("Exit"));
+        assert!(seen[2].contains("Timeout"));
+
+        crate::test_complete!("gen_server_handle_info_receives_system_messages");
+    }
+
+    #[test]
+    fn gen_server_info_ordering_is_deterministic_for_seed() {
+        fn run_scenario(seed: u64) -> Vec<String> {
+            let config = crate::lab::LabConfig::new(seed);
+            let mut runtime = crate::lab::LabRuntime::new(config);
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let cx = Cx::for_testing();
+            let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+            let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let server = InfoRecorder {
+                seen: Arc::clone(&seen),
+            };
+
+            let (handle, stored) = scope
+                .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+                .unwrap();
+            let server_task_id = handle.task_id();
+            runtime.state.store_spawned_task(server_task_id, stored);
+
+            let server_ref = handle.server_ref();
+
+            let (client_a, stored_a) = scope
+                .spawn(&mut runtime.state, &cx, move |cx| async move {
+                    server_ref
+                        .info(
+                            &cx,
+                            SystemMsg::Timeout {
+                                tick_vt: Time::from_secs(2),
+                                id: 1,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                })
+                .unwrap();
+            let client_a_id = client_a.task_id();
+            runtime.state.store_spawned_task(client_a_id, stored_a);
+
+            let server_ref_b = handle.server_ref();
+            let (client_b, stored_b) = scope
+                .spawn(&mut runtime.state, &cx, move |cx| async move {
+                    server_ref_b
+                        .info(
+                            &cx,
+                            SystemMsg::Timeout {
+                                tick_vt: Time::from_secs(2),
+                                id: 2,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                })
+                .unwrap();
+            let client_b_id = client_b.task_id();
+            runtime.state.store_spawned_task(client_b_id, stored_b);
+
+            // Let clients enqueue, then let the server drain.
+            runtime.scheduler.lock().unwrap().schedule(client_a_id, 0);
+            runtime.scheduler.lock().unwrap().schedule(client_b_id, 0);
+            runtime
+                .scheduler
+                .lock()
+                .unwrap()
+                .schedule(server_task_id, 0);
+
+            runtime.run_until_quiescent();
+            drop(handle);
+            runtime
+                .scheduler
+                .lock()
+                .unwrap()
+                .schedule(server_task_id, 0);
+            runtime.run_until_quiescent();
+
+            let out = seen.lock().expect("lock poisoned").clone();
+            out
+        }
+
+        init_test("gen_server_info_ordering_is_deterministic_for_seed");
+
+        let a = run_scenario(0xD00D_F00D);
+        let b = run_scenario(0xD00D_F00D);
+        assert_eq!(
+            a, b,
+            "system/info ordering must be deterministic for same seed"
+        );
+
+        crate::test_complete!("gen_server_info_ordering_is_deterministic_for_seed");
+    }
+
     // ---- DropOldest GenServer for backpressure tests ----
 
     /// A counter that uses DropOldest overflow policy.
@@ -1449,6 +1847,7 @@ mod tests {
         type Call = CounterCall;
         type Reply = u64;
         type Cast = TaggedCast;
+        type Info = SystemMsg;
 
         fn cast_overflow_policy(&self) -> CastOverflowPolicy {
             CastOverflowPolicy::DropOldest

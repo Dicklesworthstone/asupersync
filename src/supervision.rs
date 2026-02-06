@@ -1561,17 +1561,11 @@ impl std::fmt::Display for BindingConstraint {
             Self::WindowExhausted {
                 max_restarts,
                 window,
-            } => write!(
-                f,
-                "window exhausted: {max_restarts} restarts in {window:?}"
-            ),
+            } => write!(f, "window exhausted: {max_restarts} restarts in {window:?}"),
             Self::InsufficientCost {
                 required,
                 remaining,
-            } => write!(
-                f,
-                "insufficient cost: need {required}, have {remaining}"
-            ),
+            } => write!(f, "insufficient cost: need {required}, have {remaining}"),
             Self::DeadlineTooClose {
                 min_required,
                 remaining,
@@ -1728,6 +1722,143 @@ impl Supervisor {
         &self.strategy
     }
 
+    fn record_evidence(
+        &mut self,
+        now: u64,
+        task_id: TaskId,
+        region_id: RegionId,
+        outcome: &Outcome<(), ()>,
+        strategy_kind: &'static str,
+        decision: SupervisionDecision,
+        constraint: BindingConstraint,
+    ) -> SupervisionDecision {
+        self.evidence.push(EvidenceEntry {
+            timestamp: now,
+            task_id,
+            region_id,
+            outcome: outcome.clone(),
+            strategy_kind,
+            decision: decision.clone(),
+            binding_constraint: constraint,
+        });
+        decision
+    }
+
+    fn decide_err_with_budget(
+        &mut self,
+        task_id: TaskId,
+        region_id: RegionId,
+        parent_region_id: Option<RegionId>,
+        now: u64,
+        budget: Option<&Budget>,
+    ) -> (SupervisionDecision, BindingConstraint) {
+        match &mut self.strategy {
+            SupervisionStrategy::Stop => (
+                SupervisionDecision::Stop {
+                    task_id,
+                    region_id,
+                    reason: StopReason::ExplicitStop,
+                },
+                BindingConstraint::ExplicitStopStrategy,
+            ),
+            SupervisionStrategy::Restart(config) => {
+                let history = self.history.as_mut().expect("history exists for Restart");
+
+                // Check budget constraints if a budget is provided.
+                if let Some(budget) = budget {
+                    if let Err(refusal) = history.can_restart_with_budget(now, budget) {
+                        let constraint = match &refusal {
+                            BudgetRefusal::WindowExhausted {
+                                max_restarts,
+                                window,
+                            } => BindingConstraint::WindowExhausted {
+                                max_restarts: *max_restarts,
+                                window: *window,
+                            },
+                            BudgetRefusal::InsufficientCost {
+                                required,
+                                remaining,
+                            } => BindingConstraint::InsufficientCost {
+                                required: *required,
+                                remaining: *remaining,
+                            },
+                            BudgetRefusal::DeadlineTooClose {
+                                min_required,
+                                remaining,
+                            } => BindingConstraint::DeadlineTooClose {
+                                min_required: *min_required,
+                                remaining: *remaining,
+                            },
+                            BudgetRefusal::InsufficientPolls {
+                                min_required,
+                                remaining,
+                            } => BindingConstraint::InsufficientPolls {
+                                min_required: *min_required,
+                                remaining: *remaining,
+                            },
+                        };
+
+                        let decision = match refusal {
+                            BudgetRefusal::WindowExhausted { .. } => SupervisionDecision::Stop {
+                                task_id,
+                                region_id,
+                                reason: StopReason::RestartBudgetExhausted {
+                                    total_restarts: config.max_restarts,
+                                    window: config.window,
+                                },
+                            },
+                            _ => SupervisionDecision::Stop {
+                                task_id,
+                                region_id,
+                                reason: StopReason::BudgetRefused(refusal),
+                            },
+                        };
+
+                        return (decision, constraint);
+                    }
+                } else if !history.can_restart(now) {
+                    return (
+                        SupervisionDecision::Stop {
+                            task_id,
+                            region_id,
+                            reason: StopReason::RestartBudgetExhausted {
+                                total_restarts: config.max_restarts,
+                                window: config.window,
+                            },
+                        },
+                        BindingConstraint::WindowExhausted {
+                            max_restarts: config.max_restarts,
+                            window: config.window,
+                        },
+                    );
+                }
+
+                let attempt = history.recent_restart_count(now) as u32 + 1;
+                let delay = history.next_delay(now);
+                history.record_restart(now);
+
+                (
+                    SupervisionDecision::Restart {
+                        task_id,
+                        region_id,
+                        attempt,
+                        delay,
+                    },
+                    BindingConstraint::RestartAllowed { attempt },
+                )
+            }
+            SupervisionStrategy::Escalate => (
+                SupervisionDecision::Escalate {
+                    task_id,
+                    region_id,
+                    parent_region_id,
+                    outcome: Outcome::Err(()),
+                },
+                BindingConstraint::EscalateStrategy,
+            ),
+        }
+    }
+
     /// Decide what to do when an actor fails.
     ///
     /// Returns the supervision decision and optionally records a restart.
@@ -1747,7 +1878,7 @@ impl Supervisor {
         task_id: TaskId,
         region_id: RegionId,
         parent_region_id: Option<RegionId>,
-        outcome: Outcome<(), ()>,
+        outcome: &Outcome<(), ()>,
         now: u64,
     ) -> SupervisionDecision {
         self.on_failure_with_budget(task_id, region_id, parent_region_id, outcome, now, None)
@@ -1776,7 +1907,7 @@ impl Supervisor {
         task_id: TaskId,
         region_id: RegionId,
         parent_region_id: Option<RegionId>,
-        outcome: Outcome<(), ()>,
+        outcome: &Outcome<(), ()>,
         now: u64,
         budget: Option<&Budget>,
     ) -> SupervisionDecision {
@@ -1786,215 +1917,53 @@ impl Supervisor {
             SupervisionStrategy::Escalate => "Escalate",
         };
 
-        // Helper: record evidence and return the decision.
-        let mut record = |decision: SupervisionDecision,
-                          constraint: BindingConstraint|
-         -> SupervisionDecision {
-            self.evidence.push(EvidenceEntry {
-                timestamp: now,
-                task_id,
-                region_id,
-                outcome: outcome.clone(),
-                strategy_kind,
-                decision: decision.clone(),
-                binding_constraint: constraint,
-            });
-            decision
-        };
-
         // SPORK monotone severity contract:
         // - Panics are never restartable.
         // - Cancellation is an external directive; it is not restartable.
         // - Only `Err` is eligible for `Restart(..)` and `Escalate`.
-        match outcome {
-            Outcome::Ok(()) => {
-                let decision = SupervisionDecision::Stop {
+        let (decision, constraint) = match outcome {
+            Outcome::Ok(()) => (
+                SupervisionDecision::Stop {
                     task_id,
                     region_id,
                     reason: StopReason::ExplicitStop,
-                };
-                record(
-                    decision,
-                    BindingConstraint::MonotoneSeverity {
-                        outcome_kind: "Ok",
-                    },
-                )
-            }
-            Outcome::Cancelled(ref reason) => {
-                let decision = SupervisionDecision::Stop {
+                },
+                BindingConstraint::MonotoneSeverity { outcome_kind: "Ok" },
+            ),
+            Outcome::Cancelled(reason) => (
+                SupervisionDecision::Stop {
                     task_id,
                     region_id,
                     reason: StopReason::Cancelled(reason.clone()),
-                };
-                record(
-                    decision,
-                    BindingConstraint::MonotoneSeverity {
-                        outcome_kind: "Cancelled",
-                    },
-                )
-            }
-            Outcome::Panicked(_) => {
-                let decision = SupervisionDecision::Stop {
+                },
+                BindingConstraint::MonotoneSeverity {
+                    outcome_kind: "Cancelled",
+                },
+            ),
+            Outcome::Panicked(_) => (
+                SupervisionDecision::Stop {
                     task_id,
                     region_id,
                     reason: StopReason::Panicked,
-                };
-                record(
-                    decision,
-                    BindingConstraint::MonotoneSeverity {
-                        outcome_kind: "Panicked",
-                    },
-                )
+                },
+                BindingConstraint::MonotoneSeverity {
+                    outcome_kind: "Panicked",
+                },
+            ),
+            Outcome::Err(()) => {
+                self.decide_err_with_budget(task_id, region_id, parent_region_id, now, budget)
             }
-            Outcome::Err(()) => match &mut self.strategy {
-                SupervisionStrategy::Stop => {
-                    let decision = SupervisionDecision::Stop {
-                        task_id,
-                        region_id,
-                        reason: StopReason::ExplicitStop,
-                    };
-                    self.evidence.push(EvidenceEntry {
-                        timestamp: now,
-                        task_id,
-                        region_id,
-                        outcome: outcome.clone(),
-                        strategy_kind,
-                        decision: decision.clone(),
-                        binding_constraint: BindingConstraint::ExplicitStopStrategy,
-                    });
-                    decision
-                }
+        };
 
-                SupervisionStrategy::Restart(config) => {
-                    let history = self.history.as_mut().expect("history exists for Restart");
-
-                    // Check budget constraints if a budget is provided
-                    if let Some(budget) = budget {
-                        if let Err(refusal) = history.can_restart_with_budget(now, budget) {
-                            let constraint = match &refusal {
-                                BudgetRefusal::WindowExhausted {
-                                    max_restarts,
-                                    window,
-                                } => BindingConstraint::WindowExhausted {
-                                    max_restarts: *max_restarts,
-                                    window: *window,
-                                },
-                                BudgetRefusal::InsufficientCost {
-                                    required,
-                                    remaining,
-                                } => BindingConstraint::InsufficientCost {
-                                    required: *required,
-                                    remaining: *remaining,
-                                },
-                                BudgetRefusal::DeadlineTooClose {
-                                    min_required,
-                                    remaining,
-                                } => BindingConstraint::DeadlineTooClose {
-                                    min_required: *min_required,
-                                    remaining: *remaining,
-                                },
-                                BudgetRefusal::InsufficientPolls {
-                                    min_required,
-                                    remaining,
-                                } => BindingConstraint::InsufficientPolls {
-                                    min_required: *min_required,
-                                    remaining: *remaining,
-                                },
-                            };
-                            let decision = match refusal {
-                                BudgetRefusal::WindowExhausted { .. } => {
-                                    SupervisionDecision::Stop {
-                                        task_id,
-                                        region_id,
-                                        reason: StopReason::RestartBudgetExhausted {
-                                            total_restarts: config.max_restarts,
-                                            window: config.window,
-                                        },
-                                    }
-                                }
-                                _ => SupervisionDecision::Stop {
-                                    task_id,
-                                    region_id,
-                                    reason: StopReason::BudgetRefused(refusal),
-                                },
-                            };
-                            self.evidence.push(EvidenceEntry {
-                                timestamp: now,
-                                task_id,
-                                region_id,
-                                outcome: outcome.clone(),
-                                strategy_kind,
-                                decision: decision.clone(),
-                                binding_constraint: constraint,
-                            });
-                            return decision;
-                        }
-                    } else if !history.can_restart(now) {
-                        let decision = SupervisionDecision::Stop {
-                            task_id,
-                            region_id,
-                            reason: StopReason::RestartBudgetExhausted {
-                                total_restarts: config.max_restarts,
-                                window: config.window,
-                            },
-                        };
-                        self.evidence.push(EvidenceEntry {
-                            timestamp: now,
-                            task_id,
-                            region_id,
-                            outcome: outcome.clone(),
-                            strategy_kind,
-                            decision: decision.clone(),
-                            binding_constraint: BindingConstraint::WindowExhausted {
-                                max_restarts: config.max_restarts,
-                                window: config.window,
-                            },
-                        });
-                        return decision;
-                    }
-
-                    let attempt = history.recent_restart_count(now) as u32 + 1;
-                    let delay = history.next_delay(now);
-                    history.record_restart(now);
-
-                    let decision = SupervisionDecision::Restart {
-                        task_id,
-                        region_id,
-                        attempt,
-                        delay,
-                    };
-                    self.evidence.push(EvidenceEntry {
-                        timestamp: now,
-                        task_id,
-                        region_id,
-                        outcome: outcome.clone(),
-                        strategy_kind,
-                        decision: decision.clone(),
-                        binding_constraint: BindingConstraint::RestartAllowed { attempt },
-                    });
-                    decision
-                }
-
-                SupervisionStrategy::Escalate => {
-                    let decision = SupervisionDecision::Escalate {
-                        task_id,
-                        region_id,
-                        parent_region_id,
-                        outcome: Outcome::Err(()),
-                    };
-                    self.evidence.push(EvidenceEntry {
-                        timestamp: now,
-                        task_id,
-                        region_id,
-                        outcome: outcome.clone(),
-                        strategy_kind,
-                        decision: decision.clone(),
-                        binding_constraint: BindingConstraint::EscalateStrategy,
-                    });
-                    decision
-                }
-            },
-        }
+        self.record_evidence(
+            now,
+            task_id,
+            region_id,
+            outcome,
+            strategy_kind,
+            decision,
+            constraint,
+        )
     }
 
     /// Get the restart history (if using Restart strategy).
@@ -2424,7 +2393,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            &Outcome::Cancelled(CancelReason::user("test")),
             0,
         );
 
@@ -2448,7 +2417,7 @@ mod tests {
 
         // First error should trigger restart
         let decision =
-            supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+            supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
 
         assert!(matches!(
             decision,
@@ -2460,7 +2429,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1_000_000_000, // 1 second later
         );
 
@@ -2483,7 +2452,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            &Outcome::Cancelled(CancelReason::user("test")),
             0,
         );
 
@@ -2506,12 +2475,12 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts allowed
-        supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1_000_000_000,
         );
 
@@ -2520,7 +2489,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2_000_000_000,
         );
 
@@ -2543,12 +2512,12 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts within window
-        supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             500_000_000, // 0.5 seconds
         );
 
@@ -2557,7 +2526,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2_000_000_000, // 2 seconds later - both old restarts outside window
         );
 
@@ -2580,7 +2549,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             Some(parent),
-            Outcome::Err(()),
+            &Outcome::Err(()),
             0,
         );
 
@@ -2606,7 +2575,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             Some(parent),
-            Outcome::Cancelled(CancelReason::user("test")),
+            &Outcome::Cancelled(CancelReason::user("test")),
             0,
         );
 
@@ -2633,7 +2602,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Panicked(PanicPayload::new("test panic")),
+            &Outcome::Panicked(PanicPayload::new("test panic")),
             0,
         );
 
@@ -4926,5 +4895,631 @@ mod tests {
         assert_eq!(names, vec!["alpha", "mike", "zulu"]);
 
         crate::test_complete!("conformance_name_lex_tie_break");
+    }
+
+    // ---------------------------------------------------------------
+    // Evidence Ledger Tests (bd-35iz1)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn evidence_ledger_empty_on_creation() {
+        init_test("evidence_ledger_empty_on_creation");
+
+        let supervisor = Supervisor::new(SupervisionStrategy::Stop);
+        assert!(supervisor.evidence().is_empty());
+        assert_eq!(supervisor.evidence().len(), 0);
+
+        crate::test_complete!("evidence_ledger_empty_on_creation");
+    }
+
+    #[test]
+    fn evidence_records_explicit_stop_strategy() {
+        init_test("evidence_records_explicit_stop_strategy");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
+        let _decision = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+        );
+
+        let ledger = supervisor.evidence();
+        assert_eq!(ledger.len(), 1);
+        let entry = &ledger.entries()[0];
+        assert_eq!(entry.timestamp, 1000);
+        assert_eq!(entry.task_id, test_task_id());
+        assert_eq!(entry.region_id, test_region_id());
+        assert_eq!(entry.strategy_kind, "Stop");
+        assert_eq!(
+            entry.binding_constraint,
+            BindingConstraint::ExplicitStopStrategy
+        );
+
+        crate::test_complete!("evidence_records_explicit_stop_strategy");
+    }
+
+    #[test]
+    fn evidence_records_restart_allowed() {
+        init_test("evidence_records_restart_allowed");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        let _d1 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+        );
+        let _d2 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2000,
+        );
+
+        let ledger = supervisor.evidence();
+        assert_eq!(ledger.len(), 2);
+
+        assert_eq!(
+            ledger.entries()[0].binding_constraint,
+            BindingConstraint::RestartAllowed { attempt: 1 }
+        );
+        assert_eq!(ledger.entries()[0].timestamp, 1000);
+        assert_eq!(ledger.entries()[0].strategy_kind, "Restart");
+
+        assert_eq!(
+            ledger.entries()[1].binding_constraint,
+            BindingConstraint::RestartAllowed { attempt: 2 }
+        );
+        assert_eq!(ledger.entries()[1].timestamp, 2000);
+
+        crate::test_complete!("evidence_records_restart_allowed");
+    }
+
+    #[test]
+    fn evidence_records_window_exhaustion() {
+        init_test("evidence_records_window_exhaustion");
+
+        let window = Duration::from_secs(10);
+        let config = RestartConfig::new(2, window);
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Two restarts allowed
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+        );
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2000,
+        );
+        // Third should be window exhausted
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            3000,
+        );
+
+        let ledger = supervisor.evidence();
+        assert_eq!(ledger.len(), 3);
+
+        assert_eq!(
+            ledger.entries()[0].binding_constraint,
+            BindingConstraint::RestartAllowed { attempt: 1 }
+        );
+        assert_eq!(
+            ledger.entries()[1].binding_constraint,
+            BindingConstraint::RestartAllowed { attempt: 2 }
+        );
+        assert_eq!(
+            ledger.entries()[2].binding_constraint,
+            BindingConstraint::WindowExhausted {
+                max_restarts: 2,
+                window,
+            }
+        );
+
+        crate::test_complete!("evidence_records_window_exhaustion");
+    }
+
+    #[test]
+    fn evidence_records_monotone_severity_panicked() {
+        init_test("evidence_records_monotone_severity_panicked");
+
+        // Even with Restart strategy, panics produce MonotoneSeverity evidence
+        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Panicked(PanicPayload::new("boom")),
+            1000,
+        );
+
+        let ledger = supervisor.evidence();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger.entries()[0].binding_constraint,
+            BindingConstraint::MonotoneSeverity {
+                outcome_kind: "Panicked",
+            }
+        );
+        assert_eq!(ledger.entries()[0].strategy_kind, "Restart");
+
+        crate::test_complete!("evidence_records_monotone_severity_panicked");
+    }
+
+    #[test]
+    fn evidence_records_monotone_severity_cancelled() {
+        init_test("evidence_records_monotone_severity_cancelled");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            1000,
+        );
+
+        let entry = &supervisor.evidence().entries()[0];
+        assert_eq!(
+            entry.binding_constraint,
+            BindingConstraint::MonotoneSeverity {
+                outcome_kind: "Cancelled",
+            }
+        );
+
+        crate::test_complete!("evidence_records_monotone_severity_cancelled");
+    }
+
+    #[test]
+    fn evidence_records_monotone_severity_ok() {
+        init_test("evidence_records_monotone_severity_ok");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Ok(()),
+            1000,
+        );
+
+        let entry = &supervisor.evidence().entries()[0];
+        assert_eq!(
+            entry.binding_constraint,
+            BindingConstraint::MonotoneSeverity { outcome_kind: "Ok" }
+        );
+
+        crate::test_complete!("evidence_records_monotone_severity_ok");
+    }
+
+    #[test]
+    fn evidence_records_escalate_strategy() {
+        init_test("evidence_records_escalate_strategy");
+
+        let parent = RegionId::from_arena(ArenaIndex::new(0, 5));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Escalate);
+
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            Some(parent),
+            Outcome::Err(()),
+            1000,
+        );
+
+        let entry = &supervisor.evidence().entries()[0];
+        assert_eq!(entry.strategy_kind, "Escalate");
+        assert_eq!(
+            entry.binding_constraint,
+            BindingConstraint::EscalateStrategy
+        );
+
+        crate::test_complete!("evidence_records_escalate_strategy");
+    }
+
+    #[test]
+    fn evidence_records_budget_insufficient_cost() {
+        init_test("evidence_records_budget_insufficient_cost");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60)).with_restart_cost(100);
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        let budget = Budget {
+            cost_quota: Some(50),
+            ..Budget::INFINITE
+        };
+        supervisor.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+            Some(&budget),
+        );
+
+        let entry = &supervisor.evidence().entries()[0];
+        assert_eq!(
+            entry.binding_constraint,
+            BindingConstraint::InsufficientCost {
+                required: 100,
+                remaining: 50,
+            }
+        );
+
+        crate::test_complete!("evidence_records_budget_insufficient_cost");
+    }
+
+    #[test]
+    fn evidence_records_budget_insufficient_polls() {
+        init_test("evidence_records_budget_insufficient_polls");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60)).with_min_polls(10);
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        let budget = Budget {
+            poll_quota: 5,
+            ..Budget::INFINITE
+        };
+        supervisor.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+            Some(&budget),
+        );
+
+        let entry = &supervisor.evidence().entries()[0];
+        assert_eq!(
+            entry.binding_constraint,
+            BindingConstraint::InsufficientPolls {
+                min_required: 10,
+                remaining: 5,
+            }
+        );
+
+        crate::test_complete!("evidence_records_budget_insufficient_polls");
+    }
+
+    #[test]
+    fn evidence_records_budget_deadline_too_close() {
+        init_test("evidence_records_budget_deadline_too_close");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60))
+            .with_min_remaining(Duration::from_secs(10));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Budget deadline is 5 seconds from now but we need 10 seconds minimum
+        let now_nanos = 1_000_000_000u64; // 1 second
+        let deadline_nanos = 6_000_000_000u64; // 6 seconds (5 seconds remaining)
+        let budget = Budget {
+            deadline: Some(Time::from_nanos(deadline_nanos)),
+            ..Budget::INFINITE
+        };
+        supervisor.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            now_nanos,
+            Some(&budget),
+        );
+
+        let entry = &supervisor.evidence().entries()[0];
+        assert!(matches!(
+            entry.binding_constraint,
+            BindingConstraint::DeadlineTooClose { .. }
+        ));
+
+        crate::test_complete!("evidence_records_budget_deadline_too_close");
+    }
+
+    #[test]
+    fn evidence_full_lifecycle_restart_to_exhaustion() {
+        init_test("evidence_full_lifecycle_restart_to_exhaustion");
+
+        let window = Duration::from_secs(60);
+        let config = RestartConfig::new(3, window);
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // 3 restarts, then exhaustion, then another attempt (still exhausted)
+        for i in 0u64..5 {
+            supervisor.on_failure(
+                test_task_id(),
+                test_region_id(),
+                None,
+                Outcome::Err(()),
+                i * 1_000_000_000,
+            );
+        }
+
+        let ledger = supervisor.evidence();
+        assert_eq!(ledger.len(), 5);
+
+        // First 3: RestartAllowed
+        for (idx, expected_attempt) in [(0, 1u32), (1, 2), (2, 3)] {
+            assert_eq!(
+                ledger.entries()[idx].binding_constraint,
+                BindingConstraint::RestartAllowed {
+                    attempt: expected_attempt,
+                }
+            );
+        }
+
+        // 4th and 5th: WindowExhausted
+        for idx in 3..5 {
+            assert_eq!(
+                ledger.entries()[idx].binding_constraint,
+                BindingConstraint::WindowExhausted {
+                    max_restarts: 3,
+                    window,
+                }
+            );
+        }
+
+        crate::test_complete!("evidence_full_lifecycle_restart_to_exhaustion");
+    }
+
+    #[test]
+    fn evidence_for_task_filter() {
+        init_test("evidence_for_task_filter");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+        let task_a = TaskId::from_arena(ArenaIndex::new(0, 1));
+        let task_b = TaskId::from_arena(ArenaIndex::new(0, 2));
+
+        supervisor.on_failure(task_a, test_region_id(), None, Outcome::Err(()), 1000);
+        supervisor.on_failure(task_b, test_region_id(), None, Outcome::Err(()), 2000);
+        supervisor.on_failure(task_a, test_region_id(), None, Outcome::Err(()), 3000);
+
+        let a_entries: Vec<_> = supervisor.evidence().for_task(task_a).collect();
+        assert_eq!(a_entries.len(), 2);
+        assert_eq!(a_entries[0].timestamp, 1000);
+        assert_eq!(a_entries[1].timestamp, 3000);
+
+        let b_entries: Vec<_> = supervisor.evidence().for_task(task_b).collect();
+        assert_eq!(b_entries.len(), 1);
+
+        crate::test_complete!("evidence_for_task_filter");
+    }
+
+    #[test]
+    fn evidence_with_constraint_filter() {
+        init_test("evidence_with_constraint_filter");
+
+        let config = RestartConfig::new(2, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Two restarts then a panicked outcome
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+        );
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2000,
+        );
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Panicked(PanicPayload::new("oops")),
+            3000,
+        );
+
+        let restarts: Vec<_> = supervisor
+            .evidence()
+            .with_constraint(|c| matches!(c, BindingConstraint::RestartAllowed { .. }))
+            .collect();
+        assert_eq!(restarts.len(), 2);
+
+        let severity: Vec<_> = supervisor
+            .evidence()
+            .with_constraint(|c| matches!(c, BindingConstraint::MonotoneSeverity { .. }))
+            .collect();
+        assert_eq!(severity.len(), 1);
+
+        crate::test_complete!("evidence_with_constraint_filter");
+    }
+
+    #[test]
+    fn evidence_take_drains_ledger() {
+        init_test("evidence_take_drains_ledger");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
+        supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+        );
+
+        assert_eq!(supervisor.evidence().len(), 1);
+        let taken = supervisor.take_evidence();
+        assert_eq!(taken.len(), 1);
+        assert!(supervisor.evidence().is_empty());
+
+        crate::test_complete!("evidence_take_drains_ledger");
+    }
+
+    #[test]
+    fn evidence_deterministic_across_strategies() {
+        init_test("evidence_deterministic_across_strategies");
+
+        // Verify that the same inputs always produce the same evidence,
+        // regardless of strategy — evidence is a deterministic function of inputs.
+        let outcomes = vec![
+            Outcome::Ok(()),
+            Outcome::Err(()),
+            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Panicked(PanicPayload::new("boom")),
+        ];
+
+        for strategy in [
+            SupervisionStrategy::Stop,
+            SupervisionStrategy::Restart(RestartConfig::new(5, Duration::from_secs(60))),
+            SupervisionStrategy::Escalate,
+        ] {
+            let mut sup_a = Supervisor::new(strategy.clone());
+            let mut sup_b = Supervisor::new(strategy);
+
+            for (i, outcome) in outcomes.iter().enumerate() {
+                let t = (i as u64) * 1000;
+                sup_a.on_failure(test_task_id(), test_region_id(), None, outcome.clone(), t);
+                sup_b.on_failure(test_task_id(), test_region_id(), None, outcome.clone(), t);
+            }
+
+            let a = sup_a.evidence();
+            let b = sup_b.evidence();
+            assert_eq!(a.len(), b.len());
+            for (ea, eb) in a.entries().iter().zip(b.entries().iter()) {
+                assert_eq!(ea.timestamp, eb.timestamp);
+                assert_eq!(ea.strategy_kind, eb.strategy_kind);
+                assert_eq!(ea.binding_constraint, eb.binding_constraint);
+            }
+        }
+
+        crate::test_complete!("evidence_deterministic_across_strategies");
+    }
+
+    #[test]
+    fn evidence_binding_constraint_display() {
+        init_test("evidence_binding_constraint_display");
+
+        // Verify Display impls produce useful human-readable strings
+        let constraints = vec![
+            (
+                BindingConstraint::MonotoneSeverity {
+                    outcome_kind: "Panicked",
+                },
+                "monotone severity: Panicked is not restartable",
+            ),
+            (BindingConstraint::ExplicitStopStrategy, "strategy is Stop"),
+            (BindingConstraint::EscalateStrategy, "strategy is Escalate"),
+            (
+                BindingConstraint::RestartAllowed { attempt: 3 },
+                "restart allowed (attempt 3)",
+            ),
+            (
+                BindingConstraint::WindowExhausted {
+                    max_restarts: 5,
+                    window: Duration::from_secs(60),
+                },
+                "window exhausted: 5 restarts in 60s",
+            ),
+            (
+                BindingConstraint::InsufficientCost {
+                    required: 100,
+                    remaining: 42,
+                },
+                "insufficient cost: need 100, have 42",
+            ),
+            (
+                BindingConstraint::InsufficientPolls {
+                    min_required: 10,
+                    remaining: 3,
+                },
+                "insufficient polls: need 10, have 3",
+            ),
+        ];
+
+        for (constraint, expected) in constraints {
+            assert_eq!(format!("{constraint}"), expected);
+        }
+
+        crate::test_complete!("evidence_binding_constraint_display");
+    }
+
+    #[test]
+    fn evidence_window_exhaustion_with_budget_vs_without() {
+        init_test("evidence_window_exhaustion_with_budget_vs_without");
+
+        let window = Duration::from_secs(60);
+        let config = RestartConfig::new(1, window);
+
+        // Without budget: exhaust via can_restart(now)
+        let mut sup_no_budget = Supervisor::new(SupervisionStrategy::Restart(config.clone()));
+        sup_no_budget.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+        ); // restart
+        sup_no_budget.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2000,
+        ); // exhausted
+
+        // With budget (sufficient): exhaust via can_restart_with_budget
+        let mut sup_budget = Supervisor::new(SupervisionStrategy::Restart(config));
+        let budget = Budget::INFINITE;
+        sup_budget.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1000,
+            Some(&budget),
+        ); // restart
+        sup_budget.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2000,
+            Some(&budget),
+        ); // exhausted
+
+        // Both should produce WindowExhausted as the binding constraint
+        assert_eq!(
+            sup_no_budget.evidence().entries()[1].binding_constraint,
+            BindingConstraint::WindowExhausted {
+                max_restarts: 1,
+                window,
+            }
+        );
+        assert_eq!(
+            sup_budget.evidence().entries()[1].binding_constraint,
+            BindingConstraint::WindowExhausted {
+                max_restarts: 1,
+                window,
+            }
+        );
+
+        crate::test_complete!("evidence_window_exhaustion_with_budget_vs_without");
     }
 }
