@@ -1152,7 +1152,7 @@ mod tests {
 
         // Calibrate with queue depths 1..=10.
         for i in 1..=10 {
-            cal.calibrate("queue_depth", i as f64);
+            cal.calibrate("queue_depth", f64::from(i));
         }
         assert!(cal.is_metric_calibrated("queue_depth"));
 
@@ -1168,7 +1168,7 @@ mod tests {
 
         // Calibrate with small queue depths.
         for i in 1..=20 {
-            cal.calibrate("queue_depth", i as f64);
+            cal.calibrate("queue_depth", f64::from(i));
         }
 
         // A value far above the calibration range should be anomalous.
@@ -1220,13 +1220,13 @@ mod tests {
 
         // Phase 1: calibrate with small values.
         for i in 1..=10 {
-            cal.calibrate("metric", i as f64);
+            cal.calibrate("metric", f64::from(i));
         }
         let t1 = cal.threshold("metric").unwrap();
 
         // Phase 2: add larger values.
         for i in 11..=20 {
-            cal.calibrate("metric", i as f64);
+            cal.calibrate("metric", f64::from(i));
         }
         let t2 = cal.threshold("metric").unwrap();
 
@@ -1242,12 +1242,12 @@ mod tests {
         let mut cal = HealthThresholdCalibrator::new(config);
 
         for i in 1..=20 {
-            cal.calibrate("depth", i as f64);
+            cal.calibrate("depth", f64::from(i));
         }
 
         // Check several normal values.
         for i in 1..=10 {
-            let _ = cal.check_and_track("depth", i as f64);
+            let _ = cal.check_and_track("depth", f64::from(i));
         }
 
         let rates = cal.coverage_rates();
@@ -1264,8 +1264,8 @@ mod tests {
         let mut cal = HealthThresholdCalibrator::new(config);
 
         for i in 1..=10 {
-            cal.calibrate("queue_depth", i as f64);
-            cal.calibrate("restart_rate", i as f64 * 0.01);
+            cal.calibrate("queue_depth", f64::from(i));
+            cal.calibrate("restart_rate", f64::from(i) * 0.01);
         }
 
         assert!(cal.is_metric_calibrated("queue_depth"));
@@ -1282,7 +1282,7 @@ mod tests {
         let mut cal = HealthThresholdCalibrator::new(config);
 
         for i in 1..=10 {
-            cal.calibrate("queue_depth", i as f64);
+            cal.calibrate("queue_depth", f64::from(i));
         }
 
         assert!(!cal.any_anomalous(&[("queue_depth", 5.0)]));
@@ -1295,7 +1295,7 @@ mod tests {
         let mut cal = HealthThresholdCalibrator::new(config);
 
         for i in 1..=10 {
-            cal.calibrate("queue_depth", i as f64);
+            cal.calibrate("queue_depth", f64::from(i));
         }
 
         let result = cal.check("queue_depth", 5.0).unwrap();
@@ -1310,7 +1310,7 @@ mod tests {
             let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
             let mut cal = HealthThresholdCalibrator::new(config);
             for i in 1..=10 {
-                cal.calibrate("m", i as f64);
+                cal.calibrate("m", f64::from(i));
             }
             cal.check("m", 7.5).unwrap()
         };
@@ -1364,7 +1364,7 @@ mod tests {
             }
         }
 
-        let coverage = conforming_count as f64 / total as f64;
+        let coverage = f64::from(conforming_count) / f64::from(total);
         assert!(
             coverage >= 1.0 - alpha - 0.05,
             "coverage {coverage:.2} should be ≥ {:.2}",
@@ -1380,14 +1380,14 @@ mod tests {
 
         // Calibrate with values 1..=20.
         for i in 1..=20 {
-            cal.calibrate("depth", i as f64);
+            cal.calibrate("depth", f64::from(i));
         }
 
         // Check 50 values within the calibration range.
         let mut conforming = 0;
         let total = 50;
         for i in 0..total {
-            let value = ((i % 20) + 1) as f64;
+            let value = f64::from((i % 20) + 1);
             if let Some(result) = cal.check("depth", value) {
                 if result.conforming {
                     conforming += 1;
@@ -1395,7 +1395,7 @@ mod tests {
             }
         }
 
-        let coverage = conforming as f64 / total as f64;
+        let coverage = f64::from(conforming) / f64::from(total);
         assert!(
             coverage >= 1.0 - alpha - 0.05,
             "health threshold coverage {coverage:.2} should be ≥ {:.2}",
