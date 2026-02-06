@@ -493,15 +493,69 @@ rustdoc output.
 - `security::SecurityContext` for signing/verifying symbols
 - `Cx::trace` + `observability::Metrics` for structured telemetry
 
-### Spork (OTP Layer, Planned)
+### Spork (OTP Mental Model on Asupersync)
 
-The OTP-grade ergonomics layer (Spork) is being specified and built as a library
-layer over the existing runtime primitives (regions, cancellation, obligations, lab).
+Spork is the OTP-grade library layer being built on top of Asupersync's core
+invariants: structured concurrency, explicit cancellation, obligation linearity,
+and deterministic lab execution.
 
-Canonical spec for the intended `asupersync::spork::*` module layout, feature gating,
-and capability contracts:
-- `docs/spork_glossary_invariants.md` (Section 6: Public API Surface Map)
-- `docs/spork_glossary_invariants.md` (Section 2: INV-6A Outcome Mapping Tables)
+Think of Spork as:
+- OTP ergonomics (supervision, naming, call/cast, link/monitor)
+- mapped onto region ownership and outcome semantics
+- with deterministic replay/debugging as a first-class feature
+
+#### OTP -> Asupersync Mapping
+
+| OTP concept | Spork / Asupersync mapping |
+|------------|-----------------------------|
+| Process | Region-owned task/actor (never detached) |
+| Supervisor | Compiled restart topology over regions |
+| Link | Failure coupling via supervision/escalation rules |
+| Monitor + DOWN | Observation channel with deterministic ordering |
+| Registry | Name leases as obligations (commit/abort, no stale ownership) |
+| call/cast | Request-response vs fire-and-forget mailbox flows |
+
+#### Failure and Outcome Semantics
+
+Spork uses Asupersync's four-valued outcome lattice:
+
+```text
+Ok < Err < Cancelled < Panicked
+```
+
+Key rule: failed executions are immutable facts in traces. Recovery is modeled
+by starting new executions, not rewriting old outcomes.
+
+Practical implications:
+- `Err` may restart (policy + budget dependent)
+- `Cancelled` typically maps to stop (external directive)
+- `Panicked` maps to stop/escalate (never "healed" in place)
+
+See:
+- `docs/spork_glossary_invariants.md` (INV-6, INV-6A)
+- `src/supervision.rs` (`Supervisor::on_failure`)
+
+#### Deterministic Incident Workflow (Spork-oriented)
+
+1. Reproduce with lab runtime using fixed seed/config.
+2. Capture trace/crash artifacts (canonical fingerprints + replay inputs).
+3. Inspect supervision decisions and ordering-sensitive events.
+4. Replay the same seed and verify identical decisions.
+5. Adjust policy/budget/topology and re-run until invariant holds.
+
+This turns "flaky OTP behavior" into deterministic, auditable steps.
+
+See:
+- `docs/spork_deterministic_ordering.md`
+- `docs/spork_glossary_invariants.md`
+- `src/trace/crashpack.rs`
+- `src/lab/runtime.rs`
+
+#### Current Surface Status
+
+The Spork layer is actively being built. For concrete API shape and module map:
+- `docs/spork_glossary_invariants.md` (Section 1 glossary, Section 6 API map)
+- `docs/spork_deterministic_ordering.md` (mailbox/down/registry ordering contracts)
 
 ---
 
