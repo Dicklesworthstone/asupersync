@@ -1533,27 +1533,27 @@ theorem tick_preserves_wellformed {Value Error Panic : Type}
 -- ==========================================================================
 
 theorem complete_preserves_wellformed {Value Error Panic : Type}
-    {s s' : State Value Error Panic} (tid : TaskId)
+    {s s' : State Value Error Panic} {t : TaskId}
     {outcome : Outcome Value Error CancelReason Panic}
     (hWF : WellFormed s)
-    (hStep : Step s (Label.complete tid outcome) s')
+    (hStep : Step s (Label.complete t outcome) s')
     : WellFormed s' := by
   cases hStep with
   | complete _ hTask hTaskState hUpdate =>
     -- The task record is an implicit parameter of the `complete` step constructor.
-    rename_i task0
+    rename_i t0 task0
     subst hUpdate
     let completedTask : Task Value Error Panic :=
       { task0 with state := TaskState.completed outcome }
     exact {
       task_region_exists := fun t' task' hGet' => by
-        by_cases hEq : t' = tid
+        by_cases hEq : t' = t0
         · subst hEq
           have hEqTask : task' = completedTask := by
             have : completedTask = task' := by
               simpa [getTask, setTask, completedTask] using hGet'
             exact this.symm
-          obtain ⟨region, hReg⟩ := hWF.task_region_exists tid task0 hTask
+          obtain ⟨region, hReg⟩ := hWF.task_region_exists t0 task0 hTask
           have hSameRegion : task'.region = task0.region := by
             simpa [hEqTask, completedTask]
           refine ⟨region, ?_⟩
@@ -1570,7 +1570,7 @@ theorem complete_preserves_wellformed {Value Error Panic : Type}
         have hObS : getObligation s o = some ob := by
           simpa [getObligation, setTask] using hOb
         obtain ⟨holderTask, hHolderTask⟩ := hWF.obligation_holder_exists o ob hObS
-        by_cases hEq : ob.holder = tid
+        by_cases hEq : ob.holder = t0
         · refine ⟨completedTask, ?_⟩
           simpa [getTask, setTask, completedTask, hEq]
         · refine ⟨holderTask, ?_⟩
@@ -1586,7 +1586,7 @@ theorem complete_preserves_wellformed {Value Error Panic : Type}
         have hRegionS : getRegion s r = some region := by
           simpa [getRegion, setTask] using hRegion
         obtain ⟨taskChild, hTaskChild⟩ := hWF.children_exist r region hRegionS tChild hMem
-        by_cases hEq : tChild = tid
+        by_cases hEq : tChild = t0
         · refine ⟨completedTask, ?_⟩
           simpa [getTask, setTask, completedTask, hEq]
         · refine ⟨taskChild, ?_⟩
@@ -1831,21 +1831,21 @@ theorem spawn_preserves_wellformed {Value Error Panic : Type}
         by_cases hEq : t' = t
         · subst hEq
           simp [getTask, setRegion, setTask] at h
-          exact ⟨{ (s.regions r).get hRegion with children := (s.regions r).get hRegion |>.children ++ [t] },
-            by simp [getRegion, setRegion, setTask]⟩
+          refine ⟨{ region with children := region.children ++ [t] }, ?_⟩
+          simp [getRegion, setRegion, setTask]
         · simp [getTask, setRegion, setTask, hEq] at h
-          obtain ⟨region, hReg⟩ := hWF.task_region_exists t' task' h
+          obtain ⟨reg, hReg⟩ := hWF.task_region_exists t' task' h
           by_cases hRegEq : task'.region = r
-          · exact ⟨{ (s.regions r).get hRegion with children := (s.regions r).get hRegion |>.children ++ [t] },
-              by simp [getRegion, setRegion, setTask, hRegEq]⟩
-          · exact ⟨region, by simp [getRegion, setRegion, setTask, hRegEq]; exact hReg⟩
+          · exact ⟨{ region with children := region.children ++ [t] },
+              by simp [getRegion, setRegion, setTask, hRegEq, hRegion]⟩
+          · exact ⟨reg, by simp [getRegion, setRegion, setTask, hRegEq]; exact hReg⟩
       obligation_region_exists := fun o ob h => by
         simp [getObligation, setRegion, setTask] at h
-        obtain ⟨region, hReg⟩ := hWF.obligation_region_exists o ob h
+        obtain ⟨reg, hReg⟩ := hWF.obligation_region_exists o ob h
         by_cases hRegEq : ob.region = r
-        · exact ⟨{ (s.regions r).get hRegion with children := (s.regions r).get hRegion |>.children ++ [t] },
-            by simp [getRegion, setRegion, setTask, hRegEq]⟩
-        · exact ⟨region, by simp [getRegion, setRegion, setTask, hRegEq]; exact hReg⟩
+        · exact ⟨{ region with children := region.children ++ [t] },
+            by simp [getRegion, setRegion, setTask, hRegEq, hRegion]⟩
+        · exact ⟨reg, by simp [getRegion, setRegion, setTask, hRegEq]; exact hReg⟩
       obligation_holder_exists := fun o ob h => by
         simp [getObligation, setRegion, setTask] at h
         obtain ⟨task', hTask'⟩ := hWF.obligation_holder_exists o ob h
@@ -1912,8 +1912,8 @@ theorem spawn_preserves_wellformed {Value Error Panic : Type}
         · simp [getRegion, setRegion, setTask, hRegEq] at h
           obtain ⟨sub, hSub⟩ := hWF.subregions_exist r' region' h r'' hMem
           by_cases hSubEq : r'' = r
-          · exact ⟨{ (s.regions r).get hRegion with children := (s.regions r).get hRegion |>.children ++ [t] },
-              by simp [getRegion, setRegion, setTask, hSubEq]⟩
+          · exact ⟨{ region with children := region.children ++ [t] },
+              by simp [getRegion, setRegion, setTask, hSubEq, hRegion]⟩
           · exact ⟨sub, by simp [getRegion, setRegion, setTask, hSubEq]; exact hSub⟩
     }
 
