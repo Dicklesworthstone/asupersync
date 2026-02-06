@@ -37,6 +37,7 @@ use crate::types::{
 };
 use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt;
@@ -1000,6 +1001,34 @@ impl RuntimeState {
             .collect()
     }
 
+    /// Collect obligation leaks for a specific task holder using the secondary index.
+    fn collect_obligation_leaks_for_holder(
+        &self,
+        task_id: TaskId,
+    ) -> Vec<LeakedObligationInfo> {
+        self.obligations
+            .ids_for_holder(task_id)
+            .iter()
+            .filter_map(|id| {
+                let record = self.obligations.get(id.arena_index())?;
+                if !record.is_pending() {
+                    return None;
+                }
+                let held_duration_ns = self.now.duration_since(record.reserved_at);
+                Some(LeakedObligationInfo {
+                    id: record.id,
+                    kind: record.kind,
+                    holder: record.holder,
+                    region: record.region,
+                    acquired_at: record.acquired_at,
+                    held_duration_ns,
+                    description: record.description.clone(),
+                    acquire_backtrace: record.acquire_backtrace.clone(),
+                })
+            })
+            .collect()
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
         if error.leaks.is_empty() {
@@ -1766,14 +1795,14 @@ impl RuntimeState {
     /// This checks if the owning region can advance its state.
     /// Returns the task's waiters that should be woken.
     #[allow(clippy::used_underscore_binding)]
-    pub fn task_completed(&mut self, task_id: TaskId) -> Vec<TaskId> {
+    pub fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]> {
         let (owner, completion, _outcome_kind, waiters) = {
             let Some(task) = self.task(task_id) else {
                 trace!(
                     task_id = ?task_id,
                     "task_completed called for unknown task"
                 );
-                return Vec::new();
+                return SmallVec::new();
             };
             if let Some(inner) = task.cx_inner.as_ref() {
                 if let Ok(mut guard) = inner.write() {
@@ -1803,7 +1832,7 @@ impl RuntimeState {
         let _ = self.remove_task(task_id);
 
         if !matches!(completion, TaskCompletionKind::Cancelled) {
-            let leaks = self.collect_obligation_leaks(|record| record.holder == task_id);
+            let leaks = self.collect_obligation_leaks_for_holder(task_id);
             if !leaks.is_empty() {
                 self.handle_obligation_leaks(ObligationLeakError {
                     task_id: Some(task_id),
@@ -1825,12 +1854,8 @@ impl RuntimeState {
 
         // Abort any pending obligations held by this task to prevent
         // orphaned obligations from blocking region close (deadlock).
-        let orphaned: Vec<ObligationId> = self
-            .obligations
-            .iter()
-            .filter(|(_, r)| r.holder == task_id && r.is_pending())
-            .map(|(idx, _)| ObligationId::from_arena(idx))
-            .collect();
+        // Uses the holder secondary index for O(obligations_per_task) instead of O(arena_capacity).
+        let orphaned = self.obligations.sorted_pending_ids_for_holder(task_id);
         for ob_id in orphaned {
             let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
         }

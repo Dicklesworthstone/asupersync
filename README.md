@@ -366,6 +366,70 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ---
 
+## "Alien Artifact" Quality Algorithms
+
+Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it buys real guarantees (determinism, cancel-correctness, bounded cleanup, and reproducible concurrency debugging). This is not aspirational; the mechanisms below are implemented in the codebase today.
+
+### Mazurkiewicz Trace Monoid + Foata Normal Form (DPOR Equivalence Classes)
+
+Instead of treating traces as opaque linear logs, Asupersync factors out *pure commutations* of independent events via trace theory. Two traces that differ only by swapping adjacent independent events are considered equivalent, and canonicalized to a unique representative (Foata normal form). See `src/trace/canonicalize.rs`.
+
+$$
+M(\\Sigma, I) = \\Sigma^* / \\equiv_I
+$$
+
+Payoff: canonical fingerprints for schedule exploration and stable replay across "same behavior, different interleaving" runs.
+
+### Geodesic Schedule Normalization (A* / Beam Search Over Linear Extensions)
+
+Given a dependency DAG (trace poset), Asupersync constructs a valid linear extension that minimizes "owner switches" (a proxy for context-switch entropy) using deterministic heuristics and an exact bounded A* solver. See `src/trace/geodesic.rs` and `src/trace/event_structure.rs`.
+
+Payoff: smaller, more canonical traces that are easier to diff, replay, and minimize.
+
+### DPOR Race Detection + Happens-Before (Vector Clocks)
+
+Asupersync includes DPOR-style race detection and backtracking point extraction, using a minimal happens-before relation (vector clocks per task) plus resource-footprint conflicts. See `src/trace/dpor.rs` and `src/trace/independence.rs`.
+
+Payoff: systematic interleaving exploration that targets truly different behaviors instead of brute-force schedule fuzzing.
+
+### Persistent Homology of Trace Commutation Complexes (GF(2) Boundary Reduction)
+
+Schedule exploration is prioritized using topological signals from a square cell complex built out of commuting diamonds: edges are causality edges, squares represent valid commutations, and Betti numbers/persistence quantify "non-trivial scheduling freedom". The implementation uses deterministic GF(2) bitset linear algebra and boundary-matrix reduction. See `src/trace/boundary.rs`, `src/trace/gf2.rs`, and `src/trace/scoring.rs`.
+
+Payoff: an evidence-ledger, structure-aware notion of "interesting schedules" that tends to surface rare concurrency behaviors earlier.
+
+### Sheaf-Theoretic Consistency Checks for Distributed Sagas
+
+In distributed obligation tracking, pairwise lattice merges can hide *global* inconsistency (phantom commits). Asupersync models this as a sheaf-style gluing problem and detects obstructions where no global assignment explains all local observations. See `src/trace/distributed/sheaf.rs`.
+
+Payoff: catches split-brain-style saga states that evade purely pairwise conflict checks.
+
+### Anytime-Valid Invariant Monitoring (E-Processes, Ville's Inequality)
+
+The lab runtime can continuously monitor invariants (task leaks, obligation leaks, region quiescence) using e-processes: a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties". See `src/lab/oracle/eprocess.rs` and `src/obligation/eprocess.rs`.
+
+Payoff: turn long-running exploration into statistically sound monitoring, with deterministic, explainable rejection thresholds.
+
+### Distribution-Free Conformal Calibration for Oracle Metrics
+
+Oracle anomaly thresholds are calibrated using split conformal prediction, giving finite-sample, distribution-free coverage guarantees under exchangeability assumptions across deterministic schedule seeds. See `src/lab/conformal.rs`.
+
+Payoff: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
+
+### Algebraic Law Sheets + Rewrite Engines With Side-Condition Lattices
+
+Asupersync's concurrency combinators come with an explicit law sheet (severity lattices, budget semirings, race/join laws, etc.) and a rewrite engine guarded by conservative static analyses (obligation-safety and cancel-safety lattices; deadline min-plus reasoning). See `src/combinator/laws.rs`, `src/plan/rewrite.rs`, and `src/plan/analysis.rs`.
+
+Payoff: principled plan optimization without silently breaking cancel/drain/quiescence invariants.
+
+### TLA+ Export for Model Checking
+
+Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC model checking of core invariants (no orphans, obligation linearity, quiescence). See `src/trace/tla_export.rs`.
+
+Payoff: bridge from deterministic runtime traces to model-checking workflows when you need "prove it", not "it passed tests".
+
+---
+
 ## Using Asupersync as a Dependency
 
 ### Cargo.toml

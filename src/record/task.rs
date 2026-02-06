@@ -8,6 +8,7 @@ use crate::tracing_compat::trace;
 use crate::types::{
     Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
 };
+use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::Waker;
@@ -286,7 +287,7 @@ pub struct TaskRecord {
     /// Lab-only: last step this task was polled (for futurelock detection).
     pub last_polled_step: u64,
     /// Tasks waiting for this task to complete.
-    pub waiters: Vec<TaskId>,
+    pub waiters: SmallVec<[TaskId; 4]>,
     /// Cached waker for this task (avoids per-poll Arc allocation).
     /// The tuple stores (waker, priority) so we can detect priority changes.
     pub cached_waker: Option<(Waker, u8)>,
@@ -344,7 +345,7 @@ impl TaskRecord {
             #[cfg(feature = "tracing-integration")]
             created_instant: Instant::now(),
             last_polled_step: 0,
-            waiters: Vec::new(),
+            waiters: SmallVec::new(),
             cached_waker: None,
             cached_cancel_waker: None,
             cancel_epoch: 0,
