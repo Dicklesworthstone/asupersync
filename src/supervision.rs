@@ -5633,7 +5633,7 @@ mod tests {
     #[test]
     fn emission_wiring_restart_produces_generalized_record() {
         init_test("emission_wiring_restart_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, Subsystem, SupervisionDetail, Verdict};
+        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 3,
@@ -5652,7 +5652,7 @@ mod tests {
         assert_eq!(gen.len(), 1);
 
         let record = &gen.entries()[0];
-        assert_eq!(record.subsystem, crate::evidence::Subsystem::Supervision);
+        assert_eq!(record.subsystem, Subsystem::Supervision);
         assert_eq!(record.verdict, Verdict::Restart);
         assert_eq!(record.task_id, task);
         assert_eq!(record.region_id, region);
