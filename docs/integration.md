@@ -501,6 +501,7 @@ layer over the existing runtime primitives (regions, cancellation, obligations, 
 Canonical spec for the intended `asupersync::spork::*` module layout, feature gating,
 and capability contracts:
 - `docs/spork_glossary_invariants.md` (Section 6: Public API Surface Map)
+- `docs/spork_glossary_invariants.md` (Section 2: INV-6A Outcome Mapping Tables)
 
 ---
 

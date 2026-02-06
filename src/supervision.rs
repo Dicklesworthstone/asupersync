@@ -1780,34 +1780,90 @@ impl Supervisor {
         now: u64,
         budget: Option<&Budget>,
     ) -> SupervisionDecision {
+        let strategy_kind = match &self.strategy {
+            SupervisionStrategy::Stop => "Stop",
+            SupervisionStrategy::Restart(_) => "Restart",
+            SupervisionStrategy::Escalate => "Escalate",
+        };
+
+        // Helper: record evidence and return the decision.
+        let mut record = |decision: SupervisionDecision,
+                          constraint: BindingConstraint|
+         -> SupervisionDecision {
+            self.evidence.push(EvidenceEntry {
+                timestamp: now,
+                task_id,
+                region_id,
+                outcome: outcome.clone(),
+                strategy_kind,
+                decision: decision.clone(),
+                binding_constraint: constraint,
+            });
+            decision
+        };
+
         // SPORK monotone severity contract:
         // - Panics are never restartable.
         // - Cancellation is an external directive; it is not restartable.
         // - Only `Err` is eligible for `Restart(..)` and `Escalate`.
         match outcome {
-            Outcome::Ok(()) => SupervisionDecision::Stop {
-                task_id,
-                region_id,
-                // `on_failure*` should not be called for Ok outcomes; stop is the safest
-                // deterministic fallback.
-                reason: StopReason::ExplicitStop,
-            },
-            Outcome::Cancelled(reason) => SupervisionDecision::Stop {
-                task_id,
-                region_id,
-                reason: StopReason::Cancelled(reason),
-            },
-            Outcome::Panicked(_) => SupervisionDecision::Stop {
-                task_id,
-                region_id,
-                reason: StopReason::Panicked,
-            },
-            Outcome::Err(()) => match &mut self.strategy {
-                SupervisionStrategy::Stop => SupervisionDecision::Stop {
+            Outcome::Ok(()) => {
+                let decision = SupervisionDecision::Stop {
                     task_id,
                     region_id,
                     reason: StopReason::ExplicitStop,
-                },
+                };
+                record(
+                    decision,
+                    BindingConstraint::MonotoneSeverity {
+                        outcome_kind: "Ok",
+                    },
+                )
+            }
+            Outcome::Cancelled(ref reason) => {
+                let decision = SupervisionDecision::Stop {
+                    task_id,
+                    region_id,
+                    reason: StopReason::Cancelled(reason.clone()),
+                };
+                record(
+                    decision,
+                    BindingConstraint::MonotoneSeverity {
+                        outcome_kind: "Cancelled",
+                    },
+                )
+            }
+            Outcome::Panicked(_) => {
+                let decision = SupervisionDecision::Stop {
+                    task_id,
+                    region_id,
+                    reason: StopReason::Panicked,
+                };
+                record(
+                    decision,
+                    BindingConstraint::MonotoneSeverity {
+                        outcome_kind: "Panicked",
+                    },
+                )
+            }
+            Outcome::Err(()) => match &mut self.strategy {
+                SupervisionStrategy::Stop => {
+                    let decision = SupervisionDecision::Stop {
+                        task_id,
+                        region_id,
+                        reason: StopReason::ExplicitStop,
+                    };
+                    self.evidence.push(EvidenceEntry {
+                        timestamp: now,
+                        task_id,
+                        region_id,
+                        outcome: outcome.clone(),
+                        strategy_kind,
+                        decision: decision.clone(),
+                        binding_constraint: BindingConstraint::ExplicitStopStrategy,
+                    });
+                    decision
+                }
 
                 SupervisionStrategy::Restart(config) => {
                     let history = self.history.as_mut().expect("history exists for Restart");
@@ -1815,7 +1871,37 @@ impl Supervisor {
                     // Check budget constraints if a budget is provided
                     if let Some(budget) = budget {
                         if let Err(refusal) = history.can_restart_with_budget(now, budget) {
-                            return match refusal {
+                            let constraint = match &refusal {
+                                BudgetRefusal::WindowExhausted {
+                                    max_restarts,
+                                    window,
+                                } => BindingConstraint::WindowExhausted {
+                                    max_restarts: *max_restarts,
+                                    window: *window,
+                                },
+                                BudgetRefusal::InsufficientCost {
+                                    required,
+                                    remaining,
+                                } => BindingConstraint::InsufficientCost {
+                                    required: *required,
+                                    remaining: *remaining,
+                                },
+                                BudgetRefusal::DeadlineTooClose {
+                                    min_required,
+                                    remaining,
+                                } => BindingConstraint::DeadlineTooClose {
+                                    min_required: *min_required,
+                                    remaining: *remaining,
+                                },
+                                BudgetRefusal::InsufficientPolls {
+                                    min_required,
+                                    remaining,
+                                } => BindingConstraint::InsufficientPolls {
+                                    min_required: *min_required,
+                                    remaining: *remaining,
+                                },
+                            };
+                            let decision = match refusal {
                                 BudgetRefusal::WindowExhausted { .. } => {
                                     SupervisionDecision::Stop {
                                         task_id,
@@ -1832,9 +1918,19 @@ impl Supervisor {
                                     reason: StopReason::BudgetRefused(refusal),
                                 },
                             };
+                            self.evidence.push(EvidenceEntry {
+                                timestamp: now,
+                                task_id,
+                                region_id,
+                                outcome: outcome.clone(),
+                                strategy_kind,
+                                decision: decision.clone(),
+                                binding_constraint: constraint,
+                            });
+                            return decision;
                         }
                     } else if !history.can_restart(now) {
-                        return SupervisionDecision::Stop {
+                        let decision = SupervisionDecision::Stop {
                             task_id,
                             region_id,
                             reason: StopReason::RestartBudgetExhausted {
@@ -1842,26 +1938,61 @@ impl Supervisor {
                                 window: config.window,
                             },
                         };
+                        self.evidence.push(EvidenceEntry {
+                            timestamp: now,
+                            task_id,
+                            region_id,
+                            outcome: outcome.clone(),
+                            strategy_kind,
+                            decision: decision.clone(),
+                            binding_constraint: BindingConstraint::WindowExhausted {
+                                max_restarts: config.max_restarts,
+                                window: config.window,
+                            },
+                        });
+                        return decision;
                     }
 
                     let attempt = history.recent_restart_count(now) as u32 + 1;
                     let delay = history.next_delay(now);
                     history.record_restart(now);
 
-                    SupervisionDecision::Restart {
+                    let decision = SupervisionDecision::Restart {
                         task_id,
                         region_id,
                         attempt,
                         delay,
-                    }
+                    };
+                    self.evidence.push(EvidenceEntry {
+                        timestamp: now,
+                        task_id,
+                        region_id,
+                        outcome: outcome.clone(),
+                        strategy_kind,
+                        decision: decision.clone(),
+                        binding_constraint: BindingConstraint::RestartAllowed { attempt },
+                    });
+                    decision
                 }
 
-                SupervisionStrategy::Escalate => SupervisionDecision::Escalate {
-                    task_id,
-                    region_id,
-                    parent_region_id,
-                    outcome: Outcome::Err(()),
-                },
+                SupervisionStrategy::Escalate => {
+                    let decision = SupervisionDecision::Escalate {
+                        task_id,
+                        region_id,
+                        parent_region_id,
+                        outcome: Outcome::Err(()),
+                    };
+                    self.evidence.push(EvidenceEntry {
+                        timestamp: now,
+                        task_id,
+                        region_id,
+                        outcome: outcome.clone(),
+                        strategy_kind,
+                        decision: decision.clone(),
+                        binding_constraint: BindingConstraint::EscalateStrategy,
+                    });
+                    decision
+                }
             },
         }
     }
@@ -1870,6 +2001,22 @@ impl Supervisor {
     #[must_use]
     pub fn history(&self) -> Option<&RestartHistory> {
         self.history.as_ref()
+    }
+
+    /// Access the evidence ledger.
+    ///
+    /// Returns a reference to the append-only ledger containing one
+    /// [`EvidenceEntry`] per supervision decision.
+    #[must_use]
+    pub fn evidence(&self) -> &EvidenceLedger {
+        &self.evidence
+    }
+
+    /// Take ownership of the evidence ledger, replacing it with an empty one.
+    ///
+    /// Useful for draining evidence in test assertions.
+    pub fn take_evidence(&mut self) -> EvidenceLedger {
+        std::mem::take(&mut self.evidence)
     }
 }
 
