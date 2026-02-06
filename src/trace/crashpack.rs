@@ -260,7 +260,7 @@ pub struct ManifestAttachment {
 }
 
 // serde expects `skip_serializing_if` predicates to take `&T`.
-#[allow(clippy::trivially_copy_pass_by_ref)]
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if requires &T
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
