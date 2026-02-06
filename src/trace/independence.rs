@@ -109,13 +109,15 @@ pub fn accesses_conflict(a: &ResourceAccess, b: &ResourceAccess) -> bool {
 /// Events with an empty footprint (like `UserTrace`) are independent of all
 /// other events (except themselves, by irreflexivity).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
     use TraceEventKind::{
-        CancelAck, CancelRequest, ChaosInjection, Checkpoint, Complete, FuturelockDetected,
-        IoError, IoReady, IoRequested, IoResult, ObligationAbort, ObligationCommit, ObligationLeak,
-        ObligationReserve, Poll, RegionCancelled, RegionCloseBegin, RegionCloseComplete,
-        RegionCreated, RngSeed, RngValue, Schedule, Spawn, TimeAdvance, TimerCancelled, TimerFired,
-        TimerScheduled, UserTrace, Wake, Yield,
+        CancelAck, CancelRequest, ChaosInjection, Checkpoint, Complete, DownDelivered,
+        ExitDelivered, FuturelockDetected, IoError, IoReady, IoRequested, IoResult, LinkCreated,
+        LinkDropped, MonitorCreated, MonitorDropped, ObligationAbort, ObligationCommit,
+        ObligationLeak, ObligationReserve, Poll, RegionCancelled, RegionCloseBegin,
+        RegionCloseComplete, RegionCreated, RngSeed, RngValue, Schedule, Spawn, TimeAdvance,
+        TimerCancelled, TimerFired, TimerScheduled, UserTrace, Wake, Yield,
     };
 
     match (&event.kind, &event.data) {
@@ -220,6 +222,57 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
         (UserTrace, _) => {
             vec![]
         }
+
+        // === Monitor / Down (Spork) ===
+        //
+        // Conservative footprint: treat these as touching the involved tasks
+        // (and watcher region) so Foata layers can commute truly independent
+        // notifications while preserving per-task ordering.
+        (
+            MonitorCreated | MonitorDropped,
+            TraceData::Monitor {
+                watcher,
+                watcher_region,
+                monitored,
+                ..
+            },
+        ) => vec![
+            ResourceAccess::write(Resource::Task(*watcher)),
+            ResourceAccess::read(Resource::Region(*watcher_region)),
+            ResourceAccess::read(Resource::Task(*monitored)),
+        ],
+        (
+            DownDelivered,
+            TraceData::Down {
+                watcher, monitored, ..
+            },
+        ) => vec![
+            ResourceAccess::write(Resource::Task(*watcher)),
+            ResourceAccess::read(Resource::Task(*monitored)),
+            ResourceAccess::read(Resource::GlobalClock),
+        ],
+
+        // === Link / Exit (Spork) ===
+        (
+            LinkCreated | LinkDropped,
+            TraceData::Link {
+                task_a,
+                region_a,
+                task_b,
+                region_b,
+                ..
+            },
+        ) => vec![
+            ResourceAccess::write(Resource::Task(*task_a)),
+            ResourceAccess::read(Resource::Region(*region_a)),
+            ResourceAccess::write(Resource::Task(*task_b)),
+            ResourceAccess::read(Resource::Region(*region_b)),
+        ],
+        (ExitDelivered, TraceData::Exit { from, to, .. }) => vec![
+            ResourceAccess::read(Resource::Task(*from)),
+            ResourceAccess::write(Resource::Task(*to)),
+            ResourceAccess::read(Resource::GlobalClock),
+        ],
 
         // === Fallback: conservative global state write ===
         // Handles unexpected kind/data combinations safely.

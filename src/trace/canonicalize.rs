@@ -598,6 +598,7 @@ fn event_hash_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monitor::DownReason;
     use crate::record::ObligationKind;
     use crate::types::{ObligationId, RegionId, TaskId, Time};
 
@@ -735,6 +736,123 @@ mod tests {
         let fp_b = trace_fingerprint(&trace_b);
         // These are genuinely different traces (different causal structure).
         assert_ne!(fp_a, fp_b);
+    }
+
+    // === Deterministic ordering keys (bd-wwnkh) ===
+
+    #[test]
+    fn down_delivered_canonicalizes_by_completion_vt_monitored_monitor_ref() {
+        let e0 = TraceEvent::down_delivered(
+            1,
+            Time::ZERO,
+            1,
+            tid(10),
+            tid(3),
+            Time::from_nanos(4),
+            DownReason::Normal,
+        );
+        let e1 = TraceEvent::down_delivered(
+            2,
+            Time::ZERO,
+            10,
+            tid(11),
+            tid(1),
+            Time::from_nanos(5),
+            DownReason::Normal,
+        );
+        let e2 = TraceEvent::down_delivered(
+            3,
+            Time::ZERO,
+            9,
+            tid(12),
+            tid(1),
+            Time::from_nanos(5),
+            DownReason::Normal,
+        );
+        let e3 = TraceEvent::down_delivered(
+            4,
+            Time::ZERO,
+            1,
+            tid(13),
+            tid(2),
+            Time::from_nanos(5),
+            DownReason::Normal,
+        );
+
+        // All four events are independent (distinct watcher tasks). Canonical
+        // ordering within the layer must follow:
+        // (completion_vt, monitored_tid, monitor_ref).
+        let trace_a = [e0.clone(), e1.clone(), e2.clone(), e3.clone()];
+        let trace_b = [e3.clone(), e2.clone(), e1.clone(), e0.clone()];
+
+        let foata_a = canonicalize(&trace_a);
+        let foata_b = canonicalize(&trace_b);
+        assert_eq!(foata_a.fingerprint(), foata_b.fingerprint());
+        assert_eq!(foata_a.depth(), 1);
+
+        let flat = foata_a.flatten();
+        assert_eq!(flat.len(), 4);
+        assert_eq!(flat[0], e0);
+        assert_eq!(flat[1], e2);
+        assert_eq!(flat[2], e1);
+        assert_eq!(flat[3], e3);
+    }
+
+    #[test]
+    fn exit_delivered_canonicalizes_by_failure_vt_from_link_ref() {
+        let e0 = TraceEvent::exit_delivered(
+            1,
+            Time::ZERO,
+            1,
+            tid(2),
+            tid(20),
+            Time::from_nanos(9),
+            DownReason::Error("boom".to_string()),
+        );
+        let e1 = TraceEvent::exit_delivered(
+            2,
+            Time::ZERO,
+            10,
+            tid(1),
+            tid(21),
+            Time::from_nanos(10),
+            DownReason::Error("boom".to_string()),
+        );
+        let e2 = TraceEvent::exit_delivered(
+            3,
+            Time::ZERO,
+            9,
+            tid(1),
+            tid(22),
+            Time::from_nanos(10),
+            DownReason::Error("boom".to_string()),
+        );
+        let e3 = TraceEvent::exit_delivered(
+            4,
+            Time::ZERO,
+            1,
+            tid(3),
+            tid(23),
+            Time::from_nanos(10),
+            DownReason::Error("boom".to_string()),
+        );
+
+        // Canonical ordering must follow:
+        // (failure_vt, from_tid, link_ref).
+        let trace_a = [e3.clone(), e2.clone(), e1.clone(), e0.clone()];
+        let trace_b = [e0.clone(), e1.clone(), e2.clone(), e3.clone()];
+
+        let foata_a = canonicalize(&trace_a);
+        let foata_b = canonicalize(&trace_b);
+        assert_eq!(foata_a.fingerprint(), foata_b.fingerprint());
+        assert_eq!(foata_a.depth(), 1);
+
+        let flat = foata_a.flatten();
+        assert_eq!(flat.len(), 4);
+        assert_eq!(flat[0], e0);
+        assert_eq!(flat[1], e2);
+        assert_eq!(flat[2], e1);
+        assert_eq!(flat[3], e3);
     }
 
     // === Complex equivalence: three independent events in any of 6 orders ===
