@@ -6117,6 +6117,13 @@ mod tests {
             .create_obligation(ObligationKind::Ack, task, region, None)
             .expect("obl2");
 
+        // Request close on the region so advance_region_state is allowed to
+        // drive it through Closing -> Finalizing -> Closed.
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+        }
+
         crate::assert_with_log!(
             state.pending_obligation_count() == 2,
             "two pending obligations",
@@ -6177,7 +6184,7 @@ mod tests {
         let task_d = insert_task(&mut state, region);
 
         // Cancel siblings of task_b (should cancel a, c, d but not b)
-        let reason = CancelReason::new(CancelKind::FailFast, "sibling failed");
+        let reason = CancelReason::fail_fast().with_message("sibling failed");
         let to_cancel = state.cancel_sibling_tasks(region, task_b, &reason);
 
         // task_b should NOT appear in the cancellation list
@@ -6361,6 +6368,13 @@ mod tests {
             .create_obligation(ObligationKind::IoOp, task, region, None)
             .expect("io_op");
 
+        // Request close on the region so advance_region_state can complete close
+        // once leaked obligations are recovered (auto-aborted).
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+        }
+
         crate::assert_with_log!(
             state.pending_obligation_count() == 2,
             "two pending obligations",
@@ -6372,7 +6386,7 @@ mod tests {
         state
             .task_mut(task)
             .expect("task")
-            .complete(Outcome::Err(Error::new(ErrorKind::Unknown)));
+            .complete(Outcome::Err(Error::new(ErrorKind::Internal)));
         let _ = state.task_completed(task);
 
         // In Recover mode, leaked obligations are aborted, so region should close
