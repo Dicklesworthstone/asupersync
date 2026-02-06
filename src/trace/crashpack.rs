@@ -1419,9 +1419,8 @@ mod tests {
     fn file_writer_fails_on_missing_dir() {
         init_test("file_writer_fails_on_missing_dir");
 
-        let writer = FileCrashPackWriter::new(
-            std::path::PathBuf::from("/nonexistent/crashpack/dir"),
-        );
+        let writer =
+            FileCrashPackWriter::new(std::path::PathBuf::from("/nonexistent/crashpack/dir"));
 
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
