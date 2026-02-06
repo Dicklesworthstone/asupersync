@@ -45,9 +45,9 @@ pub mod buffer;
 pub mod canonicalize;
 pub mod causality;
 pub mod certificate;
-pub mod crashpack;
 pub mod compat;
 pub mod compression;
+pub mod crashpack;
 pub mod distributed;
 pub mod divergence;
 pub mod dpor;
@@ -69,10 +69,6 @@ pub mod tla_export;
 
 pub use boundary::{matmul_gf2, SquareComplex};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
-pub use crashpack::{
-    CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest, FailureInfo,
-    SupervisionSnapshot, CRASHPACK_SCHEMA_VERSION,
-};
 pub use canonicalize::{
     canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
 };
@@ -85,6 +81,10 @@ pub use compat::{
     CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
 };
 pub use compression::{compress as compress_trace, CompressedTrace, Level as CompressionLevel};
+pub use crashpack::{
+    CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest, EvidenceEntrySnapshot,
+    FailureInfo, FailureOutcome, SupervisionSnapshot, CRASHPACK_SCHEMA_VERSION,
+};
 pub use divergence::{
     diagnose_divergence, minimal_divergent_prefix, AffectedEntities, DiagnosticConfig,
     DivergenceCategory, DivergenceReport, EventSummary,

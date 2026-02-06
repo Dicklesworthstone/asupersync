@@ -20,8 +20,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::crashpack::{CrashPack, CrashPackConfig, FailureInfo};
-//! use asupersync::types::{TaskId, RegionId, Outcome, Time};
+//! use asupersync::trace::crashpack::{CrashPack, CrashPackConfig, FailureInfo, FailureOutcome};
+//! use asupersync::types::{TaskId, RegionId, Time};
 //!
 //! let pack = CrashPack::builder(CrashPackConfig {
 //!     seed: 42,
@@ -31,7 +31,7 @@
 //! .failure(FailureInfo {
 //!     task: TaskId::testing_default(),
 //!     region: RegionId::testing_default(),
-//!     outcome: Outcome::Panicked("oops".into()),
+//!     outcome: FailureOutcome::Panicked { message: "oops".to_string() },
 //!     virtual_time: Time::from_secs(5),
 //! })
 //! .fingerprint(0xCAFE_BABE)
@@ -47,7 +47,7 @@
 use crate::trace::canonicalize::TraceEventKey;
 use crate::trace::replay::ReplayEvent;
 use crate::trace::scoring::EvidenceEntry;
-use crate::types::{Outcome, RegionId, TaskId, Time};
+use crate::types::{CancelKind, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
@@ -111,7 +111,7 @@ impl Default for CrashPackConfig {
 /// Description of the triggering failure.
 ///
 /// Captures which task failed, where, and what the outcome was.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FailureInfo {
     /// The task that failed.
     pub task: TaskId,
@@ -119,8 +119,8 @@ pub struct FailureInfo {
     /// The region containing the failed task.
     pub region: RegionId,
 
-    /// The failure outcome (Err / Cancelled / Panicked).
-    pub outcome: Outcome<(), ()>,
+    /// The failure outcome.
+    pub outcome: FailureOutcome,
 
     /// Virtual time at which the failure was observed.
     pub virtual_time: Time,
@@ -136,6 +136,50 @@ impl PartialEq for FailureInfo {
 
 impl Eq for FailureInfo {}
 
+/// Minimal failure outcome for crash packs.
+///
+/// This is intentionally smaller than [`crate::types::Outcome`]. Crash packs are repro
+/// artifacts, so we only record the deterministic summary needed for debugging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailureOutcome {
+    /// Application error.
+    Err,
+    /// Cancelled, recording only the cancellation kind.
+    Cancelled {
+        /// The kind of cancellation.
+        cancel_kind: CancelKind,
+    },
+    /// Panicked, recording only the panic message.
+    Panicked {
+        /// The panic message.
+        message: String,
+    },
+}
+
+/// Serializable snapshot of an [`EvidenceEntry`] for crash packs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceEntrySnapshot {
+    /// Birth column index in the boundary matrix.
+    pub birth: usize,
+    /// Death column index (or `usize::MAX` for unpaired/infinite classes).
+    pub death: usize,
+    /// Whether this class is novel (not seen before).
+    pub is_novel: bool,
+    /// Persistence interval length (None = infinite).
+    pub persistence: Option<u64>,
+}
+
+impl From<EvidenceEntry> for EvidenceEntrySnapshot {
+    fn from(e: EvidenceEntry) -> Self {
+        Self {
+            birth: e.class.birth,
+            death: e.class.death,
+            is_novel: e.is_novel,
+            persistence: e.persistence,
+        }
+    }
+}
+
 // =============================================================================
 // Supervision Decision Snapshot
 // =============================================================================
@@ -144,7 +188,7 @@ impl Eq for FailureInfo {}
 ///
 /// Records what the supervisor decided and why, providing the "evidence
 /// ledger" for debugging supervision chain behavior.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisionSnapshot {
     /// Virtual time when the decision was made.
     pub virtual_time: Time,
@@ -159,7 +203,6 @@ pub struct SupervisionSnapshot {
     pub decision: String,
 
     /// Additional context (e.g., "attempt 3 of 5", "budget exhausted").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
 }
 
@@ -232,7 +275,7 @@ impl CrashPackManifest {
 ///
 /// All fields except `manifest.created_at` are deterministic: given the same
 /// seed, config, and code, the same crash pack is produced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CrashPack {
     /// Top-level manifest with version, config, and fingerprint.
     pub manifest: CrashPackManifest,
@@ -244,7 +287,6 @@ pub struct CrashPack {
     ///
     /// Bounded to avoid unbounded growth; the number of layers and events
     /// per layer are configurable at creation time.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub canonical_prefix: Vec<Vec<TraceEventKey>>,
 
     /// Minimal divergent prefix: the shortest replay event sequence that
@@ -252,27 +294,23 @@ pub struct CrashPack {
     ///
     /// This is the primary repro artifact. Feed it to `TraceReplayer` to
     /// step through the execution up to the failure.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub divergent_prefix: Vec<ReplayEvent>,
 
     /// Evidence ledger entries capturing key runtime decisions.
     ///
     /// These are the "proof" entries from the scoring/evidence system
     /// that document why the runtime made particular choices.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<EvidenceEntry>,
+    pub evidence: Vec<EvidenceEntrySnapshot>,
 
     /// Supervision decision log leading up to the failure.
     ///
     /// Ordered by virtual time; captures the chain of restart/stop/escalate
     /// decisions that preceded (or caused) the failure.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supervision_log: Vec<SupervisionSnapshot>,
 
     /// Oracle invariant violations detected during the execution.
     ///
     /// Sorted and deduplicated. Empty if all invariants held.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub oracle_violations: Vec<String>,
 }
 
@@ -349,7 +387,7 @@ pub struct CrashPackBuilder {
     event_count: u64,
     canonical_prefix: Vec<Vec<TraceEventKey>>,
     divergent_prefix: Vec<ReplayEvent>,
-    evidence: Vec<EvidenceEntry>,
+    evidence: Vec<EvidenceEntrySnapshot>,
     supervision_log: Vec<SupervisionSnapshot>,
     oracle_violations: Vec<String>,
 }
@@ -393,7 +431,10 @@ impl CrashPackBuilder {
     /// Add evidence ledger entries.
     #[must_use]
     pub fn evidence(mut self, entries: Vec<EvidenceEntry>) -> Self {
-        self.evidence = entries;
+        self.evidence = entries
+            .into_iter()
+            .map(EvidenceEntrySnapshot::from)
+            .collect();
         self
     }
 
@@ -428,11 +469,7 @@ impl CrashPackBuilder {
         supervision_log.sort_by_key(|s| s.virtual_time);
 
         CrashPack {
-            manifest: CrashPackManifest::new(
-                self.config,
-                self.fingerprint,
-                self.event_count,
-            ),
+            manifest: CrashPackManifest::new(self.config, self.fingerprint, self.event_count),
             failure,
             canonical_prefix: self.canonical_prefix,
             divergent_prefix: self.divergent_prefix,
@@ -462,7 +499,6 @@ fn wall_clock_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::PanicPayload;
     use crate::util::ArenaIndex;
 
     fn init_test(name: &str) {
@@ -482,7 +518,9 @@ mod tests {
         FailureInfo {
             task: tid(1),
             region: rid(0),
-            outcome: Outcome::Panicked(PanicPayload::from("test panic")),
+            outcome: FailureOutcome::Panicked {
+                message: "test panic".to_string(),
+            },
             virtual_time: Time::from_secs(5),
         }
     }
@@ -526,10 +564,7 @@ mod tests {
         assert_eq!(pack.manifest.config.config_hash, 0xDEAD);
         assert_eq!(pack.manifest.config.worker_count, 4);
         assert_eq!(pack.manifest.config.max_steps, Some(1000));
-        assert_eq!(
-            pack.manifest.config.commit_hash.as_deref(),
-            Some("abc123")
-        );
+        assert_eq!(pack.manifest.config.commit_hash.as_deref(), Some("abc123"));
         assert_eq!(pack.manifest.fingerprint, 0xCAFE_BABE);
         assert_eq!(pack.manifest.event_count, 500);
         assert_eq!(pack.failure.task, tid(1));
@@ -700,13 +735,15 @@ mod tests {
         let f1 = FailureInfo {
             task: tid(1),
             region: rid(0),
-            outcome: Outcome::Panicked(PanicPayload::from("a")),
+            outcome: FailureOutcome::Panicked {
+                message: "a".to_string(),
+            },
             virtual_time: Time::from_secs(5),
         };
         let f2 = FailureInfo {
             task: tid(1),
             region: rid(0),
-            outcome: Outcome::Err(()), // different outcome
+            outcome: FailureOutcome::Err, // different outcome
             virtual_time: Time::from_secs(5),
         };
         // Equality on (task, region, virtual_time)
@@ -715,7 +752,9 @@ mod tests {
         let f3 = FailureInfo {
             task: tid(2), // different task
             region: rid(0),
-            outcome: Outcome::Panicked(PanicPayload::from("a")),
+            outcome: FailureOutcome::Panicked {
+                message: "a".to_string(),
+            },
             virtual_time: Time::from_secs(5),
         };
         assert_ne!(f1, f3);
@@ -727,8 +766,7 @@ mod tests {
     fn manifest_new_sets_version() {
         init_test("manifest_new_sets_version");
 
-        let manifest =
-            CrashPackManifest::new(CrashPackConfig::default(), 0xBEEF, 100);
+        let manifest = CrashPackManifest::new(CrashPackConfig::default(), 0xBEEF, 100);
 
         assert_eq!(manifest.schema_version, CRASHPACK_SCHEMA_VERSION);
         assert_eq!(manifest.fingerprint, 0xBEEF);
@@ -745,14 +783,14 @@ mod tests {
         let prefix = vec![
             ReplayEvent::RngSeed { seed: 42 },
             ReplayEvent::TaskScheduled {
-                task_id: crate::trace::replay::CompactTaskId(1),
+                task: crate::trace::replay::CompactTaskId(1),
                 at_tick: 0,
             },
         ];
 
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
-            .divergent_prefix(prefix.clone())
+            .divergent_prefix(prefix)
             .build();
 
         assert!(pack.has_divergent_prefix());
