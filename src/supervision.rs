@@ -5559,7 +5559,7 @@ mod tests {
         let tid = |n: u32| TaskId::from_arena(ArenaIndex::new(n, 1));
 
         // Same vt for all three; ordering should collapse to start_pos then TaskId.
-        let mut batch = vec![("c", tid(3)), ("a", tid(1)), ("b", tid(2))];
+        let mut batch = [("c", tid(3)), ("a", tid(1)), ("b", tid(2))];
         batch.sort_by_key(|(name, task_id)| {
             (
                 compiled.child_start_pos(name).expect("known child"),
