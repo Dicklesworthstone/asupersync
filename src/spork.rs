@@ -140,6 +140,224 @@ pub mod prelude {
     // -- Errors --
     pub use crate::app::{AppCompileError, AppStartError};
     pub use crate::supervision::SupervisorCompileError;
+
+    // -- Unified error --
+    pub use super::error::SporkError;
+}
+
+// =============================================================================
+// Unified Error Taxonomy (bd-2x5xc)
+// =============================================================================
+
+/// Unified SPORK error taxonomy.
+///
+/// Rather than requiring callers to memorize domain-specific error enums
+/// (`AppStartError`, `CallError`, `SupervisorCompileError`, ...),
+/// `SporkError` provides a single error type that covers all SPORK operations.
+///
+/// # Domains
+///
+/// | Domain         | Covers                                      |
+/// |----------------|---------------------------------------------|
+/// | `Lifecycle`    | `AppStartError`, `AppStopError`             |
+/// | `Compile`      | `AppCompileError`, `SupervisorCompileError` |
+/// | `Spawn`        | `AppSpawnError`, `SupervisorSpawnError`      |
+/// | `Call`         | `GenServerHandle::call()` failures          |
+/// | `Cast`         | `GenServerHandle::cast()` failures          |
+/// | `Info`         | `GenServerHandle::info()` failures          |
+///
+/// # Severity
+///
+/// All variants carry a [`SporkSeverity`] classification that is monotone:
+/// a failure that was classified as `Permanent` by its origin domain will
+/// never be downgraded by wrapping it in `SporkError`.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::spork::prelude::*;
+///
+/// let result: Result<(), SporkError> = app.start(&mut cx).await.map_err(SporkError::from);
+/// match result {
+///     Err(e) if e.is_permanent() => eprintln!("fatal: {e}"),
+///     Err(e) => eprintln!("transient: {e}"),
+///     Ok(()) => {},
+/// }
+/// ```
+pub mod error {
+    use crate::app::{AppCompileError, AppSpawnError, AppStartError, AppStopError};
+    use crate::gen_server::{CallError, CastError, InfoError};
+    use crate::supervision::{SupervisorCompileError, SupervisorSpawnError};
+
+    /// Severity classification for SPORK errors.
+    ///
+    /// Monotone: wrapping an error in `SporkError` never downgrades severity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum SporkSeverity {
+        /// The operation may succeed if retried (e.g., mailbox full).
+        Transient,
+        /// The operation failed and should not be retried in the same way
+        /// (e.g., cycle in topology, server stopped).
+        Permanent,
+    }
+
+    /// Unified error type for all SPORK operations.
+    #[derive(Debug)]
+    pub enum SporkError {
+        /// Application start failed (compile or spawn phase).
+        Start(AppStartError),
+        /// Application stop failed.
+        Stop(AppStopError),
+        /// Supervisor topology compilation failed.
+        Compile(AppCompileError),
+        /// Supervisor spawn failed.
+        Spawn(AppSpawnError),
+        /// GenServer `call()` failed.
+        Call(CallError),
+        /// GenServer `cast()` failed.
+        Cast(CastError),
+        /// GenServer `info()` send failed.
+        Info(InfoError),
+    }
+
+    impl SporkError {
+        /// Classify the severity of this error.
+        ///
+        /// Severity is monotone: permanent errors remain permanent.
+        #[must_use]
+        pub fn severity(&self) -> SporkSeverity {
+            match self {
+                // Lifecycle errors are permanent (topology or region failures)
+                Self::Start(_) | Self::Stop(_) | Self::Compile(_) | Self::Spawn(_) => {
+                    SporkSeverity::Permanent
+                }
+                // Communication errors depend on the variant
+                Self::Call(e) => match e {
+                    CallError::ServerStopped | CallError::NoReply | CallError::Cancelled(_) => {
+                        SporkSeverity::Permanent
+                    }
+                },
+                Self::Cast(e) => match e {
+                    CastError::Full => SporkSeverity::Transient,
+                    CastError::ServerStopped | CastError::Cancelled(_) => SporkSeverity::Permanent,
+                },
+                Self::Info(e) => match e {
+                    InfoError::Full => SporkSeverity::Transient,
+                    InfoError::ServerStopped | InfoError::Cancelled(_) => SporkSeverity::Permanent,
+                },
+            }
+        }
+
+        /// Returns `true` if this error is permanent (should not retry).
+        #[must_use]
+        pub fn is_permanent(&self) -> bool {
+            self.severity() == SporkSeverity::Permanent
+        }
+
+        /// Returns `true` if this error is transient (may succeed on retry).
+        #[must_use]
+        pub fn is_transient(&self) -> bool {
+            self.severity() == SporkSeverity::Transient
+        }
+
+        /// Returns a short domain tag for this error (e.g., `"start"`, `"call"`).
+        #[must_use]
+        pub fn domain(&self) -> &'static str {
+            match self {
+                Self::Start(_) => "start",
+                Self::Stop(_) => "stop",
+                Self::Compile(_) => "compile",
+                Self::Spawn(_) => "spawn",
+                Self::Call(_) => "call",
+                Self::Cast(_) => "cast",
+                Self::Info(_) => "info",
+            }
+        }
+    }
+
+    impl std::fmt::Display for SporkError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Start(e) => write!(f, "spork start: {e}"),
+                Self::Stop(e) => write!(f, "spork stop: {e}"),
+                Self::Compile(e) => write!(f, "spork compile: {e}"),
+                Self::Spawn(e) => write!(f, "spork spawn: {e}"),
+                Self::Call(e) => write!(f, "spork call: {e}"),
+                Self::Cast(e) => write!(f, "spork cast: {e}"),
+                Self::Info(e) => write!(f, "spork info: {e}"),
+            }
+        }
+    }
+
+    impl std::error::Error for SporkError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                Self::Start(e) => Some(e),
+                Self::Stop(e) => Some(e),
+                Self::Compile(e) => Some(e),
+                Self::Spawn(e) => Some(e),
+                Self::Call(e) => Some(e),
+                Self::Cast(e) => Some(e),
+                Self::Info(e) => Some(e),
+            }
+        }
+    }
+
+    // -- From conversions (zero-cost wrapping) --
+
+    impl From<AppStartError> for SporkError {
+        fn from(e: AppStartError) -> Self {
+            Self::Start(e)
+        }
+    }
+
+    impl From<AppStopError> for SporkError {
+        fn from(e: AppStopError) -> Self {
+            Self::Stop(e)
+        }
+    }
+
+    impl From<AppCompileError> for SporkError {
+        fn from(e: AppCompileError) -> Self {
+            Self::Compile(e)
+        }
+    }
+
+    impl From<AppSpawnError> for SporkError {
+        fn from(e: AppSpawnError) -> Self {
+            Self::Spawn(e)
+        }
+    }
+
+    impl From<SupervisorCompileError> for SporkError {
+        fn from(e: SupervisorCompileError) -> Self {
+            Self::Compile(AppCompileError::SupervisorCompile(e))
+        }
+    }
+
+    impl From<SupervisorSpawnError> for SporkError {
+        fn from(e: SupervisorSpawnError) -> Self {
+            Self::Spawn(AppSpawnError::SpawnFailed(e))
+        }
+    }
+
+    impl From<CallError> for SporkError {
+        fn from(e: CallError) -> Self {
+            Self::Call(e)
+        }
+    }
+
+    impl From<CastError> for SporkError {
+        fn from(e: CastError) -> Self {
+            Self::Cast(e)
+        }
+    }
+
+    impl From<InfoError> for SporkError {
+        fn from(e: InfoError) -> Self {
+            Self::Info(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +471,215 @@ mod tests {
         let _ignore = prelude::ExitPolicy::Ignore;
 
         crate::test_complete!("exit_policy_constructible");
+    }
+
+    // =====================================================================
+    // Unified Error Taxonomy tests (bd-2x5xc)
+    // =====================================================================
+
+    mod error_taxonomy {
+        use crate::app::{AppCompileError, AppStartError, AppStopError};
+        use crate::gen_server::{CallError, CastError, InfoError};
+        use crate::spork::error::{SporkError, SporkSeverity};
+        use crate::supervision::SupervisorCompileError;
+        use crate::types::RegionId;
+        use crate::util::arena::ArenaIndex;
+
+        fn dummy_region_id() -> RegionId {
+            RegionId::from_arena(ArenaIndex::new(0, 0))
+        }
+
+        fn init_test(name: &str) {
+            crate::test_utils::init_test_logging();
+            crate::test_phase!(name);
+        }
+
+        // -- From conversions --
+
+        #[test]
+        fn from_call_error() {
+            init_test("from_call_error");
+            let e: SporkError = CallError::ServerStopped.into();
+            assert!(matches!(e, SporkError::Call(CallError::ServerStopped)));
+            crate::test_complete!("from_call_error");
+        }
+
+        #[test]
+        fn from_cast_error() {
+            init_test("from_cast_error");
+            let e: SporkError = CastError::Full.into();
+            assert!(matches!(e, SporkError::Cast(CastError::Full)));
+            crate::test_complete!("from_cast_error");
+        }
+
+        #[test]
+        fn from_info_error() {
+            init_test("from_info_error");
+            let e: SporkError = InfoError::ServerStopped.into();
+            assert!(matches!(e, SporkError::Info(InfoError::ServerStopped)));
+            crate::test_complete!("from_info_error");
+        }
+
+        #[test]
+        fn from_app_compile_error() {
+            init_test("from_app_compile_error");
+            let inner = AppCompileError::SupervisorCompile(
+                SupervisorCompileError::DuplicateChildName("dup".into()),
+            );
+            let e: SporkError = inner.into();
+            assert!(matches!(e, SporkError::Compile(_)));
+            crate::test_complete!("from_app_compile_error");
+        }
+
+        #[test]
+        fn from_supervisor_compile_error() {
+            init_test("from_supervisor_compile_error");
+            let inner = SupervisorCompileError::DuplicateChildName("x".into());
+            let e: SporkError = inner.into();
+            // Should wrap via AppCompileError::SupervisorCompile
+            assert!(matches!(
+                e,
+                SporkError::Compile(AppCompileError::SupervisorCompile(_))
+            ));
+            crate::test_complete!("from_supervisor_compile_error");
+        }
+
+        #[test]
+        fn from_app_start_error() {
+            init_test("from_app_start_error");
+            let inner = AppStartError::CompileFailed(AppCompileError::SupervisorCompile(
+                SupervisorCompileError::DuplicateChildName("a".into()),
+            ));
+            let e: SporkError = inner.into();
+            assert!(matches!(e, SporkError::Start(_)));
+            crate::test_complete!("from_app_start_error");
+        }
+
+        #[test]
+        fn from_app_stop_error() {
+            init_test("from_app_stop_error");
+            let inner = AppStopError::RegionNotFound(dummy_region_id());
+            let e: SporkError = inner.into();
+            assert!(matches!(e, SporkError::Stop(_)));
+            crate::test_complete!("from_app_stop_error");
+        }
+
+        // -- Severity classification --
+
+        #[test]
+        fn severity_permanent_lifecycle() {
+            init_test("severity_permanent_lifecycle");
+            let e = SporkError::Start(AppStartError::CompileFailed(
+                AppCompileError::SupervisorCompile(SupervisorCompileError::DuplicateChildName(
+                    "a".into(),
+                )),
+            ));
+            assert_eq!(e.severity(), SporkSeverity::Permanent);
+            assert!(e.is_permanent());
+            assert!(!e.is_transient());
+            crate::test_complete!("severity_permanent_lifecycle");
+        }
+
+        #[test]
+        fn severity_permanent_call() {
+            init_test("severity_permanent_call");
+            let e = SporkError::Call(CallError::ServerStopped);
+            assert_eq!(e.severity(), SporkSeverity::Permanent);
+            assert!(e.is_permanent());
+            crate::test_complete!("severity_permanent_call");
+        }
+
+        #[test]
+        fn severity_transient_cast_full() {
+            init_test("severity_transient_cast_full");
+            let e = SporkError::Cast(CastError::Full);
+            assert_eq!(e.severity(), SporkSeverity::Transient);
+            assert!(e.is_transient());
+            assert!(!e.is_permanent());
+            crate::test_complete!("severity_transient_cast_full");
+        }
+
+        #[test]
+        fn severity_transient_info_full() {
+            init_test("severity_transient_info_full");
+            let e = SporkError::Info(InfoError::Full);
+            assert_eq!(e.severity(), SporkSeverity::Transient);
+            assert!(e.is_transient());
+            crate::test_complete!("severity_transient_info_full");
+        }
+
+        #[test]
+        fn severity_permanent_cast_stopped() {
+            init_test("severity_permanent_cast_stopped");
+            let e = SporkError::Cast(CastError::ServerStopped);
+            assert_eq!(e.severity(), SporkSeverity::Permanent);
+            crate::test_complete!("severity_permanent_cast_stopped");
+        }
+
+        // -- Domain tags --
+
+        #[test]
+        fn domain_tags() {
+            init_test("domain_tags");
+            assert_eq!(
+                SporkError::Start(AppStartError::CompileFailed(
+                    AppCompileError::SupervisorCompile(SupervisorCompileError::DuplicateChildName(
+                        "a".into()
+                    ))
+                ))
+                .domain(),
+                "start"
+            );
+            assert_eq!(
+                SporkError::Stop(AppStopError::RegionNotFound(dummy_region_id())).domain(),
+                "stop"
+            );
+            assert_eq!(
+                SporkError::Compile(AppCompileError::SupervisorCompile(
+                    SupervisorCompileError::DuplicateChildName("a".into())
+                ))
+                .domain(),
+                "compile"
+            );
+            assert_eq!(SporkError::Call(CallError::ServerStopped).domain(), "call");
+            assert_eq!(SporkError::Cast(CastError::Full).domain(), "cast");
+            assert_eq!(SporkError::Info(InfoError::ServerStopped).domain(), "info");
+            crate::test_complete!("domain_tags");
+        }
+
+        // -- Display --
+
+        #[test]
+        fn display_format() {
+            init_test("display_format");
+            let e = SporkError::Call(CallError::ServerStopped);
+            let s = format!("{e}");
+            assert!(s.starts_with("spork call:"), "got: {s}");
+
+            let e2 = SporkError::Cast(CastError::Full);
+            let s2 = format!("{e2}");
+            assert!(s2.starts_with("spork cast:"), "got: {s2}");
+            crate::test_complete!("display_format");
+        }
+
+        // -- Error source chain --
+
+        #[test]
+        fn error_source_chain() {
+            init_test("error_source_chain");
+            let e = SporkError::Call(CallError::NoReply);
+            let source = std::error::Error::source(&e);
+            assert!(source.is_some(), "SporkError should have a source");
+            crate::test_complete!("error_source_chain");
+        }
+
+        // -- SporkSeverity ordering --
+
+        #[test]
+        fn severity_ordering() {
+            init_test("severity_ordering");
+            assert!(SporkSeverity::Transient < SporkSeverity::Permanent);
+            crate::test_complete!("severity_ordering");
+        }
     }
 }
