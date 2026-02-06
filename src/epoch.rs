@@ -2250,12 +2250,8 @@ mod tests {
             source,
         );
         let result = block_on(fut);
-        match result {
-            Either::Left(Ok(v)) => {
-                crate::assert_with_log!(v == 1, "left result", 1, v);
-            }
-            _ => panic!("unexpected select result"),
-        }
+        let ok = matches!(result, Either::Left(Ok(1)));
+        crate::assert_with_log!(ok, "epoch_select left result", true, ok);
         crate::test_complete!("test_epoch_select_left");
     }
 

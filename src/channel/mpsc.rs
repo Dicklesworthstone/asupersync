@@ -735,7 +735,15 @@ mod tests {
             match block_on(rx.recv(&cx)) {
                 Ok(value) => received.push(value),
                 Err(RecvError::Disconnected) => break,
-                Err(other) => panic!("unexpected recv error: {other:?}"),
+                Err(other) => {
+                    crate::assert_with_log!(
+                        false,
+                        "unexpected recv error",
+                        "Disconnected",
+                        format!("{other:?}")
+                    );
+                    break;
+                }
             }
         }
 
