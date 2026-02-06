@@ -765,9 +765,12 @@ struct ReadyKey {
 
 impl Ord for ReadyKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.idx
-            .cmp(&other.idx)
-            .then_with(|| self.name.cmp(&other.name))
+        // Deterministic ordering key for tie-breaks:
+        // - `StartTieBreak::NameLex` uses (name, idx) directly via `BTreeSet` iteration.
+        // - `StartTieBreak::InsertionOrder` selects the minimum idx explicitly (see below).
+        self.name
+            .cmp(&other.name)
+            .then_with(|| self.idx.cmp(&other.idx))
     }
 }
 
@@ -816,11 +819,11 @@ impl CompiledSupervisor {
 
         let mut order = Vec::with_capacity(builder.children.len());
         while let Some(next) = match builder.tie_break {
-            StartTieBreak::InsertionOrder => ready.iter().next().cloned(),
-            StartTieBreak::NameLex => ready
+            StartTieBreak::InsertionOrder => ready
                 .iter()
-                .min_by(|a, b| a.name.cmp(&b.name).then_with(|| a.idx.cmp(&b.idx)))
+                .min_by(|a, b| a.idx.cmp(&b.idx).then_with(|| a.name.cmp(&b.name)))
                 .cloned(),
+            StartTieBreak::NameLex => ready.iter().next().cloned(),
         } {
             ready.take(&next);
             order.push(next.idx);
@@ -878,6 +881,27 @@ impl CompiledSupervisor {
         self.restart_plan_for_idx(failed_idx)
     }
 
+    /// Returns the deterministic start position (rank) for `child_name`.
+    ///
+    /// This is the core ordering key for supervisor-level determinism:
+    /// - Restart sequencing is derived from start order (cancel = reverse, restart = forward).
+    /// - If a runtime layer batches multiple logically-simultaneous child failures, it should
+    ///   process them in ascending start position (and use `TaskId` as a stable tie-break if needed).
+    #[must_use]
+    pub fn child_start_pos(&self, child_name: &str) -> Option<usize> {
+        let child_idx = self
+            .children
+            .iter()
+            .enumerate()
+            .find_map(|(idx, child)| (child.name == child_name).then_some(idx))?;
+        self.start_pos_for_child_idx(child_idx)
+    }
+
+    #[must_use]
+    fn start_pos_for_child_idx(&self, child_idx: usize) -> Option<usize> {
+        self.start_order.iter().position(|&idx| idx == child_idx)
+    }
+
     /// Compute a restart plan for a concrete failure `outcome`.
     ///
     /// This enforces the monotone-severity contract:
@@ -914,10 +938,7 @@ impl CompiledSupervisor {
 
     #[must_use]
     fn restart_plan_for_idx(&self, failed_child_idx: usize) -> Option<SupervisorRestartPlan> {
-        let failed_pos = self
-            .start_order
-            .iter()
-            .position(|&idx| idx == failed_child_idx)?;
+        let failed_pos = self.start_pos_for_child_idx(failed_child_idx)?;
 
         let positions: Vec<usize> = match self.restart_policy {
             RestartPolicy::OneForOne => vec![failed_pos],
@@ -2516,6 +2537,7 @@ pub enum MonitorEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
     use crate::types::PanicPayload;
     use crate::util::ArenaIndex;
 
@@ -3571,45 +3593,43 @@ mod tests {
         // "a" fails → cancels a, b, c (all from a onward)
         let plan_a = compiled.restart_plan_for("a").unwrap();
         let ops_a = compiled.compile_restart_ops(&plan_a);
-        let cancel_a: Vec<&str> = ops_a
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(cancel_a.len(), 3);
+        {
+            let cancel_count = ops_a
+                .ops
+                .iter()
+                .filter(|op| matches!(op, RegionOp::CancelChild { .. }))
+                .count();
+            assert_eq!(cancel_count, 3);
+        }
 
         // "b" fails → cancels b, c (from b onward)
         let plan_b = compiled.restart_plan_for("b").unwrap();
         let ops_b = compiled.compile_restart_ops(&plan_b);
-        let cancel_b: Vec<&str> = ops_b
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(cancel_b.len(), 2);
-        assert!(
-            !cancel_b.contains(&"a"),
-            "RestForOne must not cancel earlier children"
-        );
+        {
+            let cancel_count = ops_b
+                .ops
+                .iter()
+                .filter(|op| matches!(op, RegionOp::CancelChild { .. }))
+                .count();
+            assert_eq!(cancel_count, 2);
+            let cancels_a = ops_b
+                .ops
+                .iter()
+                .any(|op| matches!(op, RegionOp::CancelChild { name, .. } if name == "a"));
+            assert!(!cancels_a, "RestForOne must not cancel earlier children");
+        }
 
         // "c" fails → cancels only c
         let plan_c = compiled.restart_plan_for("c").unwrap();
         let ops_c = compiled.compile_restart_ops(&plan_c);
-        let cancel_c: Vec<&str> = ops_c
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(cancel_c.len(), 1);
+        {
+            let cancel_count = ops_c
+                .ops
+                .iter()
+                .filter(|op| matches!(op, RegionOp::CancelChild { .. }))
+                .count();
+            assert_eq!(cancel_count, 1);
+        }
 
         crate::test_complete!("conformance_rest_for_one_cancels_rest");
     }
@@ -5496,6 +5516,63 @@ mod tests {
         crate::test_complete!("conformance_name_lex_tie_break");
     }
 
+    /// Conformance: `CompiledSupervisor::child_start_pos` matches the compiled `start_order`.
+    #[test]
+    fn conformance_child_start_pos_matches_start_order() {
+        init_test("conformance_child_start_pos_matches_start_order");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_tie_break(StartTieBreak::NameLex)
+            .child(ChildSpec::new("db", noop_start))
+            .child(ChildSpec::new("cache", noop_start).depends_on("db"))
+            .child(ChildSpec::new("web", noop_start).depends_on("db"))
+            .child(ChildSpec::new("worker", noop_start).depends_on("cache"))
+            .compile()
+            .expect("compile");
+
+        for (pos, &idx) in compiled.start_order.iter().enumerate() {
+            let name = compiled.children[idx].name.as_str();
+            assert_eq!(compiled.child_start_pos(name), Some(pos));
+        }
+        assert_eq!(compiled.child_start_pos("does_not_exist"), None);
+
+        crate::test_complete!("conformance_child_start_pos_matches_start_order");
+    }
+
+    /// Conformance: a stable tie-break key for batching logically-simultaneous failures.
+    ///
+    /// If multiple child failures are observed in the same quantum, a runtime layer should
+    /// process them in ascending child start position (dependencies-first), using `TaskId`
+    /// as a stable secondary key if needed.
+    #[test]
+    fn conformance_simultaneous_failures_sorted_by_start_pos_then_task_id() {
+        init_test("conformance_simultaneous_failures_sorted_by_start_pos_then_task_id");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_tie_break(StartTieBreak::InsertionOrder)
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start))
+            .child(ChildSpec::new("c", noop_start))
+            .compile()
+            .expect("compile");
+
+        let tid = |n: u32| TaskId::from_arena(ArenaIndex::new(n, 1));
+
+        // Same vt for all three; ordering should collapse to start_pos then TaskId.
+        let mut batch = vec![("c", tid(3)), ("a", tid(1)), ("b", tid(2))];
+        batch.sort_by_key(|(name, task_id)| {
+            (
+                compiled.child_start_pos(name).expect("known child"),
+                *task_id,
+            )
+        });
+
+        let names: Vec<&str> = batch.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+
+        crate::test_complete!("conformance_simultaneous_failures_sorted_by_start_pos_then_task_id");
+    }
+
     // ---------------------------------------------------------------
     // Evidence Ledger Tests (bd-35iz1)
     // ---------------------------------------------------------------
@@ -6135,7 +6212,6 @@ mod tests {
     #[test]
     fn emission_wiring_restart_produces_generalized_record() {
         init_test("emission_wiring_restart_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 3,
@@ -6170,7 +6246,6 @@ mod tests {
     #[test]
     fn emission_wiring_stop_produces_generalized_record() {
         init_test("emission_wiring_stop_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
@@ -6193,7 +6268,6 @@ mod tests {
     #[test]
     fn emission_wiring_escalate_produces_generalized_record() {
         init_test("emission_wiring_escalate_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Escalate);
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
@@ -6216,7 +6290,6 @@ mod tests {
     #[test]
     fn emission_wiring_monotone_severity_produces_generalized_record() {
         init_test("emission_wiring_monotone_severity_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 3,
@@ -6252,7 +6325,6 @@ mod tests {
     #[test]
     fn emission_wiring_window_exhaustion_produces_generalized_record() {
         init_test("emission_wiring_window_exhaustion_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 1,
@@ -6291,7 +6363,6 @@ mod tests {
     #[test]
     fn emission_wiring_budget_refused_produces_generalized_record() {
         init_test("emission_wiring_budget_refused_produces_generalized_record");
-        use crate::evidence::{EvidenceDetail, SupervisionDetail, Verdict};
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 5,
