@@ -208,8 +208,60 @@ pub struct SupervisionSnapshot {
 }
 
 // =============================================================================
-// Crash Pack Manifest
+// Crash Pack Manifest (bd-35u33)
 // =============================================================================
+
+/// Minimum schema version this code can read.
+///
+/// Crash packs with `schema_version < MINIMUM_SUPPORTED_SCHEMA_VERSION` are
+/// rejected during validation.
+pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+
+/// The kind of content described by a [`ManifestAttachment`].
+///
+/// Known kinds get first-class enum variants for type-safe matching.
+/// Unknown or user-defined content uses `Custom`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum AttachmentKind {
+    /// Canonical trace prefix (Foata layers).
+    CanonicalPrefix,
+    /// Minimal divergent replay prefix.
+    DivergentPrefix,
+    /// Evidence ledger entries.
+    EvidenceLedger,
+    /// Supervision decision log.
+    SupervisionLog,
+    /// Oracle violation list.
+    OracleViolations,
+    /// User-defined or future attachment type.
+    Custom {
+        /// Free-form type tag.
+        tag: String,
+    },
+}
+
+/// Describes one attachment in the crash pack.
+///
+/// The manifest carries an attachment list so that tooling can inspect
+/// what a crash pack contains without deserializing the full payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAttachment {
+    /// What kind of content this attachment holds.
+    #[serde(flatten)]
+    pub kind: AttachmentKind,
+
+    /// Number of top-level items (events, entries, layers, etc.).
+    pub item_count: u64,
+
+    /// Approximate serialized size in bytes (0 if unknown).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub size_hint_bytes: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
 
 /// The crash pack manifest: top-level metadata and structural summary.
 ///
@@ -218,6 +270,13 @@ pub struct SupervisionSnapshot {
 /// 1. Check version compatibility
 /// 2. Identify the failure at a glance
 /// 3. Locate the detailed trace data
+/// 4. Enumerate attachments without full deserialization
+///
+/// # Schema Versioning
+///
+/// The `schema_version` field enables forward compatibility. Use
+/// [`validate()`](CrashPackManifest::validate) before processing a crash pack
+/// to ensure the current code can interpret it correctly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashPackManifest {
     /// Schema version for forward compatibility.
@@ -237,7 +296,56 @@ pub struct CrashPackManifest {
 
     /// Wall-clock timestamp when the crash pack was created (Unix epoch nanos).
     pub created_at: u64,
+
+    /// Attachment table of contents.
+    ///
+    /// Lists the sections present in this crash pack so tooling can
+    /// discover content without deserializing the full payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ManifestAttachment>,
 }
+
+/// Errors from manifest schema validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestValidationError {
+    /// Schema version is newer than what this code supports.
+    VersionTooNew {
+        /// The manifest's schema version.
+        manifest_version: u32,
+        /// The maximum version this code supports.
+        supported_version: u32,
+    },
+    /// Schema version is older than the minimum this code can read.
+    VersionTooOld {
+        /// The manifest's schema version.
+        manifest_version: u32,
+        /// The minimum version this code requires.
+        minimum_version: u32,
+    },
+}
+
+impl std::fmt::Display for ManifestValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VersionTooNew {
+                manifest_version,
+                supported_version,
+            } => write!(
+                f,
+                "crash pack schema v{manifest_version} is newer than supported v{supported_version}"
+            ),
+            Self::VersionTooOld {
+                manifest_version,
+                minimum_version,
+            } => write!(
+                f,
+                "crash pack schema v{manifest_version} is older than minimum v{minimum_version}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ManifestValidationError {}
 
 impl CrashPackManifest {
     /// Create a new manifest with the given config and fingerprint.
@@ -249,7 +357,46 @@ impl CrashPackManifest {
             fingerprint,
             event_count,
             created_at: wall_clock_nanos(),
+            attachments: Vec::new(),
         }
+    }
+
+    /// Validate that this manifest's schema version is compatible with the
+    /// current code.
+    ///
+    /// Returns `Ok(())` if `MINIMUM_SUPPORTED_SCHEMA_VERSION <= schema_version <= CRASHPACK_SCHEMA_VERSION`.
+    pub fn validate(&self) -> Result<(), ManifestValidationError> {
+        if self.schema_version > CRASHPACK_SCHEMA_VERSION {
+            return Err(ManifestValidationError::VersionTooNew {
+                manifest_version: self.schema_version,
+                supported_version: CRASHPACK_SCHEMA_VERSION,
+            });
+        }
+        if self.schema_version < MINIMUM_SUPPORTED_SCHEMA_VERSION {
+            return Err(ManifestValidationError::VersionTooOld {
+                manifest_version: self.schema_version,
+                minimum_version: MINIMUM_SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if this manifest's schema version is compatible.
+    #[must_use]
+    pub fn is_compatible(&self) -> bool {
+        self.validate().is_ok()
+    }
+
+    /// Look up an attachment by kind.
+    #[must_use]
+    pub fn attachment(&self, kind: &AttachmentKind) -> Option<&ManifestAttachment> {
+        self.attachments.iter().find(|a| &a.kind == kind)
+    }
+
+    /// Returns `true` if the manifest lists an attachment of the given kind.
+    #[must_use]
+    pub fn has_attachment(&self, kind: &AttachmentKind) -> bool {
+        self.attachment(kind).is_some()
     }
 }
 
@@ -481,6 +628,10 @@ impl CrashPackBuilder {
 
     /// Build the crash pack.
     ///
+    /// The manifest's attachment list is auto-populated from the crash pack
+    /// content: non-empty sections are listed as attachments so that tooling
+    /// can inspect the table of contents without full deserialization.
+    ///
     /// # Panics
     ///
     /// Panics if `failure` has not been set.
@@ -492,8 +643,54 @@ impl CrashPackBuilder {
         let mut supervision_log = self.supervision_log;
         supervision_log.sort_by_key(|s| s.virtual_time);
 
+        // Build attachment table of contents from non-empty sections
+        let mut attachments = Vec::new();
+        if !self.canonical_prefix.is_empty() {
+            let item_count: u64 = self
+                .canonical_prefix
+                .iter()
+                .map(|layer| layer.len() as u64)
+                .sum();
+            attachments.push(ManifestAttachment {
+                kind: AttachmentKind::CanonicalPrefix,
+                item_count,
+                size_hint_bytes: 0,
+            });
+        }
+        if !self.divergent_prefix.is_empty() {
+            attachments.push(ManifestAttachment {
+                kind: AttachmentKind::DivergentPrefix,
+                item_count: self.divergent_prefix.len() as u64,
+                size_hint_bytes: 0,
+            });
+        }
+        if !self.evidence.is_empty() {
+            attachments.push(ManifestAttachment {
+                kind: AttachmentKind::EvidenceLedger,
+                item_count: self.evidence.len() as u64,
+                size_hint_bytes: 0,
+            });
+        }
+        if !supervision_log.is_empty() {
+            attachments.push(ManifestAttachment {
+                kind: AttachmentKind::SupervisionLog,
+                item_count: supervision_log.len() as u64,
+                size_hint_bytes: 0,
+            });
+        }
+        if !self.oracle_violations.is_empty() {
+            attachments.push(ManifestAttachment {
+                kind: AttachmentKind::OracleViolations,
+                item_count: self.oracle_violations.len() as u64,
+                size_hint_bytes: 0,
+            });
+        }
+
+        let mut manifest = CrashPackManifest::new(self.config, self.fingerprint, self.event_count);
+        manifest.attachments = attachments;
+
         CrashPack {
-            manifest: CrashPackManifest::new(self.config, self.fingerprint, self.event_count),
+            manifest,
             failure,
             canonical_prefix: self.canonical_prefix,
             divergent_prefix: self.divergent_prefix,
@@ -1488,6 +1685,339 @@ mod tests {
         assert_eq!(id1.path(), id2.path());
 
         crate::test_complete!("conformance_same_pack_same_artifact_path");
+    }
+
+    // =================================================================
+    // Manifest Schema Tests (bd-35u33)
+    // =================================================================
+
+    #[test]
+    fn manifest_validate_current_version() {
+        init_test("manifest_validate_current_version");
+
+        let manifest = CrashPackManifest::new(CrashPackConfig::default(), 0, 0);
+        assert!(manifest.validate().is_ok());
+        assert!(manifest.is_compatible());
+        assert_eq!(manifest.schema_version, CRASHPACK_SCHEMA_VERSION);
+
+        crate::test_complete!("manifest_validate_current_version");
+    }
+
+    #[test]
+    fn manifest_validate_rejects_future_version() {
+        init_test("manifest_validate_rejects_future_version");
+
+        let mut manifest = CrashPackManifest::new(CrashPackConfig::default(), 0, 0);
+        manifest.schema_version = CRASHPACK_SCHEMA_VERSION + 1;
+
+        let err = manifest.validate().unwrap_err();
+        assert!(!manifest.is_compatible());
+        assert!(matches!(err, ManifestValidationError::VersionTooNew { .. }));
+        // Display impl
+        assert!(err.to_string().contains("newer than supported"));
+
+        crate::test_complete!("manifest_validate_rejects_future_version");
+    }
+
+    #[test]
+    fn manifest_validate_rejects_old_version() {
+        init_test("manifest_validate_rejects_old_version");
+
+        let mut manifest = CrashPackManifest::new(CrashPackConfig::default(), 0, 0);
+        manifest.schema_version = 0; // below minimum
+
+        let err = manifest.validate().unwrap_err();
+        assert!(!manifest.is_compatible());
+        assert!(matches!(err, ManifestValidationError::VersionTooOld { .. }));
+        assert!(err.to_string().contains("older than minimum"));
+
+        crate::test_complete!("manifest_validate_rejects_old_version");
+    }
+
+    #[test]
+    fn manifest_attachments_auto_populated() {
+        init_test("manifest_attachments_auto_populated");
+
+        // A pack with canonical prefix, divergent prefix, and oracle violations
+        // should have those listed as attachments.
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&events)
+            .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 42 }])
+            .oracle_violations(vec!["inv-1".into()])
+            .build();
+
+        assert_eq!(pack.manifest.attachments.len(), 3);
+        assert!(pack
+            .manifest
+            .has_attachment(&AttachmentKind::CanonicalPrefix));
+        assert!(pack
+            .manifest
+            .has_attachment(&AttachmentKind::DivergentPrefix));
+        assert!(pack
+            .manifest
+            .has_attachment(&AttachmentKind::OracleViolations));
+        assert!(!pack
+            .manifest
+            .has_attachment(&AttachmentKind::EvidenceLedger));
+        assert!(!pack
+            .manifest
+            .has_attachment(&AttachmentKind::SupervisionLog));
+
+        crate::test_complete!("manifest_attachments_auto_populated");
+    }
+
+    #[test]
+    fn manifest_empty_pack_no_attachments() {
+        init_test("manifest_empty_pack_no_attachments");
+
+        let pack = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .build();
+
+        assert!(pack.manifest.attachments.is_empty());
+
+        crate::test_complete!("manifest_empty_pack_no_attachments");
+    }
+
+    #[test]
+    fn manifest_attachment_item_counts() {
+        init_test("manifest_attachment_item_counts");
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .canonical_prefix(vec![
+                vec![TraceEventKey {
+                    kind: 1,
+                    primary: 0,
+                    secondary: 0,
+                    tertiary: 0,
+                }],
+                vec![
+                    TraceEventKey {
+                        kind: 2,
+                        primary: 1,
+                        secondary: 0,
+                        tertiary: 0,
+                    },
+                    TraceEventKey {
+                        kind: 2,
+                        primary: 2,
+                        secondary: 0,
+                        tertiary: 0,
+                    },
+                ],
+            ])
+            .supervision_snapshot(SupervisionSnapshot {
+                virtual_time: Time::from_secs(1),
+                task: tid(1),
+                region: rid(0),
+                decision: "restart".into(),
+                context: None,
+            })
+            .build();
+
+        // Canonical prefix: 2 layers with 3 total events
+        let cp = pack
+            .manifest
+            .attachment(&AttachmentKind::CanonicalPrefix)
+            .unwrap();
+        assert_eq!(cp.item_count, 3);
+
+        // Supervision log: 1 entry
+        let sl = pack
+            .manifest
+            .attachment(&AttachmentKind::SupervisionLog)
+            .unwrap();
+        assert_eq!(sl.item_count, 1);
+
+        crate::test_complete!("manifest_attachment_item_counts");
+    }
+
+    #[test]
+    fn manifest_attachment_kind_serde_round_trip() {
+        init_test("manifest_attachment_kind_serde_round_trip");
+
+        let kinds = vec![
+            AttachmentKind::CanonicalPrefix,
+            AttachmentKind::DivergentPrefix,
+            AttachmentKind::EvidenceLedger,
+            AttachmentKind::SupervisionLog,
+            AttachmentKind::OracleViolations,
+            AttachmentKind::Custom {
+                tag: "heap-dump".into(),
+            },
+        ];
+
+        for kind in &kinds {
+            let json = serde_json::to_string(kind).unwrap();
+            let parsed: AttachmentKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(&parsed, kind, "round trip failed for {json}");
+        }
+
+        crate::test_complete!("manifest_attachment_kind_serde_round_trip");
+    }
+
+    #[test]
+    fn manifest_serde_round_trip_with_attachments() {
+        init_test("manifest_serde_round_trip_with_attachments");
+
+        let mut manifest = CrashPackManifest::new(sample_config(), 0xBEEF, 100);
+        manifest.attachments = vec![
+            ManifestAttachment {
+                kind: AttachmentKind::CanonicalPrefix,
+                item_count: 10,
+                size_hint_bytes: 2048,
+            },
+            ManifestAttachment {
+                kind: AttachmentKind::Custom {
+                    tag: "user-data".into(),
+                },
+                item_count: 1,
+                size_hint_bytes: 0,
+            },
+        ];
+
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let parsed: CrashPackManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.schema_version, CRASHPACK_SCHEMA_VERSION);
+        assert_eq!(parsed.config.seed, 42);
+        assert_eq!(parsed.fingerprint, 0xBEEF);
+        assert_eq!(parsed.attachments.len(), 2);
+        assert_eq!(parsed.attachments[0].kind, AttachmentKind::CanonicalPrefix);
+        assert_eq!(parsed.attachments[0].item_count, 10);
+        assert_eq!(parsed.attachments[0].size_hint_bytes, 2048);
+        assert_eq!(
+            parsed.attachments[1].kind,
+            AttachmentKind::Custom {
+                tag: "user-data".into()
+            }
+        );
+
+        crate::test_complete!("manifest_serde_round_trip_with_attachments");
+    }
+
+    #[test]
+    fn manifest_deserialize_without_attachments() {
+        init_test("manifest_deserialize_without_attachments");
+
+        // Simulate a v1 manifest JSON that was written before the attachments
+        // field existed. The #[serde(default)] should handle this gracefully.
+        let json = r#"{
+            "schema_version": 1,
+            "config": { "seed": 1, "config_hash": 0, "worker_count": 1 },
+            "fingerprint": 999,
+            "event_count": 50,
+            "created_at": 0
+        }"#;
+
+        let manifest: CrashPackManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.fingerprint, 999);
+        assert!(manifest.attachments.is_empty());
+        assert!(manifest.is_compatible());
+
+        crate::test_complete!("manifest_deserialize_without_attachments");
+    }
+
+    #[test]
+    fn manifest_json_skips_empty_attachments() {
+        init_test("manifest_json_skips_empty_attachments");
+
+        let manifest = CrashPackManifest::new(CrashPackConfig::default(), 0, 0);
+        let json = serde_json::to_string(&manifest).unwrap();
+
+        // Empty attachments should be skipped by skip_serializing_if
+        assert!(!json.contains("attachments"));
+
+        crate::test_complete!("manifest_json_skips_empty_attachments");
+    }
+
+    #[test]
+    fn manifest_json_skips_zero_size_hint() {
+        init_test("manifest_json_skips_zero_size_hint");
+
+        let attachment = ManifestAttachment {
+            kind: AttachmentKind::CanonicalPrefix,
+            item_count: 5,
+            size_hint_bytes: 0,
+        };
+        let json = serde_json::to_string(&attachment).unwrap();
+        assert!(!json.contains("size_hint_bytes"));
+
+        let non_zero = ManifestAttachment {
+            kind: AttachmentKind::CanonicalPrefix,
+            item_count: 5,
+            size_hint_bytes: 1024,
+        };
+        let json2 = serde_json::to_string(&non_zero).unwrap();
+        assert!(json2.contains("size_hint_bytes"));
+
+        crate::test_complete!("manifest_json_skips_zero_size_hint");
+    }
+
+    #[test]
+    fn conformance_attachments_in_crash_pack_json() {
+        init_test("conformance_attachments_in_crash_pack_json");
+
+        // Full crash pack with all sections → attachments appear in JSON
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&events)
+            .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 42 }])
+            .oracle_violations(vec!["v1".into()])
+            .supervision_snapshot(SupervisionSnapshot {
+                virtual_time: Time::from_secs(1),
+                task: tid(1),
+                region: rid(0),
+                decision: "restart".into(),
+                context: None,
+            })
+            .build();
+
+        let writer = MemoryCrashPackWriter::new();
+        writer.write(&pack).unwrap();
+        let json_str = &writer.written()[0].1;
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+
+        let atts = parsed["manifest"]["attachments"].as_array().unwrap();
+        assert_eq!(atts.len(), 4);
+
+        // Verify kinds are tagged correctly
+        let kinds: Vec<&str> = atts.iter().map(|a| a["kind"].as_str().unwrap()).collect();
+        assert!(kinds.contains(&"CanonicalPrefix"));
+        assert!(kinds.contains(&"DivergentPrefix"));
+        assert!(kinds.contains(&"SupervisionLog"));
+        assert!(kinds.contains(&"OracleViolations"));
+
+        crate::test_complete!("conformance_attachments_in_crash_pack_json");
+    }
+
+    #[test]
+    fn conformance_validation_error_is_std_error() {
+        init_test("conformance_validation_error_is_std_error");
+
+        let err = ManifestValidationError::VersionTooNew {
+            manifest_version: 99,
+            supported_version: 1,
+        };
+
+        // Must implement std::error::Error
+        let _: &dyn std::error::Error = &err;
+        assert!(err.to_string().contains("99"));
+
+        crate::test_complete!("conformance_validation_error_is_std_error");
     }
 
     // =================================================================
