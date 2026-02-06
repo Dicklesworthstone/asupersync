@@ -488,6 +488,14 @@ impl Future for OwnedAcquireFuture {
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
             state.waiters.retain(|waiter| waiter.id != waiter_id);
+            // Wake next waiter if there are still permits available.
+            // Without this, add_permits(N) where N satisfies multiple waiters
+            // would only wake the first, leaving others sleeping indefinitely.
+            if state.permits > 0 {
+                if let Some(next) = state.waiters.front() {
+                    next.waker.wake_by_ref();
+                }
+            }
             return Poll::Ready(Ok(OwnedSemaphorePermit {
                 semaphore: self.semaphore.clone(),
                 count: self.count,
@@ -554,6 +562,53 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
+        }
+    }
+
+    fn poll_once_with_waker<T, F>(future: &mut F, waker: &Waker) -> Option<T>
+    where
+        F: Future<Output = T> + Unpin,
+    {
+        let mut cx = Context::from_waker(waker);
+        match Pin::new(future).poll(&mut cx) {
+            Poll::Ready(v) => Some(v),
+            Poll::Pending => None,
+        }
+    }
+
+    fn poll_until_ready_with_waker<T, F>(future: &mut F, waker: &Waker) -> T
+    where
+        F: Future<Output = T> + Unpin,
+    {
+        let mut cx = Context::from_waker(waker);
+        loop {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(std::sync::atomic::AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -759,6 +814,58 @@ mod tests {
 
         drop(permit1); // explicitly drop to document lifetime
         crate::test_complete!("test_semaphore_cancel_preserves_order");
+    }
+
+    #[test]
+    fn owned_acquire_cascades_wakeup_when_permits_remain() {
+        init_test("owned_acquire_cascades_wakeup_when_permits_remain");
+
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Arc::new(Semaphore::new(2));
+
+        // Exhaust permits so both owned acquires register as waiters.
+        let held = sem.try_acquire(2).expect("initial acquire");
+
+        let w1 = CountingWaker::new();
+        let w2 = CountingWaker::new();
+        let waker1 = Waker::from(Arc::clone(&w1));
+        let waker2 = Waker::from(Arc::clone(&w2));
+
+        let mut fut1 = Box::pin(OwnedSemaphorePermit::acquire(Arc::clone(&sem), &cx1, 1));
+        let mut fut2 = Box::pin(OwnedSemaphorePermit::acquire(Arc::clone(&sem), &cx2, 1));
+
+        let pending1 = poll_once_with_waker(&mut fut1, &waker1).is_none();
+        let pending2 = poll_once_with_waker(&mut fut2, &waker2).is_none();
+        crate::assert_with_log!(pending1, "fut1 pending", true, pending1);
+        crate::assert_with_log!(pending2, "fut2 pending", true, pending2);
+
+        // Release 2 permits. This should wake only the front waiter (fut1) directly.
+        drop(held);
+        crate::assert_with_log!(w1.count() > 0, "front waiter woken", true, w1.count() > 0);
+        crate::assert_with_log!(
+            w2.count() == 0,
+            "second waiter not woken yet",
+            0usize,
+            w2.count()
+        );
+
+        // When fut1 acquires while permits remain, it must wake fut2.
+        let permit1 = poll_until_ready_with_waker(&mut fut1, &waker1).expect("owned acquire 1");
+        crate::assert_with_log!(
+            w2.count() > 0,
+            "second waiter woken by cascade",
+            true,
+            w2.count() > 0
+        );
+
+        // fut2 should be able to acquire without waiting for permit1 to drop.
+        let permit2 = poll_until_ready_with_waker(&mut fut2, &waker2).expect("owned acquire 2");
+
+        drop(permit1);
+        drop(permit2);
+
+        crate::test_complete!("owned_acquire_cascades_wakeup_when_permits_remain");
     }
 
     #[test]
