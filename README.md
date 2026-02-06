@@ -411,6 +411,37 @@ impl Cx {
 
 ---
 
+## Spork (OTP Mental Model)
+
+Spork is an OTP-style layer built on Asupersync's kernel guarantees: regions
+(structured concurrency), obligations (linearity), explicit cancellation, and the
+deterministic lab runtime.
+
+### OTP Mapping (Conceptual)
+
+| OTP Concept | Spork / Asupersync Interpretation |
+|------------|-----------------------------------|
+| Process | A region-owned task/actor (cannot orphan) |
+| Supervisor | A compiled, deterministic restart topology over regions |
+| Link | Failure propagation rule (sibling/parent coupling; deterministic) |
+| Monitor + DOWN | Observation without coupling: deterministic notifications |
+| Registry | Names as lease obligations: reserve/commit or abort (no stale names) |
+| call/cast | Request/response and mailbox protocols with bounded drain on cancel |
+
+### Why Spork Is Strictly Stronger (When We Finish It)
+
+- Determinism: the lab runtime makes OTP-style debugging reproducible (seeded schedules, trace capture/replay, schedule exploration).
+- Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so OTP-style shutdown has explicit budgets and bounded cleanup.
+- No silent leaks: regions cannot close with live children or unresolved obligations (permits/acks/leases), so "forgot to reply" and "stale name" become structural failures (or test-oracle failures), not production mysteries.
+
+### Where To Look In The Repo
+
+- Supervisor compilation/runtime: `src/supervision.rs`
+- Name leases + registry plumbing: `src/cx/registry.rs`
+- Deterministic ordering contracts (Spork): `docs/spork_deterministic_ordering.md`
+- Spork glossary + invariants: `docs/spork_glossary_invariants.md`
+- Crash artifacts + canonical traces: `src/trace/crashpack.rs`
+
 ## Mathematical Foundations
 
 Asupersync has formal semantics backing its engineering.
