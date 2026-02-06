@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT"
 description = "Proc macros for asupersync structured concurrency runtime"
 repository = "https://github.com/Dicklesworthstone/asupersync"
+readme = "README.md"
 keywords = ["async", "structured", "concurrency", "macros", "proc-macro"]
 categories = ["asynchronous", "concurrency"]
 

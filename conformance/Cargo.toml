@@ -5,6 +5,9 @@ edition = "2021"
 description = "Conformance test suite for async runtime specifications"
 license = "MIT"
 repository = "https://github.com/Dicklesworthstone/asupersync"
+readme = "README.md"
+keywords = ["async", "conformance", "runtime", "testing"]
+categories = ["asynchronous", "development-tools::testing"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
