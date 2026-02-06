@@ -658,6 +658,88 @@ cx.trace("request_done");
 Use `Cx::trace` for deterministic lab traces and runtime logs. Avoid direct
 stdout/stderr printing in core logic.
 
+### Tutorial: Build a Supervised Named Service (Spork, planned surface)
+
+This walkthrough shows the intended flow for a small OTP-style service:
+
+1. define a GenServer-like process for stateful request handling
+2. register a stable name via registry lease semantics
+3. run under supervisor policy with restart budget
+4. use monitor/link-style failure observation/propagation
+5. validate behavior in lab runtime with deterministic replay
+
+Status note:
+- End-to-end Spork app wiring is still being finalized, but the core pieces
+  below are real APIs you can use today.
+
+Compile a deterministic supervisor topology:
+
+```no_run
+use asupersync::Budget;
+use asupersync::supervision::{
+    ChildSpec, RestartConfig, SupervisionStrategy, SupervisorBuilder,
+};
+
+let compiled = SupervisorBuilder::new("counter_root")
+    .child(
+        ChildSpec::new("counter_service", |_scope, _state, _cx| {
+            unimplemented!("spawn child task/actor and return TaskId");
+        })
+        .with_restart(SupervisionStrategy::Restart(RestartConfig::default()))
+        .with_shutdown_budget(Budget::INFINITE.with_poll_quota(1_000)),
+    )
+    .compile()?;
+
+assert_eq!(compiled.start_order.len(), 1);
+# Ok::<(), asupersync::supervision::SupervisorCompileError>(())
+```
+
+Use lease-backed registry naming (no ambient globals, no stale-name ambiguity):
+
+```no_run
+use asupersync::cx::NameRegistry;
+use asupersync::{RegionId, TaskId, Time};
+
+let mut registry = NameRegistry::new();
+let mut lease = registry.register(
+    "counter",
+    TaskId::new_ephemeral(),
+    RegionId::new_ephemeral(),
+    Time::ZERO,
+)?;
+assert!(registry.whereis("counter").is_some());
+
+// On graceful stop: resolve the obligation and remove discoverability.
+lease.release()?;
+registry.unregister("counter")?;
+# Ok::<(), asupersync::cx::NameLeaseError>(())
+```
+
+Planned end-to-end Spork surface (API names may still shift):
+
+```ignore
+use asupersync::spork::prelude::*;
+
+// Spawn supervised GenServer child, register name, then interact via call/cast.
+// Current anchors in code:
+// - Scope::spawn_gen_server (src/gen_server.rs)
+// - GenServerHandle::{call,cast,info} (src/gen_server.rs)
+// - NameRegistry reserve/commit/abort model (src/cx/registry.rs)
+// - SupervisorBuilder + ChildSpec compile/start contracts (src/supervision.rs)
+```
+
+What to verify in lab tests:
+- region close implies quiescence (no live descendants)
+- no obligation leaks (reply/name leases resolve)
+- restart policy behavior is deterministic for same seed
+- monitor/down ordering is replay-stable
+
+Primary references:
+- `docs/spork_glossary_invariants.md`
+- `docs/spork_deterministic_ordering.md`
+- `src/supervision.rs`
+- `src/cx/registry.rs`
+
 ### Evidence Ledger (Galaxy-Brain Mode)
 
 For explainability, the runtime can emit an **evidence ledger**: a compact,
