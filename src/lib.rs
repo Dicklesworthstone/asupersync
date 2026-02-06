@@ -90,6 +90,7 @@ pub mod io;
 pub mod lab;
 pub mod messaging;
 pub mod migration;
+pub mod monitor;
 pub mod net;
 pub mod obligation;
 pub mod observability;
