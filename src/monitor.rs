@@ -965,4 +965,372 @@ mod tests {
         assert!(set.watchers_of(target).is_empty());
         assert!(set.is_empty());
     }
+
+    // ---------------------------------------------------------------
+    // Conformance tests (bd-1hkxo)
+    //
+    // - Multiple watchers on same target
+    // - Multiple simultaneous downs (deterministic batch ordering)
+    // - Cancellation interaction (region cleanup consistency)
+    // - Monotone severity preservation in Down notifications
+    // ---------------------------------------------------------------
+
+    /// Conformance: multiple watchers receive independent Down notifications
+    /// when the monitored task terminates. Each watcher gets its own
+    /// notification with its unique MonitorRef.
+    #[test]
+    fn conformance_multiple_watchers_independent_notifications() {
+        let mut set = MonitorSet::new();
+        let region = test_region_id(0, 0);
+        let target = test_task_id(100, 0);
+
+        let w1 = test_task_id(1, 0);
+        let w2 = test_task_id(2, 0);
+        let w3 = test_task_id(3, 0);
+        let w4 = test_task_id(4, 0);
+
+        let m1 = set.establish(w1, region, target);
+        let m2 = set.establish(w2, region, target);
+        let m3 = set.establish(w3, region, target);
+        let m4 = set.establish(w4, region, target);
+
+        // Target terminates
+        let watchers = set.watchers_of(target);
+        assert_eq!(watchers.len(), 4);
+
+        let completion_vt = Time::from_nanos(1000);
+        let mut batch = DownBatch::new();
+        for (mref, _watcher) in &watchers {
+            batch.push(
+                completion_vt,
+                DownNotification {
+                    monitored: target,
+                    reason: DownReason::Error("crash".into()),
+                    monitor_ref: *mref,
+                },
+            );
+        }
+
+        let sorted = batch.into_sorted();
+        assert_eq!(sorted.len(), 4, "each watcher must receive a notification");
+
+        // All notifications reference the same target
+        for notif in &sorted {
+            assert_eq!(notif.monitored, target);
+            assert!(notif.reason.is_error());
+        }
+
+        // Each notification has a unique MonitorRef
+        let mrefs: Vec<MonitorRef> = sorted.iter().map(|n| n.monitor_ref).collect();
+        assert!(mrefs.contains(&m1));
+        assert!(mrefs.contains(&m2));
+        assert!(mrefs.contains(&m3));
+        assert!(mrefs.contains(&m4));
+    }
+
+    /// Conformance: multiple simultaneous downs are delivered in deterministic
+    /// order. When N targets terminate at the same virtual time, notifications
+    /// are sorted by (vt, monitored_tid).
+    #[test]
+    fn conformance_simultaneous_downs_deterministic_order() {
+        let mut set = MonitorSet::new();
+        let region = test_region_id(0, 0);
+        let watcher = test_task_id(1, 0);
+
+        // Watcher monitors 5 targets
+        let targets: Vec<TaskId> = (10..15).map(|i| test_task_id(i, 0)).collect();
+        let mrefs: Vec<MonitorRef> = targets
+            .iter()
+            .map(|t| set.establish(watcher, region, *t))
+            .collect();
+
+        // All 5 targets terminate at the SAME virtual time
+        let same_vt = Time::from_nanos(500);
+        let mut batch = DownBatch::new();
+
+        // Insert in reverse order to test that sorting overrides insertion order
+        for i in (0..5).rev() {
+            batch.push(
+                same_vt,
+                DownNotification {
+                    monitored: targets[i],
+                    reason: DownReason::Error(format!("error_{i}")),
+                    monitor_ref: mrefs[i],
+                },
+            );
+        }
+
+        let sorted = batch.into_sorted();
+        assert_eq!(sorted.len(), 5);
+
+        // Sorted by TaskId since all vt are equal
+        // targets[0]=tid(10), targets[1]=tid(11), ..., targets[4]=tid(14)
+        for (i, notif) in sorted.iter().enumerate() {
+            assert_eq!(
+                notif.monitored,
+                targets[i],
+                "notification {i} should be for target tid({})",
+                10 + i
+            );
+        }
+
+        // Run this 10 times to verify stability
+        for _trial in 0..10 {
+            let mut batch2 = DownBatch::new();
+            for i in (0..5).rev() {
+                batch2.push(
+                    same_vt,
+                    DownNotification {
+                        monitored: targets[i],
+                        reason: DownReason::Error(format!("error_{i}")),
+                        monitor_ref: mrefs[i],
+                    },
+                );
+            }
+            let sorted2 = batch2.into_sorted();
+            for (i, notif) in sorted2.iter().enumerate() {
+                assert_eq!(notif.monitored, targets[i]);
+            }
+        }
+    }
+
+    /// Conformance: mixed virtual times produce correct interleaved ordering.
+    /// Multiple targets terminate at different times; ordering respects vt first,
+    /// then tid for tie-breaking.
+    #[test]
+    fn conformance_mixed_vt_deterministic_interleaving() {
+        let mut set = MonitorSet::new();
+        let region = test_region_id(0, 0);
+        let watcher = test_task_id(1, 0);
+
+        let t_a = test_task_id(5, 0);
+        let t_b = test_task_id(3, 0);
+        let t_c = test_task_id(8, 0);
+        let t_d = test_task_id(2, 0);
+
+        let m_a = set.establish(watcher, region, t_a);
+        let m_b = set.establish(watcher, region, t_b);
+        let m_c = set.establish(watcher, region, t_c);
+        let m_d = set.establish(watcher, region, t_d);
+
+        let mut batch = DownBatch::new();
+        // Different vt values; some share the same vt
+        batch.push(
+            Time::from_nanos(200),
+            DownNotification {
+                monitored: t_a,
+                reason: DownReason::Error("a".into()),
+                monitor_ref: m_a,
+            },
+        );
+        batch.push(
+            Time::from_nanos(100),
+            DownNotification {
+                monitored: t_b,
+                reason: DownReason::Panicked(PanicPayload::new("b")),
+                monitor_ref: m_b,
+            },
+        );
+        batch.push(
+            Time::from_nanos(200),
+            DownNotification {
+                monitored: t_c,
+                reason: DownReason::Normal,
+                monitor_ref: m_c,
+            },
+        );
+        batch.push(
+            Time::from_nanos(100),
+            DownNotification {
+                monitored: t_d,
+                reason: DownReason::Cancelled(CancelReason::default()),
+                monitor_ref: m_d,
+            },
+        );
+
+        let sorted = batch.into_sorted();
+        // vt=100: tid(2) before tid(3)
+        assert_eq!(sorted[0].monitored, t_d); // tid(2), vt=100
+        assert_eq!(sorted[1].monitored, t_b); // tid(3), vt=100
+                                              // vt=200: tid(5) before tid(8)
+        assert_eq!(sorted[2].monitored, t_a); // tid(5), vt=200
+        assert_eq!(sorted[3].monitored, t_c); // tid(8), vt=200
+    }
+
+    /// Conformance: region cleanup prevents stale Down delivery across
+    /// multiple regions. Watchers in closed regions don't receive notifications;
+    /// watchers in open regions still do.
+    #[test]
+    fn conformance_cancellation_cleanup_cross_region() {
+        let mut set = MonitorSet::new();
+        let r_closing = test_region_id(1, 0);
+        let r_open = test_region_id(2, 0);
+        let target = test_task_id(100, 0);
+
+        let w_closing = test_task_id(1, 0);
+        let w_open = test_task_id(2, 0);
+
+        set.establish(w_closing, r_closing, target);
+        let m_open = set.establish(w_open, r_open, target);
+
+        // Cancel region 1: w_closing's monitors are released
+        let removed = set.cleanup_region(r_closing);
+        assert_eq!(removed.len(), 1);
+
+        // Target terminates: only w_open should receive notification
+        let watchers = set.watchers_of(target);
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(watchers[0].0, m_open);
+        assert_eq!(watchers[0].1, w_open);
+
+        // Build notification batch — only one notification
+        let mut batch = DownBatch::new();
+        for (mref, _) in &watchers {
+            batch.push(
+                Time::from_nanos(500),
+                DownNotification {
+                    monitored: target,
+                    reason: DownReason::Error("target died".into()),
+                    monitor_ref: *mref,
+                },
+            );
+        }
+
+        let sorted = batch.into_sorted();
+        assert_eq!(
+            sorted.len(),
+            1,
+            "only the open-region watcher gets notified"
+        );
+        assert_eq!(sorted[0].monitor_ref, m_open);
+    }
+
+    /// Conformance: after region cleanup, indexes are fully consistent.
+    /// No dangling references in by_ref, by_monitored, or by_watcher_region.
+    #[test]
+    fn conformance_cleanup_index_consistency() {
+        let mut set = MonitorSet::new();
+        let r1 = test_region_id(1, 0);
+        let r2 = test_region_id(2, 0);
+
+        let t1 = test_task_id(1, 0);
+        let t2 = test_task_id(2, 0);
+        let t3 = test_task_id(3, 0);
+        let target = test_task_id(100, 0);
+
+        // Three watchers across two regions
+        set.establish(t1, r1, target);
+        set.establish(t2, r1, target);
+        let m3 = set.establish(t3, r2, target);
+
+        // Cleanup region 1
+        set.cleanup_region(r1);
+
+        // Only m3 remains
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.watchers_of(target).len(), 1);
+        assert_eq!(set.watcher_of(m3), Some(t3));
+        assert_eq!(set.monitored_of(m3), Some(target));
+
+        // Cleanup region 2
+        set.cleanup_region(r2);
+        assert!(set.is_empty());
+        assert!(set.watchers_of(target).is_empty());
+    }
+
+    /// Conformance: monotone severity — Down notifications carry the exact
+    /// DownReason from the task outcome. All four severity levels are preserved.
+    #[test]
+    fn conformance_monotone_severity_in_down() {
+        let outcomes = vec![
+            ("Normal", DownReason::Normal),
+            ("Error", DownReason::Error("fail".into())),
+            ("Cancelled", DownReason::Cancelled(CancelReason::default())),
+            ("Panicked", DownReason::Panicked(PanicPayload::new("boom"))),
+        ];
+
+        for (name, reason) in outcomes {
+            let notif = DownNotification {
+                monitored: test_task_id(1, 0),
+                reason: reason.clone(),
+                monitor_ref: MonitorRef::from_raw(1),
+            };
+
+            // The notification carries the EXACT reason — no downgrade
+            match name {
+                "Normal" => assert!(notif.reason.is_normal()),
+                "Error" => assert!(notif.reason.is_error()),
+                "Cancelled" => assert!(notif.reason.is_cancelled()),
+                "Panicked" => assert!(notif.reason.is_panicked()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// Conformance: remove_monitored + cleanup_region applied in sequence
+    /// produces a clean, empty set. No leaked internal state.
+    #[test]
+    fn conformance_sequential_cleanup_no_leaks() {
+        let mut set = MonitorSet::new();
+        let r1 = test_region_id(1, 0);
+        let r2 = test_region_id(2, 0);
+
+        let w1 = test_task_id(1, 0);
+        let w2 = test_task_id(2, 0);
+        let t1 = test_task_id(10, 0);
+        let t2 = test_task_id(20, 0);
+
+        // w1 (r1) monitors t1 and t2
+        set.establish(w1, r1, t1);
+        set.establish(w1, r1, t2);
+        // w2 (r2) monitors t1
+        set.establish(w2, r2, t1);
+
+        assert_eq!(set.len(), 3);
+
+        // t1 terminates: remove its monitors
+        set.remove_monitored(t1);
+        assert_eq!(set.len(), 1); // only w1 -> t2 remains
+
+        // Region 1 closes: remove remaining monitors
+        set.cleanup_region(r1);
+        assert!(set.is_empty());
+
+        // All queries return empty
+        assert!(set.watchers_of(t1).is_empty());
+        assert!(set.watchers_of(t2).is_empty());
+        assert_eq!(set.len(), 0);
+    }
+
+    /// Conformance: demonitor prevents Down delivery for the specific monitor
+    /// while leaving other monitors on the same target intact.
+    #[test]
+    fn conformance_demonitor_selective_cancellation() {
+        let mut set = MonitorSet::new();
+        let region = test_region_id(0, 0);
+        let target = test_task_id(100, 0);
+
+        let w1 = test_task_id(1, 0);
+        let w2 = test_task_id(2, 0);
+        let w3 = test_task_id(3, 0);
+
+        let m1 = set.establish(w1, region, target);
+        let _m2 = set.establish(w2, region, target);
+        let _m3 = set.establish(w3, region, target);
+
+        // Demonitor w1 only
+        assert!(set.demonitor(m1));
+
+        // Only w2 and w3 remain as watchers
+        let watchers = set.watchers_of(target);
+        assert_eq!(watchers.len(), 2);
+
+        let watcher_tids: Vec<TaskId> = watchers.iter().map(|(_, t)| *t).collect();
+        assert!(
+            !watcher_tids.contains(&w1),
+            "demonitored watcher must not appear"
+        );
+        assert!(watcher_tids.contains(&w2));
+        assert!(watcher_tids.contains(&w3));
+    }
 }
