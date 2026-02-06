@@ -170,7 +170,7 @@ Concurrency bugs become reproducible test failures.
 
 ## "Alien Artifact" Quality Algorithms
 
-Asupersync deliberately uses mathematically rigorous machinery where it buys real correctness, determinism, and debuggability. The goal is not "cleverness"; it's to make concurrency properties *structural*, so both humans and coding agents can trust the system under cancellation, failures, and schedule perturbations.
+Asupersync deliberately uses mathematically rigorous machinery where it buys real correctness, determinism, and debuggability. The intent is to make concurrency properties *structural*, so both humans and coding agents can trust the system under cancellation, failures, and schedule perturbations.
 
 ### Formal Semantics (and a Lean Skeleton) for the Runtime Kernel
 
@@ -192,7 +192,7 @@ This is the kind of structure that lets us reason about cancellation protocols a
 
 The Lab runtime includes a DPOR-style schedule explorer (`src/lab/explorer.rs`) that treats executions as traces modulo commutation of independent events (Mazurkiewicz equivalence). Instead of "run it 10,000 times and pray", it tracks coverage by equivalence class fingerprints and can prioritize exploration based on trace topology.
 
-The net effect: deterministic, replayable concurrency debugging with *coverage semantics* rather than vibes.
+Result: deterministic, replayable concurrency debugging with *coverage semantics* rather than vibes.
 
 ### Anytime-Valid Invariant Monitoring via e-processes
 
@@ -216,7 +216,7 @@ This is used to keep alerting and invariant diagnostics robust without baking in
 
 ### Explainable Evidence Ledgers (Bayes Factors, Galaxy-Brain Diagnostics)
 
-When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. The goal is agent-friendly debugging: equations + substitutions + one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening.
+When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. This enables agent-friendly debugging: equations, substitutions, and one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening.
 
 ### Deterministic Algorithms in the Hot Path (Not Just in Tests)
 
@@ -226,7 +226,7 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
 - Deterministic consistent hashing (`src/distributed/consistent_hash.rs`) for stable assignment without iteration-order landmines.
 - Trace canonicalization and race analysis hooks integrated into the lab runtime (`src/lab/runtime.rs`, `src/trace/dpor`).
 
-The point is simple: "same seed, same behavior" should be true end-to-end, not just for a demo scheduler.
+"Same seed, same behavior" holds end-to-end, not just for a demo scheduler.
 
 ---
 
@@ -408,6 +408,180 @@ impl Cx {
 | **Cancel Lane** | Tasks in cancellation states | 200-255 (highest) |
 | **Timed Lane** | Deadline-driven tasks (EDF) | Based on deadline |
 | **Ready Lane** | Normal runnable tasks | Default priority |
+
+---
+
+## Networking & Protocol Stack
+
+Asupersync ships a cancel-safe networking stack from raw sockets through application protocols. Every layer participates in structured concurrency: reads and writes respect region budgets, cancellation drains connections cleanly, and the lab runtime can substitute virtual TCP for deterministic network testing.
+
+### TCP
+
+`src/net/tcp/` provides `TcpStream`, `TcpListener`, and split reader/writer halves. Connections are registered with the I/O reactor (epoll or io_uring) and use oneshot waker semantics: the reactor disarms interest after each readiness event, and the stream re-arms explicitly. This avoids spurious wakes at the cost of a `set_interest` call per poll cycle, which benchmarks show is negligible compared to syscall overhead.
+
+A `VirtualTcp` implementation (`src/net/tcp/virtual_tcp.rs`) provides a fully in-memory TCP abstraction for lab-runtime tests. Same API surface, deterministic behavior, no kernel sockets.
+
+### HTTP/1.1 and HTTP/2
+
+`src/http/h1/` implements HTTP/1.1 with chunked transfer encoding, connection keep-alive, and streaming request/response bodies. `src/http/h2/` implements HTTP/2 frame parsing, HPACK header compression, flow control, and stream multiplexing over a single connection.
+
+Both layers integrate with connection pooling (`src/http/pool.rs`) and optional response compression (`src/http/compress.rs`).
+
+### WebSocket
+
+`src/net/websocket/` implements RFC 6455: handshake, binary/text frames, ping/pong, and close frames with status codes. The split reader/writer model allows concurrent send and receive within the same region.
+
+### TLS
+
+`src/tls/` wraps `rustls` for TLS 1.2/1.3 with three feature flags:
+
+| Flag | Root Certs |
+|------|------------|
+| `tls` | Bring your own |
+| `tls-native-roots` | OS trust store |
+| `tls-webpki-roots` | Mozilla's WebPKI bundle |
+
+### DNS and UDP
+
+`src/net/dns/` provides async DNS resolution with address-family selection. `src/net/udp.rs` provides async UDP sockets with send/receive and cancellation safety.
+
+---
+
+## Database Integration
+
+Asupersync includes async clients for three databases, each respecting structured concurrency and cancellation.
+
+| Database | Location | Wire Protocol | Auth |
+|----------|----------|---------------|------|
+| **SQLite** | `src/database/sqlite.rs` | Blocking pool bridge | N/A |
+| **PostgreSQL** | `src/database/postgres.rs` | Binary protocol v3 | SCRAM-SHA-256 |
+| **MySQL** | `src/database/mysql.rs` | MySQL wire protocol | Native + caching_sha2 |
+
+All three support prepared statements, transactions, and connection reuse. SQLite operations run on the blocking thread pool (since `rusqlite` is synchronous) with cancel-safe wrappers that respect region deadlines. PostgreSQL and MySQL implement their wire protocols directly over `TcpStream`, avoiding external driver dependencies.
+
+---
+
+## Channels and Synchronization Primitives
+
+### Channels
+
+| Channel | Location | Pattern | Cancel-Safe |
+|---------|----------|---------|-------------|
+| **MPSC** | `src/channel/mpsc.rs` | Multi-producer, single-consumer | Two-phase send (reserve/commit) |
+| **Oneshot** | `src/channel/oneshot.rs` | Single send, single receive | Two-phase send |
+| **Broadcast** | `src/channel/broadcast.rs` | Fan-out to subscribers | Waiter cleanup on drop |
+| **Watch** | `src/channel/watch.rs` | Last-value multicast | Always-current read |
+| **Session** | `src/channel/session.rs` | Typed RPC with reply obligation | Reply is a linear resource |
+
+The two-phase pattern (reserve a permit, then commit the send) is central to cancel-correctness. A reserved-but-uncommitted permit aborts cleanly on cancellation. A committed send is guaranteed delivered. No half-sent messages.
+
+### Synchronization
+
+| Primitive | Location | Notes |
+|-----------|----------|-------|
+| **Mutex** | `src/sync/mutex.rs` | Fair, cancel-safe, tracks contention |
+| **RwLock** | `src/sync/rwlock.rs` | Writer preference with reader batching |
+| **Semaphore** | `src/sync/semaphore.rs` | Counting, with permit-as-obligation model |
+| **Barrier** | `src/sync/barrier.rs` | N-way synchronization point |
+| **Notify** | `src/sync/notify.rs` | One-time or multi-waiter notification |
+| **OnceLock** | `src/sync/once_cell.rs` | Async one-time initialization |
+| **ContendedMutex** | `src/sync/contended_mutex.rs` | Mutex with contention metrics |
+| **Pool** | `src/sync/pool.rs` | Object pool with per-thread caches |
+
+All primitives are deterministic under the lab runtime and participate in futurelock detection.
+
+---
+
+## Concurrency Combinators
+
+Beyond `join`, `race`, and `timeout`, the combinator library includes patterns for distributed systems and resilience:
+
+| Combinator | Location | Purpose |
+|------------|----------|---------|
+| **quorum** | `src/combinator/quorum.rs` | M-of-N completion for consensus patterns |
+| **hedge** | `src/combinator/hedge.rs` | Start backup after delay, first response wins |
+| **first_ok** | `src/combinator/first_ok.rs` | Try operations sequentially until one succeeds |
+| **pipeline** | `src/combinator/pipeline.rs` | Staged transformations with backpressure |
+| **map_reduce** | `src/combinator/map_reduce.rs` | Parallel map + monoid reduction |
+| **circuit_breaker** | `src/combinator/circuit_breaker.rs` | Failure detection, open/half-open/closed states |
+| **bulkhead** | `src/combinator/bulkhead.rs` | Concurrency isolation (bounded parallelism) |
+| **rate_limit** | `src/combinator/rate_limit.rs` | Token bucket throughput control |
+| **bracket** | `src/combinator/bracket.rs` | Acquire/use/release with guaranteed cleanup |
+| **retry** | `src/combinator/retry.rs` | Exponential backoff, budget-aware |
+
+Every combinator is cancel-safe. Losers drain after races. Outcomes aggregate via the severity lattice. An explicit law sheet (`src/combinator/laws.rs`) documents algebraic properties (associativity, commutativity, distributivity) and a rewrite engine (`src/plan/rewrite.rs`) can optimize combinator DAGs while preserving cancel/drain/quiescence invariants.
+
+---
+
+## RaptorQ Fountain Coding
+
+`src/raptorq/` implements RFC 6330 systematic RaptorQ codes, a fountain code where any K-of-N encoded symbols suffice to recover the original K source symbols. This underpins Asupersync's distributed snapshot distribution: region state is encoded, symbols are assigned to replicas via consistent hashing, and recovery requires collecting a quorum of symbols from surviving nodes.
+
+| Module | Purpose |
+|--------|---------|
+| `rfc6330.rs` | Standard-compliant parameter computation |
+| `systematic.rs` | Systematic encoder/decoder |
+| `gf256.rs` | GF(2^8) arithmetic (addition, multiplication, inversion) |
+| `linalg.rs` | Matrix operations over GF(256) |
+| `pipeline.rs` | Full sender/receiver pipelines with symbol authentication |
+| `proof.rs` | Decode proof system for verifiable recovery |
+
+The implementation is deterministic (no randomness in lab mode) and integrates with the security layer (`src/security/`) for per-symbol authentication tags, preventing Byzantine symbol injection.
+
+---
+
+## Stream Combinators
+
+`src/stream/` provides a composable stream library with the standard functional operators: `map`, `filter`, `take`, `skip`, `chunks`, `chain`, `merge`, `zip`, `fold`, `for_each`, `inspect`, `enumerate`, `any_all`, `count`, `fuse`, `buffered`, and `try_stream`. Streams integrate with channels (`broadcast_stream`, `receiver_stream`) and participate in cancellation; a dropped stream cleanly aborts any pending I/O.
+
+---
+
+## Observability
+
+### Structured Logging
+
+`src/observability/entry.rs` defines `LogEntry` with span IDs, task IDs, region context, and structured fields. Log levels (Trace through Error) are separate from cancellation severity. The `LogCollector` batches entries for export.
+
+### Metrics
+
+`src/observability/metrics.rs` provides Counter, Gauge, and Histogram abstractions with a zero-allocation hot path. Optional OpenTelemetry integration (`src/observability/otel.rs`) exports to any OTLP-compatible backend. Multiple exporters (stdout, in-memory for tests, null for benchmarks) can compose via `MultiExporter`.
+
+### Task Inspector and Diagnostics
+
+`src/observability/task_inspector.rs` introspects live task state: blocked reasons, obligation holdings, budget usage, and cancellation status. `src/observability/diagnostics.rs` produces structured explanations: `CancellationExplanation` traces the full cancel propagation chain, `TaskBlockedExplanation` identifies what a task is waiting on, and `ObligationLeak` pinpoints which obligation was not resolved and by whom.
+
+---
+
+## Proc Macros
+
+`asupersync-macros/` provides proc macros for ergonomic structured concurrency:
+
+```rust
+scope! {
+    let a = spawn!(worker_a);
+    let b = spawn!(worker_b);
+    join!(a, b)
+}
+
+let winner = race!(task_a, task_b);
+```
+
+The macros expand to standard Scope/Cx calls with proper region ownership. Compile-fail tests (via `trybuild`) verify that incorrect usage produces clear error messages. See `docs/macro-dsl.md` for the full pattern catalog.
+
+---
+
+## Conformance Suite
+
+`conformance/` is a standalone crate containing runtime-agnostic correctness tests. It verifies:
+
+- **Budget enforcement**: deadlines and poll quotas are respected
+- **Channel invariants**: two-phase sends, bounded capacity, waiter cleanup
+- **I/O correctness**: read/write under cancellation
+- **Outcome aggregation**: severity lattice composition
+- **Runtime invariants**: no orphans, region quiescence
+- **Negative tests**: fault injection scenarios (obligation leaks, region hangs)
+
+Tests emit deterministic artifact bundles (`event_log.txt`, `failed_assertions.json`, `repro_manifest.json`) when `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set, making CI failures reproducible with a single manifest file.
 
 ---
 
@@ -740,15 +914,20 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 
 ## Limitations
 
-### Current Phase (0-1) Constraints
+### Current State
 
-| Capability | Current State | Planned |
-|------------|---------------|---------|
-| Multi-threaded runtime | 🔜 In progress | Phase 1 |
-| I/O reactor integration | ❌ Not yet | Phase 2 |
-| Actor supervision | ❌ Planned | Phase 3 |
-| Distributed runtime | ❌ Designed | Phase 4 |
-| DPOR exploration | ⚠️ Hooks exist | Phase 5 |
+| Capability | Status |
+|------------|--------|
+| Single-thread deterministic kernel | ✅ Complete |
+| Parallel scheduler + work-stealing | ✅ Implemented (three-lane scheduler) |
+| I/O reactor (epoll + io_uring) | ✅ Implemented |
+| TCP, HTTP/1.1, HTTP/2, WebSocket, TLS | ✅ Implemented |
+| Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
+| Actor supervision (GenServer, links, monitors) | ✅ Implemented |
+| DPOR schedule exploration | ✅ Implemented |
+| Distributed runtime (remote tasks, sagas, leases) | ⚠️ Core implemented, integration in progress |
+| RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
+| Formal verification (Lean skeleton, TLA+ export) | ⚠️ Scaffolding in place |
 
 ### What Asupersync Doesn't Do
 
@@ -772,11 +951,12 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 | Phase | Focus | Status |
 |-------|-------|--------|
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
-| **Phase 1** | Parallel scheduler + region heap | 🔜 In Progress |
-| **Phase 2** | I/O integration | Planned |
-| **Phase 3** | Actors + session types | Planned |
-| **Phase 4** | Distributed structured concurrency | Planned |
-| **Phase 5** | DPOR + TLA+ tooling | Planned |
+| **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
+| **Phase 2** | I/O integration (epoll, io_uring, TCP, HTTP, TLS) | ✅ Complete |
+| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
+| **Phase 4** | Distributed structured concurrency | 🔜 In Progress |
+| **Phase 5** | DPOR + TLA+ tooling | ✅ Core complete, integration ongoing |
+| **Phase 6** | Production hardening, ecosystem adapters | Planned |
 
 ---
 
@@ -804,7 +984,7 @@ Asupersync has its own runtime with explicit capabilities. For code that needs t
 
 ### Is this production-ready?
 
-Phase 0 (single-threaded deterministic kernel) is complete and tested. Phase 1 (multi-threaded) is in progress. Use for internal applications where correctness matters more than ecosystem breadth.
+Phases 0 through 3 are complete: deterministic kernel, parallel scheduler, full I/O stack (TCP/HTTP/TLS/WebSocket), database clients, and OTP-style actors with supervision. Phase 4 (distributed structured concurrency) is in progress. Use for internal applications where correctness matters more than ecosystem breadth.
 
 ### How do I report bugs?
 
