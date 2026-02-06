@@ -196,6 +196,139 @@ impl NameLease {
 }
 
 // ============================================================================
+// NamePermit (bd-2is3i)
+// ============================================================================
+
+/// A name registration permit (reserve stage).
+///
+/// A `NamePermit` represents intent to register a name. The permit must be
+/// either committed (producing a [`NameLease`]) or aborted before the owning
+/// region closes. Dropping without resolving triggers a panic (drop bomb).
+///
+/// # Three-Phase Lifecycle
+///
+/// ```text
+/// NameRegistry::reserve() → NamePermit (reserved, NOT visible to whereis)
+///                                │
+///                                ├─ NameRegistry::commit_permit() → NameLease (visible)
+///                                │
+///                                ├─ abort() → AbortedProof (cancelled, name never registered)
+///                                │
+///                                └─ (drop)  → PANIC (obligation leaked)
+/// ```
+///
+/// The permit stage allows setup work between reservation and commitment.
+/// If setup fails, the permit can be aborted without ever making the name
+/// visible to other tasks.
+///
+/// # Bead
+///
+/// bd-2is3i | Parent: bd-133q8
+#[derive(Debug)]
+pub struct NamePermit {
+    /// The name being reserved.
+    name: String,
+    /// The task requesting the name.
+    holder: TaskId,
+    /// The region containing the holder.
+    region: RegionId,
+    /// Virtual time of reservation.
+    reserved_at: Time,
+    /// Obligation token (drop bomb). Transferred to NameLease on commit.
+    token: Option<ObligationToken<LeaseKind>>,
+}
+
+impl NamePermit {
+    /// Creates a new name permit with an armed obligation token.
+    ///
+    /// The caller must eventually call [`commit`](Self::commit) (via
+    /// [`NameRegistry::commit_permit`]) or [`abort`](Self::abort).
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+    ) -> Self {
+        let name = name.into();
+        let token = ObligationToken::reserve(format!("name_permit:{name}"));
+        Self {
+            name,
+            holder,
+            region,
+            reserved_at,
+            token: Some(token),
+        }
+    }
+
+    /// Returns the reserved name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the task requesting the name.
+    #[must_use]
+    pub fn holder(&self) -> TaskId {
+        self.holder
+    }
+
+    /// Returns the region of the holder.
+    #[must_use]
+    pub fn region(&self) -> RegionId {
+        self.region
+    }
+
+    /// Returns the virtual time of reservation.
+    #[must_use]
+    pub fn reserved_at(&self) -> Time {
+        self.reserved_at
+    }
+
+    /// Returns `true` if the permit has not yet been committed or aborted.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.token.is_some()
+    }
+
+    /// Consume the permit, transferring the obligation token to a new
+    /// [`NameLease`].
+    ///
+    /// This is called internally by [`NameRegistry::commit_permit`]. Direct
+    /// callers should use the registry method to also update the registry state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the permit was already committed or aborted.
+    fn commit(mut self) -> NameLease {
+        let token = self
+            .token
+            .take()
+            .expect("NamePermit::commit called on already-resolved permit");
+        NameLease {
+            name: self.name.clone(),
+            holder: self.holder,
+            region: self.region,
+            acquired_at: self.reserved_at,
+            token: Some(token),
+        }
+    }
+
+    /// Abort the permit (cancel the reservation).
+    ///
+    /// The name was never registered; the obligation is aborted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameLeaseError::AlreadyResolved` if the permit was already
+    /// committed or aborted.
+    pub fn abort(&mut self) -> Result<AbortedProof<LeaseKind>, NameLeaseError> {
+        let token = self.token.take().ok_or(NameLeaseError::AlreadyResolved)?;
+        Ok(token.abort())
+    }
+}
+
+// ============================================================================
 // NameLeaseError
 // ============================================================================
 
@@ -247,6 +380,8 @@ impl std::error::Error for NameLeaseError {}
 pub struct NameRegistry {
     /// Active leases keyed by name (deterministic BTreeMap ordering).
     leases: BTreeMap<String, NameEntry>,
+    /// Pending permits keyed by name (reserved but not yet committed).
+    pending: BTreeMap<String, NameEntry>,
 }
 
 /// Internal entry for a registered name.
@@ -266,6 +401,7 @@ impl NameRegistry {
     pub fn new() -> Self {
         Self {
             leases: BTreeMap::new(),
+            pending: BTreeMap::new(),
         }
     }
 
@@ -288,6 +424,12 @@ impl NameRegistry {
                 current_holder: entry.holder,
             });
         }
+        if let Some(entry) = self.pending.get(&name) {
+            return Err(NameLeaseError::NameTaken {
+                name,
+                current_holder: entry.holder,
+            });
+        }
         self.leases.insert(
             name.clone(),
             NameEntry {
@@ -297,6 +439,78 @@ impl NameRegistry {
             },
         );
         Ok(NameLease::new(name, holder, region, now))
+    }
+
+    /// Reserve a name, creating a [`NamePermit`].
+    ///
+    /// The name is reserved but NOT yet visible to [`whereis`](Self::whereis).
+    /// The permit must be committed via [`commit_permit`](Self::commit_permit)
+    /// to make the name visible, or aborted via [`NamePermit::abort`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameLeaseError::NameTaken` if the name is already registered
+    /// or already reserved by a pending permit.
+    pub fn reserve(
+        &mut self,
+        name: impl Into<String>,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<NamePermit, NameLeaseError> {
+        let name = name.into();
+        if let Some(entry) = self.leases.get(&name) {
+            return Err(NameLeaseError::NameTaken {
+                name,
+                current_holder: entry.holder,
+            });
+        }
+        if let Some(entry) = self.pending.get(&name) {
+            return Err(NameLeaseError::NameTaken {
+                name,
+                current_holder: entry.holder,
+            });
+        }
+        self.pending.insert(
+            name.clone(),
+            NameEntry {
+                holder,
+                region,
+                acquired_at: now,
+            },
+        );
+        Ok(NamePermit::new(name, holder, region, now))
+    }
+
+    /// Commit a permit, transitioning it to a [`NameLease`].
+    ///
+    /// The name moves from pending to active, becoming visible to
+    /// [`whereis`](Self::whereis).
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameLeaseError::NotFound` if the permit's name is not in the
+    /// pending set (e.g., if the permit was already committed or the registry
+    /// was cleaned up).
+    pub fn commit_permit(&mut self, mut permit: NamePermit) -> Result<NameLease, NameLeaseError> {
+        let name = permit.name().to_string();
+        let Some(entry) = self.pending.remove(&name) else {
+            // Abort the permit to defuse the drop bomb before returning error.
+            let _ = permit.abort();
+            return Err(NameLeaseError::NotFound { name });
+        };
+        self.leases.insert(name, entry);
+        Ok(permit.commit())
+    }
+
+    /// Cancel a pending permit, removing it from the pending set.
+    ///
+    /// The caller must also call [`NamePermit::abort`] on the permit itself
+    /// to resolve the obligation.
+    ///
+    /// Returns `true` if the name was in the pending set.
+    pub fn cancel_permit(&mut self, name: &str) -> bool {
+        self.pending.remove(name).is_some()
     }
 
     /// Unregister a name, removing it from the registry.
@@ -350,16 +564,27 @@ impl NameRegistry {
     /// Remove all names held by tasks in the given region.
     ///
     /// Returns the names that were removed (sorted deterministically).
-    /// The caller is responsible for aborting the corresponding leases.
+    ///
+    /// Note: this removes both active leases and pending permits held in the
+    /// region. The caller is responsible for resolving the corresponding
+    /// obligations (leases released/aborted; permits aborted).
     pub fn cleanup_region(&mut self, region: RegionId) -> Vec<String> {
-        let to_remove: Vec<String> = self
+        let mut to_remove: Vec<String> = self
             .leases
             .iter()
             .filter(|(_, e)| e.region == region)
             .map(|(name, _)| name.clone())
             .collect();
+        to_remove.extend(
+            self.pending
+                .iter()
+                .filter(|(_, e)| e.region == region)
+                .map(|(name, _)| name.clone()),
+        );
+        to_remove.sort();
         for name in &to_remove {
             self.leases.remove(name);
+            self.pending.remove(name);
         }
         to_remove
     }
@@ -367,15 +592,27 @@ impl NameRegistry {
     /// Remove all names held by a specific task.
     ///
     /// Returns the names that were removed (sorted deterministically).
+    ///
+    /// Note: this removes both active leases and pending permits held by the
+    /// task. The caller is responsible for resolving the corresponding
+    /// obligations.
     pub fn cleanup_task(&mut self, task: TaskId) -> Vec<String> {
-        let to_remove: Vec<String> = self
+        let mut to_remove: Vec<String> = self
             .leases
             .iter()
             .filter(|(_, e)| e.holder == task)
             .map(|(name, _)| name.clone())
             .collect();
+        to_remove.extend(
+            self.pending
+                .iter()
+                .filter(|(_, e)| e.holder == task)
+                .map(|(name, _)| name.clone()),
+        );
+        to_remove.sort();
         for name in &to_remove {
             self.leases.remove(name);
+            self.pending.remove(name);
         }
         to_remove
     }
@@ -435,6 +672,31 @@ pub enum RegistryEvent {
         task: TaskId,
         /// Number of names removed.
         count: usize,
+    },
+    /// A name was reserved via a permit (not yet visible to whereis).
+    NameReserved {
+        /// The reserved name.
+        name: String,
+        /// The task that reserved the name.
+        holder: TaskId,
+        /// The region of the holder.
+        region: RegionId,
+    },
+    /// A name permit was committed, transitioning to an active lease.
+    NamePermitCommitted {
+        /// The name that transitioned from reserved to active.
+        name: String,
+        /// The task that committed the permit.
+        holder: TaskId,
+    },
+    /// A name permit was aborted (reservation cancelled).
+    NamePermitAborted {
+        /// The aborted name.
+        name: String,
+        /// The task that held the permit.
+        holder: TaskId,
+        /// Why the permit was aborted.
+        reason: String,
     },
 }
 
@@ -539,6 +801,102 @@ mod tests {
         lease.release().unwrap();
 
         crate::test_complete!("registry_register_and_whereis");
+    }
+
+    // ---------------------------------------------------------------
+    // NamePermit tests (bd-2is3i)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn registry_reserve_commit_makes_visible() {
+        init_test("registry_reserve_commit_makes_visible");
+
+        let mut reg = NameRegistry::new();
+        let permit = reg
+            .reserve("svc", tid(1), rid(0), Time::from_secs(1))
+            .expect("reserve ok");
+
+        // Reserved names are not visible until committed.
+        assert_eq!(reg.whereis("svc"), None);
+        assert!(!reg.is_registered("svc"));
+
+        let mut lease = reg.commit_permit(permit).expect("commit ok");
+        assert_eq!(reg.whereis("svc"), Some(tid(1)));
+        assert!(reg.is_registered("svc"));
+
+        lease.release().unwrap();
+        crate::test_complete!("registry_reserve_commit_makes_visible");
+    }
+
+    #[test]
+    fn registry_reserve_abort_releases_name() {
+        init_test("registry_reserve_abort_releases_name");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(0), Time::from_secs(1))
+            .expect("reserve ok");
+
+        // Abort the permit obligation and cancel the pending entry.
+        permit.abort().unwrap();
+        assert!(reg.cancel_permit("svc"));
+
+        // Now the name can be registered normally.
+        let mut lease = reg
+            .register("svc", tid(2), rid(0), Time::from_secs(2))
+            .unwrap();
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+        lease.release().unwrap();
+
+        crate::test_complete!("registry_reserve_abort_releases_name");
+    }
+
+    #[test]
+    fn registry_reserve_blocks_register() {
+        init_test("registry_reserve_blocks_register");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+
+        let err = reg.register("svc", tid(2), rid(0), Time::ZERO).unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::NameTaken {
+                name: "svc".into(),
+                current_holder: tid(1),
+            }
+        );
+
+        permit.abort().unwrap();
+        assert!(reg.cancel_permit("svc"));
+
+        crate::test_complete!("registry_reserve_blocks_register");
+    }
+
+    #[test]
+    fn registry_cleanup_region_removes_pending_permits() {
+        init_test("registry_cleanup_region_removes_pending_permits");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(1), Time::ZERO)
+            .expect("reserve ok");
+
+        let removed = reg.cleanup_region(rid(1));
+        assert_eq!(removed, vec!["svc"]);
+
+        // Abort the permit (simulating region cleanup).
+        permit.abort().unwrap();
+
+        // Registry should no longer consider the name taken.
+        let mut lease = reg
+            .register("svc", tid(2), rid(0), Time::from_secs(1))
+            .unwrap();
+        lease.release().unwrap();
+
+        crate::test_complete!("registry_cleanup_region_removes_pending_permits");
     }
 
     #[test]
@@ -731,6 +1089,20 @@ mod tests {
         let _task_cleanup = RegistryEvent::TaskCleanup {
             task: tid(1),
             count: 2,
+        };
+        let _reserved = RegistryEvent::NameReserved {
+            name: "svc".into(),
+            holder: tid(1),
+            region: rid(0),
+        };
+        let _committed = RegistryEvent::NamePermitCommitted {
+            name: "svc".into(),
+            holder: tid(1),
+        };
+        let _permit_aborted = RegistryEvent::NamePermitAborted {
+            name: "svc".into(),
+            holder: tid(1),
+            reason: "setup failed".into(),
         };
 
         crate::test_complete!("registry_event_variants");
@@ -1342,5 +1714,193 @@ mod tests {
         l2.release().unwrap();
 
         crate::test_complete!("conformance_cross_region_isolation");
+    }
+
+    // ---------------------------------------------------------------
+    // NamePermit conformance tests (bd-2is3i)
+    // ---------------------------------------------------------------
+
+    /// Conformance: cleanup_task also removes pending permits held by the task.
+    #[test]
+    fn conformance_cleanup_task_removes_pending_permits() {
+        init_test("conformance_cleanup_task_removes_pending_permits");
+
+        let mut reg = NameRegistry::new();
+
+        // Task 1 has a committed lease and a pending permit.
+        let mut lease = reg.register("active", tid(1), rid(0), Time::ZERO).unwrap();
+        let mut permit = reg
+            .reserve("pending_name", tid(1), rid(0), Time::from_secs(1))
+            .expect("reserve ok");
+
+        let removed = reg.cleanup_task(tid(1));
+        assert_eq!(removed, vec!["active", "pending_name"]);
+        assert_eq!(reg.len(), 0);
+
+        // Both name slots freed — a new task can take either.
+        let mut l2 = reg
+            .register("pending_name", tid(2), rid(0), Time::from_secs(2))
+            .unwrap();
+
+        lease.abort().unwrap();
+        permit.abort().unwrap();
+        l2.release().unwrap();
+
+        crate::test_complete!("conformance_cleanup_task_removes_pending_permits");
+    }
+
+    /// Conformance: double reserve of the same name is blocked.
+    #[test]
+    fn conformance_double_reserve_blocked() {
+        init_test("conformance_double_reserve_blocked");
+
+        let mut reg = NameRegistry::new();
+        let mut p1 = reg
+            .reserve("singleton", tid(1), rid(0), Time::ZERO)
+            .expect("first reserve ok");
+
+        let err = reg
+            .reserve("singleton", tid(2), rid(0), Time::ZERO)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::NameTaken {
+                name: "singleton".into(),
+                current_holder: tid(1),
+            }
+        );
+
+        p1.abort().unwrap();
+        reg.cancel_permit("singleton");
+
+        crate::test_complete!("conformance_double_reserve_blocked");
+    }
+
+    /// Conformance: permit accessors return correct values.
+    #[test]
+    fn permit_accessors() {
+        init_test("permit_accessors");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("my_svc", tid(7), rid(3), Time::from_secs(42))
+            .expect("reserve ok");
+
+        assert_eq!(permit.name(), "my_svc");
+        assert_eq!(permit.holder(), tid(7));
+        assert_eq!(permit.region(), rid(3));
+        assert_eq!(permit.reserved_at(), Time::from_secs(42));
+        assert!(permit.is_pending());
+
+        permit.abort().unwrap();
+        assert!(!permit.is_pending());
+        reg.cancel_permit("my_svc");
+
+        crate::test_complete!("permit_accessors");
+    }
+
+    /// Conformance: permit commit produces a valid active NameLease with
+    /// the same obligation token (no new token created).
+    #[test]
+    fn conformance_permit_commit_transfers_token() {
+        init_test("conformance_permit_commit_transfers_token");
+
+        let mut reg = NameRegistry::new();
+        let permit = reg
+            .reserve("transfer", tid(1), rid(0), Time::from_secs(5))
+            .expect("reserve ok");
+
+        let mut lease = reg.commit_permit(permit).expect("commit ok");
+
+        // Lease inherits permit's metadata.
+        assert_eq!(lease.name(), "transfer");
+        assert_eq!(lease.holder(), tid(1));
+        assert_eq!(lease.region(), rid(0));
+        assert_eq!(lease.acquired_at(), Time::from_secs(5));
+        assert!(lease.is_active());
+
+        // The lease can be released (obligation committed).
+        let proof = lease.release().unwrap();
+        let resolved = proof.into_resolved_proof();
+        assert_eq!(
+            resolved.resolution,
+            crate::obligation::graded::Resolution::Commit,
+        );
+
+        crate::test_complete!("conformance_permit_commit_transfers_token");
+    }
+
+    /// Conformance: permit abort produces a valid AbortedProof.
+    #[test]
+    fn conformance_permit_abort_proof() {
+        init_test("conformance_permit_abort_proof");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("abortable", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+
+        let proof = permit.abort().unwrap();
+        let resolved = proof.into_resolved_proof();
+        assert_eq!(
+            resolved.resolution,
+            crate::obligation::graded::Resolution::Abort,
+        );
+
+        // Double abort is an error.
+        assert_eq!(permit.abort().unwrap_err(), NameLeaseError::AlreadyResolved);
+
+        reg.cancel_permit("abortable");
+
+        crate::test_complete!("conformance_permit_abort_proof");
+    }
+
+    /// Conformance: committed lease blocks a new reserve on the same name.
+    #[test]
+    fn conformance_lease_blocks_reserve() {
+        init_test("conformance_lease_blocks_reserve");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("taken", tid(1), rid(0), Time::ZERO).unwrap();
+
+        let err = reg
+            .reserve("taken", tid(2), rid(0), Time::ZERO)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::NameTaken {
+                name: "taken".into(),
+                current_holder: tid(1),
+            }
+        );
+
+        lease.release().unwrap();
+
+        crate::test_complete!("conformance_lease_blocks_reserve");
+    }
+
+    /// Conformance: commit_permit on an already-cancelled permit returns NotFound.
+    #[test]
+    fn conformance_commit_after_cancel_fails() {
+        init_test("conformance_commit_after_cancel_fails");
+
+        let mut reg = NameRegistry::new();
+        let permit = reg
+            .reserve("ephemeral", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+
+        // Cancel the pending entry first.
+        assert!(reg.cancel_permit("ephemeral"));
+
+        // commit_permit should fail because the name is no longer pending.
+        let err = reg.commit_permit(permit).unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::NotFound {
+                name: "ephemeral".into()
+            }
+        );
+
+        crate::test_complete!("conformance_commit_after_cancel_fails");
     }
 }
