@@ -23,6 +23,27 @@
 //! - **Shard D (Instrumentation)**: Trace buffer, metrics provider (lock-free)
 //! - **Shard E (Config)**: Read-only configuration (no lock needed)
 //!
+//! # RuntimeState Method → ShardGuard Mapping
+//!
+//! Any method that calls `advance_region_state` needs all three locks (B→A→C)
+//! because the `Finalizing` branch checks task terminal status (A) and handles
+//! obligation leaks (C).
+//!
+//! | RuntimeState method              | Guard                    | Shards  | Reason                    |
+//! |----------------------------------|--------------------------|---------|---------------------------|
+//! | poll / push / pop / steal        | `tasks_only`             | A       | Hot-path task access only |
+//! | region tree queries              | `regions_only`           | B       | Read-only region checks   |
+//! | obligation queries               | `obligations_only`       | C       | Read-only obligation data |
+//! | `create_obligation`              | `for_obligation`         | B→C     | Region validate + insert  |
+//! | `commit_obligation`              | `for_obligation_resolve` | B→A→C   | Calls advance_region_state|
+//! | `abort_obligation`               | `for_obligation_resolve` | B→A→C   | Calls advance_region_state|
+//! | `mark_obligation_leaked`         | `for_obligation_resolve` | B→A→C   | Calls advance_region_state|
+//! | `spawn` / `create_task`          | `for_spawn`              | B→A     | Region + task insert      |
+//! | `cancel_request`                 | `for_cancel`             | B→A→C   | Calls advance_region_state|
+//! | `cancel_sibling_tasks`           | `for_cancel`             | B→A→C   | May propagate cancel      |
+//! | `task_completed`                 | `for_task_completed`     | B→A→C   | Task remove + region adv. |
+//! | snapshot / quiescence check      | `all`                    | B→A→C   | Full-state read           |
+//!
 //! See `docs/runtime_state_contention_inventory.md` for the full spec.
 
 use crate::cx::cx::ObservabilityState;
@@ -420,12 +441,19 @@ impl<'a> ShardGuard<'a> {
         }
     }
 
-    /// Lock for cancel_request: D→B→A.
+    /// Lock for cancel_request: D→B→A→C.
     ///
     /// Use for: initiating cancellation, propagating to descendant tasks.
+    ///
+    /// # Why B→A→C (not just B→A)
+    ///
+    /// `cancel_request` calls `advance_region_state`, which in the
+    /// `Finalizing` branch can call `handle_obligation_leaks` →
+    /// `abort_obligation` → obligation table access. Any cancel path
+    /// that triggers region state advancement needs obligation access.
     #[must_use]
     pub fn for_cancel(shards: &'a ShardedState) -> Self {
-        // Acquire in order: B→A (D is lock-free, C not needed)
+        // Acquire in order: B→A→C (D is lock-free)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
@@ -436,23 +464,33 @@ impl<'a> ShardGuard<'a> {
         let tasks = shards.tasks.lock().expect("tasks lock poisoned");
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Obligations);
+        let obligations = shards
+            .obligations
+            .lock()
+            .expect("obligations lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Obligations);
 
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: Some(tasks),
-            obligations: None,
+            obligations: Some(obligations),
             #[cfg(debug_assertions)]
-            debug_locks: 2,
+            debug_locks: 3,
         }
     }
 
-    /// Lock for obligation lifecycle: D→B→C.
+    /// Lock for obligation creation: D→B→C.
     ///
-    /// Use for: create/commit/abort obligation.
+    /// Use for: `create_obligation` only. This guard does NOT cover
+    /// resolve operations (commit/abort/mark_leaked) — use
+    /// [`for_obligation_resolve`](Self::for_obligation_resolve) for those.
     #[must_use]
     pub fn for_obligation(shards: &'a ShardedState) -> Self {
-        // Acquire in order: B→C (D is lock-free, A not needed)
+        // Acquire in order: B→C (D is lock-free, A not needed for creation)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards.regions.lock().expect("regions lock poisoned");
@@ -474,6 +512,49 @@ impl<'a> ShardGuard<'a> {
             obligations: Some(obligations),
             #[cfg(debug_assertions)]
             debug_locks: 2,
+        }
+    }
+
+    /// Lock for obligation resolve operations: D→B→A→C.
+    ///
+    /// Use for: `commit_obligation`, `abort_obligation`, `mark_obligation_leaked`.
+    ///
+    /// # Why B→A→C (not just B→C)
+    ///
+    /// Obligation resolve operations call `advance_region_state`, which
+    /// in the `Finalizing` branch checks task terminal status (needs A)
+    /// and handles obligation leaks (needs C). The task shard is required
+    /// because `can_region_complete_close` iterates task IDs to verify
+    /// all tasks are terminal before allowing region closure.
+    #[must_use]
+    pub fn for_obligation_resolve(shards: &'a ShardedState) -> Self {
+        // Acquire in order: B→A→C (D is lock-free)
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Regions);
+        let regions = shards.regions.lock().expect("regions lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Regions);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Tasks);
+        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Tasks);
+        #[cfg(debug_assertions)]
+        lock_order::before_lock(LockShard::Obligations);
+        let obligations = shards
+            .obligations
+            .lock()
+            .expect("obligations lock poisoned");
+        #[cfg(debug_assertions)]
+        lock_order::after_lock(LockShard::Obligations);
+
+        Self {
+            config: &shards.config,
+            regions: Some(regions),
+            tasks: Some(tasks),
+            obligations: Some(obligations),
+            #[cfg(debug_assertions)]
+            debug_locks: 3,
         }
     }
 
@@ -795,7 +876,7 @@ mod tests {
         let guard = ShardGuard::for_cancel(&state);
         assert!(guard.regions.is_some());
         assert!(guard.tasks.is_some());
-        assert!(guard.obligations.is_none());
+        assert!(guard.obligations.is_some());
     }
 
     #[test]
@@ -807,6 +888,18 @@ mod tests {
         let guard = ShardGuard::for_obligation(&state);
         assert!(guard.regions.is_some());
         assert!(guard.tasks.is_none());
+        assert!(guard.obligations.is_some());
+    }
+
+    #[test]
+    fn for_obligation_resolve_guard() {
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        let guard = ShardGuard::for_obligation_resolve(&state);
+        assert!(guard.regions.is_some());
+        assert!(guard.tasks.is_some());
         assert!(guard.obligations.is_some());
     }
 
@@ -916,8 +1009,11 @@ mod tests {
 
         {
             let _guard = ShardGuard::for_cancel(&state);
-            assert_eq!(lock_order::held_count(), 2);
-            assert_eq!(lock_order::held_labels(), vec!["B:Regions", "A:Tasks"]);
+            assert_eq!(lock_order::held_count(), 3);
+            assert_eq!(
+                lock_order::held_labels(),
+                vec!["B:Regions", "A:Tasks", "C:Obligations"]
+            );
         }
         assert_eq!(lock_order::held_count(), 0);
     }
@@ -937,6 +1033,26 @@ mod tests {
             assert_eq!(
                 lock_order::held_labels(),
                 vec!["B:Regions", "C:Obligations"]
+            );
+        }
+        assert_eq!(lock_order::held_count(), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_order_obligation_resolve_guard_tracking() {
+        assert_eq!(lock_order::held_count(), 0);
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _guard = ShardGuard::for_obligation_resolve(&state);
+            assert_eq!(lock_order::held_count(), 3);
+            assert_eq!(
+                lock_order::held_labels(),
+                vec!["B:Regions", "A:Tasks", "C:Obligations"]
             );
         }
         assert_eq!(lock_order::held_count(), 0);
@@ -1139,7 +1255,7 @@ mod tests {
                 thread::spawn(move || {
                     barrier.wait();
                     for i in 0..iterations {
-                        match i % 7 {
+                        match i % 8 {
                             0 => {
                                 let _g = ShardGuard::tasks_only(&state);
                             }
@@ -1159,6 +1275,9 @@ mod tests {
                                 let _g = ShardGuard::for_obligation(&state);
                             }
                             6 => {
+                                let _g = ShardGuard::for_obligation_resolve(&state);
+                            }
+                            7 => {
                                 let _g = ShardGuard::all(&state);
                             }
                             _ => unreachable!(),
