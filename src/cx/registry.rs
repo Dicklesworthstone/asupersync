@@ -329,6 +329,61 @@ impl NamePermit {
 }
 
 // ============================================================================
+// Collision Policy (bd-16j5r)
+// ============================================================================
+
+/// How to handle a name collision during registration.
+///
+/// Determinism contract (REG-FIRST): the scheduler's `pick_next` ordering
+/// determines which task calls `register_with_policy` first. The collision
+/// policy governs what happens when a second task requests the same name.
+///
+/// # Bead
+///
+/// bd-16j5r | Parent: bd-133q8
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameCollisionPolicy {
+    /// Reject the registration with `NameLeaseError::NameTaken`.
+    Fail,
+    /// Forcibly replace the existing holder. The old registry entry is removed
+    /// and a new lease is created for the new holder. The old holder's
+    /// `NameLease` becomes orphaned — the caller is responsible for notifying
+    /// the displaced task so it can abort its lease.
+    Replace,
+    /// Enqueue a budgeted waiter. The name will be granted to the first
+    /// waiter (FIFO, deterministic) whose deadline has not passed when the
+    /// name becomes available. Use [`NameRegistry::take_granted`] to drain
+    /// granted leases after a name is freed.
+    Wait {
+        /// Maximum virtual time at which the wait expires.
+        deadline: Time,
+    },
+}
+
+/// Outcome of a [`NameRegistry::register_with_policy`] call.
+#[derive(Debug)]
+pub enum NameCollisionOutcome {
+    /// Name was available; lease acquired immediately.
+    Registered {
+        /// The acquired lease.
+        lease: NameLease,
+    },
+    /// Name was taken and the old holder was displaced.
+    Replaced {
+        /// The new lease for the replacing task.
+        lease: NameLease,
+        /// The task that was displaced.
+        displaced_holder: TaskId,
+        /// The region of the displaced task.
+        displaced_region: RegionId,
+    },
+    /// Name was taken; the request was enqueued as a budgeted waiter.
+    /// The lease will be created when the name is freed, if the deadline
+    /// has not passed. Use [`NameRegistry::take_granted`] to retrieve it.
+    Enqueued,
+}
+
+// ============================================================================
 // NameLeaseError
 // ============================================================================
 
@@ -349,6 +404,11 @@ pub enum NameLeaseError {
         /// The name that was looked up.
         name: String,
     },
+    /// A budgeted wait expired before the name became available.
+    WaitBudgetExceeded {
+        /// The name that was waited on.
+        name: String,
+    },
 }
 
 impl fmt::Display for NameLeaseError {
@@ -362,6 +422,9 @@ impl fmt::Display for NameLeaseError {
                 write!(f, "name '{name}' already held by {current_holder}")
             }
             Self::NotFound { name } => write!(f, "name '{name}' not found"),
+            Self::WaitBudgetExceeded { name } => {
+                write!(f, "wait budget exceeded for name '{name}'")
+            }
         }
     }
 }
@@ -382,6 +445,11 @@ pub struct NameRegistry {
     leases: BTreeMap<String, NameEntry>,
     /// Pending permits keyed by name (reserved but not yet committed).
     pending: BTreeMap<String, NameEntry>,
+    /// Budgeted waiters keyed by name (FIFO order per name).
+    waiters: BTreeMap<String, Vec<WaiterEntry>>,
+    /// Leases granted to waiters, pending retrieval by the waiter's task.
+    /// Use [`take_granted`](Self::take_granted) to drain.
+    granted: Vec<GrantedLease>,
 }
 
 /// Internal entry for a registered name.
@@ -395,6 +463,28 @@ struct NameEntry {
     acquired_at: Time,
 }
 
+/// Internal entry for a budgeted waiter.
+#[derive(Debug)]
+struct WaiterEntry {
+    /// The task waiting for the name.
+    holder: TaskId,
+    /// The region of the waiting task.
+    region: RegionId,
+    /// When the waiter was enqueued.
+    enqueued_at: Time,
+    /// Maximum virtual time at which the wait expires.
+    deadline: Time,
+}
+
+/// A lease granted to a waiter when a name becomes available.
+#[derive(Debug)]
+pub struct GrantedLease {
+    /// The name that was granted.
+    pub name: String,
+    /// The lease for the granted name.
+    pub lease: NameLease,
+}
+
 impl NameRegistry {
     /// Creates an empty name registry.
     #[must_use]
@@ -402,6 +492,8 @@ impl NameRegistry {
         Self {
             leases: BTreeMap::new(),
             pending: BTreeMap::new(),
+            waiters: BTreeMap::new(),
+            granted: Vec::new(),
         }
     }
 
@@ -513,10 +605,96 @@ impl NameRegistry {
         self.pending.remove(name).is_some()
     }
 
+    /// Register a name with an explicit collision policy.
+    ///
+    /// This is the primary entry point for policy-aware registration. The
+    /// `policy` argument determines what happens when the name is already
+    /// registered or reserved.
+    ///
+    /// # Policies
+    ///
+    /// - [`Fail`](NameCollisionPolicy::Fail): returns `NameLeaseError::NameTaken`.
+    /// - [`Replace`](NameCollisionPolicy::Replace): displaces the existing
+    ///   holder. The old entry is removed and a new lease is created.
+    ///   The caller must notify the displaced task to abort its lease.
+    /// - [`Wait`](NameCollisionPolicy::Wait): enqueues a budgeted waiter.
+    ///   When the name is freed (via [`unregister_and_grant`](Self::unregister_and_grant)
+    ///   or cleanup), the first eligible waiter is granted a lease.
+    ///   Use [`take_granted`](Self::take_granted) to retrieve granted leases.
+    pub fn register_with_policy(
+        &mut self,
+        name: impl Into<String>,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+        policy: NameCollisionPolicy,
+    ) -> Result<NameCollisionOutcome, NameLeaseError> {
+        let name = name.into();
+        let existing = self.leases.get(&name).or_else(|| self.pending.get(&name));
+
+        match existing {
+            None => {
+                // No collision — register normally.
+                self.leases.insert(
+                    name.clone(),
+                    NameEntry {
+                        holder,
+                        region,
+                        acquired_at: now,
+                    },
+                );
+                let lease = NameLease::new(&name, holder, region, now);
+                Ok(NameCollisionOutcome::Registered { lease })
+            }
+            Some(entry) => {
+                let current_holder = entry.holder;
+                let current_region = entry.region;
+                match policy {
+                    NameCollisionPolicy::Fail => Err(NameLeaseError::NameTaken {
+                        name,
+                        current_holder,
+                    }),
+                    NameCollisionPolicy::Replace => {
+                        // Remove old entries from both maps.
+                        self.leases.remove(&name);
+                        self.pending.remove(&name);
+                        // Insert new entry.
+                        self.leases.insert(
+                            name.clone(),
+                            NameEntry {
+                                holder,
+                                region,
+                                acquired_at: now,
+                            },
+                        );
+                        let lease = NameLease::new(&name, holder, region, now);
+                        Ok(NameCollisionOutcome::Replaced {
+                            lease,
+                            displaced_holder: current_holder,
+                            displaced_region: current_region,
+                        })
+                    }
+                    NameCollisionPolicy::Wait { deadline } => {
+                        // Enqueue a budgeted waiter.
+                        self.waiters.entry(name).or_default().push(WaiterEntry {
+                            holder,
+                            region,
+                            enqueued_at: now,
+                            deadline,
+                        });
+                        Ok(NameCollisionOutcome::Enqueued)
+                    }
+                }
+            }
+        }
+    }
+
     /// Unregister a name, removing it from the registry.
     ///
-    /// Returns `true` if the name was removed. The caller is responsible for
-    /// resolving the corresponding [`NameLease`].
+    /// The caller is responsible for resolving the corresponding [`NameLease`].
+    /// This does NOT check the waiter queue — use
+    /// [`unregister_and_grant`](Self::unregister_and_grant) to also grant
+    /// waiting tasks.
     ///
     /// # Errors
     ///
@@ -529,6 +707,89 @@ impl NameRegistry {
                 name: name.to_string(),
             })
         }
+    }
+
+    /// Unregister a name and grant it to the first eligible waiter.
+    ///
+    /// If there are no waiters (or all have expired), the name is simply freed.
+    /// If a waiter is eligible, a new lease is created and pushed to the
+    /// `granted` queue. Use [`take_granted`](Self::take_granted) to retrieve it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameLeaseError::NotFound` if the name is not registered.
+    pub fn unregister_and_grant(&mut self, name: &str, now: Time) -> Result<(), NameLeaseError> {
+        if self.leases.remove(name).is_none() {
+            return Err(NameLeaseError::NotFound {
+                name: name.to_string(),
+            });
+        }
+        self.try_grant_to_first_waiter(name, now);
+        Ok(())
+    }
+
+    /// Check the waiter queue for a name and grant to the first eligible waiter.
+    ///
+    /// Expired waiters (deadline < now) are removed. If an eligible waiter
+    /// exists, a new lease entry is created in `leases` and the lease is
+    /// pushed to the `granted` queue.
+    fn try_grant_to_first_waiter(&mut self, name: &str, now: Time) {
+        let Some(queue) = self.waiters.get_mut(name) else {
+            return;
+        };
+        // Remove expired waiters.
+        queue.retain(|w| w.deadline >= now);
+        if queue.is_empty() {
+            self.waiters.remove(name);
+            return;
+        }
+        // Grant to first waiter (FIFO, deterministic).
+        let waiter = queue.remove(0);
+        if queue.is_empty() {
+            self.waiters.remove(name);
+        }
+        self.leases.insert(
+            name.to_string(),
+            NameEntry {
+                holder: waiter.holder,
+                region: waiter.region,
+                acquired_at: now,
+            },
+        );
+        let lease = NameLease::new(name, waiter.holder, waiter.region, now);
+        self.granted.push(GrantedLease {
+            name: name.to_string(),
+            lease,
+        });
+    }
+
+    /// Drain all granted leases (from waiter grants).
+    ///
+    /// Returns the list of leases that were granted to waiters since the
+    /// last call to `take_granted`. Each returned `GrantedLease` carries
+    /// an armed obligation — the caller must resolve it.
+    pub fn take_granted(&mut self) -> Vec<GrantedLease> {
+        std::mem::take(&mut self.granted)
+    }
+
+    /// Remove all expired waiters for a given virtual time.
+    ///
+    /// Returns the number of waiters removed.
+    pub fn drain_expired_waiters(&mut self, now: Time) -> usize {
+        let mut removed = 0;
+        self.waiters.retain(|_, queue| {
+            let before = queue.len();
+            queue.retain(|w| w.deadline >= now);
+            removed += before - queue.len();
+            !queue.is_empty()
+        });
+        removed
+    }
+
+    /// Returns the number of active waiters across all names.
+    #[must_use]
+    pub fn waiter_count(&self) -> usize {
+        self.waiters.values().map(Vec::len).sum()
     }
 
     /// Look up which task holds a given name.
@@ -565,8 +826,8 @@ impl NameRegistry {
     ///
     /// Returns the names that were removed (sorted deterministically).
     ///
-    /// Note: this removes both active leases and pending permits held in the
-    /// region. The caller is responsible for resolving the corresponding
+    /// Note: this removes active leases, pending permits, and waiters held
+    /// in the region. The caller is responsible for resolving the corresponding
     /// obligations (leases released/aborted; permits aborted).
     pub fn cleanup_region(&mut self, region: RegionId) -> Vec<String> {
         let mut to_remove: Vec<String> = self
@@ -586,6 +847,11 @@ impl NameRegistry {
             self.leases.remove(name);
             self.pending.remove(name);
         }
+        // Also remove waiters belonging to this region.
+        for queue in self.waiters.values_mut() {
+            queue.retain(|w| w.region != region);
+        }
+        self.waiters.retain(|_, q| !q.is_empty());
         to_remove
     }
 
@@ -593,8 +859,8 @@ impl NameRegistry {
     ///
     /// Returns the names that were removed (sorted deterministically).
     ///
-    /// Note: this removes both active leases and pending permits held by the
-    /// task. The caller is responsible for resolving the corresponding
+    /// Note: this removes active leases, pending permits, and waiters held
+    /// by the task. The caller is responsible for resolving the corresponding
     /// obligations.
     pub fn cleanup_task(&mut self, task: TaskId) -> Vec<String> {
         let mut to_remove: Vec<String> = self
@@ -614,6 +880,11 @@ impl NameRegistry {
             self.leases.remove(name);
             self.pending.remove(name);
         }
+        // Also remove waiters belonging to this task.
+        for queue in self.waiters.values_mut() {
+            queue.retain(|w| w.holder != task);
+        }
+        self.waiters.retain(|_, q| !q.is_empty());
         to_remove
     }
 }
@@ -697,6 +968,31 @@ pub enum RegistryEvent {
         holder: TaskId,
         /// Why the permit was aborted.
         reason: String,
+    },
+    /// A name was forcibly replaced (collision policy: Replace).
+    NameReplaced {
+        /// The name that was replaced.
+        name: String,
+        /// The new holder.
+        new_holder: TaskId,
+        /// The displaced holder.
+        displaced_holder: TaskId,
+    },
+    /// A waiter was enqueued for a taken name (collision policy: Wait).
+    WaiterEnqueued {
+        /// The name being waited on.
+        name: String,
+        /// The waiting task.
+        holder: TaskId,
+        /// The deadline for the wait.
+        deadline: Time,
+    },
+    /// A waiter was granted a name when it became available.
+    WaiterGranted {
+        /// The granted name.
+        name: String,
+        /// The task that was granted the name.
+        holder: TaskId,
     },
 }
 
@@ -1103,6 +1399,20 @@ mod tests {
             name: "svc".into(),
             holder: tid(1),
             reason: "setup failed".into(),
+        };
+        let _replaced = RegistryEvent::NameReplaced {
+            name: "svc".into(),
+            new_holder: tid(2),
+            displaced_holder: tid(1),
+        };
+        let _waiter_enqueued = RegistryEvent::WaiterEnqueued {
+            name: "svc".into(),
+            holder: tid(2),
+            deadline: Time::from_secs(60),
+        };
+        let _waiter_granted = RegistryEvent::WaiterGranted {
+            name: "svc".into(),
+            holder: tid(2),
         };
 
         crate::test_complete!("registry_event_variants");
@@ -1902,5 +2212,514 @@ mod tests {
         );
 
         crate::test_complete!("conformance_commit_after_cancel_fails");
+    }
+
+    // ---------------------------------------------------------------
+    // Collision policy tests (bd-16j5r)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn collision_fail_rejects_duplicate() {
+        init_test("collision_fail_rejects_duplicate");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg
+            .register("singleton", tid(1), rid(0), Time::ZERO)
+            .unwrap();
+
+        let err = reg
+            .register_with_policy(
+                "singleton",
+                tid(2),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Fail,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::NameTaken {
+                name: "singleton".into(),
+                current_holder: tid(1),
+            }
+        );
+        assert_eq!(reg.len(), 1);
+
+        lease.release().unwrap();
+        crate::test_complete!("collision_fail_rejects_duplicate");
+    }
+
+    #[test]
+    fn collision_fail_succeeds_when_no_collision() {
+        init_test("collision_fail_succeeds_when_no_collision");
+
+        let mut reg = NameRegistry::new();
+        let outcome = reg
+            .register_with_policy(
+                "fresh",
+                tid(1),
+                rid(0),
+                Time::ZERO,
+                NameCollisionPolicy::Fail,
+            )
+            .unwrap();
+
+        let mut lease = match outcome {
+            NameCollisionOutcome::Registered { lease } => lease,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+        assert_eq!(reg.whereis("fresh"), Some(tid(1)));
+
+        lease.release().unwrap();
+        crate::test_complete!("collision_fail_succeeds_when_no_collision");
+    }
+
+    #[test]
+    fn collision_replace_displaces_old_holder() {
+        init_test("collision_replace_displaces_old_holder");
+
+        let mut reg = NameRegistry::new();
+        let mut old_lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(1),
+                Time::from_secs(5),
+                NameCollisionPolicy::Replace,
+            )
+            .unwrap();
+
+        let mut new_lease = match outcome {
+            NameCollisionOutcome::Replaced {
+                lease,
+                displaced_holder,
+                displaced_region,
+            } => {
+                assert_eq!(displaced_holder, tid(1));
+                assert_eq!(displaced_region, rid(0));
+                lease
+            }
+            other => panic!("expected Replaced, got {other:?}"),
+        };
+
+        // New holder is visible.
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+        assert_eq!(reg.len(), 1);
+
+        // Old holder's lease is orphaned — must be aborted.
+        old_lease.abort().unwrap();
+        new_lease.release().unwrap();
+
+        crate::test_complete!("collision_replace_displaces_old_holder");
+    }
+
+    #[test]
+    fn collision_replace_on_free_name_registers_normally() {
+        init_test("collision_replace_on_free_name_registers_normally");
+
+        let mut reg = NameRegistry::new();
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(1),
+                rid(0),
+                Time::ZERO,
+                NameCollisionPolicy::Replace,
+            )
+            .unwrap();
+
+        let mut lease = match outcome {
+            NameCollisionOutcome::Registered { lease } => lease,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+        assert_eq!(reg.whereis("svc"), Some(tid(1)));
+
+        lease.release().unwrap();
+        crate::test_complete!("collision_replace_on_free_name_registers_normally");
+    }
+
+    #[test]
+    fn collision_wait_enqueues_waiter() {
+        init_test("collision_wait_enqueues_waiter");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(60),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Name still held by original task.
+        assert_eq!(reg.whereis("svc"), Some(tid(1)));
+
+        lease.abort().unwrap();
+        crate::test_complete!("collision_wait_enqueues_waiter");
+    }
+
+    #[test]
+    fn collision_wait_grants_on_unregister() {
+        init_test("collision_wait_grants_on_unregister");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Enqueue a waiter.
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(60),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+
+        // Free the name using unregister_and_grant.
+        reg.unregister_and_grant("svc", Time::from_secs(10))
+            .unwrap();
+        lease.release().unwrap();
+
+        // Waiter should have been granted.
+        assert_eq!(reg.waiter_count(), 0);
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        let granted = reg.take_granted();
+        assert_eq!(granted.len(), 1);
+        assert_eq!(granted[0].name, "svc");
+        let mut granted_lease = granted.into_iter().next().unwrap().lease;
+        assert_eq!(granted_lease.holder(), tid(2));
+        granted_lease.release().unwrap();
+
+        crate::test_complete!("collision_wait_grants_on_unregister");
+    }
+
+    #[test]
+    fn collision_wait_expired_waiter_not_granted() {
+        init_test("collision_wait_expired_waiter_not_granted");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Enqueue a waiter with a short deadline.
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(5),
+            },
+        )
+        .unwrap();
+
+        // Free the name AFTER the deadline.
+        reg.unregister_and_grant("svc", Time::from_secs(10))
+            .unwrap();
+        lease.release().unwrap();
+
+        // Waiter should NOT have been granted (expired).
+        assert_eq!(reg.waiter_count(), 0);
+        assert_eq!(reg.whereis("svc"), None);
+        let granted = reg.take_granted();
+        assert!(granted.is_empty());
+
+        crate::test_complete!("collision_wait_expired_waiter_not_granted");
+    }
+
+    #[test]
+    fn collision_wait_fifo_ordering() {
+        init_test("collision_wait_fifo_ordering");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Enqueue two waiters.
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        reg.register_with_policy(
+            "svc",
+            tid(3),
+            rid(0),
+            Time::from_secs(2),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 2);
+
+        // Free the name — first waiter (tid 2) should win.
+        reg.unregister_and_grant("svc", Time::from_secs(10))
+            .unwrap();
+        lease.release().unwrap();
+
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+        assert_eq!(reg.waiter_count(), 1); // tid 3 still waiting
+
+        // Free again — second waiter (tid 3) should get it.
+        let mut granted1 = reg.take_granted().into_iter().next().unwrap().lease;
+        reg.unregister_and_grant("svc", Time::from_secs(20))
+            .unwrap();
+        granted1.release().unwrap();
+
+        assert_eq!(reg.whereis("svc"), Some(tid(3)));
+        assert_eq!(reg.waiter_count(), 0);
+
+        let mut granted2 = reg.take_granted().into_iter().next().unwrap().lease;
+        granted2.release().unwrap();
+
+        crate::test_complete!("collision_wait_fifo_ordering");
+    }
+
+    #[test]
+    fn collision_wait_cleanup_region_removes_waiters() {
+        init_test("collision_wait_cleanup_region_removes_waiters");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Enqueue a waiter in region 1.
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(1),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Cleanup region 1 removes the waiter.
+        reg.cleanup_region(rid(1));
+        assert_eq!(reg.waiter_count(), 0);
+
+        lease.abort().unwrap();
+        crate::test_complete!("collision_wait_cleanup_region_removes_waiters");
+    }
+
+    #[test]
+    fn collision_wait_cleanup_task_removes_waiters() {
+        init_test("collision_wait_cleanup_task_removes_waiters");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Enqueue a waiter from task 2.
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Cleanup task 2 removes the waiter.
+        reg.cleanup_task(tid(2));
+        assert_eq!(reg.waiter_count(), 0);
+
+        lease.abort().unwrap();
+        crate::test_complete!("collision_wait_cleanup_task_removes_waiters");
+    }
+
+    #[test]
+    fn collision_drain_expired_waiters() {
+        init_test("collision_drain_expired_waiters");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Two waiters with different deadlines.
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(10),
+            },
+        )
+        .unwrap();
+        reg.register_with_policy(
+            "svc",
+            tid(3),
+            rid(0),
+            Time::from_secs(2),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(100),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 2);
+
+        // Drain expired at time 50: only first waiter is expired.
+        let removed = reg.drain_expired_waiters(Time::from_secs(50));
+        assert_eq!(removed, 1);
+        assert_eq!(reg.waiter_count(), 1);
+
+        lease.abort().unwrap();
+        crate::test_complete!("collision_drain_expired_waiters");
+    }
+
+    #[test]
+    fn collision_replace_displaces_pending_permit() {
+        init_test("collision_replace_displaces_pending_permit");
+
+        let mut reg = NameRegistry::new();
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+
+        // Replace policy should displace the pending permit.
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Replace,
+            )
+            .unwrap();
+
+        let mut new_lease = match outcome {
+            NameCollisionOutcome::Replaced {
+                lease,
+                displaced_holder,
+                ..
+            } => {
+                assert_eq!(displaced_holder, tid(1));
+                lease
+            }
+            other => panic!("expected Replaced, got {other:?}"),
+        };
+
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        // The old permit is orphaned; abort it.
+        permit.abort().unwrap();
+        new_lease.release().unwrap();
+
+        crate::test_complete!("collision_replace_displaces_pending_permit");
+    }
+
+    /// Conformance: register_with_policy Fail mode is equivalent to register().
+    #[test]
+    fn conformance_policy_fail_equivalent_to_register() {
+        init_test("conformance_policy_fail_equivalent_to_register");
+
+        let mut reg = NameRegistry::new();
+
+        // Register with Fail policy.
+        let outcome = reg
+            .register_with_policy("svc", tid(1), rid(0), Time::ZERO, NameCollisionPolicy::Fail)
+            .unwrap();
+        let mut lease = match outcome {
+            NameCollisionOutcome::Registered { lease } => lease,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+
+        // Try again — should fail identically to register().
+        let err_policy = reg
+            .register_with_policy("svc", tid(2), rid(0), Time::ZERO, NameCollisionPolicy::Fail)
+            .unwrap_err();
+        let err_register = reg.register("svc", tid(3), rid(0), Time::ZERO).unwrap_err();
+
+        // Both should be NameTaken with holder tid(1).
+        match (&err_policy, &err_register) {
+            (
+                NameLeaseError::NameTaken {
+                    current_holder: h1, ..
+                },
+                NameLeaseError::NameTaken {
+                    current_holder: h2, ..
+                },
+            ) => assert_eq!(h1, h2),
+            _ => panic!("expected NameTaken from both"),
+        }
+
+        lease.release().unwrap();
+        crate::test_complete!("conformance_policy_fail_equivalent_to_register");
+    }
+
+    /// Conformance: replace produces a valid active lease for the new holder.
+    #[test]
+    fn conformance_replace_lease_is_valid() {
+        init_test("conformance_replace_lease_is_valid");
+
+        let mut reg = NameRegistry::new();
+        let mut old_lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(1),
+                Time::from_secs(5),
+                NameCollisionPolicy::Replace,
+            )
+            .unwrap();
+
+        let mut new_lease = match outcome {
+            NameCollisionOutcome::Replaced { lease, .. } => lease,
+            other => panic!("expected Replaced, got {other:?}"),
+        };
+
+        // New lease metadata is correct.
+        assert_eq!(new_lease.name(), "svc");
+        assert_eq!(new_lease.holder(), tid(2));
+        assert_eq!(new_lease.region(), rid(1));
+        assert_eq!(new_lease.acquired_at(), Time::from_secs(5));
+        assert!(new_lease.is_active());
+
+        // Can release with a valid proof.
+        let proof = new_lease.release().unwrap();
+        let resolved = proof.into_resolved_proof();
+        assert_eq!(
+            resolved.resolution,
+            crate::obligation::graded::Resolution::Commit,
+        );
+
+        old_lease.abort().unwrap();
+        crate::test_complete!("conformance_replace_lease_is_valid");
+    }
+
+    /// Conformance: WaitBudgetExceeded error displays correctly.
+    #[test]
+    fn wait_budget_exceeded_display() {
+        init_test("wait_budget_exceeded_display");
+
+        let err = NameLeaseError::WaitBudgetExceeded { name: "svc".into() };
+        assert!(err.to_string().contains("svc"));
+        assert!(err.to_string().contains("budget"));
+
+        crate::test_complete!("wait_budget_exceeded_display");
     }
 }
