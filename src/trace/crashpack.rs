@@ -259,6 +259,8 @@ pub struct ManifestAttachment {
     pub size_hint_bytes: u64,
 }
 
+// serde expects `skip_serializing_if` predicates to take `&T`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
