@@ -1055,14 +1055,14 @@ mod tests {
 
         // Sorted by target TaskId (c=3) before (b=4), regardless of insertion order.
         let to0 = match &actions[0] {
-            LinkExitAction::CancelPeer { to, .. } => *to,
-            LinkExitAction::DeliverExit { to, .. } => *to,
-            LinkExitAction::Ignored { to, .. } => *to,
+            LinkExitAction::CancelPeer { to, .. }
+            | LinkExitAction::DeliverExit { to, .. }
+            | LinkExitAction::Ignored { to, .. } => *to,
         };
         let to1 = match &actions[1] {
-            LinkExitAction::CancelPeer { to, .. } => *to,
-            LinkExitAction::DeliverExit { to, .. } => *to,
-            LinkExitAction::Ignored { to, .. } => *to,
+            LinkExitAction::CancelPeer { to, .. }
+            | LinkExitAction::DeliverExit { to, .. }
+            | LinkExitAction::Ignored { to, .. } => *to,
         };
         assert_eq!(to0, c);
         assert_eq!(to1, b);
