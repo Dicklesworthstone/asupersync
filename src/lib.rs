@@ -109,6 +109,7 @@ pub mod server;
 pub mod service;
 pub mod session;
 pub mod signal;
+pub mod spork;
 pub mod stream;
 pub mod supervision;
 pub mod sync;
