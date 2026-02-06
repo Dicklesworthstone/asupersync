@@ -493,6 +493,15 @@ rustdoc output.
 - `security::SecurityContext` for signing/verifying symbols
 - `Cx::trace` + `observability::Metrics` for structured telemetry
 
+### Spork (OTP Layer, Planned)
+
+The OTP-grade ergonomics layer (Spork) is being specified and built as a library
+layer over the existing runtime primitives (regions, cancellation, obligations, lab).
+
+Canonical spec for the intended `asupersync::spork::*` module layout, feature gating,
+and capability contracts:
+- `docs/spork_glossary_invariants.md` (Section 6: Public API Surface Map)
+
 ---
 
 ## Tutorials

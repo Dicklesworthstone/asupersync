@@ -83,6 +83,7 @@ pub mod encoding;
 pub mod epoch;
 pub mod error;
 pub mod fs;
+pub mod gen_server;
 pub mod grpc;
 pub mod http;
 pub mod io;

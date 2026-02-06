@@ -40,7 +40,8 @@
 
 use std::time::Duration;
 
-use crate::types::{CancelReason, Outcome, RegionId, TaskId};
+use crate::runtime::{RegionCreateError, RuntimeState, SpawnError};
+use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
 
 /// Supervision strategy for handling actor failures.
 ///
@@ -315,49 +316,155 @@ impl SupervisionConfig {
 // Eq requires manual impl due to f64 in BackoffStrategy
 impl Eq for SupervisionConfig {}
 
-/// Specification for a supervised child actor.
+/// Name registration policy for a child.
 ///
-/// Contains the child's configuration and optional custom supervision settings.
-#[derive(Debug, Clone)]
+/// This is a **spec-level** field used by the SPORK supervisor builder to
+/// define how children become discoverable. The actual registry capability
+/// is planned (bd-3rpp8); until then this is carried through compilation
+/// for determinism and UX contracts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum NameRegistrationPolicy {
+    /// Child is not registered.
+    #[default]
+    None,
+    /// Child should be registered under `name`.
+    Register {
+        /// Registry key.
+        name: String,
+        /// Collision behavior when the name is already taken.
+        collision: NameCollisionPolicy,
+    },
+}
+
+/// Deterministic collision policy for name registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NameCollisionPolicy {
+    /// Deterministically fail child start if name is taken.
+    #[default]
+    Fail,
+    /// Deterministically replace the previous owner (requires proof hooks later).
+    Replace,
+    /// Deterministically wait (budget-aware) for the name to become free.
+    Wait,
+}
+
+/// Start factory for a supervised child.
+///
+/// This is intentionally synchronous: child start should spawn tasks/actors
+/// and return the *root* `TaskId` for the child. The supervisor runtime can
+/// then track/wait/cancel by task identity.
+pub trait ChildStart: Send {
+    /// Start (or restart) the child inside `scope.region`.
+    fn start(
+        &mut self,
+        scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        state: &mut RuntimeState,
+        cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError>;
+}
+
+impl<F> ChildStart for F
+where
+    F: FnMut(
+            &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            &mut RuntimeState,
+            &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError>
+        + Send,
+{
+    fn start(
+        &mut self,
+        scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        state: &mut RuntimeState,
+        cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
+        (self)(scope, state, cx)
+    }
+}
+
+/// Specification for a supervised child.
+///
+/// This is the **compiled topology input** for the SPORK supervisor builder.
+/// It is intentionally explicit: all "ambient" behavior (naming, restart,
+/// ordering) is specified in data so that the compiled runtime is deterministic.
 pub struct ChildSpec {
-    /// Unique name for the child (for logging and lookup).
+    /// Unique child identifier (stable tie-break key).
     pub name: String,
-
-    /// Supervision config for this specific child (overrides parent's default).
-    pub config: Option<SupervisionConfig>,
-
-    /// Whether the child should be started immediately.
+    /// Start factory (invoked at initial start and on restart).
+    pub start: Box<dyn ChildStart>,
+    /// Restart strategy for this child (Stop/Restart/Escalate).
+    pub restart: SupervisionStrategy,
+    /// Shutdown/cleanup budget for this child (used during supervisor stop).
+    pub shutdown_budget: Budget,
+    /// Explicit dependencies (child names). Used to compute deterministic start order.
+    pub depends_on: Vec<String>,
+    /// Optional name registration policy.
+    pub registration: NameRegistrationPolicy,
+    /// Whether the child should be started immediately at supervisor boot.
     pub start_immediately: bool,
-
     /// Whether the child is required (supervisor fails if child can't start).
     pub required: bool,
 }
 
-impl Default for ChildSpec {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            config: None,
-            start_immediately: true,
-            required: true,
-        }
+impl std::fmt::Debug for ChildSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildSpec")
+            .field("name", &self.name)
+            .field("restart", &self.restart)
+            .field("shutdown_budget", &self.shutdown_budget)
+            .field("depends_on", &self.depends_on)
+            .field("registration", &self.registration)
+            .field("start_immediately", &self.start_immediately)
+            .field("required", &self.required)
+            .finish_non_exhaustive()
     }
 }
 
 impl ChildSpec {
-    /// Create a new child spec with the given name.
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
+    /// Create a new child spec.
+    ///
+    /// The child is `required` and `start_immediately` by default.
+    pub fn new<F>(name: impl Into<String>, start: F) -> Self
+    where
+        F: ChildStart + 'static,
+    {
         Self {
             name: name.into(),
-            ..Default::default()
+            start: Box::new(start),
+            restart: SupervisionStrategy::default(),
+            shutdown_budget: Budget::INFINITE,
+            depends_on: Vec::new(),
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
         }
     }
 
-    /// Set a custom supervision config for this child.
+    /// Set the restart strategy for this child.
     #[must_use]
-    pub fn with_config(mut self, config: SupervisionConfig) -> Self {
-        self.config = Some(config);
+    pub fn with_restart(mut self, restart: SupervisionStrategy) -> Self {
+        self.restart = restart;
+        self
+    }
+
+    /// Set the shutdown budget for this child.
+    #[must_use]
+    pub fn with_shutdown_budget(mut self, budget: Budget) -> Self {
+        self.shutdown_budget = budget;
+        self
+    }
+
+    /// Add a dependency on another child by name.
+    #[must_use]
+    pub fn depends_on(mut self, name: impl Into<String>) -> Self {
+        self.depends_on.push(name.into());
+        self
+    }
+
+    /// Set name registration policy for this child.
+    #[must_use]
+    pub fn with_registration(mut self, policy: NameRegistrationPolicy) -> Self {
+        self.registration = policy;
         self
     }
 
@@ -374,6 +481,324 @@ impl ChildSpec {
         self.required = required;
         self
     }
+}
+
+/// Deterministic start-order tie-break policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartTieBreak {
+    /// Choose the next ready child by insertion order (stable).
+    #[default]
+    InsertionOrder,
+    /// Choose the next ready child lexicographically by name.
+    NameLex,
+}
+
+/// Errors that can occur when compiling a supervisor topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorCompileError {
+    /// Two children shared the same name.
+    DuplicateChildName(String),
+    /// A dependency referenced an unknown child.
+    UnknownDependency {
+        /// Child name.
+        child: String,
+        /// Dependency name that was not present in the child set.
+        depends_on: String,
+    },
+    /// Dependency graph contains a cycle.
+    CycleDetected {
+        /// Remaining nodes with non-zero in-degree (sorted).
+        remaining: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for SupervisorCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateChildName(name) => write!(f, "duplicate child name: {name}"),
+            Self::UnknownDependency { child, depends_on } => {
+                write!(f, "child {child} depends on unknown child {depends_on}")
+            }
+            Self::CycleDetected { remaining } => write!(
+                f,
+                "dependency cycle detected among children: {}",
+                remaining.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SupervisorCompileError {}
+
+/// Errors that can occur when spawning a compiled supervisor.
+#[derive(Debug)]
+pub enum SupervisorSpawnError {
+    /// Failed to create supervisor region.
+    RegionCreate(RegionCreateError),
+    /// Child start failed.
+    ChildStartFailed {
+        /// Child name.
+        child: String,
+        /// Underlying spawn error.
+        err: SpawnError,
+    },
+}
+
+impl std::fmt::Display for SupervisorSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RegionCreate(e) => write!(f, "supervisor region create failed: {e}"),
+            Self::ChildStartFailed { child, err } => {
+                write!(f, "child start failed: child={child} err={err}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SupervisorSpawnError {}
+
+impl From<RegionCreateError> for SupervisorSpawnError {
+    fn from(value: RegionCreateError) -> Self {
+        Self::RegionCreate(value)
+    }
+}
+
+/// Builder for an OTP-style supervisor topology.
+///
+/// The builder is pure data + closures; `compile()` produces a deterministic start
+/// order and validates dependencies.
+#[derive(Debug)]
+pub struct SupervisorBuilder {
+    name: String,
+    budget: Option<Budget>,
+    tie_break: StartTieBreak,
+    children: Vec<ChildSpec>,
+}
+
+impl SupervisorBuilder {
+    /// Create a new supervisor builder.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            budget: None,
+            tie_break: StartTieBreak::InsertionOrder,
+            children: Vec::new(),
+        }
+    }
+
+    /// Override the supervisor region budget (met with the parent budget).
+    #[must_use]
+    pub fn with_budget(mut self, budget: Budget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Set the deterministic tie-break policy for ready children.
+    #[must_use]
+    pub fn with_tie_break(mut self, tie_break: StartTieBreak) -> Self {
+        self.tie_break = tie_break;
+        self
+    }
+
+    /// Add a child spec.
+    #[must_use]
+    pub fn child(mut self, child: ChildSpec) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    /// Compile the topology into a deterministic start order.
+    pub fn compile(self) -> Result<CompiledSupervisor, SupervisorCompileError> {
+        CompiledSupervisor::new(self)
+    }
+}
+
+/// A compiled supervisor topology with deterministic start order.
+#[derive(Debug)]
+pub struct CompiledSupervisor {
+    /// Supervisor name (for trace/evidence output).
+    pub name: String,
+    /// Optional supervisor region budget override.
+    pub budget: Option<Budget>,
+    /// Deterministic tie-break policy used during compilation.
+    pub tie_break: StartTieBreak,
+    /// Child specifications (including start factories).
+    pub children: Vec<ChildSpec>,
+    /// Deterministic start order as indices into `children`.
+    pub start_order: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadyKey {
+    name: String,
+    idx: usize,
+}
+
+impl Ord for ReadyKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.idx
+            .cmp(&other.idx)
+            .then_with(|| self.name.cmp(&other.name))
+    }
+}
+
+impl PartialOrd for ReadyKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl CompiledSupervisor {
+    fn new(builder: SupervisorBuilder) -> Result<Self, SupervisorCompileError> {
+        let mut name_to_idx = std::collections::HashMap::<String, usize>::new();
+        for (idx, child) in builder.children.iter().enumerate() {
+            if name_to_idx.insert(child.name.clone(), idx).is_some() {
+                return Err(SupervisorCompileError::DuplicateChildName(
+                    child.name.clone(),
+                ));
+            }
+        }
+
+        let mut indeg = vec![0usize; builder.children.len()];
+        let mut out = vec![Vec::<usize>::new(); builder.children.len()];
+
+        for (idx, child) in builder.children.iter().enumerate() {
+            for dep in &child.depends_on {
+                let Some(&dep_idx) = name_to_idx.get(dep) else {
+                    return Err(SupervisorCompileError::UnknownDependency {
+                        child: child.name.clone(),
+                        depends_on: dep.clone(),
+                    });
+                };
+                indeg[idx] += 1;
+                out[dep_idx].push(idx);
+            }
+        }
+
+        let mut ready = std::collections::BTreeSet::<ReadyKey>::new();
+        for (idx, child) in builder.children.iter().enumerate() {
+            if indeg[idx] == 0 {
+                ready.insert(ReadyKey {
+                    name: child.name.clone(),
+                    idx,
+                });
+            }
+        }
+
+        let mut order = Vec::with_capacity(builder.children.len());
+        while let Some(next) = match builder.tie_break {
+            StartTieBreak::InsertionOrder => ready.iter().next().cloned(),
+            StartTieBreak::NameLex => ready
+                .iter()
+                .min_by(|a, b| a.name.cmp(&b.name).then_with(|| a.idx.cmp(&b.idx)))
+                .cloned(),
+        } {
+            ready.take(&next);
+            order.push(next.idx);
+            for &succ in &out[next.idx] {
+                indeg[succ] = indeg[succ].saturating_sub(1);
+                if indeg[succ] == 0 {
+                    ready.insert(ReadyKey {
+                        name: builder.children[succ].name.clone(),
+                        idx: succ,
+                    });
+                }
+            }
+        }
+
+        if order.len() != builder.children.len() {
+            let mut remaining = Vec::new();
+            for (idx, child) in builder.children.iter().enumerate() {
+                if indeg[idx] > 0 {
+                    remaining.push(child.name.clone());
+                }
+            }
+            remaining.sort();
+            return Err(SupervisorCompileError::CycleDetected { remaining });
+        }
+
+        Ok(Self {
+            name: builder.name,
+            budget: builder.budget,
+            tie_break: builder.tie_break,
+            children: builder.children,
+            start_order: order,
+        })
+    }
+
+    /// Spawns the supervisor as a child region under `parent_region` and starts
+    /// all `start_immediately` children in the compiled order.
+    ///
+    /// This method is intentionally minimal: it establishes the **region-owned
+    /// structure** and deterministic start ordering. Full restart semantics
+    /// (one_for_one/one_for_all/rest_for_one, budgets, evidence ledgers) are
+    /// layered on top by follow-up beads (bd-3ddsi, bd-1yv7a, bd-35iz1).
+    pub fn spawn(
+        mut self,
+        state: &mut RuntimeState,
+        cx: &crate::cx::Cx,
+        parent_region: RegionId,
+        parent_budget: Budget,
+    ) -> Result<SupervisorHandle, SupervisorSpawnError> {
+        let budget = self.budget.unwrap_or(parent_budget);
+        let region = state.create_child_region(parent_region, budget)?;
+        let effective_budget = state
+            .region(region)
+            .map_or(budget, crate::record::RegionRecord::budget);
+
+        let scope: crate::cx::Scope<'static, crate::types::policy::FailFast> =
+            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, effective_budget);
+
+        let mut started = Vec::new();
+        for &idx in &self.start_order {
+            let child = &mut self.children[idx];
+            if !child.start_immediately {
+                continue;
+            }
+            match child.start.start(&scope, state, cx) {
+                Ok(task_id) => started.push(StartedChild {
+                    name: child.name.clone(),
+                    task_id,
+                }),
+                Err(err) => {
+                    cx.trace("supervisor_child_start_failed");
+                    if child.required {
+                        return Err(SupervisorSpawnError::ChildStartFailed {
+                            child: child.name.clone(),
+                            err,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(SupervisorHandle {
+            name: self.name,
+            region,
+            started,
+        })
+    }
+}
+
+/// Result of spawning a compiled supervisor.
+#[derive(Debug)]
+pub struct SupervisorHandle {
+    /// Supervisor name.
+    pub name: String,
+    /// Region that owns the supervisor and its children.
+    pub region: RegionId,
+    /// Children that were started immediately (in start order).
+    pub started: Vec<StartedChild>,
+}
+
+/// Information about a child started by a supervisor.
+#[derive(Debug)]
+pub struct StartedChild {
+    /// Child name.
+    pub name: String,
+    /// Root task id for the child.
+    pub task_id: TaskId,
 }
 
 impl BackoffStrategy {
@@ -735,6 +1160,41 @@ mod tests {
 
     fn test_region_id() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(0, 0))
+    }
+
+    /// Helper: a `ChildStart`-compatible function that returns a dummy `TaskId`.
+    /// Named functions satisfy the HRTB required by `ChildStart` where closures
+    /// with inferred lifetimes do not.
+    #[allow(clippy::unnecessary_wraps)]
+    fn noop_start(
+        _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        _state: &mut RuntimeState,
+        _cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
+        Ok(test_task_id())
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    struct LoggingStart {
+        name: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ChildStart for LoggingStart {
+        fn start(
+            &mut self,
+            scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            state: &mut RuntimeState,
+            cx: &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError> {
+            self.log
+                .lock()
+                .expect("poisoned")
+                .push(self.name.to_string());
+            let handle = scope.spawn_registered(state, cx, |_cx| async move { 0u8 })?;
+            Ok(handle.task_id())
+        }
     }
 
     #[test]
@@ -1105,15 +1565,22 @@ mod tests {
     fn child_spec_builder() {
         init_test("child_spec_builder");
 
-        let spec = ChildSpec::new("worker-1")
-            .with_config(SupervisionConfig::default())
+        let spec = ChildSpec::new("worker-1", noop_start)
+            .with_restart(SupervisionStrategy::Restart(RestartConfig::default()))
+            .with_shutdown_budget(Budget::with_deadline_secs(10))
+            .with_registration(NameRegistrationPolicy::Register {
+                name: "worker-1".to_string(),
+                collision: NameCollisionPolicy::Fail,
+            })
+            .depends_on("db")
             .with_start_immediately(false)
             .with_required(false);
 
         assert_eq!(spec.name, "worker-1");
-        assert!(spec.config.is_some());
+        assert!(matches!(spec.restart, SupervisionStrategy::Restart(_)));
         assert!(!spec.start_immediately);
         assert!(!spec.required);
+        assert_eq!(spec.depends_on, vec!["db".to_string()]);
 
         crate::test_complete!("child_spec_builder");
     }
@@ -1122,14 +1589,86 @@ mod tests {
     fn child_spec_defaults() {
         init_test("child_spec_defaults");
 
-        let spec = ChildSpec::new("default-child");
+        let spec = ChildSpec::new("default-child", noop_start);
 
         assert_eq!(spec.name, "default-child");
-        assert!(spec.config.is_none());
+        assert!(matches!(spec.restart, SupervisionStrategy::Stop));
+        assert_eq!(spec.shutdown_budget, Budget::INFINITE);
+        assert!(spec.depends_on.is_empty());
+        assert_eq!(spec.registration, NameRegistrationPolicy::None);
         assert!(spec.start_immediately);
         assert!(spec.required);
 
         crate::test_complete!("child_spec_defaults");
+    }
+
+    #[test]
+    fn supervisor_builder_compile_order_insertion_tie_break() {
+        init_test("supervisor_builder_compile_order_insertion_tie_break");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"))
+            .child(ChildSpec::new("c", noop_start).depends_on("a"));
+
+        let compiled = builder.compile().expect("compile");
+        assert_eq!(compiled.start_order, vec![0, 1, 2]);
+
+        crate::test_complete!("supervisor_builder_compile_order_insertion_tie_break");
+    }
+
+    #[test]
+    fn supervisor_builder_compile_detects_cycle() {
+        init_test("supervisor_builder_compile_detects_cycle");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("a", noop_start).depends_on("b"))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"));
+
+        let err = builder.compile().expect_err("should detect cycle");
+        assert!(matches!(err, SupervisorCompileError::CycleDetected { .. }));
+
+        crate::test_complete!("supervisor_builder_compile_detects_cycle");
+    }
+
+    #[test]
+    fn compiled_supervisor_spawn_starts_children_in_order() {
+        init_test("compiled_supervisor_spawn_starts_children_in_order");
+
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let mk = |name: &'static str, log: &Arc<Mutex<Vec<String>>>| {
+            ChildSpec::new(
+                name,
+                LoggingStart {
+                    name,
+                    log: Arc::clone(log),
+                },
+            )
+        };
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(mk("a", &log))
+            .child(mk("b", &log).depends_on("a"))
+            .child(mk("c", &log).depends_on("a"));
+
+        let compiled = builder.compile().expect("compile");
+
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        let handle = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect("spawn");
+
+        assert_eq!(handle.started.len(), 3);
+        assert_eq!(
+            *log.lock().expect("poisoned"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+
+        crate::test_complete!("compiled_supervisor_spawn_starts_children_in_order");
     }
 
     #[test]

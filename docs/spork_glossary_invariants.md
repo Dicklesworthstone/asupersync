@@ -285,3 +285,88 @@ Spork is not wire-compatible with Erlang/BEAM. It does not implement Erlang's di
 6. **Two-phase mailbox sends**: Erlang's `!` is fire-and-forget. Spork's mailbox uses reserve/commit, making sends cancel-safe and backpressure-aware.
 
 7. **Supervision is monotone**: Erlang can restart after any crash. Spork distinguishes panics (always stop) from errors (restartable), enforcing severity monotonicity.
+
+---
+
+## 6. Public API Surface Map (Spork)
+
+This section defines the **intended public module layout** for the SPORK layer and the
+**capability contracts** that prevent ambient authority and preserve lab determinism.
+
+Status: planned (bd-24wd7). This is the API shape that downstream work (Supervisor builder,
+GenServer, Registry, Link/Monitor, Crash artifacts, Lab harness) should converge on.
+
+### 6.1 Modules (Planned)
+
+Spork lives under a single module root:
+
+- `asupersync::spork` (feature-gated; see 6.2)
+
+Submodules and responsibilities:
+
+| Module | Responsibility | Maps To / Builds On |
+|--------|----------------|---------------------|
+| `spork::genserver` | `GenServer` trait, `call/cast`, reply-obligation linearity, budget-driven timeouts | `actor`, `channel`, `obligation`, `types::{Budget, Outcome}` |
+| `spork::supervisor` | `Supervisor` builder + `ChildSpec`, compiled topology over regions, deterministic restart semantics | `supervision`, `cx::{Scope, Cx}`, `runtime::RuntimeState` |
+| `spork::registry` | capability-scoped naming, name ownership as lease obligations, deterministic collision semantics | `obligation`, `types::{Time, Budget}`, planned in bd-3rpp8 |
+| `spork::link` | linking/monitoring, down events, deterministic ordering contracts | `supervision` + planned monitor/Down delivery |
+| `spork::crash` | deterministic crash packs, canonical traces, replay hooks | `trace`, `lab`, `record` (internal) |
+| `spork::lab` | app harness + conformance suites (seed-sweep, DPOR, oracles) | `lab::{LabRuntime, LabConfig}`, `trace` |
+
+Design constraints:
+- No new executors/runtimes inside Spork. Spork is strictly an API layer over asupersync.
+- Spork may expose new **types**, but effects must still flow through `Cx` or explicit handles.
+
+### 6.2 Cargo Feature Gating (Planned)
+
+Spork should not be on the hot path for users who only want the runtime kernel. The intended
+feature map is:
+
+| Feature | Enables | Notes |
+|---------|---------|-------|
+| `spork` | `pub mod spork` | Default-off (proposed). No new executor deps; pure library code. |
+| `spork-lab` | `spork::lab` helpers and conformance scaffolding | May depend on `lab` internals; remains deterministic. |
+| `spork-crash` | `spork::crash` crash pack writers + golden tests | Should reuse existing `trace` canonicalization. |
+
+Non-goals for feature gating:
+- Spork features MUST NOT introduce ambient singletons (global registry, global process table).
+- Spork features MUST NOT require wall-clock time for semantics (lab uses virtual time).
+
+### 6.3 Capability Contracts
+
+Spork APIs must be capability-driven. Any API that can cause effects must require either:
+- a `Cx<Caps>` where `Caps` includes the needed effect bits, or
+- an explicit handle/capability object obtained from `Cx` or a region-local constructor.
+
+**Base effect bits** (implemented today): `spawn`, `time`, `random`, `io`, `remote`
+(`src/cx/cap.rs`). Spork adds *domain* capabilities (GenServer/Supervisor/Registry/Link/Crash/Lab)
+that are derived from these base effects and region ownership.
+
+Capability shape (planned):
+
+| Capability | Acquire From | Lifetime / Ownership | Determinism Contract |
+|------------|--------------|----------------------|----------------------|
+| `GenServerCap` | `Cx` (or a `SporkCx` wrapper) with `spawn + time` | Region-scoped; cannot outlive owning region | timeouts/backoff use `Time`/timer driver; no wall-clock; mailbox ordering tie-breaks are stable |
+| `SupervisorCap` | `Scope` / region builder (`Scope::spork_supervisor(...)`) | Region-scoped; compiled topology determines region tree | restarts use lab time; decisions are trace-visible; no global restarter state |
+| `RegistryCap` | `Cx`-derived handle, stored explicitly (no global singleton) | Lease obligation ties ownership to region/task; name release on close | deterministic collision rules; no HashMap iteration order dependence |
+| `LinkCap` | `Cx`-derived handle | link state owned by region/supervisor; cleaned on close | Down delivery ordering is stable (explicit tie-break key) |
+| `CrashCap` | `Cx`-derived handle (requires trace buffer) | scoped to runtime/lab harness; writes deterministic artifacts | crash packs are stable across same seed + trace equivalence canonicalization |
+| `LabCap` | `LabRuntime` / harness entrypoint | test-only orchestration; not for production execution paths | schedule is seed-driven and replayable; oracles are deterministic |
+
+Notes:
+- `Cx` is clonable and shared; *authority* is type-level (capability set), and *ownership* is
+  region-level (region close implies quiescence).
+- `Cx::current()` exists as **runtime plumbing** (thread-local set while polling) and must not be
+  required by Spork APIs. If used, it must be a convenience only, not a capability acquisition path.
+
+### 6.4 No Ambient Globals (Hard Rule)
+
+Spork must not require any of the following:
+- a global registry or global name table
+- a static process table
+- ambient access to the scheduler
+
+Allowed patterns:
+- explicit handles stored in app state and passed through constructors
+- capability objects derived from `Cx` / `Scope` and scoped to a region
+- trace/log collection only via `Cx::trace` or structured observability hooks
