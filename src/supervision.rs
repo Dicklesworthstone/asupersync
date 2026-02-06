@@ -715,6 +715,48 @@ pub struct SupervisorRestartPlan {
     pub restart_order: Vec<String>,
 }
 
+/// An atomic region operation emitted by strategy compilation.
+///
+/// These ops form a three-phase restart protocol:
+/// 1. **Cancel** dependents-first (reverse start order).
+/// 2. **Drain** each cancelled child (bounded by its shutdown budget).
+/// 3. **Restart** dependencies-first (start order).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionOp {
+    /// Request cancellation for the named child, bounded by its shutdown budget.
+    CancelChild {
+        /// Child name.
+        name: String,
+        /// Budget for shutdown/cleanup.
+        shutdown_budget: Budget,
+    },
+    /// Drain/quiesce the named child after cancellation, bounded by its shutdown budget.
+    DrainChild {
+        /// Child name.
+        name: String,
+        /// Budget for drain phase.
+        shutdown_budget: Budget,
+    },
+    /// Restart the named child (re-invoke its `ChildStart`).
+    RestartChild {
+        /// Child name.
+        name: String,
+    },
+}
+
+/// A compiled sequence of [`RegionOp`]s produced from a [`SupervisorRestartPlan`].
+///
+/// The ops are ordered: all cancels first, then all drains, then all restarts.
+/// This three-phase ordering ensures no child is restarted while siblings are
+/// still draining.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledRestartOps {
+    /// The restart policy that produced this sequence.
+    pub policy: RestartPolicy,
+    /// Ordered operations to execute.
+    pub ops: Vec<RegionOp>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadyKey {
     name: String,
@@ -899,6 +941,51 @@ impl CompiledSupervisor {
             cancel_order,
             restart_order,
         })
+    }
+
+    /// Compile a [`SupervisorRestartPlan`] into a sequence of [`RegionOp`]s.
+    ///
+    /// The output is a three-phase protocol:
+    /// 1. `CancelChild` for each entry in `cancel_order` (dependents-first), bounded by
+    ///    the child's `shutdown_budget`.
+    /// 2. `DrainChild` for each cancelled child (same order), bounded by the same budget.
+    /// 3. `RestartChild` for each entry in `restart_order` (dependencies-first).
+    ///
+    /// This is a pure function: no side effects, deterministic, replay-stable.
+    #[must_use]
+    pub fn compile_restart_ops(&self, plan: &SupervisorRestartPlan) -> CompiledRestartOps {
+        let child_by_name =
+            |name: &str| -> Option<&ChildSpec> { self.children.iter().find(|c| c.name == name) };
+
+        let mut ops = Vec::new();
+
+        // Phase 1: Cancel in cancel_order (dependents-first)
+        for name in &plan.cancel_order {
+            let budget = child_by_name(name).map_or(Budget::INFINITE, |c| c.shutdown_budget);
+            ops.push(RegionOp::CancelChild {
+                name: name.clone(),
+                shutdown_budget: budget,
+            });
+        }
+
+        // Phase 2: Drain each cancelled child (bounded by shutdown budget)
+        for name in &plan.cancel_order {
+            let budget = child_by_name(name).map_or(Budget::INFINITE, |c| c.shutdown_budget);
+            ops.push(RegionOp::DrainChild {
+                name: name.clone(),
+                shutdown_budget: budget,
+            });
+        }
+
+        // Phase 3: Restart in restart_order (dependencies-first)
+        for name in &plan.restart_order {
+            ops.push(RegionOp::RestartChild { name: name.clone() });
+        }
+
+        CompiledRestartOps {
+            policy: plan.policy,
+            ops,
+        }
     }
 
     /// Spawns the supervisor as a child region under `parent_region` and starts
@@ -3151,6 +3238,419 @@ mod tests {
         assert_ne!(RestartPolicy::OneForAll, RestartPolicy::RestForOne);
 
         crate::test_complete!("restart_policy_equality");
+    }
+
+    // ── compile_restart_ops tests ──────────────────────────────────────
+
+    /// Helper: build a ChildSpec with a given name and shutdown budget.
+    fn make_restart_child(name: &str, budget: Budget) -> ChildSpec {
+        ChildSpec {
+            name: name.to_string(),
+            start: Box::new(noop_start),
+            restart: SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
+            shutdown_budget: budget,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        }
+    }
+
+    #[test]
+    fn compile_restart_ops_one_for_one() {
+        init_test("compile_restart_ops_one_for_one");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("b").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        assert_eq!(ops.policy, RestartPolicy::OneForOne);
+        // Only "b" should be affected: cancel b, drain b, restart b
+        assert_eq!(ops.ops.len(), 3);
+        assert!(matches!(&ops.ops[0], RegionOp::CancelChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[1], RegionOp::DrainChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[2], RegionOp::RestartChild { name } if name == "b"));
+
+        crate::test_complete!("compile_restart_ops_one_for_one");
+    }
+
+    #[test]
+    fn compile_restart_ops_one_for_all() {
+        init_test("compile_restart_ops_one_for_all");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("b").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        assert_eq!(ops.policy, RestartPolicy::OneForAll);
+        // All 3 children: 3 cancels + 3 drains + 3 restarts = 9 ops
+        assert_eq!(ops.ops.len(), 9);
+
+        // Cancel order is reverse start order: c, b, a
+        assert!(matches!(&ops.ops[0], RegionOp::CancelChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[1], RegionOp::CancelChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[2], RegionOp::CancelChild { name, .. } if name == "a"));
+
+        // Drain order matches cancel order
+        assert!(matches!(&ops.ops[3], RegionOp::DrainChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[4], RegionOp::DrainChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[5], RegionOp::DrainChild { name, .. } if name == "a"));
+
+        // Restart order is start order: a, b, c
+        assert!(matches!(&ops.ops[6], RegionOp::RestartChild { name } if name == "a"));
+        assert!(matches!(&ops.ops[7], RegionOp::RestartChild { name } if name == "b"));
+        assert!(matches!(&ops.ops[8], RegionOp::RestartChild { name } if name == "c"));
+
+        crate::test_complete!("compile_restart_ops_one_for_all");
+    }
+
+    #[test]
+    fn compile_restart_ops_rest_for_one() {
+        init_test("compile_restart_ops_rest_for_one");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::RestForOne)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("b").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        assert_eq!(ops.policy, RestartPolicy::RestForOne);
+        // b and c affected: 2 cancels + 2 drains + 2 restarts = 6 ops
+        assert_eq!(ops.ops.len(), 6);
+
+        // Cancel order is reverse of affected suffix: c, b
+        assert!(matches!(&ops.ops[0], RegionOp::CancelChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[1], RegionOp::CancelChild { name, .. } if name == "b"));
+
+        // Drain same order
+        assert!(matches!(&ops.ops[2], RegionOp::DrainChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[3], RegionOp::DrainChild { name, .. } if name == "b"));
+
+        // Restart in start order: b, c
+        assert!(matches!(&ops.ops[4], RegionOp::RestartChild { name } if name == "b"));
+        assert!(matches!(&ops.ops[5], RegionOp::RestartChild { name } if name == "c"));
+
+        crate::test_complete!("compile_restart_ops_rest_for_one");
+    }
+
+    #[test]
+    fn compile_restart_ops_preserves_per_child_budgets() {
+        init_test("compile_restart_ops_preserves_per_child_budgets");
+
+        let budget_a = Budget::INFINITE.with_poll_quota(10);
+        let budget_b = Budget::INFINITE.with_poll_quota(20);
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", budget_a))
+            .child(make_restart_child("b", budget_b))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("a").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        // Cancel ops carry per-child budget
+        match &ops.ops[0] {
+            RegionOp::CancelChild {
+                name,
+                shutdown_budget,
+            } => {
+                assert_eq!(name, "b");
+                assert_eq!(*shutdown_budget, budget_b);
+            }
+            other => panic!("expected CancelChild, got {other:?}"),
+        }
+        match &ops.ops[1] {
+            RegionOp::CancelChild {
+                name,
+                shutdown_budget,
+            } => {
+                assert_eq!(name, "a");
+                assert_eq!(*shutdown_budget, budget_a);
+            }
+            other => panic!("expected CancelChild, got {other:?}"),
+        }
+
+        // Drain ops also carry per-child budget
+        match &ops.ops[2] {
+            RegionOp::DrainChild {
+                name,
+                shutdown_budget,
+            } => {
+                assert_eq!(name, "b");
+                assert_eq!(*shutdown_budget, budget_b);
+            }
+            other => panic!("expected DrainChild, got {other:?}"),
+        }
+
+        crate::test_complete!("compile_restart_ops_preserves_per_child_budgets");
+    }
+
+    #[test]
+    fn compile_restart_ops_with_dependencies() {
+        init_test("compile_restart_ops_with_dependencies");
+
+        // b depends on a, c depends on b → topo order: a, b, c
+        let mut child_b = make_restart_child("b", Budget::INFINITE);
+        child_b.depends_on = vec!["a".to_string()];
+        let mut child_c = make_restart_child("c", Budget::INFINITE);
+        child_c.depends_on = vec!["b".to_string()];
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(child_b)
+            .child(child_c)
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("a").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        // Cancel order: dependents-first → c, b, a
+        assert!(matches!(&ops.ops[0], RegionOp::CancelChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[1], RegionOp::CancelChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[2], RegionOp::CancelChild { name, .. } if name == "a"));
+
+        // Restart order: dependencies-first → a, b, c
+        assert!(matches!(&ops.ops[6], RegionOp::RestartChild { name } if name == "a"));
+        assert!(matches!(&ops.ops[7], RegionOp::RestartChild { name } if name == "b"));
+        assert!(matches!(&ops.ops[8], RegionOp::RestartChild { name } if name == "c"));
+
+        crate::test_complete!("compile_restart_ops_with_dependencies");
+    }
+
+    #[test]
+    fn compile_restart_ops_deterministic() {
+        init_test("compile_restart_ops_deterministic");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("b").unwrap();
+        let ops1 = compiled.compile_restart_ops(&plan);
+        let ops2 = compiled.compile_restart_ops(&plan);
+
+        assert_eq!(ops1, ops2, "compile_restart_ops must be deterministic");
+
+        crate::test_complete!("compile_restart_ops_deterministic");
+    }
+
+    #[test]
+    fn compile_restart_ops_three_phase_ordering() {
+        init_test("compile_restart_ops_three_phase_ordering");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("a").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        // All cancels come first, then all drains, then all restarts
+        let mut phase = 0; // 0=cancel, 1=drain, 2=restart
+        for op in &ops.ops {
+            let op_phase = match op {
+                RegionOp::CancelChild { .. } => 0,
+                RegionOp::DrainChild { .. } => 1,
+                RegionOp::RestartChild { .. } => 2,
+            };
+            assert!(
+                op_phase >= phase,
+                "ops must be ordered: cancels, then drains, then restarts; got phase {op_phase} after {phase}"
+            );
+            phase = op_phase;
+        }
+
+        crate::test_complete!("compile_restart_ops_three_phase_ordering");
+    }
+
+    // ── conformance tests ──────────────────────────────────────────────
+
+    #[test]
+    fn conformance_one_for_one_isolates_failure() {
+        init_test("conformance_one_for_one_isolates_failure");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        // Each failure only affects the failed child
+        for name in &["a", "b", "c"] {
+            let plan = compiled.restart_plan_for(name).unwrap();
+            let ops = compiled.compile_restart_ops(&plan);
+            let names: Vec<&str> = ops
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    RegionOp::CancelChild { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec![*name],
+                "OneForOne must only cancel the failed child"
+            );
+        }
+
+        crate::test_complete!("conformance_one_for_one_isolates_failure");
+    }
+
+    #[test]
+    fn conformance_one_for_all_cancels_all() {
+        init_test("conformance_one_for_all_cancels_all");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        // Any single failure cancels ALL children
+        for name in &["a", "b", "c"] {
+            let plan = compiled.restart_plan_for(name).unwrap();
+            let ops = compiled.compile_restart_ops(&plan);
+            let cancel_count = ops
+                .ops
+                .iter()
+                .filter(|op| matches!(op, RegionOp::CancelChild { .. }))
+                .count();
+            assert_eq!(cancel_count, 3, "OneForAll must cancel all children");
+        }
+
+        crate::test_complete!("conformance_one_for_all_cancels_all");
+    }
+
+    #[test]
+    fn conformance_rest_for_one_cancels_rest() {
+        init_test("conformance_rest_for_one_cancels_rest");
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::RestForOne)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(make_restart_child("b", Budget::INFINITE))
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        // "a" fails → cancels a, b, c (all from a onward)
+        let plan_a = compiled.restart_plan_for("a").unwrap();
+        let ops_a = compiled.compile_restart_ops(&plan_a);
+        let cancel_a: Vec<&str> = ops_a
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancel_a.len(), 3);
+
+        // "b" fails → cancels b, c (from b onward)
+        let plan_b = compiled.restart_plan_for("b").unwrap();
+        let ops_b = compiled.compile_restart_ops(&plan_b);
+        let cancel_b: Vec<&str> = ops_b
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancel_b.len(), 2);
+        assert!(
+            !cancel_b.contains(&"a"),
+            "RestForOne must not cancel earlier children"
+        );
+
+        // "c" fails → cancels only c
+        let plan_c = compiled.restart_plan_for("c").unwrap();
+        let ops_c = compiled.compile_restart_ops(&plan_c);
+        let cancel_c: Vec<&str> = ops_c
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancel_c.len(), 1);
+
+        crate::test_complete!("conformance_rest_for_one_cancels_rest");
+    }
+
+    #[test]
+    fn conformance_cancel_drain_restart_budget_bound() {
+        init_test("conformance_cancel_drain_restart_budget_bound");
+
+        let budget_a = Budget::INFINITE.with_poll_quota(5);
+        let budget_b = Budget::INFINITE.with_poll_quota(10);
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", budget_a))
+            .child(make_restart_child("b", budget_b))
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("a").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        // Every cancel and drain op must carry a budget
+        for op in &ops.ops {
+            match op {
+                RegionOp::CancelChild {
+                    shutdown_budget, ..
+                }
+                | RegionOp::DrainChild {
+                    shutdown_budget, ..
+                } => {
+                    // Budget must not be zero (our test budgets have poll_quota > 0)
+                    assert!(
+                        shutdown_budget.poll_quota > 0,
+                        "shutdown budget must be present"
+                    );
+                }
+                RegionOp::RestartChild { .. } => {} // restarts don't carry budgets
+            }
+        }
+
+        crate::test_complete!("conformance_cancel_drain_restart_budget_bound");
     }
 
     #[test]
