@@ -1028,44 +1028,44 @@ mod tests {
     fn test_token_creation() {
         let mut rng = DetRng::new(42);
         let obj = ObjectId::new_for_test(1);
-        let cancel_token = SymbolCancelToken::new(obj, &mut rng);
+        let cancel_handle = SymbolCancelToken::new(obj, &mut rng);
 
-        assert_eq!(cancel_token.object_id(), obj);
-        assert!(!cancel_token.is_cancelled());
-        assert!(cancel_token.reason().is_none());
-        assert!(cancel_token.cancelled_at().is_none());
+        assert_eq!(cancel_handle.object_id(), obj);
+        assert!(!cancel_handle.is_cancelled());
+        assert!(cancel_handle.reason().is_none());
+        assert!(cancel_handle.cancelled_at().is_none());
     }
 
     #[test]
     fn test_token_cancel_once() {
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         let now = Time::from_millis(100);
         let reason = CancelReason::user("test");
 
         // First cancel succeeds
-        assert!(cancel_token.cancel(&reason, now));
-        assert!(cancel_token.is_cancelled());
-        assert_eq!(cancel_token.reason().unwrap().kind, CancelKind::User);
-        assert_eq!(cancel_token.cancelled_at(), Some(now));
+        assert!(cancel_handle.cancel(&reason, now));
+        assert!(cancel_handle.is_cancelled());
+        assert_eq!(cancel_handle.reason().unwrap().kind, CancelKind::User);
+        assert_eq!(cancel_handle.cancelled_at(), Some(now));
 
         // Second cancel returns false (not first caller) but strengthens
-        assert!(!cancel_token.cancel(&CancelReason::timeout(), Time::from_millis(200)));
+        assert!(!cancel_handle.cancel(&CancelReason::timeout(), Time::from_millis(200)));
 
         // Reason strengthened to Timeout (more severe than User)
-        assert_eq!(cancel_token.reason().unwrap().kind, CancelKind::Timeout);
+        assert_eq!(cancel_handle.reason().unwrap().kind, CancelKind::Timeout);
     }
 
     #[test]
     fn test_token_reason_propagates() {
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         let reason = CancelReason::timeout().with_message("timed out");
-        cancel_token.cancel(&reason, Time::from_millis(500));
+        cancel_handle.cancel(&reason, Time::from_millis(500));
 
-        let stored = cancel_token.reason().unwrap();
+        let stored = cancel_handle.reason().unwrap();
         assert_eq!(stored.kind, CancelKind::Timeout);
         assert_eq!(stored.message, Some("timed out"));
     }
@@ -1091,18 +1091,18 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         let notified = Arc::new(AtomicBool::new(false));
         let notified_clone = notified.clone();
 
-        cancel_token.add_listener(move |_reason: &CancelReason, _at: Time| {
+        cancel_handle.add_listener(move |_reason: &CancelReason, _at: Time| {
             notified_clone.store(true, Ordering::SeqCst);
         });
 
         assert!(!notified.load(Ordering::SeqCst));
 
-        cancel_token.cancel(&CancelReason::user("test"), Time::from_millis(100));
+        cancel_handle.cancel(&CancelReason::user("test"), Time::from_millis(100));
 
         assert!(notified.load(Ordering::SeqCst));
     }
@@ -1111,24 +1111,24 @@ mod tests {
     fn test_token_serialization() {
         let mut rng = DetRng::new(42);
         let obj = ObjectId::new(0x1234_5678_9abc_def0, 0xfedc_ba98_7654_3210);
-        let cancel_token = SymbolCancelToken::new(obj, &mut rng);
+        let cancel_handle = SymbolCancelToken::new(obj, &mut rng);
 
-        let bytes = cancel_token.to_bytes();
+        let bytes = cancel_handle.to_bytes();
         assert_eq!(bytes.len(), TOKEN_WIRE_SIZE);
 
         let parsed = SymbolCancelToken::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.token_id(), cancel_token.token_id());
-        assert_eq!(parsed.object_id(), cancel_token.object_id());
+        assert_eq!(parsed.token_id(), cancel_handle.token_id());
+        assert_eq!(parsed.object_id(), cancel_handle.object_id());
         assert!(!parsed.is_cancelled());
     }
 
     #[test]
     fn test_token_cancel_sets_reason_when_already_cancelled() {
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
-        cancel_token.cancel(&CancelReason::user("initial"), Time::from_millis(100));
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        cancel_handle.cancel(&CancelReason::user("initial"), Time::from_millis(100));
 
-        let parsed = SymbolCancelToken::from_bytes(&cancel_token.to_bytes()).unwrap();
+        let parsed = SymbolCancelToken::from_bytes(&cancel_handle.to_bytes()).unwrap();
         assert!(parsed.is_cancelled());
         assert!(parsed.reason().is_none());
 
@@ -1142,10 +1142,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
-        cancel_token.cancel(&CancelReason::user("initial"), Time::from_millis(100));
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        cancel_handle.cancel(&CancelReason::user("initial"), Time::from_millis(100));
 
-        let parsed = SymbolCancelToken::from_bytes(&cancel_token.to_bytes()).unwrap();
+        let parsed = SymbolCancelToken::from_bytes(&cancel_handle.to_bytes()).unwrap();
         assert!(parsed.is_cancelled());
 
         let notified = Arc::new(AtomicBool::new(false));
@@ -1235,11 +1235,11 @@ mod tests {
     fn test_prepare_cancel_uses_token_id() {
         let mut rng = DetRng::new(7);
         let object_id = ObjectId::new_for_test(42);
-        let cancel_token = SymbolCancelToken::new(object_id, &mut rng);
-        let token_id = cancel_token.token_id();
+        let cancel_handle = SymbolCancelToken::new(object_id, &mut rng);
+        let token_id = cancel_handle.token_id();
 
         let broadcaster = CancelBroadcaster::new(NullSink);
-        broadcaster.register_token(cancel_token);
+        broadcaster.register_token(cancel_handle);
 
         let msg = broadcaster.prepare_cancel(
             object_id,
@@ -1453,43 +1453,43 @@ mod tests {
     #[test]
     fn test_cancel_strengthens_reason() {
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         // First cancel with User reason.
-        let first = cancel_token.cancel(&CancelReason::user("first"), Time::from_millis(100));
+        let first = cancel_handle.cancel(&CancelReason::user("first"), Time::from_millis(100));
         assert!(first);
 
         // Second cancel with Shutdown reason — should strengthen.
-        let second = cancel_token.cancel(
+        let second = cancel_handle.cancel(
             &CancelReason::new(CancelKind::Shutdown),
             Time::from_millis(200),
         );
         assert!(!second); // not the first caller
 
         // Reason strengthened to Shutdown (more severe).
-        assert_eq!(cancel_token.reason().unwrap().kind, CancelKind::Shutdown);
+        assert_eq!(cancel_handle.reason().unwrap().kind, CancelKind::Shutdown);
         // Timestamp unchanged (first cancel time preserved).
-        assert_eq!(cancel_token.cancelled_at(), Some(Time::from_millis(100)));
+        assert_eq!(cancel_handle.cancelled_at(), Some(Time::from_millis(100)));
     }
 
     #[test]
     fn test_cancel_does_not_weaken_reason() {
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         // First cancel with Shutdown reason.
-        let first = cancel_token.cancel(
+        let first = cancel_handle.cancel(
             &CancelReason::new(CancelKind::Shutdown),
             Time::from_millis(100),
         );
         assert!(first);
 
         // Second cancel with weaker User reason — should not weaken.
-        let second = cancel_token.cancel(&CancelReason::user("gentle"), Time::from_millis(200));
+        let second = cancel_handle.cancel(&CancelReason::user("gentle"), Time::from_millis(200));
         assert!(!second);
 
         // Reason stays at Shutdown.
-        assert_eq!(cancel_token.reason().unwrap().kind, CancelKind::Shutdown);
+        assert_eq!(cancel_handle.reason().unwrap().kind, CancelKind::Shutdown);
     }
 
     // ---- Multiple listeners notified on cancel --------------------------
@@ -1499,18 +1499,18 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let mut rng = DetRng::new(42);
-        let cancel_token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
 
         let count = Arc::new(AtomicU32::new(0));
 
         for _ in 0..3 {
             let c = count.clone();
-            cancel_token.add_listener(move |_: &CancelReason, _: Time| {
+            cancel_handle.add_listener(move |_: &CancelReason, _: Time| {
                 c.fetch_add(1, Ordering::SeqCst);
             });
         }
 
-        cancel_token.cancel(&CancelReason::timeout(), Time::from_millis(100));
+        cancel_handle.cancel(&CancelReason::timeout(), Time::from_millis(100));
 
         assert_eq!(count.load(Ordering::SeqCst), 3);
     }
@@ -1554,16 +1554,16 @@ mod tests {
     fn test_token_serialization_roundtrip_deterministic() {
         let mut rng = DetRng::new(99);
         let obj = ObjectId::new(0xdead_beef_cafe_babe, 0x1234_5678_9abc_def0);
-        let cancel_token = SymbolCancelToken::new(obj, &mut rng);
+        let cancel_handle = SymbolCancelToken::new(obj, &mut rng);
 
         // Serialize and deserialize twice — should produce identical results.
-        let bytes1 = cancel_token.to_bytes();
+        let bytes1 = cancel_handle.to_bytes();
         let parsed1 = SymbolCancelToken::from_bytes(&bytes1).unwrap();
         let bytes2 = parsed1.to_bytes();
 
         assert_eq!(bytes1, bytes2, "serialization must be deterministic");
-        assert_eq!(parsed1.token_id(), cancel_token.token_id());
-        assert_eq!(parsed1.object_id(), cancel_token.object_id());
+        assert_eq!(parsed1.token_id(), cancel_handle.token_id());
+        assert_eq!(parsed1.object_id(), cancel_handle.object_id());
     }
 
     // ---- Message forwarding exhaustion ----------------------------------
