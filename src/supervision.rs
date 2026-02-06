@@ -1474,14 +1474,237 @@ pub enum SupervisionEvent {
     },
 }
 
+// ---------------------------------------------------------------------------
+// Evidence Ledger (bd-35iz1)
+//
+// Structured, deterministic, test-assertable record of *why* each supervision
+// decision was made.  Every call to `Supervisor::on_failure_with_budget`
+// appends exactly one `EvidenceEntry` whose `binding_constraint` field
+// identifies the specific rule that determined the outcome.
+// ---------------------------------------------------------------------------
+
+/// The specific constraint that bound a supervision decision.
+///
+/// Each supervision decision is determined by exactly one binding constraint.
+/// This enum captures which rule was decisive, along with the relevant
+/// parameters, so that tests and observability tooling can verify the
+/// reasoning chain without inspecting implementation details.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindingConstraint {
+    /// Monotone severity: outcome is too severe for restart.
+    ///
+    /// `Panicked`, `Cancelled`, and `Ok` outcomes bypass strategy evaluation
+    /// entirely — the decision is `Stop` regardless of the configured strategy.
+    MonotoneSeverity {
+        /// Human-readable label for the outcome kind (e.g. `"Panicked"`).
+        outcome_kind: &'static str,
+    },
+
+    /// The supervision strategy is `Stop` — no restart attempted.
+    ExplicitStopStrategy,
+
+    /// The supervision strategy is `Escalate`.
+    EscalateStrategy,
+
+    /// Restart was allowed: window + budget checks passed.
+    RestartAllowed {
+        /// Which attempt this restart represents (1-indexed).
+        attempt: u32,
+    },
+
+    /// Sliding-window restart count exhausted.
+    WindowExhausted {
+        /// Maximum restarts allowed in the window.
+        max_restarts: u32,
+        /// The window duration.
+        window: Duration,
+    },
+
+    /// Cost quota insufficient for `restart_cost`.
+    InsufficientCost {
+        /// Cost required per restart.
+        required: u64,
+        /// Remaining cost quota.
+        remaining: u64,
+    },
+
+    /// Remaining time until deadline is less than `min_remaining_for_restart`.
+    DeadlineTooClose {
+        /// Minimum remaining time required.
+        min_required: Duration,
+        /// Actual remaining time.
+        remaining: Duration,
+    },
+
+    /// Poll quota insufficient for `min_polls_for_restart`.
+    InsufficientPolls {
+        /// Minimum polls required.
+        min_required: u32,
+        /// Remaining poll quota.
+        remaining: u32,
+    },
+}
+
+impl Eq for BindingConstraint {}
+
+impl std::fmt::Display for BindingConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MonotoneSeverity { outcome_kind } => {
+                write!(f, "monotone severity: {outcome_kind} is not restartable")
+            }
+            Self::ExplicitStopStrategy => write!(f, "strategy is Stop"),
+            Self::EscalateStrategy => write!(f, "strategy is Escalate"),
+            Self::RestartAllowed { attempt } => {
+                write!(f, "restart allowed (attempt {attempt})")
+            }
+            Self::WindowExhausted {
+                max_restarts,
+                window,
+            } => write!(
+                f,
+                "window exhausted: {max_restarts} restarts in {window:?}"
+            ),
+            Self::InsufficientCost {
+                required,
+                remaining,
+            } => write!(
+                f,
+                "insufficient cost: need {required}, have {remaining}"
+            ),
+            Self::DeadlineTooClose {
+                min_required,
+                remaining,
+            } => write!(
+                f,
+                "deadline too close: need {min_required:?}, have {remaining:?}"
+            ),
+            Self::InsufficientPolls {
+                min_required,
+                remaining,
+            } => write!(
+                f,
+                "insufficient polls: need {min_required}, have {remaining}"
+            ),
+        }
+    }
+}
+
+/// A single evidence entry recording why a supervision decision was made.
+///
+/// Each call to [`Supervisor::on_failure_with_budget`] produces exactly one
+/// entry.  The entry captures the full context: what failed, what strategy
+/// was in effect, what decision was made, and — crucially — which constraint
+/// was binding.
+#[derive(Debug, Clone)]
+pub struct EvidenceEntry {
+    /// Virtual timestamp (nanoseconds) when the decision was made.
+    pub timestamp: u64,
+    /// The failing task.
+    pub task_id: TaskId,
+    /// The region containing the task.
+    pub region_id: RegionId,
+    /// The failure outcome that triggered supervision.
+    pub outcome: Outcome<(), ()>,
+    /// Human-readable label for the strategy kind (`"Stop"`, `"Restart"`, `"Escalate"`).
+    pub strategy_kind: &'static str,
+    /// The resulting supervision decision.
+    pub decision: SupervisionDecision,
+    /// The specific constraint that determined the decision.
+    pub binding_constraint: BindingConstraint,
+}
+
+/// Deterministic, append-only ledger of supervision evidence.
+///
+/// Collects structured [`EvidenceEntry`] records for every supervision
+/// decision, making the full reasoning chain test-assertable.  Entries are
+/// ordered by insertion (which is deterministic under virtual time).
+///
+/// # Test Usage
+///
+/// ```ignore
+/// let ledger = supervisor.evidence();
+/// assert_eq!(ledger.len(), 3);
+/// assert!(matches!(
+///     ledger.entries()[0].binding_constraint,
+///     BindingConstraint::RestartAllowed { attempt: 1 },
+/// ));
+/// assert!(matches!(
+///     ledger.entries()[2].binding_constraint,
+///     BindingConstraint::WindowExhausted { .. },
+/// ));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceLedger {
+    entries: Vec<EvidenceEntry>,
+}
+
+impl EvidenceLedger {
+    /// Create an empty ledger.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Append an evidence entry.
+    pub fn push(&mut self, entry: EvidenceEntry) {
+        self.entries.push(entry);
+    }
+
+    /// All recorded entries, in insertion order.
+    #[must_use]
+    pub fn entries(&self) -> &[EvidenceEntry] {
+        &self.entries
+    }
+
+    /// Number of recorded entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if no entries have been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Iterate over entries for a specific task.
+    pub fn for_task(&self, task_id: TaskId) -> impl Iterator<Item = &EvidenceEntry> {
+        self.entries.iter().filter(move |e| e.task_id == task_id)
+    }
+
+    /// Iterate over entries that resulted in a specific constraint kind.
+    pub fn with_constraint<F>(&self, predicate: F) -> impl Iterator<Item = &EvidenceEntry>
+    where
+        F: Fn(&BindingConstraint) -> bool,
+    {
+        self.entries
+            .iter()
+            .filter(move |e| predicate(&e.binding_constraint))
+    }
+
+    /// Clear all entries (useful for test setup).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 /// Supervisor for managing actor restarts.
 ///
 /// Integrates with the supervision strategy to decide whether to
 /// restart, stop, or escalate on failure.
+///
+/// Every decision is recorded in an internal [`EvidenceLedger`], accessible
+/// via [`evidence`](Self::evidence).  The ledger is deterministic and
+/// test-assertable.
 #[derive(Debug)]
 pub struct Supervisor {
     strategy: SupervisionStrategy,
     history: Option<RestartHistory>,
+    evidence: EvidenceLedger,
 }
 
 impl Supervisor {
@@ -1492,7 +1715,11 @@ impl Supervisor {
             SupervisionStrategy::Restart(config) => Some(RestartHistory::new(config.clone())),
             _ => None,
         };
-        Self { strategy, history }
+        Self {
+            strategy,
+            history,
+            evidence: EvidenceLedger::new(),
+        }
     }
 
     /// Get the supervision strategy.
@@ -3931,7 +4158,7 @@ mod tests {
                 assert_eq!(tid, test_task_id());
                 assert_eq!(rid, test_region_id());
             }
-            other => panic!("expected Escalate, got {other:?}"),
+            other => assert!(false, "expected Escalate, got {other:?}"),
         }
 
         crate::test_complete!("conformance_escalation_without_parent_region");
@@ -4076,7 +4303,7 @@ mod tests {
                     assert_eq!(rid, region);
                     assert_eq!(reason, StopReason::ExplicitStop);
                 }
-                other => panic!("expected Stop, got {other:?}"),
+                other => assert!(false, "expected Stop, got {other:?}"),
             }
         }
 
@@ -4104,7 +4331,10 @@ mod tests {
                         assert_eq!(rid, region);
                         assert_eq!(attempt, expected_attempt);
                     }
-                    other => panic!("expected Restart attempt={expected_attempt}, got {other:?}"),
+                    other => assert!(
+                        false,
+                        "expected Restart attempt={expected_attempt}, got {other:?}"
+                    ),
                 }
             }
         }
@@ -4124,7 +4354,7 @@ mod tests {
                     assert_eq!(rid, region);
                     assert_eq!(parent_region_id, Some(parent));
                 }
-                other => panic!("expected Escalate, got {other:?}"),
+                other => assert!(false, "expected Escalate, got {other:?}"),
             }
         }
 
@@ -4154,7 +4384,7 @@ mod tests {
                 assert_eq!(attempt, 1);
                 assert_eq!(delay, config.backoff.delay_for_attempt(0));
             }
-            other => panic!("expected Restart, got {other:?}"),
+            other => assert!(false, "expected Restart, got {other:?}"),
         }
 
         // Attempt 2: delay should be for attempt index 1 = 200ms
@@ -4170,7 +4400,7 @@ mod tests {
                 assert_eq!(attempt, 2);
                 assert_eq!(delay, config.backoff.delay_for_attempt(1));
             }
-            other => panic!("expected Restart, got {other:?}"),
+            other => assert!(false, "expected Restart, got {other:?}"),
         }
 
         // Attempt 3: delay should be for attempt index 2 = 400ms
@@ -4186,7 +4416,7 @@ mod tests {
                 assert_eq!(attempt, 3);
                 assert_eq!(delay, config.backoff.delay_for_attempt(2));
             }
-            other => panic!("expected Restart, got {other:?}"),
+            other => assert!(false, "expected Restart, got {other:?}"),
         }
 
         crate::test_complete!("conformance_restart_delay_matches_backoff");
@@ -4331,7 +4561,7 @@ mod tests {
                     assert_eq!(child, "required_fail");
                 }
                 other @ SupervisorSpawnError::RegionCreate(_) => {
-                    panic!("expected ChildStartFailed, got {other:?}")
+                    assert!(false, "expected ChildStartFailed, got {other:?}");
                 }
             }
         }
@@ -4520,7 +4750,7 @@ mod tests {
                 assert!(remaining.contains(&"b".to_string()));
                 assert!(remaining.contains(&"c".to_string()));
             }
-            other => panic!("expected CycleDetected, got {other:?}"),
+            other => assert!(false, "expected CycleDetected, got {other:?}"),
         }
 
         crate::test_complete!("conformance_compile_rejects_cycles");
