@@ -339,6 +339,7 @@ impl<P: Policy> Scope<'_, P> {
             io_driver,
             Some(child_entropy),
         )
+        .with_registry_handle(cx.registry_handle())
         .with_blocking_pool_handle(cx.blocking_pool_handle());
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
@@ -727,7 +728,8 @@ impl<P: Policy> Scope<'_, P> {
             Some(child_observability),
             io_driver,
             Some(child_entropy),
-        );
+        )
+        .with_registry_handle(cx.registry_handle());
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
 

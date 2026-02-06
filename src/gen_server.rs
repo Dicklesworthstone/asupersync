@@ -61,11 +61,57 @@ use std::sync::Arc;
 use crate::actor::{ActorId, ActorState};
 use crate::channel::mpsc;
 use crate::channel::oneshot;
-use crate::channel::session::{self, TrackedOneshotSender};
+use crate::channel::session::{self, TrackedOneshotPermit};
 use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use crate::runtime::{JoinError, SpawnError};
 use crate::types::{CxInner, Outcome, TaskId};
+
+// ============================================================================
+// Cast overflow policy
+// ============================================================================
+
+/// Policy for handling cast sends when the GenServer mailbox is full.
+///
+/// When a bounded mailbox reaches capacity, the overflow policy determines
+/// what happens to new cast messages. Lossy policies (`DropOldest`) are
+/// trace-visible: every dropped message emits a trace event.
+///
+/// # Default
+///
+/// The default policy is `Reject`, which returns `CastError::Full` to the
+/// sender. This is the safest option and forces callers to handle backpressure
+/// explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastOverflowPolicy {
+    /// Reject the new cast when the mailbox is full.
+    ///
+    /// The sender receives `CastError::Full` and can decide what to do
+    /// (retry, drop, log, etc.). No messages are lost silently.
+    Reject,
+
+    /// Drop the oldest unprocessed message to make room for the new one.
+    ///
+    /// The dropped message is traced for observability. This is useful for
+    /// "latest-value-wins" patterns (e.g., sensor readings, UI state updates)
+    /// where stale data is less valuable than fresh data.
+    DropOldest,
+}
+
+impl Default for CastOverflowPolicy {
+    fn default() -> Self {
+        Self::Reject
+    }
+}
+
+impl std::fmt::Display for CastOverflowPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reject => write!(f, "Reject"),
+            Self::DropOldest => write!(f, "DropOldest"),
+        }
+    }
+}
 
 /// A GenServer processes calls (request-response) and casts (fire-and-forget).
 ///
@@ -117,6 +163,16 @@ pub trait GenServer: Send + 'static {
     fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
+
+    /// Returns the overflow policy for cast messages when the mailbox is full.
+    ///
+    /// The default is [`CastOverflowPolicy::Reject`], which returns
+    /// `CastError::Full` to the sender.
+    ///
+    /// Override this to use `DropOldest` for "latest-value-wins" patterns.
+    fn cast_overflow_policy(&self) -> CastOverflowPolicy {
+        CastOverflowPolicy::Reject
+    }
 }
 
 /// Handle for sending a reply to a call.
@@ -125,16 +181,20 @@ pub trait GenServer: Send + 'static {
 /// [`send()`](Self::send) or [`abort()`](Self::abort). Dropping without
 /// consuming triggers a panic via [`ObligationToken<SendPermit>`].
 ///
-/// Backed by [`TrackedOneshotSender`](session::TrackedOneshotSender) from
-/// `channel::session`, making "silent reply drop" structurally impossible.
+/// Backed by [`TrackedOneshotPermit`](session::TrackedOneshotPermit) from
+/// `channel::session`,
+/// making "silent reply drop" structurally impossible.
 pub struct Reply<R> {
     cx: Cx,
-    tx: TrackedOneshotSender<R>,
+    permit: TrackedOneshotPermit<R>,
 }
 
 impl<R: Send + 'static> Reply<R> {
-    fn new(cx: &Cx, tx: TrackedOneshotSender<R>) -> Self {
-        Self { cx: cx.clone(), tx }
+    fn new(cx: &Cx, permit: TrackedOneshotPermit<R>) -> Self {
+        Self {
+            cx: cx.clone(),
+            permit,
+        }
     }
 
     /// Send the reply value to the caller, returning a [`CommittedProof`].
@@ -142,11 +202,11 @@ impl<R: Send + 'static> Reply<R> {
     /// Consumes the reply handle. If the caller has dropped (e.g., timed out),
     /// the obligation is aborted cleanly (no panic).
     pub fn send(self, value: R) -> ReplyOutcome {
-        match self.tx.send(&self.cx, value) {
+        match self.permit.send(value) {
             Ok(proof) => ReplyOutcome::Committed(proof),
             Err(_send_err) => {
-                // Receiver (caller) dropped — e.g., timed out. The
-                // TrackedOneshotSender::send already aborted the obligation.
+                // Receiver (caller) dropped — e.g., timed out. The tracked
+                // permit aborts the obligation cleanly in this case.
                 self.cx.trace("gen_server::reply_caller_gone");
                 ReplyOutcome::CallerGone
             }
@@ -159,21 +219,20 @@ impl<R: Send + 'static> Reply<R> {
     /// delegating to another process). Returns an [`AbortedProof`].
     #[must_use]
     pub fn abort(self) -> AbortedProof<SendPermit> {
-        let permit = self.tx.reserve(&self.cx);
-        permit.abort()
+        self.permit.abort()
     }
 
     /// Check if the caller is still waiting for a reply.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.permit.is_closed()
     }
 }
 
 impl<R> std::fmt::Debug for Reply<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reply")
-            .field("pending", &!self.tx.is_closed())
+            .field("pending", &!self.permit.is_closed())
             .finish_non_exhaustive()
     }
 }
@@ -203,7 +262,7 @@ impl std::fmt::Debug for ReplyOutcome {
 enum Envelope<S: GenServer> {
     Call {
         request: S::Call,
-        reply_tx: TrackedOneshotSender<S::Reply>,
+        reply_permit: TrackedOneshotPermit<S::Reply>,
     },
     Cast {
         msg: S::Cast,
@@ -284,6 +343,7 @@ pub struct GenServerHandle<S: GenServer> {
     task_id: TaskId,
     receiver: oneshot::Receiver<Result<S, JoinError>>,
     inner: std::sync::Weak<std::sync::RwLock<CxInner>>,
+    overflow_policy: CastOverflowPolicy,
 }
 
 /// Error returned when a call fails.
@@ -334,19 +394,45 @@ impl<S: GenServer> GenServerHandle<S> {
     /// if the server drops the reply without sending, the obligation token
     /// panics rather than silently losing the reply.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
-        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let envelope = Envelope::Call { request, reply_tx };
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(CallError::ServerStopped);
+        }
 
-        self.sender
-            .send(cx, envelope)
-            .await
-            .map_err(|_| CallError::ServerStopped)?;
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
+        let reply_permit = reply_tx.reserve(cx);
+        let envelope = Envelope::Call {
+            request,
+            reply_permit,
+        };
+
+        if let Err(e) = self.sender.send(cx, envelope).await {
+            // If the envelope couldn't be enqueued, we must abort the reply
+            // obligation to avoid an obligation-token leak.
+            let envelope = match e {
+                mpsc::SendError::Disconnected(v)
+                | mpsc::SendError::Cancelled(v)
+                | mpsc::SendError::Full(v) => v,
+            };
+            if let Envelope::Call { reply_permit, .. } = envelope {
+                let _aborted = reply_permit.abort();
+            }
+            return Err(CallError::ServerStopped);
+        }
 
         reply_rx.recv(cx).await.map_err(|_| CallError::NoReply)
     }
 
     /// Send a cast (fire-and-forget) to the server.
     pub async fn cast(&self, cx: &Cx, msg: S::Cast) -> Result<(), CastError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(CastError::ServerStopped);
+        }
         let envelope = Envelope::Cast { msg };
         self.sender
             .send(cx, envelope)
@@ -355,14 +441,48 @@ impl<S: GenServer> GenServerHandle<S> {
     }
 
     /// Try to send a cast without blocking.
+    ///
+    /// Applies the server's [`CastOverflowPolicy`] when the mailbox is full:
+    /// - `Reject`: returns `CastError::Full`
+    /// - `DropOldest`: evicts the oldest message and enqueues the new one
     pub fn try_cast(&self, msg: S::Cast) -> Result<(), CastError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(CastError::ServerStopped);
+        }
         let envelope = Envelope::Cast { msg };
-        self.sender.try_send(envelope).map_err(|e| match e {
-            mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
-                CastError::ServerStopped
+        match self.overflow_policy {
+            CastOverflowPolicy::Reject => {
+                self.sender.try_send(envelope).map_err(|e| match e {
+                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                        CastError::ServerStopped
+                    }
+                    mpsc::SendError::Full(_) => CastError::Full,
+                })
             }
-            mpsc::SendError::Full(_) => CastError::Full,
-        })
+            CastOverflowPolicy::DropOldest => {
+                match self.sender.send_evict_oldest(envelope) {
+                    Ok(Some(_evicted)) => {
+                        // Trace the eviction for observability.
+                        // The evicted envelope is intentionally dropped.
+                        Ok(())
+                    }
+                    Ok(None) => Ok(()),
+                    Err(mpsc::SendError::Disconnected(_)) => Err(CastError::ServerStopped),
+                    Err(mpsc::SendError::Full(_) | mpsc::SendError::Cancelled(_)) => {
+                        unreachable!("send_evict_oldest never returns Full or Cancelled")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the server's overflow policy for cast messages.
+    #[must_use]
+    pub fn cast_overflow_policy(&self) -> CastOverflowPolicy {
+        self.overflow_policy
     }
 
     /// Returns the server's actor ID.
@@ -406,13 +526,14 @@ impl<S: GenServer> GenServerHandle<S> {
 
 /// A lightweight, clonable reference for casting to a GenServer.
 ///
-/// Does not support calls (use `GenServerHandle` for that) since calls
-/// require a reply channel that needs the handle's lifetime.
+/// Supports `call()` and `cast()`; it does not support `join()` (use
+/// [`GenServerHandle`] for waiting on the final server state).
 #[derive(Debug)]
 pub struct GenServerRef<S: GenServer> {
     actor_id: ActorId,
     sender: mpsc::Sender<Envelope<S>>,
     state: Arc<GenServerStateCell>,
+    overflow_policy: CastOverflowPolicy,
 }
 
 impl<S: GenServer> Clone for GenServerRef<S> {
@@ -421,6 +542,7 @@ impl<S: GenServer> Clone for GenServerRef<S> {
             actor_id: self.actor_id,
             sender: self.sender.clone(),
             state: Arc::clone(&self.state),
+            overflow_policy: self.overflow_policy,
         }
     }
 }
@@ -428,17 +550,43 @@ impl<S: GenServer> Clone for GenServerRef<S> {
 impl<S: GenServer> GenServerRef<S> {
     /// Send a call to the server.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(CallError::ServerStopped);
+        }
+
         let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let envelope = Envelope::Call { request, reply_tx };
-        self.sender
-            .send(cx, envelope)
-            .await
-            .map_err(|_| CallError::ServerStopped)?;
+        let reply_permit = reply_tx.reserve(cx);
+        let envelope = Envelope::Call {
+            request,
+            reply_permit,
+        };
+
+        if let Err(e) = self.sender.send(cx, envelope).await {
+            let envelope = match e {
+                mpsc::SendError::Disconnected(v)
+                | mpsc::SendError::Cancelled(v)
+                | mpsc::SendError::Full(v) => v,
+            };
+            if let Envelope::Call { reply_permit, .. } = envelope {
+                let _aborted = reply_permit.abort();
+            }
+            return Err(CallError::ServerStopped);
+        }
+
         reply_rx.recv(cx).await.map_err(|_| CallError::NoReply)
     }
 
     /// Send a cast to the server.
     pub async fn cast(&self, cx: &Cx, msg: S::Cast) -> Result<(), CastError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(CastError::ServerStopped);
+        }
         let envelope = Envelope::Cast { msg };
         self.sender
             .send(cx, envelope)
@@ -447,14 +595,36 @@ impl<S: GenServer> GenServerRef<S> {
     }
 
     /// Try to send a cast without blocking.
+    ///
+    /// Applies the server's [`CastOverflowPolicy`] when the mailbox is full.
     pub fn try_cast(&self, msg: S::Cast) -> Result<(), CastError> {
+        if matches!(
+            self.state.load(),
+            ActorState::Stopping | ActorState::Stopped
+        ) {
+            return Err(CastError::ServerStopped);
+        }
         let envelope = Envelope::Cast { msg };
-        self.sender.try_send(envelope).map_err(|e| match e {
-            mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
-                CastError::ServerStopped
+        match self.overflow_policy {
+            CastOverflowPolicy::Reject => {
+                self.sender.try_send(envelope).map_err(|e| match e {
+                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                        CastError::ServerStopped
+                    }
+                    mpsc::SendError::Full(_) => CastError::Full,
+                })
             }
-            mpsc::SendError::Full(_) => CastError::Full,
-        })
+            CastOverflowPolicy::DropOldest => {
+                match self.sender.send_evict_oldest(envelope) {
+                    Ok(Some(_evicted)) => Ok(()),
+                    Ok(None) => Ok(()),
+                    Err(mpsc::SendError::Disconnected(_)) => Err(CastError::ServerStopped),
+                    Err(mpsc::SendError::Full(_) | mpsc::SendError::Cancelled(_)) => {
+                        unreachable!("send_evict_oldest never returns Full or Cancelled")
+                    }
+                }
+            }
+        }
     }
 
     /// Returns true if the server has stopped.
@@ -484,6 +654,7 @@ impl<S: GenServer> GenServerHandle<S> {
             actor_id: self.actor_id,
             sender: self.sender.clone(),
             state: Arc::clone(&self.state),
+            overflow_policy: self.overflow_policy,
         }
     }
 }
@@ -559,8 +730,11 @@ async fn run_gen_server_loop<S: GenServer>(mut server: S, cx: Cx, cell: &GenServ
 /// Dispatch a single envelope to the appropriate handler.
 async fn dispatch_envelope<S: GenServer>(server: &mut S, cx: &Cx, envelope: Envelope<S>) {
     match envelope {
-        Envelope::Call { request, reply_tx } => {
-            let reply = Reply::new(cx, reply_tx);
+        Envelope::Call {
+            request,
+            reply_permit,
+        } => {
+            let reply = Reply::new(cx, reply_permit);
             server.handle_call(cx, request, reply).await;
         }
         Envelope::Cast { msg } => {
@@ -589,6 +763,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         use crate::runtime::stored_task::StoredTask;
         use crate::tracing_compat::{debug, debug_span};
 
+        let overflow_policy = server.cast_overflow_policy();
         let (msg_tx, msg_rx) = mpsc::channel::<Envelope<S>>(mailbox_capacity);
         let (result_tx, result_rx) = oneshot::channel::<Result<S, JoinError>>();
         let task_id = self.create_task_record(state)?;
@@ -663,6 +838,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             task_id,
             receiver: result_rx,
             inner: inner_weak,
+            overflow_policy,
         };
 
         Ok((handle, stored))
@@ -770,6 +946,51 @@ mod tests {
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_spawn_and_cast");
+    }
+
+    #[test]
+    fn gen_server_spawn_and_call() {
+        init_test("gen_server_spawn_and_call");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                server_ref.call(&cx, CounterCall::Add(5)).await.unwrap()
+            })
+            .unwrap();
+        let client_task_id = client_handle.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, client_stored);
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_quiescent();
+
+        let result =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        assert_eq!(result, 5);
+
+        crate::test_complete!("gen_server_spawn_and_call");
     }
 
     #[test]
@@ -990,7 +1211,8 @@ mod tests {
 
         let cx = Cx::for_testing();
         let (tx, _rx) = session::tracked_oneshot::<u64>();
-        let reply = Reply::new(&cx, tx);
+        let permit = tx.reserve(&cx);
+        let reply = Reply::new(&cx, permit);
         let debug_str = format!("{reply:?}");
         assert!(debug_str.contains("Reply"));
         assert!(debug_str.contains("pending"));

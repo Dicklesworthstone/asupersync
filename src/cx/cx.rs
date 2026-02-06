@@ -52,6 +52,7 @@
 //! - All capabilities flow through the wrapped Cx
 
 use super::cap;
+use super::registry::RegistryHandle;
 use crate::combinator::select::SelectAll;
 use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
@@ -159,6 +160,7 @@ pub struct Cx<Caps = cap::All> {
     entropy: Arc<dyn EntropySource>,
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
+    registry: Option<RegistryHandle>,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
 }
@@ -176,6 +178,7 @@ impl<Caps> Clone for Cx<Caps> {
             entropy: Arc::clone(&self.entropy),
             logical_clock: self.logical_clock.clone(),
             remote_cap: self.remote_cap.clone(),
+            registry: self.registry.clone(),
             _caps: PhantomData,
         }
     }
@@ -318,6 +321,7 @@ impl<Caps> Cx<Caps> {
             entropy: Arc::new(OsEntropy),
             logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
+            registry: None,
             _caps: PhantomData,
         }
     }
@@ -409,6 +413,7 @@ impl<Caps> Cx<Caps> {
             entropy,
             logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
+            registry: None,
             _caps: PhantomData,
         }
     }
@@ -464,8 +469,31 @@ impl<Caps> Cx<Caps> {
             entropy: self.entropy.clone(),
             logical_clock: self.logical_clock.clone(),
             remote_cap: self.remote_cap.clone(),
+            registry: self.registry.clone(),
             _caps: PhantomData,
         }
+    }
+
+    /// Attaches a registry handle to this context.
+    ///
+    /// This is how Spork-style naming is made capability-scoped (no globals):
+    /// tasks only see a registry if their `Cx` carries one.
+    #[must_use]
+    pub(crate) fn with_registry_handle(mut self, registry: Option<RegistryHandle>) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// Returns the registry capability handle, if attached.
+    #[must_use]
+    pub fn registry_handle(&self) -> Option<RegistryHandle> {
+        self.registry.clone()
+    }
+
+    /// Returns true if a registry handle is attached.
+    #[must_use]
+    pub fn has_registry(&self) -> bool {
+        self.registry.is_some()
     }
 
     /// Returns the current logical time without ticking.

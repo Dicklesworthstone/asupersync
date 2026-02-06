@@ -312,6 +312,15 @@ impl<T> SendPermit<T> {
         }
         self.sent = true; // Prevent drop from double-aborting
     }
+
+    /// Returns `true` if the receiver has been dropped.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("oneshot lock poisoned")
+            .receiver_dropped
+    }
 }
 
 impl<T> Drop for SendPermit<T> {

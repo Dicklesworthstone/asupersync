@@ -45,6 +45,7 @@ pub mod buffer;
 pub mod canonicalize;
 pub mod causality;
 pub mod certificate;
+pub mod crashpack;
 pub mod compat;
 pub mod compression;
 pub mod distributed;
@@ -68,6 +69,10 @@ pub mod tla_export;
 
 pub use boundary::{matmul_gf2, SquareComplex};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
+pub use crashpack::{
+    CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest, FailureInfo,
+    SupervisionSnapshot, CRASHPACK_SCHEMA_VERSION,
+};
 pub use canonicalize::{
     canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
 };

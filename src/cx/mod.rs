@@ -39,6 +39,7 @@
 
 pub mod cap;
 pub mod cx;
+pub mod registry;
 pub mod scope;
 pub mod wrappers;
 
@@ -47,6 +48,7 @@ pub use cap::{
     SubsetOf,
 };
 pub use cx::{Cx, SpanGuard};
+pub use registry::{RegistryCap, RegistryHandle};
 pub use scope::Scope;
 pub use wrappers::{
     narrow, BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps,
