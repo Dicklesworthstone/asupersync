@@ -1,6 +1,6 @@
 [package]
 name = "asupersync-conformance"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Conformance test suite for async runtime specifications"
 license = "MIT"
