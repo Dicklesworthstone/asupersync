@@ -63,4 +63,5 @@ criterion/
 
 # Local scratch / build outputs
 /tmp/
+.tmp/
 **/a.out
