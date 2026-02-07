@@ -740,9 +740,11 @@ fn parse_conformance_args(input: &str) -> Result<ConformanceArgs, String> {
         match key {
             "spec" => spec = Some(value),
             "requirement" => requirement = Some(value),
-            other => return Err(format!(
+            other => {
+                return Err(format!(
                 "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
-            )),
+            ))
+            }
         }
     }
 
