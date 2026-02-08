@@ -22,10 +22,30 @@ fn init() {
     init_test_logging();
 }
 
+fn setup_trace_replay_scenario(runtime: &mut LabRuntime) {
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    for i in 0..5 {
+        let completed = Arc::clone(&completed);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                for _ in 0..3 {
+                    asupersync::runtime::yield_now().await;
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+                i // return value doesn't matter, just needs to capture i
+            })
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    }
+}
+
 #[test]
 fn sharding_region_close_quiescence() {
     init();
-    let seed = 0x544152445_u64; // "SHARDS"
+    let seed = 0x0005_4415_2445_u64; // "SHARDS"
     let config = LabConfig::new(seed).max_steps(10_000);
 
     let mut runtime = LabRuntime::new(config);
@@ -63,7 +83,7 @@ fn sharding_region_close_quiescence() {
 #[test]
 fn sharding_obligation_resolution() {
     init();
-    let seed = 0x4F424C4947_u64; // "OBLIG"
+    let seed = 0x004F_424C_4947_u64; // "OBLIG"
     let config = LabConfig::new(seed);
     let mut runtime = LabRuntime::new(config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
@@ -97,7 +117,10 @@ fn sharding_obligation_resolution() {
     runtime.run_until_quiescent();
 
     let report = runtime.report();
-    assert!(report.quiescent, "Runtime must be quiescent after obligation resolution");
+    assert!(
+        report.quiescent,
+        "Runtime must be quiescent after obligation resolution"
+    );
     assert!(
         report.invariant_violations.is_empty(),
         "No invariant violations: {:?}",
@@ -108,21 +131,20 @@ fn sharding_obligation_resolution() {
 #[test]
 fn sharding_cancellation_drain() {
     init();
-    let seed = 0x43414E43454C_u64; // "CANCEL"
+    let seed = 0x4341_4E43_454C_u64; // "CANCEL"
     let config = LabConfig::new(seed);
     let mut runtime = LabRuntime::new(config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
     // Create a task that yields many times (simulating long-running work)
     let completed = Arc::new(AtomicUsize::new(0));
-    let completed_clone = completed.clone();
     let (task_id, _handle) = runtime
         .state
         .create_task(root, Budget::INFINITE, async move {
             for _ in 0..100 {
                 asupersync::runtime::yield_now().await;
             }
-            completed_clone.fetch_add(1, Ordering::SeqCst);
+            completed.fetch_add(1, Ordering::SeqCst);
         })
         .expect("create task");
     runtime.scheduler.lock().unwrap().schedule(task_id, 0);
@@ -134,15 +156,12 @@ fn sharding_cancellation_drain() {
         .expect("create obligation");
 
     // Cancel the region (should cancel the task and drain obligations)
-    let tasks_to_schedule = runtime
-        .state
-        .cancel_request(root, &asupersync::types::CancelReason::user("test"), None);
-    for (tid, priority) in tasks_to_schedule {
+    let tasks_to_schedule =
         runtime
-            .scheduler
-            .lock()
-            .unwrap()
-            .schedule(tid, priority);
+            .state
+            .cancel_request(root, &asupersync::types::CancelReason::user("test"), None);
+    for (tid, priority) in tasks_to_schedule {
+        runtime.scheduler.lock().unwrap().schedule(tid, priority);
     }
 
     // Abort the obligation (simulating cleanup during cancellation)
@@ -154,7 +173,10 @@ fn sharding_cancellation_drain() {
     runtime.run_until_quiescent();
 
     let report = runtime.report();
-    assert!(report.quiescent, "Runtime must be quiescent after cancellation drain");
+    assert!(
+        report.quiescent,
+        "Runtime must be quiescent after cancellation drain"
+    );
     assert!(
         report.invariant_violations.is_empty(),
         "No invariant violations: {:?}",
@@ -165,37 +187,17 @@ fn sharding_cancellation_drain() {
 #[test]
 fn sharding_trace_replay_determinism() {
     init();
-    let seed = 0x5245504C4159_u64; // "REPLAY"
-
-    fn setup_scenario(runtime: &mut LabRuntime) {
-        let root = runtime.state.create_root_region(Budget::INFINITE);
-        let completed = Arc::new(AtomicUsize::new(0));
-
-        for i in 0..5 {
-            let completed = completed.clone();
-            let (task_id, _handle) = runtime
-                .state
-                .create_task(root, Budget::INFINITE, async move {
-                    for _ in 0..3 {
-                        asupersync::runtime::yield_now().await;
-                    }
-                    completed.fetch_add(1, Ordering::SeqCst);
-                    i // return value doesn't matter, just needs to capture i
-                })
-                .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        }
-    }
+    let seed = 0x5245_504C_4159_u64; // "REPLAY"
 
     // Run 1
     let mut runtime1 = LabRuntime::new(LabConfig::new(seed));
-    setup_scenario(&mut runtime1);
+    setup_trace_replay_scenario(&mut runtime1);
     runtime1.run_until_quiescent();
     let report1 = runtime1.report();
 
     // Run 2
     let mut runtime2 = LabRuntime::new(LabConfig::new(seed));
-    setup_scenario(&mut runtime2);
+    setup_trace_replay_scenario(&mut runtime2);
     runtime2.run_until_quiescent();
     let report2 = runtime2.report();
 

@@ -4,7 +4,6 @@ use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 

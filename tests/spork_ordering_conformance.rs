@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::gen_server::{SystemMsg, SystemMsgBatch};
 use asupersync::monitor::{DownNotification, DownReason, MonitorRef};
 use asupersync::runtime::{RuntimeState, SpawnError};
@@ -105,6 +107,7 @@ fn test_supervisor_shutdown_order() {
     // Contract SUP-STOP: Children are stopped in reverse start order.
     // Start order is determined by dependencies (topological sort).
 
+    #[allow(clippy::unnecessary_wraps)]
     fn noop_start(
         _scope: &asupersync::cx::Scope<'static, asupersync::types::policy::FailFast>,
         _state: &mut RuntimeState,

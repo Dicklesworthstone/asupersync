@@ -1,6 +1,8 @@
+#![allow(missing_docs)]
+
 use asupersync::cx::Cx;
 use asupersync::lab::network::{DistributedHarness, NetworkConfig};
-use asupersync::remote::{spawn_remote, ComputationName, NodeId, RemoteInput};
+use asupersync::remote::{spawn_remote, ComputationName, RemoteInput};
 use std::time::Duration;
 
 #[test]
@@ -43,7 +45,7 @@ fn test_distributed_spawn_virtual_runtime() {
         // Check if finished
         match handle.try_join() {
             Ok(Some(result)) => {
-                println!("Remote task finished with result: {:?}", result);
+                println!("Remote task finished with result: {result:?}");
                 assert!(result.is_success());
                 finished = true;
                 break;
@@ -52,7 +54,7 @@ fn test_distributed_spawn_virtual_runtime() {
                 // Still running
             }
             Err(e) => {
-                panic!("Remote task failed: {:?}", e);
+                panic!("Remote task failed: {e:?}");
             }
         }
     }

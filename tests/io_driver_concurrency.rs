@@ -1,19 +1,14 @@
-use asupersync::runtime::io_driver::IoDriverHandle;
-use asupersync::runtime::reactor::{LabReactor, Reactor};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::task::{Wake, Waker};
-use std::time::Duration;
+#![allow(missing_docs)]
 
-struct NoopWaker;
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
+use asupersync::runtime::io_driver::IoDriverHandle;
+use asupersync::runtime::reactor::LabReactor;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn test_io_driver_handle_split_lock() {
     let reactor = Arc::new(LabReactor::new());
-    let handle = IoDriverHandle::new(reactor.clone());
+    let handle = IoDriverHandle::new(reactor);
 
     // 1. Verify we can turn with 0 events
     let res = handle.turn_with(Some(Duration::ZERO), |_, _| {});
@@ -21,9 +16,8 @@ fn test_io_driver_handle_split_lock() {
     assert_eq!(res.unwrap(), 0);
 
     // 2. Register something
-    let waker = Waker::from(Arc::new(NoopWaker));
-    // We can't implement Source easily here as it's a trait requiring AsRawFd or similar depending on platform
-    // But we can check internal state access via stats()
+    // We can't implement Source easily here as it's a trait requiring AsRawFd or
+    // similar depending on platform, so we validate through observable stats.
     let stats = handle.stats();
     assert_eq!(stats.polls, 1);
 
