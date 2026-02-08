@@ -292,6 +292,26 @@ impl Scheduler {
         self.scheduled.is_empty()
     }
 
+    /// Returns true if there is work that can be executed immediately.
+    ///
+    /// Returns true if:
+    /// - Cancel lane is not empty
+    /// - Ready lane is not empty
+    /// - Timed lane has a task with `deadline <= now`
+    #[must_use]
+    pub fn has_runnable_work(&self, now: Time) -> bool {
+        if !self.cancel_lane.is_empty() || !self.ready_lane.is_empty() {
+            return true;
+        }
+        self.timed_lane.peek().is_some_and(|t| t.deadline <= now)
+    }
+
+    /// Returns the earliest deadline from the timed lane, if any.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Time> {
+        self.timed_lane.peek().map(|t| t.deadline)
+    }
+
     /// Allocates and returns the next generation number for FIFO ordering.
     fn next_gen(&mut self) -> u64 {
         let gen = self.next_generation;
