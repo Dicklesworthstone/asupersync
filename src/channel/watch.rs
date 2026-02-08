@@ -161,6 +161,10 @@ impl<T> WatchInner<T> {
 
     fn register_waker(&self, waiter: WatchWaiter) {
         let mut waiters = self.waiters.lock().expect("watch lock poisoned");
+        // Stale entries can remain after cancelled/dropped wait futures.
+        // They have no owner `Receiver` reference, so only the waiters vec
+        // holds their flag (`strong_count == 1`). Prune before inserting.
+        waiters.retain(|entry| Arc::strong_count(&entry.queued) > 1);
         waiters.push(waiter);
     }
 }
@@ -1085,8 +1089,7 @@ mod tests {
         let mut task_cx = Context::from_waker(waker);
 
         // Create and drop futures 50 times without sending.
-        // Each cycle adds at most 1 entry (stale entries accumulate
-        // until the next wake_all, matching pre-fix behavior).
+        // Stale entries should be pruned on each re-registration.
         for _ in 0..50 {
             let mut future = rx.changed(&cx);
             let result = Pin::new(&mut future).poll(&mut task_cx);
@@ -1096,9 +1099,9 @@ mod tests {
 
         let waiter_count = tx.inner.waiters.lock().unwrap().len();
         crate::assert_with_log!(
-            waiter_count == 50,
-            "stale entries from cancel cycles",
-            50,
+            waiter_count == 1,
+            "stale entries pruned across cancel cycles",
+            1,
             waiter_count
         );
 
@@ -1107,6 +1110,40 @@ mod tests {
         let waiter_count = tx.inner.waiters.lock().unwrap().len();
         crate::assert_with_log!(waiter_count == 0, "all drained after send", 0, waiter_count);
         crate::test_complete!("cancel_and_recreate_bounded_waiters");
+    }
+
+    #[test]
+    fn dropped_receiver_waiter_is_pruned_on_next_registration() {
+        init_test("dropped_receiver_waiter_is_pruned_on_next_registration");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel(0);
+        let mut rx2 = tx.subscribe();
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+
+        // Register rx1 waiter, then drop rx1 without any send.
+        {
+            let mut future = rx1.changed(&cx);
+            let result = Pin::new(&mut future).poll(&mut task_cx);
+            assert!(result.is_pending());
+        }
+        drop(rx1);
+
+        // Next registration should prune dropped receiver's stale waiter.
+        {
+            let mut future = rx2.changed(&cx);
+            let result = Pin::new(&mut future).poll(&mut task_cx);
+            assert!(result.is_pending());
+        }
+
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "dropped receiver waiter pruned",
+            1,
+            waiter_count
+        );
+        crate::test_complete!("dropped_receiver_waiter_is_pruned_on_next_registration");
     }
 
     #[test]
