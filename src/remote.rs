@@ -201,7 +201,11 @@ impl RemoteInput {
 /// API with the underlying transport (network or virtual harness).
 pub trait RemoteRuntime: Send + Sync + fmt::Debug {
     /// Sends a message to the network.
-    fn send_message(&self, envelope: MessageEnvelope<RemoteMessage>) -> Result<(), RemoteError>;
+    fn send_message(
+        &self,
+        destination: &NodeId,
+        envelope: MessageEnvelope<RemoteMessage>,
+    ) -> Result<(), RemoteError>;
 
     /// Registers a pending local task expecting a result.
     fn register_task(
@@ -631,7 +635,7 @@ pub fn spawn_remote(
             sender_time,
             RemoteMessage::SpawnRequest(req),
         );
-        runtime.send_message(envelope)?;
+        runtime.send_message(&node, envelope)?;
     } else {
         // Phase 0: Drop sender (simulates network that never returns)
         // or keep it alive if we want to simulate timeout?
