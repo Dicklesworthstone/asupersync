@@ -922,6 +922,95 @@ impl<P: Policy> Scope<'_, P> {
         }
     }
 
+    /// Hedges a primary operation with a backup operation.
+    ///
+    /// 1. Spawns the primary task immediately.
+    /// 2. Waits for the delay.
+    /// 3. If primary finishes before delay: returns primary result.
+    /// 4. If delay fires: spawns backup task and races them.
+    ///
+    /// The loser is cancelled and drained.
+    ///
+    /// # Arguments
+    /// * `state` - The runtime state
+    /// * `cx` - The capability context
+    /// * `delay` - The hedge delay
+    /// * `primary` - The primary future factory
+    /// * `backup` - The backup future factory
+    ///
+    /// # Returns
+    /// `Ok(T)` if successful, `Err(JoinError)` if failed/cancelled.
+    pub async fn hedge<F1, Fut1, F2, Fut2, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        cx: &Cx<Caps>,
+        delay: std::time::Duration,
+        primary: F1,
+        backup: F2,
+    ) -> Result<T, JoinError>
+    where
+        Caps: cap::HasSpawn + cap::HasTime + Send + Sync + 'static,
+        F1: FnOnce(Cx<Caps>) -> Fut1 + Send + 'static,
+        Fut1: Future<Output = T> + Send + 'static,
+        F2: FnOnce(Cx<Caps>) -> Fut2 + Send + 'static,
+        Fut2: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use crate::combinator::select::Select;
+        use crate::combinator::Either;
+
+        // 1. Spawn primary
+        let h1 = self.spawn_registered(state, cx, primary)?;
+
+        // 2. Race primary vs delay
+        // We reuse the join future if it doesn't complete, so we must pin it.
+        // We use plain join() because we don't want to cancel h1 if the delay fires.
+        let f1_join = h1.join(cx);
+        let mut f1_pinned = Box::pin(f1_join);
+
+        // Compute deadline
+        let now = cx
+            .timer_driver()
+            .map(|d| d.now())
+            .unwrap_or_else(crate::time::wall_now);
+        let sleep_fut = crate::time::sleep(now, delay);
+        let mut sleep_pinned = Box::pin(sleep_fut);
+
+        match Select::new(&mut f1_pinned, &mut sleep_pinned).await {
+            Either::Left(res) => {
+                // Primary finished first
+                res
+            }
+            Either::Right(_) => {
+                // Timeout fired. Spawn backup.
+                let h2 = self.spawn_registered(state, cx, backup)?;
+
+                // Now race h1 and h2
+                // We reuse f1_pinned which is still pending.
+                // We create h2 join future.
+                let f2_join = h2.join(cx);
+                let mut f2_pinned = Box::pin(f2_join);
+
+                match Select::new(&mut f1_pinned, &mut f2_pinned).await {
+                    Either::Left(res) => {
+                        // Primary won race
+                        // Cancel h2
+                        h2.abort_with_reason(CancelReason::race_loser());
+                        let _ = f2_pinned.await; // Drain h2
+                        res
+                    }
+                    Either::Right(res) => {
+                        // Backup won race
+                        // Cancel h1
+                        h1.abort_with_reason(CancelReason::race_loser());
+                        let _ = f1_pinned.await; // Drain h1
+                        res
+                    }
+                }
+            }
+        }
+    }
+
     /// Races multiple tasks, waiting for the first to complete.
     ///
     /// The winner's result is returned. Losers are cancelled and drained.
