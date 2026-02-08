@@ -395,9 +395,100 @@ Next ==
 \* Deadlock checking is disabled because terminal states (all closed) are expected.
 Spec == Init /\ [][Next]_vars
 
-\* ---- Invariants (checked by TLC) ----
+\* ---- Core Invariants (checked by TLC) ----
 
-Inv == TypeInvariant /\ WellFormedInvariant /\ NoOrphanTasks
-       /\ NoLeakedObligations /\ CloseImpliesQuiescent
+CoreInv == TypeInvariant /\ WellFormedInvariant /\ NoOrphanTasks
+           /\ NoLeakedObligations /\ CloseImpliesQuiescent
+
+\* ===========================================================================
+\* SPORK PROOF HOOKS (bd-3s5mw)
+\*
+\* Invariant specifications for three key Spork properties:
+\*   SINV-1: Reply linearity (no dropped replies)
+\*   SINV-2: Supervision severity monotonicity
+\*   SINV-3: Registry lease resolution on region close
+\*
+\* These are expressed in terms of the existing obligation lifecycle model.
+\* In the bounded model, obligations abstract over both call-reply tokens
+\* and registry name leases — both use the same Reserve → Commit|Abort|Leak
+\* state machine. The invariants below confirm that the obligation lifecycle
+\* correctly enforces Spork's linearity guarantees.
+\*
+\* Cross-references:
+\*   Runtime oracles:  src/lab/oracle/spork.rs
+\*   Formal spec:      docs/spork_operational_semantics.md (S3, S4, S5, S8)
+\*   Lean proofs:      formal/lean/Asupersync.lean (SporkProofHooks section)
+\* ===========================================================================
+
+\* ---- SINV-1: Reply Linearity ----
+\*
+\* GenServer calls create obligations (Reserve). The Reply<R> token is
+\* the commitment mechanism: sending the reply is Commit, explicit drop
+\* is Abort, and failure to send is Leak (detected by oracle).
+\*
+\* In the bounded model, this reduces to: no alive obligation can remain
+\* in Reserved state when its holder's region is Closed.
+\* This is a strengthening of NoLeakedObligations applied per-obligation.
+
+ReplyLinearityInvariant ==
+    \A o \in ObligationIds :
+        obAlive[o] =>
+            (regionState[obRegion[o]] = "Closed" =>
+                obState[o] \in {"Committed", "Aborted", "Leaked"})
+
+\* ---- SINV-3: Registry Lease Resolution ----
+\*
+\* Registry name leases are obligations. When a region closes, all leases
+\* belonging to that region must be resolved. This is equivalent to
+\* SINV-1 but stated from the region's perspective.
+\*
+\* In the bounded model, this is: the ledger of any Closed region is empty.
+\* Already covered by NoLeakedObligations and CloseImpliesQuiescent,
+\* but stated explicitly for the Spork invariant cross-reference.
+
+RegistryLeaseInvariant ==
+    \A r \in RegionIds :
+        regionState[r] = "Closed" =>
+            /\ regionLedger[r] = {}
+            /\ \A o \in ObligationIds :
+                   (obAlive[o] /\ obRegion[o] = r) =>
+                       obState[o] \in {"Committed", "Aborted", "Leaked"}
+
+\* ---- SINV-2: Severity Monotonicity (proof sketch) ----
+\*
+\* The severity lattice Ok < Err < Cancelled < Panicked determines
+\* supervision restart eligibility:
+\*   - Ok:        Normal exit, never restart
+\*   - Err:       Transient fault, may restart (if policy allows)
+\*   - Cancelled: External directive, never restart
+\*   - Panicked:  Programming error, never restart
+\*
+\* This invariant cannot be directly model-checked in the current bounded
+\* model because the TLA+ spec abstracts away outcome severity (tasks
+\* simply transition to "Completed" without a severity tag).
+\*
+\* However, the structural property is verifiable:
+\*   - The severity lattice is a total order (proved in Lean: Severity.le_total)
+\*   - Restart eligibility is monotone: only Err maps to Restart
+\*     (proved in Lean: panicked_never_restartable, cancelled_never_restartable)
+\*   - The oracle SupervisionOracle in src/lab/oracle/actor.rs verifies
+\*     restart decisions at runtime
+\*
+\* For future model extension, the invariant would be:
+\*
+\* SeverityMonotonicityInvariant ==
+\*     \A t \in TaskIds :
+\*         taskAlive[t] /\ taskState[t] = "Completed" =>
+\*             LET sev == taskSeverity[t]
+\*             IN  (sev \in {"Cancelled", "Panicked"}) =>
+\*                     supervisorDecision[t] \in {"Stop", "Escalate"}
+
+\* ---- Combined Spork Invariant ----
+
+SporkInv == ReplyLinearityInvariant /\ RegistryLeaseInvariant
+
+\* ---- Combined Invariant (core + Spork) ----
+
+Inv == CoreInv /\ SporkInv
 
 ================================================================================
