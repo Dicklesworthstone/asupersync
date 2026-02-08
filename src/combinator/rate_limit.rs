@@ -34,7 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crate::types::Time;
@@ -210,16 +210,22 @@ struct QueueEntry {
 /// Fixed-point scale for token storage (allows fractional tokens).
 const FIXED_POINT_SCALE: u64 = 1000;
 
+/// Internal state of the token bucket.
+struct BucketState {
+    /// Token bucket state (stored as fixed-point).
+    /// tokens * FIXED_POINT_SCALE to allow fractional tokens.
+    tokens_fixed: u64,
+
+    /// Last refill time (as millis since epoch).
+    last_refill: u64,
+}
+
 /// Thread-safe rate limiter using token bucket algorithm.
 pub struct RateLimiter {
     policy: RateLimitPolicy,
 
-    /// Token bucket state (stored as fixed-point for atomicity).
-    /// tokens * FIXED_POINT_SCALE to allow fractional tokens.
-    tokens_fixed: AtomicU64,
-
-    /// Last refill time (as millis since epoch).
-    last_refill: AtomicU64,
+    /// Protected bucket state.
+    state: Mutex<BucketState>,
 
     /// Waiting queue for FIFO ordering.
     wait_queue: RwLock<VecDeque<QueueEntry>>,
@@ -229,9 +235,6 @@ pub struct RateLimiter {
 
     /// Metrics.
     metrics: RwLock<RateLimitMetrics>,
-
-    /// Total wait time accumulator (ms).
-    total_wait_ms: AtomicU64,
 }
 
 impl RateLimiter {
@@ -242,12 +245,13 @@ impl RateLimiter {
 
         Self {
             policy,
-            tokens_fixed: AtomicU64::new(initial_tokens),
-            last_refill: AtomicU64::new(0),
+            state: Mutex::new(BucketState {
+                tokens_fixed: initial_tokens,
+                last_refill: 0,
+            }),
             wait_queue: RwLock::new(VecDeque::new()),
             next_id: AtomicU64::new(0),
             metrics: RwLock::new(RateLimitMetrics::default()),
-            total_wait_ms: AtomicU64::new(0),
         }
     }
 
@@ -268,60 +272,39 @@ impl RateLimiter {
     #[allow(clippy::cast_precision_loss)]
     pub fn metrics(&self) -> RateLimitMetrics {
         let mut m = self.metrics.read().expect("lock poisoned").clone();
-        m.available_tokens =
-            self.tokens_fixed.load(Ordering::SeqCst) as f64 / FIXED_POINT_SCALE as f64;
+        let state = self.state.lock().expect("lock poisoned");
+        m.available_tokens = state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64;
         m
     }
 
     /// Refill tokens based on elapsed time.
     ///
-    /// Uses CAS on `last_refill` to ensure only one thread adds tokens for any
-    /// given time period, preventing double-refill race conditions.
+    /// Requires lock on state.
     #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-    fn refill(&self, now: Time) {
-        let now_millis = now.as_millis();
-        let period_ms = self.policy.period.as_millis() as f64;
-        let tokens_per_ms = (f64::from(self.policy.rate) / period_ms) * FIXED_POINT_SCALE as f64;
-        let max_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
-
-        // CAS loop on last_refill to claim the refill operation
-        loop {
-            let last = self.last_refill.load(Ordering::SeqCst);
-
-            if now_millis <= last {
-                return; // Already refilled up to this time
-            }
-
-            // Try to claim this refill by updating last_refill first
-            if self
-                .last_refill
-                .compare_exchange(last, now_millis, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
-                // Someone else updated last_refill, retry
-                continue;
-            }
-
-            // We won the race - now calculate and add tokens
-            let elapsed_ms = now_millis - last;
-            let tokens_to_add = (elapsed_ms as f64 * tokens_per_ms) as u64;
-
-            // CAS loop to add tokens
-            loop {
-                let current = self.tokens_fixed.load(Ordering::SeqCst);
-                let new_tokens = (current + tokens_to_add).min(max_tokens);
-
-                if self
-                    .tokens_fixed
-                    .compare_exchange(current, new_tokens, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-
+    fn refill_inner(&self, state: &mut BucketState, now_millis: u64) {
+        if now_millis <= state.last_refill {
             return;
         }
+
+        let elapsed_ms = now_millis - state.last_refill;
+        let period_ms = self.policy.period.as_millis() as f64;
+
+        if period_ms > 0.0 {
+            let tokens_per_ms =
+                (f64::from(self.policy.rate) / period_ms) * FIXED_POINT_SCALE as f64;
+            let tokens_to_add = (elapsed_ms as f64 * tokens_per_ms) as u64;
+            let max_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
+
+            state.tokens_fixed = (state.tokens_fixed + tokens_to_add).min(max_tokens);
+        }
+
+        state.last_refill = now_millis;
+    }
+
+    /// Refill tokens based on elapsed time from the provided deterministic clock.
+    pub fn refill(&self, now: Time) {
+        let mut state = self.state.lock().expect("lock poisoned");
+        self.refill_inner(&mut state, now.as_millis());
     }
 
     /// Try to acquire tokens without waiting.
@@ -329,29 +312,21 @@ impl RateLimiter {
     /// Returns `true` if tokens were acquired, `false` if insufficient tokens.
     #[must_use]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
-        self.refill(now);
+        let mut state = self.state.lock().expect("lock poisoned");
+        let now_millis = now.as_millis();
+
+        self.refill_inner(&mut state, now_millis);
 
         let cost_fixed = u64::from(cost) * FIXED_POINT_SCALE;
 
-        loop {
-            let current = self.tokens_fixed.load(Ordering::SeqCst);
-            if current < cost_fixed {
-                return false;
-            }
+        if state.tokens_fixed >= cost_fixed {
+            state.tokens_fixed -= cost_fixed;
+            drop(state); // Release lock before updating metrics
 
-            if self
-                .tokens_fixed
-                .compare_exchange(
-                    current,
-                    current - cost_fixed,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                self.metrics.write().expect("lock poisoned").total_allowed += 1;
-                return true;
-            }
+            self.metrics.write().expect("lock poisoned").total_allowed += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -401,9 +376,11 @@ impl RateLimiter {
         clippy::cast_sign_loss
     )]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
-        self.refill(now);
-
-        let current_fixed = self.tokens_fixed.load(Ordering::SeqCst);
+        let current_fixed = {
+            let mut state = self.state.lock().expect("lock poisoned");
+            self.refill_inner(&mut state, now.as_millis());
+            state.tokens_fixed
+        };
         let cost_fixed = u64::from(cost) * FIXED_POINT_SCALE;
 
         if current_fixed >= cost_fixed {
@@ -440,7 +417,8 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn available_tokens(&self) -> f64 {
-        self.tokens_fixed.load(Ordering::SeqCst) as f64 / FIXED_POINT_SCALE as f64
+        let state = self.state.lock().expect("lock poisoned");
+        state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
     }
 
     // =========================================================================
@@ -509,45 +487,40 @@ impl RateLimiter {
             }
         }
 
-        // Refill tokens
-        drop(queue);
-        self.refill(now);
-        let mut queue = self.wait_queue.write().expect("lock poisoned");
+        // Try to grant awaiting entries
+        let mut first_granted = None;
+        let mut state = self.state.lock().expect("lock poisoned");
+        self.refill_inner(&mut state, now_millis);
 
-        // FIFO: only grant the first waiting entry
-        let entry = queue.iter_mut().find(|entry| entry.result.is_none())?;
-
-        let cost_fixed = u64::from(entry.cost) * FIXED_POINT_SCALE;
-
-        // CAS loop to consume tokens safely (prevents TOCTOU race with try_acquire)
-        let tokens_consumed = loop {
-            let current = self.tokens_fixed.load(Ordering::SeqCst);
-            if current < cost_fixed {
-                break false; // Not enough tokens
+        for entry in queue.iter_mut() {
+            // Skip already processed (granted/timeout/cancelled)
+            if entry.result.is_some() {
+                continue;
             }
-            if self
-                .tokens_fixed
-                .compare_exchange(
-                    current,
-                    current - cost_fixed,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                break true; // Successfully consumed tokens
-            }
-            // CAS failed, another thread consumed tokens, retry
-        };
 
-        if tokens_consumed {
-            entry.result = Some(Ok(()));
+            let cost_fixed = u64::from(entry.cost) * FIXED_POINT_SCALE;
 
-            // Record wait time
-            let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
-            self.total_wait_ms.fetch_add(wait_ms, Ordering::Relaxed);
+            if state.tokens_fixed >= cost_fixed {
+                state.tokens_fixed -= cost_fixed;
+                entry.result = Some(Ok(()));
 
-            {
+                if first_granted.is_none() {
+                    first_granted = Some(entry.id);
+                }
+
+                // Update metrics
+                let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
+                // Release state lock temporarily? No, metrics lock is fine inside state lock if order is consistent.
+                // But wait_queue lock is held. Hierarchy: wait_queue -> state -> metrics?
+                // Current: wait_queue held. state held.
+                // try_acquire: state held. metrics held.
+                // So metrics should be acquired inside state.
+                // Wait, enqueue: wait_queue held. metrics held.
+                // So wait_queue -> metrics.
+                // try_acquire: state -> metrics.
+                // process_queue: wait_queue -> state -> metrics.
+                // This seems consistent.
+
                 let mut metrics = self.metrics.write().expect("lock poisoned");
                 metrics.total_allowed += 1;
                 let wait_duration = Duration::from_millis(wait_ms);
@@ -558,16 +531,17 @@ impl RateLimiter {
                 }
 
                 if metrics.total_waited > 0 {
-                    metrics.avg_wait_time = Duration::from_millis(
-                        self.total_wait_ms.load(Ordering::Relaxed) / metrics.total_waited,
-                    );
+                    let total_ms = metrics.total_wait_time.as_millis() as u64;
+                    metrics.avg_wait_time = Duration::from_millis(total_ms / metrics.total_waited);
                 }
+            } else {
+                // Stop at first ungrantable entry to preserve FIFO order?
+                // Yes, generally rate limiters should be FIFO.
+                break;
             }
-
-            return Some(entry.id);
         }
 
-        None
+        first_granted
     }
 
     /// Check the status of a queued entry.
@@ -634,8 +608,12 @@ impl RateLimiter {
     /// Reset the rate limiter to full capacity.
     pub fn reset(&self) {
         let initial_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
-        self.tokens_fixed.store(initial_tokens, Ordering::SeqCst);
-        self.last_refill.store(0, Ordering::SeqCst);
+
+        {
+            let mut state = self.state.lock().expect("lock poisoned");
+            state.tokens_fixed = initial_tokens;
+            state.last_refill = 0;
+        }
 
         let mut queue = self.wait_queue.write().expect("lock poisoned");
         for entry in queue.iter_mut() {

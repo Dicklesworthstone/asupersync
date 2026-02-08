@@ -725,6 +725,8 @@ struct GenericPoolState<R> {
     idle: std::collections::VecDeque<IdleResource<R>>,
     /// Number of resources currently in use.
     active: usize,
+    /// Number of resources currently being created asynchronously.
+    creating: usize,
     /// Total resources ever created.
     total_created: u64,
     /// Total acquisitions.
@@ -772,7 +774,8 @@ where
         }
 
         // If resources are available, we are ready.
-        if !state.idle.is_empty() || state.active < self.pool.config.max_size {
+        let total_including_creating = state.active + state.idle.len() + state.creating;
+        if !state.idle.is_empty() || total_including_creating < self.pool.config.max_size {
             // If we were waiting, remove ourselves
             if let Some(id) = self.waiter_id {
                 state.waiters.retain(|w| w.id != id);
@@ -824,6 +827,66 @@ where
             if let Ok(mut state) = self.pool.state.lock() {
                 state.waiters.retain(|w| w.id != id);
             }
+        }
+    }
+}
+
+/// Reservation for an in-flight resource creation slot.
+///
+/// This ensures pool capacity accounting remains correct across async suspend
+/// points: if acquire is cancelled while creating a resource, the reservation
+/// is released in `Drop`.
+struct CreateSlotReservation<'a, R, F>
+where
+    R: Send + 'static,
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    pool: &'a GenericPool<R, F>,
+    committed: bool,
+}
+
+impl<'a, R, F> CreateSlotReservation<'a, R, F>
+where
+    R: Send + 'static,
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    fn try_reserve(pool: &'a GenericPool<R, F>) -> Option<Self> {
+        if pool.reserve_create_slot() {
+            Some(Self {
+                pool,
+                committed: false,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn commit(mut self) {
+        self.pool.commit_create_slot();
+        self.committed = true;
+    }
+}
+
+impl<R, F> Drop for CreateSlotReservation<'_, R, F>
+where
+    R: Send + 'static,
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    fn drop(&mut self) {
+        if !self.committed {
+            self.pool.release_create_slot();
         }
     }
 }
@@ -885,6 +948,7 @@ where
             state: std::sync::Mutex::new(GenericPoolState {
                 idle: std::collections::VecDeque::new(),
                 active: 0,
+                creating: 0,
                 total_created: 0,
                 total_acquisitions: 0,
                 total_wait_time: Duration::ZERO,
@@ -967,7 +1031,9 @@ where
     ///   [`PoolConfig::min_size`] resources were created.
     /// - [`WarmupStrategy::BestEffort`]: Never returns an error from warmup.
     pub async fn warmup(&self) -> Result<usize, PoolError> {
-        let target = self.config.warmup_connections;
+        let existing = self.total_count();
+        let capacity = self.config.max_size.saturating_sub(existing);
+        let target = self.config.warmup_connections.min(capacity);
         if target == 0 {
             return Ok(0);
         }
@@ -1119,15 +1185,42 @@ where
         result
     }
 
-    /// Get current total count (active + idle).
+    /// Get current total count (active + idle + in-flight creates).
     fn total_count(&self) -> usize {
         let state = self.state.lock().expect("pool state lock poisoned");
-        state.active + state.idle.len()
+        state.active + state.idle.len() + state.creating
     }
 
-    /// Check if we can create a new resource.
-    fn can_create(&self) -> bool {
-        self.total_count() < self.config.max_size
+    /// Reserve a creation slot under max-size accounting.
+    fn reserve_create_slot(&self) -> bool {
+        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let total = state.active + state.idle.len() + state.creating;
+        if state.closed || total >= self.config.max_size {
+            return false;
+        }
+        state.creating += 1;
+        true
+    }
+
+    /// Release an uncommitted creation slot and notify one waiter.
+    fn release_create_slot(&self) {
+        let waiter = {
+            let mut state = self.state.lock().expect("pool state lock poisoned");
+            state.creating = state.creating.saturating_sub(1);
+            state.waiters.pop_front()
+        };
+        if let Some(waiter) = waiter {
+            waiter.waker.wake();
+        }
+    }
+
+    /// Commit a completed creation slot into active accounting.
+    fn commit_create_slot(&self) {
+        let mut state = self.state.lock().expect("pool state lock poisoned");
+        state.creating = state.creating.saturating_sub(1);
+        state.active += 1;
+        state.total_acquisitions += 1;
+        state.total_created += 1;
     }
 
     /// Create a new resource using the factory.
@@ -1149,14 +1242,6 @@ where
     fn remove_waiter(&self, id: u64) {
         let mut state = self.state.lock().expect("pool state lock poisoned");
         state.waiters.retain(|w| w.id != id);
-    }
-
-    /// Record that a resource was acquired (internal state update).
-    fn record_acquisition(&self) {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
-        state.active += 1;
-        state.total_acquisitions += 1;
-        state.total_created += 1;
     }
 
     /// Update metrics gauges from current pool state.
@@ -1240,9 +1325,9 @@ where
                 }
 
                 // Try to create a new resource if under capacity
-                if self.can_create() {
+                if let Some(create_slot) = CreateSlotReservation::try_reserve(self) {
                     let resource = self.create_resource().await?;
-                    self.record_acquisition();
+                    create_slot.commit();
                     let acquire_duration = acquire_start.elapsed();
 
                     // Record metrics for create and acquire
@@ -1881,6 +1966,50 @@ mod tests {
     }
 
     #[test]
+    fn create_slot_reservation_enforces_max_size_and_releases_on_drop() {
+        init_test("create_slot_reservation_enforces_max_size_and_releases_on_drop");
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+
+        let slot1 = CreateSlotReservation::try_reserve(&pool);
+        crate::assert_with_log!(
+            slot1.is_some(),
+            "first slot reserved",
+            true,
+            slot1.is_some()
+        );
+
+        let slot2 = CreateSlotReservation::try_reserve(&pool);
+        crate::assert_with_log!(
+            slot2.is_none(),
+            "second slot blocked at max_size=1",
+            true,
+            slot2.is_none()
+        );
+
+        drop(slot1);
+
+        let slot3 = CreateSlotReservation::try_reserve(&pool);
+        crate::assert_with_log!(
+            slot3.is_some(),
+            "slot released when reservation dropped",
+            true,
+            slot3.is_some()
+        );
+        if let Some(slot) = slot3 {
+            slot.commit();
+        }
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.active == 1,
+            "commit converts reserved slot to active resource",
+            1usize,
+            stats.active
+        );
+        crate::test_complete!("create_slot_reservation_enforces_max_size_and_releases_on_drop");
+    }
+
+    #[test]
     fn generic_pool_try_acquire_creates_resource() {
         init_test("generic_pool_try_acquire_creates_resource");
 
@@ -2345,6 +2474,23 @@ mod tests {
         assert_eq!(stats.active, 0, "no active resources");
 
         crate::test_complete!("warmup_creates_resources");
+    }
+
+    #[test]
+    fn warmup_respects_max_size() {
+        init_test("warmup_respects_max_size");
+
+        let config = PoolConfig::with_max_size(2).warmup_connections(5);
+        let pool = GenericPool::new(simple_factory, config);
+
+        let created = futures_lite::future::block_on(pool.warmup()).expect("warmup should succeed");
+        assert_eq!(created, 2, "warmup must not exceed max_size");
+
+        let stats = pool.stats();
+        assert_eq!(stats.idle, 2, "idle resources capped by max_size");
+        assert_eq!(stats.total, 2, "total resources capped by max_size");
+
+        crate::test_complete!("warmup_respects_max_size");
     }
 
     #[test]
