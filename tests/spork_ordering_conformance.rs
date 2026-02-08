@@ -1,18 +1,17 @@
-use asupersync::gen_server::{SystemMsg, SystemMsgBatch, SystemMsgSubjectKey};
-use asupersync::monitor::{DownNotification, DownReason};
-use asupersync::supervision::{
-    ChildSpec, RestartPolicy, StartTieBreak, SupervisionStrategy, SupervisorBuilder,
-};
-use asupersync::types::{Outcome, TaskId, Time};
+use asupersync::gen_server::{SystemMsg, SystemMsgBatch};
+use asupersync::monitor::{DownNotification, DownReason, MonitorRef};
+use asupersync::runtime::{RuntimeState, SpawnError};
+use asupersync::supervision::{ChildSpec, StartTieBreak, SupervisorBuilder};
+use asupersync::types::{TaskId, Time};
 
 /// Helper to create a dummy SystemMsg for testing ordering.
 fn make_down(vt: u64, tid: u32) -> SystemMsg {
     SystemMsg::Down {
         completion_vt: Time::from_nanos(vt),
         notification: DownNotification {
-            monitored: TaskId::new(0, tid),
-            reason: DownReason::Outcome(Outcome::Ok(())),
-            monitor_ref_id: 0,
+            monitored: TaskId::new_for_test(tid, 0),
+            reason: DownReason::Normal,
+            monitor_ref: MonitorRef::new_for_test(0),
         },
     }
 }
@@ -20,8 +19,8 @@ fn make_down(vt: u64, tid: u32) -> SystemMsg {
 fn make_exit(vt: u64, tid: u32) -> SystemMsg {
     SystemMsg::Exit {
         exit_vt: Time::from_nanos(vt),
-        from: TaskId::new(0, tid),
-        reason: DownReason::Outcome(Outcome::Ok(())),
+        from: TaskId::new_for_test(tid, 0),
+        reason: DownReason::Normal,
     }
 }
 
@@ -94,8 +93,8 @@ fn test_sys_msg_batch_ordering() {
         },
     ) = (&sorted[1], &sorted[2])
     {
-        assert_eq!(n1.monitored.index(), 2);
-        assert_eq!(n2.monitored.index(), 99);
+        assert_eq!(n1.monitored.arena_index().index(), 2);
+        assert_eq!(n2.monitored.arena_index().index(), 99);
     } else {
         panic!("Unexpected message types at index 1 and 2");
     }
@@ -106,11 +105,17 @@ fn test_supervisor_shutdown_order() {
     // Contract SUP-STOP: Children are stopped in reverse start order.
     // Start order is determined by dependencies (topological sort).
 
-    let child_a = ChildSpec::new("A", |_, _, _| Ok(TaskId::new(0, 1)));
-    let mut child_b = ChildSpec::new("B", |_, _, _| Ok(TaskId::new(0, 2)));
-    child_b.depends_on.push("A".to_string()); // B depends on A
-    let mut child_c = ChildSpec::new("C", |_, _, _| Ok(TaskId::new(0, 3)));
-    child_c.depends_on.push("B".to_string()); // C depends on B
+    fn noop_start(
+        _scope: &asupersync::cx::Scope<'static, asupersync::types::policy::FailFast>,
+        _state: &mut RuntimeState,
+        _cx: &asupersync::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
+        Ok(TaskId::new_for_test(0, 1))
+    }
+
+    let child_a = ChildSpec::new("A", noop_start);
+    let child_b = ChildSpec::new("B", noop_start).depends_on("A");
+    let child_c = ChildSpec::new("C", noop_start).depends_on("B");
 
     // Builder insertion order: C, B, A (reverse of dependency)
     let builder = SupervisorBuilder::new("sup")

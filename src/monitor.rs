@@ -69,6 +69,13 @@ impl MonitorRef {
         Self(id)
     }
 
+    /// Creates a `MonitorRef` for integration testing purposes.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new_for_test(id: u64) -> Self {
+        Self(id)
+    }
+
     /// Returns the underlying numeric identifier.
     #[must_use]
     pub fn id(self) -> u64 {
