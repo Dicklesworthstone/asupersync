@@ -726,7 +726,8 @@ impl TimerWheel {
         // accessing self.active / self.coalescing through &mut self.
         let mut ready = std::mem::take(&mut self.ready);
 
-        // Calculate the coalesced time boundary if coalescing is enabled
+        // Calculate the coalesced time boundary if coalescing is enabled.
+        // Coalescing only applies when there are enough timers in-window.
         let coalesced_time = if self.coalescing.enabled {
             let window_ns = self
                 .coalescing
@@ -743,6 +744,14 @@ impl TimerWheel {
         } else {
             None
         };
+        let coalescing_enabled = coalesced_time.is_some_and(|boundary| {
+            let min_group_size = self.coalescing.min_group_size.max(1);
+            ready
+                .iter()
+                .filter(|entry| self.is_live(entry) && entry.deadline <= boundary)
+                .count()
+                >= min_group_size
+        });
 
         // Process in-place with swap_remove — no separate `remaining` allocation.
         let mut i = 0;
@@ -752,10 +761,12 @@ impl TimerWheel {
                 continue;
             }
 
-            let should_fire = coalesced_time.map_or_else(
-                || ready[i].deadline <= now,
-                |coalesced| ready[i].deadline <= coalesced,
-            );
+            let should_fire = if coalescing_enabled {
+                let coalesced = coalesced_time.expect("coalesced time present");
+                ready[i].deadline <= coalesced
+            } else {
+                ready[i].deadline <= now
+            };
 
             if should_fire {
                 let entry = ready.swap_remove(i);
@@ -776,12 +787,13 @@ impl TimerWheel {
     /// This is useful for monitoring coalescing effectiveness.
     #[must_use]
     pub fn coalescing_group_size(&self, now: Time) -> usize {
+        let expired_count = self
+            .ready
+            .iter()
+            .filter(|e| self.is_live(e) && e.deadline <= now)
+            .count();
         if !self.coalescing.enabled {
-            return self
-                .ready
-                .iter()
-                .filter(|e| self.is_live(e) && e.deadline <= now)
-                .count();
+            return expired_count;
         }
 
         let window_ns = self
@@ -790,21 +802,24 @@ impl TimerWheel {
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
         if window_ns == 0 {
-            return self
-                .ready
-                .iter()
-                .filter(|e| self.is_live(e) && e.deadline <= now)
-                .count();
+            return expired_count;
         }
 
         let now_ns = now.as_nanos();
         let window_end_ns = ((now_ns / window_ns) + 1) * window_ns;
         let coalesced_time = Time::from_nanos(window_end_ns);
 
-        self.ready
+        let coalesced_count = self
+            .ready
             .iter()
             .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
-            .count()
+            .count();
+
+        if coalesced_count >= self.coalescing.min_group_size.max(1) {
+            coalesced_count
+        } else {
+            expired_count
+        }
     }
 
     fn is_live(&self, entry: &TimerEntry) -> bool {
@@ -1152,26 +1167,56 @@ mod tests {
         let mut wheel =
             TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
 
-        // Register only 3 timers within the window
+        // Register only 3 timers in the coalesce window.
         let counter = Arc::new(AtomicU64::new(0));
-        for i in 0..3 {
+        for deadline in [
+            Time::from_nanos(100_000),   // 0.1ms
+            Time::from_nanos(2_000_000), // 2ms
+            Time::from_nanos(4_000_000), // 4ms
+        ] {
             let waker = counter_waker(counter.clone());
-            wheel.register(Time::from_nanos(i * 100_000), waker); // 0, 0.1ms, 0.2ms
+            wheel.register(deadline, waker);
         }
 
-        // Even though we have coalescing enabled, group_size < min_group_size
-        // means these timers fire based on their actual deadlines
-        // (Note: min_group_size doesn't prevent coalescing, it's advisory)
+        // At 1ms, only the first timer is actually expired. Coalescing should
+        // not pull in 2ms/4ms timers because group size is below the threshold.
         let wakers = wheel.collect_expired(Time::from_millis(1));
-        // With current implementation, coalescing still fires them together
-        // because they're within the window and deadlines <= coalesced_time
         crate::assert_with_log!(
-            wakers.len() == 3,
-            "timers within window fire together",
-            3,
+            wakers.len() == 1,
+            "coalescing gate keeps sparse timers on deadline",
+            1,
             wakers.len()
         );
         crate::test_complete!("coalescing_min_group_size");
+    }
+
+    #[test]
+    fn coalescing_min_group_size_enables_window_when_threshold_met() {
+        init_test("coalescing_min_group_size_enables_window_when_threshold_met");
+        let coalescing = CoalescingConfig::new()
+            .coalesce_window(Duration::from_millis(5))
+            .min_group_size(3)
+            .enable();
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        for deadline in [
+            Time::from_nanos(100_000),   // 0.1ms
+            Time::from_nanos(2_000_000), // 2ms
+            Time::from_nanos(4_000_000), // 4ms
+        ] {
+            wheel.register(deadline, counter_waker(counter.clone()));
+        }
+
+        let wakers = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            wakers.len() == 3,
+            "coalescing enabled when threshold met",
+            3,
+            wakers.len()
+        );
+        crate::test_complete!("coalescing_min_group_size_enables_window_when_threshold_met");
     }
 
     // =========================================================================
