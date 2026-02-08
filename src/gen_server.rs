@@ -2003,6 +2003,76 @@ mod tests {
     }
 
     #[test]
+    fn gen_server_handle_rejects_call_and_cast_after_stop() {
+        init_test("gen_server_handle_rejects_call_and_cast_after_stop");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        // Let the server start, then request stop.
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_idle();
+        handle.stop();
+
+        let call_err =
+            futures_lite::future::block_on(handle.call(&cx, CounterCall::Get)).unwrap_err();
+        assert!(
+            matches!(call_err, CallError::ServerStopped),
+            "call after stop must return ServerStopped, got {call_err:?}"
+        );
+
+        let cast_err =
+            futures_lite::future::block_on(handle.cast(&cx, CounterCast::Reset)).unwrap_err();
+        assert!(
+            matches!(cast_err, CastError::ServerStopped),
+            "cast after stop must return ServerStopped, got {cast_err:?}"
+        );
+
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+        assert!(handle.is_finished());
+
+        crate::test_complete!("gen_server_handle_rejects_call_and_cast_after_stop");
+    }
+
+    #[test]
+    fn gen_server_handle_join_returns_final_state_after_stop() {
+        init_test("gen_server_handle_join_returns_final_state_after_stop");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        handle.stop();
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+        assert!(handle.is_finished());
+
+        let final_state = futures_lite::future::block_on(handle.join(&cx)).expect("join");
+        assert_eq!(
+            final_state.count, 0,
+            "final server state should be returned"
+        );
+
+        crate::test_complete!("gen_server_handle_join_returns_final_state_after_stop");
+    }
+
+    #[test]
     fn gen_server_stop_wakes_blocked_mailbox_recv() {
         #[allow(clippy::items_after_statements)]
         struct StopWakeProbe {
