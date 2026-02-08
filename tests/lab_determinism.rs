@@ -129,7 +129,15 @@ fn run_tasks_with_seed(seed: u64, task_count: usize, yields_per_task: usize) -> 
         task_ids.push(task_id);
     }
 
-    // Schedule all tasks at the same priority (creates non-determinism opportunity)
+    // Shuffle scheduling order deterministically from the seed so different seeds
+    // exercise different interleavings while remaining replayable.
+    let mut rng = DetRng::new(seed);
+    for i in (1..task_ids.len()).rev() {
+        let j = rng.next_usize(i + 1);
+        task_ids.swap(i, j);
+    }
+
+    // Schedule all tasks at the same priority.
     for task_id in task_ids {
         runtime.scheduler.lock().unwrap().schedule(task_id, 0);
     }
