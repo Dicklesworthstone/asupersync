@@ -62,6 +62,7 @@ pub mod oracle;
 pub mod replay;
 pub mod runtime;
 pub mod snapshot_restore;
+pub mod spork_harness;
 pub mod virtual_time_wheel;
 
 pub use crate::util::{
@@ -115,6 +116,7 @@ pub use runtime::{
     HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary, LabRunReport, LabRuntime,
     LabTraceCertificateSummary, SporkHarnessReport,
 };
+pub use spork_harness::{HarnessError, SporkAppHarness};
 pub use snapshot_restore::{
     RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
 };
