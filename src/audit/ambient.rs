@@ -116,7 +116,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 589,
+        line: 622,
         category: AmbientCategory::Spawn,
         severity: Severity::Info,
         description: "Worker thread spawning in blocking pool",

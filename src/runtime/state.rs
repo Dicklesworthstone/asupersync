@@ -1953,8 +1953,8 @@ impl RuntimeState {
             return false;
         };
 
-        // Allow registration in any non-terminal state
-        if region.state().is_terminal() {
+        // Reject registration once the region has begun closing or is terminal
+        if region.state().is_closing() || region.state().is_terminal() {
             return false;
         }
 
@@ -1982,8 +1982,8 @@ impl RuntimeState {
             return false;
         };
 
-        // Allow registration in any non-terminal state
-        if region.state().is_terminal() {
+        // Reject registration once the region has begun closing or is terminal
+        if region.state().is_closing() || region.state().is_terminal() {
             return false;
         }
 
