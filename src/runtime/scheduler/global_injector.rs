@@ -212,6 +212,16 @@ impl GlobalInjector {
             && self.ready_queue.is_empty()
     }
 
+    /// Returns true if there is work that can be executed immediately.
+    #[must_use]
+    pub fn has_runnable_work(&self, now: Time) -> bool {
+        if !self.cancel_queue.is_empty() || !self.ready_queue.is_empty() {
+            return true;
+        }
+        let queue = self.timed_queue.lock().unwrap();
+        queue.heap.peek().is_some_and(|t| t.deadline <= now)
+    }
+
     /// Returns the approximate number of pending tasks across all lanes.
     #[must_use]
     pub fn len(&self) -> usize {

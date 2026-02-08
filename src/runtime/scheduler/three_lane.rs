@@ -929,27 +929,38 @@ impl ThreeLaneWorker {
             // PHASE 6: Backoff before parking
             let mut backoff = 0;
 
+            // Fast queue is Single Producer (this worker). If it's empty here, it stays empty
+            // because only this worker pushes to it (via spawn/steal), and we are in the backoff loop.
+            // So we don't need to check it inside the loop.
+            if !self.fast_queue.is_empty() {
+                continue;
+            }
+
             loop {
                 // Check shutdown before parking to avoid hanging in the backoff loop.
                 if self.shutdown.load(Ordering::Acquire) {
                     break;
                 }
 
-                // Quick check for new work in global, fast, and local queues.
-                let local_has_work = self
+                // Get current time for runnable checks
+                let now = self
+                    .timer_driver
+                    .as_ref()
+                    .map_or(Time::ZERO, TimerDriverHandle::now);
+
+                // Quick check for new work in global and local queues.
+                // We use has_runnable_work(now) to avoid busy-looping on future timed tasks.
+                let local_has_runnable = self
                     .local
                     .lock()
-                    .map(|local| !local.is_empty())
+                    .map(|local| local.has_runnable_work(now))
                     .unwrap_or(false);
                 let local_ready_has_work = self
                     .local_ready
                     .lock()
                     .map(|q| !q.is_empty())
                     .unwrap_or(false);
-                if !self.global.is_empty()
-                    || !self.fast_queue.is_empty()
-                    || local_has_work
-                    || local_ready_has_work
+                if self.global.has_runnable_work(now) || local_has_runnable || local_ready_has_work
                 {
                     break;
                 }
@@ -963,26 +974,35 @@ impl ThreeLaneWorker {
                 } else if self.enable_parking {
                     // Park with timeout based on next timer deadline or IO polling needs.
                     let has_io = self.io_driver.is_some();
-                    if let Some(timer) = &self.timer_driver {
-                        if let Some(next_deadline) = timer.next_deadline() {
-                            let now = timer.now();
-                            if next_deadline > now {
-                                let nanos = next_deadline.duration_since(now);
-                                self.parker.park_timeout(Duration::from_nanos(nanos));
-                            } else {
-                                // If deadline is due or passed, don't park - break to process timers.
-                                break;
-                            }
-                        } else if has_io {
-                            // No pending timers but IO driver is active;
-                            // use short timeout so we periodically poll the reactor.
-                            self.parker.park_timeout(Duration::from_millis(1));
+
+                    // Calculate earliest deadline from all sources
+                    let timer_deadline = self
+                        .timer_driver
+                        .as_ref()
+                        .and_then(TimerDriverHandle::next_deadline);
+                    let local_deadline = self.local.lock().ok().and_then(|l| l.next_deadline());
+                    let global_deadline = self.global.peek_earliest_deadline();
+
+                    let next_deadline = [timer_deadline, local_deadline, global_deadline]
+                        .into_iter()
+                        .flatten()
+                        .min();
+
+                    if let Some(next_deadline) = next_deadline {
+                        // Re-fetch now to ensure we don't sleep if deadline passed during logic
+                        let now = self
+                            .timer_driver
+                            .as_ref()
+                            .map_or(Time::ZERO, TimerDriverHandle::now);
+                        if next_deadline > now {
+                            let nanos = next_deadline.duration_since(now);
+                            self.parker.park_timeout(Duration::from_nanos(nanos));
                         } else {
-                            // No pending timers and no IO, park indefinitely.
-                            self.parker.park();
+                            // If deadline is due or passed, don't park - break to process timers/tasks.
+                            break;
                         }
                     } else if has_io {
-                        // No timer driver but IO driver is active;
+                        // No pending timers but IO driver is active;
                         // use short timeout so we periodically poll the reactor.
                         self.parker.park_timeout(Duration::from_millis(1));
                     } else {
