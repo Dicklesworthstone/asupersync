@@ -222,4 +222,27 @@ mod tests {
         table.remove_task(TaskId::from_arena(idx1));
         assert_eq!(table.live_task_count(), 1);
     }
+
+    #[test]
+    fn store_and_remove_stored_future() {
+        use crate::runtime::stored_task::StoredTask;
+        use crate::types::Outcome;
+
+        let mut table = TaskTable::new();
+        let idx = table.insert_task(make_task_record(RegionId::from_arena(ArenaIndex::new(
+            1, 0,
+        ))));
+        let task_id = TaskId::from_arena(idx);
+
+        let stored = StoredTask::new(async { Outcome::Ok(()) });
+        table.store_spawned_task(task_id, stored);
+
+        assert_eq!(table.stored_future_count(), 1);
+        assert!(table.get_stored_future(task_id).is_some());
+
+        let removed = table.remove_stored_future(task_id);
+        assert!(removed.is_some());
+        assert_eq!(table.stored_future_count(), 0);
+        assert!(table.get_stored_future(task_id).is_none());
+    }
 }

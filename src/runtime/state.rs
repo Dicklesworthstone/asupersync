@@ -1953,8 +1953,8 @@ impl RuntimeState {
             return false;
         };
 
-        // Only allow registration while region is Open
-        if !region.state().can_spawn() {
+        // Allow registration in any non-terminal state
+        if region.state().is_terminal() {
             return false;
         }
 
@@ -1982,8 +1982,8 @@ impl RuntimeState {
             return false;
         };
 
-        // Only allow registration while region is Open
-        if !region.state().can_spawn() {
+        // Allow registration in any non-terminal state
+        if region.state().is_terminal() {
             return false;
         }
 

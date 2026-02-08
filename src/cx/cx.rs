@@ -484,6 +484,15 @@ impl<Caps> Cx<Caps> {
         self
     }
 
+    /// Attaches a remote capability to this context.
+    ///
+    /// This allows the context to perform remote operations like `spawn_remote`.
+    #[must_use]
+    pub fn with_remote_cap(mut self, cap: RemoteCap) -> Self {
+        self.remote_cap = Some(Arc::new(cap));
+        self
+    }
+
     /// Returns the registry capability handle, if attached.
     #[must_use]
     pub fn registry_handle(&self) -> Option<RegistryHandle> {

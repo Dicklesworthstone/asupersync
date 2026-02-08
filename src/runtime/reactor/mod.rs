@@ -321,6 +321,12 @@ impl Events {
     }
 }
 
+impl Default for Events {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl<'a> IntoIterator for &'a Events {
     type Item = &'a Event;
     type IntoIter = std::slice::Iter<'a, Event>;

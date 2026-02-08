@@ -73,13 +73,17 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
+/// Shared state between the future and the wait queue.
+#[derive(Debug)]
+struct SharedWaiter {
+    waker: Mutex<Waker>,
+    queued: AtomicBool,
+}
+
 /// A queued waiter for channel capacity.
 #[derive(Debug)]
 struct SendWaiter {
-    waker: Waker,
-    /// Flag indicating whether this waiter is still queued.
-    /// Set to false when woken, allowing the future to re-register.
-    queued: Arc<AtomicBool>,
+    shared: Arc<SharedWaiter>,
 }
 
 /// Internal channel state shared between senders and receivers.
@@ -141,6 +145,18 @@ impl<T> ChannelInner<T> {
     /// Returns true if the channel is closed (all senders dropped).
     fn is_closed(&self) -> bool {
         self.sender_count == 0
+    }
+
+    /// Wakes the next waiting sender, if any.
+    ///
+    /// This does NOT remove the waiter from the queue. The waiter is responsible
+    /// for removing itself upon successfully acquiring a permit.
+    fn wake_next_sender(&self) {
+        if let Some(waiter) = self.send_wakers.front() {
+            waiter.shared.queued.store(false, Ordering::Release);
+            let waker = waiter.shared.waker.lock().expect("waiter lock poisoned");
+            waker.wake_by_ref();
+        }
     }
 }
 
@@ -314,8 +330,7 @@ impl<T> Sender<T> {
 pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
-    /// Tracks whether we've registered a waiter to prevent unbounded queue growth.
-    waiter: Option<Arc<AtomicBool>>,
+    waiter: Option<Arc<SharedWaiter>>,
 }
 
 impl<'a, T> Future for Reserve<'a, T> {
@@ -341,45 +356,55 @@ impl<'a, T> Future for Reserve<'a, T> {
 
         if inner.has_capacity() {
             inner.reserved += 1;
-            // Mark as no longer queued if we had a waiter
+            // Remove self from queue
             if let Some(waiter) = self.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
+                let is_head = inner
+                    .send_wakers
+                    .front()
+                    .is_some_and(|w| Arc::ptr_eq(&w.shared, waiter));
+
+                if is_head {
+                    inner.send_wakers.pop_front();
+                } else {
+                    inner
+                        .send_wakers
+                        .retain(|w| !Arc::ptr_eq(&w.shared, waiter));
+                }
+
+                // CASCADE: If there is still capacity, wake the *next* waiter.
+                if inner.has_capacity() {
+                    inner.wake_next_sender();
+                }
             }
+
             return Poll::Ready(Ok(SendPermit {
                 sender: self.sender,
                 sent: false,
             }));
         }
 
-        // Only register the waker once to prevent unbounded queue growth.
-        // If the waker changes between polls (rare), we accept the stale waker -
-        // another waiter will be woken instead, which is harmless.
-        let mut new_waiter = None;
-        match self.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                // We were woken but capacity isn't available yet - re-register
-                waiter.store(true, Ordering::Release);
-                inner.send_wakers.push_back(SendWaiter {
-                    waker: ctx.waker().clone(),
-                    queued: Arc::clone(waiter),
-                });
+        // Register/update waiter
+        if let Some(waiter) = self.waiter.as_ref() {
+            // Already queued. Update waker.
+            if let Ok(mut waker_guard) = waiter.waker.lock() {
+                if !waker_guard.will_wake(ctx.waker()) {
+                    waker_guard.clone_from(ctx.waker());
+                }
             }
-            Some(_) => {} // Still queued, don't add again
-            None => {
-                // First time waiting - create new waiter
-                let waiter = Arc::new(AtomicBool::new(true));
-                inner.send_wakers.push_back(SendWaiter {
-                    waker: ctx.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
-        }
-        drop(inner);
-        if let Some(waiter) = new_waiter {
+            waiter.queued.store(true, Ordering::Release);
+        } else {
+            // New waiter
+            let waiter = Arc::new(SharedWaiter {
+                waker: Mutex::new(ctx.waker().clone()),
+                queued: AtomicBool::new(true),
+            });
+            inner.send_wakers.push_back(SendWaiter {
+                shared: Arc::clone(&waiter),
+            });
             self.waiter = Some(waiter);
         }
 
+        drop(inner);
         Poll::Pending
     }
 }
@@ -388,11 +413,6 @@ impl<T> Drop for Reserve<'_, T> {
     fn drop(&mut self) {
         // If we have a waiter, we need to remove it from the sender's queue.
         if let Some(waiter) = self.waiter.as_ref() {
-            // Optimization: if queued is already false (we were woken), no need to lock
-            if !waiter.load(Ordering::Acquire) {
-                return;
-            }
-
             let mut inner = self
                 .sender
                 .shared
@@ -400,11 +420,23 @@ impl<T> Drop for Reserve<'_, T> {
                 .lock()
                 .expect("channel lock poisoned");
 
-            // Check again under lock to be sure
-            if waiter.load(Ordering::Acquire) {
+            // We need to remove ourselves.
+            let is_head = inner
+                .send_wakers
+                .front()
+                .is_some_and(|w| Arc::ptr_eq(&w.shared, waiter));
+
+            if is_head {
+                inner.send_wakers.pop_front();
+            } else {
                 inner
                     .send_wakers
-                    .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+                    .retain(|w| !Arc::ptr_eq(&w.shared, waiter));
+            }
+
+            // Propagate wake if we were blocking capacity
+            if inner.has_capacity() {
+                inner.wake_next_sender();
             }
         }
     }
@@ -502,8 +534,9 @@ impl<T> SendPermit<'_, T> {
         if inner.receiver_dropped {
             // Receiver is gone; drop the value and release capacity.
             for waiter in inner.send_wakers.drain(..) {
-                waiter.queued.store(false, Ordering::Release);
-                waiter.waker.wake();
+                waiter.shared.queued.store(false, Ordering::Release);
+                let waker = waiter.shared.waker.lock().expect("waiter lock poisoned");
+                waker.wake_by_ref();
             }
             return;
         }
@@ -530,11 +563,7 @@ impl<T> SendPermit<'_, T> {
             inner.reserved -= 1;
         }
 
-        // Wake all waiting senders (simple strategy)
-        for waiter in inner.send_wakers.drain(..) {
-            waiter.queued.store(false, Ordering::Release);
-            waiter.waker.wake();
-        }
+        inner.wake_next_sender();
     }
 }
 
@@ -553,10 +582,7 @@ impl<T> Drop for SendPermit<'_, T> {
                 inner.reserved -= 1;
             }
 
-            for waiter in inner.send_wakers.drain(..) {
-                waiter.queued.store(false, Ordering::Release);
-                waiter.waker.wake();
-            }
+            inner.wake_next_sender();
         }
     }
 }
@@ -585,22 +611,19 @@ impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
 
-        match inner.queue.pop_front() {
-            Some(value) => {
-                for waiter in inner.send_wakers.drain(..) {
-                    waiter.queued.store(false, Ordering::Release);
-                    waiter.waker.wake();
-                }
-                Ok(value)
-            }
-            None => {
+        inner.queue.pop_front().map_or_else(
+            || {
                 if inner.is_closed() {
                     Err(RecvError::Disconnected)
                 } else {
                     Err(RecvError::Empty)
                 }
-            }
-        }
+            },
+            |value| {
+                inner.wake_next_sender();
+                Ok(value)
+            },
+        )
     }
 
     /// Returns true if all senders have been dropped.
@@ -681,10 +704,7 @@ impl<T> Future for Recv<'_, T> {
             .expect("channel lock poisoned");
 
         if let Some(value) = inner.queue.pop_front() {
-            for waiter in inner.send_wakers.drain(..) {
-                waiter.queued.store(false, Ordering::Release);
-                waiter.waker.wake();
-            }
+            inner.wake_next_sender();
             return Poll::Ready(Ok(value));
         }
 
@@ -705,8 +725,9 @@ impl<T> Drop for Receiver<T> {
         // long-lived (they hold Arc refs that keep the queue alive).
         inner.queue.clear();
         for waiter in inner.send_wakers.drain(..) {
-            waiter.queued.store(false, Ordering::Release);
-            waiter.waker.wake();
+            waiter.shared.queued.store(false, Ordering::Release);
+            let waker = waiter.shared.waker.lock().expect("waiter lock poisoned");
+            waker.wake_by_ref();
         }
     }
 }

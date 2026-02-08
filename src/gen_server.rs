@@ -257,12 +257,80 @@ pub enum SystemMsg {
 }
 
 impl SystemMsg {
-    fn vt(&self) -> Time {
+    const fn vt(&self) -> Time {
         match self {
             Self::Down { completion_vt, .. } => *completion_vt,
             Self::Exit { exit_vt, .. } => *exit_vt,
             Self::Timeout { tick_vt, .. } => *tick_vt,
         }
+    }
+
+    const fn kind_rank(&self) -> u8 {
+        match self {
+            Self::Down { .. } => 0,
+            Self::Exit { .. } => 1,
+            Self::Timeout { .. } => 2,
+        }
+    }
+
+    const fn subject_key(&self) -> SystemMsgSubjectKey {
+        match self {
+            Self::Down { notification, .. } => SystemMsgSubjectKey::Task(notification.monitored),
+            Self::Exit { from, .. } => SystemMsgSubjectKey::Task(*from),
+            Self::Timeout { id, .. } => SystemMsgSubjectKey::TimeoutId(*id),
+        }
+    }
+
+    /// Deterministic ordering key for batched system-message delivery.
+    ///
+    /// Order is:
+    /// 1. virtual time (`vt`)
+    /// 2. message kind rank (`Down < Exit < Timeout`)
+    /// 3. stable subject key (`TaskId` or timeout id)
+    ///
+    /// This key underpins the app shutdown ordering contract in
+    /// `docs/spork_deterministic_ordering.md`.
+    #[must_use]
+    pub const fn sort_key(&self) -> (Time, u8, SystemMsgSubjectKey) {
+        (self.vt(), self.kind_rank(), self.subject_key())
+    }
+}
+
+/// Stable subject key used by [`SystemMsg::sort_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SystemMsgSubjectKey {
+    /// Messages keyed by task identity (`Down`, `Exit`).
+    Task(TaskId),
+    /// Timeout tick keyed by timeout id.
+    TimeoutId(u64),
+}
+
+/// Batched system messages with deterministic sort for shutdown drain paths.
+///
+/// This is used when a runtime layer accumulates multiple `Down` / `Exit` /
+/// `Timeout` messages in one scheduler step and needs replay-stable delivery.
+#[derive(Debug, Default)]
+pub struct SystemMsgBatch {
+    entries: Vec<SystemMsg>,
+}
+
+impl SystemMsgBatch {
+    /// Creates an empty batch.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a message to the batch.
+    pub fn push(&mut self, msg: SystemMsg) {
+        self.entries.push(msg);
+    }
+
+    /// Consumes the batch and returns deterministically ordered messages.
+    #[must_use]
+    pub fn into_sorted(mut self) -> Vec<SystemMsg> {
+        self.entries.sort_by_key(SystemMsg::sort_key);
+        self.entries
     }
 }
 
@@ -2184,6 +2252,125 @@ mod tests {
         crate::types::RegionId::from_arena(ArenaIndex::new(n, 0))
     }
 
+    /// Conformance: app shutdown batches use SYS-ORDER
+    /// (`vt`, `Down < Exit < Timeout`, stable subject key).
+    #[test]
+    fn conformance_system_msg_sort_key_orders_shutdown_batch() {
+        init_test("conformance_system_msg_sort_key_orders_shutdown_batch");
+
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref_down_6 = monitors.establish(tid(90), rid(0), tid(6));
+        let mref_down_3 = monitors.establish(tid(91), rid(0), tid(3));
+
+        let mut batch = SystemMsgBatch::new();
+        batch.push(SystemMsg::Exit {
+            exit_vt: Time::from_secs(10),
+            from: tid(6),
+            reason: DownReason::Normal,
+        });
+        batch.push(SystemMsg::Timeout {
+            tick_vt: Time::from_secs(10),
+            id: 4,
+        });
+        batch.push(SystemMsg::Down {
+            completion_vt: Time::from_secs(10),
+            notification: DownNotification {
+                monitored: tid(6),
+                reason: DownReason::Normal,
+                monitor_ref: mref_down_6,
+            },
+        });
+        batch.push(SystemMsg::Timeout {
+            tick_vt: Time::from_secs(9),
+            id: 99,
+        });
+        batch.push(SystemMsg::Down {
+            completion_vt: Time::from_secs(10),
+            notification: DownNotification {
+                monitored: tid(3),
+                reason: DownReason::Normal,
+                monitor_ref: mref_down_3,
+            },
+        });
+        batch.push(SystemMsg::Exit {
+            exit_vt: Time::from_secs(10),
+            from: tid(2),
+            reason: DownReason::Normal,
+        });
+        batch.push(SystemMsg::Timeout {
+            tick_vt: Time::from_secs(10),
+            id: 1,
+        });
+
+        let sorted = batch.into_sorted();
+        let keys: Vec<_> = sorted.iter().map(SystemMsg::sort_key).collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                (Time::from_secs(9), 2, SystemMsgSubjectKey::TimeoutId(99)),
+                (Time::from_secs(10), 0, SystemMsgSubjectKey::Task(tid(3))),
+                (Time::from_secs(10), 0, SystemMsgSubjectKey::Task(tid(6))),
+                (Time::from_secs(10), 1, SystemMsgSubjectKey::Task(tid(2))),
+                (Time::from_secs(10), 1, SystemMsgSubjectKey::Task(tid(6))),
+                (Time::from_secs(10), 2, SystemMsgSubjectKey::TimeoutId(1)),
+                (Time::from_secs(10), 2, SystemMsgSubjectKey::TimeoutId(4)),
+            ],
+            "shutdown system-message ordering must follow SYS-ORDER"
+        );
+
+        crate::test_complete!("conformance_system_msg_sort_key_orders_shutdown_batch");
+    }
+
+    /// Conformance: `SystemMsgBatch::into_sorted` is equivalent to explicit
+    /// `sort_by_key(SystemMsg::sort_key)`.
+    #[test]
+    fn conformance_system_msg_batch_matches_explicit_sort() {
+        init_test("conformance_system_msg_batch_matches_explicit_sort");
+
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(77), rid(0), tid(8));
+
+        let messages = vec![
+            SystemMsg::Timeout {
+                tick_vt: Time::from_secs(12),
+                id: 4,
+            },
+            SystemMsg::Exit {
+                exit_vt: Time::from_secs(11),
+                from: tid(8),
+                reason: DownReason::Error("boom".to_string()),
+            },
+            SystemMsg::Down {
+                completion_vt: Time::from_secs(11),
+                notification: DownNotification {
+                    monitored: tid(8),
+                    reason: DownReason::Normal,
+                    monitor_ref: mref,
+                },
+            },
+            SystemMsg::Timeout {
+                tick_vt: Time::from_secs(11),
+                id: 2,
+            },
+        ];
+
+        let mut batch = SystemMsgBatch::new();
+        for msg in messages.clone() {
+            batch.push(msg);
+        }
+        let batched = batch.into_sorted();
+
+        let mut explicit = messages;
+        explicit.sort_by_key(SystemMsg::sort_key);
+
+        let batched_keys: Vec<_> = batched.iter().map(SystemMsg::sort_key).collect();
+        let explicit_keys: Vec<_> = explicit.iter().map(SystemMsg::sort_key).collect();
+        assert_eq!(batched_keys, explicit_keys);
+
+        crate::test_complete!("conformance_system_msg_batch_matches_explicit_sort");
+    }
+
     #[test]
     fn gen_server_handle_info_receives_system_messages() {
         init_test("gen_server_handle_info_receives_system_messages");
@@ -3266,8 +3453,7 @@ mod tests {
         let server_ref_2 = handle.server_ref();
 
         // Client 1: sends a call that the server will process.
-        let result_1: Arc<Mutex<Option<Result<u64, CallError>>>> =
-            Arc::new(Mutex::new(None));
+        let result_1: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_1_clone = Arc::clone(&result_1);
         let (c1_handle, c1_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
@@ -3279,8 +3465,7 @@ mod tests {
         runtime.state.store_spawned_task(c1_id, c1_stored);
 
         // Client 2: sends a call that will queue behind client 1.
-        let result_2: Arc<Mutex<Option<Result<u64, CallError>>>> =
-            Arc::new(Mutex::new(None));
+        let result_2: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_2_clone = Arc::clone(&result_2);
         let (c2_handle, c2_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
@@ -3356,10 +3541,7 @@ mod tests {
 
         // try_cast to a stopped server should fail.
         let cast_result = server_ref.try_cast(CounterCast::Reset);
-        assert!(
-            cast_result.is_err(),
-            "cast to stopped server must fail"
-        );
+        assert!(cast_result.is_err(), "cast to stopped server must fail");
 
         crate::test_complete!("conformance_stopped_server_rejects_new_messages");
     }
@@ -3388,8 +3570,7 @@ mod tests {
         // Phase 1: Fire off a mix of casts and then a call.
         server_ref.try_cast(CounterCast::Reset).unwrap();
 
-        let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> =
-            Arc::new(Mutex::new(None));
+        let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let call_result_clone = Arc::clone(&call_result);
         let server_ref_for_call = handle.server_ref();
         let (client, client_stored) = scope
@@ -3586,12 +3767,7 @@ mod tests {
 
         // DropOldest counter with capacity 2.
         let (handle, stored) = scope
-            .spawn_gen_server(
-                &mut runtime.state,
-                &cx,
-                DropOldestCounter { count: 0 },
-                2,
-            )
+            .spawn_gen_server(&mut runtime.state, &cx, DropOldestCounter { count: 0 }, 2)
             .unwrap();
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
@@ -3703,8 +3879,7 @@ mod tests {
 
         // Client calls the server. The server aborts the reply, so the
         // client should see a channel close / error.
-        let call_result: Arc<Mutex<Option<Result<(), CallError>>>> =
-            Arc::new(Mutex::new(None));
+        let call_result: Arc<Mutex<Option<Result<(), CallError>>>> = Arc::new(Mutex::new(None));
         let call_result_clone = Arc::clone(&call_result);
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
@@ -3731,10 +3906,7 @@ mod tests {
 
         // The client should have received an error since the server aborted.
         if let Some(ref result) = *call_result.lock().unwrap() {
-            assert!(
-                result.is_err(),
-                "aborted reply should result in call error"
-            );
+            assert!(result.is_err(), "aborted reply should result in call error");
         }
 
         // Clean up.
@@ -3803,8 +3975,7 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
-        let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> =
-            Arc::new(Mutex::new(None));
+        let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let call_result_clone = Arc::clone(&call_result);
 
         let (ch, cs) = scope
@@ -3903,8 +4074,7 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
-        let call_err: Arc<Mutex<Option<Result<(), CallError>>>> =
-            Arc::new(Mutex::new(None));
+        let call_err: Arc<Mutex<Option<Result<(), CallError>>>> = Arc::new(Mutex::new(None));
         let call_err_clone = Arc::clone(&call_err);
 
         let (ch, cs) = scope
@@ -4071,10 +4241,10 @@ mod tests {
         crate::test_phase!("named_server_register_and_whereis");
 
         let budget = Budget::new().with_poll_quota(100_000);
-        let mut runtime = LabRuntime::new(LabConfig::new(42));
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
-        let scope = Scope::<FailFast>::new(region, budget);
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
 
         #[allow(clippy::items_after_statements)]
@@ -4141,10 +4311,10 @@ mod tests {
         crate::test_phase!("named_server_duplicate_name_rejected");
 
         let budget = Budget::new().with_poll_quota(100_000);
-        let mut runtime = LabRuntime::new(LabConfig::new(42));
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
-        let scope = Scope::<FailFast>::new(region, budget);
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
 
         #[allow(clippy::items_after_statements)]
@@ -4223,10 +4393,10 @@ mod tests {
         crate::test_phase!("named_server_abort_lease_removes_name");
 
         let budget = Budget::new().with_poll_quota(100_000);
-        let mut runtime = LabRuntime::new(LabConfig::new(42));
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
-        let scope = Scope::<FailFast>::new(region, budget);
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
 
         #[allow(clippy::items_after_statements)]
@@ -4294,10 +4464,10 @@ mod tests {
         crate::test_phase!("named_server_take_lease_manual_management");
 
         let budget = Budget::new().with_poll_quota(100_000);
-        let mut runtime = LabRuntime::new(LabConfig::new(42));
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
-        let scope = Scope::<FailFast>::new(region, budget);
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
 
         #[allow(clippy::items_after_statements)]

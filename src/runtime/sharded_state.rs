@@ -301,9 +301,13 @@ const ROOT_REGION_NONE: u64 = 0;
 #[inline]
 fn encode_root_region(region: RegionId) -> u64 {
     let arena = region.arena_index();
-    let index = u64::from(arena.index()).saturating_add(1);
-    let generation = u64::from(arena.generation()).saturating_add(1);
-    (generation << 32) | index
+    let index = u64::from(arena.index());
+    let generation = u64::from(arena.generation());
+    let packed = (generation << 32) | index;
+    // Reserve 0 for NONE.
+    // If packed == u64::MAX, packed + 1 is 0, which would be confused with NONE.
+    assert!(packed != u64::MAX, "region ID too large for atomic storage");
+    packed + 1
 }
 
 #[inline]
@@ -311,8 +315,9 @@ fn decode_root_region(encoded: u64) -> Option<RegionId> {
     if encoded == ROOT_REGION_NONE {
         return None;
     }
-    let index = ((encoded & 0xFFFF_FFFF) as u32).saturating_sub(1);
-    let generation = ((encoded >> 32) as u32).saturating_sub(1);
+    let packed = encoded - 1;
+    let index = (packed & 0xFFFF_FFFF) as u32;
+    let generation = (packed >> 32) as u32;
     Some(RegionId::from_arena(ArenaIndex::new(index, generation)))
 }
 

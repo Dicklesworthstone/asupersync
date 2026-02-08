@@ -572,7 +572,10 @@ impl NameRegistry {
     ) -> NameWatchRef {
         let name = name.into();
         let watch_ref = NameWatchRef(self.next_watch_ref);
-        self.next_watch_ref = self.next_watch_ref.saturating_add(1);
+        self.next_watch_ref = self
+            .next_watch_ref
+            .checked_add(1)
+            .expect("watch ref overflow");
 
         let watcher_record = NameWatcher {
             watch_ref,

@@ -39,10 +39,127 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError};
 use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
+
+// ============================================================================
+// ChildName — reference-counted name for zero-cost cloning on hot paths
+// ============================================================================
+
+/// Shared, reference-counted child/supervisor name.
+///
+/// Cloning a `ChildName` is O(1) (atomic reference count bump) instead of
+/// O(n) for a `String` clone. This eliminates heap allocations in the
+/// supervisor restart-plan hot path where names are cloned into
+/// `SupervisorRestartPlan` and `RegionOp` structures.
+#[derive(Clone, Hash, Eq, Ord, PartialOrd)]
+pub struct ChildName(Arc<str>);
+
+impl ChildName {
+    /// Create a new `ChildName`.
+    pub fn new(name: impl Into<Arc<str>>) -> Self {
+        Self(name.into())
+    }
+
+    /// Borrow as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ChildName {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ChildName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ChildName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq for ChildName {
+    fn eq(&self, other: &Self) -> bool {
+        *self.0 == *other.0
+    }
+}
+
+impl PartialEq<str> for ChildName {
+    fn eq(&self, other: &str) -> bool {
+        &*self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ChildName {
+    fn eq(&self, other: &&str) -> bool {
+        &*self.0 == *other
+    }
+}
+
+impl PartialEq<String> for ChildName {
+    fn eq(&self, other: &String) -> bool {
+        &*self.0 == other.as_str()
+    }
+}
+
+impl PartialEq<ChildName> for str {
+    fn eq(&self, other: &ChildName) -> bool {
+        self == &*other.0
+    }
+}
+
+impl PartialEq<ChildName> for &str {
+    fn eq(&self, other: &ChildName) -> bool {
+        *self == &*other.0
+    }
+}
+
+impl PartialEq<ChildName> for String {
+    fn eq(&self, other: &ChildName) -> bool {
+        self.as_str() == &*other.0
+    }
+}
+
+impl From<&str> for ChildName {
+    fn from(s: &str) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
+impl From<String> for ChildName {
+    fn from(s: String) -> Self {
+        Self(Arc::from(s))
+    }
+}
+
+impl From<Arc<str>> for ChildName {
+    fn from(s: Arc<str>) -> Self {
+        Self(s)
+    }
+}
+
+impl std::fmt::Debug for ChildName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &*self.0)
+    }
+}
+
+impl std::fmt::Display for ChildName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Supervision strategy for handling actor failures.
 ///
@@ -475,7 +592,7 @@ where
 /// ordering) is specified in data so that the compiled runtime is deterministic.
 pub struct ChildSpec {
     /// Unique child identifier (stable tie-break key).
-    pub name: String,
+    pub name: ChildName,
     /// Start factory (invoked at initial start and on restart).
     pub start: Box<dyn ChildStart>,
     /// Restart strategy for this child (Stop/Restart/Escalate).
@@ -483,7 +600,7 @@ pub struct ChildSpec {
     /// Shutdown/cleanup budget for this child (used during supervisor stop).
     pub shutdown_budget: Budget,
     /// Explicit dependencies (child names). Used to compute deterministic start order.
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<ChildName>,
     /// Optional name registration policy.
     pub registration: NameRegistrationPolicy,
     /// Whether the child should be started immediately at supervisor boot.
@@ -510,7 +627,7 @@ impl ChildSpec {
     /// Create a new child spec.
     ///
     /// The child is `required` and `start_immediately` by default.
-    pub fn new<F>(name: impl Into<String>, start: F) -> Self
+    pub fn new<F>(name: impl Into<ChildName>, start: F) -> Self
     where
         F: ChildStart + 'static,
     {
@@ -542,7 +659,7 @@ impl ChildSpec {
 
     /// Add a dependency on another child by name.
     #[must_use]
-    pub fn depends_on(mut self, name: impl Into<String>) -> Self {
+    pub fn depends_on(mut self, name: impl Into<ChildName>) -> Self {
         self.depends_on.push(name.into());
         self
     }
@@ -583,18 +700,18 @@ pub enum StartTieBreak {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorCompileError {
     /// Two children shared the same name.
-    DuplicateChildName(String),
+    DuplicateChildName(ChildName),
     /// A dependency referenced an unknown child.
     UnknownDependency {
         /// Child name.
-        child: String,
+        child: ChildName,
         /// Dependency name that was not present in the child set.
-        depends_on: String,
+        depends_on: ChildName,
     },
     /// Dependency graph contains a cycle.
     CycleDetected {
         /// Remaining nodes with non-zero in-degree (sorted).
-        remaining: Vec<String>,
+        remaining: Vec<ChildName>,
     },
 }
 
@@ -605,11 +722,16 @@ impl std::fmt::Display for SupervisorCompileError {
             Self::UnknownDependency { child, depends_on } => {
                 write!(f, "child {child} depends on unknown child {depends_on}")
             }
-            Self::CycleDetected { remaining } => write!(
-                f,
-                "dependency cycle detected among children: {}",
-                remaining.join(", ")
-            ),
+            Self::CycleDetected { remaining } => {
+                write!(f, "dependency cycle detected among children: ")?;
+                for (i, name) in remaining.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -624,7 +746,7 @@ pub enum SupervisorSpawnError {
     /// Child start failed.
     ChildStartFailed {
         /// Child name.
-        child: String,
+        child: ChildName,
         /// Underlying spawn error.
         err: SpawnError,
     },
@@ -655,7 +777,7 @@ impl From<RegionCreateError> for SupervisorSpawnError {
 /// order and validates dependencies.
 #[derive(Debug)]
 pub struct SupervisorBuilder {
-    name: String,
+    name: ChildName,
     budget: Option<Budget>,
     tie_break: StartTieBreak,
     restart_policy: RestartPolicy,
@@ -665,7 +787,7 @@ pub struct SupervisorBuilder {
 impl SupervisorBuilder {
     /// Create a new supervisor builder.
     #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<ChildName>) -> Self {
         Self {
             name: name.into(),
             budget: None,
@@ -717,7 +839,7 @@ impl SupervisorBuilder {
 #[derive(Debug)]
 pub struct CompiledSupervisor {
     /// Supervisor name (for trace/evidence output).
-    pub name: String,
+    pub name: ChildName,
     /// Optional supervisor region budget override.
     pub budget: Option<Budget>,
     /// Deterministic tie-break policy used during compilation.
@@ -740,9 +862,9 @@ pub struct SupervisorRestartPlan {
     /// Supervisor policy that produced this plan.
     pub policy: RestartPolicy,
     /// Children to cancel in order (dependents-first).
-    pub cancel_order: Vec<String>,
+    pub cancel_order: Vec<ChildName>,
     /// Children to restart in order (dependencies-first).
-    pub restart_order: Vec<String>,
+    pub restart_order: Vec<ChildName>,
 }
 
 /// An atomic region operation emitted by strategy compilation.
@@ -756,21 +878,21 @@ pub enum RegionOp {
     /// Request cancellation for the named child, bounded by its shutdown budget.
     CancelChild {
         /// Child name.
-        name: String,
+        name: ChildName,
         /// Budget for shutdown/cleanup.
         shutdown_budget: Budget,
     },
     /// Drain/quiesce the named child after cancellation, bounded by its shutdown budget.
     DrainChild {
         /// Child name.
-        name: String,
+        name: ChildName,
         /// Budget for drain phase.
         shutdown_budget: Budget,
     },
     /// Restart the named child (re-invoke its `ChildStart`).
     RestartChild {
         /// Child name.
-        name: String,
+        name: ChildName,
     },
 }
 
@@ -789,7 +911,7 @@ pub struct CompiledRestartOps {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadyKey {
-    name: String,
+    name: ChildName,
     idx: usize,
 }
 
@@ -812,7 +934,7 @@ impl PartialOrd for ReadyKey {
 
 impl CompiledSupervisor {
     fn new(builder: SupervisorBuilder) -> Result<Self, SupervisorCompileError> {
-        let mut name_to_idx = std::collections::HashMap::<String, usize>::new();
+        let mut name_to_idx = std::collections::HashMap::<ChildName, usize>::new();
         for (idx, child) in builder.children.iter().enumerate() {
             if name_to_idx.insert(child.name.clone(), idx).is_some() {
                 return Err(SupervisorCompileError::DuplicateChildName(
@@ -925,6 +1047,31 @@ impl CompiledSupervisor {
             .enumerate()
             .find_map(|(idx, child)| (child.name == child_name).then_some(idx))?;
         self.start_pos_for_child_idx(child_idx)
+    }
+
+    /// Returns child names in deterministic start order.
+    ///
+    /// This is the concrete ordering contract used by supervisor startup
+    /// (**SUP-START** in `docs/spork_deterministic_ordering.md`).
+    #[must_use]
+    pub fn child_start_order_names(&self) -> Vec<&str> {
+        self.start_order
+            .iter()
+            .map(|&idx| self.children[idx].name.as_str())
+            .collect()
+    }
+
+    /// Returns child names in deterministic stop/drain order.
+    ///
+    /// Stop/drain order is the reverse of start order, matching OTP-style
+    /// dependency unwind (**SUP-STOP** in `docs/spork_deterministic_ordering.md`).
+    #[must_use]
+    pub fn child_stop_order_names(&self) -> Vec<&str> {
+        self.start_order
+            .iter()
+            .rev()
+            .map(|&idx| self.children[idx].name.as_str())
+            .collect()
     }
 
     #[must_use]
@@ -1097,7 +1244,7 @@ impl CompiledSupervisor {
 #[derive(Debug)]
 pub struct SupervisorHandle {
     /// Supervisor name.
-    pub name: String,
+    pub name: ChildName,
     /// Region that owns the supervisor and its children.
     pub region: RegionId,
     /// Children that were started immediately (in start order).
@@ -1108,7 +1255,7 @@ pub struct SupervisorHandle {
 #[derive(Debug)]
 pub struct StartedChild {
     /// Child name.
-    pub name: String,
+    pub name: ChildName,
     /// Root task id for the child.
     pub task_id: TaskId,
 }
@@ -1127,12 +1274,28 @@ impl BackoffStrategy {
                 max,
                 multiplier,
             } => {
+                // Sanitize multiplier to prevent panics in Duration conversion
+                let safe_multiplier = if multiplier.is_finite() && *multiplier >= 0.0 {
+                    *multiplier
+                } else {
+                    2.0
+                };
+
                 // Allow lossy cast - precision loss is acceptable for backoff timing
                 #[allow(clippy::cast_precision_loss)]
                 // Cap exponent to prevent overflow/infinity in powi
                 let exp = i32::try_from(attempt).unwrap_or(30).min(30);
-                let base = initial.as_secs_f64() * multiplier.powi(exp);
-                let delay = Duration::from_secs_f64(base.min(max.as_secs_f64()));
+
+                let base_secs = initial.as_secs_f64() * safe_multiplier.powi(exp);
+
+                // Ensure base_secs is valid (finite and non-negative) before creating Duration
+                let safe_secs = if base_secs.is_finite() && base_secs >= 0.0 {
+                    base_secs
+                } else {
+                    max.as_secs_f64()
+                };
+
+                let delay = Duration::from_secs_f64(safe_secs.min(max.as_secs_f64()));
                 Some(delay)
             }
         }
@@ -3809,7 +3972,7 @@ mod tests {
     /// Helper: build a ChildSpec with a given name and shutdown budget.
     fn make_restart_child(name: &str, budget: Budget) -> ChildSpec {
         ChildSpec {
-            name: name.to_string(),
+            name: name.into(),
             start: Box::new(noop_start),
             restart: SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
             shutdown_budget: budget,
@@ -3976,9 +4139,9 @@ mod tests {
 
         // b depends on a, c depends on b → topo order: a, b, c
         let mut child_b = make_restart_child("b", Budget::INFINITE);
-        child_b.depends_on = vec!["a".to_string()];
+        child_b.depends_on = vec!["a".into()];
         let mut child_c = make_restart_child("c", Budget::INFINITE);
-        child_c.depends_on = vec!["b".to_string()];
+        child_c.depends_on = vec!["b".into()];
 
         let compiled = SupervisorBuilder::new("test")
             .with_restart_policy(RestartPolicy::OneForAll)
@@ -6023,9 +6186,9 @@ mod tests {
             Err(SupervisorCompileError::CycleDetected { remaining }) => {
                 // All three are in the cycle
                 assert_eq!(remaining.len(), 3);
-                assert!(remaining.contains(&"a".to_string()));
-                assert!(remaining.contains(&"b".to_string()));
-                assert!(remaining.contains(&"c".to_string()));
+                assert!(remaining.contains(&ChildName::from("a")));
+                assert!(remaining.contains(&ChildName::from("b")));
+                assert!(remaining.contains(&ChildName::from("c")));
             }
             other => unreachable!("expected CycleDetected, got {other:?}"),
         }
@@ -6047,11 +6210,7 @@ mod tests {
 
         let compiled = builder.compile().expect("compile");
 
-        let names: Vec<&str> = compiled
-            .start_order
-            .iter()
-            .map(|&idx| compiled.children[idx].name.as_str())
-            .collect();
+        let names = compiled.child_start_order_names();
 
         assert_eq!(names, vec!["alpha", "mike", "zulu"]);
 
@@ -6079,6 +6238,33 @@ mod tests {
         assert_eq!(compiled.child_start_pos("does_not_exist"), None);
 
         crate::test_complete!("conformance_child_start_pos_matches_start_order");
+    }
+
+    /// Conformance: deterministic stop/drain order is reverse start order (SUP-STOP).
+    #[test]
+    fn conformance_child_stop_order_is_reverse_start_order() {
+        init_test("conformance_child_stop_order_is_reverse_start_order");
+
+        let compiled = SupervisorBuilder::new("sup")
+            .with_tie_break(StartTieBreak::NameLex)
+            .child(ChildSpec::new("db", noop_start))
+            .child(ChildSpec::new("cache", noop_start).depends_on("db"))
+            .child(ChildSpec::new("web", noop_start).depends_on("db"))
+            .child(ChildSpec::new("worker", noop_start).depends_on("cache"))
+            .compile()
+            .expect("compile");
+
+        let start = compiled.child_start_order_names();
+        let stop = compiled.child_stop_order_names();
+
+        let mut expected = start.clone();
+        expected.reverse();
+
+        assert_eq!(stop, expected);
+        assert_eq!(start, vec!["db", "cache", "web", "worker"]);
+        assert_eq!(stop, vec!["worker", "web", "cache", "db"]);
+
+        crate::test_complete!("conformance_child_stop_order_is_reverse_start_order");
     }
 
     /// Conformance: a stable tie-break key for batching logically-simultaneous failures.
