@@ -386,6 +386,10 @@ impl EProcessMonitor {
             "supervision",
             "mailbox",
             "rref_access",
+            "reply_linearity",
+            "registry_lease",
+            "down_order",
+            "supervisor_quiescence",
         ];
         Self::new(&invariants, config)
     }
@@ -854,9 +858,13 @@ mod tests {
     }
 
     #[test]
-    fn monitor_all_invariants_has_twelve() {
+    fn monitor_all_invariants_has_spork_invariants_too() {
         let monitor = EProcessMonitor::all_invariants();
-        assert_eq!(monitor.processes.len(), 13);
+        assert_eq!(monitor.processes.len(), 17);
+        assert!(monitor.process("reply_linearity").is_some());
+        assert!(monitor.process("registry_lease").is_some());
+        assert!(monitor.process("down_order").is_some());
+        assert!(monitor.process("supervisor_quiescence").is_some());
     }
 
     #[test]

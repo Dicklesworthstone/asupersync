@@ -10,9 +10,9 @@ use crate::codec::{Decoder, Encoder};
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::{
-    parse_frame, ContinuationFrame, DataFrame, Frame, FrameHeader, GoAwayFrame, HeadersFrame,
-    PingFrame, PushPromiseFrame, RstStreamFrame, Setting, SettingsFrame, WindowUpdateFrame,
-    FRAME_HEADER_SIZE,
+    parse_frame, ContinuationFrame, DataFrame, Frame, FrameHeader, FrameType, GoAwayFrame,
+    HeadersFrame, PingFrame, PushPromiseFrame, RstStreamFrame, Setting, SettingsFrame,
+    WindowUpdateFrame, FRAME_HEADER_SIZE,
 };
 use super::hpack::{self, Header};
 use super::settings::Settings;
@@ -73,35 +73,42 @@ impl Decoder for FrameCodec {
     type Error = H2Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // First, try to parse the header if we don't have one
-        let header = if let Some(header) = self.partial_header.take() {
-            header
-        } else {
-            if src.len() < FRAME_HEADER_SIZE {
+        loop {
+            // First, try to parse the header if we don't have one.
+            let header = if let Some(header) = self.partial_header.take() {
+                header
+            } else {
+                if src.len() < FRAME_HEADER_SIZE {
+                    return Ok(None);
+                }
+                FrameHeader::parse(src)?
+            };
+
+            // Validate frame size.
+            if header.length > self.max_frame_size {
+                return Err(H2Error::frame_size(format!(
+                    "frame too large: {} > {}",
+                    header.length, self.max_frame_size
+                )));
+            }
+
+            // Check if we have the full payload.
+            let payload_len = header.length as usize;
+            if src.len() < payload_len {
+                self.partial_header = Some(header);
                 return Ok(None);
             }
-            FrameHeader::parse(src)?
-        };
 
-        // Validate frame size
-        if header.length > self.max_frame_size {
-            return Err(H2Error::frame_size(format!(
-                "frame too large: {} > {}",
-                header.length, self.max_frame_size
-            )));
+            // Extract payload first. For unknown extension frame types, HTTP/2 requires
+            // endpoints to ignore them while preserving connection state.
+            let payload = src.split_to(payload_len).freeze();
+            if FrameType::from_u8(header.frame_type).is_none() {
+                continue;
+            }
+
+            let frame = parse_frame(&header, payload)?;
+            return Ok(Some(frame));
         }
-
-        // Check if we have the full payload
-        let payload_len = header.length as usize;
-        if src.len() < payload_len {
-            self.partial_header = Some(header);
-            return Ok(None);
-        }
-
-        // Extract payload and parse frame
-        let payload = src.split_to(payload_len).freeze();
-        let frame = parse_frame(&header, payload)?;
-        Ok(Some(frame))
     }
 }
 
@@ -1181,6 +1188,50 @@ mod tests {
             }
             _ => panic!("expected PING frame"),
         }
+    }
+
+    #[test]
+    fn test_frame_codec_skips_unknown_frame_type() {
+        let mut codec = FrameCodec::new();
+        let mut buf = BytesMut::new();
+
+        // Unknown extension frame type (0xFF) should be ignored.
+        FrameHeader {
+            length: 3,
+            frame_type: 0xFF,
+            flags: 0,
+            stream_id: 0,
+        }
+        .write(&mut buf);
+        buf.extend_from_slice(&[1, 2, 3]);
+
+        let ping = PingFrame::new([9, 8, 7, 6, 5, 4, 3, 2]);
+        Frame::Ping(ping).encode(&mut buf);
+
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        match decoded {
+            Frame::Ping(p) => assert_eq!(p.opaque_data, [9, 8, 7, 6, 5, 4, 3, 2]),
+            _ => panic!("expected PING frame"),
+        }
+    }
+
+    #[test]
+    fn test_frame_codec_unknown_frame_without_followup_returns_none() {
+        let mut codec = FrameCodec::new();
+        let mut buf = BytesMut::new();
+
+        FrameHeader {
+            length: 2,
+            frame_type: 0xFE,
+            flags: 0,
+            stream_id: 0,
+        }
+        .write(&mut buf);
+        buf.extend_from_slice(&[0xAA, 0xBB]);
+
+        let decoded = codec.decode(&mut buf).unwrap();
+        assert!(decoded.is_none(), "expected no decoded frame");
+        assert!(buf.is_empty(), "unknown frame bytes should be consumed");
     }
 
     #[test]
