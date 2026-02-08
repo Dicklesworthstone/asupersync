@@ -386,97 +386,110 @@ pub struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     b_to_a_total: u64,
 }
 
+/// Result of a single transfer step.
+enum TransferResult {
+    /// Direction is fully complete (read done and buffer flushed).
+    Done,
+    /// Blocked on I/O.
+    Pending,
+    /// Made progress (read or wrote bytes).
+    Progress,
+    /// Encountered an error.
+    Error(io::Error),
+}
+
 impl<A, B> CopyBidirectional<'_, A, B>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     B: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    /// Poll the A->B transfer direction.
-    fn poll_a_to_b(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// Perform one step of A->B transfer.
+    fn step_a_to_b(&mut self, cx: &mut Context<'_>) -> TransferResult {
         let state = &mut self.a_to_b;
 
-        loop {
-            // If we have buffered data, write it to B
-            if state.pos < state.cap {
-                match Pin::new(&mut *self.b).poll_write(cx, &self.a_to_b_buf[state.pos..state.cap])
-                {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Ready(Ok(0)) => {
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                    }
-                    Poll::Ready(Ok(n)) => {
-                        state.pos += n;
-                        self.a_to_b_total += n as u64;
-                        continue;
-                    }
+        // 1. Try to write buffered data to B
+        if state.pos < state.cap {
+            match Pin::new(&mut *self.b).poll_write(cx, &self.a_to_b_buf[state.pos..state.cap]) {
+                Poll::Pending => return TransferResult::Pending,
+                Poll::Ready(Err(err)) => return TransferResult::Error(err),
+                Poll::Ready(Ok(0)) => {
+                    return TransferResult::Error(io::Error::from(io::ErrorKind::WriteZero));
+                }
+                Poll::Ready(Ok(n)) => {
+                    state.pos += n;
+                    self.a_to_b_total += n as u64;
+                    return TransferResult::Progress;
                 }
             }
+        }
 
-            // If read from A is done and buffer is empty, this direction is finished
-            if state.read_done {
-                return Poll::Ready(Ok(()));
-            }
+        // 2. If read from A is done and buffer is empty, this direction is finished
+        if state.read_done {
+            return TransferResult::Done;
+        }
 
-            // Read more data from A
-            let mut read_buf = ReadBuf::new(&mut self.a_to_b_buf);
-            match Pin::new(&mut *self.a).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Ready(Ok(())) => {
-                    let n = read_buf.filled().len();
-                    if n == 0 {
-                        state.read_done = true;
-                    } else {
-                        state.pos = 0;
-                        state.cap = n;
-                    }
+        // 3. Read more data from A
+        // Reset buffer state if empty (it should be empty here due to check 1)
+        state.pos = 0;
+        state.cap = 0;
+
+        let mut read_buf = ReadBuf::new(&mut self.a_to_b_buf);
+        match Pin::new(&mut *self.a).poll_read(cx, &mut read_buf) {
+            Poll::Pending => TransferResult::Pending,
+            Poll::Ready(Err(err)) => TransferResult::Error(err),
+            Poll::Ready(Ok(())) => {
+                let n = read_buf.filled().len();
+                if n == 0 {
+                    state.read_done = true;
                 }
+                state.cap = n;
+                // We just learned we are done, but we haven't flushed anything (buffer was empty).
+                // Next call will hit check 2.
+                TransferResult::Progress
             }
         }
     }
 
-    /// Poll the B->A transfer direction.
-    fn poll_b_to_a(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// Perform one step of B->A transfer.
+    fn step_b_to_a(&mut self, cx: &mut Context<'_>) -> TransferResult {
         let state = &mut self.b_to_a;
 
-        loop {
-            // If we have buffered data, write it to A
-            if state.pos < state.cap {
-                match Pin::new(&mut *self.a).poll_write(cx, &self.b_to_a_buf[state.pos..state.cap])
-                {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Ready(Ok(0)) => {
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
-                    }
-                    Poll::Ready(Ok(n)) => {
-                        state.pos += n;
-                        self.b_to_a_total += n as u64;
-                        continue;
-                    }
+        // 1. Try to write buffered data to A
+        if state.pos < state.cap {
+            match Pin::new(&mut *self.a).poll_write(cx, &self.b_to_a_buf[state.pos..state.cap]) {
+                Poll::Pending => return TransferResult::Pending,
+                Poll::Ready(Err(err)) => return TransferResult::Error(err),
+                Poll::Ready(Ok(0)) => {
+                    return TransferResult::Error(io::Error::from(io::ErrorKind::WriteZero));
+                }
+                Poll::Ready(Ok(n)) => {
+                    state.pos += n;
+                    self.b_to_a_total += n as u64;
+                    return TransferResult::Progress;
                 }
             }
+        }
 
-            // If read from B is done and buffer is empty, this direction is finished
-            if state.read_done {
-                return Poll::Ready(Ok(()));
-            }
+        // 2. If read from B is done and buffer is empty, this direction is finished
+        if state.read_done {
+            return TransferResult::Done;
+        }
 
-            // Read more data from B
-            let mut read_buf = ReadBuf::new(&mut self.b_to_a_buf);
-            match Pin::new(&mut *self.b).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Ready(Ok(())) => {
-                    let n = read_buf.filled().len();
-                    if n == 0 {
-                        state.read_done = true;
-                    } else {
-                        state.pos = 0;
-                        state.cap = n;
-                    }
+        // 3. Read more data from B
+        state.pos = 0;
+        state.cap = 0;
+
+        let mut read_buf = ReadBuf::new(&mut self.b_to_a_buf);
+        match Pin::new(&mut *self.b).poll_read(cx, &mut read_buf) {
+            Poll::Pending => TransferResult::Pending,
+            Poll::Ready(Err(err)) => TransferResult::Error(err),
+            Poll::Ready(Ok(())) => {
+                let n = read_buf.filled().len();
+                if n == 0 {
+                    state.read_done = true;
                 }
+                state.cap = n;
+                TransferResult::Progress
             }
         }
     }
@@ -492,39 +505,34 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        // Poll both directions, tracking if either made progress or is pending
-        let mut made_progress = true;
+        // Poll both directions, interleaved, until both block or are done
+        loop {
+            let mut made_progress = false;
 
-        while made_progress {
-            made_progress = false;
-
-            // Poll A->B if not done
-            if !(this.a_to_b.read_done && this.a_to_b.pos >= this.a_to_b.cap) {
-                match this.poll_a_to_b(cx) {
-                    Poll::Ready(Ok(())) => made_progress = true,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Pending => {}
-                }
+            // Step A->B
+            match this.step_a_to_b(cx) {
+                TransferResult::Progress => made_progress = true,
+                TransferResult::Error(e) => return Poll::Ready(Err(e)),
+                TransferResult::Done | TransferResult::Pending => {}
             }
 
-            // Poll B->A if not done
-            if !(this.b_to_a.read_done && this.b_to_a.pos >= this.b_to_a.cap) {
-                match this.poll_b_to_a(cx) {
-                    Poll::Ready(Ok(())) => made_progress = true,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Pending => {}
-                }
+            // Step B->A
+            match this.step_b_to_a(cx) {
+                TransferResult::Progress => made_progress = true,
+                TransferResult::Error(e) => return Poll::Ready(Err(e)),
+                TransferResult::Done | TransferResult::Pending => {}
             }
-        }
 
-        // Check if both directions are complete
-        let a_to_b_done = this.a_to_b.read_done && this.a_to_b.pos >= this.a_to_b.cap;
-        let b_to_a_done = this.b_to_a.read_done && this.b_to_a.pos >= this.b_to_a.cap;
+            if !made_progress {
+                // Check if both are done
+                let a_to_b_done = this.a_to_b.read_done && this.a_to_b.pos >= this.a_to_b.cap;
+                let b_to_a_done = this.b_to_a.read_done && this.b_to_a.pos >= this.b_to_a.cap;
 
-        if a_to_b_done && b_to_a_done {
-            Poll::Ready(Ok((this.a_to_b_total, this.b_to_a_total)))
-        } else {
-            Poll::Pending
+                if a_to_b_done && b_to_a_done {
+                    return Poll::Ready(Ok((this.a_to_b_total, this.b_to_a_total)));
+                }
+                return Poll::Pending;
+            }
         }
     }
 }

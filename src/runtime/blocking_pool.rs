@@ -676,6 +676,7 @@ fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
 }
 
 /// The worker loop for blocking pool threads.
+#[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
 fn blocking_worker_loop(inner: &BlockingPoolInner) {
     loop {
         // Try to get work from the queue
@@ -711,14 +712,26 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) {
         // Check if we should retire this thread
         let active = inner.active_threads.load(Ordering::Relaxed);
         if active > inner.min_threads {
-            // Park with timeout
-            let result = inner
-                .condvar
-                .wait_timeout(inner.mutex.lock().unwrap(), inner.idle_timeout)
-                .unwrap();
+            let timed_out = {
+                // Park with timeout.
+                let guard = inner.mutex.lock().unwrap();
+
+                // Re-check queue under lock to prevent lost wakeup.
+                if !inner.queue.is_empty() {
+                    drop(guard);
+                    continue;
+                }
+
+                let (guard, wait_result) = inner
+                    .condvar
+                    .wait_timeout(guard, inner.idle_timeout)
+                    .unwrap();
+                drop(guard);
+                wait_result.timed_out()
+            };
 
             // If we timed out and there's still no work, consider retiring
-            if result.1.timed_out()
+            if timed_out
                 && inner.queue.is_empty()
                 && inner.active_threads.load(Ordering::Relaxed) > inner.min_threads
             {
@@ -726,9 +739,18 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) {
                 break;
             }
         } else {
-            // We're at min_threads, park indefinitely
-            let guard = inner.mutex.lock().unwrap();
-            let _guard = inner.condvar.wait(guard).unwrap();
+            {
+                // We're at min_threads, park indefinitely.
+                let guard = inner.mutex.lock().unwrap();
+
+                // Re-check queue under lock to prevent lost wakeup.
+                if !inner.queue.is_empty() {
+                    drop(guard);
+                    continue;
+                }
+
+                drop(inner.condvar.wait(guard).unwrap());
+            }
         }
     }
 }

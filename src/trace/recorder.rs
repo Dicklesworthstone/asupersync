@@ -33,6 +33,7 @@
 use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 use crate::tracing_compat::{error, warn};
 use crate::types::{RegionId, Severity, TaskId, Time};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::sync::Arc;
@@ -243,8 +244,13 @@ pub mod chaos_kind {
 /// - Waker invocations
 #[derive(Debug)]
 pub struct TraceRecorder {
-    /// The underlying trace being built.
-    trace: Option<ReplayTrace>,
+    /// Metadata for the trace being built.
+    metadata: Option<TraceMetadata>,
+    /// Buffer of recorded events.
+    ///
+    /// Uses `VecDeque` for efficient O(1) removal from front when `DropOldest`
+    /// limit action is active.
+    events: Option<VecDeque<ReplayEvent>>,
     /// Configuration.
     config: RecorderConfig,
     /// Whether the initial RNG seed has been recorded.
@@ -265,16 +271,17 @@ impl TraceRecorder {
     /// Creates a new trace recorder with custom configuration.
     #[must_use]
     pub fn with_config(metadata: TraceMetadata, config: RecorderConfig) -> Self {
-        let trace = if config.enabled {
-            Some(ReplayTrace::with_capacity(
-                metadata,
-                config.initial_capacity,
-            ))
+        let (metadata, events) = if config.enabled {
+            (
+                Some(metadata),
+                Some(VecDeque::with_capacity(config.initial_capacity)),
+            )
         } else {
-            None
+            (None, None)
         };
         Self {
-            trace,
+            metadata,
+            events,
             config,
             seed_recorded: false,
             stopped: false,
@@ -286,7 +293,8 @@ impl TraceRecorder {
     #[must_use]
     pub fn disabled() -> Self {
         Self {
-            trace: None,
+            metadata: None,
+            events: None,
             config: RecorderConfig::disabled(),
             seed_recorded: false,
             stopped: true,
@@ -298,27 +306,24 @@ impl TraceRecorder {
     #[must_use]
     #[inline]
     pub fn is_enabled(&self) -> bool {
-        self.trace.is_some()
+        self.events.is_some()
     }
 
     /// Returns the number of recorded events.
     #[must_use]
     pub fn event_count(&self) -> usize {
-        self.trace
-            .as_ref()
-            .map_or(0, super::replay::ReplayTrace::len)
+        self.events.as_ref().map_or(0, VecDeque::len)
     }
 
     /// Returns the estimated size of the trace in bytes.
     #[must_use]
     pub fn estimated_size(&self) -> usize {
-        self.trace
-            .as_ref()
-            .map_or(0, super::replay::ReplayTrace::estimated_size)
+        // Metadata overhead (~50 bytes) + events
+        50 + self.estimated_event_bytes as usize
     }
 
     fn should_record(&self) -> bool {
-        self.trace.is_some() && !self.stopped
+        self.events.is_some() && !self.stopped
     }
 
     fn resolve_limit_action(&self, info: &LimitReached) -> LimitAction {
@@ -383,13 +388,13 @@ impl TraceRecorder {
     }
 
     fn drop_oldest_event(&mut self) -> bool {
-        let Some(trace) = self.trace.as_mut() else {
+        let Some(events) = self.events.as_mut() else {
             return false;
         };
-        if trace.events.is_empty() {
+        if events.is_empty() {
             return false;
         }
-        let dropped = trace.events.remove(0);
+        let dropped = events.pop_front().expect("events not empty");
         self.estimated_event_bytes = self
             .estimated_event_bytes
             .saturating_sub(dropped.estimated_size() as u64);
@@ -446,8 +451,8 @@ impl TraceRecorder {
         if !self.ensure_capacity(event_size) {
             return;
         }
-        if let Some(ref mut trace) = self.trace {
-            trace.push(event);
+        if let Some(ref mut events) = self.events {
+            events.push_back(event);
             self.estimated_event_bytes = self.estimated_event_bytes.saturating_add(event_size);
         }
     }
@@ -667,36 +672,65 @@ impl TraceRecorder {
     /// Returns `None` if recording was disabled.
     #[must_use]
     pub fn finish(self) -> Option<ReplayTrace> {
-        self.trace
+        if let (Some(metadata), Some(events)) = (self.metadata, self.events) {
+            Some(ReplayTrace {
+                metadata,
+                events: events.into(),
+                cursor: 0,
+            })
+        } else {
+            None
+        }
     }
 
     /// Takes the trace without consuming the recorder.
     ///
     /// This resets the recorder to a new empty trace with the same config.
     pub fn take(&mut self) -> Option<ReplayTrace> {
-        let taken = self.trace.take();
-        if let Some(ref t) = taken {
-            // Re-initialize with same metadata but fresh events
-            let mut new_meta = t.metadata.clone();
-            new_meta.recorded_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            self.trace = Some(ReplayTrace::with_capacity(
-                new_meta,
-                self.config.initial_capacity,
-            ));
-            self.seed_recorded = false;
-            self.stopped = false;
-            self.estimated_event_bytes = 0;
+        if self.metadata.is_none() || self.events.is_none() {
+            return None;
         }
-        taken
+
+        let metadata = self.metadata.clone().unwrap();
+        let events = self
+            .events
+            .replace(VecDeque::with_capacity(self.config.initial_capacity))
+            .unwrap();
+
+        let trace = ReplayTrace {
+            metadata: metadata.clone(),
+            events: events.into(),
+            cursor: 0,
+        };
+
+        // Re-initialize with same metadata but fresh events
+        let mut new_meta = metadata;
+        new_meta.recorded_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        self.metadata = Some(new_meta);
+        self.seed_recorded = false;
+        self.stopped = false;
+        self.estimated_event_bytes = 0;
+
+        Some(trace)
     }
 
-    /// Returns a reference to the current trace, if recording.
+    /// Returns a snapshot of the current trace, if recording.
+    ///
+    /// This clones the events, so it can be expensive for large traces.
     #[must_use]
-    pub fn trace(&self) -> Option<&ReplayTrace> {
-        self.trace.as_ref()
+    pub fn snapshot(&self) -> Option<ReplayTrace> {
+        if let (Some(metadata), Some(events)) = (&self.metadata, &self.events) {
+            Some(ReplayTrace {
+                metadata: metadata.clone(),
+                events: events.clone().into(),
+                cursor: 0,
+            })
+        } else {
+            None
+        }
     }
 }
 

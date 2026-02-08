@@ -975,7 +975,7 @@ impl LabRuntime {
     }
 
     fn auto_divergent_prefix(&self) -> Vec<ReplayEvent> {
-        let Some(replay_trace) = self.replay_recorder.trace() else {
+        let Some(replay_trace) = self.replay_recorder.snapshot() else {
             return Vec::new();
         };
         if replay_trace.events.is_empty() {
@@ -990,7 +990,7 @@ impl LabRuntime {
             )
             .unwrap_or(replay_trace.events.len() - 1);
 
-        crate::trace::minimal_divergent_prefix(replay_trace, failure_index).events
+        crate::trace::minimal_divergent_prefix(&replay_trace, failure_index).events
     }
 
     fn report_with_steps_delta(&mut self, steps_delta: u64) -> LabRunReport {
@@ -1079,9 +1079,10 @@ impl LabRuntime {
         // 1. Choose a worker and pop a task (deterministic multi-worker model)
         let worker_count = self.config.worker_count.max(1);
         let worker_hint = (rng_value as usize) % worker_count;
+        let now = self.now();
         let (task_id, dispatch_lane) = {
             let mut sched = self.scheduler.lock().unwrap();
-            if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value) {
+            if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value, now) {
                 (tid, lane)
             } else if let Some(tid) = sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
             {
@@ -1799,7 +1800,12 @@ impl LabScheduler {
         self.workers[worker].schedule_timed(task, deadline);
     }
 
-    fn pop_for_worker(&mut self, worker: usize, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
+    fn pop_for_worker(
+        &mut self,
+        worker: usize,
+        rng_hint: u64,
+        now: Time,
+    ) -> Option<(TaskId, DispatchLane)> {
         if self.workers.is_empty() {
             return None;
         }
@@ -1816,11 +1822,18 @@ impl LabScheduler {
             }
         }
 
-        if let Some((task, lane)) = self.workers[worker].pop_non_cancel_with_rng(rng_hint) {
+        if let Some(task) = self.workers[worker].pop_timed_only_with_hint(rng_hint, now) {
             *cancel_streak = 0;
             self.scheduled.remove(&task);
             self.assignments.insert(task, worker);
-            return Some((task, lane));
+            return Some((task, DispatchLane::Timed));
+        }
+
+        if let Some(task) = self.workers[worker].pop_ready_only_with_hint(rng_hint) {
+            *cancel_streak = 0;
+            self.scheduled.remove(&task);
+            self.assignments.insert(task, worker);
+            return Some((task, DispatchLane::Ready));
         }
 
         if let Some((task, lane)) = self.workers[worker].pop_cancel_with_rng(rng_hint) {
@@ -1849,7 +1862,7 @@ impl LabScheduler {
                 continue;
             }
             if let Some(task) =
-                self.workers[victim].pop_with_rng_hint(rng_hint.wrapping_add(offset as u64))
+                self.workers[victim].pop_ready_only_with_hint(rng_hint.wrapping_add(offset as u64))
             {
                 self.scheduled.remove(&task);
                 self.assignments.insert(task, thief);
@@ -2116,6 +2129,90 @@ mod tests {
         let b = r2.rng.next_u64();
         crate::assert_with_log!(a == b, "rng", b, a);
         crate::test_complete!("deterministic_rng");
+    }
+
+    #[test]
+    fn lab_scheduler_pop_for_worker_respects_timed_deadlines() {
+        init_test("lab_scheduler_pop_for_worker_respects_timed_deadlines");
+        let mut scheduler = LabScheduler::new(1);
+        let timed = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let ready = TaskId::from_arena(ArenaIndex::new(2, 0));
+
+        scheduler.schedule_timed(timed, Time::from_nanos(100));
+        scheduler.schedule(ready, 10);
+
+        let first = scheduler.pop_for_worker(0, 0, Time::ZERO);
+        crate::assert_with_log!(
+            first == Some((ready, DispatchLane::Ready)),
+            "ready task dispatches before not-due timed task",
+            Some((ready, DispatchLane::Ready)),
+            first
+        );
+
+        let second = scheduler.pop_for_worker(0, 1, Time::ZERO);
+        crate::assert_with_log!(
+            second.is_none(),
+            "future timed task stays queued before deadline",
+            true,
+            second.is_none()
+        );
+
+        let third = scheduler.pop_for_worker(0, 2, Time::from_nanos(100));
+        crate::assert_with_log!(
+            third == Some((timed, DispatchLane::Timed)),
+            "timed task dispatches at deadline",
+            Some((timed, DispatchLane::Timed)),
+            third
+        );
+
+        crate::test_complete!("lab_scheduler_pop_for_worker_respects_timed_deadlines");
+    }
+
+    #[test]
+    fn lab_scheduler_steal_for_worker_only_steals_ready_tasks() {
+        init_test("lab_scheduler_steal_for_worker_only_steals_ready_tasks");
+        let mut scheduler = LabScheduler::new(2);
+        let cancel = TaskId::from_arena(ArenaIndex::new(10, 0));
+        let timed = TaskId::from_arena(ArenaIndex::new(11, 0));
+        let ready = TaskId::from_arena(ArenaIndex::new(12, 0));
+
+        // With 2 workers, assignment is round-robin: cancel->w0, timed->w1, ready->w0.
+        scheduler.schedule_cancel(cancel, 100);
+        scheduler.schedule_timed(timed, Time::ZERO);
+        scheduler.schedule(ready, 50);
+
+        let stolen = scheduler.steal_for_worker(1, 0);
+        crate::assert_with_log!(
+            stolen == Some(ready),
+            "steal path takes only ready lane work",
+            Some(ready),
+            stolen
+        );
+
+        crate::assert_with_log!(
+            scheduler.workers[0].has_cancel_work(),
+            "victim cancel lane remains intact after steal",
+            true,
+            scheduler.workers[0].has_cancel_work()
+        );
+
+        let cancel_dispatch = scheduler.pop_for_worker(0, 0, Time::ZERO);
+        crate::assert_with_log!(
+            cancel_dispatch == Some((cancel, DispatchLane::Cancel)),
+            "cancel lane still dispatches from victim worker",
+            Some((cancel, DispatchLane::Cancel)),
+            cancel_dispatch
+        );
+
+        let timed_dispatch = scheduler.pop_for_worker(1, 0, Time::ZERO);
+        crate::assert_with_log!(
+            timed_dispatch == Some((timed, DispatchLane::Timed)),
+            "timed lane remains on owning worker",
+            Some((timed, DispatchLane::Timed)),
+            timed_dispatch
+        );
+
+        crate::test_complete!("lab_scheduler_steal_for_worker_only_steals_ready_tasks");
     }
 
     #[test]
