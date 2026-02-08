@@ -495,15 +495,15 @@ impl TimerWheel {
     /// Returns the earliest pending deadline, if any.
     #[must_use]
     pub fn next_deadline(&mut self) -> Option<Time> {
-        if self.ready.iter().any(|entry| self.is_live(entry)) {
-            return Some(self.current_time());
-        }
-
+        let current = self.current_time();
         let mut min_deadline: Option<Time> = None;
 
         for entry in &self.ready {
             if !self.is_live(entry) {
                 continue;
+            }
+            if entry.deadline <= current {
+                return Some(current);
             }
             min_deadline =
                 Some(min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)));
@@ -907,6 +907,25 @@ mod tests {
             wakers.len()
         );
         crate::test_complete!("wheel_overflow_promotes_when_in_range");
+    }
+
+    #[test]
+    fn next_deadline_ready_same_tick_returns_actual_deadline() {
+        init_test("next_deadline_ready_same_tick_returns_actual_deadline");
+        let mut wheel = TimerWheel::new();
+        let deadline = Time::from_nanos(500_000); // < 1ms, still in current L0 tick
+        let waker = counter_waker(Arc::new(AtomicU64::new(0)));
+
+        wheel.register(deadline, waker);
+
+        let next = wheel.next_deadline();
+        crate::assert_with_log!(
+            next == Some(deadline),
+            "same-tick future deadline preserved",
+            Some(deadline),
+            next
+        );
+        crate::test_complete!("next_deadline_ready_same_tick_returns_actual_deadline");
     }
 
     struct CounterWaker {

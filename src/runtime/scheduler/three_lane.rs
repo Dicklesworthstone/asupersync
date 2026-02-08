@@ -603,17 +603,21 @@ impl ThreeLaneScheduler {
     /// `LocalQueue` (O(1) IntrusiveStack) instead of the global injector
     /// or the PriorityScheduler heap.
     ///
-    /// # Panics
+    /// # Local Tasks
     ///
-    /// Panics if the task is local (`!Send`) and we are not on the owner thread
-    /// (i.e. `schedule_local_task` fails). Local tasks cannot be spawned
-    /// remotely via this method.
+    /// If the task is local (`!Send`), it attempts to schedule it on the current
+    /// thread if it matches the owner. If called from a non-owner thread, it
+    /// attempts to route the task to the pinned worker's `local_ready` queue.
     pub fn spawn(&self, task: TaskId, priority: u8) {
         // Dedup: check wake_state before scheduling anywhere.
-        let (should_schedule, is_local) = {
+        let (should_schedule, is_local, pinned_worker) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state.task(task).map_or((true, false), |record| {
-                (record.wake_state.notify(), record.is_local())
+            state.task(task).map_or((true, false, None), |record| {
+                (
+                    record.wake_state.notify(),
+                    record.is_local(),
+                    record.pinned_worker(),
+                )
             })
         };
 
@@ -622,13 +626,21 @@ impl ThreeLaneScheduler {
         }
 
         if is_local {
-            // Local tasks MUST go to the non-stealable local_ready queue.
-            // They can only be spawned from the owner thread (because the future is !Send).
+            // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             if schedule_local_task(task) {
                 return;
             }
-            // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
-            // Skipping spawn may cause the task to never run, but avoids UB.
+
+            // 2. Try routing to pinned worker (cross-thread spawn)
+            if let Some(worker_id) = pinned_worker {
+                if let Some(queue) = self.local_ready.get(worker_id) {
+                    queue.lock().expect("local_ready lock poisoned").push(task);
+                    self.coordinator.wake_worker(worker_id);
+                    return;
+                }
+            }
+
+            // 3. Failure: Cannot route local task
             debug_assert!(
                 false,
                 "Attempted to spawn local task {task:?} from non-owner thread or outside worker context"
@@ -671,17 +683,21 @@ impl ThreeLaneScheduler {
     /// `LocalQueue` (O(1)) or `PriorityScheduler` instead of the global
     /// injector. For cancel wakeups, use `inject_cancel` instead.
     ///
-    /// # Panics
+    /// # Local Tasks
     ///
-    /// Panics if the task is local (`!Send`) and we are not on the owner thread.
-    /// Local tasks must be woken via their `Waker` (which handles remote wakes)
-    /// or on the owner thread.
+    /// If the task is local (`!Send`), it attempts to schedule it on the current
+    /// thread if it matches the owner. If called from a non-owner thread, it
+    /// attempts to route the task to the pinned worker's `local_ready` queue.
     pub fn wake(&self, task: TaskId, priority: u8) {
         // Dedup check.
-        let (should_schedule, is_local) = {
+        let (should_schedule, is_local, pinned_worker) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state.task(task).map_or((true, false), |record| {
-                (record.wake_state.notify(), record.is_local())
+            state.task(task).map_or((true, false, None), |record| {
+                (
+                    record.wake_state.notify(),
+                    record.is_local(),
+                    record.pinned_worker(),
+                )
             })
         };
 
@@ -690,12 +706,21 @@ impl ThreeLaneScheduler {
         }
 
         if is_local {
-            // Local tasks MUST go to the non-stealable local_ready queue.
+            // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             if schedule_local_task(task) {
                 return;
             }
-            // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
-            // Skipping wake may cause the task to hang, but avoids UB.
+
+            // 2. Try routing to pinned worker (cross-thread wake)
+            if let Some(worker_id) = pinned_worker {
+                if let Some(queue) = self.local_ready.get(worker_id) {
+                    queue.lock().expect("local_ready lock poisoned").push(task);
+                    self.coordinator.wake_worker(worker_id);
+                    return;
+                }
+            }
+
+            // 3. Failure: Cannot route local task
             debug_assert!(
                 false,
                 "Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead."
