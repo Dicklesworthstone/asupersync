@@ -29,6 +29,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -72,8 +73,8 @@ pub struct VirtualTcpStream {
     read_half: Arc<Mutex<ChannelHalf>>,
     /// Channel to which this stream writes (the other side reads from here).
     write_half: Arc<Mutex<ChannelHalf>>,
-    nodelay: bool,
-    ttl: u32,
+    nodelay: AtomicBool,
+    ttl: AtomicU32,
     write_shutdown: bool,
 }
 
@@ -102,8 +103,8 @@ impl VirtualTcpStream {
             peer_addr: b_addr,
             read_half: Arc::clone(&b_to_a),
             write_half: Arc::clone(&a_to_b),
-            nodelay: false,
-            ttl: 64,
+            nodelay: AtomicBool::new(false),
+            ttl: AtomicU32::new(64),
             write_shutdown: false,
         };
 
@@ -112,8 +113,8 @@ impl VirtualTcpStream {
             peer_addr: a_addr,
             read_half: a_to_b,
             write_half: b_to_a,
-            nodelay: false,
-            ttl: 64,
+            nodelay: AtomicBool::new(false),
+            ttl: AtomicU32::new(64),
             write_shutdown: false,
         };
 
@@ -277,22 +278,21 @@ impl TcpStreamApi for VirtualTcpStream {
     }
 
     fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        // We can't mutate through &self without interior mutability,
-        // but for a virtual stream this is a no-op in practice.
-        let _ = nodelay;
+        self.nodelay.store(nodelay, Ordering::Relaxed);
         Ok(())
     }
 
     fn nodelay(&self) -> io::Result<bool> {
-        Ok(self.nodelay)
+        Ok(self.nodelay.load(Ordering::Relaxed))
     }
 
-    fn set_ttl(&self, _ttl: u32) -> io::Result<()> {
+    fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        self.ttl.store(ttl, Ordering::Relaxed);
         Ok(())
     }
 
     fn ttl(&self) -> io::Result<u32> {
-        Ok(self.ttl)
+        Ok(self.ttl.load(Ordering::Relaxed))
     }
 }
 
@@ -720,15 +720,23 @@ mod tests {
 
     #[test]
     fn virtual_stream_nodelay_and_ttl() {
-        let (a, _b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
+        let (a, b) = VirtualTcpStream::pair(addr("127.0.0.1:1000"), addr("127.0.0.1:2000"));
 
         // Defaults
         assert!(!a.nodelay().unwrap());
         assert_eq!(a.ttl().unwrap(), 64);
+        assert!(!b.nodelay().unwrap());
+        assert_eq!(b.ttl().unwrap(), 64);
 
-        // set_nodelay and set_ttl are no-ops that succeed
+        // set_nodelay/set_ttl should be reflected by getters.
         assert!(a.set_nodelay(true).is_ok());
         assert!(a.set_ttl(128).is_ok());
+        assert!(a.nodelay().unwrap());
+        assert_eq!(a.ttl().unwrap(), 128);
+
+        // Stream-local options should not bleed into the peer handle.
+        assert!(!b.nodelay().unwrap());
+        assert_eq!(b.ttl().unwrap(), 64);
     }
 
     #[test]
