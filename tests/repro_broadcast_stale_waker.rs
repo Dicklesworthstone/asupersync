@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::channel::broadcast;
 use asupersync::cx::Cx;
 use std::future::Future;
@@ -34,7 +36,7 @@ fn repro_broadcast_stale_waker() {
 
     // 1. Poll with Waker A
     {
-        let waker = waker_a.clone().into();
+        let waker = waker_a.into();
         let mut ctx = Context::from_waker(&waker);
         assert!(matches!(fut.as_mut().poll(&mut ctx), Poll::Pending));
     }
