@@ -478,9 +478,10 @@ impl CircuitBreaker {
     pub fn record_success(&self, permit: Permit, now: Time) {
         let now_millis = now.as_millis();
 
-        {
+        let callback_event = {
             let mut metrics = self.metrics.write().expect("lock poisoned");
             metrics.total_success += 1;
+            let mut event = None;
 
             match permit {
                 Permit::Normal => {
@@ -535,8 +536,8 @@ impl CircuitBreaker {
                                         metrics.times_closed += 1;
                                         metrics.current_state = new_state;
                                         metrics.current_failure_streak = 0;
-                                        if let Some(ref cb) = self.policy.on_state_change {
-                                            cb(state, new_state, &metrics);
+                                        if self.policy.on_state_change.is_some() {
+                                            event = Some((state, new_state, metrics.clone()));
                                         }
                                         break;
                                     }
@@ -565,6 +566,13 @@ impl CircuitBreaker {
                     }
                 }
             }
+            event
+        };
+
+        if let Some((from, to, m)) = callback_event {
+            if let Some(ref cb) = self.policy.on_state_change {
+                cb(from, to, &m);
+            }
         }
 
         // Check sliding window after recording success - may trigger open
@@ -576,26 +584,37 @@ impl CircuitBreaker {
         });
 
         if window_triggered {
-            let mut metrics = self.metrics.write().expect("lock poisoned");
-            // Transition to Open due to window
-            let current_bits = self.state_bits.load(Ordering::SeqCst);
-            let state = State::from_bits(current_bits);
-            // Only transition if not already Open?
-            if !matches!(state, State::Open { .. }) {
-                let new_state = State::Open {
-                    since_millis: now_millis,
-                };
-                self.state_bits
-                    .store(new_state.to_bits(), Ordering::SeqCst);
-                metrics.times_opened += 1;
-                metrics.current_state = new_state;
+            let callback_event = {
+                let mut metrics = self.metrics.write().expect("lock poisoned");
+                // Transition to Open due to window
+                let current_bits = self.state_bits.load(Ordering::SeqCst);
+                let state = State::from_bits(current_bits);
+                let mut event = None;
 
-                if let Some(ref w) = self.sliding_window {
-                    w.write().expect("lock poisoned").reset();
+                // Only transition if not already Open?
+                if !matches!(state, State::Open { .. }) {
+                    let new_state = State::Open {
+                        since_millis: now_millis,
+                    };
+                    self.state_bits
+                        .store(new_state.to_bits(), Ordering::SeqCst);
+                    metrics.times_opened += 1;
+                    metrics.current_state = new_state;
+
+                    if let Some(ref w) = self.sliding_window {
+                        w.write().expect("lock poisoned").reset();
+                    }
+
+                    if self.policy.on_state_change.is_some() {
+                        event = Some((state, new_state, metrics.clone()));
+                    }
                 }
+                event
+            };
 
-                if let Some(ref callback) = self.policy.on_state_change {
-                    callback(state, new_state, &metrics);
+            if let Some((from, to, m)) = callback_event {
+                if let Some(ref cb) = self.policy.on_state_change {
+                    cb(from, to, &m);
                 }
             }
         }
@@ -659,23 +678,80 @@ impl CircuitBreaker {
                     (w.should_open(), Some(w.failure_rate()))
                 });
 
-        let mut metrics = self.metrics.write().expect("lock poisoned");
-        metrics.total_failure += 1;
-        if let Some(rate) = failure_rate {
-            metrics.sliding_window_failure_rate = Some(rate);
-        }
+        let callback_event = {
+            let mut metrics = self.metrics.write().expect("lock poisoned");
+            metrics.total_failure += 1;
+            if let Some(rate) = failure_rate {
+                metrics.sliding_window_failure_rate = Some(rate);
+            }
+            let mut event = None;
 
-        match permit {
-            Permit::Normal => {
-                loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
-                    let state = State::from_bits(current_bits);
-                    match state {
-                        State::Closed { failures } => {
-                            let new_failures = failures + 1;
-                            metrics.current_failure_streak = new_failures;
+            match permit {
+                Permit::Normal => {
+                    loop {
+                        let current_bits = self.state_bits.load(Ordering::SeqCst);
+                        let state = State::from_bits(current_bits);
+                        match state {
+                            State::Closed { failures } => {
+                                let new_failures = failures + 1;
+                                metrics.current_failure_streak = new_failures;
 
-                            if new_failures >= self.policy.failure_threshold || window_triggered {
+                                if new_failures >= self.policy.failure_threshold || window_triggered {
+                                    let new_state = State::Open {
+                                        since_millis: now_millis,
+                                    };
+                                    if self
+                                        .state_bits
+                                        .compare_exchange(
+                                            current_bits,
+                                            new_state.to_bits(),
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                        )
+                                        .is_ok()
+                                    {
+                                        metrics.times_opened += 1;
+                                        metrics.current_state = new_state;
+                                        if self.policy.on_state_change.is_some() {
+                                            event = Some((state, new_state, metrics.clone()));
+                                        }
+                                        if let Some(ref w) = self.sliding_window {
+                                            w.write().expect("lock poisoned").reset();
+                                        }
+                                        break;
+                                    }
+                                } else {
+                                    let new_state = State::Closed {
+                                        failures: new_failures,
+                                    };
+                                    if self
+                                        .state_bits
+                                        .compare_exchange(
+                                            current_bits,
+                                            new_state.to_bits(),
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                        )
+                                        .is_ok()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                Permit::Probe => {
+                    loop {
+                        let current_bits = self.state_bits.load(Ordering::SeqCst);
+                        let state = State::from_bits(current_bits);
+                        match state {
+                            State::HalfOpen {
+                                probes_active: _,
+                                successes: _,
+                            } => {
+                                // Probe failed -> Reopen
                                 let new_state = State::Open {
                                     since_millis: now_millis,
                                 };
@@ -691,73 +767,26 @@ impl CircuitBreaker {
                                 {
                                     metrics.times_opened += 1;
                                     metrics.current_state = new_state;
-                                    if let Some(ref cb) = self.policy.on_state_change {
-                                        cb(state, new_state, &metrics);
+                                    if self.policy.on_state_change.is_some() {
+                                        event = Some((state, new_state, metrics.clone()));
                                     }
                                     if let Some(ref w) = self.sliding_window {
                                         w.write().expect("lock poisoned").reset();
                                     }
                                     break;
                                 }
-                            } else {
-                                let new_state = State::Closed {
-                                    failures: new_failures,
-                                };
-                                if self
-                                    .state_bits
-                                    .compare_exchange(
-                                        current_bits,
-                                        new_state.to_bits(),
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                                {
-                                    break;
-                                }
                             }
+                            _ => break,
                         }
-                        _ => break,
                     }
                 }
             }
-            Permit::Probe => {
-                loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
-                    let state = State::from_bits(current_bits);
-                    match state {
-                        State::HalfOpen {
-                            probes_active: _,
-                            successes: _,
-                        } => {
-                            // Probe failed -> Reopen
-                            let new_state = State::Open {
-                                since_millis: now_millis,
-                            };
-                            if self
-                                .state_bits
-                                .compare_exchange(
-                                    current_bits,
-                                    new_state.to_bits(),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
-                                )
-                                .is_ok()
-                            {
-                                metrics.times_opened += 1;
-                                metrics.current_state = new_state;
-                                if let Some(ref cb) = self.policy.on_state_change {
-                                    cb(state, new_state, &metrics);
-                                }
-                                if let Some(ref w) = self.sliding_window {
-                                    w.write().expect("lock poisoned").reset();
-                                }
-                                break;
-                            }
-                        }
-                        _ => break,
-                    }
-                }
+            event
+        };
+
+        if let Some((from, to, m)) = callback_event {
+            if let Some(ref cb) = self.policy.on_state_change {
+                cb(from, to, &m);
             }
         }
     }
