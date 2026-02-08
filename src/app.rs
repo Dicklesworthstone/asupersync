@@ -1470,4 +1470,428 @@ mod tests {
         let _stopped = app_handle.stop(&mut state).expect("stop ok");
         crate::test_complete!("app_registry_stop_does_not_panic");
     }
+
+    // =====================================================================
+    // Mini Chat App Example (bd-2cruj)
+    //
+    // Demonstrates GenServer + Registry + Supervisor integration patterns.
+    // =====================================================================
+
+    use crate::gen_server::{GenServer, Reply, SystemMsg};
+    use std::future::Future;
+    use std::pin::Pin;
+
+    /// Chat room state: holds a bounded message history.
+    struct ChatRoom {
+        history: Vec<String>,
+        max_history: usize,
+    }
+
+    /// Synchronous requests (call): operations that return a response.
+    enum ChatCall {
+        /// Get the current message history.
+        GetHistory,
+        /// Get the number of messages.
+        Count,
+    }
+
+    /// Asynchronous messages (cast): fire-and-forget operations.
+    enum ChatCast {
+        /// Post a message to the room.
+        Post(String),
+        /// Clear all messages.
+        Clear,
+    }
+
+    impl GenServer for ChatRoom {
+        type Call = ChatCall;
+        type Reply = Vec<String>;
+        type Cast = ChatCast;
+        type Info = SystemMsg;
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            request: ChatCall,
+            reply: Reply<Vec<String>>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            match request {
+                ChatCall::GetHistory => {
+                    let _ = reply.send(self.history.clone());
+                }
+                ChatCall::Count => {
+                    // Encode count as a single-element vec to satisfy the Reply type.
+                    let _ = reply.send(vec![self.history.len().to_string()]);
+                }
+            }
+            Box::pin(async {})
+        }
+
+        fn handle_cast(
+            &mut self,
+            _cx: &Cx,
+            msg: ChatCast,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            match msg {
+                ChatCast::Post(text) => {
+                    self.history.push(text);
+                    if self.history.len() > self.max_history {
+                        self.history.remove(0);
+                    }
+                }
+                ChatCast::Clear => {
+                    self.history.clear();
+                }
+            }
+            Box::pin(async {})
+        }
+    }
+
+    impl ChatRoom {
+        fn new(max_history: usize) -> Self {
+            Self {
+                history: Vec::new(),
+                max_history,
+            }
+        }
+    }
+
+    #[test]
+    fn example_chat_room_call_and_cast() {
+        // Demonstrates: GenServer with typed call (GetHistory) and cast (Post).
+        init_test("example_chat_room_call_and_cast");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, ChatRoom::new(100), 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        // Cast: post messages (fire-and-forget).
+        handle
+            .try_cast(ChatCast::Post("alice: hello".into()))
+            .unwrap();
+        handle
+            .try_cast(ChatCast::Post("bob: hi alice".into()))
+            .unwrap();
+        handle
+            .try_cast(ChatCast::Post("alice: how are you?".into()))
+            .unwrap();
+
+        // Spawn a client task that calls GetHistory.
+        let server_ref = handle.server_ref();
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
+            })
+            .unwrap();
+        let client_id = client_handle.task_id();
+        runtime.state.store_spawned_task(client_id, client_stored);
+
+        // Schedule both server and client, run to quiescence.
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.run_until_quiescent();
+
+        // Verify the client received the full history.
+        let history =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0], "alice: hello");
+        assert_eq!(history[1], "bob: hi alice");
+        assert_eq!(history[2], "alice: how are you?");
+
+        crate::test_complete!("example_chat_room_call_and_cast");
+    }
+
+    #[test]
+    fn example_chat_room_bounded_history() {
+        // Demonstrates: cast overflow handling (bounded history, not bounded channel).
+        init_test("example_chat_room_bounded_history");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
+
+        // Chat room with max 2 messages.
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, ChatRoom::new(2), 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        // Post 3 messages; oldest should be evicted.
+        handle.try_cast(ChatCast::Post("msg1".into())).unwrap();
+        handle.try_cast(ChatCast::Post("msg2".into())).unwrap();
+        handle.try_cast(ChatCast::Post("msg3".into())).unwrap();
+
+        let server_ref = handle.server_ref();
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
+            })
+            .unwrap();
+        let client_id = client_handle.task_id();
+        runtime.state.store_spawned_task(client_id, client_stored);
+
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.run_until_quiescent();
+
+        let history =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        assert_eq!(history, vec!["msg2", "msg3"], "oldest message evicted");
+
+        crate::test_complete!("example_chat_room_bounded_history");
+    }
+
+    #[test]
+    fn example_chat_room_named_via_registry() {
+        // Demonstrates: named server registration + whereis lookup.
+        init_test("example_chat_room_named_via_registry");
+
+        let registry = Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
+
+        // Spawn a named chat room via the atomic spawn_named_gen_server API.
+        let (mut named_handle, stored) = scope
+            .spawn_named_gen_server(
+                &mut runtime.state,
+                &cx,
+                &mut registry.lock(),
+                "lobby",
+                ChatRoom::new(100),
+                32,
+                crate::types::Time::ZERO,
+            )
+            .unwrap();
+        let task_id = named_handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        // The room should be discoverable via whereis.
+        let found = registry.lock().whereis("lobby");
+        assert!(
+            found.is_some(),
+            "named chat room must be visible via whereis"
+        );
+        assert_eq!(found.unwrap(), task_id);
+
+        // Post and read via the named handle's server_ref.
+        named_handle
+            .inner()
+            .try_cast(ChatCast::Post("welcome to lobby".into()))
+            .unwrap();
+
+        let server_ref = named_handle.server_ref();
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
+            })
+            .unwrap();
+        let client_id = client_handle.task_id();
+        runtime.state.store_spawned_task(client_id, client_stored);
+
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.run_until_quiescent();
+
+        let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
+        assert_eq!(history, vec!["welcome to lobby"]);
+
+        // Clean up: release the name lease obligation, then unregister the name.
+        named_handle.stop_and_release().expect("release ok");
+        registry.lock().unregister("lobby").expect("unregister ok");
+
+        // After unregister, whereis should return None.
+        let found_after = registry.lock().whereis("lobby");
+        assert!(found_after.is_none(), "name must be gone after unregister");
+
+        crate::test_complete!("example_chat_room_named_via_registry");
+    }
+
+    #[test]
+    fn example_chat_room_supervised_app() {
+        // Demonstrates: ChatRoom as a supervised child in an AppSpec.
+        init_test("example_chat_room_supervised_app");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let chat_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_clone = Arc::clone(&chat_started);
+
+        // ChildSpec that spawns a ChatRoom GenServer.
+        let chat_child = ChildSpec {
+            name: "lobby".into(),
+            start: Box::new(
+                move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                      state: &mut RuntimeState,
+                      cx: &Cx| {
+                    let (handle, stored) =
+                        scope.spawn_gen_server::<ChatRoom>(state, cx, ChatRoom::new(100), 32)?;
+                    started_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let task_id = handle.task_id();
+                    state.store_spawned_task(task_id, stored);
+                    Ok(task_id)
+                },
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("chat_app").child(chat_child);
+        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        assert!(
+            chat_started.load(std::sync::atomic::Ordering::SeqCst),
+            "ChatRoom GenServer child must be started by supervisor"
+        );
+        assert_eq!(app_handle.name(), "chat_app");
+        assert_eq!(app_handle.supervisor().started.len(), 1);
+        assert_eq!(app_handle.supervisor().started[0].name, "lobby");
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("example_chat_room_supervised_app");
+    }
+
+    #[test]
+    fn example_chat_app_with_dependencies() {
+        // Demonstrates: supervisor compilation with child dependencies.
+        // The "announcements" child depends on "lobby" — topological sort
+        // ensures lobby starts first regardless of insertion order.
+        init_test("example_chat_app_with_dependencies");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let lobby_child = ChildSpec {
+            name: "lobby".into(),
+            start: Box::new(
+                |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                 state: &mut RuntimeState,
+                 _cx: &Cx| {
+                    state
+                        .create_task(scope.region_id(), scope.budget(), async { 1_u8 })
+                        .map(|(_, s)| s.task_id())
+                },
+            ),
+            restart: crate::supervision::SupervisionStrategy::Restart(
+                crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(60)),
+            ),
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+        let announcements_child = ChildSpec {
+            name: "announcements".into(),
+            start: Box::new(
+                |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                 state: &mut RuntimeState,
+                 _cx: &Cx| {
+                    state
+                        .create_task(scope.region_id(), scope.budget(), async { 2_u8 })
+                        .map(|(_, s)| s.task_id())
+                },
+            ),
+            restart: crate::supervision::SupervisionStrategy::Restart(
+                crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(60)),
+            ),
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec!["lobby".into()], // depends on lobby
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        // Insert in reverse order: announcements first, then lobby.
+        let spec = AppSpec::new("chat_app")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(announcements_child)
+            .child(lobby_child);
+        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        // Despite insertion order, start order must be lobby -> announcements.
+        let names: Vec<&str> = app_handle
+            .supervisor()
+            .started
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["lobby", "announcements"]);
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("example_chat_app_with_dependencies");
+    }
+
+    #[test]
+    fn example_chat_clear_resets_history() {
+        // Demonstrates: cast (Clear) resets server state.
+        init_test("example_chat_clear_resets_history");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, ChatRoom::new(100), 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        // Post, then clear, then post again.
+        handle.try_cast(ChatCast::Post("old msg".into())).unwrap();
+        handle.try_cast(ChatCast::Clear).unwrap();
+        handle
+            .try_cast(ChatCast::Post("fresh start".into()))
+            .unwrap();
+
+        let server_ref = handle.server_ref();
+        let (client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
+            })
+            .unwrap();
+        let client_id = client_handle.task_id();
+        runtime.state.store_spawned_task(client_id, client_stored);
+
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.run_until_quiescent();
+
+        let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
+        assert_eq!(history, vec!["fresh start"], "clear must reset history");
+
+        crate::test_complete!("example_chat_clear_resets_history");
+    }
 }
