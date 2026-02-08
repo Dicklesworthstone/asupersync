@@ -55,6 +55,13 @@ pub enum SpawnError {
     RegionClosed(RegionId),
     /// Local spawn attempted without an active worker-local scheduler.
     LocalSchedulerUnavailable,
+    /// Named service registration failed during spawn.
+    NameRegistrationFailed {
+        /// The attempted service name.
+        name: String,
+        /// Deterministic failure reason.
+        reason: String,
+    },
     /// The target region has reached its admission limit.
     RegionAtCapacity {
         /// The region that rejected the spawn.
@@ -73,6 +80,9 @@ impl std::fmt::Display for SpawnError {
             Self::RegionClosed(id) => write!(f, "region closed: {id:?}"),
             Self::LocalSchedulerUnavailable => {
                 write!(f, "local spawn requires an active worker scheduler")
+            }
+            Self::NameRegistrationFailed { name, reason } => {
+                write!(f, "name registration failed: name={name} reason={reason}")
             }
             Self::RegionAtCapacity {
                 region,

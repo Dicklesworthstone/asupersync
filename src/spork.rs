@@ -67,8 +67,9 @@ pub mod supervisor {
 /// Re-exports from [`crate::gen_server`].
 pub mod gen_server {
     pub use crate::gen_server::{
-        CallError, CastError, CastOverflowPolicy, GenServer, GenServerHandle, GenServerRef,
-        InfoError, Reply, ReplyOutcome, SystemMsg,
+        named_gen_server_start, CallError, CastError, CastOverflowPolicy, GenServer,
+        GenServerHandle, GenServerRef, InfoError, NamedGenServerStart, Reply, ReplyOutcome,
+        SystemMsg,
     };
 }
 
@@ -128,7 +129,8 @@ pub mod prelude {
 
     // -- GenServer --
     pub use crate::gen_server::{
-        CallError, CastError, GenServer, GenServerHandle, Reply, SystemMsg,
+        named_gen_server_start, CallError, CastError, GenServer, GenServerHandle,
+        NamedGenServerStart, Reply, SystemMsg,
     };
 
     // -- Monitor --

@@ -1554,6 +1554,108 @@ impl<S: GenServer> NamedGenServerHandle<S> {
 }
 
 // ============================================================================
+// Supervised named-start helper (bd-1hvy1)
+// ============================================================================
+
+/// Child-start helper for running a named GenServer under supervision.
+///
+/// This adapter wires together:
+/// 1. Name lease acquisition (`spawn_named_gen_server`)
+/// 2. Server task storage in runtime state
+/// 3. Deterministic lease/name cleanup on region stop via a sync finalizer
+///
+/// Use this when building [`crate::supervision::ChildSpec`] entries for named
+/// services.
+pub struct NamedGenServerStart<S, F>
+where
+    S: GenServer,
+    F: FnMut() -> S + Send + 'static,
+{
+    registry: Arc<parking_lot::Mutex<crate::cx::NameRegistry>>,
+    name: String,
+    mailbox_capacity: usize,
+    make_server: F,
+}
+
+/// Construct a [`NamedGenServerStart`] helper for supervised named services.
+#[must_use]
+pub fn named_gen_server_start<S, F>(
+    registry: Arc<parking_lot::Mutex<crate::cx::NameRegistry>>,
+    name: impl Into<String>,
+    mailbox_capacity: usize,
+    make_server: F,
+) -> NamedGenServerStart<S, F>
+where
+    S: GenServer,
+    F: FnMut() -> S + Send + 'static,
+{
+    NamedGenServerStart {
+        registry,
+        name: name.into(),
+        mailbox_capacity,
+        make_server,
+    }
+}
+
+impl<S, F> crate::supervision::ChildStart for NamedGenServerStart<S, F>
+where
+    S: GenServer,
+    F: FnMut() -> S + Send + 'static,
+{
+    fn start(
+        &mut self,
+        scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        state: &mut crate::runtime::RuntimeState,
+        cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
+        let now = crate::types::Time::ZERO;
+        let server = (self.make_server)();
+        let (mut named_handle, stored) = scope
+            .spawn_named_gen_server(
+                state,
+                cx,
+                &mut self.registry.lock(),
+                self.name.clone(),
+                server,
+                self.mailbox_capacity,
+                now,
+            )
+            .map_err(|err| match err {
+                NamedSpawnError::Spawn(spawn_err) => spawn_err,
+                NamedSpawnError::NameTaken(name_err) => SpawnError::NameRegistrationFailed {
+                    name: self.name.clone(),
+                    reason: name_err.to_string(),
+                },
+            })?;
+
+        let task_id = named_handle.task_id();
+        state.store_spawned_task(task_id, stored);
+
+        let lease_slot = Arc::new(parking_lot::Mutex::new(named_handle.take_lease()));
+        let lease_slot_for_finalizer = Arc::clone(&lease_slot);
+        let registry_for_finalizer = Arc::clone(&self.registry);
+        let finalizer_registered = scope.defer_sync(state, move || {
+            let _ = registry_for_finalizer.lock().cleanup_task(task_id);
+            let lease_to_resolve = lease_slot_for_finalizer.lock().take();
+            if let Some(mut lease) = lease_to_resolve {
+                let _ = lease.release();
+            }
+        });
+
+        if !finalizer_registered {
+            let _ = self.registry.lock().cleanup_task(task_id);
+            let lease_to_abort = lease_slot.lock().take();
+            if let Some(mut lease) = lease_to_abort {
+                let _ = lease.abort();
+            }
+            return Err(SpawnError::RegionClosed(scope.region_id()));
+        }
+
+        Ok(task_id)
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -4595,5 +4697,180 @@ mod tests {
         let _ = lease.abort();
 
         crate::test_complete!("named_server_take_lease_manual_management");
+    }
+
+    #[test]
+    #[allow(clippy::items_after_statements)]
+    fn named_start_helper_supervisor_stop_cleans_registry() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("named_start_helper_supervisor_stop_cleans_registry");
+
+        #[derive(Debug)]
+        struct Noop;
+
+        impl GenServer for Noop {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        let registry: Arc<parking_lot::Mutex<crate::cx::NameRegistry>> =
+            Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
+        let root = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+
+        let child = crate::supervision::ChildSpec::new(
+            "svc_child",
+            named_gen_server_start(Arc::clone(&registry), "svc", 16, || Noop),
+        );
+
+        let compiled = crate::supervision::SupervisorBuilder::new("svc_supervisor")
+            .child(child)
+            .compile()
+            .expect("compile supervisor");
+
+        let supervisor = compiled
+            .spawn(&mut runtime.state, &cx, root, budget)
+            .expect("spawn supervisor");
+
+        assert_eq!(supervisor.started.len(), 1, "exactly one started child");
+        let child_task = supervisor.started[0].task_id;
+        assert_eq!(registry.lock().whereis("svc"), Some(child_task));
+
+        // Stop the supervisor region and drive cancellation/finalization.
+        let tasks_to_schedule = runtime.state.cancel_request(
+            supervisor.region,
+            &crate::types::CancelReason::user("stop"),
+            None,
+        );
+        for (task_id, priority) in tasks_to_schedule {
+            runtime
+                .scheduler
+                .lock()
+                .unwrap()
+                .schedule(task_id, priority);
+        }
+        runtime.run_until_quiescent();
+
+        assert!(
+            registry.lock().whereis("svc").is_none(),
+            "name must be removed after supervised stop",
+        );
+
+        crate::test_complete!("named_start_helper_supervisor_stop_cleans_registry");
+    }
+
+    #[test]
+    #[allow(clippy::items_after_statements)]
+    fn named_start_helper_crash_then_stop_cleans_registry() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("named_start_helper_crash_then_stop_cleans_registry");
+
+        #[derive(Debug)]
+        struct PanicOnStart;
+
+        impl GenServer for PanicOnStart {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {
+                    panic!("intentional start crash for registry cleanup test");
+                })
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        let registry: Arc<parking_lot::Mutex<crate::cx::NameRegistry>> =
+            Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(7));
+        let root = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+
+        let child = crate::supervision::ChildSpec::new(
+            "panic_child",
+            named_gen_server_start(Arc::clone(&registry), "panic_svc", 8, || PanicOnStart),
+        );
+
+        let compiled = crate::supervision::SupervisorBuilder::new("panic_supervisor")
+            .child(child)
+            .compile()
+            .expect("compile supervisor");
+
+        let supervisor = compiled
+            .spawn(&mut runtime.state, &cx, root, budget)
+            .expect("spawn supervisor");
+
+        let child_task = supervisor.started[0].task_id;
+        assert_eq!(registry.lock().whereis("panic_svc"), Some(child_task));
+
+        // Drive the child once so it crashes in on_start.
+        runtime.scheduler.lock().unwrap().schedule(child_task, 0);
+        runtime.run_until_idle();
+
+        // Region stop must still clean the registry + resolve the lease.
+        let tasks_to_schedule = runtime.state.cancel_request(
+            supervisor.region,
+            &crate::types::CancelReason::user("shutdown"),
+            None,
+        );
+        for (task_id, priority) in tasks_to_schedule {
+            runtime
+                .scheduler
+                .lock()
+                .unwrap()
+                .schedule(task_id, priority);
+        }
+        runtime.run_until_quiescent();
+
+        assert!(
+            registry.lock().whereis("panic_svc").is_none(),
+            "name must be removed after crash + region stop",
+        );
+
+        crate::test_complete!("named_start_helper_crash_then_stop_cleans_registry");
     }
 }
