@@ -17,10 +17,10 @@
 //! - `recv` is cancel-safe: if cancelled, no message is consumed (cursor not advanced).
 
 use crate::cx::Cx;
+use crate::util::{Arena, ArenaIndex};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -65,15 +65,6 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// A queued waiter for broadcast messages.
-#[derive(Debug)]
-struct RecvWaiter {
-    waker: Waker,
-    /// Flag indicating whether this waiter is still queued.
-    /// Set to false when woken, allowing the future to re-register.
-    queued: Arc<AtomicBool>,
-}
-
 /// Internal state shared between senders and receivers.
 #[derive(Debug)]
 struct Shared<T> {
@@ -88,7 +79,7 @@ struct Shared<T> {
     /// Number of active senders.
     sender_count: usize,
     /// Waiting receivers.
-    wakers: Vec<RecvWaiter>,
+    wakers: Arena<Waker>,
 }
 
 #[derive(Debug)]
@@ -127,7 +118,7 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             total_sent: 0,
             receiver_count: 1,
             sender_count: 1,
-            wakers: Vec::new(),
+            wakers: Arena::new(),
         }),
     });
 
@@ -220,10 +211,10 @@ impl<T> Drop for Sender<T> {
         let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
         inner.sender_count -= 1;
         if inner.sender_count == 0 {
-            for waiter in inner.wakers.drain(..) {
-                waiter.queued.store(false, Ordering::Release);
-                waiter.waker.wake();
-            }
+            inner.wakers.retain(|waker| {
+                waker.wake_by_ref();
+                false
+            });
         }
     }
 }
@@ -259,10 +250,10 @@ impl<T: Clone> SendPermit<'_, T> {
         let receiver_count = inner.receiver_count;
 
         // Wake everyone waiting for messages
-        for waiter in inner.wakers.drain(..) {
-            waiter.queued.store(false, Ordering::Release);
-            waiter.waker.wake();
-        }
+        inner.wakers.retain(|waker| {
+            waker.wake_by_ref();
+            false
+        });
 
         drop(inner);
         receiver_count
@@ -296,20 +287,16 @@ impl<T: Clone> Receiver<T> {
 pub struct Recv<'a, T> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx,
-    /// Tracks whether we've registered a waiter to prevent unbounded queue growth.
-    waiter: Option<Arc<AtomicBool>>,
+    /// Token for the registered waiter in the arena.
+    waiter: Option<ArenaIndex>,
 }
 
 impl<T> Recv<'_, T> {
     fn clear_waiter_registration(&mut self) {
-        let Some(waiter) = self.waiter.take() else {
-            return;
-        };
-
-        // Mark as no longer queued (idempotent) and remove any stale waiter entries.
-        waiter.store(false, Ordering::Release);
-        if let Ok(mut inner) = self.receiver.channel.inner.lock() {
-            inner.wakers.retain(|w| !Arc::ptr_eq(&w.queued, &waiter));
+        if let Some(token) = self.waiter.take() {
+            if let Ok(mut inner) = self.receiver.channel.inner.lock() {
+                inner.wakers.remove(token);
+            }
         }
     }
 }
@@ -339,9 +326,9 @@ impl<T: Clone> Future for Recv<'_, T> {
         if this.receiver.next_index < earliest {
             let missed = earliest - this.receiver.next_index;
             this.receiver.next_index = earliest;
-            // Mark as no longer queued if we had a waiter
-            if let Some(waiter) = this.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
+            // Clear waiter if we had one
+            if let Some(token) = this.waiter.take() {
+                inner.wakers.remove(token);
             }
             return Poll::Ready(Err(RecvError::Lagged(missed)));
         }
@@ -350,12 +337,13 @@ impl<T: Clone> Future for Recv<'_, T> {
         let offset = this.receiver.next_index.saturating_sub(earliest) as usize;
 
         if let Some(slot) = inner.buffer.get(offset) {
+            let msg = slot.msg.clone();
             this.receiver.next_index += 1;
-            // Mark as no longer queued if we had a waiter
-            if let Some(waiter) = this.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
+            // Clear waiter
+            if let Some(token) = this.waiter.take() {
+                inner.wakers.remove(token);
             }
-            return Poll::Ready(Ok(slot.msg.clone()));
+            return Poll::Ready(Ok(msg));
         }
 
         // 3. Check if closed
@@ -363,31 +351,24 @@ impl<T: Clone> Future for Recv<'_, T> {
             return Poll::Ready(Err(RecvError::Closed));
         }
 
-        // 4. Wait - only register once to prevent unbounded queue growth
-        let mut new_waiter = None;
-        match this.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                // We were woken but no message yet - re-register
-                waiter.store(true, Ordering::Release);
-                inner.wakers.push(RecvWaiter {
-                    waker: ctx.waker().clone(),
-                    queued: Arc::clone(waiter),
-                });
+        // 4. Wait - register or update waker
+        let current_waker = ctx.waker();
+
+        if let Some(token) = this.waiter {
+            if let Some(waker) = inner.wakers.get_mut(token) {
+                // If waker changed, update it in place
+                if !waker.will_wake(current_waker) {
+                    *waker = current_waker.clone();
+                }
+            } else {
+                // Token invalid (woken and removed from arena), re-register
+                let token = inner.wakers.insert(current_waker.clone());
+                this.waiter = Some(token);
             }
-            Some(_) => {} // Still queued, don't add again
-            None => {
-                // First time waiting - create new waiter
-                let waiter = Arc::new(AtomicBool::new(true));
-                inner.wakers.push(RecvWaiter {
-                    waker: ctx.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
-        }
-        drop(inner);
-        if let Some(waiter) = new_waiter {
-            this.waiter = Some(waiter);
+        } else {
+            // Not registered
+            let token = inner.wakers.insert(current_waker.clone());
+            this.waiter = Some(token);
         }
 
         Poll::Pending
