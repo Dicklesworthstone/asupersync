@@ -249,6 +249,78 @@ impl<T> Arena<T> {
         }
     }
 
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements `e` such that `f(&e)` returns `false`.
+    /// This method operates in place and preserves the generation counters of removed elements.
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        // Pass 1: Apply predicate and mark slots as Vacant if needed.
+        let mut new_len = 0;
+        for slot in &mut self.slots {
+            let is_occupied = matches!(*slot, Slot::Occupied { .. });
+            if is_occupied {
+                // Check if we should remove (and run side effects)
+                // We use a separate match to avoid holding the borrow of `slot` while calling `f`
+                let remove = match slot {
+                    Slot::Occupied { value, .. } => !f(value),
+                    _ => unreachable!(),
+                };
+
+                if remove {
+                    // Perform removal
+                    // Re-match to get generation (safe because previous borrow ended)
+                    let gen = if let Slot::Occupied { generation, .. } = slot {
+                        *generation
+                    } else {
+                        unreachable!()
+                    };
+                    
+                    *slot = Slot::Vacant {
+                        next_free: None,
+                        generation: gen.wrapping_add(1),
+                    };
+                } else {
+                    new_len += 1;
+                }
+            }
+        }
+        self.len = new_len;
+
+        // Pass 2: Rebuild free list.
+        // We collect indices of all vacant slots to avoid double-mutable borrow issues.
+        let mut vacant_indices = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if matches!(slot, Slot::Vacant { .. }) {
+                vacant_indices.push(i);
+            }
+        }
+
+        if vacant_indices.is_empty() {
+            self.free_head = None;
+            return;
+        }
+
+        self.free_head = Some(vacant_indices[0] as u32);
+
+        // Link them up
+        for i in 0..vacant_indices.len() - 1 {
+            let curr = vacant_indices[i];
+            let next = vacant_indices[i+1];
+            if let Slot::Vacant { next_free, .. } = &mut self.slots[curr] {
+                *next_free = Some(next as u32);
+            }
+        }
+
+        // Terminate the last one
+        let last = *vacant_indices.last().unwrap();
+        if let Slot::Vacant { next_free, .. } = &mut self.slots[last] {
+            *next_free = None;
+        }
+    }
+
     /// Returns true if the index is valid and points to an occupied slot.
     #[must_use]
     pub fn contains(&self, index: ArenaIndex) -> bool {
