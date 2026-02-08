@@ -1138,7 +1138,7 @@ mod tests {
             cb.record_success(permit, now);
         }
 
-        assert_eq!(cb.state(), State::Closed);
+        assert_eq!(cb.state(), State::Closed { failures: 0 });
     }
 
     #[test]
@@ -1190,7 +1190,7 @@ mod tests {
         cb.record_success(permit, now);
 
         assert_eq!(cb.metrics().current_failure_streak, 0);
-        assert_eq!(cb.state(), State::Closed);
+        assert_eq!(cb.state(), State::Closed { failures: 0 });
     }
 
     // =========================================================================
@@ -1210,7 +1210,7 @@ mod tests {
         // Non-matching error doesn't count
         let permit = cb.should_allow(now).unwrap();
         cb.record_failure(permit, "network error", now);
-        assert_eq!(cb.state(), State::Closed);
+        assert_eq!(cb.state(), State::Closed { failures: 0 });
         assert_eq!(cb.metrics().total_ignored_errors, 1);
 
         // Matching error opens circuit
@@ -1272,7 +1272,8 @@ mod tests {
         }
 
         // Should still be closed (minimum not met)
-        assert_eq!(cb.state(), State::Closed);
+        // Failure count is 5
+        assert_eq!(cb.state(), State::Closed { failures: 5 });
     }
 
     // =========================================================================
@@ -1480,7 +1481,7 @@ mod tests {
         // Reset
         cb.reset();
 
-        assert_eq!(cb.state(), State::Closed);
+        assert_eq!(cb.state(), State::Closed { failures: 0 });
         assert_eq!(cb.metrics().current_failure_streak, 0);
     }
 
