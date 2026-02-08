@@ -25,7 +25,7 @@ fn test_mpsc_fifo_starvation() {
     tx.try_send(1).expect("first send");
 
     let tx_a = tx.clone();
-    let cx_a = cx.clone();
+    let cx_a = cx;
 
     // Sender A: waits for capacity
     let handle_a = thread::spawn(move || {

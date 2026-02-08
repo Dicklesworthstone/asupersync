@@ -286,7 +286,14 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
-            state.waiters.retain(|waiter| waiter.id != waiter_id);
+
+            // Optimization: Since we verified we are next in line, we are either
+            // at the front of the queue or the queue is empty. We can just pop
+            // the front instead of scanning the whole deque with retain (O(N)).
+            if !state.waiters.is_empty() {
+                state.waiters.pop_front();
+            }
+
             // Wake next waiter if there are still permits available.
             // Without this, add_permits(N) where N satisfies multiple waiters
             // would only wake the first, leaving others sleeping indefinitely.
@@ -295,6 +302,9 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                     next.waker.wake_by_ref();
                 }
             }
+            drop(state);
+            // Clear waiter_id after releasing state guard to avoid borrow conflicts.
+            self.waiter_id = None;
             return Poll::Ready(Ok(SemaphorePermit {
                 semaphore: self.semaphore,
                 count: self.count,
@@ -487,7 +497,12 @@ impl Future for OwnedAcquireFuture {
 
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
-            state.waiters.retain(|waiter| waiter.id != waiter_id);
+
+            // Optimization: O(1) removal instead of O(N) retain
+            if !state.waiters.is_empty() {
+                state.waiters.pop_front();
+            }
+
             // Wake next waiter if there are still permits available.
             // Without this, add_permits(N) where N satisfies multiple waiters
             // would only wake the first, leaving others sleeping indefinitely.
@@ -496,6 +511,9 @@ impl Future for OwnedAcquireFuture {
                     next.waker.wake_by_ref();
                 }
             }
+            drop(state);
+            // Prevent redundant Drop cleanup after releasing state guard.
+            self.waiter_id = None;
             return Poll::Ready(Ok(OwnedSemaphorePermit {
                 semaphore: self.semaphore.clone(),
                 count: self.count,

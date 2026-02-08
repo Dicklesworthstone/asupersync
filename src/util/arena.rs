@@ -277,7 +277,7 @@ impl<T> Arena<T> {
                     } else {
                         unreachable!()
                     };
-                    
+
                     *slot = Slot::Vacant {
                         next_free: None,
                         generation: gen.wrapping_add(1),
@@ -308,7 +308,7 @@ impl<T> Arena<T> {
         // Link them up
         for i in 0..vacant_indices.len() - 1 {
             let curr = vacant_indices[i];
-            let next = vacant_indices[i+1];
+            let next = vacant_indices[i + 1];
             if let Slot::Vacant { next_free, .. } = &mut self.slots[curr] {
                 *next_free = Some(next as u32);
             }

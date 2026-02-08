@@ -719,6 +719,37 @@ impl TimerWheel {
         }
     }
 
+    fn promote_coalescing_window_entries(&mut self, boundary: Time, ready: &mut Vec<TimerEntry>) {
+        for level in &mut self.levels {
+            for slot_idx in 0..SLOTS_PER_LEVEL {
+                let slot_empty = {
+                    let slot = &mut level.slots[slot_idx];
+                    let mut i = 0;
+                    while i < slot.len() {
+                        if slot[i].deadline <= boundary {
+                            ready.push(slot.swap_remove(i));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    slot.is_empty()
+                };
+                if slot_empty {
+                    level.clear_occupied(slot_idx);
+                }
+            }
+        }
+
+        while self
+            .overflow
+            .peek()
+            .is_some_and(|entry| entry.deadline <= boundary)
+        {
+            let entry = self.overflow.pop().expect("peeked entry missing");
+            ready.push(entry.entry);
+        }
+    }
+
     fn drain_ready(&mut self, now: Time) -> Vec<Waker> {
         let mut wakers = Vec::new();
 
@@ -744,6 +775,10 @@ impl TimerWheel {
         } else {
             None
         };
+        if let Some(boundary) = coalesced_time {
+            self.promote_coalescing_window_entries(boundary, &mut ready);
+        }
+
         let coalescing_enabled = coalesced_time.is_some_and(|boundary| {
             let min_group_size = self.coalescing.min_group_size.max(1);
             ready
