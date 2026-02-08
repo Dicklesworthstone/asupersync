@@ -32,11 +32,18 @@ fn spork_harness_report_schema_is_deterministic() {
     assert_eq!(j1, j2);
 
     // Schema shape checks (stable field locations).
-    assert_eq!(j1["schema_version"].as_u64(), Some(1));
+    assert_eq!(
+        j1["schema_version"].as_u64(),
+        Some(u64::from(SporkHarnessReport::SCHEMA_VERSION))
+    );
     assert_eq!(j1["app"]["name"].as_str(), Some("demo-app"));
     assert_eq!(j1["lab"]["config"]["seed"].as_u64(), Some(42));
     assert!(j1["fingerprints"]["trace"].as_u64().is_some());
     assert!(j1["run"]["trace"]["fingerprint"].as_u64().is_some());
+    assert_eq!(j1["crashpack"]["path"].as_str(), Some("crashpack.tar"));
+    assert!(j1["crashpack"]["id"].as_str().is_some());
+    assert!(j1["crashpack"]["fingerprint"].as_u64().is_some());
+    assert!(j1["crashpack"]["replay"]["command_line"].as_str().is_some());
 
     // Attachment ordering is deterministic: kind first (crashpack, replay_trace, trace), then path.
     let kinds = j1["attachments"]

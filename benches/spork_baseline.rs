@@ -86,19 +86,13 @@ fn bench_genserver_call(c: &mut Criterion) {
             let scope = Scope::<FailFast>::new(region, budget);
 
             let (handle, stored) = scope
-                .spawn_gen_server(
-                    &mut runtime.state,
-                    &cx,
-                    BenchCounter { count: 0 },
-                    32,
-                )
+                .spawn_gen_server(&mut runtime.state, &cx, BenchCounter { count: 0 }, 32)
                 .unwrap();
             let server_task_id = handle.task_id();
             runtime.state.store_spawned_task(server_task_id, stored);
 
             let server_ref = handle.server_ref();
-            let result: Arc<Mutex<Option<Result<u64, CallError>>>> =
-                Arc::new(Mutex::new(None));
+            let result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
             let result_clone = Arc::clone(&result);
 
             let (ch, cs) = scope
@@ -137,12 +131,7 @@ fn bench_genserver_call(c: &mut Criterion) {
             let scope = Scope::<FailFast>::new(region, budget);
 
             let (handle, stored) = scope
-                .spawn_gen_server(
-                    &mut runtime.state,
-                    &cx,
-                    BenchCounter { count: 0 },
-                    32,
-                )
+                .spawn_gen_server(&mut runtime.state, &cx, BenchCounter { count: 0 }, 32)
                 .unwrap();
             let server_task_id = handle.task_id();
             runtime.state.store_spawned_task(server_task_id, stored);
@@ -174,12 +163,7 @@ fn bench_genserver_call(c: &mut Criterion) {
             let scope = Scope::<FailFast>::new(region, budget);
 
             let (handle, stored) = scope
-                .spawn_gen_server(
-                    &mut runtime.state,
-                    &cx,
-                    BenchCounter { count: 0 },
-                    32,
-                )
+                .spawn_gen_server(&mut runtime.state, &cx, BenchCounter { count: 0 }, 32)
                 .unwrap();
             let server_task_id = handle.task_id();
             runtime.state.store_spawned_task(server_task_id, stored);
@@ -204,7 +188,9 @@ fn bench_registry_operations(c: &mut Criterion) {
             let task_id = TaskId::new_for_test(1, 0);
             let region = RegionId::new_for_test(0, 0);
             let now = Time::ZERO;
-            let mut lease = registry.register("bench_name", task_id, region, now).unwrap();
+            let mut lease = registry
+                .register("bench_name", task_id, region, now)
+                .unwrap();
             let _ = lease.abort();
             black_box(())
         })
@@ -252,7 +238,9 @@ fn bench_registry_operations(c: &mut Criterion) {
             let task_id = TaskId::new_for_test(1, 0);
             let region = RegionId::new_for_test(0, 0);
             let now = Time::ZERO;
-            let mut lease = registry.register("cycle_name", task_id, region, now).unwrap();
+            let mut lease = registry
+                .register("cycle_name", task_id, region, now)
+                .unwrap();
             let _ = lease.abort();
             let _ = registry.unregister("cycle_name");
             black_box(())
@@ -341,8 +329,7 @@ fn bench_harness_lifecycle(c: &mut Criterion) {
     group.bench_function("empty_app_lifecycle", |b| {
         b.iter(|| {
             let app = asupersync::app::AppSpec::new("bench_app");
-            let harness =
-                asupersync::lab::SporkAppHarness::with_seed(42, app).unwrap();
+            let harness = asupersync::lab::SporkAppHarness::with_seed(42, app).unwrap();
             let report = harness.run_to_report().unwrap();
             black_box(report.run.trace_fingerprint)
         })

@@ -1,7 +1,7 @@
 # SPORK Deterministic Ordering Contracts
 
 > Defines replay-stable tie-break rules for mailbox ordering, down-notification
-> delivery, and registry name acquisition under contention.
+> delivery, registry name acquisition, and app shutdown system-message ordering.
 >
 > Bead: bd-12qan | Parent: bd-11z9a
 
@@ -17,6 +17,8 @@ subsystems that, under concurrent execution, face inherent races:
    scheduling quantum
 3. **Registry name acquisition** — when multiple processes race to register
    the same name
+4. **App shutdown system messages** — when `Down`/`Exit`/`Timeout` notifications
+   are batched during shutdown/drain paths
 
 All rules must produce identical orderings when executed under `LabRuntime`
 with the same seed. Production mode need not enforce total ordering, but must
@@ -313,6 +315,43 @@ dependencies are unwound correctly.
   children are stopped in order cn, c_{n-1}, ..., ci (reverse start order).
   stop(ck) completes before stop(c_{k-1}) begins.
 ```
+
+### 4.4 App/GenServer Shutdown System-Message Ordering
+
+Shutdown and drain paths may produce mixed batches of system notifications
+(`Down`, `Exit`, `Timeout`). Delivery order must be replay-stable and
+independent of container insertion order.
+
+**Contract (SYS-ORDER)**:
+```
+∀ system messages M batched for shutdown/drain:
+  sort by key K(m) = (vt(m), kind_rank(m), subject_key(m))
+  where:
+    kind_rank(Down)=0, kind_rank(Exit)=1, kind_rank(Timeout)=2
+    subject_key(Down)=monitored_tid
+    subject_key(Exit)=from_tid
+    subject_key(Timeout)=timeout_id
+```
+
+This is implemented by `SystemMsg::sort_key()` and
+`SystemMsgBatch::into_sorted()` in `src/gen_server.rs`.
+
+**Contract (SYS-LINK-MONITOR)**:
+```
+For equal vt:
+  monitor Down notifications are delivered before link Exit notifications,
+  and both are delivered before Timeout ticks.
+```
+
+This aligns monitor/link behavior with the shared deterministic ordering
+contract and avoids hidden races in shutdown traces.
+
+### 4.5 App Harness Trace Canonicalization
+
+App-harness trace fingerprinting/canonicalization must preserve the
+`SYS-ORDER` contract for shutdown-phase system messages. Canonicalization may
+reorder trace events only when it preserves `(vt, kind_rank, subject_key)`
+ordering for `Down`/`Exit`/`Timeout` batches.
 
 ---
 
