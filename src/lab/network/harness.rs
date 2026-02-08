@@ -59,41 +59,36 @@ type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
 /// A virtual runtime bridge for testing distributed logic.
 #[derive(Debug)]
 pub struct VirtualNetworkRuntime {
+    local_node: NodeId,
     outbox: Arc<Mutex<VecDeque<(NodeId, RemoteMessage)>>>,
     pending_results: SharedPendingResults,
 }
 
 impl RemoteRuntime for VirtualNetworkRuntime {
-    fn send_message(&self, _envelope: MessageEnvelope<RemoteMessage>) -> Result<(), RemoteError> {
-        // In the harness, we just push to the outbox. The harness loop will pick it up.
-        // We ignore the `envelope.sender` because the SimNode knows who it is,
-        // but we assume the caller set it correctly.
-        // The `outbox` expects (Target, Message).
-        // Wait, MessageEnvelope has `sender`, but `send_message` doesn't strictly specify *target*
-        // in the envelope?
-        // Ah, `RemoteRuntime::send_message` signature in `remote.rs` takes `MessageEnvelope`.
-        // But `MessageEnvelope` only has `sender` and `payload`.
-        // Where is the destination?
-        // The `RemoteTransport::send` took `to: &NodeId`.
-        // But `RemoteRuntime::send_message` in my previous edit took `MessageEnvelope`.
-        // I missed the destination! `spawn_remote` builds the envelope but doesn't pass destination to `send_message`?
-        // `spawn_remote` has `node` (target). It needs to pass it.
-        // I need to fix `RemoteRuntime` trait in `remote.rs` first?
-        // Or `spawn_remote` should put destination in the envelope? No, envelope is for the wire.
+    fn send_message(
+        &self,
+        destination: &NodeId,
+        envelope: MessageEnvelope<RemoteMessage>,
+    ) -> Result<(), RemoteError> {
+        // The harness owns sender identity per SimNode. Rewrite protocol-origin fields so
+        // reply routing uses this node's actual ID instead of placeholder defaults.
+        let message = match envelope.payload {
+            RemoteMessage::SpawnRequest(mut req) => {
+                req.origin_node = self.local_node.clone();
+                RemoteMessage::SpawnRequest(req)
+            }
+            RemoteMessage::CancelRequest(mut cancel) => {
+                cancel.origin_node = self.local_node.clone();
+                RemoteMessage::CancelRequest(cancel)
+            }
+            other => other,
+        };
 
-        // Let's assume for a moment `RemoteRuntime::send_message` takes destination.
-        // But I defined it as `fn send_message(&self, envelope: MessageEnvelope<RemoteMessage>)`.
-        // This is a bug in my `remote.rs` definition.
-        // `spawn_remote` *has* the target node.
-
-        // WORKAROUND: For this specific harness, we can't route without destination.
-        // However, `RemoteMessage::SpawnRequest` *contains* `origin_node`.
-        // But it doesn't contain target node (except implicitly as "who receives this").
-
-        // I MUST fix `remote.rs` first.
-        Err(RemoteError::TransportError(
-            "Fixme: RemoteRuntime needs destination".into(),
-        ))
+        self.outbox
+            .lock()
+            .unwrap()
+            .push_back((destination.clone(), message));
+        Ok(())
     }
 
     fn register_task(
@@ -223,9 +218,8 @@ impl SimNode {
     /// Creates a RemoteCap connected to this node.
     #[must_use]
     pub fn create_cap(&self) -> RemoteCap {
-        // Note: This VirtualNetworkRuntime is broken until we fix the trait to take a destination.
-        // We will fix this in a subsequent step.
         let runtime = VirtualNetworkRuntime {
+            local_node: self.node_id.clone(),
             outbox: self.app_outbox.clone(),
             pending_results: self.pending_results.clone(),
         };

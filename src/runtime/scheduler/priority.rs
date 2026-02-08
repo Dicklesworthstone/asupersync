@@ -624,11 +624,12 @@ impl Scheduler {
     }
 
     /// Pops only from the cancel lane with RNG tie-breaking.
-    ///
-    /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
     #[must_use]
-    pub fn pop_cancel_only_with_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
-        self.pop_cancel_only()
+    pub fn pop_cancel_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        let entry =
+            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
+        self.scheduled.remove(entry.task);
+        Some(entry.task)
     }
 
     /// Pops only from the timed lane if the earliest deadline is due.
@@ -651,12 +652,18 @@ impl Scheduler {
     }
 
     /// Pops only from the timed lane if the earliest deadline is due,
-    /// with RNG tie-breaking.
-    ///
-    /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
+    /// with RNG tie-breaking among tasks sharing the earliest deadline.
     #[must_use]
-    pub fn pop_timed_only_with_hint(&mut self, _rng_hint: u64, now: Time) -> Option<TaskId> {
-        self.pop_timed_only(now)
+    pub fn pop_timed_only_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<TaskId> {
+        let earliest = self.timed_lane.peek()?;
+        if earliest.deadline > now {
+            return None;
+        }
+        let entry =
+            Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
+                .expect("timed_lane peeked non-empty");
+        self.scheduled.remove(entry.task);
+        Some(entry.task)
     }
 
     /// Pops only from the ready lane.
@@ -672,12 +679,13 @@ impl Scheduler {
         None
     }
 
-    /// Pops only from the ready lane with RNG tie-breaking.
-    ///
-    /// Note: With heap-based implementation, FIFO ordering is used instead of RNG.
+    /// Pops only from the ready lane with RNG tie-breaking among equal priorities.
     #[must_use]
-    pub fn pop_ready_only_with_hint(&mut self, _rng_hint: u64) -> Option<TaskId> {
-        self.pop_ready_only()
+    pub fn pop_ready_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        let entry =
+            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)?;
+        self.scheduled.remove(entry.task);
+        Some(entry.task)
     }
 
     /// Steals a batch of ready tasks for another worker.
