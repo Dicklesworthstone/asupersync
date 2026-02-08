@@ -940,19 +940,18 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// # Returns
     /// `Ok(T)` if successful, `Err(JoinError)` if failed/cancelled.
-    pub async fn hedge<F1, Fut1, F2, Fut2, T, Caps>(
+    pub async fn hedge<F1, Fut1, F2, Fut2, T>(
         &self,
         state: &mut RuntimeState,
-        cx: &Cx<Caps>,
+        cx: &Cx,
         delay: std::time::Duration,
         primary: F1,
         backup: F2,
     ) -> Result<T, JoinError>
     where
-        Caps: cap::HasSpawn + cap::HasTime + Send + Sync + 'static,
-        F1: FnOnce(Cx<Caps>) -> Fut1 + Send + 'static,
+        F1: FnOnce(Cx) -> Fut1 + Send + 'static,
         Fut1: Future<Output = T> + Send + 'static,
-        F2: FnOnce(Cx<Caps>) -> Fut2 + Send + 'static,
+        F2: FnOnce(Cx) -> Fut2 + Send + 'static,
         Fut2: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
@@ -960,7 +959,9 @@ impl<P: Policy> Scope<'_, P> {
         use crate::combinator::Either;
 
         // 1. Spawn primary
-        let h1 = self.spawn_registered(state, cx, primary)?;
+        let h1 = self
+            .spawn_registered(state, cx, primary)
+            .map_err(|_| JoinError::Cancelled(CancelReason::resource_unavailable()))?;
 
         // 2. Race primary vs delay
         // We reuse the join future if it doesn't complete, so we must pin it.
@@ -971,8 +972,7 @@ impl<P: Policy> Scope<'_, P> {
         // Compute deadline
         let now = cx
             .timer_driver()
-            .map(|d| d.now())
-            .unwrap_or_else(crate::time::wall_now);
+            .map_or_else(crate::time::wall_now, |d| d.now());
         let sleep_fut = crate::time::sleep(now, delay);
         let mut sleep_pinned = Box::pin(sleep_fut);
 
@@ -981,9 +981,11 @@ impl<P: Policy> Scope<'_, P> {
                 // Primary finished first
                 res
             }
-            Either::Right(_) => {
+            Either::Right(()) => {
                 // Timeout fired. Spawn backup.
-                let h2 = self.spawn_registered(state, cx, backup)?;
+                let h2 = self
+                    .spawn_registered(state, cx, backup)
+                    .map_err(|_| JoinError::Cancelled(CancelReason::resource_unavailable()))?;
 
                 // Now race h1 and h2
                 // We reuse f1_pinned which is still pending.
@@ -1252,7 +1254,7 @@ mod tests {
     #[test]
     fn spawn_registered_task_can_be_polled() {
         use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Waker};
 
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
@@ -1345,7 +1347,7 @@ mod tests {
     #[test]
     fn spawn_local_makes_progress_via_local_ready() {
         use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Waker};
 
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
@@ -1449,7 +1451,7 @@ mod tests {
     #[test]
     fn test_join_manual_poll() {
         use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Waker};
 
         struct NoopWaker;
         impl std::task::Wake for NoopWaker {
@@ -1752,7 +1754,54 @@ mod tests {
     }
 
     #[test]
-    fn race_all_interleaving() {
+    fn test_hedge_combinator_manual() {
+        use crate::time::TimerDriverHandle;
+        use crate::time::VirtualClock;
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        state.set_timer_driver(timer.clone());
+
+        let region = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new_with_drivers(
+            region,
+            TaskId::testing_default(),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx.clone()));
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut ctx = Context::from_waker(&waker);
+
+        // Smoke test: first poll should spawn primary and return pending.
+        let mut hedge_fut = Box::pin(scope.hedge(
+            &mut state,
+            &cx,
+            std::time::Duration::from_secs(10),
+            |_| async { 1 },
+            |_| async { 2 },
+        ));
+        assert!(hedge_fut.as_mut().poll(&mut ctx).is_pending());
+        drop(hedge_fut);
+        clock.advance(0);
+    }
+
+    #[test]
+    fn race_all_aborted_task_is_drained() {
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
 
