@@ -979,16 +979,21 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         let mut state = self.lock.state.lock().expect("rwlock state poisoned");
 
         if let Some(waiter) = self.waiter.as_ref() {
-            let initial_len = state.writer_queue.len();
-            state
-                .writer_queue
-                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
-            let removed = initial_len != state.writer_queue.len();
+            let already_dequeued = !waiter.load(Ordering::Acquire);
+            let removed = if already_dequeued {
+                false
+            } else {
+                let initial_len = state.writer_queue.len();
+                state
+                    .writer_queue
+                    .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+                initial_len != state.writer_queue.len()
+            };
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
             if !removed {
-                let dequeued = !waiter.load(Ordering::Acquire);
+                let dequeued = already_dequeued || !waiter.load(Ordering::Acquire);
                 if dequeued
                     && !state.writer_active
                     && state.readers == 0

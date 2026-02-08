@@ -360,6 +360,19 @@ impl BlockingPool {
         let task_id = self.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
         let completion = Arc::new(BlockingTaskCompletion::new());
+        let handle = BlockingTaskHandle {
+            task_id,
+            cancelled: Arc::clone(&cancelled),
+            completion: Arc::clone(&completion),
+        };
+
+        // Contract: after shutdown, new tasks are rejected.
+        // Return an already-completed cancelled handle instead of queueing work.
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            cancelled.store(true, Ordering::Release);
+            completion.signal_done();
+            return handle;
+        }
 
         let task = BlockingTask {
             id: task_id,
@@ -376,11 +389,7 @@ impl BlockingPool {
         self.maybe_spawn_thread();
         self.notify_one();
 
-        BlockingTaskHandle {
-            task_id,
-            cancelled,
-            completion,
-        }
+        handle
     }
 
     /// Returns the number of pending tasks in the queue.
@@ -500,6 +509,18 @@ impl BlockingPoolHandle {
         let task_id = self.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
         let completion = Arc::new(BlockingTaskCompletion::new());
+        let handle = BlockingTaskHandle {
+            task_id,
+            cancelled: Arc::clone(&cancelled),
+            completion: Arc::clone(&completion),
+        };
+
+        // Keep behavior aligned with BlockingPool::spawn_with_priority.
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            cancelled.store(true, Ordering::Release);
+            completion.signal_done();
+            return handle;
+        }
 
         let task = BlockingTask {
             id: task_id,
@@ -519,11 +540,7 @@ impl BlockingPoolHandle {
             self.inner.condvar.notify_one();
         }
 
-        BlockingTaskHandle {
-            task_id,
-            cancelled,
-            completion,
-        }
+        handle
     }
 
     /// Returns the number of pending tasks.
@@ -848,6 +865,39 @@ mod tests {
         assert!(pool.is_shutdown());
 
         assert!(pool.shutdown_and_wait(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn spawn_after_shutdown_is_rejected() {
+        let pool = BlockingPool::new(1, 2);
+        pool.shutdown();
+
+        let counter = Arc::new(AtomicI32::new(0));
+        let c = Arc::clone(&counter);
+        let handle = pool.spawn(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(handle.is_cancelled());
+        assert!(handle.wait_timeout(Duration::from_millis(100)));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn handle_spawn_after_shutdown_is_rejected() {
+        let pool = BlockingPool::new(1, 2);
+        let handle_api = pool.handle();
+        pool.shutdown();
+
+        let counter = Arc::new(AtomicI32::new(0));
+        let c = Arc::clone(&counter);
+        let handle = handle_api.spawn(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(handle.is_cancelled());
+        assert!(handle.wait_timeout(Duration::from_millis(100)));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     #[test]
