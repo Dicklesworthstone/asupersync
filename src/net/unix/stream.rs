@@ -1,8 +1,4 @@
-#![allow(unsafe_code)]
 //! Unix domain socket stream implementation.
-//!
-//! This module uses unsafe code for peer credentials retrieval (getsockopt/getpeereid)
-//! and ancillary data passing (sendmsg/recvmsg).
 //!
 //! This module provides [`UnixStream`] for bidirectional communication over
 //! Unix domain sockets.
@@ -25,6 +21,8 @@ use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+use nix::errno::Errno;
+use nix::sys::socket::{self, ControlMessage, ControlMessageOwned, MsgFlags};
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{self, SocketAddr};
@@ -32,6 +30,11 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+
+fn nix_to_io(err: nix::Error) -> io::Error {
+    // nix::Error is a type alias to nix::errno::Errno (Copy + Eq, etc).
+    io::Error::from_raw_os_error(err as i32)
+}
 
 /// Credentials of the peer process.
 ///
@@ -81,24 +84,16 @@ pub struct UnixStream {
     registration: Mutex<Option<IoRegistration>>,
 }
 
-// Wrapper to implement Source for net::UnixStream
-struct UnixStreamSource<'a>(&'a net::UnixStream);
-
-impl std::os::unix::io::AsRawFd for UnixStreamSource<'_> {
-    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
-        self.0.as_raw_fd()
-    }
-}
-
-// Source is auto-implemented via blanket impl since we now implement AsRawFd
-
 impl UnixStream {
     /// Creates a UnixStream from raw parts (internal use).
     #[must_use]
-    pub(crate) fn from_parts(inner: Arc<net::UnixStream>) -> Self {
+    pub(crate) fn from_parts(
+        inner: Arc<net::UnixStream>,
+        registration: Option<IoRegistration>,
+    ) -> Self {
         Self {
             inner,
-            registration: Mutex::new(None), // Lazy registration on first I/O
+            registration: Mutex::new(registration), // Lazy registration on first I/O
         }
     }
 
@@ -358,8 +353,7 @@ impl UnixStream {
     /// let (tx, rx) = UnixStream::pair()?;
     /// let file = std::fs::File::open("/etc/passwd")?;
     ///
-    /// let mut ancillary_buf = [0u8; 128];
-    /// let mut ancillary = SocketAncillary::new(&mut ancillary_buf);
+    /// let mut ancillary = SocketAncillary::new(128);
     /// ancillary.add_fds(&[file.as_raw_fd()]);
     ///
     /// let n = tx.send_with_ancillary(b"file attached", &mut ancillary).await?;
@@ -368,7 +362,7 @@ impl UnixStream {
     pub async fn send_with_ancillary(
         &self,
         buf: &[u8],
-        ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+        ancillary: &mut crate::net::unix::SocketAncillary,
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
@@ -414,19 +408,18 @@ impl UnixStream {
     ///
     /// ```ignore
     /// use asupersync::net::unix::{UnixStream, SocketAncillary, AncillaryMessage};
-    /// use std::os::unix::io::FromRawFd;
+    /// use nix::unistd;
     ///
     /// let mut buf = [0u8; 64];
-    /// let mut ancillary_buf = [0u8; 128];
-    /// let mut ancillary = SocketAncillary::new(&mut ancillary_buf);
+    /// let mut ancillary = SocketAncillary::new(128);
     ///
     /// let n = rx.recv_with_ancillary(&mut buf, &mut ancillary).await?;
     ///
     /// for msg in ancillary.messages() {
     ///     if let AncillaryMessage::ScmRights(fds) = msg {
     ///         for fd in fds {
-    ///             let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    ///             // Use the file...
+    ///             // Use the fd, then close it (or wrap it in an owned type).
+    ///             let _ = unistd::close(fd);
     ///         }
     ///     }
     /// }
@@ -437,7 +430,7 @@ impl UnixStream {
     pub async fn recv_with_ancillary(
         &self,
         buf: &mut [u8],
-        ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+        ancillary: &mut crate::net::unix::SocketAncillary,
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
@@ -490,10 +483,8 @@ impl UnixStream {
     /// [`reunite`]: OwnedReadHalf::reunite
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        (
-            OwnedReadHalf::new(self.inner.clone()),
-            OwnedWriteHalf::new(self.inner),
-        )
+        let registration = self.registration.lock().expect("lock poisoned").take();
+        OwnedReadHalf::new_pair(self.inner, registration)
     }
 }
 
@@ -631,45 +622,12 @@ impl std::os::unix::io::AsRawFd for UnixStream {
 /// Linux implementation using SO_PEERCRED.
 #[cfg(target_os = "linux")]
 fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
-    use std::os::unix::io::AsRawFd;
-
-    // ucred structure from Linux
-    #[repr(C)]
-    struct LinuxUcred {
-        pid: i32,
-        uid: u32,
-        gid: u32,
-    }
-
-    let fd = stream.as_raw_fd();
-    let mut ucred = LinuxUcred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<LinuxUcred>() as libc::socklen_t;
-
-    // SAFETY: getsockopt is a well-defined syscall, and we're passing
-    // correct buffer size and type for SO_PEERCRED option.
-    let ret = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut ucred).cast::<libc::c_void>(),
-            &raw mut len,
-        )
-    };
-
-    if ret == 0 {
-        Ok(UCred {
-            uid: ucred.uid,
-            gid: ucred.gid,
-            pid: Some(ucred.pid),
-        })
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    let creds = socket::getsockopt(stream, socket::sockopt::PeerCredentials).map_err(nix_to_io)?;
+    Ok(UCred {
+        uid: creds.uid() as u32,
+        gid: creds.gid() as u32,
+        pid: Some(creds.pid() as i32),
+    })
 }
 
 /// macOS/BSD implementation using getpeereid.
@@ -680,24 +638,12 @@ fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
     target_os = "netbsd"
 ))]
 fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = stream.as_raw_fd();
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-
-    // SAFETY: getpeereid is a well-defined syscall on BSD systems.
-    let ret = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
-
-    if ret == 0 {
-        Ok(UCred {
-            uid: uid as u32,
-            gid: gid as u32,
-            pid: None, // Not available via getpeereid
-        })
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    let (uid, gid) = nix::unistd::getpeereid(stream).map_err(nix_to_io)?;
+    Ok(UCred {
+        uid: uid.as_raw() as u32,
+        gid: gid.as_raw() as u32,
+        pid: None,
+    })
 }
 
 // Ancillary data send/receive implementations using sendmsg/recvmsg
@@ -706,73 +652,68 @@ fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
 fn send_with_ancillary_impl(
     fd: std::os::unix::io::RawFd,
     buf: &[u8],
-    ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+    ancillary: &mut crate::net::unix::SocketAncillary,
 ) -> io::Result<usize> {
-    use std::mem::MaybeUninit;
+    let iov = [IoSlice::new(buf)];
 
-    let mut iov = libc::iovec {
-        iov_base: buf.as_ptr().cast::<libc::c_void>().cast_mut(),
-        iov_len: buf.len(),
+    let cmsgs_storage;
+    let cmsgs: &[ControlMessage<'_>] = if ancillary.send_fds().is_empty() {
+        &[]
+    } else {
+        cmsgs_storage = [ControlMessage::ScmRights(ancillary.send_fds())];
+        &cmsgs_storage
     };
 
-    let mut msg: libc::msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-    msg.msg_iov = &raw mut iov;
-    msg.msg_iovlen = 1;
-
-    if !ancillary.is_empty() {
-        msg.msg_control = ancillary.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = ancillary.len() as _;
-    }
-
-    // SAFETY: sendmsg is a well-defined syscall and we've set up the
-    // msghdr correctly with valid pointers and lengths.
-    let ret = unsafe { libc::sendmsg(fd, &raw const msg, 0) };
-
-    if ret >= 0 {
-        // Clear the ancillary data after successful send
-        ancillary.clear();
-        let len = usize::try_from(ret).unwrap_or(0);
-        Ok(len)
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    let n = socket::sendmsg::<()>(fd, &iov, cmsgs, MsgFlags::empty(), None).map_err(nix_to_io)?;
+    ancillary.clear_send_fds();
+    Ok(n)
 }
 
 /// Receives data with ancillary data using recvmsg.
 fn recv_with_ancillary_impl(
     fd: std::os::unix::io::RawFd,
     buf: &mut [u8],
-    ancillary: &mut crate::net::unix::SocketAncillary<'_>,
+    ancillary: &mut crate::net::unix::SocketAncillary,
 ) -> io::Result<usize> {
-    use std::mem::MaybeUninit;
+    let mut iov = [IoSliceMut::new(buf)];
 
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast::<libc::c_void>(),
-        iov_len: buf.len(),
-    };
+    // `recvmsg` returns a value that borrows the control-message buffer. Keep that borrow
+    // scoped so we can update `ancillary` after parsing the received control messages.
+    let (bytes, received_fds, truncated) = {
+        let cmsg_buf = ancillary.prepare_for_recv();
+        let msg = socket::recvmsg::<()>(fd, &mut iov, Some(cmsg_buf), MsgFlags::empty())
+            .map_err(nix_to_io)?;
 
-    let mut msg: libc::msghdr = unsafe { MaybeUninit::zeroed().assume_init() };
-    msg.msg_iov = &raw mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = ancillary.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = ancillary.capacity() as _;
+        let mut received_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
+        let mut truncated = false;
 
-    // SAFETY: recvmsg is a well-defined syscall and we've set up the
-    // msghdr correctly with valid pointers and lengths.
-    let ret = unsafe { libc::recvmsg(fd, &raw mut msg, 0) };
-
-    if ret >= 0 {
-        let truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
-        // SAFETY: recvmsg has written msg_controllen bytes of valid
-        // control message data to the buffer.
-        unsafe {
-            ancillary.set_len(msg.msg_controllen, truncated);
+        match msg.cmsgs() {
+            Ok(iter) => {
+                for cmsg in iter {
+                    if let ControlMessageOwned::ScmRights(fds) = cmsg {
+                        received_fds.extend_from_slice(&fds);
+                    }
+                }
+            }
+            Err(Errno::ENOBUFS) => {
+                truncated = true;
+            }
+            Err(errno) => {
+                return Err(io::Error::from_raw_os_error(errno as i32));
+            }
         }
-        let len = usize::try_from(ret).unwrap_or(0);
-        Ok(len)
-    } else {
-        Err(io::Error::last_os_error())
+
+        Ok::<_, io::Error>((msg.bytes, received_fds, truncated))
+    }?;
+
+    if !received_fds.is_empty() {
+        ancillary.push_received_fds(&received_fds);
     }
+    if truncated {
+        ancillary.mark_truncated();
+    }
+
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -973,8 +914,8 @@ mod tests {
         let cred2 = s2.peer_cred().expect("peer_cred s2 failed");
 
         // Both should report the same process (ourselves)
-        let user_id = unsafe { libc::getuid() } as u32;
-        let group_id = unsafe { libc::getgid() } as u32;
+        let user_id = nix::unistd::getuid().as_raw() as u32;
+        let group_id = nix::unistd::getgid().as_raw() as u32;
 
         crate::assert_with_log!(cred1.uid == user_id, "s1 uid", user_id, cred1.uid);
         crate::assert_with_log!(cred1.gid == group_id, "s1 gid", group_id, cred1.gid);
@@ -997,8 +938,7 @@ mod tests {
     #[test]
     fn test_send_recv_with_ancillary() {
         use crate::net::unix::{AncillaryMessage, SocketAncillary};
-        use std::io::Read as _;
-        use std::os::unix::io::{AsRawFd, FromRawFd};
+        use std::os::unix::io::AsRawFd;
 
         init_test("test_send_recv_with_ancillary");
         futures_lite::future::block_on(async {
@@ -1013,8 +953,7 @@ mod tests {
             nix::unistd::write(&pipe_write, b"test data").expect("write to pipe failed");
 
             // Send the read end of the pipe
-            let mut ancillary_buf = [0u8; 128];
-            let mut send_ancillary = SocketAncillary::new(&mut ancillary_buf);
+            let mut send_ancillary = SocketAncillary::new(128);
             let added = send_ancillary.add_fds(&[pipe_read_raw]);
             crate::assert_with_log!(added, "add_fds", true, added);
 
@@ -1030,8 +969,7 @@ mod tests {
 
             // Receive the data and file descriptor
             let mut recv_buf = [0u8; 64];
-            let mut recv_ancillary_buf = [0u8; 128];
-            let mut recv_ancillary = SocketAncillary::new(&mut recv_ancillary_buf);
+            let mut recv_ancillary = SocketAncillary::new(128);
 
             let received = rx
                 .recv_with_ancillary(&mut recv_buf, &mut recv_ancillary)
@@ -1048,10 +986,9 @@ mod tests {
             // Extract the file descriptor
             let mut received_fd = None;
             for msg in recv_ancillary.messages() {
-                if let AncillaryMessage::ScmRights(fds) = msg {
-                    for fd in fds {
-                        received_fd = Some(fd);
-                    }
+                let AncillaryMessage::ScmRights(fds) = msg;
+                for fd in fds {
+                    received_fd = Some(fd);
                 }
             }
 
@@ -1061,10 +998,17 @@ mod tests {
             drop(pipe_write);
 
             // Verify we can read from the received file descriptor
-            // SAFETY: We received this fd from the sender and will close it properly
-            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
             let mut data = Vec::new();
-            file.read_to_end(&mut data).expect("read from fd failed");
+            let mut tmp = [0u8; 64];
+            loop {
+                match nix::unistd::read(fd, &mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => data.extend_from_slice(&tmp[..n]),
+                    Err(nix::errno::Errno::EINTR) => {}
+                    Err(e) => panic!("read from received fd failed: {e:?}"),
+                }
+            }
+            nix::unistd::close(fd).expect("close received fd");
             crate::assert_with_log!(&data == b"test data", "pipe data", b"test data", data);
         });
         crate::test_complete!("test_send_recv_with_ancillary");

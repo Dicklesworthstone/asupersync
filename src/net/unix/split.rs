@@ -3,17 +3,24 @@
 //! This module provides borrowed and owned halves for splitting a
 //! [`UnixStream`](super::UnixStream) into separate read and write handles.
 
+use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 /// Borrowed read half of a [`UnixStream`](super::UnixStream).
 ///
 /// Created by [`UnixStream::split`](super::UnixStream::split).
+///
+/// This half does not participate in reactor registration - it busy-loops on
+/// `WouldBlock` by waking immediately. For proper async I/O with reactor
+/// integration, use the owned split via [`UnixStream::into_split`].
 #[derive(Debug)]
 pub struct ReadHalf<'a> {
     inner: &'a net::UnixStream,
@@ -49,6 +56,10 @@ impl AsyncRead for ReadHalf<'_> {
 /// Borrowed write half of a [`UnixStream`](super::UnixStream).
 ///
 /// Created by [`UnixStream::split`](super::UnixStream::split).
+///
+/// This half does not participate in reactor registration - it busy-loops on
+/// `WouldBlock` by waking immediately. For proper async I/O with reactor
+/// integration, use the owned split via [`UnixStream::into_split`].
 #[derive(Debug)]
 pub struct WriteHalf<'a> {
     inner: &'a net::UnixStream,
@@ -95,18 +106,97 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 }
 
+/// Shared state for owned split halves.
+///
+/// Both owned halves share the same reactor registration so that interest and
+/// waker updates are coordinated.
+pub(crate) struct UnixStreamInner {
+    stream: Arc<net::UnixStream>,
+    registration: Mutex<Option<IoRegistration>>,
+}
+
+impl std::fmt::Debug for UnixStreamInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnixStreamInner")
+            .field("stream", &self.stream)
+            .field("registration", &"...")
+            .finish()
+    }
+}
+
+impl UnixStreamInner {
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let mut guard = self.registration.lock().expect("lock poisoned");
+
+        if let Some(registration) = guard.as_mut() {
+            let combined = registration.interest() | interest;
+            // Oneshoot registration: always re-arm.
+            if let Err(err) = registration.set_interest(combined) {
+                if err.kind() == io::ErrorKind::NotConnected {
+                    *guard = None;
+                    cx.waker().wake_by_ref();
+                    return Ok(());
+                }
+                return Err(err);
+            }
+            if registration.update_waker(cx.waker().clone()) {
+                return Ok(());
+            }
+            *guard = None;
+        }
+
+        drop(guard);
+
+        let Some(current) = Cx::current() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+
+        match driver.register(&*self.stream, interest, cx.waker().clone()) {
+            Ok(registration) => {
+                *self.registration.lock().expect("lock poisoned") = Some(registration);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                cx.waker().wake_by_ref();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
 /// Owned read half of a [`UnixStream`](super::UnixStream).
 ///
 /// Created by [`UnixStream::into_split`](super::UnixStream::into_split).
 /// Can be reunited with [`OwnedWriteHalf`] using [`reunite`](Self::reunite).
 #[derive(Debug)]
 pub struct OwnedReadHalf {
-    pub(crate) inner: Arc<net::UnixStream>,
+    inner: Arc<UnixStreamInner>,
 }
 
 impl OwnedReadHalf {
-    pub(crate) fn new(inner: Arc<net::UnixStream>) -> Self {
-        Self { inner }
+    pub(crate) fn new_pair(
+        stream: Arc<net::UnixStream>,
+        registration: Option<IoRegistration>,
+    ) -> (Self, OwnedWriteHalf) {
+        let inner = Arc::new(UnixStreamInner {
+            stream,
+            registration: Mutex::new(registration),
+        });
+        (
+            Self {
+                inner: inner.clone(),
+            },
+            OwnedWriteHalf {
+                inner,
+                shutdown_on_drop: true,
+            },
+        )
     }
 
     /// Attempts to reunite with a write half to reform a [`UnixStream`](super::UnixStream).
@@ -119,9 +209,17 @@ impl OwnedReadHalf {
         if Arc::ptr_eq(&self.inner, &other.inner) {
             let mut other = other;
             other.shutdown_on_drop = false;
-            drop(other);
-            // Note: Original registration is lost when splitting; reunited stream gets fresh lazy registration
-            Ok(super::UnixStream::from_parts(self.inner))
+
+            let registration = self
+                .inner
+                .registration
+                .lock()
+                .expect("lock poisoned")
+                .take();
+            Ok(super::UnixStream::from_parts(
+                self.inner.stream.clone(),
+                registration,
+            ))
         } else {
             Err(ReuniteError(self, other))
         }
@@ -134,14 +232,16 @@ impl AsyncRead for OwnedReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut inner = &*self.inner;
-        match inner.read(buf.unfilled()) {
+        let inner: &net::UnixStream = &self.inner.stream;
+        match (&*inner).read(buf.unfilled()) {
             Ok(n) => {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                if let Err(e) = self.inner.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -160,24 +260,17 @@ impl AsyncRead for OwnedReadHalf {
 /// to disable this behavior.
 #[derive(Debug)]
 pub struct OwnedWriteHalf {
-    pub(crate) inner: Arc<net::UnixStream>,
+    inner: Arc<UnixStreamInner>,
     shutdown_on_drop: bool,
 }
 
 impl OwnedWriteHalf {
-    pub(crate) fn new(inner: Arc<net::UnixStream>) -> Self {
-        Self {
-            inner,
-            shutdown_on_drop: true,
-        }
-    }
-
     /// Shuts down the write side of the stream.
     ///
     /// This is equivalent to calling `shutdown(Shutdown::Write)` on the
     /// original stream.
     pub fn shutdown(&self) -> io::Result<()> {
-        self.inner.shutdown(Shutdown::Write)
+        self.inner.stream.shutdown(Shutdown::Write)
     }
 
     /// Controls whether the write direction is shut down when dropped.
@@ -194,11 +287,13 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let mut inner = &*self.inner;
-        match inner.write(buf) {
+        let inner: &net::UnixStream = &self.inner.stream;
+        match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                if let Err(e) = self.inner.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -206,11 +301,13 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut inner = &*self.inner;
-        match inner.flush() {
+        let inner: &net::UnixStream = &self.inner.stream;
+        match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                if let Err(e) = self.inner.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -218,7 +315,7 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.inner.shutdown(Shutdown::Write)?;
+        self.inner.stream.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
     }
 }
@@ -226,7 +323,7 @@ impl AsyncWrite for OwnedWriteHalf {
 impl Drop for OwnedWriteHalf {
     fn drop(&mut self) {
         if self.shutdown_on_drop {
-            let _ = self.inner.shutdown(Shutdown::Write);
+            let _ = self.inner.stream.shutdown(Shutdown::Write);
         }
     }
 }
@@ -264,9 +361,8 @@ mod tests {
         let (s1, _s2) = net::UnixStream::pair().expect("pair failed");
         s1.set_nonblocking(true).expect("set_nonblocking failed");
 
-        let arc1 = Arc::new(s1);
-        let _read = OwnedReadHalf::new(arc1.clone());
-        let _write = OwnedWriteHalf::new(arc1);
+        let stream = super::super::UnixStream::from_std(s1);
+        let (_read, _write) = stream.into_split();
     }
 
     #[test]
