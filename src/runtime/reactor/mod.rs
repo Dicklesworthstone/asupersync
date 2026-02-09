@@ -586,11 +586,13 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     target_os = "netbsd",
     target_os = "dragonfly"
 ))]
+/// Create a reactor for POSIX systems using kqueue.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Ok(Arc::new(KqueueReactor::new()?))
 }
 
 #[cfg(target_os = "windows")]
+/// Create a reactor for Windows systems using mio.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Ok(Arc::new(IocpReactor::new()?))
 }

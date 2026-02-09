@@ -272,12 +272,13 @@ impl<'a> Iterator for AncillaryMessages<'a> {
             }
 
             let cmsg_len = (*cmsg_ptr).cmsg_len;
-            if cmsg_len < mem::size_of::<libc::cmsghdr>() {
+            let cmsg_hdr_size = mem::size_of::<libc::cmsghdr>() as u32;
+            if cmsg_len < cmsg_hdr_size {
                 return None;
             }
 
             // Advance to next message
-            let data_len = cmsg_len - mem::size_of::<libc::cmsghdr>();
+            let data_len = cmsg_len - cmsg_hdr_size;
             let cmsg_space = libc::CMSG_SPACE(data_len as u32) as usize;
             self.current += cmsg_space.max(mem::size_of::<libc::cmsghdr>());
 
@@ -286,7 +287,7 @@ impl<'a> Iterator for AncillaryMessages<'a> {
             let data_ptr = libc::CMSG_DATA(cmsg_ptr);
 
             if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
-                let fd_count = data_len / mem::size_of::<RawFd>();
+                let fd_count = (data_len / mem::size_of::<RawFd>() as u32) as usize;
                 let fds = std::slice::from_raw_parts(data_ptr as *const RawFd, fd_count);
                 Some(AncillaryMessage::ScmRights(ScmRights { fds }))
             } else {
