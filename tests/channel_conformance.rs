@@ -49,41 +49,62 @@ fn sleep_future(duration: Duration) -> impl Future<Output = ()> + Send {
         spawned: bool,
         done: bool,
         waker: Option<Waker>,
+        join: Option<std::thread::JoinHandle<()>>,
     }
 
     let state = Arc::new(Mutex::new(SleepState {
         spawned: false,
         done: false,
         waker: None,
+        join: None,
     }));
 
     let state_clone = Arc::clone(&state);
     future::poll_fn(move |cx: &mut Context<'_>| {
+        let mut join = None;
+        let mut ready = false;
         let should_spawn = {
             let mut guard = state_clone.lock().expect("sleep state lock poisoned");
             if guard.done {
-                return Poll::Ready(());
-            }
-
-            guard.waker = Some(cx.waker().clone());
-            if guard.spawned {
+                join = guard.join.take();
+                ready = true;
                 false
             } else {
-                guard.spawned = true;
-                true
+                guard.waker = Some(cx.waker().clone());
+                if guard.spawned {
+                    false
+                } else {
+                    guard.spawned = true;
+                    true
+                }
             }
         };
 
+        if let Some(join) = join {
+            // The sleeper thread sets done=true just before returning. Join should be fast, and
+            // prevents accumulating detached threads across the conformance suite.
+            let _ = join.join();
+        }
+        if ready {
+            return Poll::Ready(());
+        }
+
         if should_spawn {
             let thread_state = Arc::clone(&state_clone);
-            std::thread::spawn(move || {
+            let handle = std::thread::spawn(move || {
                 std::thread::sleep(duration);
-                let mut guard = thread_state.lock().expect("sleep state lock poisoned");
-                guard.done = true;
-                if let Some(waker) = guard.waker.take() {
+
+                let waker = {
+                    let mut guard = thread_state.lock().expect("sleep state lock poisoned");
+                    guard.done = true;
+                    guard.waker.take()
+                };
+                if let Some(waker) = waker {
                     waker.wake();
                 }
             });
+            let mut guard = state_clone.lock().expect("sleep state lock poisoned");
+            guard.join = Some(handle);
         }
 
         Poll::Pending
