@@ -515,6 +515,52 @@ Think of Spork as:
 | Registry | Name leases as obligations (commit/abort, no stale ownership) |
 | call/cast | Request-response vs fire-and-forget mailbox flows |
 
+#### Capability Wiring Patterns (No Globals)
+
+Spork is capability-driven: if you cannot reach it from `Cx` (or a handle derived
+from `Cx`), you do not have authority to use it. This keeps the runtime free of
+ambient singletons and makes lab execution deterministic and replayable.
+
+Patterns:
+
+- **Registry injection (capability-scoped naming)**:
+  - Construct a registry capability and pass it into your app spec.
+  - All child contexts spawned by the app inherit the same registry handle.
+
+  ```ignore
+  use asupersync::spork::prelude::*;
+  use std::sync::Arc;
+
+  let registry = NameRegistry::new();
+  let registry = RegistryHandle::new(Arc::new(registry));
+
+  let app = AppSpec::new("my_app")
+      .with_registry(registry)
+      .child(/* ... */);
+  ```
+
+- **Remote spawning (explicit distributed authority)**:
+  - Attach a `RemoteCap` to the root `Cx` (tests) or configure it via your runtime
+    boundary.
+  - Child scopes inherit the capability, so code does not reach for globals.
+
+  ```ignore
+  use asupersync::{Cx, remote::{RemoteCap, NodeId}};
+
+  let cx = Cx::for_testing()
+      .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin-a")));
+  ```
+
+- **Trace / evidence plumbing (observability as a capability)**:
+  - Use `Cx::trace` (structured) rather than stdout/stderr.
+  - In the lab runtime, traces are collected into replayable buffers and child
+    tasks inherit the trace context automatically.
+
+- **Lab vs prod driver selection (determinism boundary)**:
+  - Use `lab::LabRuntime` for deterministic schedule exploration and oracle checks.
+  - Use `runtime::RuntimeBuilder` for production configuration (drivers, pools,
+    observability exporters).
+
 #### Failure and Outcome Semantics
 
 Spork uses Asupersync's four-valued outcome lattice:

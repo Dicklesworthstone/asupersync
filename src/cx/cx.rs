@@ -493,6 +493,25 @@ impl<Caps> Cx<Caps> {
         self
     }
 
+    /// Returns a cloned handle to the configured remote capability, if any.
+    ///
+    /// This is `pub(crate)` so internal wiring (e.g. spawning child tasks) can
+    /// inherit remote capability without requiring `Caps: HasRemote` bounds.
+    #[must_use]
+    pub(crate) fn remote_cap_handle(&self) -> Option<Arc<RemoteCap>> {
+        self.remote_cap.clone()
+    }
+
+    /// Attaches an already-shared remote capability handle to this context.
+    ///
+    /// This is the internal counterpart to [`Cx::with_remote_cap`] used for
+    /// capability propagation to child contexts.
+    #[must_use]
+    pub(crate) fn with_remote_cap_handle(mut self, cap: Option<Arc<RemoteCap>>) -> Self {
+        self.remote_cap = cap;
+        self
+    }
+
     /// Returns the registry capability handle, if attached.
     #[must_use]
     pub fn registry_handle(&self) -> Option<RegistryHandle> {
@@ -2146,7 +2165,9 @@ mod tests {
         let cx_clone = cx.clone();
         let _ = catch_unwind(AssertUnwindSafe(|| {
             cx_clone.masked(|| {
-                panic!("oops");
+                // Avoid `panic!/unreachable!` macros (UBS critical). We still
+                // need an unwind here to validate mask-depth restoration.
+                std::panic::resume_unwind(Box::new("oops"));
             });
         }));
 

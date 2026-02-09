@@ -340,6 +340,7 @@ impl<P: Policy> Scope<'_, P> {
             Some(child_entropy),
         )
         .with_registry_handle(cx.registry_handle())
+        .with_remote_cap_handle(cx.remote_cap_handle())
         .with_blocking_pool_handle(cx.blocking_pool_handle());
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
@@ -544,7 +545,7 @@ impl<P: Policy> Scope<'_, P> {
     pub fn spawn_local<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
-        _cx: &Cx<Caps>,
+        cx: &Cx<Caps>,
         f: F,
     ) -> Result<TaskHandle<Fut::Output>, SpawnError>
     where
@@ -557,8 +558,19 @@ impl<P: Policy> Scope<'_, P> {
         use crate::runtime::task_handle::JoinError;
 
         // Use the infrastructure helper to create the record, channel, etc.
-        let (task_id, handle, child_cx_full, result_tx) =
+        let (task_id, handle, base_cx_full, result_tx) =
             state.create_task_infrastructure(self.region, self.budget)?;
+
+        // Ensure child contexts inherit capability wiring (no-globals).
+        // Note: create_task_infrastructure already attached `Cx` to the TaskRecord; update it
+        // so other runtime paths observe the same capability set.
+        let child_cx_full = base_cx_full
+            .with_registry_handle(cx.registry_handle())
+            .with_remote_cap_handle(cx.remote_cap_handle())
+            .with_blocking_pool_handle(cx.blocking_pool_handle());
+        if let Some(record) = state.task_mut(task_id) {
+            record.set_cx(child_cx_full.clone());
+        }
 
         let child_cx = child_cx_full.retype::<Caps>();
 
@@ -729,7 +741,9 @@ impl<P: Policy> Scope<'_, P> {
             io_driver,
             Some(child_entropy),
         )
-        .with_registry_handle(cx.registry_handle());
+        .with_registry_handle(cx.registry_handle())
+        .with_remote_cap_handle(cx.remote_cap_handle())
+        .with_blocking_pool_handle(cx.blocking_pool_handle());
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
 
@@ -1227,6 +1241,64 @@ mod tests {
         // Task should be owned by the region
         let task = task.unwrap();
         assert_eq!(task.owner, region);
+    }
+
+    #[test]
+    fn spawn_inherits_registry_and_remote_capabilities() {
+        use crate::cx::registry::RegistryHandle;
+        use crate::remote::{NodeId, RemoteCap};
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+
+        let registry = crate::cx::NameRegistry::new();
+        let registry_handle = RegistryHandle::new(Arc::new(registry));
+        let parent_registry_arc = registry_handle.as_arc();
+
+        let cx = test_cx()
+            .with_registry_handle(Some(registry_handle))
+            .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin-test")));
+
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let handle = scope
+            .spawn_registered(&mut state, &cx, move |cx| async move {
+                let child_registry = cx.registry_handle().expect("child must inherit registry");
+                let child_registry_arc = child_registry.as_arc();
+                let same_registry = Arc::ptr_eq(&child_registry_arc, &parent_registry_arc);
+
+                let child_remote = cx.remote().expect("child must inherit remote cap");
+                let origin = child_remote.local_node().as_str().to_owned();
+
+                (same_registry, origin)
+            })
+            .unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        let stored = state
+            .get_stored_future(handle.task_id())
+            .expect("spawn_registered must store the task");
+        assert!(stored.poll(&mut poll_cx).is_ready());
+
+        let mut join_fut = Box::pin(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok((same_registry, origin))) => {
+                assert!(
+                    same_registry,
+                    "child should observe the same RegistryCap instance"
+                );
+                assert_eq!(origin, "origin-test");
+            }
+            other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
+        }
     }
 
     #[test]
