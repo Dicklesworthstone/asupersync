@@ -4,8 +4,8 @@
 # Usage:
 #   ./scripts/capture_baseline.sh                    # capture from latest run
 #   ./scripts/capture_baseline.sh --save baselines/  # capture and save to dir
-#   ./scripts/capture_baseline.sh --run --save baselines/criterion
-#   ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/criterion
+#   ./scripts/capture_baseline.sh --run --save baselines/
+#   ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 #
 # Reads target/criterion/*/new/estimates.json and produces a single JSON
 # baseline file with mean/median/p95/p99 for each benchmark.
@@ -42,8 +42,8 @@ Options:
 Examples:
   ./scripts/capture_baseline.sh
   ./scripts/capture_baseline.sh --save baselines/
-  ./scripts/capture_baseline.sh --run --save baselines/criterion
-  ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/criterion
+  ./scripts/capture_baseline.sh --run --save baselines/
+  ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 USAGE
 }
 
@@ -76,7 +76,7 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 if [[ "$SMOKE" -eq 1 && -z "$SAVE_DIR" ]]; then
-    SAVE_DIR="baselines/criterion"
+    SAVE_DIR="baselines"
 fi
 
 # Run the command if requested (smoke runs always do this).

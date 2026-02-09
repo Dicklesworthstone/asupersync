@@ -235,12 +235,12 @@ fn smoke_report_format_parses() {
         "command": "cargo bench --bench phase0_baseline",
         "seed": "3735928559",
         "criterion_dir": "target/criterion",
-        "baseline_path": "baselines/criterion/baseline_20260203_190000.json",
-        "latest_path": "baselines/criterion/baseline_latest.json",
+        "baseline_path": "baselines/baseline_20260203_190000.json",
+        "latest_path": "baselines/baseline_latest.json",
         "git_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         "config": {
             "criterion_dir": "target/criterion",
-            "save_dir": "baselines/criterion",
+            "save_dir": "baselines",
             "compare_path": null,
             "metric": "median_ns",
             "max_regression_pct": 10.0
@@ -262,22 +262,16 @@ fn smoke_report_format_parses() {
     assert_eq!(report.criterion_dir, "target/criterion");
     assert_eq!(
         report.baseline_path,
-        "baselines/criterion/baseline_20260203_190000.json"
+        "baselines/baseline_20260203_190000.json"
     );
-    assert_eq!(
-        report.latest_path,
-        "baselines/criterion/baseline_latest.json"
-    );
+    assert_eq!(report.latest_path, "baselines/baseline_latest.json");
     assert_eq!(report.system.os, "linux");
     assert_eq!(report.system.arch, "x86_64");
     assert!(!report.system.platform.is_empty());
     assert!(report.env.contains_key("CI"));
     assert!(report.env.contains_key("RUSTFLAGS"));
     assert_eq!(report.config.criterion_dir, "target/criterion");
-    assert_eq!(
-        report.config.save_dir.as_deref(),
-        Some("baselines/criterion")
-    );
+    assert_eq!(report.config.save_dir.as_deref(), Some("baselines"));
     assert!(report.config.compare_path.is_none());
     assert_eq!(report.config.metric, "median_ns");
     assert!(

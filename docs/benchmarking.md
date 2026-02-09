@@ -40,7 +40,7 @@ and behavior-preserving:
 Example baseline + smoke capture:
 
 ```bash
-./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/criterion
+./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 ```
 
 ### Smoke Report Schema (artifact manifest)
@@ -55,12 +55,12 @@ available):
   "command": "cargo bench --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
-  "baseline_path": "baselines/criterion/baseline_20260203_190000.json",
-  "latest_path": "baselines/criterion/baseline_latest.json",
+  "baseline_path": "baselines/baseline_20260203_190000.json",
+  "latest_path": "baselines/baseline_latest.json",
   "git_sha": "deadbeef...",
   "config": {
     "criterion_dir": "target/criterion",
-    "save_dir": "baselines/criterion",
+    "save_dir": "baselines",
     "compare_path": null,
     "metric": "median_ns",
     "max_regression_pct": 10.0
@@ -227,14 +227,14 @@ Use `scripts/capture_baseline.sh` to consolidate Criterion output and (optionall
 run a smoke capture end-to-end with structured metadata.
 
 ```bash
-# Run bench + capture baseline into baselines/criterion
-./scripts/capture_baseline.sh --run --save baselines/criterion
+# Run bench + capture baseline into baselines/
+./scripts/capture_baseline.sh --run --save baselines/
 
 # End-to-end smoke run with structured report
-./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/criterion
+./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 ```
 
-The smoke report is stored as `baselines/criterion/smoke_report_<timestamp>.json` and
+The smoke report is stored as `baselines/smoke_report_<timestamp>.json` and
 captures env, command, seed, git SHA, and a `config` block (criterion dir,
 save dir, comparison settings).
 
@@ -264,8 +264,8 @@ save dir, comparison settings).
   "command": "cargo bench --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
-  "baseline_path": "baselines/criterion/baseline_20260203_190000.json",
-  "latest_path": "baselines/criterion/baseline_latest.json",
+  "baseline_path": "baselines/baseline_20260203_190000.json",
+  "latest_path": "baselines/baseline_latest.json",
   "git_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
   "env": {
     "CI": "true",
@@ -537,8 +537,8 @@ For multi-benchmark runs with structured artifacts, use:
 
 ```bash
 ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark
-./scripts/run_perf_e2e.sh --compare baselines/criterion/baseline_latest.json
-./scripts/run_perf_e2e.sh --save-baseline baselines/criterion
+./scripts/run_perf_e2e.sh --compare baselines/baseline_latest.json
+./scripts/run_perf_e2e.sh --save-baseline baselines/
 ```
 
 Artifacts are written under `target/perf-results/` with:
@@ -688,7 +688,7 @@ This is enforced in `.github/workflows/benchmarks.yml` using the baseline JSON p
 ## Perf Dashboard Inputs
 
 If you are building a dashboard, ingest these artifacts:
-- `baselines/criterion/baseline_latest.json` for the current benchmark baseline
+- `baselines/baseline_latest.json` for the current benchmark baseline
 - `target/perf-results/perf_<timestamp>/report.json` for each perf run
 - `target/perf-results/perf_<timestamp>/artifacts/baseline_current.json` for per-run baseline snapshots
 

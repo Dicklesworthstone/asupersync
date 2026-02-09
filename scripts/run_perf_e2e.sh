@@ -7,12 +7,12 @@
 # Usage:
 #   ./scripts/run_perf_e2e.sh --list
 #   ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark
-#   ./scripts/run_perf_e2e.sh --compare baselines/criterion/baseline_latest.json
-#   ./scripts/run_perf_e2e.sh --save-baseline baselines/criterion
+#   ./scripts/run_perf_e2e.sh --compare baselines/baseline_latest.json
+#   ./scripts/run_perf_e2e.sh --save-baseline baselines/
 #
 # Environment:
 #   PERF_OUTPUT_DIR    - run outputs (default: target/perf-results)
-#   PERF_BASELINE_DIR  - default baseline dir (auto: baselines/criterion or baselines)
+#   PERF_BASELINE_DIR  - default baseline dir (default: baselines/)
 #   PERF_TIMEOUT       - per-bench timeout seconds (default: 0 = no timeout)
 #   PERF_BENCH_ARGS    - extra args passed to cargo bench (default: "-- --noplot")
 #   ASUPERSYNC_SEED    - deterministic seed (if benchmark uses it)
@@ -22,10 +22,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-DEFAULT_BASELINE_DIR="${PROJECT_ROOT}/baselines/criterion"
-if [[ ! -d "$DEFAULT_BASELINE_DIR" ]]; then
-    DEFAULT_BASELINE_DIR="${PROJECT_ROOT}/baselines"
-fi
+DEFAULT_BASELINE_DIR="${PROJECT_ROOT}/baselines"
 
 OUTPUT_DIR="${PERF_OUTPUT_DIR:-${PROJECT_ROOT}/target/perf-results}"
 BASELINE_DIR="${PERF_BASELINE_DIR:-$DEFAULT_BASELINE_DIR}"
