@@ -531,6 +531,9 @@ fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
         .configure_mailbox(actor(300), 2, false);
     harness.oracles.mailbox.on_send(actor(300), now);
     harness.oracles.mailbox.on_send(actor(300), now);
+    // Baseline must fully drain the mailbox so the "no silent drops" invariant holds.
+    harness.oracles.mailbox.on_receive(actor(300), now);
+    harness.oracles.mailbox.on_receive(actor(300), now);
 }
 
 fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
@@ -542,6 +545,10 @@ fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
     harness.oracles.mailbox.on_send(actor(300), now);
     harness.oracles.mailbox.on_send(actor(300), now);
     harness.oracles.mailbox.on_send(actor(300), now);
+    // Drain all messages so `check()` reports the capacity violation (not a generic "message lost").
+    harness.oracles.mailbox.on_receive(actor(300), now);
+    harness.oracles.mailbox.on_receive(actor(300), now);
+    harness.oracles.mailbox.on_receive(actor(300), now);
 }
 
 fn baseline_rref_access(harness: &mut MetaHarness) {

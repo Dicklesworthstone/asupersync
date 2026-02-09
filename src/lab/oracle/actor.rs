@@ -690,10 +690,15 @@ impl MailboxOracle {
 
     /// Verifies the invariants hold.
     pub fn check(&self, now: Time) -> Result<(), MailboxViolation> {
-        // Check for message loss (sent != received for stopped actors)
+        // For end-of-run oracle checking, the mailbox must be fully drained.
+        //
+        // If `total_sent != total_received`, then either:
+        // - some messages were never received (pending/lost), or
+        // - receive bookkeeping is incorrect (spurious receives).
+        //
+        // Either way, this violates "no silent drops" and should fail.
         for (&actor, stats) in &self.mailboxes {
-            // Only check if current_size should be 0 (all messages processed)
-            if stats.current_size == 0 && stats.total_sent != stats.total_received {
+            if stats.total_sent != stats.total_received {
                 return Err(MailboxViolation {
                     kind: MailboxViolationKind::MessageLost {
                         sent: stats.total_sent,
@@ -1034,6 +1039,32 @@ mod tests {
             let count = oracle.mailbox_count();
             crate::assert_with_log!(count == 0, "mailbox_count", 0, count);
             crate::test_complete!("mailbox_reset_clears_state");
+        }
+
+        #[test]
+        fn sent_but_not_received_fails() {
+            init_test("sent_but_not_received_fails");
+            let mut oracle = MailboxOracle::new();
+
+            oracle.configure_mailbox(actor(1), 10, true);
+            oracle.on_send(actor(1), t(10));
+
+            let result = oracle.check(t(100));
+            let err = result.is_err();
+            crate::assert_with_log!(err, "err", true, err);
+
+            let violation = result.unwrap_err();
+            match violation.kind {
+                MailboxViolationKind::MessageLost { sent, received } => {
+                    crate::assert_with_log!(sent == 1, "sent", 1, sent);
+                    crate::assert_with_log!(received == 0, "received", 0, received);
+                }
+                other => {
+                    panic!("Expected MessageLost, got {other:?}");
+                }
+            }
+
+            crate::test_complete!("sent_but_not_received_fails");
         }
     }
 }

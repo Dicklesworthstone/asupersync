@@ -1404,6 +1404,38 @@ impl ThreeLaneWorker {
 
     #[allow(clippy::too_many_lines)]
     pub(crate) fn execute(&self, task_id: TaskId) {
+        // Guard to handle task panics during polling.
+        // If the future panics, this guard will catch the unwind and mark the task as Panicked.
+        struct TaskExecutionGuard<'a> {
+            worker: &'a ThreeLaneWorker,
+            task_id: TaskId,
+            completed: bool,
+        }
+
+        impl Drop for TaskExecutionGuard<'_> {
+            fn drop(&mut self) {
+                if !self.completed && std::thread::panicking() {
+                    let mut state = self
+                        .worker
+                        .state
+                        .lock()
+                        .expect("runtime state lock poisoned");
+                    if let Some(record) = state.task_mut(self.task_id) {
+                        if !record.state.is_terminal() {
+                            record.complete(crate::types::Outcome::Panicked(
+                                crate::types::outcome::PanicPayload::new(
+                                    "task panicked during poll",
+                                ),
+                            ));
+                        }
+                    }
+                    // We also need to ensure the task isn't lost if it was in the middle of transition
+                    // But complete() marks it terminal, so it won't be scheduled again.
+                    // The future itself is lost (owned by the stack frame unwinding).
+                }
+            }
+        }
+
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
         let (
@@ -1529,8 +1561,15 @@ impl ThreeLaneWorker {
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
+        let mut guard = TaskExecutionGuard {
+            worker: self,
+            task_id,
+            completed: false,
+        };
+
         match stored.poll(&mut cx) {
             Poll::Ready(outcome) => {
+                guard.completed = true;
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
@@ -1639,6 +1678,7 @@ impl ThreeLaneWorker {
                 wake_state.clear();
             }
             Poll::Pending => {
+                guard.completed = true;
                 // Store task back
                 match stored {
                     AnyStoredTask::Global(t) => {
