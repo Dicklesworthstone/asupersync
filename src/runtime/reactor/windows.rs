@@ -4,6 +4,10 @@
 //! is completion-based rather than readiness-based, the `polling` abstraction
 //! exposes readiness-style events that are compatible with the runtime.
 
+// Re-export parent types so submodules can use `super::` imports.
+#[allow(unused_imports)]
+use super::{Event, Events, Interest, Reactor, Source, Token};
+
 // Windows implementation.
 #[cfg(target_os = "windows")]
 mod iocp_impl {

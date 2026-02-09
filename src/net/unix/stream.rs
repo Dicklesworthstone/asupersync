@@ -766,7 +766,7 @@ fn recv_with_ancillary_impl(
         // SAFETY: recvmsg has written msg_controllen bytes of valid
         // control message data to the buffer.
         unsafe {
-            ancillary.set_len(msg.msg_controllen, truncated);
+            ancillary.set_len(msg.msg_controllen as usize, truncated);
         }
         let len = usize::try_from(ret).unwrap_or(0);
         Ok(len)

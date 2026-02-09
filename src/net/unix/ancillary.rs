@@ -271,13 +271,14 @@ impl<'a> Iterator for AncillaryMessages<'a> {
                 return None;
             }
 
-            let cmsg_len = (*cmsg_ptr).cmsg_len;
+            let cmsg_len = (*cmsg_ptr).cmsg_len as usize;
             if cmsg_len < mem::size_of::<libc::cmsghdr>() {
                 return None;
             }
 
             // Advance to next message
             let data_len = cmsg_len - mem::size_of::<libc::cmsghdr>();
+            #[allow(clippy::cast_possible_truncation)]
             let cmsg_space = libc::CMSG_SPACE(data_len as u32) as usize;
             self.current += cmsg_space.max(mem::size_of::<libc::cmsghdr>());
 
