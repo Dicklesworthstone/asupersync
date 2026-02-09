@@ -17,6 +17,7 @@ use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use crate::error::{Error, ErrorKind};
 use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
+use crate::security::SecurityContext;
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
 use crate::RejectReason;
@@ -352,6 +353,11 @@ impl std::fmt::Debug for RecoveryCollector {
 pub struct RecoveryDecodingConfig {
     /// Whether to verify decoded data integrity.
     pub verify_integrity: bool,
+    /// Optional security context used to verify untrusted/unverified symbols.
+    ///
+    /// When `verify_integrity` is true and this is `Some`, decoding will verify
+    /// tags for symbols where `AuthenticatedSymbol::is_verified()` is false.
+    pub auth_context: Option<SecurityContext>,
     /// Maximum decode attempts before failure.
     pub max_decode_attempts: u32,
     /// Whether to attempt partial decode.
@@ -364,6 +370,7 @@ impl Default for RecoveryDecodingConfig {
             // Default off until recovery is plumbed with a `SecurityContext`.
             // (DecodingPipeline requires an auth context to verify tags.)
             verify_integrity: false,
+            auth_context: None,
             max_decode_attempts: 3,
             allow_partial_decode: false,
         }
@@ -482,7 +489,13 @@ impl StateDecoder {
             // If verify_integrity is true, the pipeline will validate auth tags.
             verify_auth: self.config.verify_integrity,
         };
-        let mut pipeline = DecodingPipeline::new(config);
+        let mut pipeline = match (
+            self.config.verify_integrity,
+            self.config.auth_context.clone(),
+        ) {
+            (true, Some(ctx)) => DecodingPipeline::with_auth(config, ctx),
+            _ => DecodingPipeline::new(config),
+        };
         if let Err(err) = pipeline.set_object_params(*params) {
             self.decoder_state = DecoderState::Failed {
                 reason: err.to_string(),
@@ -915,6 +928,52 @@ mod tests {
 
         assert_eq!(recovered.region_id, snapshot.region_id);
         assert_eq!(recovered.sequence, snapshot.sequence);
+    }
+
+    #[test]
+    fn decoder_verify_integrity_with_auth_context_verifies_unverified_symbols() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let ctx = SecurityContext::for_testing(42);
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+            verify_integrity: true,
+            auth_context: Some(ctx.clone()),
+            ..Default::default()
+        });
+
+        for sym in &encoded.symbols {
+            // Compute a correct tag, then present it as "unverified" so the pipeline must verify.
+            let signed = ctx.sign_symbol(sym);
+            let unverified =
+                AuthenticatedSymbol::from_parts(signed.symbol().clone(), *signed.tag());
+            decoder.add_symbol(&unverified).unwrap();
+        }
+
+        let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
+        assert_eq!(recovered.region_id, snapshot.region_id);
+        assert_eq!(recovered.sequence, snapshot.sequence);
+    }
+
+    #[test]
+    fn decoder_verify_integrity_without_auth_context_rejects_unverified_symbols() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+            verify_integrity: true,
+            auth_context: None,
+            ..Default::default()
+        });
+
+        for sym in &encoded.symbols {
+            let unverified =
+                AuthenticatedSymbol::from_parts(sym.clone(), AuthenticationTag::zero());
+            decoder.add_symbol(&unverified).unwrap();
+        }
+
+        let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::CorruptedSymbol);
     }
 
     #[test]
@@ -1472,6 +1531,7 @@ mod tests {
     fn decoding_config_default_values() {
         let config = RecoveryDecodingConfig::default();
         assert!(!config.verify_integrity);
+        assert!(config.auth_context.is_none());
         assert_eq!(config.max_decode_attempts, 3);
         assert!(!config.allow_partial_decode);
     }
