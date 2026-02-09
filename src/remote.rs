@@ -213,6 +213,12 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
         task_id: RemoteTaskId,
         tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
     );
+
+    /// Unregisters a pending local task after spawn failure.
+    ///
+    /// Implementations that keep a pending-results map should remove the
+    /// entry for `task_id`. The default implementation is a no-op.
+    fn unregister_task(&self, _task_id: RemoteTaskId) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +262,8 @@ pub struct RemoteCap {
     default_lease: Duration,
     /// Budget ceiling for remote tasks (if set, tighter than region budget).
     remote_budget: Option<Budget>,
+    /// Identity used as the origin node for outbound remote protocol messages.
+    local_node: NodeId,
     /// The connected remote runtime (transport).
     runtime: Option<Arc<dyn RemoteRuntime>>,
 }
@@ -267,6 +275,7 @@ impl RemoteCap {
         Self {
             default_lease: Duration::from_secs(30),
             remote_budget: None,
+            local_node: NodeId::new("local"),
             runtime: None,
         }
     }
@@ -282,6 +291,13 @@ impl RemoteCap {
     #[must_use]
     pub fn with_remote_budget(mut self, budget: Budget) -> Self {
         self.remote_budget = Some(budget);
+        self
+    }
+
+    /// Sets the local node identity used as protocol origin.
+    #[must_use]
+    pub fn with_local_node(mut self, node: NodeId) -> Self {
+        self.local_node = node;
         self
     }
 
@@ -302,6 +318,12 @@ impl RemoteCap {
     #[must_use]
     pub fn remote_budget(&self) -> Option<&Budget> {
         self.remote_budget.as_ref()
+    }
+
+    /// Returns the local node identity used for protocol origin metadata.
+    #[must_use]
+    pub fn local_node(&self) -> &NodeId {
+        &self.local_node
     }
 
     /// Returns the attached remote runtime, if any.
@@ -622,7 +644,7 @@ pub fn spawn_remote(
             lease,
             idempotency_key: IdempotencyKey::generate(cx),
             budget: cap.remote_budget,
-            origin_node: NodeId::new("local"), // TODO: Local node ID from config
+            origin_node: cap.local_node().clone(),
             origin_region: region,
             origin_task: cx.task_id(),
         };
@@ -635,7 +657,10 @@ pub fn spawn_remote(
             sender_time,
             RemoteMessage::SpawnRequest(req),
         );
-        runtime.send_message(&node, envelope)?;
+        if let Err(err) = runtime.send_message(&node, envelope) {
+            runtime.unregister_task(remote_task_id);
+            return Err(err);
+        }
     } else {
         // Phase 0: Drop sender (simulates network that never returns)
         // or keep it alive if we want to simulate timeout?
@@ -2137,6 +2162,7 @@ pub mod trace_events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn node_id_basics() {
@@ -2181,15 +2207,145 @@ mod tests {
         let cap = RemoteCap::new();
         assert_eq!(cap.default_lease(), Duration::from_secs(30));
         assert!(cap.remote_budget().is_none());
+        assert_eq!(cap.local_node().as_str(), "local");
     }
 
     #[test]
     fn remote_cap_builder() {
         let cap = RemoteCap::new()
             .with_default_lease(Duration::from_secs(60))
-            .with_remote_budget(Budget::INFINITE);
+            .with_remote_budget(Budget::INFINITE)
+            .with_local_node(NodeId::new("origin-a"));
         assert_eq!(cap.default_lease(), Duration::from_secs(60));
         assert!(cap.remote_budget().is_some());
+        assert_eq!(cap.local_node().as_str(), "origin-a");
+    }
+
+    #[derive(Debug, Default)]
+    struct CaptureRuntime {
+        sent: Mutex<Vec<(NodeId, MessageEnvelope<RemoteMessage>)>>,
+    }
+
+    impl RemoteRuntime for CaptureRuntime {
+        fn send_message(
+            &self,
+            destination: &NodeId,
+            envelope: MessageEnvelope<RemoteMessage>,
+        ) -> Result<(), RemoteError> {
+            self.sent
+                .lock()
+                .expect("capture runtime lock poisoned")
+                .push((destination.clone(), envelope));
+            Ok(())
+        }
+
+        fn register_task(
+            &self,
+            _task_id: RemoteTaskId,
+            _tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+        ) {
+            // Intentionally dropped in this capture runtime.
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingSendRuntime {
+        registered: Mutex<Vec<RemoteTaskId>>,
+        unregistered: Mutex<Vec<RemoteTaskId>>,
+    }
+
+    impl RemoteRuntime for FailingSendRuntime {
+        fn send_message(
+            &self,
+            _destination: &NodeId,
+            _envelope: MessageEnvelope<RemoteMessage>,
+        ) -> Result<(), RemoteError> {
+            Err(RemoteError::TransportError("simulated send failure".into()))
+        }
+
+        fn register_task(
+            &self,
+            task_id: RemoteTaskId,
+            _tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+        ) {
+            self.registered
+                .lock()
+                .expect("failing runtime lock poisoned")
+                .push(task_id);
+        }
+
+        fn unregister_task(&self, task_id: RemoteTaskId) {
+            self.unregistered
+                .lock()
+                .expect("failing runtime lock poisoned")
+                .push(task_id);
+        }
+    }
+
+    #[test]
+    fn spawn_remote_uses_cap_local_node_for_origin() {
+        let runtime = Arc::new(CaptureRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let _ = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let (destination, envelope) = {
+            let sent = runtime.sent.lock().expect("capture runtime lock poisoned");
+            assert_eq!(sent.len(), 1);
+            sent[0].clone()
+        };
+        assert_eq!(destination.as_str(), "worker-1");
+        assert_eq!(envelope.sender.as_str(), "origin-a");
+        match &envelope.payload {
+            RemoteMessage::SpawnRequest(req) => {
+                assert_eq!(req.origin_node.as_str(), "origin-a");
+            }
+            other => unreachable!("expected SpawnRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_remote_send_failure_unregisters_pending_task() {
+        let runtime = Arc::new(FailingSendRuntime::default());
+        let cap = RemoteCap::new().with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let err = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect_err("spawn_remote should fail when send_message fails");
+        match err {
+            RemoteError::TransportError(msg) => {
+                assert!(msg.contains("simulated send failure"));
+            }
+            other => unreachable!("expected TransportError, got {other:?}"),
+        }
+
+        let registered = runtime
+            .registered
+            .lock()
+            .expect("failing runtime lock poisoned")
+            .clone();
+        let unregistered = runtime
+            .unregistered
+            .lock()
+            .expect("failing runtime lock poisoned")
+            .clone();
+
+        assert_eq!(registered.len(), 1);
+        assert_eq!(unregistered, registered);
     }
 
     #[test]

@@ -401,6 +401,36 @@ impl EvidenceRecord {
             self.timestamp, self.subsystem, self.verdict, self.detail
         )
     }
+
+    /// Convert this record into an evidence "card" suitable for deterministic,
+    /// human/agent-friendly debugging.
+    ///
+    /// A card is the "galaxy-brain" triple:
+    /// - `rule`: a general rule or equation form ("why this verdict follows")
+    /// - `substitution`: the same rule with concrete values
+    /// - `intuition`: a one-line explanation
+    #[must_use]
+    pub fn to_card(&self) -> EvidenceCard {
+        let (rule, substitution, intuition) =
+            evidence_card_triple(self.subsystem, self.verdict, &self.detail);
+
+        EvidenceCard {
+            timestamp: self.timestamp,
+            task_id: self.task_id,
+            region_id: self.region_id,
+            subsystem: self.subsystem,
+            verdict: self.verdict,
+            rule,
+            substitution,
+            intuition,
+        }
+    }
+
+    /// Render this record as a deterministic, multi-line evidence card.
+    #[must_use]
+    pub fn render_card(&self) -> String {
+        self.to_card().render()
+    }
 }
 
 impl fmt::Display for EvidenceRecord {
@@ -416,6 +446,221 @@ impl fmt::Display for EvidenceRecord {
 // ---------------------------------------------------------------------------
 // Generalized Evidence Ledger
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Evidence Cards (Galaxy-Brain Rendering)
+// ---------------------------------------------------------------------------
+
+/// A deterministic "galaxy-brain" evidence card derived from a single record.
+///
+/// This is intentionally lightweight and stable so tests can assert exact
+/// output and agents can grep for `rule:` / `substitution:` / `intuition:`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceCard {
+    /// Virtual timestamp (nanoseconds) when the decision was made.
+    pub timestamp: u64,
+    /// The task involved in the decision.
+    pub task_id: TaskId,
+    /// The region containing the task.
+    pub region_id: RegionId,
+    /// Which Spork subsystem produced this evidence.
+    pub subsystem: Subsystem,
+    /// One-word verdict: what happened.
+    pub verdict: Verdict,
+    /// General rule/equation form.
+    pub rule: String,
+    /// Rule with concrete values substituted.
+    pub substitution: String,
+    /// One-line intuition.
+    pub intuition: String,
+}
+
+impl EvidenceCard {
+    /// Render this card to a deterministic, multi-line string.
+    ///
+    /// Format:
+    ///
+    /// ```text
+    /// [{timestamp}] {subsystem} {verdict} task={task:?} region={region:?}
+    /// rule: ...
+    /// substitution: ...
+    /// intuition: ...
+    /// ```
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!(
+            "[{}] {} {} task={:?} region={:?}\nrule: {}\nsubstitution: {}\nintuition: {}\n",
+            self.timestamp,
+            self.subsystem,
+            self.verdict,
+            self.task_id,
+            self.region_id,
+            self.rule,
+            self.substitution,
+            self.intuition
+        )
+    }
+}
+
+impl fmt::Display for EvidenceCard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
+fn supervision_card_triple(detail: &SupervisionDetail) -> (String, String, String) {
+    match detail {
+        SupervisionDetail::MonotoneSeverity { outcome_kind } => (
+            "If outcome severity is not restartable, the supervisor must STOP.".to_string(),
+            format!("outcome_kind={outcome_kind} => STOP"),
+            format!(
+                "Outcome {outcome_kind} is terminal for supervision; stopping preserves monotone severity."
+            ),
+        ),
+        SupervisionDetail::ExplicitStop => (
+            "If supervision strategy is Stop, the supervisor must STOP.".to_string(),
+            "strategy=Stop => STOP".to_string(),
+            "Strategy is Stop; no restart is attempted.".to_string(),
+        ),
+        SupervisionDetail::ExplicitEscalate => (
+            "If supervision strategy is Escalate, the supervisor must ESCALATE.".to_string(),
+            "strategy=Escalate => ESCALATE".to_string(),
+            "Strategy is Escalate; failure is propagated to the parent region.".to_string(),
+        ),
+        SupervisionDetail::RestartAllowed { attempt, delay } => (
+            "If restart window and budget allow, the supervisor may RESTART.".to_string(),
+            delay.as_ref().map_or_else(
+                || format!("attempt={attempt} => RESTART"),
+                |d| format!("attempt={attempt}, delay={d:?} => RESTART"),
+            ),
+            "Restart attempt is permitted; any configured delay is applied deterministically."
+                .to_string(),
+        ),
+        SupervisionDetail::WindowExhausted {
+            max_restarts,
+            window,
+        } => (
+            "If restarts in the intensity window exceed the limit, the supervisor must STOP."
+                .to_string(),
+            format!("max_restarts={max_restarts}, window={window:?} => STOP"),
+            "Restart intensity exceeded; stopping prevents an unbounded crash loop.".to_string(),
+        ),
+        SupervisionDetail::BudgetRefused { constraint } => (
+            "If restart would violate budget constraints, the supervisor must STOP.".to_string(),
+            format!("{constraint} => STOP"),
+            "Budget would be exceeded; stopping is deterministic and cancel-correct.".to_string(),
+        ),
+    }
+}
+
+fn registry_card_triple(detail: &RegistryDetail) -> (String, String, String) {
+    match detail {
+        RegistryDetail::NameAvailable => (
+            "If the name is unheld, registration is ACCEPTED.".to_string(),
+            "name is available => ACCEPT".to_string(),
+            "No collision; a name lease is created and must be resolved linearly.".to_string(),
+        ),
+        RegistryDetail::NameCollision { existing_holder } => (
+            "If the name is already held, registration is REJECTED.".to_string(),
+            format!("existing_holder={existing_holder:?} => REJECT"),
+            "Collision prevents ambiguous ownership; reject to preserve determinism.".to_string(),
+        ),
+        RegistryDetail::RegionClosed { region } => (
+            "If the owning region is closed, registration is REJECTED.".to_string(),
+            format!("region={region:?} is closed => REJECT"),
+            "Closed regions cannot accept new obligations; reject avoids orphaned leases."
+                .to_string(),
+        ),
+        RegistryDetail::LeaseCommitted => (
+            "If the lease obligation is committed, the name is RELEASED.".to_string(),
+            "lease committed => RELEASE".to_string(),
+            "Normal lifecycle release; name becomes available again.".to_string(),
+        ),
+        RegistryDetail::LeaseCancelled { reason } => (
+            "If cancellation occurs, the lease is ABORTED.".to_string(),
+            format!("cancel_reason={reason} => ABORT"),
+            "Cancellation triggers cleanup; abort avoids stale names.".to_string(),
+        ),
+        RegistryDetail::LeaseCleanedUp { region } => (
+            "If region cleanup runs, the lease is ABORTED.".to_string(),
+            format!("cleanup_region={region:?} => ABORT"),
+            "Region close implies quiescence; leases are aborted during cleanup.".to_string(),
+        ),
+        RegistryDetail::TaskCleanedUp { task } => (
+            "If task cleanup runs, the lease is ABORTED.".to_string(),
+            format!("cleanup_task={task:?} => ABORT"),
+            "Task termination must not leave names held; abort releases the lease.".to_string(),
+        ),
+    }
+}
+
+fn link_card_triple(detail: &LinkDetail) -> (String, String, String) {
+    match detail {
+        LinkDetail::ExitPropagated { source, reason } => (
+            "If a linked task exits and exits are not trapped, the signal is PROPAGATED."
+                .to_string(),
+            format!("source={source:?}, reason={reason:?} => PROPAGATE"),
+            "Linked failures propagate to preserve OTP-style failure semantics.".to_string(),
+        ),
+        LinkDetail::TrapExit { source } => (
+            "If the target traps exits, the signal is SUPPRESSED.".to_string(),
+            format!("source={source:?}, trap_exit=true => SUPPRESS"),
+            "Target traps exits, so failure is converted into a message instead of killing."
+                .to_string(),
+        ),
+        LinkDetail::Unlinked => (
+            "If the link was removed, no propagation occurs.".to_string(),
+            "link already removed => SUPPRESS".to_string(),
+            "No active link exists; nothing to propagate.".to_string(),
+        ),
+        LinkDetail::RegionCleanup { region } => (
+            "If region cleanup runs, links are cleaned up without propagation.".to_string(),
+            format!("cleanup_region={region:?} => SUPPRESS"),
+            "Region close implies quiescence; cleanup suppresses further signals.".to_string(),
+        ),
+    }
+}
+
+fn monitor_card_triple(detail: &MonitorDetail) -> (String, String, String) {
+    match detail {
+        MonitorDetail::DownDelivered { monitored, reason } => (
+            "If a monitored task terminates, a DOWN is DELIVERED to the watcher.".to_string(),
+            format!("monitored={monitored:?}, reason={reason:?} => DELIVER"),
+            "Monitors provide observation without coupling; DOWN is delivered deterministically."
+                .to_string(),
+        ),
+        MonitorDetail::WatcherRegionClosed { region } => (
+            "If the watcher region is closed, DOWN delivery is DROPPED.".to_string(),
+            format!("watcher_region={region:?} closed => DROP"),
+            "Watcher cannot receive messages after cleanup; drop avoids resurrecting work."
+                .to_string(),
+        ),
+        MonitorDetail::Demonitored => (
+            "If the monitor was removed, no DOWN is delivered.".to_string(),
+            "demonitored => DROP".to_string(),
+            "No active monitor exists; nothing to deliver.".to_string(),
+        ),
+        MonitorDetail::RegionCleanup { region, count } => (
+            "If region cleanup runs, monitors are DROPPED.".to_string(),
+            format!("cleanup_region={region:?}, released={count} => DROP"),
+            "Region close releases monitor obligations; dropping is deterministic cleanup."
+                .to_string(),
+        ),
+    }
+}
+
+fn evidence_card_triple(
+    _subsystem: Subsystem,
+    _verdict: Verdict,
+    detail: &EvidenceDetail,
+) -> (String, String, String) {
+    match detail {
+        EvidenceDetail::Supervision(d) => supervision_card_triple(d),
+        EvidenceDetail::Registry(d) => registry_card_triple(d),
+        EvidenceDetail::Link(d) => link_card_triple(d),
+        EvidenceDetail::Monitor(d) => monitor_card_triple(d),
+    }
+}
 
 /// Deterministic, append-only, subsystem-agnostic evidence ledger.
 ///
@@ -502,6 +747,19 @@ impl GeneralizedLedger {
         let mut out = String::new();
         for entry in &self.entries {
             out.push_str(&entry.render());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Render the entire ledger to deterministic evidence cards.
+    ///
+    /// Each entry becomes one card, separated by a blank line.
+    #[must_use]
+    pub fn render_cards(&self) -> String {
+        let mut out = String::new();
+        for entry in &self.entries {
+            out.push_str(&entry.render_card());
             out.push('\n');
         }
         out
@@ -905,5 +1163,67 @@ mod tests {
         assert_eq!(ledger.filter(|e| e.timestamp > 200).count(), 2);
 
         crate::test_complete!("generalized_ledger_filter_predicate");
+    }
+
+    #[test]
+    fn evidence_record_render_card_supervision_restart() {
+        init_test("evidence_record_render_card_supervision_restart");
+
+        let record = EvidenceRecord {
+            timestamp: 1_000_000_001,
+            task_id: test_task_id(),
+            region_id: test_region_id(),
+            subsystem: Subsystem::Supervision,
+            verdict: Verdict::Restart,
+            detail: EvidenceDetail::Supervision(SupervisionDetail::RestartAllowed {
+                attempt: 1,
+                delay: Some(Duration::from_millis(10)),
+            }),
+        };
+
+        let rendered = record.render_card();
+        assert!(rendered.contains("supervision RESTART"));
+        assert!(rendered.contains("rule: If restart window and budget allow"));
+        assert!(rendered.contains("substitution: attempt=1, delay=10ms => RESTART"));
+        assert!(rendered.contains("intuition: Restart attempt is permitted"));
+
+        crate::test_complete!("evidence_record_render_card_supervision_restart");
+    }
+
+    #[test]
+    fn generalized_ledger_render_cards_deterministic() {
+        init_test("generalized_ledger_render_cards_deterministic");
+
+        let mut ledger_a = GeneralizedLedger::new();
+        let mut ledger_b = GeneralizedLedger::new();
+
+        for ledger in [&mut ledger_a, &mut ledger_b] {
+            ledger.push(EvidenceRecord {
+                timestamp: 10,
+                task_id: test_task_id(),
+                region_id: test_region_id(),
+                subsystem: Subsystem::Registry,
+                verdict: Verdict::Reject,
+                detail: EvidenceDetail::Registry(RegistryDetail::NameCollision {
+                    existing_holder: test_task_id_2(),
+                }),
+            });
+            ledger.push(EvidenceRecord {
+                timestamp: 11,
+                task_id: test_task_id(),
+                region_id: test_region_id(),
+                subsystem: Subsystem::Supervision,
+                verdict: Verdict::Stop,
+                detail: EvidenceDetail::Supervision(SupervisionDetail::WindowExhausted {
+                    max_restarts: 2,
+                    window: Duration::from_secs(1),
+                }),
+            });
+        }
+
+        // Byte-for-byte identical rendering
+        assert_eq!(ledger_a.render_cards(), ledger_b.render_cards());
+
+        crate::test_complete!("generalized_ledger_render_cards_deterministic");
     }
 }

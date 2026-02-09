@@ -142,7 +142,7 @@ where
         while this.buf.remaining() > 0 {
             let chunk = this.buf.chunk();
             if chunk.is_empty() {
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
             }
             match Pin::new(&mut *this.writer).poll_write(cx, chunk) {
                 Poll::Pending => return Poll::Pending,
@@ -269,7 +269,7 @@ mod tests {
                 return output;
             }
         }
-        panic!("future did not resolve");
+        unreachable!("future did not resolve");
     }
 
     #[test]

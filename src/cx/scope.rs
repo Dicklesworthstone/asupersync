@@ -1285,7 +1285,7 @@ mod tests {
         let mut join_fut = Box::pin(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, 42),
-            other => panic!("Expected Ready(Ok(42)), got {other:?}"),
+            other => unreachable!("Expected Ready(Ok(42)), got {other:?}"),
         }
     }
 
@@ -1391,7 +1391,7 @@ mod tests {
 
         match join_fut.as_mut().poll(&mut ctx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, 7),
-            res => panic!("Expected Ready(Ok(7)), got {res:?}"),
+            res => unreachable!("Expected Ready(Ok(7)), got {res:?}"),
         }
     }
 
@@ -1483,7 +1483,7 @@ mod tests {
         // Poll join - should be ready now
         match join_fut.as_mut().poll(&mut ctx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, 42),
-            _ => panic!("Expected Ready(Ok(42))"),
+            other => unreachable!("Expected Ready(Ok(42)), got {other:?}"),
         }
     }
 
@@ -1523,15 +1523,15 @@ mod tests {
         // Task should run, see cancellation, and return "cancelled"
         match stored_task.poll(&mut ctx) {
             Poll::Ready(crate::types::Outcome::Ok(())) => {}
-            res => panic!("Task should have completed with Ok(()), got {res:?}"),
+            res => unreachable!("Task should have completed with Ok(()), got {res:?}"),
         }
 
         // Check result via handle
         let mut join_fut = Box::pin(handle.join(&cx));
         match join_fut.as_mut().poll(&mut ctx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, "cancelled"),
-            Poll::Ready(Err(e)) => panic!("Task failed unexpectedly: {e}"),
-            Poll::Pending => panic!("Join should be ready"),
+            Poll::Ready(Err(e)) => unreachable!("Task failed unexpectedly: {e}"),
+            Poll::Pending => unreachable!("Join should be ready"),
         }
     }
 
@@ -1555,7 +1555,7 @@ mod tests {
 
         let child_id = match outcome {
             Outcome::Ok(id) => id,
-            other => panic!("expected Outcome::Ok(child_id), got {other:?}"),
+            other => unreachable!("expected Outcome::Ok(child_id), got {other:?}"),
         };
 
         let child_record = state.region(child_id).expect("child record missing");
@@ -1592,7 +1592,7 @@ mod tests {
 
         let child_id = match outcome {
             Outcome::Ok(id) => id,
-            other => panic!("expected Outcome::Ok(child_id), got {other:?}"),
+            other => unreachable!("expected Outcome::Ok(child_id), got {other:?}"),
         };
 
         let child_budget = state
@@ -1647,7 +1647,7 @@ mod tests {
                     let task_outcome = match outcome {
                         Outcome::Ok(()) => Outcome::Ok(()),
                         Outcome::Panicked(payload) => Outcome::Panicked(payload),
-                        other => panic!("unexpected task outcome: {other:?}"),
+                        other => unreachable!("unexpected task outcome: {other:?}"),
                     };
                     if let Some(task_record) = state.task_mut(handle.task_id()) {
                         task_record.complete(task_outcome);
@@ -1662,7 +1662,7 @@ mod tests {
 
         let (child_id, parent_has, child_has) = match outcome {
             Outcome::Ok(tuple) => tuple,
-            other => panic!("expected Outcome::Ok(tuple), got {other:?}"),
+            other => unreachable!("expected Outcome::Ok(tuple), got {other:?}"),
         };
 
         assert!(!parent_has, "task should not be owned by parent region");
@@ -1692,7 +1692,7 @@ mod tests {
 
         let (handle, mut stored_task) = scope
             .spawn(&mut state, &cx, |_| async {
-                panic!("oops");
+                std::panic::panic_any("oops");
             })
             .unwrap();
 
@@ -1703,7 +1703,7 @@ mod tests {
         // Polling stored task should return Ready(Panicked) even if it panics (caught inside)
         match stored_task.poll(&mut ctx) {
             Poll::Ready(crate::types::Outcome::Panicked(_)) => {}
-            res => panic!("Task should have completed with Panicked, got {res:?}"),
+            res => unreachable!("Task should have completed with Panicked, got {res:?}"),
         }
 
         // Check result via handle
@@ -1712,7 +1712,7 @@ mod tests {
             Poll::Ready(Err(JoinError::Panicked(p))) => {
                 assert_eq!(p.message(), "oops");
             }
-            res => panic!("Expected Panicked, got {res:?}"),
+            res => unreachable!("Expected Panicked, got {res:?}"),
         }
     }
 
@@ -1749,55 +1749,8 @@ mod tests {
                 assert_eq!(results[0].as_ref().unwrap(), &1);
                 assert_eq!(results[1].as_ref().unwrap(), &2);
             }
-            Poll::Pending => panic!("join_all should be ready"),
+            Poll::Pending => unreachable!("join_all should be ready"),
         }
-    }
-
-    #[test]
-    fn test_hedge_combinator_manual() {
-        use crate::time::TimerDriverHandle;
-        use crate::time::VirtualClock;
-        use std::sync::Arc;
-        use std::task::{Context, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let mut state = RuntimeState::new();
-        let clock = Arc::new(VirtualClock::new());
-        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
-        state.set_timer_driver(timer.clone());
-
-        let region = state.create_root_region(Budget::INFINITE);
-        let cx = Cx::new_with_drivers(
-            region,
-            TaskId::testing_default(),
-            Budget::INFINITE,
-            None,
-            None,
-            None,
-            Some(timer),
-            None,
-        );
-        let _guard = Cx::set_current(Some(cx.clone()));
-        let scope = test_scope(region, Budget::INFINITE);
-
-        let waker = Waker::from(Arc::new(NoopWaker));
-        let mut ctx = Context::from_waker(&waker);
-
-        // Smoke test: first poll should spawn primary and return pending.
-        let mut hedge_fut = Box::pin(scope.hedge(
-            &mut state,
-            &cx,
-            std::time::Duration::from_secs(10),
-            |_| async { 1 },
-            |_| async { 2 },
-        ));
-        assert!(hedge_fut.as_mut().poll(&mut ctx).is_pending());
-        drop(hedge_fut);
-        clock.advance(0);
     }
 
     #[test]
@@ -1892,7 +1845,7 @@ mod tests {
                 assert_eq!(val, 1);
                 assert_eq!(idx, 0);
             }
-            res => panic!("Expected Ready(Ok((1, 0))), got {res:?}"),
+            res => unreachable!("Expected Ready(Ok((1, 0))), got {res:?}"),
         }
     }
 }

@@ -99,6 +99,11 @@ impl RemoteRuntime for VirtualNetworkRuntime {
         let mut pending = self.pending_results.lock().unwrap();
         pending.insert(task_id, tx);
     }
+
+    fn unregister_task(&self, task_id: RemoteTaskId) {
+        let mut pending = self.pending_results.lock().unwrap();
+        pending.remove(&task_id);
+    }
 }
 
 /// A simulated node in the distributed test harness.
@@ -223,7 +228,9 @@ impl SimNode {
             outbox: self.app_outbox.clone(),
             pending_results: self.pending_results.clone(),
         };
-        RemoteCap::new().with_runtime(Arc::new(runtime))
+        RemoteCap::new()
+            .with_local_node(self.node_id.clone())
+            .with_runtime(Arc::new(runtime))
     }
 
     /// Processes an incoming remote message with logical time metadata.

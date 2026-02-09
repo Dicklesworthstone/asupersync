@@ -31,7 +31,10 @@
 //! - Use `kill_on_drop(true)` for automatic cleanup on cancellation.
 //! - I/O operations are cancel-safe (partial reads/writes are fine).
 
+use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
@@ -40,6 +43,78 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process as std_process;
 use std::task::{Context, Poll};
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(bool, bool)> {
+    let mut any = false;
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return Ok((true, any)),
+            Ok(n) => {
+                any = true;
+                out.extend_from_slice(&buf[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok((false, any)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn register_interest(
+    registration: &mut Option<IoRegistration>,
+    source: &dyn crate::runtime::reactor::Source,
+    cx: &Context<'_>,
+    interest: Interest,
+) -> io::Result<()> {
+    if let Some(reg) = registration {
+        let combined = reg.interest() | interest;
+        if let Err(err) = reg.set_interest(combined) {
+            if err.kind() == io::ErrorKind::NotConnected {
+                *registration = None;
+                cx.waker().wake_by_ref();
+                return Ok(());
+            }
+            return Err(err);
+        }
+        if reg.update_waker(cx.waker().clone()) {
+            return Ok(());
+        }
+        *registration = None;
+    }
+
+    let Some(current) = Cx::current() else {
+        cx.waker().wake_by_ref();
+        return Ok(());
+    };
+    let Some(driver) = current.io_driver_handle() else {
+        cx.waker().wake_by_ref();
+        return Ok(());
+    };
+
+    match driver.register(source, interest, cx.waker().clone()) {
+        Ok(reg) => {
+            *registration = Some(reg);
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            cx.waker().wake_by_ref();
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
 
 /// Error type for process operations.
 #[derive(Debug, thiserror::Error)]
@@ -411,9 +486,9 @@ impl Command {
         })?;
 
         // Extract the I/O handles before wrapping (use take() to avoid partial move)
-        let stdin = child.stdin.take().map(ChildStdin::from_std);
-        let stdout = child.stdout.take().map(ChildStdout::from_std);
-        let stderr = child.stderr.take().map(ChildStderr::from_std);
+        let stdin = child.stdin.take().map(ChildStdin::from_std).transpose()?;
+        let stdout = child.stdout.take().map(ChildStdout::from_std).transpose()?;
+        let stderr = child.stderr.take().map(ChildStderr::from_std).transpose()?;
 
         Ok(Child {
             inner: Some(child),
@@ -579,16 +654,59 @@ impl Child {
         let mut stdout_buf = Vec::new();
         let mut stderr_buf = Vec::new();
 
-        // Read stdout and stderr
-        if let Some(ref mut handle) = stdout_handle {
-            handle.inner.read_to_end(&mut stdout_buf)?;
-        }
-        if let Some(ref mut handle) = stderr_handle {
-            handle.inner.read_to_end(&mut stderr_buf)?;
+        // Avoid deadlocks: interleave drain attempts with `try_wait`.
+        let mut status = None;
+        let mut stdout_done = stdout_handle.is_none();
+        let mut stderr_done = stderr_handle.is_none();
+
+        while status.is_none() || !stdout_done || !stderr_done {
+            let mut progressed = false;
+
+            if status.is_none() {
+                match self.try_wait() {
+                    Ok(Some(s)) => {
+                        status = Some(s);
+                        progressed = true;
+                    }
+                    Ok(None) => {}
+                    // Some environments can surface EAGAIN for non-blocking waitpid
+                    // style checks. Treat it as "still running" and keep draining.
+                    Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e),
+                }
+            }
+
+            if let Some(handle) = stdout_handle.as_mut() {
+                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
+                if done {
+                    stdout_handle = None;
+                    stdout_done = true;
+                }
+                progressed |= any || done;
+            }
+
+            if let Some(handle) = stderr_handle.as_mut() {
+                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
+                if done {
+                    stderr_handle = None;
+                    stderr_done = true;
+                }
+                progressed |= any || done;
+            }
+
+            if status.is_some() && stdout_done && stderr_done {
+                break;
+            }
+
+            if !progressed {
+                std::thread::yield_now();
+            }
         }
 
-        // Wait for exit
-        let status = self.wait()?;
+        let status = match status {
+            Some(s) => s,
+            None => self.wait()?,
+        };
 
         Ok(Output {
             status,
@@ -681,11 +799,16 @@ impl Drop for Child {
 #[derive(Debug)]
 pub struct ChildStdin {
     inner: std_process::ChildStdin,
+    registration: Option<IoRegistration>,
 }
 
 impl ChildStdin {
-    fn from_std(stdin: std_process::ChildStdin) -> Self {
-        Self { inner: stdin }
+    fn from_std(stdin: std_process::ChildStdin) -> io::Result<Self> {
+        set_nonblocking(stdin.as_raw_fd())?;
+        Ok(Self {
+            inner: stdin,
+            registration: None,
+        })
     }
 
     /// Returns the raw file descriptor.
@@ -697,21 +820,39 @@ impl ChildStdin {
 
 impl AsyncWrite for ChildStdin {
     fn poll_write(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // For now, use blocking write
-        // TODO: Use non-blocking I/O with reactor
-        match self.inner.write(buf) {
+        let this = self.get_mut();
+        match this.inner.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::WRITABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(self.inner.flush())
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match this.inner.flush() {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::WRITABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -742,11 +883,16 @@ impl AsyncWrite for ChildStdin {
 #[derive(Debug)]
 pub struct ChildStdout {
     inner: std_process::ChildStdout,
+    registration: Option<IoRegistration>,
 }
 
 impl ChildStdout {
-    fn from_std(stdout: std_process::ChildStdout) -> Self {
-        Self { inner: stdout }
+    fn from_std(stdout: std_process::ChildStdout) -> io::Result<Self> {
+        set_nonblocking(stdout.as_raw_fd())?;
+        Ok(Self {
+            inner: stdout,
+            registration: None,
+        })
     }
 
     /// Returns the raw file descriptor.
@@ -758,19 +904,25 @@ impl ChildStdout {
 
 impl AsyncRead for ChildStdout {
     fn poll_read(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        // For now, use blocking read
-        // TODO: Use non-blocking I/O with reactor
+        let this = self.get_mut();
         let unfilled = buf.unfilled();
-        match self.inner.read(unfilled) {
+        match this.inner.read(unfilled) {
             Ok(n) => {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
@@ -798,11 +950,16 @@ impl AsyncRead for ChildStdout {
 #[derive(Debug)]
 pub struct ChildStderr {
     inner: std_process::ChildStderr,
+    registration: Option<IoRegistration>,
 }
 
 impl ChildStderr {
-    fn from_std(stderr: std_process::ChildStderr) -> Self {
-        Self { inner: stderr }
+    fn from_std(stderr: std_process::ChildStderr) -> io::Result<Self> {
+        set_nonblocking(stderr.as_raw_fd())?;
+        Ok(Self {
+            inner: stderr,
+            registration: None,
+        })
     }
 
     /// Returns the raw file descriptor.
@@ -814,19 +971,25 @@ impl ChildStderr {
 
 impl AsyncRead for ChildStderr {
     fn poll_read(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        // For now, use blocking read
-        // TODO: Use non-blocking I/O with reactor
+        let this = self.get_mut();
         let unfilled = buf.unfilled();
-        match self.inner.read(unfilled) {
+        match this.inner.read(unfilled) {
             Ok(n) => {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }

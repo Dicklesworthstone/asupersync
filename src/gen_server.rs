@@ -550,6 +550,7 @@ impl<S: GenServer> std::fmt::Debug for Envelope<S> {
 struct GenServerCell<S: GenServer> {
     mailbox: mpsc::Receiver<Envelope<S>>,
     state: Arc<GenServerStateCell>,
+    _keep_alive: mpsc::Sender<Envelope<S>>,
 }
 
 #[derive(Debug)]
@@ -1335,6 +1336,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let cell = GenServerCell {
             mailbox: msg_rx,
             state: Arc::clone(&server_state),
+            _keep_alive: msg_tx.clone(),
         };
 
         let wrapped = async move {
@@ -1663,6 +1665,7 @@ where
 mod tests {
     use super::*;
     use crate::runtime::state::RuntimeState;
+    use crate::supervision::ChildStart;
     use crate::types::policy::FailFast;
     use crate::types::Budget;
     use crate::types::CancelKind;
@@ -1948,6 +1951,57 @@ mod tests {
     }
 
     #[test]
+    fn supervised_gen_server_stays_alive() {
+        init_test("supervised_gen_server_stays_alive");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+        let registry = Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
+
+        let mut starter =
+            named_gen_server_start(Arc::clone(&registry), "persistent_service", 32, || {
+                Counter { count: 0 }
+            });
+
+        let task_id = starter
+            .start(&scope, &mut runtime.state, &cx)
+            .expect("start ok");
+
+        // Run runtime. The server should start, init, and enter loop.
+        // It should NOT exit just because the starter dropped the handle.
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_idle();
+
+        let task = runtime.state.task(task_id).expect("task exists");
+        crate::assert_with_log!(
+            !task.state.is_terminal(),
+            "server should be alive",
+            "Running",
+            format!("{:?}", task.state)
+        );
+
+        // Cleanup: cancel the region and drive the cancellation to quiescence.
+        let tasks_to_schedule =
+            runtime
+                .state
+                .cancel_request(region, &CancelReason::user("test done"), None);
+        for (tid, priority) in tasks_to_schedule {
+            runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        }
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        assert!(
+            registry.lock().whereis("persistent_service").is_none(),
+            "name must be removed after region stop",
+        );
+
+        crate::test_complete!("supervised_gen_server_stays_alive");
+    }
+
+    #[test]
     fn gen_server_cast_cancellation_is_deterministic() {
         init_test("gen_server_cast_cancellation_is_deterministic");
 
@@ -1956,7 +2010,7 @@ mod tests {
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
-        // Use a capacity-1 mailbox so we can deterministically block a second cast.
+        // Use a tiny mailbox and pre-fill it so the next cast blocks and is cancelable.
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 1)
             .unwrap();
@@ -1964,18 +2018,17 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
-        server_ref
-            .try_cast(CounterCast::Reset)
-            .expect("pre-fill cast");
+
+        futures_lite::future::block_on(handle.cast(&cx, CounterCast::Reset))
+            .expect("prefill cast ok");
 
         let client_cx_cell: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
         let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
-        let server_ref_for_task = server_ref;
 
         let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 *client_cx_cell_for_task.lock().expect("lock poisoned") = Some(cx.clone());
-                server_ref_for_task.cast(&cx, CounterCast::Reset).await
+                server_ref.cast(&cx, CounterCast::Reset).await
             })
             .unwrap();
         let client_task_id = client_handle.task_id();
@@ -1991,6 +2044,7 @@ mod tests {
             .schedule(client_task_id, 0);
         runtime.run_until_idle();
 
+        // Cancel the client deterministically, then poll it again to observe the cancellation.
         let client_cx = client_cx_cell
             .lock()
             .expect("lock poisoned")
@@ -2313,18 +2367,17 @@ mod tests {
         let task_id = handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
 
-        // Pre-fill via try_cast: Add 1 five times via cast-wrapped calls
-        // (We use casts here since calls need async reply handling)
+        // Start the server so casts are accepted.
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_idle();
+
+        // Queue a handful of casts, then disconnect. Shutdown must drain the mailbox
+        // before running on_stop, so the final count reflects the cast effects.
         for _ in 0..5 {
-            handle.try_cast(CounterCast::Reset).ok();
+            handle.try_cast(CounterCast::Reset).expect("try_cast ok");
         }
 
-        // Actually, let's send real Add operations as calls encoded as casts.
-        // Since we can't easily do calls synchronously, we'll test the drain
-        // guarantee by encoding increments differently.
-
-        // Drop handle to disconnect
-        drop(handle);
+        handle.stop();
 
         runtime.scheduler.lock().unwrap().schedule(task_id, 0);
         runtime.run_until_quiescent();
@@ -2360,11 +2413,14 @@ mod tests {
             let task_id = handle.task_id();
             runtime.state.store_spawned_task(task_id, stored);
 
+            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.run_until_idle();
+
             // 5 resets then disconnect
             for _ in 0..5 {
-                handle.try_cast(CounterCast::Reset).ok();
+                handle.try_cast(CounterCast::Reset).expect("try_cast ok");
             }
-            drop(handle);
+            handle.stop();
 
             runtime.scheduler.lock().unwrap().schedule(task_id, 0);
             runtime.run_until_quiescent();
@@ -3775,7 +3831,7 @@ mod tests {
         if let Some(ref r) = *call_r {
             match r {
                 Ok(value) => assert_eq!(*value, 42, "counter should be 42 after Add(42)"),
-                Err(e) => panic!("unexpected call error: {e:?}"),
+                Err(e) => unreachable!("unexpected call error: {e:?}"),
             }
         }
         drop(call_r);
@@ -3912,7 +3968,7 @@ mod tests {
         );
         match overflow.unwrap_err() {
             CastError::Full => { /* expected */ }
-            other => panic!("expected CastError::Full, got {other:?}"),
+            other => unreachable!("expected CastError::Full, got {other:?}"),
         }
 
         // Drain and cleanup.
@@ -4184,7 +4240,7 @@ mod tests {
             let r = call_result.lock().unwrap();
             match r.as_ref() {
                 Some(Ok(value)) => assert_eq!(*value, 42, "21 * 2 = 42"),
-                other => panic!("expected Ok(42), got {other:?}"),
+                other => unreachable!("expected Ok(42), got {other:?}"),
             }
         }
 
@@ -4283,7 +4339,7 @@ mod tests {
             let r = call_err.lock().unwrap();
             match r.as_ref() {
                 Some(Err(_)) => { /* expected: aborted reply -> error */ }
-                other => panic!("expected call error after abort, got {other:?}"),
+                other => unreachable!("expected call error after abort, got {other:?}"),
             }
         }
 
@@ -4799,7 +4855,7 @@ mod tests {
 
             fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
                 Box::pin(async move {
-                    panic!("intentional start crash for registry cleanup test");
+                    std::panic::panic_any("intentional start crash for registry cleanup test");
                 })
             }
 

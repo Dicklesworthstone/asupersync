@@ -8,7 +8,7 @@
 //! | Application     | [`app`]                | `AppSpec`, `AppHandle`, `CompiledApp`  |
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`|
-//! | Registry        | *(future)*             | *(bd-2hccu)*                           |
+//! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -73,6 +73,17 @@ pub mod gen_server {
     };
 }
 
+/// Capability-scoped name registry and lease obligations.
+///
+/// Re-exports from [`crate::cx::registry`].
+pub mod registry {
+    pub use crate::cx::registry::{
+        GrantedLease, NameCollisionOutcome, NameCollisionPolicy, NameLease, NameLeaseError,
+        NameOwnershipKind, NameOwnershipNotification, NamePermit, NameRegistry, NameWatchRef,
+        RegistryCap, RegistryEvent, RegistryHandle,
+    };
+}
+
 /// Unidirectional down notifications.
 ///
 /// Re-exports from [`crate::monitor`].
@@ -114,6 +125,7 @@ pub mod crash {
 /// - **Supervision**: `SupervisorBuilder`, `ChildSpec`, `ChildStart`,
 ///   `SupervisionStrategy`, `RestartConfig`, `RestartPolicy`
 /// - **GenServer**: `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg`
+/// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -132,6 +144,9 @@ pub mod prelude {
         named_gen_server_start, CallError, CastError, GenServer, GenServerHandle,
         NamedGenServerStart, Reply, SystemMsg,
     };
+
+    // -- Registry --
+    pub use crate::cx::{NameLease, NameRegistry, RegistryHandle};
 
     // -- Monitor --
     pub use crate::monitor::{DownNotification, DownReason, MonitorRef};
@@ -386,6 +401,9 @@ mod tests {
         let _ = std::any::type_name::<prelude::SupervisionStrategy>();
         let _ = std::any::type_name::<prelude::RestartPolicy>();
         let _ = std::any::type_name::<prelude::BackoffStrategy>();
+        let _ = std::any::type_name::<prelude::NameRegistry>();
+        let _ = std::any::type_name::<prelude::RegistryHandle>();
+        let _ = std::any::type_name::<prelude::NameLease>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
         let _ = std::any::type_name::<prelude::DownNotification>();
@@ -421,6 +439,12 @@ mod tests {
         let _ = std::any::type_name::<gen_server::CastOverflowPolicy>();
         let _ = std::any::type_name::<gen_server::InfoError>();
         let _ = std::any::type_name::<gen_server::ReplyOutcome>();
+
+        // Registry sub-module
+        let _ = std::any::type_name::<registry::NameRegistry>();
+        let _ = std::any::type_name::<registry::RegistryHandle>();
+        let _ = std::any::type_name::<registry::NameLease>();
+        let _ = std::any::type_name::<registry::NameCollisionPolicy>();
 
         // Monitor sub-module
         let _ = std::any::type_name::<monitor::MonitorRef>();

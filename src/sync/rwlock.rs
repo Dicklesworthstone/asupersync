@@ -396,6 +396,27 @@ impl<T> RwLock<T> {
     }
 }
 
+// Guards used during acquisition to restore counters if the underlying std lock panics.
+struct ReaderCountGuard<'a, T> {
+    lock: &'a RwLock<T>,
+}
+
+impl<T> Drop for ReaderCountGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.release_reader();
+    }
+}
+
+struct WriterActiveGuard<'a, T> {
+    lock: &'a RwLock<T>,
+}
+
+impl<T> Drop for WriterActiveGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.release_writer();
+    }
+}
+
 /// Future returned by `RwLock::read`.
 pub struct ReadFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
@@ -424,18 +445,35 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             }
             drop(state);
 
-            return match self.lock.data.read() {
-                Ok(guard) => Poll::Ready(Ok(RwLockReadGuard {
+            let guard = ReaderCountGuard { lock: self.lock };
+
+            let result = match self.lock.data.read() {
+                Ok(read_guard) => Poll::Ready(Ok(RwLockReadGuard {
                     lock: self.lock,
-                    guard: Some(guard),
+                    guard: Some(read_guard),
                 })),
                 Err(poisoned) => {
                     self.lock.poisoned.store(true, Ordering::Release);
-                    self.lock.release_reader_on_error();
+                    // release_reader is called by guard drop
                     drop(poisoned.into_inner());
                     Poll::Ready(Err(RwLockError::Poisoned))
                 }
             };
+
+            // If success, forget guard so it doesn't decrement (RwLockReadGuard will do it)
+            // If error (Poisoned), guard decrements. Wait, release_reader_on_error wakes writers too.
+            // release_reader does the same.
+            // But RwLockReadGuard calls release_reader on drop.
+            // If we return Ready(Ok), we transfer responsibility to RwLockReadGuard.
+            // If we return Ready(Err), we must decrement.
+
+            if matches!(&result, Poll::Ready(Ok(_))) {
+                std::mem::forget(guard);
+            }
+            // If Err(Poisoned), guard drops and decrements.
+            // Correct.
+
+            return result;
         }
 
         let mut new_waiter = None;
@@ -547,18 +585,26 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             }
             drop(state);
 
-            return match self.lock.data.write() {
-                Ok(guard) => Poll::Ready(Ok(RwLockWriteGuard {
+            let guard = WriterActiveGuard { lock: self.lock };
+
+            let result = match self.lock.data.write() {
+                Ok(write_guard) => Poll::Ready(Ok(RwLockWriteGuard {
                     lock: self.lock,
-                    guard: Some(guard),
+                    guard: Some(write_guard),
                 })),
                 Err(poisoned) => {
                     self.lock.poisoned.store(true, Ordering::Release);
-                    self.lock.release_writer_on_error();
+                    // release_writer is called by guard drop
                     drop(poisoned.into_inner());
                     Poll::Ready(Err(RwLockError::Poisoned))
                 }
             };
+
+            if matches!(&result, Poll::Ready(Ok(_))) {
+                std::mem::forget(guard);
+            }
+
+            return result;
         }
 
         let mut new_waiter = None;
