@@ -1,8 +1,4 @@
-#![allow(unsafe_code)]
 //! Unix domain socket datagram implementation.
-//!
-//! This module uses unsafe code for peek operations via libc and peer credentials
-//! retrieval (getsockopt/getpeereid).
 //!
 //! This module provides [`UnixDatagram`] for connectionless communication over
 //! Unix domain sockets.
@@ -37,8 +33,9 @@ use crate::cx::Cx;
 use crate::net::unix::stream::UCred;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+use nix::errno::Errno;
+use nix::sys::socket::{self, MsgFlags};
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::task::{Context, Poll};
@@ -567,30 +564,21 @@ impl UnixDatagram {
     pub fn poll_recv_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::os::unix::io::AsRawFd;
 
-        // Try a zero-byte peek to check readiness
+        // For datagrams, a 1-byte MSG_PEEK probe checks readiness without consuming data.
         let mut buf = [0u8; 1];
-        // SAFETY: recv with MSG_PEEK is a well-defined syscall
-        let ret = unsafe {
-            libc::recv(
-                self.inner.as_raw_fd(),
-                buf.as_mut_ptr().cast::<libc::c_void>(),
-                0, // zero-length read to check readiness
-                libc::MSG_PEEK | libc::MSG_DONTWAIT,
-            )
-        };
-
-        if ret >= 0 {
-            Poll::Ready(Ok(()))
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
+        match socket::recv(
+            self.inner.as_raw_fd(),
+            &mut buf,
+            MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(_) => Poll::Ready(Ok(())),
+            Err(errno) if errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK => {
                 if let Err(e) = self.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(e));
                 }
                 Poll::Pending
-            } else {
-                Poll::Ready(Err(err))
             }
+            Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
         }
     }
 
@@ -598,31 +586,41 @@ impl UnixDatagram {
     ///
     /// This is useful for implementing custom poll loops.
     pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        use std::os::unix::io::AsRawFd;
+        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        use std::os::unix::io::AsFd;
 
-        // Try a zero-byte send to check write readiness
-        // SAFETY: send with zero length is a well-defined syscall
-        let ret = unsafe {
-            libc::send(
-                self.inner.as_raw_fd(),
-                std::ptr::null(),
-                0, // zero-length to check readiness
-                libc::MSG_DONTWAIT,
-            )
-        };
-
-        if ret >= 0 {
-            Poll::Ready(Ok(()))
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
+        let mut fds = [PollFd::new(self.inner.as_fd(), PollFlags::POLLOUT)];
+        match poll(&mut fds, PollTimeout::ZERO) {
+            Ok(0) => {
                 if let Err(e) = self.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(e));
                 }
                 Poll::Pending
-            } else {
-                Poll::Ready(Err(err))
             }
+            Ok(_) => {
+                let Some(revents) = fds[0].revents() else {
+                    return Poll::Ready(Err(io::Error::other("poll returned unknown event bits")));
+                };
+
+                if revents.contains(PollFlags::POLLOUT) {
+                    Poll::Ready(Ok(()))
+                } else if revents
+                    .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+                {
+                    if let Ok(Some(err)) = self.inner.take_error() {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Err(io::Error::other(format!(
+                        "poll indicates socket error: {revents:?}"
+                    ))))
+                } else {
+                    if let Err(e) = self.register_interest(cx, Interest::WRITABLE) {
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending
+                }
+            }
+            Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
         }
     }
 
@@ -633,127 +631,75 @@ impl UnixDatagram {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
-            // SAFETY: recv with MSG_PEEK is a well-defined syscall
-            let ret = unsafe {
-                libc::recv(
-                    self.inner.as_raw_fd(),
-                    buf.as_mut_ptr().cast::<libc::c_void>(),
-                    buf.len(),
-                    libc::MSG_PEEK,
-                )
-            };
-
-            if ret >= 0 {
-                let len = usize::try_from(ret).unwrap_or(0);
-                Poll::Ready(Ok(len))
-            } else {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
+            match socket::recv(
+                self.inner.as_raw_fd(),
+                buf,
+                MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(errno) if errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK => {
                     if let Err(e) = self.register_interest(cx, Interest::READABLE) {
                         return Poll::Ready(Err(e));
                     }
                     Poll::Pending
-                } else {
-                    Poll::Ready(Err(err))
                 }
+                Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
             }
         })
         .await
     }
 
-    fn socket_addr_from_storage(
-        storage: &libc::sockaddr_storage,
-        addr_len: libc::socklen_t,
-    ) -> io::Result<SocketAddr> {
-        let family_size = std::mem::size_of::<libc::sa_family_t>();
-        let len = addr_len as usize;
-        if len < family_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unix sockaddr length too short",
-            ));
-        }
-
-        // SAFETY: sockaddr_storage is large enough for sockaddr_un.
-        let addr_un = unsafe { &*std::ptr::from_ref(storage).cast::<libc::sockaddr_un>() };
-        if libc::c_int::from(addr_un.sun_family) != libc::AF_UNIX {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "non-unix sockaddr in unix datagram",
-            ));
-        }
-
-        let path_len = len.saturating_sub(family_size);
-        let path_bytes =
-            unsafe { std::slice::from_raw_parts(addr_un.sun_path.as_ptr().cast::<u8>(), path_len) };
-
-        if path_bytes.is_empty() {
-            let empty = std::ffi::OsStr::from_bytes(&[]);
-            return SocketAddr::from_pathname(empty)
+    fn socket_addr_from_unix_addr(addr: &socket::UnixAddr) -> io::Result<SocketAddr> {
+        if let Some(path) = addr.path() {
+            return SocketAddr::from_pathname(path)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
         }
 
-        if path_bytes[0] == 0 {
-            #[cfg(target_os = "linux")]
-            {
-                return <SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(
-                    &path_bytes[1..],
-                )
+        #[cfg(target_os = "linux")]
+        if let Some(name) = addr.as_abstract() {
+            use std::os::linux::net::SocketAddrExt;
+            return <SocketAddr as SocketAddrExt>::from_abstract_name(name)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "abstract unix address unsupported",
-                ));
-            }
         }
 
-        let nul = path_bytes
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(path_bytes.len());
-        let path = std::ffi::OsStr::from_bytes(&path_bytes[..nul]);
-        SocketAddr::from_pathname(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        // "Unnamed" unix socket address (e.g., socketpair-created endpoints).
+        // std represents this as an empty pathname.
+        SocketAddr::from_pathname(Path::new(""))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Peeks at incoming data and returns the source address.
     ///
     /// Like [`recv_from`](Self::recv_from), but the data remains in the receive buffer.
     pub async fn peek_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        use std::io::IoSliceMut;
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
-            let mut addr_storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-
-            // SAFETY: recvfrom with MSG_PEEK is a well-defined syscall
-            let ret = unsafe {
-                libc::recvfrom(
-                    self.inner.as_raw_fd(),
-                    buf.as_mut_ptr().cast::<libc::c_void>(),
-                    buf.len(),
-                    libc::MSG_PEEK,
-                    (&raw mut addr_storage).cast::<libc::sockaddr>(),
-                    &raw mut addr_len,
-                )
-            };
-
-            if ret >= 0 {
-                let addr = Self::socket_addr_from_storage(&addr_storage, addr_len)?;
-                let len = usize::try_from(ret).unwrap_or(0);
-                Poll::Ready(Ok((len, addr)))
-            } else {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
+            let mut iov = [IoSliceMut::new(buf)];
+            match socket::recvmsg::<socket::UnixAddr>(
+                self.inner.as_raw_fd(),
+                &mut iov,
+                None,
+                MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(msg) => {
+                    let Some(addr) = msg.address else {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "unix datagram recvmsg missing source address",
+                        )));
+                    };
+                    let addr = Self::socket_addr_from_unix_addr(&addr)?;
+                    Poll::Ready(Ok((msg.bytes, addr)))
+                }
+                Err(errno) if errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK => {
                     if let Err(e) = self.register_interest(cx, Interest::READABLE) {
                         return Poll::Ready(Err(e));
                     }
                     Poll::Pending
-                } else {
-                    Poll::Ready(Err(err))
                 }
+                Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
             }
         })
         .await
@@ -807,45 +753,14 @@ impl std::os::unix::io::AsRawFd for UnixDatagram {
 /// Linux implementation using SO_PEERCRED.
 #[cfg(target_os = "linux")]
 fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
-    use std::os::unix::io::AsRawFd;
-
-    // ucred structure from Linux
-    #[repr(C)]
-    struct LinuxUcred {
-        pid: i32,
-        uid: u32,
-        gid: u32,
-    }
-
-    let fd = socket.as_raw_fd();
-    let mut ucred = LinuxUcred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<LinuxUcred>() as libc::socklen_t;
-
-    // SAFETY: getsockopt is a well-defined syscall, and we're passing
-    // correct buffer size and type for SO_PEERCRED option.
-    let ret = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut ucred).cast::<libc::c_void>(),
-            &raw mut len,
-        )
-    };
-
-    if ret == 0 {
-        Ok(UCred {
-            uid: ucred.uid,
-            gid: ucred.gid,
-            pid: Some(ucred.pid),
-        })
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    use nix::sys::socket::sockopt;
+    let cred = socket::getsockopt(socket, sockopt::PeerCredentials)
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    Ok(UCred {
+        uid: cred.uid() as u32,
+        gid: cred.gid() as u32,
+        pid: Some(cred.pid()),
+    })
 }
 
 /// macOS/BSD implementation using getpeereid.
@@ -856,24 +771,13 @@ fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
     target_os = "netbsd"
 ))]
 fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = socket.as_raw_fd();
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-
-    // SAFETY: getpeereid is a well-defined syscall on BSD systems.
-    let ret = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
-
-    if ret == 0 {
-        Ok(UCred {
-            uid: uid as u32,
-            gid: gid as u32,
-            pid: None, // Not available via getpeereid
-        })
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    let (uid, gid) =
+        nix::unistd::getpeereid(socket).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    Ok(UCred {
+        uid: uid.as_raw(),
+        gid: gid.as_raw(),
+        pid: None, // Not available via getpeereid
+    })
 }
 
 #[cfg(test)]
@@ -1281,8 +1185,8 @@ mod tests {
         let cred_b = b.peer_cred().expect("peer_cred b failed");
 
         // Both should report the same process (ourselves)
-        let user_id = unsafe { libc::getuid() } as u32;
-        let group_id = unsafe { libc::getgid() } as u32;
+        let user_id = nix::unistd::getuid().as_raw();
+        let group_id = nix::unistd::getgid().as_raw();
 
         crate::assert_with_log!(cred_a.uid == user_id, "a uid", user_id, cred_a.uid);
         crate::assert_with_log!(cred_a.gid == group_id, "a gid", group_id, cred_a.gid);

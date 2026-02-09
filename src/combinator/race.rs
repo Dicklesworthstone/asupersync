@@ -640,7 +640,11 @@ pub fn make_race_all_result<T, E>(
 
 /// Macro for racing multiple futures.
 ///
-/// The first future to complete wins; all others are cancelled and drained.
+/// The first future to complete wins.
+///
+/// Note: this macro is currently a placeholder and does **not** implement the
+/// full asupersync race semantics (cancel + drain losers). Use the `Scope`
+/// APIs (`Scope::race`, `Scope::race_all`) when racing spawned tasks.
 ///
 /// # Basic Usage
 ///
@@ -670,12 +674,14 @@ pub fn make_race_all_result<T, E>(
 macro_rules! race {
     // Biased mode
     (biased; $($future:expr),+ $(,)?) => {{
-        $(let _ = $future;)+
+        // Placeholder: accept syntax and ensure futures are type-checked.
+        $(::core::mem::drop($future);)+
     }};
 
     // Basic positional syntax
     ($($future:expr),+ $(,)?) => {{
-        $(let _ = $future;)+
+        // Placeholder: accept syntax and ensure futures are type-checked.
+        $(::core::mem::drop($future);)+
     }};
 }
 
@@ -1127,7 +1133,16 @@ mod tests {
     #[should_panic(expected = "winner_index out of bounds")]
     fn race_all_outcomes_panics_on_invalid_index() {
         let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1), Outcome::Ok(2)];
-
         let _ = race_all_outcomes(5, outcomes);
+    }
+
+    #[test]
+    fn race_macro_compiles_and_runs() {
+        // Simple synchronous future for testing
+        let f1 = std::future::ready(1);
+        let f2 = std::future::pending::<i32>();
+
+        // The macro is currently a placeholder that returns `()`.
+        let (): () = futures_lite::future::block_on(async { race!(f1, f2) });
     }
 }

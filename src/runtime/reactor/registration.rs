@@ -63,9 +63,12 @@ pub trait ReactorHandle: Send + Sync {
 ///
 /// # Thread Safety
 ///
-/// Registration is `!Send` and `!Sync` because it's tied to a specific reactor
-/// and should be used only on the thread where it was created. This prevents
-/// cross-thread deregistration issues.
+/// `Registration` is `Send` but `!Sync`:
+/// - It can be moved between threads (e.g., if an owning task migrates).
+/// - It cannot be shared concurrently because it uses interior mutability (`Cell`)
+///   for interest bookkeeping.
+///
+/// Reactor backends must treat deregistration/interest modification as thread-safe.
 ///
 /// # Cancel-Safety
 ///
@@ -81,8 +84,11 @@ pub struct Registration {
     reactor: Weak<dyn ReactorHandle>,
     /// Current interest (for modify operations).
     interest: Cell<Interest>,
-    /// Marker to make Registration !Send + !Sync.
-    _marker: PhantomData<*const ()>,
+    /// When true, Drop will not attempt to deregister (used by `deregister()` to avoid double calls).
+    disarmed: Cell<bool>,
+    /// Marker to keep the type `!Sync` (it already is via `Cell`, but keep an explicit marker
+    /// so the intent is obvious when refactoring fields).
+    _marker: PhantomData<std::cell::Cell<()>>,
 }
 
 impl Registration {
@@ -94,6 +100,7 @@ impl Registration {
             token,
             reactor,
             interest: Cell::new(interest),
+            disarmed: Cell::new(false),
             _marker: PhantomData,
         }
     }
@@ -178,30 +185,51 @@ impl Registration {
     /// the deregister operation fails. A `NotFound` error is treated
     /// as already deregistered.
     pub fn deregister(self) -> io::Result<()> {
-        if let Some(reactor) = self.reactor.upgrade() {
-            match reactor.deregister_by_token(self.token) {
-                Ok(()) => {
-                    // Prevent Drop from running since we've already deregistered
-                    std::mem::forget(self);
-                    Ok(())
+        // IMPORTANT: never `mem::forget` a `Registration`. It holds a `Weak`, and leaking it
+        // can keep the reactor's allocation alive indefinitely via the weak refcount.
+        //
+        // If explicit deregistration succeeds, we "disarm" Drop so it doesn't attempt a second
+        // deregistration.
+        //
+        // If it fails (and the error is not NotFound), we make a best-effort *second* attempt
+        // before returning the error, then disarm Drop. This avoids leaking registrations in
+        // the common transient-failure case without risking repeated deregistration attempts.
+        let this = self;
+
+        this.reactor.upgrade().map_or_else(
+            || {
+                // Reactor already gone, nothing to do (and nothing for Drop to do either).
+                this.disarmed.set(true);
+                Ok(())
+            },
+            |reactor| {
+                let first = reactor.deregister_by_token(this.token);
+                match first {
+                    Ok(()) => {
+                        this.disarmed.set(true);
+                        Ok(())
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        this.disarmed.set(true);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        // Best-effort retry, then disarm Drop so we don't loop.
+                        let _ = reactor.deregister_by_token(this.token);
+                        this.disarmed.set(true);
+                        Err(err)
+                    }
                 }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    // Token was already deregistered; treat as success.
-                    std::mem::forget(self);
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            }
-        } else {
-            // Reactor already gone, nothing to do
-            std::mem::forget(self);
-            Ok(())
-        }
+            },
+        )
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
+        if self.disarmed.get() {
+            return;
+        }
         if let Some(reactor) = self.reactor.upgrade() {
             // Deregister, ignoring errors (source may already be gone
             // or reactor may be shutting down)
@@ -463,8 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deregister_error_allows_drop_retry() {
-        init_test("explicit_deregister_error_allows_drop_retry");
+    fn explicit_deregister_error_attempts_best_effort_cleanup() {
+        init_test("explicit_deregister_error_attempts_best_effort_cleanup");
         let reactor = FlakyReactor::new();
         let token = Token::new(7);
 
@@ -477,8 +505,8 @@ mod tests {
         let result = reg.deregister();
         crate::assert_with_log!(result.is_err(), "deregister fails", true, result.is_err());
         let count = reactor.deregister_count();
-        crate::assert_with_log!(count == 2, "drop retried deregister", 2usize, count);
-        crate::test_complete!("explicit_deregister_error_allows_drop_retry");
+        crate::assert_with_log!(count == 2, "best-effort cleanup attempted", 2usize, count);
+        crate::test_complete!("explicit_deregister_error_attempts_best_effort_cleanup");
     }
 
     #[test]
