@@ -698,7 +698,8 @@ impl MailboxOracle {
     /// Verifies the invariants hold.
     pub fn check(&self, now: Time) -> Result<(), MailboxViolation> {
         // Return first recorded violation if any. These correspond to
-        // point-in-time safety properties (e.g. capacity/backpressure).
+        // point-in-time safety properties (e.g. capacity/backpressure) and
+        // should take precedence in reports and mutation attribution.
         if let Some(violation) = self.violations.first() {
             return Err(violation.clone());
         }
