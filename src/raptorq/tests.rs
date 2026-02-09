@@ -736,9 +736,7 @@ mod property_tests {
                 Err(e) => {
                     // Some drop patterns may create singular matrices - that's acceptable
                     // as long as we don't panic
-                    println!(
-                        "Note: drop_seed={drop_seed} produced decode error (acceptable): {e:?}"
-                    );
+                    let _ = e;
                 }
             }
         }
