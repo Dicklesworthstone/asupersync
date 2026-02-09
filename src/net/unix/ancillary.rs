@@ -1,303 +1,136 @@
-#![allow(unsafe_code)]
 //! Unix socket ancillary data for file descriptor passing.
 //!
-//! This module uses unsafe code for interfacing with libc socket control
-//! message functions (CMSG_SPACE, CMSG_LEN, CMSG_DATA).
+//! This module is implemented in terms of `nix::sys::socket::{sendmsg, recvmsg}` so the
+//! rest of the crate does not need to use `unsafe` for control-message plumbing.
 //!
-//! This module provides [`SocketAncillary`] for sending and receiving ancillary
-//! data (control messages) over Unix domain sockets, including file descriptor passing.
+//! # Notes
 //!
-//! # File Descriptor Passing
-//!
-//! Unix domain sockets support passing file descriptors between processes using
-//! the `SCM_RIGHTS` control message. This allows one process to share open files,
-//! sockets, or other file descriptors with another process.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use asupersync::net::unix::{UnixStream, SocketAncillary, AncillaryMessage};
-//! use std::os::unix::io::{AsRawFd, FromRawFd};
-//! use std::fs::File;
-//!
-//! async fn send_file_descriptor() -> std::io::Result<()> {
-//!     let (tx, rx) = UnixStream::pair()?;
-//!
-//!     // Open a file and send its descriptor
-//!     let file = File::open("/etc/passwd")?;
-//!     let fd = file.as_raw_fd();
-//!
-//!     let mut ancillary = SocketAncillary::new(&mut [0u8; 128]);
-//!     ancillary.add_fds(&[fd]);
-//!     tx.send_with_ancillary(b"here's a file", &mut ancillary).await?;
-//!
-//!     // Receive the file descriptor
-//!     let mut buf = [0u8; 64];
-//!     let mut recv_ancillary = SocketAncillary::new(&mut [0u8; 128]);
-//!     let n = rx.recv_with_ancillary(&mut buf, &mut recv_ancillary).await?;
-//!
-//!     for msg in recv_ancillary.messages() {
-//!         if let AncillaryMessage::ScmRights(fds) = msg {
-//!             for fd in fds {
-//!                 // SAFETY: We received this fd from the sender
-//!                 let received_file = unsafe { File::from_raw_fd(fd) };
-//!                 // Use the received file...
-//!             }
-//!         }
-//!     }
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Safety
-//!
-//! When receiving file descriptors, the caller is responsible for properly
-//! managing their lifetimes. Received file descriptors should typically be
-//! wrapped in a type that implements `Drop` (like `File` or `OwnedFd`) to
-//! ensure they are closed when no longer needed.
+//! - This API is intentionally small: Asupersync currently exposes `SCM_RIGHTS` for FD passing.
+//! - When receiving, the ancillary buffer capacity determines how many control messages can be
+//!   captured. If it is too small, truncation is reported via [`SocketAncillary::is_truncated`].
 
-use std::marker::PhantomData;
-use std::mem;
+use smallvec::SmallVec;
 use std::os::unix::io::RawFd;
-use std::ptr;
 
-/// Buffer for Unix socket ancillary data (control messages).
+/// Buffer and bookkeeping for Unix socket ancillary data.
 ///
-/// This struct wraps a byte buffer used for sending and receiving ancillary
-/// data with Unix domain sockets. It handles the complex layout of `cmsghdr`
-/// structures required by the kernel.
-///
-/// # Creating a Buffer
-///
-/// The buffer size depends on what you want to send/receive:
-/// - For file descriptors: `CMSG_SPACE(num_fds * size_of::<RawFd>())`
-/// - A good default for a few file descriptors is 128 bytes
-///
-/// # Example
-///
-/// ```ignore
-/// let mut buffer = [0u8; 128];
-/// let mut ancillary = SocketAncillary::new(&mut buffer);
-/// ancillary.add_fds(&[fd1, fd2]);
-/// ```
-#[derive(Debug)]
-pub struct SocketAncillary<'a> {
-    /// The underlying buffer for control messages.
-    buffer: &'a mut [u8],
-    /// Current length of valid data in the buffer.
-    length: usize,
-    /// Whether truncation occurred during receive.
+/// This type is used for both sending and receiving `SCM_RIGHTS` messages.
+/// For receiving, it owns a `Vec<u8>` that is passed to `recvmsg`.
+#[derive(Debug, Default)]
+pub struct SocketAncillary {
+    /// Capacity-only buffer used by `recvmsg`. Length is always kept at 0.
+    recv_buf: Vec<u8>,
+    /// File descriptors queued for sending.
+    send_fds: SmallVec<[RawFd; 8]>,
+    /// File descriptors received from the last `recvmsg`.
+    recv_fds: SmallVec<[RawFd; 8]>,
     truncated: bool,
 }
 
-impl<'a> SocketAncillary<'a> {
-    /// Creates a new `SocketAncillary` with the given buffer.
+impl SocketAncillary {
+    /// Create a new ancillary container with a given receive-buffer capacity (bytes).
     ///
-    /// The buffer should be large enough to hold the control messages you
-    /// want to send or receive. For file descriptors, use at least
-    /// `CMSG_SPACE(num_fds * size_of::<RawFd>())` bytes.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut buf = [0u8; 128];
-    /// let ancillary = SocketAncillary::new(&mut buf);
-    /// ```
-    pub fn new(buffer: &'a mut [u8]) -> Self {
+    /// For a few file descriptors, a capacity like 128 bytes is typically sufficient.
+    #[must_use]
+    pub fn new(recv_capacity: usize) -> Self {
         Self {
-            buffer,
-            length: 0,
+            recv_buf: Vec::with_capacity(recv_capacity),
+            send_fds: SmallVec::new(),
+            recv_fds: SmallVec::new(),
             truncated: false,
         }
     }
 
-    /// Returns the capacity of the buffer in bytes.
+    /// Returns the receive-buffer capacity (bytes).
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.buffer.len()
+        self.recv_buf.capacity()
     }
 
-    /// Returns the current length of valid ancillary data.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.length
-    }
-
-    /// Returns `true` if there is no ancillary data.
+    /// Returns `true` if no send fds are queued and no received fds are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.length == 0
+        self.send_fds.is_empty() && self.recv_fds.is_empty()
     }
 
-    /// Returns `true` if the ancillary data was truncated during receive.
-    ///
-    /// Truncation occurs when the received control messages exceed the
-    /// buffer capacity. When this happens, some file descriptors may have
-    /// been lost (and leaked).
+    /// Returns `true` if the last receive indicated control-message truncation.
     #[must_use]
     pub fn is_truncated(&self) -> bool {
         self.truncated
     }
 
-    /// Clears the ancillary data buffer.
+    /// Clears all queued and received ancillary state.
     pub fn clear(&mut self) {
-        self.length = 0;
+        self.send_fds.clear();
+        self.recv_fds.clear();
         self.truncated = false;
+        // Keep capacity; ensure length is 0.
+        self.recv_buf.clear();
     }
 
-    /// Adds file descriptors to be sent as `SCM_RIGHTS`.
+    /// Adds file descriptors to be sent via `SCM_RIGHTS`.
     ///
-    /// Returns `true` if the file descriptors were added successfully,
-    /// or `false` if there wasn't enough space in the buffer.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let fd = file.as_raw_fd();
-    /// if !ancillary.add_fds(&[fd]) {
-    ///     panic!("Buffer too small for file descriptors");
-    /// }
-    /// ```
-    #[allow(clippy::cast_ptr_alignment)]
+    /// Returns `true` (there is no fixed buffer limit on the send side; `sendmsg` builds the
+    /// control-message buffer internally).
     pub fn add_fds(&mut self, fds: &[RawFd]) -> bool {
-        if fds.is_empty() {
-            return true;
-        }
-
-        let fd_size = std::mem::size_of_val(fds);
-        let cmsg_space = unsafe { libc::CMSG_SPACE(fd_size as u32) } as usize;
-
-        if self.length + cmsg_space > self.buffer.len() {
-            return false;
-        }
-
-        // SAFETY: We've verified there's enough space in the buffer.
-        unsafe {
-            let cmsg_ptr = self
-                .buffer
-                .as_mut_ptr()
-                .add(self.length)
-                .cast::<libc::cmsghdr>();
-
-            (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(fd_size as u32) as _;
-            (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg_ptr).cmsg_type = libc::SCM_RIGHTS;
-
-            let data_ptr = libc::CMSG_DATA(cmsg_ptr).cast::<RawFd>();
-            ptr::copy_nonoverlapping(fds.as_ptr(), data_ptr, fds.len());
-        }
-
-        self.length += cmsg_space;
+        self.send_fds.extend_from_slice(fds);
         true
     }
 
-    /// Returns an iterator over the ancillary messages.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// for msg in ancillary.messages() {
-    ///     match msg {
-    ///         AncillaryMessage::ScmRights(fds) => {
-    ///             for fd in fds {
-    ///                 println!("Received fd: {}", fd);
-    ///             }
-    ///         }
-    ///         AncillaryMessage::Unknown { level, ty } => {
-    ///             println!("Unknown message: level={}, type={}", level, ty);
-    ///         }
-    ///     }
-    /// }
-    /// ```
+    /// Returns an iterator over received ancillary messages.
     #[must_use]
     pub fn messages(&self) -> AncillaryMessages<'_> {
         AncillaryMessages {
-            buffer: &self.buffer[..self.length],
-            current: 0,
-            _marker: PhantomData,
+            yielded: false,
+            recv_fds: &self.recv_fds,
         }
     }
 
-    /// Returns a pointer to the buffer for use with sendmsg/recvmsg.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the buffer remains valid for the duration of
-    /// the system call.
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.buffer.as_mut_ptr()
+    pub(crate) fn send_fds(&self) -> &[RawFd] {
+        &self.send_fds
     }
 
-    /// Sets the length after a successful recvmsg.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `len` bytes of valid control message data
-    /// have been written to the buffer.
-    pub(crate) unsafe fn set_len(&mut self, len: usize, truncated: bool) {
-        self.length = len.min(self.buffer.len());
-        self.truncated = truncated;
+    pub(crate) fn clear_send_fds(&mut self) {
+        self.send_fds.clear();
+    }
+
+    pub(crate) fn prepare_for_recv(&mut self) -> &mut Vec<u8> {
+        self.recv_fds.clear();
+        self.truncated = false;
+        self.recv_buf.clear();
+        &mut self.recv_buf
+    }
+
+    pub(crate) fn push_received_fds(&mut self, fds: &[RawFd]) {
+        self.recv_fds.extend_from_slice(fds);
+    }
+
+    pub(crate) fn mark_truncated(&mut self) {
+        self.truncated = true;
     }
 }
 
-/// Iterator over ancillary messages.
+/// Iterator over received ancillary messages.
 #[derive(Debug)]
 pub struct AncillaryMessages<'a> {
-    buffer: &'a [u8],
-    current: usize,
-    _marker: PhantomData<&'a ()>,
+    yielded: bool,
+    recv_fds: &'a [RawFd],
 }
 
 impl<'a> Iterator for AncillaryMessages<'a> {
     type Item = AncillaryMessage<'a>;
 
-    #[allow(clippy::cast_ptr_alignment)]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current >= self.buffer.len() {
+        if self.yielded {
             return None;
         }
-
-        // SAFETY: We're iterating through a valid control message buffer
-        // that was filled by recvmsg.
-        unsafe {
-            let cmsg_ptr = self
-                .buffer
-                .as_ptr()
-                .add(self.current)
-                .cast::<libc::cmsghdr>();
-
-            // Check if we have at least a header
-            if self.current + mem::size_of::<libc::cmsghdr>() > self.buffer.len() {
-                return None;
-            }
-
-            // Cast cmsg_len to usize for portable arithmetic.
-            // On Linux x86_64, cmsg_len is already usize (size_t).
-            // On macOS/BSD, cmsg_len is u32 (socklen_t).
-            let cmsg_len = (*cmsg_ptr).cmsg_len as usize;
-            let hdr_size = mem::size_of::<libc::cmsghdr>();
-            if cmsg_len < hdr_size {
-                return None;
-            }
-
-            // Advance to next message
-            let data_len = cmsg_len - hdr_size;
-            // CMSG_SPACE takes a u32; data_len is bounded by buffer capacity
-            // which fits in u32 on all supported platforms.
-            let cmsg_space = libc::CMSG_SPACE(data_len as u32) as usize;
-            self.current += cmsg_space.max(hdr_size);
-
-            let level = (*cmsg_ptr).cmsg_level;
-            let ty = (*cmsg_ptr).cmsg_type;
-            let data_ptr = libc::CMSG_DATA(cmsg_ptr);
-
-            if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
-                let fd_count = data_len / mem::size_of::<RawFd>();
-                let fds = std::slice::from_raw_parts(data_ptr as *const RawFd, fd_count);
-                Some(AncillaryMessage::ScmRights(ScmRights { fds }))
-            } else {
-                Some(AncillaryMessage::Unknown { level, ty })
-            }
+        self.yielded = true;
+        if self.recv_fds.is_empty() {
+            None
+        } else {
+            Some(AncillaryMessage::ScmRights(ScmRights {
+                fds: self.recv_fds,
+            }))
         }
     }
 }
@@ -307,25 +140,11 @@ impl<'a> Iterator for AncillaryMessages<'a> {
 pub enum AncillaryMessage<'a> {
     /// File descriptors passed via `SCM_RIGHTS`.
     ScmRights(ScmRights<'a>),
-    /// An unknown or unsupported control message.
-    Unknown {
-        /// The protocol level (e.g., `SOL_SOCKET`).
-        level: i32,
-        /// The message type.
-        ty: i32,
-    },
 }
 
 /// File descriptors received via `SCM_RIGHTS`.
 ///
-/// # Safety
-///
-/// The file descriptors returned by this iterator are raw and ownership
-/// is transferred to the receiver. The caller must ensure they are either:
-/// - Wrapped in an owned type (like `OwnedFd` or `File`) to be closed on drop
-/// - Explicitly closed with `libc::close()`
-///
-/// Failing to do so will leak file descriptors.
+/// These are raw fds; the caller must either close them or wrap them in an owned type.
 #[derive(Debug)]
 pub struct ScmRights<'a> {
     fds: &'a [RawFd],
@@ -335,13 +154,10 @@ impl Iterator for ScmRights<'_> {
     type Item = RawFd;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.fds.is_empty() {
-            None
-        } else {
-            let fd = self.fds[0];
-            self.fds = &self.fds[1..];
-            Some(fd)
-        }
+        self.fds.split_first().map(|(fd, rest)| {
+            self.fds = rest;
+            *fd
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -351,23 +167,19 @@ impl Iterator for ScmRights<'_> {
 
 impl ExactSizeIterator for ScmRights<'_> {}
 
-/// Computes the space required for ancillary data containing the given
+/// Computes a conservative buffer size for receiving ancillary data containing the given
 /// number of file descriptors.
 ///
-/// # Example
-///
-/// ```ignore
-/// let space = ancillary_space_for_fds(3);
-/// let mut buffer = vec![0u8; space];
-/// let mut ancillary = SocketAncillary::new(&mut buffer);
-/// ```
+/// This is an upper bound (it may over-allocate), but avoids `unsafe` access to libc's
+/// `CMSG_*` macros in this crate.
 #[must_use]
 pub fn ancillary_space_for_fds(fd_count: usize) -> usize {
     if fd_count == 0 {
         0
     } else {
-        let fd_size = fd_count * mem::size_of::<RawFd>();
-        unsafe { libc::CMSG_SPACE(fd_size as u32) as usize }
+        // Over-estimate by assuming one header per fd. This is fine: callers allocate once.
+        let per = nix::sys::socket::cmsg_space::<RawFd>();
+        fd_count.saturating_mul(per)
     }
 }
 
@@ -383,8 +195,7 @@ mod tests {
     #[test]
     fn test_ancillary_new() {
         init_test("test_ancillary_new");
-        let mut buffer = [0u8; 128];
-        let ancillary = SocketAncillary::new(&mut buffer);
+        let ancillary = SocketAncillary::new(128);
 
         crate::assert_with_log!(
             ancillary.capacity() == 128,
@@ -392,7 +203,6 @@ mod tests {
             128,
             ancillary.capacity()
         );
-        crate::assert_with_log!(ancillary.is_empty(), "len", 0, ancillary.len());
         crate::assert_with_log!(ancillary.is_empty(), "is_empty", true, ancillary.is_empty());
         crate::assert_with_log!(
             !ancillary.is_truncated(),
@@ -406,8 +216,7 @@ mod tests {
     #[test]
     fn test_add_fds() {
         init_test("test_add_fds");
-        let mut buffer = [0u8; 128];
-        let mut ancillary = SocketAncillary::new(&mut buffer);
+        let mut ancillary = SocketAncillary::new(128);
 
         // Add some fake fds (we're not actually sending them)
         let fds = [3, 4, 5];
@@ -426,18 +235,17 @@ mod tests {
     #[test]
     fn test_add_fds_too_small_buffer() {
         init_test("test_add_fds_too_small");
-        // Very small buffer
-        let mut buffer = [0u8; 4];
-        let mut ancillary = SocketAncillary::new(&mut buffer);
+        // Capacity only affects receive; send-side queueing is unbounded here.
+        let mut ancillary = SocketAncillary::new(4);
 
         let fds = [3, 4, 5];
         let added = ancillary.add_fds(&fds);
 
-        crate::assert_with_log!(!added, "not added", false, added);
+        crate::assert_with_log!(added, "added", true, added);
         crate::assert_with_log!(
-            ancillary.is_empty(),
-            "still empty",
-            true,
+            !ancillary.is_empty(),
+            "not empty",
+            false,
             ancillary.is_empty()
         );
         crate::test_complete!("test_add_fds_too_small");
@@ -446,8 +254,7 @@ mod tests {
     #[test]
     fn test_clear() {
         init_test("test_ancillary_clear");
-        let mut buffer = [0u8; 128];
-        let mut ancillary = SocketAncillary::new(&mut buffer);
+        let mut ancillary = SocketAncillary::new(128);
 
         ancillary.add_fds(&[3, 4]);
         crate::assert_with_log!(
