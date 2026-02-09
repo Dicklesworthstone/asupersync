@@ -48,6 +48,7 @@ mod metadata;
 mod open_options;
 mod path_ops;
 mod read_dir;
+pub mod vfs;
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 pub mod uring;
@@ -75,3 +76,5 @@ pub use path_ops::symlink;
 pub use path_ops::{symlink_dir, symlink_file};
 
 pub use std::io::SeekFrom;
+
+pub use vfs::{UnixVfs, UnixVfsFile, Vfs, VfsFile};
