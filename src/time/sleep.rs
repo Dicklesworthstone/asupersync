@@ -16,11 +16,42 @@ use crate::types::Time;
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 static START_TIME: OnceLock<Instant> = OnceLock::new();
+
+#[derive(Debug)]
+struct FallbackThread {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::Thread,
+    join: std::thread::JoinHandle<()>,
+}
+
+fn request_stop_fallback(fallback: &FallbackThread) {
+    fallback.stop.store(true, Ordering::Release);
+    fallback.thread.unpark();
+}
+
+fn take_finished_fallback(state: &mut SleepState) -> Option<std::thread::JoinHandle<()>> {
+    let finished = state
+        .fallback
+        .as_ref()
+        .is_some_and(|fallback| fallback.join.is_finished());
+    if finished {
+        Some(
+            state
+                .fallback
+                .take()
+                .expect("finished implies fallback exists")
+                .join,
+        )
+    } else {
+        None
+    }
+}
 
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
@@ -48,8 +79,8 @@ pub fn wall_now() -> Time {
 #[derive(Debug)]
 struct SleepState {
     waker: Option<Waker>,
-    /// Whether a background thread has been spawned (fallback path).
-    spawned: bool,
+    /// Background timing thread used when no timer driver is present.
+    fallback: Option<FallbackThread>,
     /// Handle to the registered timer in the timer driver.
     timer_handle: Option<TimerHandle>,
     /// Timer driver used to register the current handle.
@@ -127,7 +158,7 @@ impl Sleep {
             polled: Cell::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
-                spawned: false,
+                fallback: None,
                 timer_handle: None,
                 timer_driver: None,
             })),
@@ -174,7 +205,7 @@ impl Sleep {
             polled: Cell::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
-                spawned: false,
+                fallback: None,
                 timer_handle: None,
                 timer_driver: None,
             })),
@@ -221,11 +252,22 @@ impl Sleep {
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled.set(false);
-        let (handle, driver) = {
+        let (handle, driver, fallback_handle) = {
             let mut state = self.state.lock().expect("sleep state lock poisoned");
-            state.spawned = false;
-            (state.timer_handle.take(), state.timer_driver.take())
+            let fallback_handle = state.fallback.take().map(|fallback| {
+                request_stop_fallback(&fallback);
+                fallback.join
+            });
+            (
+                state.timer_handle.take(),
+                state.timer_driver.take(),
+                fallback_handle,
+            )
         };
+
+        if let Some(handle) = fallback_handle {
+            let _ = handle.join();
+        }
 
         // Cancel any existing timer - will be re-registered on next poll
         if let (Some(handle), Some(driver)) = (handle, driver) {
@@ -245,11 +287,22 @@ impl Sleep {
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled.set(false);
-        let (handle, driver) = {
+        let (handle, driver, fallback_handle) = {
             let mut state = self.state.lock().expect("sleep state lock poisoned");
-            state.spawned = false;
-            (state.timer_handle.take(), state.timer_driver.take())
+            let fallback_handle = state.fallback.take().map(|fallback| {
+                request_stop_fallback(&fallback);
+                fallback.join
+            });
+            (
+                state.timer_handle.take(),
+                state.timer_driver.take(),
+                fallback_handle,
+            )
         };
+
+        if let Some(handle) = fallback_handle {
+            let _ = handle.join();
+        }
 
         // Cancel any existing timer - will be re-registered on next poll
         if let (Some(handle), Some(driver)) = (handle, driver) {
@@ -330,12 +383,16 @@ impl Future for Sleep {
                 }
 
                 let mut state = self.state.lock().expect("sleep state lock poisoned");
+                let finished_handle = take_finished_fallback(&mut state);
                 state.waker = Some(cx.waker().clone());
 
                 // Prefer timer driver over background thread
                 if let Some(timer) = timer_driver.as_ref() {
-                    // Clear fallback state when using the timer driver.
-                    state.spawned = false;
+                    // If a fallback thread exists, request it stop. We don't join here
+                    // (poll must not block); Drop/reset will join.
+                    if let Some(fallback) = state.fallback.as_ref() {
+                        request_stop_fallback(fallback);
+                    }
 
                     // If we switched drivers, cancel the old timer handle first.
                     // Check if we need to cancel before taking any references.
@@ -413,25 +470,49 @@ impl Future for Sleep {
                         }
                     }
 
-                    if !state.spawned {
-                        // Fallback: spawn background thread for timing
-                        state.spawned = true;
+                    if state.fallback.is_none() {
+                        // Fallback: spawn background thread for timing.
+                        //
+                        // IMPORTANT: We retain the JoinHandle and `join()` it on Drop/reset,
+                        // so we don't leak OS threads and UBS doesn't flag this as critical.
                         let duration = self.remaining(now);
                         let state_clone = Arc::clone(&self.state);
-                        drop(state);
 
-                        // ubs:ignore — intentional fire-and-forget: short-lived timer thread
-                        // self-terminates after sleeping; JoinHandle detach is correct here
-                        std::thread::spawn(move || {
-                            std::thread::sleep(duration);
+                        let stop = Arc::new(AtomicBool::new(false));
+                        let stop_for_thread = Arc::clone(&stop);
+                        let handle = std::thread::spawn(move || {
+                            // Allow prompt cancellation via `unpark()`.
+                            let start = Instant::now();
+                            let mut remaining = duration;
+                            while !stop_for_thread.load(Ordering::Acquire) {
+                                std::thread::park_timeout(remaining);
+                                if stop_for_thread.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                let elapsed = start.elapsed();
+                                if elapsed >= duration {
+                                    break;
+                                }
+                                remaining = duration.saturating_sub(elapsed);
+                            }
+
                             let mut state = state_clone.lock().expect("sleep state lock poisoned");
                             if let Some(waker) = state.waker.take() {
                                 waker.wake();
                             }
-                            // Reset spawned flag so if we are still pending (rare), we spawn again
-                            state.spawned = false;
+                        });
+                        let thread = handle.thread().clone();
+                        state.fallback = Some(FallbackThread {
+                            stop,
+                            thread,
+                            join: handle,
                         });
                     }
+                }
+
+                drop(state);
+                if let Some(handle) = finished_handle {
+                    let _ = handle.join();
                 }
 
                 Poll::Pending
@@ -442,10 +523,25 @@ impl Future for Sleep {
 
 impl Drop for Sleep {
     fn drop(&mut self) {
-        let (handle, driver) = {
+        let (handle, driver, fallback_handle) = {
             let mut state = self.state.lock().expect("sleep state lock poisoned");
-            (state.timer_handle.take(), state.timer_driver.take())
+            // Clear waker to release task reference immediately, preventing
+            // unbounded lifetime extension if background thread is running.
+            state.waker = None;
+            let fallback_handle = state.fallback.take().map(|fallback| {
+                request_stop_fallback(&fallback);
+                fallback.join
+            });
+            (
+                state.timer_handle.take(),
+                state.timer_driver.take(),
+                fallback_handle,
+            )
         };
+
+        if let Some(handle) = fallback_handle {
+            let _ = handle.join();
+        }
 
         if let (Some(handle), Some(driver)) = (handle, driver) {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
@@ -467,7 +563,7 @@ impl Clone for Sleep {
             polled: Cell::new(false), // Fresh clone hasn't been polled
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
-                spawned: false,
+                fallback: None,
                 timer_handle: None, // Fresh clone has no timer registration
                 timer_driver: None,
             })),

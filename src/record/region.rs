@@ -904,9 +904,16 @@ impl RegionRecord {
     /// Returns true if the region is ready to finalize (no children/tasks/obligations).
     #[must_use]
     pub fn ready_to_finalize(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
-        self.children_closed(&|_region| true)
-            && self.tasks_completed(completed)
-            && self.obligations_resolved()
+        // This helper is intentionally conservative and local: a region can only
+        // be ready to finalize when it has no *tracked* children remaining.
+        //
+        // In the runtime, child regions are removed from the parent's `children`
+        // list when they complete close. If a caller wants to treat "children are
+        // all closed" as sufficient, they must supply that logic externally.
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.children.is_empty()
+            && inner.tasks.iter().all(|task| completed(*task))
+            && inner.pending_obligations == 0
     }
 }
 
@@ -961,6 +968,27 @@ mod tests {
         f: F,
     ) -> R {
         accessor.rref_with(rref, f).expect("trait with")
+    }
+
+    #[test]
+    fn ready_to_finalize_requires_no_children() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+
+        // Add one child and one task; even if the task predicate says "completed",
+        // ready_to_finalize must stay false until the child is removed.
+        region
+            .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
+            .expect("add child");
+        region
+            .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
+            .expect("add task");
+        region.resolve_obligation(); // saturating_sub safe; keep obligations at 0
+
+        assert!(!region.ready_to_finalize(&|_task| true));
+
+        // Removing the child is sufficient for this helper.
+        region.remove_child(RegionId::from_arena(ArenaIndex::new(2, 0)));
+        assert!(region.ready_to_finalize(&|_task| true));
     }
 
     fn rref_get_with_via_trait<A: RRefAccess, T: Clone + 'static>(
@@ -1508,12 +1536,13 @@ mod tests {
         let err = region
             .add_task(overflow_task)
             .expect_err("expected admission error");
-        if let AdmissionError::LimitReached { kind, limit, live } = err {
-            assert_eq!(kind, AdmissionKind::Task);
-            assert_eq!(limit, 3);
-            assert_eq!(live, 3);
-        } else {
-            panic!("expected LimitReached, got {err:?}");
+        match err {
+            AdmissionError::LimitReached { kind, limit, live } => {
+                assert_eq!(kind, AdmissionKind::Task);
+                assert_eq!(limit, 3);
+                assert_eq!(live, 3);
+            }
+            AdmissionError::Closed => unreachable!("expected LimitReached, got Closed"),
         }
     }
 

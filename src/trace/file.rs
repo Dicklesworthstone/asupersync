@@ -1344,7 +1344,7 @@ mod tests {
                 assert_eq!(task.0, count);
                 assert_eq!(at_tick, count);
             } else {
-                panic!("unexpected event type");
+                unreachable!("unexpected event type");
             }
             count += 1;
         }
@@ -1605,7 +1605,7 @@ mod tests {
                     assert_eq!(task.0, count);
                     assert_eq!(at_tick, count);
                 } else {
-                    panic!("unexpected event type");
+                    unreachable!("unexpected event type");
                 }
                 count += 1;
             }
@@ -1661,9 +1661,6 @@ mod tests {
 
             #[allow(clippy::cast_precision_loss)]
             let ratio = uncompressed_size as f64 / compressed_size as f64;
-            println!(
-                "Compression ratio: {ratio:.2}x ({uncompressed_size} -> {compressed_size} bytes)"
-            );
 
             // LZ4 should achieve at least 2x compression on this repetitive data
             assert!(

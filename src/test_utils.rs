@@ -34,7 +34,6 @@ pub use crate::test_ndjson::{
     write_artifact_bundle, NdjsonEvent, NdjsonLogger, NDJSON_SCHEMA_VERSION,
 };
 use crate::time::timeout;
-use crate::types::Time;
 use std::future::Future;
 use std::sync::{Mutex, Once};
 use std::time::Duration;
@@ -149,7 +148,14 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T> + Unpin,
 {
-    let Ok(value) = timeout(Time::ZERO, timeout_duration, f()).await else {
+    // Keep standalone usage correct: `TimeoutFuture` uses `Sleep`, whose fallback clock is
+    // `wall_now()`. Passing `Time::ZERO` here can cause immediate timeouts if `wall_now()`
+    // has already advanced earlier in the process.
+    let now = Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+
+    let Ok(value) = timeout(now, timeout_duration, f()).await else {
         unreachable!("operation '{description}' did not complete within {timeout_duration:?}");
     };
     tracing::debug!(
@@ -158,6 +164,27 @@ where
         "operation completed within timeout"
     );
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_lite::future;
+
+    #[test]
+    fn assert_completes_within_uses_wall_time_when_no_runtime_is_active() {
+        // Ensure the wall clock origin is initialized and has advanced beyond the timeout.
+        let _t0 = crate::time::wall_now();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // This should not spuriously time out in standalone mode.
+        let value = future::block_on(assert_completes_within(
+            Duration::from_millis(10),
+            "standalone immediate future",
+            || std::future::ready(7_u8),
+        ));
+        assert_eq!(value, 7);
+    }
 }
 
 /// Log a test phase transition with a visual separator.

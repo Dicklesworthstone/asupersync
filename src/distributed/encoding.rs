@@ -477,31 +477,14 @@ mod tests {
         snapshot.metadata = vec![0xAB; 64 * 3 + 7];
 
         let bytes = snapshot.to_bytes();
-        eprintln!(
-            "oversized snapshot: tasks={} children={} metadata={} bytes={}",
-            snapshot.tasks.len(),
-            snapshot.children.len(),
-            snapshot.metadata.len(),
-            bytes.len()
-        );
 
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         assert!(
             encoded.source_count > 1,
             "expected split into multiple source symbols"
         );
         let reconstructed = rebuild_source_bytes(&encoded);
-        eprintln!(
-            "decoded verification: reconstructed_bytes={}",
-            reconstructed.len()
-        );
         assert_eq!(reconstructed, bytes);
     }
 
@@ -515,29 +498,9 @@ mod tests {
         let mut encoder = StateEncoder::new(config, DetRng::new(7));
         let snapshot = RegionSnapshot::empty(RegionId::new_for_test(9, 0));
 
-        eprintln!(
-            "empty snapshot: tasks={} children={} budget_deadline={:?} metadata={}",
-            snapshot.tasks.len(),
-            snapshot.children.len(),
-            snapshot.budget.deadline_nanos,
-            snapshot.metadata.len()
-        );
-
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         let decoded = decode_roundtrip(&encoded);
-        eprintln!(
-            "decoded verification: tasks={} children={} budget_deadline={:?}",
-            decoded.tasks.len(),
-            decoded.children.len(),
-            decoded.budget.deadline_nanos
-        );
         assert!(decoded.tasks.is_empty());
         assert!(decoded.children.is_empty());
         assert!(decoded.budget.deadline_nanos.is_none());
@@ -558,22 +521,9 @@ mod tests {
             .map(|i| RegionId::new_for_test(200 + i, 0))
             .collect();
 
-        eprintln!(
-            "max nesting snapshot: tasks={} children={}",
-            snapshot.tasks.len(),
-            snapshot.children.len()
-        );
-
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         let decoded = decode_roundtrip(&encoded);
-        eprintln!("decoded verification: children={}", decoded.children.len());
         assert_eq!(decoded.children.len(), 128);
         assert_eq!(decoded.children[0], snapshot.children[0]);
         assert_eq!(decoded.children[127], snapshot.children[127]);
@@ -590,26 +540,9 @@ mod tests {
         let mut snapshot = create_test_snapshot();
         snapshot.metadata = Vec::new();
 
-        eprintln!(
-            "zero-length metadata snapshot: tasks={} children={} metadata={}",
-            snapshot.tasks.len(),
-            snapshot.children.len(),
-            snapshot.metadata.len()
-        );
-
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         let decoded = decode_roundtrip(&encoded);
-        eprintln!(
-            "decoded verification: metadata_len={}",
-            decoded.metadata.len()
-        );
         assert!(decoded.metadata.is_empty());
         assert_eq!(decoded.tasks.len(), snapshot.tasks.len());
     }
@@ -627,28 +560,9 @@ mod tests {
         snapshot.budget.polls_remaining = Some(u32::MAX);
         snapshot.budget.cost_remaining = Some(u64::MAX);
 
-        eprintln!(
-            "extreme budget snapshot: deadline={:?} polls={:?} cost={:?}",
-            snapshot.budget.deadline_nanos,
-            snapshot.budget.polls_remaining,
-            snapshot.budget.cost_remaining
-        );
-
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         let decoded = decode_roundtrip(&encoded);
-        eprintln!(
-            "decoded verification: deadline={:?} polls={:?} cost={:?}",
-            decoded.budget.deadline_nanos,
-            decoded.budget.polls_remaining,
-            decoded.budget.cost_remaining
-        );
         assert_eq!(decoded.budget.deadline_nanos, Some(0));
         assert_eq!(decoded.budget.polls_remaining, Some(u32::MAX));
         assert_eq!(decoded.budget.cost_remaining, Some(u64::MAX));
@@ -689,22 +603,8 @@ mod tests {
             snapshot.metadata = vec![0u8; metadata_len];
             snapshot_rng.fill_bytes(&mut snapshot.metadata);
 
-            eprintln!(
-                "fuzz snapshot {i}: tasks={} children={} metadata={}",
-                snapshot.tasks.len(),
-                snapshot.children.len(),
-                snapshot.metadata.len()
-            );
-
             let encoded1 = encoder1.encode(&snapshot, Time::ZERO).unwrap();
             let encoded2 = encoder2.encode(&snapshot, Time::ZERO).unwrap();
-
-            eprintln!(
-                "encoded symbols: source={} repair={} total={}",
-                encoded1.source_count,
-                encoded1.repair_count,
-                encoded1.symbols.len()
-            );
 
             assert_eq!(encoded1.params.object_id, encoded2.params.object_id);
             assert_eq!(encoded1.symbols.len(), encoded2.symbols.len());
@@ -725,20 +625,7 @@ mod tests {
         let mut encoder = StateEncoder::new(config, DetRng::new(11));
         let snapshot = create_test_snapshot();
 
-        eprintln!(
-            "repair=0 snapshot: tasks={} children={} metadata={}",
-            snapshot.tasks.len(),
-            snapshot.children.len(),
-            snapshot.metadata.len()
-        );
-
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         assert_eq!(encoded.repair_count, 0);
         assert_eq!(encoded.repair_symbols().count(), 0);
@@ -759,12 +646,6 @@ mod tests {
         snapshot.metadata = vec![0xCD; pad];
 
         let bytes = snapshot.to_bytes();
-        eprintln!(
-            "boundary snapshot: base_bytes={} pad={} total_bytes={}",
-            base,
-            pad,
-            bytes.len()
-        );
 
         let config = EncodingConfig {
             symbol_size: u16::try_from(symbol_size).expect("symbol_size fits u16"),
@@ -773,12 +654,6 @@ mod tests {
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(3));
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
-        eprintln!(
-            "encoded symbols: source={} repair={} total={}",
-            encoded.source_count,
-            encoded.repair_count,
-            encoded.symbols.len()
-        );
 
         assert_eq!(encoded.original_size % symbol_size, 0);
         assert_eq!(
@@ -786,10 +661,6 @@ mod tests {
             encoded.original_size
         );
         let reconstructed = rebuild_source_bytes(&encoded);
-        eprintln!(
-            "decoded verification: reconstructed_bytes={}",
-            reconstructed.len()
-        );
         assert_eq!(reconstructed, bytes);
     }
 }

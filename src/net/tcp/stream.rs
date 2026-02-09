@@ -275,10 +275,15 @@ impl TcpStream {
     }
 }
 
-fn timeout_now() -> crate::types::Time {
+fn timeout_now() -> Time {
     Cx::current()
         .and_then(|current| current.timer_driver())
-        .map_or(Time::ZERO, |driver| driver.now())
+        // Outside an active runtime context we still want timeouts to behave
+        // correctly using wall time. Using `Time::ZERO` here is subtly wrong
+        // because `Sleep`'s fallback clock is `wall_now()` (module-relative),
+        // so a zero "now" can cause premature timeouts if `wall_now()` has
+        // already advanced due to prior time ops in the same process.
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
 fn connect_in_progress(err: &io::Error) -> bool {
@@ -553,7 +558,7 @@ mod tests {
     use super::*;
     use crate::runtime::reactor::{Events, Reactor, Token};
     use crate::runtime::{IoDriverHandle, LabReactor};
-    use crate::types::{Budget, RegionId, TaskId};
+    use crate::types::{Budget, RegionId, TaskId, Time};
     use futures_lite::future;
     use std::future::poll_fn;
     use std::future::Future;
@@ -642,6 +647,27 @@ mod tests {
         assert_eq!(builder.connect_timeout, Some(Duration::from_secs(1)));
         assert_eq!(builder.nodelay, Some(true));
         assert_eq!(builder.keepalive, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn timeout_now_uses_wall_now_when_no_runtime_is_active() {
+        assert!(
+            Cx::current().is_none(),
+            "test must run without an active Cx"
+        );
+
+        let t0 = crate::time::wall_now();
+        std::thread::sleep(Duration::from_millis(20));
+        let now = super::timeout_now();
+
+        assert!(
+            now >= t0,
+            "timeout_now must be consistent with wall_now outside a runtime"
+        );
+        assert!(
+            now > Time::ZERO,
+            "wall time should have advanced; timeout_now should not be hard-coded to ZERO"
+        );
     }
 
     #[test]

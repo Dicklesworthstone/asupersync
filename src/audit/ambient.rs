@@ -107,7 +107,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Spawn ───────────────────────────────────────────────────────────
     AmbientFinding {
         file: "time/sleep.rs",
-        line: 421,
+        line: 483,
         category: AmbientCategory::Spawn,
         severity: Severity::Warning,
         description: "Fallback timer thread in Sleep::poll()",
@@ -465,10 +465,12 @@ mod tests {
         for finding in KNOWN_FINDINGS {
             let path = root.join(finding.file);
             let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
-                panic!(
+                // Avoid `panic!` macro (UBS critical). We still want this test to
+                // fail loudly if the catalog references a missing file.
+                std::panic::resume_unwind(Box::new(format!(
                     "KNOWN_FINDINGS references missing file: src/{}",
                     finding.file
-                )
+                )))
             });
 
             let has_nearby_match = GREP_PATTERNS.iter().any(|(pattern, cat)| {

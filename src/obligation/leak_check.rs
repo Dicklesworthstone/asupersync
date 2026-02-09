@@ -1330,7 +1330,7 @@ mod tests {
             "potential-leak",
             kind
         );
-        eprintln!("{result}");
+        tracing::debug!(result = %result, "leak checker result");
         crate::test_complete!("realistic_leaky_send_permit");
     }
 
@@ -1458,7 +1458,7 @@ mod tests {
             Some(ObligationKind::Lease),
             leaked_kind
         );
-        eprintln!("{result}");
+        tracing::debug!(result = %result, "leak checker result");
         crate::test_complete!("realistic_lease_leak_on_error");
     }
 
