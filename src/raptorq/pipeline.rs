@@ -291,11 +291,15 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::cast_sign_loss)]
 fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> usize {
-    if symbol_size == 0 {
+    // Overhead is defined as a multiplicative factor on the number of *source*
+    // symbols (e.g. 1.05 means "5% extra symbols"). An overhead of 1.0 means
+    // "no repairs requested".
+    if symbol_size == 0 || data_len == 0 || overhead <= 1.0 {
         return 0;
     }
     let source_count = data_len.div_ceil(symbol_size);
     let total = (source_count as f64 * overhead).ceil() as usize;
+    // If overhead > 1.0, we always want at least one repair symbol.
     total.saturating_sub(source_count).max(1)
 }
 
@@ -465,6 +469,27 @@ mod tests {
             1,
             source_symbols as u16,
         )
+    }
+
+    #[test]
+    fn compute_repair_count_overhead_one_requests_zero_repairs() {
+        // EncodingConfig docs: repair_overhead=1.0 means "0% extra symbols".
+        let data_len = 1024;
+        let symbol_size = 256;
+        assert_eq!(compute_repair_count(data_len, symbol_size, 1.0), 0);
+    }
+
+    #[test]
+    fn compute_repair_count_empty_data_requests_zero_repairs() {
+        assert_eq!(compute_repair_count(0, 256, 1.10), 0);
+    }
+
+    #[test]
+    fn compute_repair_count_overhead_above_one_requests_at_least_one_repair() {
+        // For small objects, rounding means a small overhead still produces one repair symbol.
+        let data_len = 64;
+        let symbol_size = 256;
+        assert_eq!(compute_repair_count(data_len, symbol_size, 1.01), 1);
     }
 
     #[test]
