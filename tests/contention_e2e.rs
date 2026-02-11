@@ -10,12 +10,14 @@
 
 mod common;
 
+use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::record::obligation::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::scheduler::three_lane::{PreemptionMetrics, ThreeLaneScheduler};
 use asupersync::runtime::RuntimeState;
 use asupersync::sync::{ContendedMutex, LockMetricsSnapshot};
 use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
-use asupersync::types::{Budget, TaskId, Time};
+use asupersync::types::{Budget, CancelReason, TaskId, Time};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +28,7 @@ use std::time::Duration;
 
 const DEFAULT_SEED: u64 = 0xC0A7_E2D0;
 const ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_CONTENTION_ARTIFACTS_DIR";
+const CROSS_ENTITY_SEED: u64 = 0x2F71_1000;
 
 // ===========================================================================
 // HELPERS
@@ -162,6 +165,197 @@ fn preemption_metrics_to_json(metrics: &[PreemptionMetrics]) -> Vec<serde_json::
             })
         })
         .collect()
+}
+
+#[derive(Debug)]
+struct CrossEntityRunResult {
+    seed: u64,
+    worker_count: usize,
+    trace_fingerprint: u64,
+    steps_total: u64,
+    quiescent: bool,
+    invariant_violations: usize,
+    pending_obligations: usize,
+    regions_cancelled: usize,
+    tasks_spawned: usize,
+    obligations_created: usize,
+}
+
+fn lock_order_snapshots() -> serde_json::Value {
+    serde_json::json!({
+        "canonical": "E:Config -> D:Instrumentation -> B:Regions -> A:Tasks -> C:Obligations",
+        "cross_entity_paths": [
+            {
+                "operation": "cancel_request",
+                "order": ["B:Regions", "A:Tasks", "C:Obligations"]
+            },
+            {
+                "operation": "task_completed",
+                "order": ["B:Regions", "A:Tasks", "C:Obligations"]
+            },
+            {
+                "operation": "obligation_create",
+                "order": ["B:Regions", "C:Obligations"]
+            },
+            {
+                "operation": "obligation_commit_abort_leak",
+                "order": ["B:Regions", "A:Tasks", "C:Obligations"]
+            }
+        ]
+    })
+}
+
+fn cross_entity_run_to_json(run: &CrossEntityRunResult) -> serde_json::Value {
+    serde_json::json!({
+        "seed": run.seed,
+        "worker_count": run.worker_count,
+        "trace_fingerprint": run.trace_fingerprint,
+        "steps_total": run.steps_total,
+        "quiescent": run.quiescent,
+        "invariant_violations": run.invariant_violations,
+        "pending_obligations": run.pending_obligations,
+        "regions_cancelled": run.regions_cancelled,
+        "tasks_spawned": run.tasks_spawned,
+        "obligations_created": run.obligations_created
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_cross_entity_locking_lab_workload(
+    seed: u64,
+    worker_count: usize,
+    region_count: usize,
+    tasks_per_region: usize,
+    obligations_per_task: usize,
+) -> CrossEntityRunResult {
+    init_test_logging();
+
+    let config = LabConfig::new(seed)
+        .worker_count(worker_count)
+        .trace_capacity(16_384)
+        .max_steps(250_000);
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    let mut regions_cancelled = 0usize;
+    let mut tasks_spawned = 0usize;
+    let mut obligations_created = 0usize;
+
+    for region_idx in 0..region_count {
+        let region = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child region");
+
+        let mut task_ids = Vec::with_capacity(tasks_per_region);
+
+        for task_idx in 0..tasks_per_region {
+            let spins = (task_idx % 3) + 1;
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    for _ in 0..spins {
+                        asupersync::runtime::yield_now().await;
+                    }
+                })
+                .expect("create task");
+            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            task_ids.push(task_id);
+            tasks_spawned += 1;
+        }
+
+        for (task_pos, task_id) in task_ids.iter().copied().enumerate() {
+            for obligation_idx in 0..obligations_per_task {
+                let obligation = runtime
+                    .state
+                    .create_obligation(
+                        ObligationKind::SendPermit,
+                        task_id,
+                        region,
+                        Some(format!(
+                            "cross-entity-r{region_idx}-t{task_pos}-o{obligation_idx}"
+                        )),
+                    )
+                    .expect("create obligation");
+                obligations_created += 1;
+
+                if region_idx % 2 == 0 {
+                    match (task_pos + obligation_idx) % 3 {
+                        0 => {
+                            runtime
+                                .state
+                                .commit_obligation(obligation)
+                                .expect("commit obligation");
+                        }
+                        _ => {
+                            runtime
+                                .state
+                                .abort_obligation(obligation, ObligationAbortReason::Cancel)
+                                .expect("abort obligation");
+                        }
+                    }
+                } else if (task_pos + obligation_idx) % 2 == 0 {
+                    runtime
+                        .state
+                        .commit_obligation(obligation)
+                        .expect("commit obligation");
+                } else {
+                    runtime
+                        .state
+                        .abort_obligation(obligation, ObligationAbortReason::Explicit)
+                        .expect("abort obligation");
+                }
+            }
+        }
+
+        if region_idx % 2 == 0 {
+            regions_cancelled += 1;
+            let to_schedule = runtime.state.cancel_request(
+                region,
+                &CancelReason::user("cross-entity-locking"),
+                None,
+            );
+            for (task_id, priority) in to_schedule {
+                runtime
+                    .scheduler
+                    .lock()
+                    .unwrap()
+                    .schedule(task_id, priority);
+            }
+        }
+    }
+
+    runtime.run_until_quiescent();
+    let report = runtime.report();
+
+    tracing::info!(
+        seed,
+        worker_count,
+        region_count,
+        tasks_per_region,
+        obligations_per_task,
+        regions_cancelled,
+        tasks_spawned,
+        obligations_created,
+        trace_fingerprint = report.trace_fingerprint,
+        steps_total = report.steps_total,
+        pending_obligations = runtime.state.pending_obligation_count(),
+        invariant_violations = report.invariant_violations.len(),
+        "cross-entity lock-order workload complete"
+    );
+
+    CrossEntityRunResult {
+        seed,
+        worker_count,
+        trace_fingerprint: report.trace_fingerprint,
+        steps_total: report.steps_total,
+        quiescent: report.quiescent,
+        invariant_violations: report.invariant_violations.len(),
+        pending_obligations: runtime.state.pending_obligation_count(),
+        regions_cancelled,
+        tasks_spawned,
+        obligations_created,
+    }
 }
 
 // ===========================================================================
@@ -461,4 +655,77 @@ fn contention_combined_summary() {
     });
 
     write_artifact("contention_combined_summary.json", &summary);
+}
+
+/// Cross-entity (cancel/obligation/region-close) load scenario with replay check.
+///
+/// Acceptance link: bd-2wfti requires at least one bd-ecaeo E2E scenario that
+/// exercises cross-entity locking under load and validates deterministic replay.
+#[test]
+fn contention_cross_entity_lock_order_replay() {
+    const WORKERS: usize = 4;
+    const REGIONS: usize = 8;
+    const TASKS_PER_REGION: usize = 10;
+    const OBLIGATIONS_PER_TASK: usize = 2;
+
+    let run_a = run_cross_entity_locking_lab_workload(
+        CROSS_ENTITY_SEED,
+        WORKERS,
+        REGIONS,
+        TASKS_PER_REGION,
+        OBLIGATIONS_PER_TASK,
+    );
+    let run_b = run_cross_entity_locking_lab_workload(
+        CROSS_ENTITY_SEED,
+        WORKERS,
+        REGIONS,
+        TASKS_PER_REGION,
+        OBLIGATIONS_PER_TASK,
+    );
+
+    let replay_match = run_a.trace_fingerprint == run_b.trace_fingerprint
+        && run_a.steps_total == run_b.steps_total;
+
+    let artifact = serde_json::json!({
+        "test": "contention_cross_entity_lock_order_replay",
+        "seed": CROSS_ENTITY_SEED,
+        "worker_count": WORKERS,
+        "load": {
+            "regions": REGIONS,
+            "tasks_per_region": TASKS_PER_REGION,
+            "obligations_per_task": OBLIGATIONS_PER_TASK
+        },
+        "lock_order_snapshots": lock_order_snapshots(),
+        "run_a": cross_entity_run_to_json(&run_a),
+        "run_b": cross_entity_run_to_json(&run_b),
+        "replay_validation": {
+            "trace_fingerprint_equal": run_a.trace_fingerprint == run_b.trace_fingerprint,
+            "steps_total_equal": run_a.steps_total == run_b.steps_total,
+            "replay_match": replay_match
+        },
+    });
+    write_artifact("contention_cross_entity_lock_order_replay.json", &artifact);
+
+    assert!(run_a.quiescent, "run_a must be quiescent");
+    assert!(run_b.quiescent, "run_b must be quiescent");
+    assert_eq!(
+        run_a.invariant_violations, 0,
+        "run_a invariant violations must be zero"
+    );
+    assert_eq!(
+        run_b.invariant_violations, 0,
+        "run_b invariant violations must be zero"
+    );
+    assert_eq!(
+        run_a.pending_obligations, 0,
+        "run_a pending obligations must be zero"
+    );
+    assert_eq!(
+        run_b.pending_obligations, 0,
+        "run_b pending obligations must be zero"
+    );
+    assert!(
+        replay_match,
+        "cross-entity scenario must be replay-stable for same seed"
+    );
 }
