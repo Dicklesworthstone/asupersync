@@ -1,0 +1,553 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_id": "lean.theorem_surface.v1",
+  "generated_by": "bd-3n3b2",
+  "source_file": "formal/lean/Asupersync.lean",
+  "theorem_count": 136,
+  "theorems": [
+    {
+      "line": 188,
+      "theorem": "removeObligationId_not_mem"
+    },
+    {
+      "line": 297,
+      "theorem": "label_dec_eq_tau"
+    },
+    {
+      "line": 301,
+      "theorem": "label_dec_ne_tau_tick"
+    },
+    {
+      "line": 309,
+      "theorem": "label_repr_tick_stable"
+    },
+    {
+      "line": 603,
+      "theorem": "setTask_getTask_same"
+    },
+    {
+      "line": 608,
+      "theorem": "setTask_getTask_other"
+    },
+    {
+      "line": 613,
+      "theorem": "setRegion_getRegion_same"
+    },
+    {
+      "line": 618,
+      "theorem": "setRegion_getRegion_other"
+    },
+    {
+      "line": 623,
+      "theorem": "setObligation_getObligation_same"
+    },
+    {
+      "line": 628,
+      "theorem": "setObligation_getObligation_other"
+    },
+    {
+      "line": 634,
+      "theorem": "setTask_getRegion"
+    },
+    {
+      "line": 640,
+      "theorem": "setTask_getObligation"
+    },
+    {
+      "line": 646,
+      "theorem": "setRegion_getTask"
+    },
+    {
+      "line": 652,
+      "theorem": "setRegion_getObligation"
+    },
+    {
+      "line": 658,
+      "theorem": "setObligation_getTask"
+    },
+    {
+      "line": 664,
+      "theorem": "setObligation_getRegion"
+    },
+    {
+      "line": 675,
+      "theorem": "commit_resolves"
+    },
+    {
+      "line": 691,
+      "theorem": "abort_resolves"
+    },
+    {
+      "line": 707,
+      "theorem": "leak_marks_leaked"
+    },
+    {
+      "line": 723,
+      "theorem": "commit_removes_from_ledger"
+    },
+    {
+      "line": 747,
+      "theorem": "abort_removes_from_ledger"
+    },
+    {
+      "line": 770,
+      "theorem": "leak_removes_from_ledger"
+    },
+    {
+      "line": 794,
+      "theorem": "close_implies_quiescent"
+    },
+    {
+      "line": 808,
+      "theorem": "close_implies_ledger_empty"
+    },
+    {
+      "line": 820,
+      "theorem": "close_implies_finalizers_empty"
+    },
+    {
+      "line": 849,
+      "theorem": "listAll_mem"
+    },
+    {
+      "line": 860,
+      "theorem": "quiescent_tasks_completed"
+    },
+    {
+      "line": 867,
+      "theorem": "quiescent_subregions_closed"
+    },
+    {
+      "line": 874,
+      "theorem": "quiescent_no_obligations"
+    },
+    {
+      "line": 881,
+      "theorem": "quiescent_no_finalizers"
+    },
+    {
+      "line": 889,
+      "theorem": "close_quiescence_decomposition"
+    },
+    {
+      "line": 918,
+      "theorem": "lease_reserve_in_ledger"
+    },
+    {
+      "line": 939,
+      "theorem": "obligation_in_ledger_blocks_close"
+    },
+    {
+      "line": 962,
+      "theorem": "lease_resolution_enables_close"
+    },
+    {
+      "line": 975,
+      "theorem": "lease_leak_removes_and_marks"
+    },
+    {
+      "line": 989,
+      "theorem": "completed_not_runnable"
+    },
+    {
+      "line": 999,
+      "theorem": "spawn_preserves_existing_task"
+    },
+    {
+      "line": 1014,
+      "theorem": "strengthenReason_rank_ge_left"
+    },
+    {
+      "line": 1021,
+      "theorem": "strengthenReason_rank_ge_right"
+    },
+    {
+      "line": 1032,
+      "theorem": "reserve_creates_reserved"
+    },
+    {
+      "line": 1055,
+      "theorem": "cancelling_from_cancelRequested"
+    },
+    {
+      "line": 1215,
+      "theorem": "reserve_holder_exists"
+    },
+    {
+      "line": 1240,
+      "theorem": "Budget.combine_comm"
+    },
+    {
+      "line": 1250,
+      "theorem": "strengthenOpt_rank_ge_incoming"
+    },
+    {
+      "line": 1265,
+      "theorem": "spawn_preserves_obligation"
+    },
+    {
+      "line": 1279,
+      "theorem": "complete_preserves_region"
+    },
+    {
+      "line": 1295,
+      "theorem": "complete_preserves_obligation"
+    },
+    {
+      "line": 1311,
+      "theorem": "cancel_request_preserves_obligation"
+    },
+    {
+      "line": 1328,
+      "theorem": "tick_preserves_task"
+    },
+    {
+      "line": 1337,
+      "theorem": "tick_preserves_region"
+    },
+    {
+      "line": 1346,
+      "theorem": "tick_preserves_obligation"
+    },
+    {
+      "line": 1360,
+      "theorem": "reserve_adds_to_ledger"
+    },
+    {
+      "line": 1407,
+      "theorem": "close_children_exist_completed"
+    },
+    {
+      "line": 1446,
+      "theorem": "close_subregions_exist_closed"
+    },
+    {
+      "line": 1502,
+      "theorem": "Steps.trans"
+    },
+    {
+      "line": 1514,
+      "theorem": "tick_always_available"
+    },
+    {
+      "line": 1520,
+      "theorem": "no_terminal_states"
+    },
+    {
+      "line": 1530,
+      "theorem": "tick_preserves_wellformed"
+    },
+    {
+      "line": 1558,
+      "theorem": "complete_preserves_wellformed"
+    },
+    {
+      "line": 1637,
+      "theorem": "Budget.combine_assoc"
+    },
+    {
+      "line": 1666,
+      "theorem": "cancel_masked_step"
+    },
+    {
+      "line": 1686,
+      "theorem": "cancel_ack_step"
+    },
+    {
+      "line": 1700,
+      "theorem": "cancel_finalize_step"
+    },
+    {
+      "line": 1713,
+      "theorem": "cancel_complete_step"
+    },
+    {
+      "line": 1733,
+      "theorem": "cancel_complete_produces_cancelled"
+    },
+    {
+      "line": 1747,
+      "theorem": "close_begin_step"
+    },
+    {
+      "line": 1757,
+      "theorem": "close_cancel_children_step"
+    },
+    {
+      "line": 1782,
+      "theorem": "close_children_done_step"
+    },
+    {
+      "line": 1794,
+      "theorem": "close_run_finalizer_step"
+    },
+    {
+      "line": 1806,
+      "theorem": "close_complete_step"
+    },
+    {
+      "line": 1825,
+      "theorem": "completed_cannot_cancel_request"
+    },
+    {
+      "line": 1844,
+      "theorem": "spawn_preserves_wellformed"
+    },
+    {
+      "line": 1987,
+      "theorem": "reserve_preserves_wellformed"
+    },
+    {
+      "line": 2136,
+      "theorem": "resolve_preserves_wellformed"
+    },
+    {
+      "line": 2277,
+      "theorem": "commit_preserves_wellformed"
+    },
+    {
+      "line": 2286,
+      "theorem": "abort_preserves_wellformed"
+    },
+    {
+      "line": 2295,
+      "theorem": "leak_preserves_wellformed"
+    },
+    {
+      "line": 2373,
+      "theorem": "cancelRequest_preserves_wellformed"
+    },
+    {
+      "line": 2413,
+      "theorem": "cancel_label_preserves_region_structure"
+    },
+    {
+      "line": 2449,
+      "theorem": "committed_obligation_stable"
+    },
+    {
+      "line": 2546,
+      "theorem": "popNext_cancel_priority"
+    },
+    {
+      "line": 2559,
+      "theorem": "popNext_timed_priority"
+    },
+    {
+      "line": 2572,
+      "theorem": "popNext_ready_when_others_empty"
+    },
+    {
+      "line": 2611,
+      "theorem": "popNextFair_eq_popNext_when_below_limit"
+    },
+    {
+      "line": 2619,
+      "theorem": "popNextFair_timed_when_limit_reached"
+    },
+    {
+      "line": 2634,
+      "theorem": "popNextFair_ready_when_limit_reached"
+    },
+    {
+      "line": 2650,
+      "theorem": "popNextFair_fallback_to_popNext"
+    },
+    {
+      "line": 2662,
+      "theorem": "popNextFair_yields_non_cancel"
+    },
+    {
+      "line": 2692,
+      "theorem": "spawned_task_created"
+    },
+    {
+      "line": 2706,
+      "theorem": "spawned_task_in_region"
+    },
+    {
+      "line": 2721,
+      "theorem": "scheduler_change_preserves_wellformed"
+    },
+    {
+      "line": 2752,
+      "theorem": "setTask_same_region_preserves_wellformed"
+    },
+    {
+      "line": 2797,
+      "theorem": "setRegion_structural_preserves_wellformed"
+    },
+    {
+      "line": 2867,
+      "theorem": "aborted_obligation_stable"
+    },
+    {
+      "line": 2953,
+      "theorem": "leaked_obligation_stable"
+    },
+    {
+      "line": 3040,
+      "theorem": "resolved_obligation_stable"
+    },
+    {
+      "line": 3070,
+      "theorem": "step_preserves_wellformed"
+    },
+    {
+      "line": 3139,
+      "theorem": "steps_preserve_wellformed"
+    },
+    {
+      "line": 3171,
+      "theorem": "cancelMasked_potential_decreases"
+    },
+    {
+      "line": 3186,
+      "theorem": "cancelAcknowledge_potential_decreases"
+    },
+    {
+      "line": 3200,
+      "theorem": "cancelFinalize_potential_decreases"
+    },
+    {
+      "line": 3213,
+      "theorem": "cancelComplete_potential_reaches_zero"
+    },
+    {
+      "line": 3229,
+      "theorem": "cancel_potential_bounded_at_entry"
+    },
+    {
+      "line": 3254,
+      "theorem": "cancel_protocol_terminates"
+    },
+    {
+      "line": 3282,
+      "theorem": "cancel_terminates_from_cancelling"
+    },
+    {
+      "line": 3296,
+      "theorem": "cancel_terminates_from_finalizing"
+    },
+    {
+      "line": 3309,
+      "theorem": "cancel_steps_testable_bound"
+    },
+    {
+      "line": 3333,
+      "theorem": "cancel_propagation_bounded"
+    },
+    {
+      "line": 3391,
+      "theorem": "stuttering_refl"
+    },
+    {
+      "line": 3397,
+      "theorem": "stuttering_preserves_wellformed"
+    },
+    {
+      "line": 3438,
+      "theorem": "spawn_creates_task"
+    },
+    {
+      "line": 3450,
+      "theorem": "spawn_preserves_other_tasks"
+    },
+    {
+      "line": 3462,
+      "theorem": "spawn_adds_child"
+    },
+    {
+      "line": 3475,
+      "theorem": "cancel_step_strengthens_reason"
+    },
+    {
+      "line": 3492,
+      "theorem": "close_produces_closed_region"
+    },
+    {
+      "line": 3505,
+      "theorem": "commit_resolves_obligation"
+    },
+    {
+      "line": 3518,
+      "theorem": "abort_resolves_obligation"
+    },
+    {
+      "line": 3532,
+      "theorem": "refinement_preserves_wellformed"
+    },
+    {
+      "line": 3601,
+      "theorem": "panicked_never_restartable"
+    },
+    {
+      "line": 3605,
+      "theorem": "cancelled_never_restartable"
+    },
+    {
+      "line": 3609,
+      "theorem": "ok_never_restartable"
+    },
+    {
+      "line": 3613,
+      "theorem": "err_is_restartable"
+    },
+    {
+      "line": 3617,
+      "theorem": "Severity.le_total"
+    },
+    {
+      "line": 3622,
+      "theorem": "Severity.le_trans"
+    },
+    {
+      "line": 3627,
+      "theorem": "Severity.le_refl"
+    },
+    {
+      "line": 3631,
+      "theorem": "Severity.rank_eq_of_le_le"
+    },
+    {
+      "line": 3639,
+      "theorem": "severity_monotone_not_restartable"
+    },
+    {
+      "line": 3679,
+      "theorem": "call_obligation_resolved_at_close"
+    },
+    {
+      "line": 3689,
+      "theorem": "no_reserved_call_obligations_after_close"
+    },
+    {
+      "line": 3724,
+      "theorem": "registry_lease_resolved_at_close"
+    },
+    {
+      "line": 3735,
+      "theorem": "registry_lease_commit_enables_close"
+    },
+    {
+      "line": 3746,
+      "theorem": "registry_lease_abort_enables_close"
+    },
+    {
+      "line": 3786,
+      "theorem": "enqueue_preserves_wellformed_constructor"
+    },
+    {
+      "line": 3800,
+      "theorem": "scheduleStep_preserves_wellformed_constructor"
+    },
+    {
+      "line": 3809,
+      "theorem": "schedule_preserves_wellformed_constructor"
+    },
+    {
+      "line": 3826,
+      "theorem": "cancelChild_preserves_wellformed_constructor"
+    }
+  ]
+}

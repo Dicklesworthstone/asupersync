@@ -1,0 +1,177 @@
+{
+  "schema_version": "1.0.0",
+  "report_id": "lean.frontier.buckets.v1",
+  "generated_by": "bd-1dorb",
+  "source_log": "target/lean-e2e/bd-cspxm_lake_build.log",
+  "bucket_ordering": "lexicographic(failure_mode,error_code)",
+  "diagnostics_total": 86,
+  "errors_total": 32,
+  "warnings_total": 54,
+  "buckets": [
+    {
+      "bucket_id": "proof-shape.application-type-mismatch",
+      "failure_mode": "proof-shape",
+      "error_code": "application-type-mismatch",
+      "count": 1,
+      "signatures": [
+        "Asupersync.lean:application-type-mismatch:application type mismatch the argument"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:3263:9"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    },
+    {
+      "bucket_id": "proof-shape.omega-goal-not-proved",
+      "failure_mode": "proof-shape",
+      "error_code": "omega-goal-not-proved",
+      "count": 1,
+      "signatures": [
+        "Asupersync.lean:omega-goal-not-proved:omega could not prove the goal"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:3357:28"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    },
+    {
+      "bucket_id": "proof-shape.other",
+      "failure_mode": "proof-shape",
+      "error_code": "other",
+      "count": 1,
+      "signatures": [
+        "Asupersync.lean:other:<id> made no progress"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:2752:58"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    },
+    {
+      "bucket_id": "proof-shape.rewrite-failed",
+      "failure_mode": "proof-shape",
+      "error_code": "rewrite-failed",
+      "count": 3,
+      "signatures": [
+        "Asupersync.lean:rewrite-failed:tactic <id> failed did not find an occurrence of the pattern"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:3459:24",
+        "Asupersync.lean:3463:26",
+        "Asupersync.lean:3467:25"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    },
+    {
+      "bucket_id": "proof-shape.subst-failed",
+      "failure_mode": "proof-shape",
+      "error_code": "subst-failed",
+      "count": 9,
+      "signatures": [
+        "Asupersync.lean:subst-failed:tactic <id> failed did not find equation for eliminating hupdate",
+        "Asupersync.lean:subst-failed:tactic <id> failed invalid equality proof it is not of the form x t or t x"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:3151:4",
+        "Asupersync.lean:3153:4",
+        "Asupersync.lean:3155:4",
+        "Asupersync.lean:3157:4",
+        "Asupersync.lean:3159:4",
+        "Asupersync.lean:3162:4",
+        "Asupersync.lean:3173:4",
+        "Asupersync.lean:3527:4",
+        "Asupersync.lean:3540:4"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    },
+    {
+      "bucket_id": "proof-shape.type-mismatch",
+      "failure_mode": "proof-shape",
+      "error_code": "type-mismatch",
+      "count": 14,
+      "signatures": [
+        "Asupersync.lean:type-mismatch:type mismatch",
+        "Asupersync.lean:type-mismatch:type mismatch after simplification term"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:2380:45",
+        "Asupersync.lean:2545:28",
+        "Asupersync.lean:2546:29",
+        "Asupersync.lean:2589:11",
+        "Asupersync.lean:2603:11",
+        "Asupersync.lean:2617:11",
+        "Asupersync.lean:2667:11",
+        "Asupersync.lean:2683:11",
+        "Asupersync.lean:2716:13",
+        "Asupersync.lean:2935:28",
+        "Asupersync.lean:2936:29",
+        "Asupersync.lean:3037:28"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    },
+    {
+      "bucket_id": "proof-shape.unsolved-goals",
+      "failure_mode": "proof-shape",
+      "error_code": "unsolved-goals",
+      "count": 3,
+      "signatures": [
+        "Asupersync.lean:unsolved-goals:unsolved goals"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:2738:14",
+        "Asupersync.lean:2752:14",
+        "Asupersync.lean:3525:26"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    }
+  ]
+}

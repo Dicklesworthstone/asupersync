@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0.0",
+  "matrix_id": "lean.coverage.v1",
+  "title": "Asupersync Lean Proof Coverage Matrix",
+  "scope": "Canonical sample matrix for semantic rule, invariant, refinement obligation, and operational gate coverage.",
+  "rows": [
+    {
+      "id": "sem.cancel.request.preservation",
+      "title": "requestCancel preserves WellFormed",
+      "row_type": "semantic_rule",
+      "status": "proven",
+      "description": "Preservation proof for requestCancel transition branch.",
+      "owner": "FoggyMarsh",
+      "depends_on": [],
+      "tags": ["cancel", "preservation"],
+      "evidence": [
+        {
+          "theorem_name": "requestCancel_preserves_wellformed",
+          "file_path": "formal/lean/Asupersync.lean",
+          "line": 2321,
+          "proof_artifact": "target/lean-e2e/bd-2ikec_lake_build.log",
+          "reviewer": "MagentaBridge"
+        }
+      ]
+    },
+    {
+      "id": "inv.no_obligation_leaks",
+      "title": "No obligation leaks",
+      "row_type": "invariant",
+      "status": "in-progress",
+      "description": "All obligations are committed or aborted by region close.",
+      "owner": "DarkElk",
+      "depends_on": ["sem.cancel.request.preservation"],
+      "tags": ["obligation", "safety"],
+      "evidence": []
+    },
+    {
+      "id": "ref.runtime.cancel_request.mapping",
+      "title": "Rust cancel_request mapped to Lean requestCancel",
+      "row_type": "refinement_obligation",
+      "status": "blocked",
+      "description": "Refinement map requires stable helper lemma and lock-order consistency witness.",
+      "owner": "RubyLantern",
+      "depends_on": ["sem.cancel.request.preservation", "inv.no_obligation_leaks"],
+      "tags": ["refinement", "runtime"],
+      "blocker": {
+        "code": "BLK_PROOF_MISSING_LEMMA",
+        "detail": "Need helper lemma linking ledger updates to obligation map normalization."
+      },
+      "evidence": []
+    },
+    {
+      "id": "ops.ci.lean.full_gate",
+      "title": "Lean full proof gate in CI",
+      "row_type": "operational_gate",
+      "status": "validated-in-ci",
+      "description": "CI runs deterministic Lean build and publishes proof artifacts.",
+      "owner": "MagentaBridge",
+      "depends_on": ["ref.runtime.cancel_request.mapping"],
+      "tags": ["ci", "proof-health"],
+      "evidence": [
+        {
+          "proof_artifact": "target/proof-artifacts/manifest.json",
+          "ci_job": "proof-checks",
+          "reviewer": "MagentaBridge"
+        }
+      ]
+    }
+  ]
+}

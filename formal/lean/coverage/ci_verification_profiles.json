@@ -1,0 +1,153 @@
+{
+  "schema_version": "1.0.0",
+  "profile_set_id": "lean.ci.verification_profiles.v1",
+  "generated_by": "bd-rook4",
+  "ordering": [
+    "smoke",
+    "frontier",
+    "full"
+  ],
+  "profiles": [
+    {
+      "name": "smoke",
+      "purpose": "Fast pull-request safety gate for high-signal Lean coverage regressions.",
+      "entry_conditions": [
+        "Any PR touching formal/lean/Asupersync.lean",
+        "Any PR touching formal/lean/coverage/*.json",
+        "Any PR touching tests/lean_*.rs"
+      ],
+      "expected_runtime_seconds": {
+        "target": 120,
+        "p95": 300,
+        "max": 420
+      },
+      "commands": [
+        "cargo fmt --check",
+        "cargo check --all-targets",
+        "cargo test --test lean_preservation_constructor_total",
+        "cargo test --test lean_theorem_rule_traceability",
+        "cargo test --test lean_theorem_surface_inventory"
+      ],
+      "output_artifacts": [
+        "formal/lean/coverage/theorem_surface_inventory.json",
+        "formal/lean/coverage/step_constructor_coverage.json",
+        "formal/lean/coverage/theorem_rule_traceability_ledger.json"
+      ],
+      "determinism_guards": [
+        "No wall-clock data embedded in coverage artifacts.",
+        "Artifact ordering and row IDs remain stable across reruns on same commit."
+      ],
+      "comparison_keys": [
+        "profile_name",
+        "git_commit",
+        "artifact_hashes_sha256",
+        "step_constructor_coverage.summary"
+      ],
+      "ownership": {
+        "primary_bead": "bd-rook4",
+        "failure_triage_bead": "bd-2vmjj",
+        "escalation_bead": "bd-2ruh1"
+      }
+    },
+    {
+      "name": "frontier",
+      "purpose": "Focused blocker burn-down gate for current frontier classes and dependency edges.",
+      "entry_conditions": [
+        "Nightly CI run",
+        "Any PR touching Track-2/Track-3 Lean frontier files",
+        "Any PR adjusting gap_risk_sequencing_plan.json priorities or edges"
+      ],
+      "expected_runtime_seconds": {
+        "target": 420,
+        "p95": 900,
+        "max": 1200
+      },
+      "commands": [
+        "cargo fmt --check",
+        "cargo check --all-targets",
+        "cargo clippy --all-targets -- -D warnings",
+        "cargo test --test lean_preservation_constructor_total",
+        "cargo test --test lean_gap_risk_sequencing_plan",
+        "cargo test --test lean_invariant_status_inventory",
+        "cargo test --test lean_baseline_report"
+      ],
+      "output_artifacts": [
+        "formal/lean/coverage/gap_risk_sequencing_plan.json",
+        "formal/lean/coverage/invariant_status_inventory.json",
+        "formal/lean/coverage/baseline_report_v1.json",
+        "formal/lean/coverage/baseline_report_v1.md"
+      ],
+      "determinism_guards": [
+        "Scoring formula remains deterministic: priority_score = 2*product_risk + unblock_potential - implementation_effort.",
+        "Critical path and dependency edges must be acyclic and replayable."
+      ],
+      "comparison_keys": [
+        "profile_name",
+        "git_commit",
+        "artifact_hashes_sha256",
+        "gap_priority_order",
+        "critical_path"
+      ],
+      "ownership": {
+        "primary_bead": "bd-rook4",
+        "failure_triage_bead": "bd-2vmjj",
+        "escalation_bead": "bd-8vpa5"
+      }
+    },
+    {
+      "name": "full",
+      "purpose": "Merge/release assurance gate with full-project validation and audit-grade comparability.",
+      "entry_conditions": [
+        "Merge-to-main",
+        "Release candidate tagging",
+        "Any change to Lean coverage ontology or policy definitions"
+      ],
+      "expected_runtime_seconds": {
+        "target": 900,
+        "p95": 1800,
+        "max": 2400
+      },
+      "commands": [
+        "cargo fmt --check",
+        "cargo check --all-targets",
+        "cargo clippy --all-targets -- -D warnings",
+        "cargo test",
+        "ubs --only=rust --diff ."
+      ],
+      "output_artifacts": [
+        "formal/lean/coverage/lean_coverage_matrix.schema.json",
+        "formal/lean/coverage/lean_coverage_matrix.sample.json",
+        "formal/lean/coverage/theorem_surface_inventory.json",
+        "formal/lean/coverage/step_constructor_coverage.json",
+        "formal/lean/coverage/theorem_rule_traceability_ledger.json",
+        "formal/lean/coverage/invariant_status_inventory.json",
+        "formal/lean/coverage/gap_risk_sequencing_plan.json",
+        "formal/lean/coverage/baseline_report_v1.json",
+        "formal/lean/coverage/baseline_report_v1.md"
+      ],
+      "determinism_guards": [
+        "All artifact hashes are captured and compared against previous successful full run.",
+        "Profile outputs are normalized to commit-scoped deterministic keys."
+      ],
+      "comparison_keys": [
+        "profile_name",
+        "git_commit",
+        "artifact_hashes_sha256",
+        "theorem_count",
+        "step_constructor_coverage.summary",
+        "invariant_status.summary",
+        "gap_priority_order"
+      ],
+      "ownership": {
+        "primary_bead": "bd-rook4",
+        "failure_triage_bead": "bd-2vmjj",
+        "escalation_bead": "bd-2ruh1"
+      }
+    }
+  ],
+  "promotion_policy": {
+    "smoke_to_frontier": "Frontier is required when smoke detects coverage drift or when gap sequencing artifacts change.",
+    "frontier_to_full": "Full is required for merge/release and any ontology/status taxonomy change.",
+    "fallback_rule": "Any deterministic mismatch in comparison_keys escalates directly to full profile and triage routing."
+  }
+}

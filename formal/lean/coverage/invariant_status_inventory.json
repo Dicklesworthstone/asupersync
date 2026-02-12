@@ -1,0 +1,210 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_id": "lean.invariant_status.v1",
+  "source_context": {
+    "lean_file": "formal/lean/Asupersync.lean",
+    "theorem_inventory": "formal/lean/coverage/theorem_surface_inventory.json",
+    "focus": "Asupersync non-negotiable invariants"
+  },
+  "canonical_invariant_definitions": [
+    {
+      "id": "inv.structured_concurrency.single_owner",
+      "name": "Structured concurrency: every task is owned by exactly one region",
+      "statement": "Task ownership is single-region and structurally preserved across spawn/schedule/cancel/close transitions."
+    },
+    {
+      "id": "inv.region_close.quiescence",
+      "name": "Region close = quiescence",
+      "statement": "A close-complete state implies no live children/subregions and no pending finalizers or obligations."
+    },
+    {
+      "id": "inv.cancel.protocol",
+      "name": "Cancellation is a protocol: request -> drain -> finalize (idempotent)",
+      "statement": "Cancellation progresses through modeled protocol states with bounded cleanup and idempotent request semantics."
+    },
+    {
+      "id": "inv.race.losers_drained",
+      "name": "Losers are drained after races",
+      "statement": "Non-winning race branches must be cancelled and fully drained before completion is considered safe."
+    },
+    {
+      "id": "inv.obligation.no_leaks",
+      "name": "No obligation leaks",
+      "statement": "Obligations are explicitly resolved (committed/aborted/leaked), and unresolved obligations block close."
+    },
+    {
+      "id": "inv.authority.no_ambient",
+      "name": "No ambient authority",
+      "statement": "Effects require explicit capabilities; unauthorized ambient effects are disallowed."
+    }
+  ],
+  "status_scale": [
+    "fully_proven",
+    "partially_proven",
+    "unproven"
+  ],
+  "invariants": [
+    {
+      "id": "inv.structured_concurrency.single_owner",
+      "name": "Structured concurrency: every task is owned by exactly one region",
+      "statement": "Task membership and region relationships remain structurally consistent through spawn/schedule/cancel/close transitions.",
+      "lean_status": "partially_proven",
+      "lean_theorems": [
+        "spawn_preserves_existing_task",
+        "spawn_preserves_obligation",
+        "spawn_preserves_wellformed",
+        "spawned_task_in_region",
+        "setTask_same_region_preserves_wellformed",
+        "setRegion_structural_preserves_wellformed",
+        "step_preserves_wellformed"
+      ],
+      "test_refs": [
+        "tests/property_region_ops.rs",
+        "tests/region_lifecycle_conformance.rs",
+        "tests/integration_e2e.rs"
+      ],
+      "gaps": [
+        "No single explicit theorem stating global uniqueness of region ownership for all task IDs."
+      ],
+      "follow_up_beads": [
+        "bd-nc3ut",
+        "bd-2iwok"
+      ]
+    },
+    {
+      "id": "inv.region_close.quiescence",
+      "name": "Region close = quiescence",
+      "statement": "If a close step completes, all child tasks/subregions/finalizers are drained and obligations are not pending.",
+      "lean_status": "fully_proven",
+      "lean_theorems": [
+        "close_implies_quiescent",
+        "close_implies_ledger_empty",
+        "close_implies_finalizers_empty",
+        "quiescent_tasks_completed",
+        "quiescent_subregions_closed",
+        "quiescent_no_obligations",
+        "quiescent_no_finalizers",
+        "close_quiescence_decomposition",
+        "close_complete_step"
+      ],
+      "test_refs": [
+        "tests/close_quiescence_regression.rs",
+        "tests/region_lifecycle_conformance.rs",
+        "tests/refinement_conformance.rs"
+      ],
+      "gaps": [],
+      "follow_up_beads": []
+    },
+    {
+      "id": "inv.cancel.protocol",
+      "name": "Cancellation is a protocol: request -> drain -> finalize (idempotent)",
+      "statement": "Cancellation transitions progress through the modeled states and terminate within bounded potential.",
+      "lean_status": "partially_proven",
+      "lean_theorems": [
+        "cancel_masked_step",
+        "cancel_ack_step",
+        "cancel_finalize_step",
+        "cancel_complete_step",
+        "cancel_complete_produces_cancelled",
+        "cancelMasked_potential_decreases",
+        "cancelAcknowledge_potential_decreases",
+        "cancelFinalize_potential_decreases",
+        "cancelComplete_potential_reaches_zero",
+        "cancel_protocol_terminates",
+        "cancel_steps_testable_bound",
+        "cancel_propagation_bounded"
+      ],
+      "test_refs": [
+        "tests/cancellation_conformance.rs",
+        "tests/cancellation_stress_e2e.rs",
+        "tests/cancel_obligation_invariants.rs",
+        "tests/refinement_conformance.rs"
+      ],
+      "gaps": [
+        "Idempotence of repeated cancel requests is not captured as a dedicated Lean theorem."
+      ],
+      "follow_up_beads": [
+        "bd-1ab3k"
+      ]
+    },
+    {
+      "id": "inv.race.losers_drained",
+      "name": "Losers are drained after races",
+      "statement": "In a race, non-winning branches must be cancelled and fully drained before completion is considered safe.",
+      "lean_status": "unproven",
+      "lean_theorems": [
+        "cancel_propagation_bounded",
+        "step_preserves_wellformed"
+      ],
+      "test_refs": [
+        "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
+        "tests/e2e/combinator/cancel_correctness/async_loser_drain.rs",
+        "tests/cancel_obligation_invariants.rs",
+        "tests/runtime_e2e.rs"
+      ],
+      "gaps": [
+        "No direct Lean theorem currently states and proves race-loser full-drain semantics."
+      ],
+      "follow_up_beads": [
+        "bd-19efq",
+        "bd-244p5"
+      ]
+    },
+    {
+      "id": "inv.obligation.no_leaks",
+      "name": "No obligation leaks",
+      "statement": "Obligations are either committed/aborted/leaked with explicit state transitions and ledger updates; unresolved obligations block close.",
+      "lean_status": "partially_proven",
+      "lean_theorems": [
+        "commit_resolves",
+        "abort_resolves",
+        "leak_marks_leaked",
+        "commit_removes_from_ledger",
+        "abort_removes_from_ledger",
+        "leak_removes_from_ledger",
+        "obligation_in_ledger_blocks_close",
+        "close_implies_ledger_empty",
+        "call_obligation_resolved_at_close",
+        "no_reserved_call_obligations_after_close",
+        "registry_lease_resolved_at_close"
+      ],
+      "test_refs": [
+        "tests/obligation_lifecycle_e2e.rs",
+        "tests/cancel_obligation_invariants.rs",
+        "tests/leak_regression_e2e.rs",
+        "tests/lease_semantics.rs"
+      ],
+      "gaps": [
+        "A single global theorem stating zero leaked obligations across all reachable executions is not yet present."
+      ],
+      "follow_up_beads": [
+        "bd-3k6l5",
+        "bd-244p5"
+      ]
+    },
+    {
+      "id": "inv.authority.no_ambient",
+      "name": "No ambient authority",
+      "statement": "Effects flow through explicit capabilities; unauthorized actions are rejected by type/capability constraints.",
+      "lean_status": "unproven",
+      "lean_theorems": [],
+      "test_refs": [
+        "tests/property_cap_obligation.rs",
+        "tests/cap_obligation_compile_fail.rs",
+        "tests/integration_e2e.rs"
+      ],
+      "gaps": [
+        "Capability discipline is heavily tested in Rust, but no dedicated Lean proof family exists yet for ambient-authority exclusion."
+      ],
+      "follow_up_beads": [
+        "bd-2iwok",
+        "bd-1vhw5"
+      ]
+    }
+  ],
+  "summary": {
+    "fully_proven": 1,
+    "partially_proven": 3,
+    "unproven": 2
+  }
+}

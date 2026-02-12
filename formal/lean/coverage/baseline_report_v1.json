@@ -1,0 +1,194 @@
+{
+  "schema_version": "1.0.0",
+  "report_id": "lean.coverage.baseline.v1",
+  "generated_by": "bd-5w2lq",
+  "source_hashes_sha256": {
+    "theorem_surface_inventory": "8771782af487abd330e763d87776ff6b44a4be46f1667ecb2c8af8c7f8b16498",
+    "step_constructor_coverage": "beb61d306918873d004f13881f4030a8b274aa54b94f40c1911240c959eac41a",
+    "theorem_rule_traceability_ledger": "0e92b936c1ee0fe306ce1f66389e09887322e199d41e09ecdd698c19a3e54e91",
+    "invariant_status_inventory": "7ddc8b6ff078cbe15b4ac979ee091a06f738118714578a4ed9d30649bae1f447",
+    "invariant_theorem_test_link_map": "18eb87e32c05041d26b5d6039c6e81a749d49b7b6bec1be608a4217ed402ef3f",
+    "gap_risk_sequencing_plan": "f80eaef4a7d959d2e5c31d82cd3f5648c9c78340d8fa8c1f745cd0fc423a3b01",
+    "ci_verification_profiles": "edc7029e1cfedee2ef8e2d6edea0ab6dd39472e1c1457e38d2be5e8f9398eff5",
+    "lean_frontier_buckets": "5d76eba5bbc38c3c8824ddbd0166a2c516ff77d8f9d43bd47bbd6f365f1ee082",
+    "lean_coverage_matrix_schema": "f1eea982a084ed96199bead1627c776b939b5dda4f676b851107e3848ba7b5eb",
+    "lean_coverage_matrix_sample": "5ef5d2f0f1867a535e76320ed2e1bbc131421c05ced2bcee3605f44fd1a0c6c8"
+  },
+  "snapshot": {
+    "theorem_surface": {
+      "theorem_count": 136,
+      "first_theorem": "removeObligationId_not_mem",
+      "last_theorem": "cancelChild_preserves_wellformed_constructor"
+    },
+    "step_constructor_coverage": {
+      "step_constructor_count": 22,
+      "covered": 22,
+      "partial": 0,
+      "missing": 0,
+      "partial_constructors": []
+    },
+    "invariant_status": {
+      "fully_proven": 1,
+      "partially_proven": 3,
+      "unproven": 2,
+      "unproven_invariant_ids": [
+        "inv.race.losers_drained",
+        "inv.authority.no_ambient"
+      ]
+    },
+    "invariant_witness_link_map": {
+      "invariants_total": 6,
+      "invariants_with_theorem_witnesses": 5,
+      "invariants_with_executable_checks": 6,
+      "invariants_with_explicit_gaps": 5,
+      "invariants_covered_via_explicit_gap_only": 1
+    },
+    "gap_priority": {
+      "first_class_blockers": [
+        "gap.declaration_order.helper_frontier",
+        "gap.proof_shape.preservation_branches",
+        "gap.missing_lemma.invariant_witness_bundle",
+        "gap.model_code_mismatch.refinement_table"
+      ],
+      "top3": [
+        "gap.declaration_order.helper_frontier",
+        "gap.proof_shape.preservation_branches",
+        "gap.missing_lemma.invariant_witness_bundle"
+      ],
+      "recommended_track_order": [
+        "track-2",
+        "track-3",
+        "track-4",
+        "track-5",
+        "track-6"
+      ]
+    },
+    "frontier_buckets": {
+      "diagnostics_total": 86,
+      "errors_total": 32,
+      "warnings_total": 54,
+      "bucket_count": 7,
+      "largest_bucket": "proof-shape.type-mismatch"
+    }
+  },
+  "ownership_map": [
+    {
+      "area": "Track-1 baseline/scope execution",
+      "bead_id": "bd-3kzbt",
+      "status": "closed",
+      "assignee": "MagentaBridge"
+    },
+    {
+      "area": "Track-1 baseline report + cadence",
+      "bead_id": "bd-5w2lq",
+      "status": "closed",
+      "assignee": "MagentaBridge"
+    },
+    {
+      "area": "Track-1 invariant theorem/test linkage",
+      "bead_id": "bd-2iwok",
+      "status": "closed",
+      "assignee": "MagentaBridge"
+    },
+    {
+      "area": "Track-2 frontier extractor + bucketing",
+      "bead_id": "bd-1dorb",
+      "status": "closed",
+      "assignee": "MagentaBridge"
+    },
+    {
+      "area": "Track-2 declaration-order stabilization",
+      "bead_id": "bd-53a0d",
+      "status": "open",
+      "assignee": null
+    },
+    {
+      "area": "Track-2 tactic stability",
+      "bead_id": "bd-kf0mv",
+      "status": "closed",
+      "assignee": "MagentaBridge"
+    },
+    {
+      "area": "Track-3 constructor-total preservation",
+      "bead_id": "bd-112rm",
+      "status": "in_progress",
+      "assignee": "MagentaBridge"
+    },
+    {
+      "area": "Track-3 invariant witness bundle",
+      "bead_id": "bd-244p5",
+      "status": "open",
+      "assignee": null
+    },
+    {
+      "area": "Track-4 explicit refinement mapping",
+      "bead_id": "bd-2ve1x",
+      "status": "open",
+      "assignee": null
+    }
+  ],
+  "maintenance_cadence": {
+    "policy_version": "1.0.0",
+    "owner_role": "Current assignee of bd-3kzbt or delegated Track owner",
+    "refresh_triggers": [
+      {
+        "trigger": "Any PR that changes formal/lean/Asupersync.lean",
+        "required_updates": [
+          "theorem_surface_inventory.json",
+          "step_constructor_coverage.json",
+          "theorem_rule_traceability_ledger.json",
+          "invariant_status_inventory.json",
+          "invariant_theorem_test_link_map.json",
+          "gap_risk_sequencing_plan.json",
+          "ci_verification_profiles.json",
+          "lean_frontier_buckets_v1.json",
+          "baseline_report_v1.json"
+        ]
+      },
+      {
+        "trigger": "Any PR that changes runtime/refinement-conformance behavior",
+        "required_updates": [
+          "theorem_rule_traceability_ledger.json",
+          "invariant_theorem_test_link_map.json",
+          "gap_risk_sequencing_plan.json",
+          "ci_verification_profiles.json",
+          "lean_frontier_buckets_v1.json",
+          "baseline_report_v1.json"
+        ]
+      },
+      {
+        "trigger": "Weekly proof-health pass (or milestone boundary)",
+        "required_updates": [
+          "ci_verification_profiles.json",
+          "lean_frontier_buckets_v1.json",
+          "baseline_report_v1.json",
+          "baseline_report_v1.md"
+        ]
+      }
+    ],
+    "verification_gates": [
+      "cargo fmt --check",
+      "cargo check --all-targets",
+      "cargo clippy --all-targets -- -D warnings",
+      "cargo test"
+    ]
+  },
+  "change_control": {
+    "definitions_are_controlled": [
+      "failure_mode_catalog in gap_risk_sequencing_plan.json",
+      "status_scale in invariant_status_inventory.json",
+      "linkage_policy in invariant_theorem_test_link_map.json",
+      "error_code/failure_mode taxonomy in lean_frontier_buckets_v1.json",
+      "row_type/status/blocker taxonomy in lean_coverage_matrix schema/model"
+    ],
+    "required_protocol": [
+      "Document rationale in bead notes and update this baseline report.",
+      "Adjust all impacted artifacts/tests in the same changeset.",
+      "Run full verification gates before claiming completion."
+    ],
+    "audit_requirements": [
+      "All bead references in baseline artifacts must resolve to existing beads.",
+      "Any first-class blocker reclassification must include explicit rationale and dependency impact."
+    ]
+  }
+}

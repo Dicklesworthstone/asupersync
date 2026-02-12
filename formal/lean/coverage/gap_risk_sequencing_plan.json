@@ -1,0 +1,446 @@
+{
+  "schema_version": "1.0.0",
+  "plan_id": "lean.gap_risk_sequencing.v1",
+  "generated_by": "bd-1vhw5",
+  "inputs": {
+    "theorem_inventory": "formal/lean/coverage/theorem_surface_inventory.json",
+    "step_constructor_coverage": "formal/lean/coverage/step_constructor_coverage.json",
+    "invariant_inventory": "formal/lean/coverage/invariant_status_inventory.json",
+    "traceability_ledger": "formal/lean/coverage/theorem_rule_traceability_ledger.json"
+  },
+  "failure_mode_catalog": [
+    {
+      "code": "declaration-order",
+      "description": "Proof failure caused by helper/theorem declaration order or helper availability at use-site."
+    },
+    {
+      "code": "missing-lemma",
+      "description": "Coverage gap where required theorem/lemma does not exist or is too weak."
+    },
+    {
+      "code": "proof-shape",
+      "description": "Branch-local shape mismatch in rewrite/subst/equality orientation that blocks completion."
+    },
+    {
+      "code": "model-code-mismatch",
+      "description": "Lean model and Rust runtime behavior are not yet mapped/aligned enough for deterministic conformance."
+    },
+    {
+      "code": "tactic-instability",
+      "description": "Unstable or non-terminating tactic behavior (e.g., recursive simp loops) causes nondeterministic/fragile proofs."
+    }
+  ],
+  "error_code_catalog": [
+    {
+      "error_code": "unknown-identifier",
+      "failure_mode": "declaration-order",
+      "description": "Helper/theorem is referenced before availability at the use-site."
+    },
+    {
+      "error_code": "constructor-alternative-missing",
+      "failure_mode": "missing-lemma",
+      "description": "A required constructor branch/proof alternative is missing."
+    },
+    {
+      "error_code": "tactic-max-rec-depth",
+      "failure_mode": "tactic-instability",
+      "description": "Tactic expansion exceeded recursion depth."
+    },
+    {
+      "error_code": "tactic-simp-nested-error",
+      "failure_mode": "tactic-instability",
+      "description": "Nested `simp` execution failed in an unstable/non-local way."
+    },
+    {
+      "error_code": "simp-no-progress",
+      "failure_mode": "tactic-instability",
+      "description": "`simp` made no progress where progress is required for the proof path."
+    },
+    {
+      "error_code": "application-type-mismatch",
+      "failure_mode": "proof-shape",
+      "description": "Application arguments do not match expected theorem/term shape."
+    },
+    {
+      "error_code": "type-mismatch",
+      "failure_mode": "proof-shape",
+      "description": "Term/type mismatch blocks local proof obligations."
+    },
+    {
+      "error_code": "rewrite-failed",
+      "failure_mode": "proof-shape",
+      "description": "Rewrite target or orientation does not match local goal/context."
+    },
+    {
+      "error_code": "subst-failed",
+      "failure_mode": "proof-shape",
+      "description": "`subst` could not eliminate with the available equality form."
+    },
+    {
+      "error_code": "unsolved-goals",
+      "failure_mode": "proof-shape",
+      "description": "Local proof branch left goals unresolved."
+    },
+    {
+      "error_code": "no-goals",
+      "failure_mode": "proof-shape",
+      "description": "Tactic expected goals but local branch has none (proof-shape drift)."
+    },
+    {
+      "error_code": "parse-unexpected-token",
+      "failure_mode": "proof-shape",
+      "description": "Parser/token mismatch in theorem branch structure."
+    },
+    {
+      "error_code": "omega-goal-not-proved",
+      "failure_mode": "proof-shape",
+      "description": "Arithmetic proof obligation not discharged by `omega`."
+    },
+    {
+      "error_code": "other",
+      "failure_mode": "proof-shape",
+      "description": "Fallback bucket for unmatched proof-shape diagnostics."
+    }
+  ],
+  "scoring_model": {
+    "range": {
+      "product_risk": "1-5",
+      "unblock_potential": "1-5",
+      "implementation_effort": "1-5"
+    },
+    "formula": "priority_score = (2 * product_risk) + unblock_potential - implementation_effort",
+    "score_interpretation": {
+      "11-15": "critical path / first-class blocker",
+      "8-10": "high priority",
+      "5-7": "medium priority",
+      "1-4": "background/parallelizable"
+    }
+  },
+  "gaps": [
+    {
+      "id": "gap.declaration_order.helper_frontier",
+      "failure_mode": "declaration-order",
+      "summary": "Lean frontier still contains helper-availability and declaration-order failures that prevent stable burn-down.",
+      "evidence_refs": [
+        "formal/lean/coverage/theorem_surface_inventory.json",
+        "formal/lean/Asupersync.lean"
+      ],
+      "linked_beads": [
+        "bd-1dorb",
+        "bd-53a0d",
+        "bd-vmom8"
+      ],
+      "product_risk": 5,
+      "unblock_potential": 5,
+      "implementation_effort": 3,
+      "priority_score": 12,
+      "rationale": [
+        "Track-2 cannot converge if the first frontier class remains declaration-order unstable.",
+        "This gap gates downstream proof-shape and tactic passes."
+      ]
+    },
+    {
+      "id": "gap.tactic_instability.recursive_simp",
+      "failure_mode": "tactic-instability",
+      "summary": "Recursive simplification and brittle tactic bundles create nondeterministic proof behavior and occasional depth failures.",
+      "evidence_refs": [
+        "formal/lean/Asupersync.lean"
+      ],
+      "linked_beads": [
+        "bd-kf0mv",
+        "bd-e5iyi"
+      ],
+      "product_risk": 4,
+      "unblock_potential": 4,
+      "implementation_effort": 2,
+      "priority_score": 10,
+      "rationale": [
+        "Tactic instability inflates MTTR and can regress previously green sections.",
+        "Stabilizing simp/tactic behavior is a prerequisite for reliable CI gates."
+      ]
+    },
+    {
+      "id": "gap.proof_shape.preservation_branches",
+      "failure_mode": "proof-shape",
+      "summary": "Preservation branches still need constructor-specific proof-shape repairs (rewrite direction, subst shape, local goals).",
+      "evidence_refs": [
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "linked_beads": [
+        "bd-112rm",
+        "bd-3tal8",
+        "bd-366fd"
+      ],
+      "product_risk": 5,
+      "unblock_potential": 4,
+      "implementation_effort": 3,
+      "priority_score": 11,
+      "rationale": [
+        "Constructor-total preservation is a hard prerequisite for theorem-complete semantics.",
+        "This gap currently blocks multiple Track-3 families."
+      ]
+    },
+    {
+      "id": "gap.missing_lemma.partial_constructor_specificity",
+      "failure_mode": "missing-lemma",
+      "summary": "Constructor-specific preservation lemmas for enqueue/scheduleStep/schedule/cancelChild are now in place; keep this row as a regression sentinel.",
+      "evidence_refs": [
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "linked_beads": [
+        "bd-112rm",
+        "bd-1ab3k"
+      ],
+      "product_risk": 1,
+      "unblock_potential": 2,
+      "implementation_effort": 1,
+      "priority_score": 3,
+      "rationale": [
+        "Constructor-total preservation coverage is now explicit in dedicated lemmas and artifacts.",
+        "The row remains to detect regressions if future edits reintroduce partial constructor status."
+      ]
+    },
+    {
+      "id": "gap.missing_lemma.invariant_witness_bundle",
+      "failure_mode": "missing-lemma",
+      "summary": "Non-negotiable invariants still contain partial/unproven witness bundles (notably no ambient authority and loser-drain).",
+      "evidence_refs": [
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "linked_beads": [
+        "bd-244p5",
+        "bd-19efq",
+        "bd-3k6l5",
+        "bd-2iwok",
+        "bd-nc3ut"
+      ],
+      "product_risk": 5,
+      "unblock_potential": 5,
+      "implementation_effort": 4,
+      "priority_score": 11,
+      "rationale": [
+        "Invariant witness completeness is central to the stated definition of complete Lean coverage.",
+        "Track-6 reliability/performance guidance depends on this bundle being explicit."
+      ]
+    },
+    {
+      "id": "gap.model_code_mismatch.refinement_table",
+      "failure_mode": "model-code-mismatch",
+      "summary": "Rust↔Lean refinement rows are not yet complete for cross-entity runtime operations and scheduler/combinator behavior.",
+      "evidence_refs": [
+        "formal/lean/coverage/theorem_rule_traceability_ledger.json"
+      ],
+      "linked_beads": [
+        "bd-2ve1x",
+        "bd-23hq7",
+        "bd-1yrju"
+      ],
+      "product_risk": 5,
+      "unblock_potential": 4,
+      "implementation_effort": 3,
+      "priority_score": 11,
+      "rationale": [
+        "Without explicit refinement mapping, proof status cannot reliably constrain runtime changes.",
+        "This is the highest-leverage bridge from formal results to executable confidence."
+      ]
+    },
+    {
+      "id": "gap.model_code_mismatch.divergence_triage",
+      "failure_mode": "model-code-mismatch",
+      "summary": "Mismatch triage process remains immature, increasing risk of unresolved model/code drift.",
+      "evidence_refs": [
+        "formal/lean/coverage/README.md"
+      ],
+      "linked_beads": [
+        "bd-1b2iv",
+        "bd-3mo4f"
+      ],
+      "product_risk": 4,
+      "unblock_potential": 3,
+      "implementation_effort": 2,
+      "priority_score": 9,
+      "rationale": [
+        "Track-4 needs deterministic routing for divergence fixes (model-first vs code-first).",
+        "Poor triage causes churn and delayed closure of refinement blockers."
+      ]
+    },
+    {
+      "id": "gap.tactic_instability.repro_artifact_governance",
+      "failure_mode": "tactic-instability",
+      "summary": "Proof failures are not yet universally captured as deterministic repro bundles with governance-grade manifests.",
+      "evidence_refs": [
+        "formal/lean/coverage/README.md"
+      ],
+      "linked_beads": [
+        "bd-rook4",
+        "bd-8vpa5",
+        "bd-kmkaf"
+      ],
+      "product_risk": 3,
+      "unblock_potential": 3,
+      "implementation_effort": 2,
+      "priority_score": 7,
+      "rationale": [
+        "This gap does not directly block theorem completion but strongly affects repeatability and auditability.",
+        "Necessary for long-term stability once frontier classes are reduced."
+      ]
+    },
+    {
+      "id": "gap.missing_lemma.impact_loop_application",
+      "failure_mode": "missing-lemma",
+      "summary": "Proof-derived assumptions are not yet fully converted into enforceable runtime guardrails and impact measurements.",
+      "evidence_refs": [
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "linked_beads": [
+        "bd-1lda7",
+        "bd-l2b3m",
+        "bd-3t7o5",
+        "bd-3q3z0",
+        "bd-n5tqv"
+      ],
+      "product_risk": 4,
+      "unblock_potential": 4,
+      "implementation_effort": 3,
+      "priority_score": 9,
+      "rationale": [
+        "Complete Lean coverage is not sufficient unless it is applied to runtime decisions.",
+        "Track-6 closes the value loop: performance, reliability, correctness."
+      ]
+    }
+  ],
+  "first_class_blockers": [
+    "gap.declaration_order.helper_frontier",
+    "gap.proof_shape.preservation_branches",
+    "gap.missing_lemma.invariant_witness_bundle",
+    "gap.model_code_mismatch.refinement_table"
+  ],
+  "priority_order": [
+    "gap.declaration_order.helper_frontier",
+    "gap.proof_shape.preservation_branches",
+    "gap.missing_lemma.invariant_witness_bundle",
+    "gap.model_code_mismatch.refinement_table",
+    "gap.tactic_instability.recursive_simp",
+    "gap.missing_lemma.partial_constructor_specificity",
+    "gap.model_code_mismatch.divergence_triage",
+    "gap.missing_lemma.impact_loop_application",
+    "gap.tactic_instability.repro_artifact_governance"
+  ],
+  "sequencing": {
+    "recommended_track_order": [
+      "track-2",
+      "track-3",
+      "track-4",
+      "track-5",
+      "track-6"
+    ],
+    "dependency_edges": [
+      {
+        "from_gap": "gap.declaration_order.helper_frontier",
+        "to_gap": "gap.tactic_instability.recursive_simp",
+        "reason": "Stable helper ordering reduces spurious tactic failures and isolates true recursion-depth issues."
+      },
+      {
+        "from_gap": "gap.declaration_order.helper_frontier",
+        "to_gap": "gap.proof_shape.preservation_branches",
+        "reason": "Proof-shape repairs are tractable only after helper availability is deterministic."
+      },
+      {
+        "from_gap": "gap.proof_shape.preservation_branches",
+        "to_gap": "gap.missing_lemma.partial_constructor_specificity",
+        "reason": "Constructor-total preservation work reveals exact missing constructor lemmas."
+      },
+      {
+        "from_gap": "gap.missing_lemma.partial_constructor_specificity",
+        "to_gap": "gap.missing_lemma.invariant_witness_bundle",
+        "reason": "Invariant witness bundles depend on constructor-complete theorem foundations."
+      },
+      {
+        "from_gap": "gap.missing_lemma.invariant_witness_bundle",
+        "to_gap": "gap.model_code_mismatch.refinement_table",
+        "reason": "Refinement rows need stable invariant witness anchors and assumptions."
+      },
+      {
+        "from_gap": "gap.model_code_mismatch.refinement_table",
+        "to_gap": "gap.model_code_mismatch.divergence_triage",
+        "reason": "Triage process is meaningful only when concrete mapping rows and mismatch classes exist."
+      },
+      {
+        "from_gap": "gap.model_code_mismatch.divergence_triage",
+        "to_gap": "gap.tactic_instability.repro_artifact_governance",
+        "reason": "Operational governance should codify established mismatch and failure classes."
+      },
+      {
+        "from_gap": "gap.tactic_instability.repro_artifact_governance",
+        "to_gap": "gap.missing_lemma.impact_loop_application",
+        "reason": "Impact loop metrics require deterministic reproducibility and auditable artifacts."
+      }
+    ],
+    "critical_path": [
+      "gap.declaration_order.helper_frontier",
+      "gap.proof_shape.preservation_branches",
+      "gap.missing_lemma.partial_constructor_specificity",
+      "gap.missing_lemma.invariant_witness_bundle",
+      "gap.model_code_mismatch.refinement_table",
+      "gap.model_code_mismatch.divergence_triage",
+      "gap.tactic_instability.repro_artifact_governance",
+      "gap.missing_lemma.impact_loop_application"
+    ],
+    "phase_plan": [
+      {
+        "phase": "phase-1-frontier-stabilization",
+        "track": "track-2",
+        "target_gaps": [
+          "gap.declaration_order.helper_frontier",
+          "gap.tactic_instability.recursive_simp"
+        ],
+        "exit_criteria": [
+          "Frontier categories declaration-order and tactic recursion are stable and trending down deterministically."
+        ]
+      },
+      {
+        "phase": "phase-2-semantics-completion",
+        "track": "track-3",
+        "target_gaps": [
+          "gap.proof_shape.preservation_branches",
+          "gap.missing_lemma.partial_constructor_specificity",
+          "gap.missing_lemma.invariant_witness_bundle"
+        ],
+        "exit_criteria": [
+          "Preservation and invariant witness coverage are constructor-total for declared scope."
+        ]
+      },
+      {
+        "phase": "phase-3-refinement-closure",
+        "track": "track-4",
+        "target_gaps": [
+          "gap.model_code_mismatch.refinement_table",
+          "gap.model_code_mismatch.divergence_triage"
+        ],
+        "exit_criteria": [
+          "Runtime operations are mapped to formal rules with deterministic divergence triage workflow."
+        ]
+      },
+      {
+        "phase": "phase-4-operationalization",
+        "track": "track-5",
+        "target_gaps": [
+          "gap.tactic_instability.repro_artifact_governance"
+        ],
+        "exit_criteria": [
+          "CI profiles and artifact manifests make proof status continuously enforceable."
+        ]
+      },
+      {
+        "phase": "phase-5-impact-loop",
+        "track": "track-6",
+        "target_gaps": [
+          "gap.missing_lemma.impact_loop_application"
+        ],
+        "exit_criteria": [
+          "Proof-guided improvements in performance, reliability, and correctness are measured and reported."
+        ]
+      }
+    ]
+  }
+}

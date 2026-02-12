@@ -1,0 +1,265 @@
+{
+  "schema_version": "1.0.0",
+  "coverage_id": "lean.step_constructor_coverage.v1",
+  "source_file": "formal/lean/Asupersync.lean",
+  "step_constructor_count": 22,
+  "global_proof_backstops": [
+    "step_preserves_wellformed",
+    "steps_preserve_wellformed"
+  ],
+  "constructors": [
+    {
+      "line": 319,
+      "constructor": "enqueue",
+      "status": "covered",
+      "mapped_theorems": [
+        "enqueue_preserves_wellformed_constructor",
+        "step_preserves_wellformed",
+        "steps_preserve_wellformed"
+      ]
+    },
+    {
+      "line": 331,
+      "constructor": "scheduleStep",
+      "status": "covered",
+      "mapped_theorems": [
+        "popNext_cancel_priority",
+        "popNext_timed_priority",
+        "popNext_ready_when_others_empty",
+        "popNextFair_eq_popNext_when_below_limit",
+        "popNextFair_timed_when_limit_reached",
+        "popNextFair_ready_when_limit_reached",
+        "popNextFair_fallback_to_popNext",
+        "popNextFair_yields_non_cancel",
+        "scheduler_change_preserves_wellformed",
+        "scheduleStep_preserves_wellformed_constructor",
+        "step_preserves_wellformed",
+        "steps_preserve_wellformed"
+      ]
+    },
+    {
+      "line": 337,
+      "constructor": "spawn",
+      "status": "covered",
+      "mapped_theorems": [
+        "spawn_preserves_existing_task",
+        "spawn_preserves_obligation",
+        "spawn_preserves_wellformed",
+        "spawned_task_created",
+        "spawned_task_in_region",
+        "spawn_creates_task",
+        "spawn_preserves_other_tasks",
+        "spawn_adds_child"
+      ]
+    },
+    {
+      "line": 351,
+      "constructor": "schedule",
+      "status": "covered",
+      "mapped_theorems": [
+        "schedule_preserves_wellformed_constructor",
+        "scheduler_change_preserves_wellformed",
+        "step_preserves_wellformed",
+        "steps_preserve_wellformed"
+      ]
+    },
+    {
+      "line": 365,
+      "constructor": "complete",
+      "status": "covered",
+      "mapped_theorems": [
+        "complete_preserves_region",
+        "complete_preserves_obligation",
+        "complete_preserves_wellformed",
+        "completed_not_runnable"
+      ]
+    },
+    {
+      "line": 374,
+      "constructor": "reserve",
+      "status": "covered",
+      "mapped_theorems": [
+        "reserve_creates_reserved",
+        "reserve_holder_exists",
+        "reserve_adds_to_ledger",
+        "reserve_preserves_wellformed",
+        "lease_reserve_in_ledger"
+      ]
+    },
+    {
+      "line": 389,
+      "constructor": "commit",
+      "status": "covered",
+      "mapped_theorems": [
+        "commit_resolves",
+        "commit_removes_from_ledger",
+        "commit_preserves_wellformed",
+        "commit_resolves_obligation",
+        "committed_obligation_stable"
+      ]
+    },
+    {
+      "line": 404,
+      "constructor": "abort",
+      "status": "covered",
+      "mapped_theorems": [
+        "abort_resolves",
+        "abort_removes_from_ledger",
+        "abort_preserves_wellformed",
+        "abort_resolves_obligation",
+        "aborted_obligation_stable"
+      ]
+    },
+    {
+      "line": 419,
+      "constructor": "leak",
+      "status": "covered",
+      "mapped_theorems": [
+        "leak_marks_leaked",
+        "leak_removes_from_ledger",
+        "leak_preserves_wellformed",
+        "leaked_obligation_stable"
+      ]
+    },
+    {
+      "line": 437,
+      "constructor": "cancelRequest",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancel_request_preserves_obligation",
+        "cancelling_from_cancelRequested",
+        "cancelRequest_preserves_wellformed",
+        "cancel_step_strengthens_reason",
+        "cancel_label_preserves_region_structure"
+      ]
+    },
+    {
+      "line": 456,
+      "constructor": "cancelMasked",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancel_masked_step",
+        "cancelMasked_potential_decreases"
+      ]
+    },
+    {
+      "line": 470,
+      "constructor": "cancelAcknowledge",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancel_ack_step",
+        "cancelAcknowledge_potential_decreases"
+      ]
+    },
+    {
+      "line": 480,
+      "constructor": "cancelFinalize",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancel_finalize_step",
+        "cancelFinalize_potential_decreases"
+      ]
+    },
+    {
+      "line": 489,
+      "constructor": "cancelComplete",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancel_complete_step",
+        "cancel_complete_produces_cancelled",
+        "cancelComplete_potential_reaches_zero",
+        "cancel_protocol_terminates",
+        "cancel_terminates_from_cancelling",
+        "cancel_terminates_from_finalizing",
+        "cancel_steps_testable_bound"
+      ]
+    },
+    {
+      "line": 500,
+      "constructor": "cancelPropagate",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancel_propagation_bounded",
+        "cancel_label_preserves_region_structure"
+      ]
+    },
+    {
+      "line": 514,
+      "constructor": "cancelChild",
+      "status": "covered",
+      "mapped_theorems": [
+        "cancelChild_preserves_wellformed_constructor",
+        "cancel_label_preserves_region_structure",
+        "cancel_propagation_bounded",
+        "step_preserves_wellformed",
+        "steps_preserve_wellformed"
+      ]
+    },
+    {
+      "line": 531,
+      "constructor": "closeBegin",
+      "status": "covered",
+      "mapped_theorems": [
+        "close_begin_step"
+      ]
+    },
+    {
+      "line": 540,
+      "constructor": "closeCancelChildren",
+      "status": "covered",
+      "mapped_theorems": [
+        "close_cancel_children_step",
+        "close_children_exist_completed",
+        "cancel_label_preserves_region_structure"
+      ]
+    },
+    {
+      "line": 558,
+      "constructor": "closeChildrenDone",
+      "status": "covered",
+      "mapped_theorems": [
+        "close_children_done_step",
+        "close_subregions_exist_closed"
+      ]
+    },
+    {
+      "line": 569,
+      "constructor": "closeRunFinalizer",
+      "status": "covered",
+      "mapped_theorems": [
+        "close_run_finalizer_step"
+      ]
+    },
+    {
+      "line": 579,
+      "constructor": "close",
+      "status": "covered",
+      "mapped_theorems": [
+        "close_complete_step",
+        "close_implies_quiescent",
+        "close_implies_ledger_empty",
+        "close_implies_finalizers_empty",
+        "close_quiescence_decomposition",
+        "close_produces_closed_region"
+      ]
+    },
+    {
+      "line": 591,
+      "constructor": "tick",
+      "status": "covered",
+      "mapped_theorems": [
+        "tick_always_available",
+        "tick_preserves_task",
+        "tick_preserves_region",
+        "tick_preserves_obligation",
+        "tick_preserves_wellformed"
+      ]
+    }
+  ],
+  "summary": {
+    "covered": 22,
+    "partial": 0,
+    "missing": 0,
+    "partial_constructors": []
+  }
+}

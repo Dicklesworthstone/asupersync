@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asupersync.dev/schemas/lean-coverage-matrix-1.0.0.json",
+  "title": "Asupersync Lean Coverage Matrix",
+  "description": "Machine-readable schema for Lean proof coverage tracking across semantics, invariants, refinement, and CI gates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "title", "scope", "rows"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "matrix_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9._-]+$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coverage_row"
+      }
+    }
+  },
+  "$defs": {
+    "row_type": {
+      "type": "string",
+      "enum": [
+        "semantic_rule",
+        "invariant",
+        "refinement_obligation",
+        "operational_gate"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "not-started",
+        "in-progress",
+        "blocked",
+        "proven",
+        "validated-in-ci"
+      ]
+    },
+    "blocker_code": {
+      "type": "string",
+      "enum": [
+        "BLK_PROOF_MISSING_LEMMA",
+        "BLK_PROOF_SHAPE_MISMATCH",
+        "BLK_MODEL_GAP",
+        "BLK_IMPL_DIVERGENCE",
+        "BLK_TOOLCHAIN_FAILURE",
+        "BLK_EXTERNAL_DEPENDENCY"
+      ]
+    },
+    "coverage_blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/blocker_code"
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "coverage_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "theorem_name": { "type": "string", "minLength": 1 },
+        "file_path": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "proof_artifact": { "type": "string", "minLength": 1 },
+        "ci_job": { "type": "string", "minLength": 1 },
+        "reviewer": { "type": "string", "minLength": 1 }
+      }
+    },
+    "coverage_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "row_type", "status", "description", "depends_on", "tags", "evidence"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "row_type": {
+          "$ref": "#/$defs/row_type"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": ["string", "null"]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9._-]+$"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "blocker": {
+          "anyOf": [
+            { "$ref": "#/$defs/coverage_blocker" },
+            { "type": "null" }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/coverage_evidence"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,426 @@
+{
+  "schema_version": "1.0.0",
+  "link_map_id": "lean.invariant_theorem_test_link_map.v1",
+  "generated_by": "bd-2iwok",
+  "source_artifacts": {
+    "invariant_status_inventory": "formal/lean/coverage/invariant_status_inventory.json",
+    "theorem_surface_inventory": "formal/lean/coverage/theorem_surface_inventory.json",
+    "theorem_rule_traceability_ledger": "formal/lean/coverage/theorem_rule_traceability_ledger.json"
+  },
+  "linkage_policy": {
+    "theorem_witnesses_must_exist_in_theorem_inventory": true,
+    "rule_links_resolve_via_theorem_rule_traceability_ledger": true,
+    "test_paths_must_exist": true,
+    "gap_rows_require_owner_and_dependency_blockers": true,
+    "enforce_via_test": "tests/lean_invariant_theorem_test_link_map.rs"
+  },
+  "invariant_links": [
+    {
+      "invariant_id": "inv.authority.no_ambient",
+      "invariant_name": "No ambient authority",
+      "theorem_witnesses": [],
+      "executable_checks": [
+        "tests/property_cap_obligation.rs",
+        "tests/cap_obligation_compile_fail.rs",
+        "tests/integration_e2e.rs"
+      ],
+      "explicit_gaps": [
+        {
+          "gap_id": "inv.authority.no_ambient.gap.lean-proof-family-missing",
+          "description": "Capability discipline is heavily tested in Rust, but no dedicated Lean proof family exists yet for ambient-authority exclusion.",
+          "owner": "MagentaBridge",
+          "dependency_blockers": [
+            "bd-2iwok",
+            "bd-1vhw5"
+          ]
+        }
+      ]
+    },
+    {
+      "invariant_id": "inv.cancel.protocol",
+      "invariant_name": "Cancellation is a protocol: request -> drain -> finalize (idempotent)",
+      "theorem_witnesses": [
+        {
+          "theorem": "cancel_masked_step",
+          "theorem_line": 1666,
+          "rule_ids": [
+            "step.cancelMasked"
+          ]
+        },
+        {
+          "theorem": "cancel_ack_step",
+          "theorem_line": 1686,
+          "rule_ids": [
+            "step.cancelAcknowledge"
+          ]
+        },
+        {
+          "theorem": "cancel_finalize_step",
+          "theorem_line": 1700,
+          "rule_ids": [
+            "step.cancelFinalize"
+          ]
+        },
+        {
+          "theorem": "cancel_complete_step",
+          "theorem_line": 1713,
+          "rule_ids": [
+            "step.cancelComplete"
+          ]
+        },
+        {
+          "theorem": "cancel_complete_produces_cancelled",
+          "theorem_line": 1733,
+          "rule_ids": [
+            "step.cancelComplete"
+          ]
+        },
+        {
+          "theorem": "cancelMasked_potential_decreases",
+          "theorem_line": 3171,
+          "rule_ids": [
+            "step.cancelMasked"
+          ]
+        },
+        {
+          "theorem": "cancelAcknowledge_potential_decreases",
+          "theorem_line": 3186,
+          "rule_ids": [
+            "step.cancelAcknowledge"
+          ]
+        },
+        {
+          "theorem": "cancelFinalize_potential_decreases",
+          "theorem_line": 3200,
+          "rule_ids": [
+            "step.cancelFinalize"
+          ]
+        },
+        {
+          "theorem": "cancelComplete_potential_reaches_zero",
+          "theorem_line": 3213,
+          "rule_ids": [
+            "step.cancelComplete"
+          ]
+        },
+        {
+          "theorem": "cancel_protocol_terminates",
+          "theorem_line": 3254,
+          "rule_ids": [
+            "step.cancelComplete"
+          ]
+        },
+        {
+          "theorem": "cancel_steps_testable_bound",
+          "theorem_line": 3309,
+          "rule_ids": [
+            "step.cancelComplete"
+          ]
+        },
+        {
+          "theorem": "cancel_propagation_bounded",
+          "theorem_line": 3333,
+          "rule_ids": [
+            "step.cancelChild",
+            "step.cancelPropagate"
+          ]
+        }
+      ],
+      "executable_checks": [
+        "tests/cancellation_conformance.rs",
+        "tests/cancellation_stress_e2e.rs",
+        "tests/cancel_obligation_invariants.rs",
+        "tests/refinement_conformance.rs"
+      ],
+      "explicit_gaps": [
+        {
+          "gap_id": "inv.cancel.protocol.gap.idempotence-theorem-missing",
+          "description": "Idempotence of repeated cancel requests is not captured as a dedicated Lean theorem.",
+          "owner": "unassigned",
+          "dependency_blockers": [
+            "bd-1ab3k"
+          ]
+        }
+      ]
+    },
+    {
+      "invariant_id": "inv.obligation.no_leaks",
+      "invariant_name": "No obligation leaks",
+      "theorem_witnesses": [
+        {
+          "theorem": "commit_resolves",
+          "theorem_line": 675,
+          "rule_ids": [
+            "step.commit"
+          ]
+        },
+        {
+          "theorem": "abort_resolves",
+          "theorem_line": 691,
+          "rule_ids": [
+            "step.abort"
+          ]
+        },
+        {
+          "theorem": "leak_marks_leaked",
+          "theorem_line": 707,
+          "rule_ids": [
+            "step.leak"
+          ]
+        },
+        {
+          "theorem": "commit_removes_from_ledger",
+          "theorem_line": 723,
+          "rule_ids": [
+            "step.commit"
+          ]
+        },
+        {
+          "theorem": "abort_removes_from_ledger",
+          "theorem_line": 747,
+          "rule_ids": [
+            "step.abort"
+          ]
+        },
+        {
+          "theorem": "leak_removes_from_ledger",
+          "theorem_line": 770,
+          "rule_ids": [
+            "step.leak"
+          ]
+        },
+        {
+          "theorem": "obligation_in_ledger_blocks_close",
+          "theorem_line": 939,
+          "rule_ids": []
+        },
+        {
+          "theorem": "close_implies_ledger_empty",
+          "theorem_line": 808,
+          "rule_ids": [
+            "step.close"
+          ]
+        },
+        {
+          "theorem": "call_obligation_resolved_at_close",
+          "theorem_line": 3679,
+          "rule_ids": []
+        },
+        {
+          "theorem": "no_reserved_call_obligations_after_close",
+          "theorem_line": 3689,
+          "rule_ids": []
+        },
+        {
+          "theorem": "registry_lease_resolved_at_close",
+          "theorem_line": 3724,
+          "rule_ids": []
+        }
+      ],
+      "executable_checks": [
+        "tests/obligation_lifecycle_e2e.rs",
+        "tests/cancel_obligation_invariants.rs",
+        "tests/leak_regression_e2e.rs",
+        "tests/lease_semantics.rs"
+      ],
+      "explicit_gaps": [
+        {
+          "gap_id": "inv.obligation.no_leaks.gap.global-zero-leak-theorem-missing",
+          "description": "A single global theorem stating zero leaked obligations across all reachable executions is not yet present.",
+          "owner": "unassigned",
+          "dependency_blockers": [
+            "bd-3k6l5",
+            "bd-244p5"
+          ]
+        }
+      ]
+    },
+    {
+      "invariant_id": "inv.race.losers_drained",
+      "invariant_name": "Losers are drained after races",
+      "theorem_witnesses": [
+        {
+          "theorem": "cancel_propagation_bounded",
+          "theorem_line": 3333,
+          "rule_ids": [
+            "step.cancelChild",
+            "step.cancelPropagate"
+          ]
+        },
+        {
+          "theorem": "step_preserves_wellformed",
+          "theorem_line": 3070,
+          "rule_ids": [
+            "step.cancelChild",
+            "step.enqueue",
+            "step.schedule",
+            "step.scheduleStep"
+          ]
+        }
+      ],
+      "executable_checks": [
+        "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
+        "tests/e2e/combinator/cancel_correctness/async_loser_drain.rs",
+        "tests/cancel_obligation_invariants.rs",
+        "tests/runtime_e2e.rs"
+      ],
+      "explicit_gaps": [
+        {
+          "gap_id": "inv.race.losers_drained.gap.direct-lean-theorem-missing",
+          "description": "No direct Lean theorem currently states and proves race-loser full-drain semantics.",
+          "owner": "unassigned",
+          "dependency_blockers": [
+            "bd-19efq",
+            "bd-244p5"
+          ]
+        }
+      ]
+    },
+    {
+      "invariant_id": "inv.region_close.quiescence",
+      "invariant_name": "Region close = quiescence",
+      "theorem_witnesses": [
+        {
+          "theorem": "close_implies_quiescent",
+          "theorem_line": 794,
+          "rule_ids": [
+            "step.close"
+          ]
+        },
+        {
+          "theorem": "close_implies_ledger_empty",
+          "theorem_line": 808,
+          "rule_ids": [
+            "step.close"
+          ]
+        },
+        {
+          "theorem": "close_implies_finalizers_empty",
+          "theorem_line": 820,
+          "rule_ids": [
+            "step.close"
+          ]
+        },
+        {
+          "theorem": "quiescent_tasks_completed",
+          "theorem_line": 860,
+          "rule_ids": []
+        },
+        {
+          "theorem": "quiescent_subregions_closed",
+          "theorem_line": 867,
+          "rule_ids": []
+        },
+        {
+          "theorem": "quiescent_no_obligations",
+          "theorem_line": 874,
+          "rule_ids": []
+        },
+        {
+          "theorem": "quiescent_no_finalizers",
+          "theorem_line": 881,
+          "rule_ids": []
+        },
+        {
+          "theorem": "close_quiescence_decomposition",
+          "theorem_line": 889,
+          "rule_ids": [
+            "step.close"
+          ]
+        },
+        {
+          "theorem": "close_complete_step",
+          "theorem_line": 1806,
+          "rule_ids": [
+            "step.close"
+          ]
+        }
+      ],
+      "executable_checks": [
+        "tests/close_quiescence_regression.rs",
+        "tests/region_lifecycle_conformance.rs",
+        "tests/refinement_conformance.rs"
+      ],
+      "explicit_gaps": []
+    },
+    {
+      "invariant_id": "inv.structured_concurrency.single_owner",
+      "invariant_name": "Structured concurrency: every task is owned by exactly one region",
+      "theorem_witnesses": [
+        {
+          "theorem": "spawn_preserves_existing_task",
+          "theorem_line": 999,
+          "rule_ids": [
+            "step.spawn"
+          ]
+        },
+        {
+          "theorem": "spawn_preserves_obligation",
+          "theorem_line": 1265,
+          "rule_ids": [
+            "step.spawn"
+          ]
+        },
+        {
+          "theorem": "spawn_preserves_wellformed",
+          "theorem_line": 1844,
+          "rule_ids": [
+            "step.spawn"
+          ]
+        },
+        {
+          "theorem": "spawned_task_in_region",
+          "theorem_line": 2706,
+          "rule_ids": [
+            "step.spawn"
+          ]
+        },
+        {
+          "theorem": "setTask_same_region_preserves_wellformed",
+          "theorem_line": 2752,
+          "rule_ids": []
+        },
+        {
+          "theorem": "setRegion_structural_preserves_wellformed",
+          "theorem_line": 2797,
+          "rule_ids": []
+        },
+        {
+          "theorem": "step_preserves_wellformed",
+          "theorem_line": 3070,
+          "rule_ids": [
+            "step.cancelChild",
+            "step.enqueue",
+            "step.schedule",
+            "step.scheduleStep"
+          ]
+        }
+      ],
+      "executable_checks": [
+        "tests/property_region_ops.rs",
+        "tests/region_lifecycle_conformance.rs",
+        "tests/integration_e2e.rs"
+      ],
+      "explicit_gaps": [
+        {
+          "gap_id": "inv.structured_concurrency.single_owner.gap.global-uniqueness-theorem-missing",
+          "description": "No single explicit theorem stating global uniqueness of region ownership for all task IDs.",
+          "owner": "MagentaBridge",
+          "dependency_blockers": [
+            "bd-nc3ut",
+            "bd-2iwok"
+          ]
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "invariants_total": 6,
+    "invariants_with_theorem_witnesses": 5,
+    "invariants_with_executable_checks": 6,
+    "invariants_with_explicit_gaps": 5,
+    "invariants_meeting_theorem_and_check_requirement": 5,
+    "invariants_covered_via_explicit_gap_only": 1,
+    "gap_entries_total": 5
+  }
+}

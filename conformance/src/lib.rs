@@ -36,6 +36,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod lean_frontier;
+pub mod lean_coverage_matrix;
 pub mod logging;
 pub mod report;
 pub mod runner;
@@ -47,6 +49,14 @@ pub use bench::{
     BenchCategory, BenchComparisonResult, BenchComparisonSummary, BenchConfig, BenchOutput,
     BenchRunResult, BenchRunSummary, BenchRunner, BenchThresholds, Benchmark, Comparison,
     ComparisonConfidence, RegressionCheck, RegressionConfig, RegressionMetric, Stats, StatsError,
+};
+pub use lean_frontier::{
+    extract_frontier_report, LeanDiagnosticSeverity, LeanFrontierBucket, LeanFrontierDiagnostic,
+    LeanFrontierReport, LEAN_FRONTIER_SCHEMA_VERSION,
+};
+pub use lean_coverage_matrix::{
+    BlockerCode, CoverageBlocker, CoverageEvidence, CoverageRow, CoverageRowType, CoverageStatus,
+    LeanCoverageMatrix, LEAN_COVERAGE_SCHEMA_VERSION,
 };
 pub use logging::{
     ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent, TestEventKind,
