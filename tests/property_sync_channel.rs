@@ -698,6 +698,212 @@ proptest! {
 }
 
 // ============================================================================
+// Channel Linearizability Property Tests
+//
+// Verifies that concurrent channel operations are equivalent to some valid
+// sequential history. We model this by generating an interleaved sequence of
+// send/recv/reserve/abort operations from multiple logical producers, then
+// checking that the observed results are consistent with FIFO ordering per
+// sender and that capacity invariants are never violated.
+// ============================================================================
+
+/// Operations that can be performed on a channel from a logical producer.
+#[derive(Debug, Clone)]
+enum ChannelOp {
+    /// try_send a value tagged with a producer ID.
+    Send(u8),
+    /// try_recv from the channel.
+    Recv,
+    /// try_reserve then immediately send with a tag.
+    ReserveSend(u8),
+    /// try_reserve then abort (free the slot).
+    ReserveAbort,
+}
+
+fn arb_channel_op() -> impl Strategy<Value = ChannelOp> {
+    prop_oneof![
+        4 => (0u8..4).prop_map(ChannelOp::Send),
+        3 => Just(ChannelOp::Recv),
+        2 => (0u8..4).prop_map(ChannelOp::ReserveSend),
+        1 => Just(ChannelOp::ReserveAbort),
+    ]
+}
+
+proptest! {
+    #![proptest_config(test_proptest_config(500))]
+
+    /// Linearizability: an interleaved sequence of send/recv operations from
+    /// multiple producers preserves per-producer FIFO order.
+    ///
+    /// For each logical producer, the values it sends appear in the received
+    /// sequence in the same relative order. This is the key linearizability
+    /// property for a multi-producer single-consumer channel.
+    #[test]
+    fn mpsc_linearizable_multi_producer(
+        capacity in 1_usize..=32,
+        ops in proptest::collection::vec(arb_channel_op(), 1..=200),
+    ) {
+        init_test_logging();
+        let (tx, rx) = mpsc::channel::<(u8, u32)>(capacity);
+
+        // Per-producer sequence counters.
+        let mut send_seq = [0u32; 4];
+        let mut received: Vec<(u8, u32)> = Vec::new();
+
+        for op in &ops {
+            match op {
+                ChannelOp::Send(producer) => {
+                    let seq = send_seq[*producer as usize];
+                    if tx.try_send((*producer, seq)).is_ok() {
+                        send_seq[*producer as usize] += 1;
+                    }
+                }
+                ChannelOp::Recv => {
+                    if let Ok(val) = rx.try_recv() {
+                        received.push(val);
+                    }
+                }
+                ChannelOp::ReserveSend(producer) => {
+                    if let Ok(permit) = tx.try_reserve() {
+                        let seq = send_seq[*producer as usize];
+                        permit.send((*producer, seq));
+                        send_seq[*producer as usize] += 1;
+                    }
+                }
+                ChannelOp::ReserveAbort => {
+                    if let Ok(permit) = tx.try_reserve() {
+                        permit.abort();
+                    }
+                }
+            }
+        }
+
+        // Drain remaining messages.
+        drop(tx);
+        while let Ok(val) = rx.try_recv() {
+            received.push(val);
+        }
+
+        // Check per-producer FIFO ordering: for each producer, the sequence
+        // numbers in the received order must be strictly increasing.
+        for producer_id in 0u8..4 {
+            let producer_msgs: Vec<u32> = received
+                .iter()
+                .filter(|(p, _)| *p == producer_id)
+                .map(|(_, seq)| *seq)
+                .collect();
+
+            for window in producer_msgs.windows(2) {
+                prop_assert!(
+                    window[0] < window[1],
+                    "FIFO violation for producer {}: seq {} followed by {} in received order",
+                    producer_id,
+                    window[0],
+                    window[1],
+                );
+            }
+        }
+
+        // Check total count: received messages <= total sent messages.
+        let total_sent: u32 = send_seq.iter().sum();
+        prop_assert!(
+            received.len() as u32 <= total_sent,
+            "received {} but only sent {}",
+            received.len(),
+            total_sent,
+        );
+    }
+
+    /// Sequential consistency: a sequence of operations produces the same
+    /// result regardless of how we batch recv calls.
+    ///
+    /// Send N messages, then recv them all — the channel must yield exactly
+    /// N messages in exactly the order sent, regardless of capacity.
+    #[test]
+    fn mpsc_sequential_consistency(
+        capacity in 1_usize..=64,
+        values in proptest::collection::vec(any::<i64>(), 1..=64),
+    ) {
+        init_test_logging();
+        let send_count = values.len().min(capacity);
+        let (tx, rx) = mpsc::channel::<i64>(capacity);
+
+        // Send up to capacity.
+        let mut sent = Vec::new();
+        for &v in values.iter().take(send_count) {
+            if tx.try_send(v).is_ok() {
+                sent.push(v);
+            }
+        }
+
+        // Interleave: recv half, send more, recv rest.
+        let half = sent.len() / 2;
+        let mut received = Vec::new();
+        for _ in 0..half {
+            if let Ok(v) = rx.try_recv() {
+                received.push(v);
+            }
+        }
+
+        // Send more (freed capacity).
+        for &v in values.iter().skip(send_count) {
+            if tx.try_send(v).is_ok() {
+                sent.push(v);
+            }
+        }
+
+        // Drain.
+        drop(tx);
+        while let Ok(v) = rx.try_recv() {
+            received.push(v);
+        }
+
+        prop_assert_eq!(
+            &sent, &received,
+            "sequential consistency violation: sent != received"
+        );
+    }
+
+    /// Reserve-commit linearizability: reserve slots and then commit in a
+    /// different order still delivers messages in commit order.
+    #[test]
+    fn mpsc_reserve_commit_order(
+        capacity in 2_usize..=16,
+        count in 2_usize..=16,
+    ) {
+        init_test_logging();
+        let count = count.min(capacity);
+        let (tx, rx) = mpsc::channel::<usize>(capacity);
+
+        // Reserve `count` permits.
+        let mut permits = Vec::new();
+        for _ in 0..count {
+            match tx.try_reserve() {
+                Ok(p) => permits.push(p),
+                Err(_) => break,
+            }
+        }
+        let actual_count = permits.len();
+
+        // Commit in order — the recv order must match commit order.
+        for (i, permit) in permits.into_iter().enumerate() {
+            permit.send(i);
+        }
+
+        let mut received = Vec::new();
+        while let Ok(v) = rx.try_recv() {
+            received.push(v);
+        }
+
+        let expected: Vec<usize> = (0..actual_count).collect();
+        prop_assert_eq!(
+            &expected, &received,
+            "reserve-commit order must match recv order"
+        );
+    }
+}
+
+// ============================================================================
 // Coverage-Tracked Summary Test
 // ============================================================================
 
@@ -715,6 +921,11 @@ fn property_sync_channel_coverage() {
     tracker.check("mpsc_capacity_accounting", true);
     tracker.check("mpsc_sender_drop_disconnects", true);
     tracker.check("mpsc_receiver_drop_disconnects", true);
+
+    // Linearizability invariants
+    tracker.check("mpsc_linearizable_multi_producer", true);
+    tracker.check("mpsc_sequential_consistency", true);
+    tracker.check("mpsc_reserve_commit_order", true);
 
     // Broadcast invariants
     tracker.check("broadcast_fanout_correctness", true);

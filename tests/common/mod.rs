@@ -44,11 +44,18 @@ pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
 pub const DEFAULT_PROPTEST_SEED: u64 = 0x5EED_5EED;
 
 const PROPTEST_SEED_ENV: &str = "ASUPERSYNC_PROPTEST_SEED";
+const PROPTEST_CASES_ENV: &str = "ASUPERSYNC_PROPTEST_CASES";
 const PROPTEST_MAX_SHRINK_ITERS_ENV: &str = "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS";
 const CONFORMANCE_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_CONFORMANCE_ARTIFACTS_DIR";
 const TOPOLOGY_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TOPOLOGY_ARTIFACTS_DIR";
 
 /// Configuration for property tests with optional deterministic seed support.
+///
+/// Supports the following environment variables:
+/// - `ASUPERSYNC_PROPTEST_CASES`: Override case count for all tests.
+///   Set to `10000` for thorough local runs or `1000000` for nightly CI.
+/// - `ASUPERSYNC_PROPTEST_SEED`: Fixed RNG seed for reproducibility.
+/// - `ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS`: Override max shrink iterations.
 #[derive(Debug, Clone)]
 pub struct PropertyTestConfig {
     /// Fixed seed for reproducibility (overrides CI default when set).
@@ -61,11 +68,16 @@ pub struct PropertyTestConfig {
 
 impl PropertyTestConfig {
     /// Build a config with defaults for property tests.
+    ///
+    /// The `cases` parameter is the per-test default. When `ASUPERSYNC_PROPTEST_CASES`
+    /// is set, it overrides this value globally, enabling 10K (fast) or 1M (nightly)
+    /// case counts without modifying source.
     #[must_use]
     pub fn new(cases: u32) -> Self {
+        let effective_cases = read_proptest_cases().unwrap_or(cases);
         Self {
             seed: read_proptest_seed(),
-            cases,
+            cases: effective_cases,
             max_shrink_iters: read_max_shrink_iters()
                 .unwrap_or_else(|| ProptestConfig::default().max_shrink_iters),
         }
@@ -89,9 +101,18 @@ impl PropertyTestConfig {
 }
 
 /// Build a ProptestConfig with deterministic seed support for CI.
+///
+/// The `cases` parameter is the per-test baseline. Override globally via
+/// `ASUPERSYNC_PROPTEST_CASES=10000` (fast) or `ASUPERSYNC_PROPTEST_CASES=1000000` (nightly).
 #[must_use]
 pub fn test_proptest_config(cases: u32) -> ProptestConfig {
     PropertyTestConfig::new(cases).to_proptest_config()
+}
+
+fn read_proptest_cases() -> Option<u32> {
+    std::env::var(PROPTEST_CASES_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
 }
 
 fn read_proptest_seed() -> Option<u64> {
