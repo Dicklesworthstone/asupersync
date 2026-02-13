@@ -8,8 +8,14 @@ use crate::types::Time;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
+use std::time::Duration;
 
 use super::wheel::TimerWheel;
+
+#[inline]
+fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
 
 /// Time source abstraction for getting the current time.
 ///
@@ -49,7 +55,7 @@ impl Default for WallClock {
 impl TimeSource for WallClock {
     fn now(&self) -> Time {
         let elapsed = self.epoch.elapsed();
-        Time::from_nanos(elapsed.as_nanos() as u64)
+        Time::from_nanos(duration_to_nanos_saturating(elapsed))
     }
 }
 
@@ -566,6 +572,14 @@ mod tests {
     // =========================================================================
     // WallClock Tests
     // =========================================================================
+
+    #[test]
+    fn duration_to_nanos_saturates_at_u64_max() {
+        init_test("duration_to_nanos_saturates_at_u64_max");
+        let nanos = duration_to_nanos_saturating(Duration::MAX);
+        crate::assert_with_log!(nanos == u64::MAX, "duration saturates", u64::MAX, nanos);
+        crate::test_complete!("duration_to_nanos_saturates_at_u64_max");
+    }
 
     #[test]
     fn wall_clock_starts_near_zero() {

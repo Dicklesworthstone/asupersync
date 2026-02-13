@@ -39,6 +39,16 @@
 use crate::types::Time;
 use std::time::Duration;
 
+#[inline]
+fn duration_as_nanos_u64_saturating(duration: Duration) -> u64 {
+    let nanos = duration.as_nanos();
+    if nanos > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        nanos as u64
+    }
+}
+
 /// Behavior for handling missed ticks in an [`Interval`].
 ///
 /// When an interval cannot keep up with its period (e.g., because processing
@@ -292,7 +302,7 @@ impl Interval {
             let tick_time = self.deadline;
             self.deadline = self
                 .deadline
-                .saturating_add_nanos(self.period.as_nanos() as u64);
+                .saturating_add_nanos(duration_as_nanos_u64_saturating(self.period));
             return tick_time;
         }
 
@@ -376,13 +386,13 @@ impl Interval {
     /// assert_eq!(interval.deadline(), Time::from_millis(5500));
     /// ```
     pub fn reset_after(&mut self, now: Time, after: Duration) {
-        self.deadline = now.saturating_add_nanos(after.as_nanos() as u64);
+        self.deadline = now.saturating_add_nanos(duration_as_nanos_u64_saturating(after));
         self.first_tick_done = false;
     }
 
     /// Advances the deadline according to the missed tick behavior.
     fn advance_deadline(&mut self, now: Time) {
-        let period_nanos = self.period.as_nanos() as u64;
+        let period_nanos = duration_as_nanos_u64_saturating(self.period);
 
         match self.missed_tick_behavior {
             MissedTickBehavior::Burst => {
@@ -397,10 +407,10 @@ impl Interval {
                 // Skip to next aligned tick
                 if now >= self.deadline {
                     let elapsed = now.as_nanos() - self.deadline.as_nanos();
-                    let periods_to_skip = elapsed / period_nanos + 1;
-                    self.deadline = self
-                        .deadline
-                        .saturating_add_nanos(periods_to_skip * period_nanos);
+                    let periods_to_skip = elapsed / period_nanos;
+                    let periods_to_skip = periods_to_skip.saturating_add(1);
+                    let skipped_nanos = periods_to_skip.saturating_mul(period_nanos);
+                    self.deadline = self.deadline.saturating_add_nanos(skipped_nanos);
                 } else {
                     self.deadline = self.deadline.saturating_add_nanos(period_nanos);
                 }
@@ -1036,6 +1046,55 @@ mod tests {
             interval.deadline()
         );
         crate::test_complete!("deadline_near_max");
+    }
+
+    #[test]
+    fn duration_max_period_saturates_first_tick_deadline() {
+        init_test("duration_max_period_saturates_first_tick_deadline");
+        let start = Time::from_nanos(7);
+        let mut interval = Interval::new(start, Duration::MAX);
+
+        let tick = interval.tick(start);
+        crate::assert_with_log!(tick == start, "first tick", start, tick);
+        crate::assert_with_log!(
+            interval.deadline() == Time::MAX,
+            "deadline saturates",
+            Time::MAX,
+            interval.deadline()
+        );
+        crate::test_complete!("duration_max_period_saturates_first_tick_deadline");
+    }
+
+    #[test]
+    fn poll_tick_with_duration_max_period_saturates_deadline() {
+        init_test("poll_tick_with_duration_max_period_saturates_deadline");
+        let start = Time::from_nanos(11);
+        let mut interval = Interval::new(start, Duration::MAX);
+
+        let tick = interval.poll_tick(start);
+        crate::assert_with_log!(tick == Some(start), "poll tick", Some(start), tick);
+        crate::assert_with_log!(
+            interval.deadline() == Time::MAX,
+            "deadline saturates after poll_tick",
+            Time::MAX,
+            interval.deadline()
+        );
+        crate::test_complete!("poll_tick_with_duration_max_period_saturates_deadline");
+    }
+
+    #[test]
+    fn reset_after_duration_max_saturates_deadline() {
+        init_test("reset_after_duration_max_saturates_deadline");
+        let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
+        interval.reset_after(Time::from_nanos(42), Duration::MAX);
+
+        crate::assert_with_log!(
+            interval.deadline() == Time::MAX,
+            "reset_after saturates",
+            Time::MAX,
+            interval.deadline()
+        );
+        crate::test_complete!("reset_after_duration_max_saturates_deadline");
     }
 
     #[test]

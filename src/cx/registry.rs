@@ -1077,6 +1077,16 @@ impl NameRegistry {
         for (name, holder, holder_region) in active_removed {
             self.emit_name_change(&name, holder, holder_region, NameOwnershipKind::Released);
         }
+        // Abort and remove granted leases belonging to this region to prevent
+        // orphaned obligation-token drop-bomb panics.
+        self.granted.retain_mut(|g| {
+            if g.lease.region() == region {
+                let _ = g.lease.abort();
+                false
+            } else {
+                true
+            }
+        });
         // Also remove waiters belonging to this region.
         for queue in self.waiters.values_mut() {
             queue.retain(|w| w.region != region);
@@ -1120,6 +1130,16 @@ impl NameRegistry {
         for (name, holder, region) in active_removed {
             self.emit_name_change(&name, holder, region, NameOwnershipKind::Released);
         }
+        // Abort and remove granted leases belonging to this task to prevent
+        // orphaned obligation-token drop-bomb panics.
+        self.granted.retain_mut(|g| {
+            if g.lease.holder() == task {
+                let _ = g.lease.abort();
+                false
+            } else {
+                true
+            }
+        });
         // Also remove waiters belonging to this task.
         for queue in self.waiters.values_mut() {
             queue.retain(|w| w.holder != task);
@@ -2931,6 +2951,84 @@ mod tests {
 
         lease.abort().unwrap();
         crate::test_complete!("collision_wait_cleanup_task_removes_waiters");
+    }
+
+    /// Cleanup of a region after a waiter has been granted must abort the
+    /// granted lease's obligation token instead of leaving it orphaned.
+    /// Before the fix, the orphaned `NameLease` in the `granted` queue
+    /// triggered an "OBLIGATION TOKEN LEAKED" panic on drop.
+    #[test]
+    fn cleanup_region_aborts_granted_lease_obligation() {
+        init_test("cleanup_region_aborts_granted_lease_obligation");
+
+        let mut reg = NameRegistry::new();
+        // Task 1 in region 0 holds "svc".
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Task 2 in region 1 waits for "svc".
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(1),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+
+        // Free the name — task 2 is granted the lease.
+        reg.unregister_and_grant("svc", Time::from_secs(5)).unwrap();
+        lease.release().unwrap();
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        // Before take_granted, clean up region 1 (task 2's region).
+        // This must abort the granted lease's obligation token.
+        reg.cleanup_region(rid(1));
+
+        // The granted queue should now be empty (lease was aborted).
+        let granted = reg.take_granted();
+        assert!(granted.is_empty());
+
+        // Dropping the registry should NOT panic.
+        drop(reg);
+        crate::test_complete!("cleanup_region_aborts_granted_lease_obligation");
+    }
+
+    /// Cleanup of a task after a waiter has been granted must abort the
+    /// granted lease's obligation token instead of leaving it orphaned.
+    #[test]
+    fn cleanup_task_aborts_granted_lease_obligation() {
+        init_test("cleanup_task_aborts_granted_lease_obligation");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Task 2 waits for "svc".
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+
+        // Free the name — task 2 is granted.
+        reg.unregister_and_grant("svc", Time::from_secs(5)).unwrap();
+        lease.release().unwrap();
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        // Before take_granted, clean up task 2.
+        reg.cleanup_task(tid(2));
+
+        let granted = reg.take_granted();
+        assert!(granted.is_empty());
+
+        drop(reg);
+        crate::test_complete!("cleanup_task_aborts_granted_lease_obligation");
     }
 
     #[test]
