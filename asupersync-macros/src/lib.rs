@@ -30,6 +30,7 @@
 mod join;
 mod race;
 mod scope;
+mod session;
 mod spawn;
 mod util;
 
@@ -228,6 +229,72 @@ pub fn conformance(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(_) => item,
         Err(message) => util::compile_error(&message).into(),
     }
+}
+
+/// Generates typestate-encoded session types from a protocol DSL.
+///
+/// The macro takes a protocol specification and generates a module containing
+/// message structs, paired session type aliases (initiator + responder), and
+/// constructor functions. The responder type is the dual of the initiator:
+/// `Send`↔`Recv`, `Select`↔`Offer`.
+///
+/// # Syntax
+///
+/// ```ignore
+/// session_protocol! {
+///     module_name<T> for ObligationVariant {
+///         msg MessageName;
+///         msg MessageWithFields { field: Type };
+///
+///         send MessageName => select {
+///             send T => end,
+///             send OtherMsg => end,
+///         }
+///     }
+/// }
+/// ```
+///
+/// # Body Actions
+///
+/// - `send Type => body` — send a value, then continue
+/// - `recv Type => body` — receive a value, then continue
+/// - `select { a, b }` — local choice (becomes `Offer` for responder)
+/// - `offer { a, b }` — remote choice (becomes `Select` for responder)
+/// - `loop { body }` — recursion point (generates `renew_loop` constructor)
+/// - `continue` — jump back to enclosing `loop`
+/// - `end` — protocol termination
+///
+/// # Generated Items
+///
+/// - `pub mod <name>` containing:
+///   - Message structs with `Debug, Clone` (+ `Copy` for unit structs)
+///   - `InitiatorSession` type alias
+///   - `ResponderSession` type alias
+///   - `new_session(channel_id) -> (Chan<Initiator, ...>, Chan<Responder, ...>)`
+///   - (if `loop` used) `InitiatorLoop`, `ResponderLoop` type aliases
+///   - (if `loop` used) `renew_loop(channel_id)` constructor
+///
+/// # Example
+///
+/// ```ignore
+/// session_protocol! {
+///     lease for Lease {
+///         msg AcquireMsg;
+///         msg RenewMsg;
+///         msg ReleaseMsg;
+///
+///         send AcquireMsg => loop {
+///             select {
+///                 send RenewMsg => continue,
+///                 send ReleaseMsg => end,
+///             }
+///         }
+///     }
+/// }
+/// ```
+#[proc_macro]
+pub fn session_protocol(input: TokenStream) -> TokenStream {
+    session::session_protocol_impl(input)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
