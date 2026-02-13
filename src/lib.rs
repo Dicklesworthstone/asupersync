@@ -84,6 +84,7 @@ pub mod encoding;
 pub mod epoch;
 pub mod error;
 pub mod evidence;
+pub mod evidence_sink;
 pub mod fs;
 pub mod gen_server;
 pub mod grpc;

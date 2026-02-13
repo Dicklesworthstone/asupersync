@@ -459,6 +459,7 @@ impl ThreeLaneScheduler {
                 steps_since_snapshot: 0,
                 governor_interval,
                 preemption_metrics: PreemptionMetrics::default(),
+                evidence_sink: None,
             });
         }
 
@@ -906,6 +907,8 @@ pub struct ThreeLaneWorker {
     governor_interval: u32,
     /// Preemption fairness metrics (cancel-lane preemption tracking).
     preemption_metrics: PreemptionMetrics,
+    /// Optional evidence sink for scheduler decision tracing (bd-1e2if.3).
+    evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
 }
 
 /// Per-worker metrics tracking cancel-lane preemption and fairness.
@@ -957,6 +960,11 @@ impl ThreeLaneWorker {
     #[must_use]
     pub fn preemption_metrics(&self) -> &PreemptionMetrics {
         &self.preemption_metrics
+    }
+
+    /// Attaches an evidence sink for scheduler decision tracing.
+    pub fn set_evidence_sink(&mut self, sink: Arc<dyn crate::evidence_sink::EvidenceSink>) {
+        self.evidence_sink = Some(sink);
     }
 
     /// Force the cached scheduling suggestion for testing the boosted 2L+1
@@ -1252,6 +1260,30 @@ impl ThreeLaneWorker {
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
         let suggestion = governor.suggest(&snapshot);
+
+        // Emit evidence when the scheduling suggestion changes.
+        if suggestion != self.cached_suggestion {
+            if let Some(ref sink) = self.evidence_sink {
+                let suggestion_str = match suggestion {
+                    SchedulingSuggestion::MeetDeadlines => "meet_deadlines",
+                    SchedulingSuggestion::DrainObligations => "drain_obligations",
+                    SchedulingSuggestion::DrainRegions => "drain_regions",
+                    SchedulingSuggestion::NoPreference => "no_preference",
+                };
+                let cancel_depth = snapshot.cancel_requested_tasks
+                    + snapshot.cancelling_tasks
+                    + snapshot.finalizing_tasks;
+                crate::evidence_sink::emit_scheduler_evidence(
+                    sink.as_ref(),
+                    suggestion_str,
+                    cancel_depth,
+                    snapshot.draining_regions,
+                    snapshot.ready_queue_depth,
+                    false,
+                );
+            }
+        }
+
         self.cached_suggestion = suggestion;
         suggestion
     }

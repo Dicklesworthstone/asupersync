@@ -341,7 +341,8 @@ impl<P: Policy> Scope<'_, P> {
         )
         .with_registry_handle(cx.registry_handle())
         .with_remote_cap_handle(cx.remote_cap_handle())
-        .with_blocking_pool_handle(cx.blocking_pool_handle());
+        .with_blocking_pool_handle(cx.blocking_pool_handle())
+        .with_evidence_sink(cx.evidence_sink_handle());
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
 
@@ -567,7 +568,8 @@ impl<P: Policy> Scope<'_, P> {
         let child_cx_full = base_cx_full
             .with_registry_handle(cx.registry_handle())
             .with_remote_cap_handle(cx.remote_cap_handle())
-            .with_blocking_pool_handle(cx.blocking_pool_handle());
+            .with_blocking_pool_handle(cx.blocking_pool_handle())
+            .with_evidence_sink(cx.evidence_sink_handle());
         if let Some(record) = state.task_mut(task_id) {
             record.set_cx(child_cx_full.clone());
         }
@@ -743,7 +745,8 @@ impl<P: Policy> Scope<'_, P> {
         )
         .with_registry_handle(cx.registry_handle())
         .with_remote_cap_handle(cx.remote_cap_handle())
-        .with_blocking_pool_handle(cx.blocking_pool_handle());
+        .with_blocking_pool_handle(cx.blocking_pool_handle())
+        .with_evidence_sink(cx.evidence_sink_handle());
         child_cx.set_trace_buffer(state.trace_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
 

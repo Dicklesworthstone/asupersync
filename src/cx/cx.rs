@@ -54,6 +54,7 @@
 use super::cap;
 use super::registry::RegistryHandle;
 use crate::combinator::select::SelectAll;
+use crate::evidence_sink::EvidenceSink;
 use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
 };
@@ -169,6 +170,7 @@ pub struct Cx<Caps = cap::All> {
     /// degrade gracefully under load. Shared via `Arc` so all clones
     /// observe the same pressure state.
     pressure: Option<Arc<SystemPressure>>,
+    evidence_sink: Option<Arc<dyn EvidenceSink>>,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
 }
@@ -188,6 +190,7 @@ impl<Caps> Clone for Cx<Caps> {
             remote_cap: self.remote_cap.clone(),
             registry: self.registry.clone(),
             pressure: self.pressure.clone(),
+            evidence_sink: self.evidence_sink.clone(),
             _caps: PhantomData,
         }
     }
@@ -332,6 +335,7 @@ impl<Caps> Cx<Caps> {
             remote_cap: None,
             registry: None,
             pressure: None,
+            evidence_sink: None,
             _caps: PhantomData,
         }
     }
@@ -425,6 +429,7 @@ impl<Caps> Cx<Caps> {
             remote_cap: None,
             registry: None,
             pressure: None,
+            evidence_sink: None,
             _caps: PhantomData,
         }
     }
@@ -482,6 +487,7 @@ impl<Caps> Cx<Caps> {
             remote_cap: self.remote_cap.clone(),
             registry: self.registry.clone(),
             pressure: self.pressure.clone(),
+            evidence_sink: self.evidence_sink.clone(),
             _caps: PhantomData,
         }
     }
@@ -553,6 +559,29 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn has_registry(&self) -> bool {
         self.registry.is_some()
+    }
+
+    /// Attaches an evidence sink for runtime decision tracing.
+    #[must_use]
+    pub fn with_evidence_sink(mut self, sink: Option<Arc<dyn EvidenceSink>>) -> Self {
+        self.evidence_sink = sink;
+        self
+    }
+
+    /// Returns a cloned handle to the evidence sink, if attached.
+    #[must_use]
+    pub(crate) fn evidence_sink_handle(&self) -> Option<Arc<dyn EvidenceSink>> {
+        self.evidence_sink.clone()
+    }
+
+    /// Emit an evidence entry to the attached sink, if any.
+    ///
+    /// This is a no-op if no evidence sink is configured. Errors during
+    /// emission are handled internally by the sink (logged and dropped).
+    pub fn emit_evidence(&self, entry: &franken_evidence::EvidenceLedger) {
+        if let Some(ref sink) = self.evidence_sink {
+            sink.emit(entry);
+        }
     }
 
     /// Returns the current logical time without ticking.
@@ -882,6 +911,21 @@ impl<Caps> Cx<Caps> {
                 inner.cancel_reason.clone(),
             )
         };
+
+        // Emit evidence for cancellation decisions observed at checkpoint.
+        if cancel_requested && mask_depth == 0 {
+            if let Some(ref sink) = self.evidence_sink {
+                let kind_str = cancel_reason
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), |r| format!("{}", r.kind));
+                crate::evidence_sink::emit_cancel_evidence(
+                    sink.as_ref(),
+                    &kind_str,
+                    budget.poll_quota,
+                    budget.priority,
+                );
+            }
+        }
 
         Self::check_cancel_from_values(
             cancel_requested,
