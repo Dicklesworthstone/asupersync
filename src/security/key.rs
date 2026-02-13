@@ -1,10 +1,13 @@
 //! Authentication keys and key derivation.
 //!
-//! Keys are 256-bit (32 byte) values used for HMAC-like authentication.
-//! In Phase 0, we use a deterministic keyed hash that is NOT cryptographically secure.
+//! Keys are 256-bit (32 byte) values used for HMAC-SHA256 authentication.
 
 use crate::util::DetRng;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::fmt;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Size of an authentication key in bytes.
 pub const AUTH_KEY_SIZE: usize = 32;
@@ -57,29 +60,17 @@ impl AuthKey {
         &self.bytes
     }
 
-    /// Derives a subkey for a specific purpose.
+    /// Derives a subkey for a specific purpose using HMAC-SHA256.
     ///
-    /// This uses a simple KDF (Key Derivation Function) construction:
-    /// `H(key || purpose)`.
-    ///
-    /// In Phase 0, this is simulated by XORing the key with the purpose hash.
+    /// Construction: `derived = HMAC-SHA256(self, purpose)`.
     #[must_use]
     pub fn derive_subkey(&self, purpose: &[u8]) -> Self {
-        let mut derived = self.bytes;
-
-        // Simple non-cryptographic mixing for Phase 0
-        // Mix in the purpose
-        for (i, &b) in purpose.iter().enumerate() {
-            derived[i % AUTH_KEY_SIZE] ^= b.wrapping_mul(31).wrapping_add(17);
+        let mut mac = HmacSha256::new_from_slice(&self.bytes).expect("HMAC accepts any key length");
+        mac.update(purpose);
+        let result = mac.finalize().into_bytes();
+        Self {
+            bytes: result.into(),
         }
-
-        // One round of mixing to avalanche
-        for i in 0..AUTH_KEY_SIZE {
-            derived[i] = derived[i].wrapping_add(derived[(i + 1) % AUTH_KEY_SIZE]);
-            derived[i] = derived[i].rotate_left(3);
-        }
-
-        Self { bytes: derived }
     }
 }
 

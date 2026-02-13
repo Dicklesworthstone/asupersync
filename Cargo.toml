@@ -54,9 +54,9 @@ cli = ["dep:clap", "dep:time", "trace-compression", "dep:conformance"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite"]
 # Enable PostgreSQL async client with wire protocol.
-postgres = ["dep:sha2"]
+postgres = []
 # Enable MySQL async client with wire protocol.
-mysql = ["dep:sha2"]
+mysql = []
 # QUIC and HTTP/3 features removed (bd-9ipp): quinn/h3/h3-quinn
 # unconditionally depend on tokio, which conflicts with this custom
 # async runtime. Source code is preserved behind dead feature gates.
@@ -138,8 +138,10 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 time = { version = "0.3", features = ["formatting"], optional = true }
 # SQLite async wrapper - bundled by default for portability
 rusqlite = { version = "0.33", features = ["bundled"], optional = true }
-# SHA-256 for PostgreSQL SCRAM authentication
-sha2 = { version = "0.10", optional = true }
+# SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM
+sha2 = "0.10"
+# HMAC for Macaroon capability token verification (bd-2lqyk.2)
+hmac = "0.12"
 # QUIC/HTTP3 deps removed (bd-9ipp): quinn/h3/h3-quinn depend on tokio.
 # quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
 # h3 = { version = "0.0.8", optional = true }
@@ -171,7 +173,6 @@ lz4_flex = "0.11"
 toml = "0.8"
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.13"
-sha2 = "0.10"
 
 [[bench]]
 name = "phase0_baseline"
