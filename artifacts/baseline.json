@@ -1,0 +1,473 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": "methodology_baselines benchmark (bd-1e2if.1)",
+  "timestamp": "2026-02-13T18:46:01Z",
+  "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479",
+  "note": "p95/p99 not available from criterion quick runs; requires extended measurement or custom harness",
+  "machine_info": {
+    "benchmark_mode": "quick",
+    "harness": "criterion 0.5"
+  },
+  "baselines": [
+    {
+      "operation": "methodology/task_spawn/inject_ready_global_queue",
+      "p50_ns": 89.92,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 88.82,
+      "ci95_upper_ns": 90.19,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_spawn/local_queue_push",
+      "p50_ns": 30362.0,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 30307.0,
+      "ci95_upper_ns": 30583.0,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_spawn/local_queue_spawn_batch/10",
+      "p50_ns": 33203.0,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 32028.0,
+      "ci95_upper_ns": 33497.0,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_spawn/local_queue_spawn_batch/100",
+      "p50_ns": 46333.0,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 44773.0,
+      "ci95_upper_ns": 46723.0,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_spawn/local_queue_spawn_batch/1000",
+      "p50_ns": 155690.0,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 149700.0,
+      "ci95_upper_ns": 157190.0,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_spawn/create_root_region",
+      "p50_ns": 424.72,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 424.05,
+      "ci95_upper_ns": 427.41,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_cancellation/cancel_region/1",
+      "p50_ns": 673.44,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 672.2,
+      "ci95_upper_ns": 678.43,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_cancellation/cancel_region/10",
+      "p50_ns": 4772.7,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 4713.5,
+      "ci95_upper_ns": 4787.5,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_cancellation/cancel_region/100",
+      "p50_ns": 40253.0,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 39858.0,
+      "ci95_upper_ns": 40351.0,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_cancellation/cancel_reason_create",
+      "p50_ns": 12.1,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 12.05,
+      "ci95_upper_ns": 12.11,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/task_cancellation/cancel_reason_strengthen",
+      "p50_ns": 11.1,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 11.06,
+      "ci95_upper_ns": 11.11,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_try_send_recv/1",
+      "p50_ns": 128.66,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 127.16,
+      "ci95_upper_ns": 129.04,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_try_send_recv/16",
+      "p50_ns": 150.03,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 149.57,
+      "ci95_upper_ns": 151.87,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_try_send_recv/256",
+      "p50_ns": 213.55,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 211.59,
+      "ci95_upper_ns": 214.04,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_throughput/10",
+      "p50_ns": 477.05,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 475.88,
+      "ci95_upper_ns": 481.75,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_throughput/100",
+      "p50_ns": 4073.6,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 3981.8,
+      "ci95_upper_ns": 4096.6,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_throughput/1000",
+      "p50_ns": 40390.0,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 39827.0,
+      "ci95_upper_ns": 40531.0,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_create_cap16",
+      "p50_ns": 80.9,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 80.0,
+      "ci95_upper_ns": 81.12,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_create_cap256",
+      "p50_ns": 127.84,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 126.58,
+      "ci95_upper_ns": 128.15,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/channel/mpsc_sender_clone",
+      "p50_ns": 35.76,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 35.64,
+      "ci95_upper_ns": 35.78,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/for_testing",
+      "p50_ns": 161.89,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 160.84,
+      "ci95_upper_ns": 162.15,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/for_testing_with_budget",
+      "p50_ns": 162.45,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 162.16,
+      "ci95_upper_ns": 163.64,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/has_timer",
+      "p50_ns": 0.64,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.64,
+      "ci95_upper_ns": 0.64,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/has_io",
+      "p50_ns": 0.64,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.64,
+      "ci95_upper_ns": 0.66,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/has_registry",
+      "p50_ns": 0.64,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.64,
+      "ci95_upper_ns": 0.64,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/has_remote",
+      "p50_ns": 0.63,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.63,
+      "ci95_upper_ns": 0.63,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/has_io_present",
+      "p50_ns": 0.63,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.63,
+      "ci95_upper_ns": 0.63,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/budget",
+      "p50_ns": 16.71,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 16.7,
+      "ci95_upper_ns": 16.71,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/is_cancel_requested",
+      "p50_ns": 12.7,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 12.69,
+      "ci95_upper_ns": 12.71,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/task_id",
+      "p50_ns": 12.54,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 12.54,
+      "ci95_upper_ns": 12.55,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/cx_capability/region_id",
+      "p50_ns": 12.6,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 12.6,
+      "ci95_upper_ns": 12.6,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/create_infinite",
+      "p50_ns": 3.87,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 3.84,
+      "ci95_upper_ns": 3.88,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/create_with_deadline_and_quota",
+      "p50_ns": 4.54,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 4.53,
+      "ci95_upper_ns": 4.55,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/is_exhausted_infinite",
+      "p50_ns": 0.65,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.65,
+      "ci95_upper_ns": 0.65,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/is_exhausted_zero",
+      "p50_ns": 0.65,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.65,
+      "ci95_upper_ns": 0.65,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/is_exhausted_with_resources",
+      "p50_ns": 0.64,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.64,
+      "ci95_upper_ns": 0.64,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/is_past_deadline_no_deadline",
+      "p50_ns": 0.64,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.64,
+      "ci95_upper_ns": 0.64,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/is_past_deadline_with_deadline",
+      "p50_ns": 0.65,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 0.64,
+      "ci95_upper_ns": 0.66,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/consume_poll",
+      "p50_ns": 7.73,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 7.72,
+      "ci95_upper_ns": 7.78,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/consume_cost",
+      "p50_ns": 7.7,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 7.68,
+      "ci95_upper_ns": 7.8,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/combine_two",
+      "p50_ns": 6.41,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 6.39,
+      "ci95_upper_ns": 6.42,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/combine_chain/4",
+      "p50_ns": 49.27,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 49.14,
+      "ci95_upper_ns": 49.3,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/combine_chain/16",
+      "p50_ns": 179.65,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 178.84,
+      "ci95_upper_ns": 179.85,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/combine_chain/64",
+      "p50_ns": 704.8,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 695.5,
+      "ci95_upper_ns": 707.13,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/remaining_time_with_deadline",
+      "p50_ns": 1.45,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 1.44,
+      "ci95_upper_ns": 1.46,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    },
+    {
+      "operation": "methodology/budget/remaining_time_no_deadline",
+      "p50_ns": 1.42,
+      "p95_ns": null,
+      "p99_ns": null,
+      "ci95_lower_ns": 1.42,
+      "ci95_upper_ns": 1.42,
+      "timestamp": "2026-02-13T18:46:01Z",
+      "git_sha": "9c838801790ddd7fd54e2f5b3136a5660371f479"
+    }
+  ]
+}
