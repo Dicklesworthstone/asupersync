@@ -1930,4 +1930,405 @@ mod tests {
         assert!(token_scope.verify(&key, &ctx_wrong_scope).is_err());
         assert!(token_rate.verify(&key, &ctx_wrong_scope).is_err());
     }
+
+    // ===================================================================
+    // bd-2lqyk.4 — Comprehensive proptest + security + E2E tests
+    // ===================================================================
+
+    use proptest::prelude::*;
+
+    /// Strategy that generates arbitrary `CaveatPredicate` values.
+    fn arb_predicate() -> impl Strategy<Value = CaveatPredicate> {
+        prop_oneof![
+            any::<u64>().prop_map(CaveatPredicate::TimeBefore),
+            any::<u64>().prop_map(CaveatPredicate::TimeAfter),
+            any::<u64>().prop_map(CaveatPredicate::RegionScope),
+            any::<u64>().prop_map(CaveatPredicate::TaskScope),
+            any::<u32>().prop_map(CaveatPredicate::MaxUses),
+            "[a-z]{1,8}".prop_map(|p| CaveatPredicate::ResourceScope(p)),
+            (1u32..1000, 1u32..86400).prop_map(|(m, w)| CaveatPredicate::RateLimit {
+                max_count: m,
+                window_secs: w,
+            }),
+            ("[a-z]{1,8}", "[a-z]{1,8}").prop_map(|(k, v)| CaveatPredicate::Custom(k, v)),
+        ]
+    }
+
+    /// Strategy that generates a `MacaroonToken` with 0..8 first-party caveats.
+    fn arb_token() -> impl Strategy<Value = (AuthKey, MacaroonToken)> {
+        (
+            any::<u64>().prop_map(|s| AuthKey::from_seed(s | 1)),
+            proptest::collection::vec(arb_predicate(), 0..8),
+        )
+            .prop_map(|(key, preds)| {
+                let mut token = MacaroonToken::mint(&key, "cap", "loc");
+                for p in preds {
+                    token = token.add_caveat(p);
+                }
+                (key, token)
+            })
+    }
+
+    // --- Proptest: predicate serialization roundtrip ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn prop_predicate_roundtrip(pred in arb_predicate()) {
+            let bytes = pred.to_bytes();
+            let (decoded, consumed) = CaveatPredicate::from_bytes(&bytes)
+                .expect("roundtrip decode must succeed");
+            prop_assert_eq!(&decoded, &pred);
+            prop_assert_eq!(consumed, bytes.len());
+        }
+    }
+
+    // --- Proptest: token binary roundtrip ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+        #[test]
+        fn prop_token_binary_roundtrip((key, token) in arb_token()) {
+            let bytes = token.to_binary();
+            let recovered = MacaroonToken::from_binary(&bytes)
+                .expect("binary roundtrip must succeed");
+            prop_assert_eq!(recovered.identifier(), token.identifier());
+            prop_assert_eq!(recovered.caveat_count(), token.caveat_count());
+            prop_assert!(recovered.verify_signature(&key));
+        }
+    }
+
+    // --- Security: no caveat removal ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+        /// Removing any single caveat from a multi-caveat token must
+        /// invalidate the HMAC chain.
+        #[test]
+        fn prop_no_caveat_removal(
+            seed in 1u64..u64::MAX,
+            preds in proptest::collection::vec(arb_predicate(), 2..6),
+        ) {
+            let key = AuthKey::from_seed(seed);
+            let mut token = MacaroonToken::mint(&key, "sec", "loc");
+            for p in &preds {
+                token = token.add_caveat(p.clone());
+            }
+            // Original verifies.
+            prop_assert!(token.verify_signature(&key));
+
+            // Remove each caveat in turn and check that verification fails.
+            let caveats = token.caveats().to_vec();
+            for skip_idx in 0..caveats.len() {
+                let mut tampered = MacaroonToken::mint(&key, "sec", "loc");
+                for (i, c) in caveats.iter().enumerate() {
+                    if i == skip_idx {
+                        continue;
+                    }
+                    if let Some(pred) = c.predicate() {
+                        tampered = tampered.add_caveat(pred.clone());
+                    }
+                }
+                // The tampered token has a different chain, so its signature
+                // won't match the original's. But it will match its own chain.
+                // The security property is: the original token's signature
+                // does NOT match this shorter chain.
+                prop_assert_ne!(
+                    tampered.signature().as_bytes(),
+                    token.signature().as_bytes(),
+                    "Removing caveat {} should change signature", skip_idx
+                );
+            }
+        }
+    }
+
+    // --- Security: no forgery without root key ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(5_000))]
+
+        /// A token minted with key K cannot be verified with a different key K'.
+        #[test]
+        fn prop_no_forgery(
+            seed1 in 1u64..u64::MAX,
+            seed2 in 1u64..u64::MAX,
+            preds in proptest::collection::vec(arb_predicate(), 0..4),
+        ) {
+            prop_assume!(seed1 != seed2);
+            let key1 = AuthKey::from_seed(seed1);
+            let key2 = AuthKey::from_seed(seed2);
+
+            let mut token = MacaroonToken::mint(&key1, "cap", "loc");
+            for p in preds {
+                token = token.add_caveat(p);
+            }
+
+            // Correct key works.
+            prop_assert!(token.verify_signature(&key1));
+            // Wrong key fails.
+            prop_assert!(!token.verify_signature(&key2));
+        }
+    }
+
+    // --- Security: monotonic restriction (proptest) ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+        /// If a token with N caveats passes verification, adding more
+        /// caveats can only cause failure or continued success, never
+        /// a token that accepts contexts rejected by the original.
+        #[test]
+        fn prop_monotonic_attenuation(
+            seed in 1u64..u64::MAX,
+            base_preds in proptest::collection::vec(arb_predicate(), 0..3),
+            extra_pred in arb_predicate(),
+            time_ms in 0u64..20000,
+            region in proptest::option::of(0u64..100),
+            task in proptest::option::of(0u64..100),
+            use_count in 0u32..20,
+        ) {
+            let key = AuthKey::from_seed(seed);
+            let mut base = MacaroonToken::mint(&key, "cap", "loc");
+            for p in base_preds {
+                base = base.add_caveat(p);
+            }
+            let attenuated = base.clone().add_caveat(extra_pred);
+
+            let mut ctx = VerificationContext::new()
+                .with_time(time_ms)
+                .with_use_count(use_count);
+            if let Some(r) = region {
+                ctx = ctx.with_region(r);
+            }
+            if let Some(t) = task {
+                ctx = ctx.with_task(t);
+            }
+
+            let base_result = base.verify(&key, &ctx);
+            let att_result = attenuated.verify(&key, &ctx);
+
+            // Monotonicity: if attenuated passes, base must also pass.
+            if att_result.is_ok() {
+                prop_assert!(
+                    base_result.is_ok(),
+                    "Attenuated token passed but base failed — escalation!"
+                );
+            }
+        }
+    }
+
+    // --- Tampered token rejection ---
+
+    #[test]
+    fn tampered_signature_bytes_rejected() {
+        let key = test_root_key();
+        let token =
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(5000));
+        let mut bytes = token.to_binary();
+
+        // Flip last byte of signature (signature is the last AUTH_KEY_SIZE bytes).
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+
+        let tampered = MacaroonToken::from_binary(&bytes).unwrap();
+        assert!(!tampered.verify_signature(&key));
+    }
+
+    #[test]
+    fn tampered_caveat_data_rejected() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(5000))
+            .add_caveat(CaveatPredicate::MaxUses(10));
+
+        let mut bytes = token.to_binary();
+        // Find a byte inside the caveat data region and flip it.
+        // The version + identifier + location header is small; caveats start after.
+        // We flip a byte in the middle of the binary.
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0x01;
+
+        // Either parsing fails or signature doesn't match.
+        match MacaroonToken::from_binary(&bytes) {
+            Some(t) => assert!(!t.verify_signature(&key)),
+            None => {} // Parse failure is also acceptable
+        }
+    }
+
+    // --- E2E: full delegation chain ---
+
+    #[test]
+    fn e2e_full_delegation_chain() {
+        // Root service mints a capability token.
+        let root_key = AuthKey::from_seed(1000);
+        let root_token = MacaroonToken::mint(&root_key, "data:readwrite", "storage-svc");
+
+        // Service attenuates to read-only with time limit.
+        let svc_token = root_token
+            .clone()
+            .add_caveat(CaveatPredicate::TimeBefore(10000))
+            .add_caveat(CaveatPredicate::ResourceScope("data/users/**".to_string()));
+
+        // Service delegates to subsystem with further restriction.
+        let sub_token = svc_token
+            .clone()
+            .add_caveat(CaveatPredicate::MaxUses(50))
+            .add_caveat(CaveatPredicate::RateLimit {
+                max_count: 10,
+                window_secs: 60,
+            });
+
+        // Subsystem further restricts scope.
+        let leaf_token = sub_token
+            .clone()
+            .add_caveat(CaveatPredicate::ResourceScope(
+                "data/users/*/profile".to_string(),
+            ))
+            .add_caveat(CaveatPredicate::RegionScope(42));
+
+        // Full verification with valid context.
+        let ctx_ok = VerificationContext::new()
+            .with_time(5000)
+            .with_resource("data/users/123/profile")
+            .with_use_count(10)
+            .with_window_use_count(5)
+            .with_region(42);
+        assert!(
+            leaf_token.verify(&root_key, &ctx_ok).is_ok(),
+            "Valid delegation chain should verify"
+        );
+
+        // HMAC chain integrity: root key verifies the full chain.
+        assert!(leaf_token.verify_signature(&root_key));
+
+        // Each intermediate token also verifies.
+        assert!(root_token.verify_signature(&root_key));
+        assert!(svc_token.verify_signature(&root_key));
+        assert!(sub_token.verify_signature(&root_key));
+
+        // Audit: caveat count grows monotonically.
+        assert_eq!(root_token.caveat_count(), 0);
+        assert_eq!(svc_token.caveat_count(), 2);
+        assert_eq!(sub_token.caveat_count(), 4);
+        assert_eq!(leaf_token.caveat_count(), 6);
+
+        // Failure cases: expired time.
+        let ctx_expired = VerificationContext::new()
+            .with_time(15000)
+            .with_resource("data/users/123/profile")
+            .with_use_count(10)
+            .with_window_use_count(5)
+            .with_region(42);
+        assert!(leaf_token.verify(&root_key, &ctx_expired).is_err());
+
+        // Wrong resource path.
+        let ctx_wrong_path = VerificationContext::new()
+            .with_time(5000)
+            .with_resource("data/admin/settings")
+            .with_use_count(10)
+            .with_window_use_count(5)
+            .with_region(42);
+        assert!(leaf_token.verify(&root_key, &ctx_wrong_path).is_err());
+
+        // Wrong region.
+        let ctx_wrong_region = VerificationContext::new()
+            .with_time(5000)
+            .with_resource("data/users/123/profile")
+            .with_use_count(10)
+            .with_window_use_count(5)
+            .with_region(99);
+        assert!(leaf_token.verify(&root_key, &ctx_wrong_region).is_err());
+
+        // Rate limit exceeded.
+        let ctx_rate = VerificationContext::new()
+            .with_time(5000)
+            .with_resource("data/users/123/profile")
+            .with_use_count(10)
+            .with_window_use_count(11)
+            .with_region(42);
+        assert!(leaf_token.verify(&root_key, &ctx_rate).is_err());
+
+        // Max uses exceeded.
+        let ctx_uses = VerificationContext::new()
+            .with_time(5000)
+            .with_resource("data/users/123/profile")
+            .with_use_count(51)
+            .with_window_use_count(5)
+            .with_region(42);
+        assert!(leaf_token.verify(&root_key, &ctx_uses).is_err());
+    }
+
+    // --- E2E: third-party delegation chain ---
+
+    #[test]
+    fn e2e_third_party_delegation_chain() {
+        let root_key = AuthKey::from_seed(2000);
+        let auth_key = AuthKey::from_seed(2001);
+
+        // Root service mints a token requiring authentication + region.
+        let token = MacaroonToken::mint(&root_key, "api:full", "api-gateway")
+            .add_caveat(CaveatPredicate::TimeBefore(10000))
+            .add_caveat(CaveatPredicate::RegionScope(1))
+            .add_third_party_caveat("auth-svc", "user_auth", &auth_key);
+
+        // Auth service issues discharge.
+        let discharge = MacaroonToken::mint(&auth_key, "user_auth", "auth-svc");
+
+        // Holder binds discharge.
+        let bound = token.bind_for_request(&discharge);
+
+        // Verify the full chain.
+        let ctx = VerificationContext::new().with_time(5000).with_region(1);
+        assert!(token
+            .verify_with_discharges(&root_key, &ctx, &[bound.clone()])
+            .is_ok());
+
+        // Fail: first-party caveat violated (wrong region).
+        let bad_ctx = VerificationContext::new().with_time(5000).with_region(99);
+        assert!(token
+            .verify_with_discharges(&root_key, &bad_ctx, &[bound.clone()])
+            .is_err());
+
+        // Fail: missing discharge.
+        assert!(token.verify_with_discharges(&root_key, &ctx, &[]).is_err());
+
+        // Fail: wrong discharge key.
+        let wrong_key = AuthKey::from_seed(9999);
+        let bad_discharge = MacaroonToken::mint(&wrong_key, "user_auth", "auth-svc");
+        let bad_bound = token.bind_for_request(&bad_discharge);
+        assert!(token
+            .verify_with_discharges(&root_key, &ctx, &[bad_bound])
+            .is_err());
+    }
+
+    // --- Verification error display ---
+
+    #[test]
+    fn verification_error_display_coverage() {
+        let e1 = VerificationError::InvalidSignature;
+        assert_eq!(format!("{e1}"), "macaroon signature verification failed");
+
+        let e2 = VerificationError::CaveatFailed {
+            index: 0,
+            predicate: "time < 100ms".to_string(),
+            reason: "expired".to_string(),
+        };
+        assert!(format!("{e2}").contains("caveat 0 failed"));
+
+        let e3 = VerificationError::MissingDischarge {
+            index: 1,
+            identifier: "auth".to_string(),
+        };
+        assert!(format!("{e3}").contains("missing discharge"));
+
+        let e4 = VerificationError::DischargeInvalid {
+            index: 2,
+            identifier: "check".to_string(),
+        };
+        assert!(format!("{e4}").contains("discharge"));
+    }
 }
