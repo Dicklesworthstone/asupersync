@@ -1155,4 +1155,459 @@ mod tests {
         let parsed: FallbackPolicy = toml::from_str(&toml_str).unwrap();
         assert_eq!(fp, parsed);
     }
+
+    #[test]
+    fn fallback_policy_json_roundtrip() {
+        let fp = FallbackPolicy::default();
+        let json = serde_json::to_string(&fp).unwrap();
+        let parsed: FallbackPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(fp, parsed);
+    }
+
+    // -- argmin correctness with known posteriors --
+
+    #[test]
+    fn argmin_correctness_deterministic_posterior() {
+        let m = two_state_matrix();
+        // Fully certain state=good: E[continue]=0.0, E[stop]=0.3 → continue wins.
+        let certain_good = Posterior::new(vec![1.0, 0.0]).unwrap();
+        assert_eq!(m.bayes_action(&certain_good), 0);
+        // Fully certain state=bad: E[continue]=0.8, E[stop]=0.1 → stop wins.
+        let certain_bad = Posterior::new(vec![0.0, 1.0]).unwrap();
+        assert_eq!(m.bayes_action(&certain_bad), 1);
+    }
+
+    #[test]
+    fn argmin_correctness_breakeven_point() {
+        let m = two_state_matrix();
+        // Find crossover: at p(good)=x, E[continue]=0.8(1-x) and E[stop]=0.3x+0.1(1-x).
+        // Crossover: 0.8-0.8x = 0.3x+0.1-0.1x → 0.8-0.8x = 0.2x+0.1 → 0.7=x → x=0.7
+        // At p(good)=0.71, continue is better.
+        let above = Posterior::new(vec![0.71, 0.29]).unwrap();
+        assert_eq!(m.bayes_action(&above), 0);
+        // At p(good)=0.69, stop is better.
+        let below = Posterior::new(vec![0.69, 0.31]).unwrap();
+        assert_eq!(m.bayes_action(&below), 1);
+    }
+
+    #[test]
+    fn argmin_three_state_three_action() {
+        // 3 states, 3 actions: verify argmin in a bigger space.
+        let m = LossMatrix::new(
+            vec!["s0".into(), "s1".into(), "s2".into()],
+            vec!["a0".into(), "a1".into(), "a2".into()],
+            vec![
+                1.0, 2.0, 3.0, // state 0
+                3.0, 1.0, 2.0, // state 1
+                2.0, 3.0, 1.0, // state 2
+            ],
+        )
+        .unwrap();
+        // Uniform posterior: E[a0]=2.0, E[a1]=2.0, E[a2]=2.0 → all tied.
+        // Rust's min_by returns the last equal element, so index 2.
+        let uniform = Posterior::uniform(3);
+        let action = m.bayes_action(&uniform);
+        // Any action is valid since all expected losses are equal.
+        assert!(action < 3);
+        // Posterior concentrated on state 1: a1 has loss 1.0 → a1 wins.
+        let state1 = Posterior::new(vec![0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(m.bayes_action(&state1), 1);
+        // Posterior concentrated on state 2: a2 has loss 1.0 → a2 wins.
+        let state2 = Posterior::new(vec![0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(m.bayes_action(&state2), 2);
+    }
+
+    // -- Bayesian update hand-computed --
+
+    #[test]
+    fn bayesian_update_hand_computed_three_state() {
+        // Prior: [0.5, 0.3, 0.2]
+        // Likelihoods: [0.1, 0.6, 0.3]
+        // Unnorm: [0.05, 0.18, 0.06]  sum=0.29
+        // Posterior: [0.05/0.29, 0.18/0.29, 0.06/0.29]
+        let mut p = Posterior::new(vec![0.5, 0.3, 0.2]).unwrap();
+        p.bayesian_update(&[0.1, 0.6, 0.3]);
+        let expected = [0.05 / 0.29, 0.18 / 0.29, 0.06 / 0.29];
+        for (i, &e) in expected.iter().enumerate() {
+            assert!(
+                (p.probs()[i] - e).abs() < 1e-10,
+                "state {i}: got {}, expected {e}",
+                p.probs()[i]
+            );
+        }
+    }
+
+    #[test]
+    fn bayesian_update_successive_convergence() {
+        // Repeated observations of state 0 should drive posterior toward certainty.
+        let mut p = Posterior::uniform(3);
+        for _ in 0..20 {
+            p.bayesian_update(&[0.9, 0.05, 0.05]);
+        }
+        assert!(p.probs()[0] > 0.999);
+        assert!(p.probs()[1] < 0.001);
+        assert!(p.probs()[2] < 0.001);
+    }
+
+    // -- End-to-end decision pipeline --
+
+    #[test]
+    fn end_to_end_pipeline() {
+        let contract = TestContract::new();
+        let mut posterior = Posterior::uniform(2);
+
+        // Feed 5 "good" observations: posterior should shift toward state 0.
+        for _ in 0..5 {
+            contract.update_posterior(&mut posterior, 0);
+        }
+        assert!(posterior.probs()[0] > 0.99);
+
+        // Make a decision: should be "continue" (low loss when good).
+        let ctx = test_ctx(0.95, 200);
+        let outcome = evaluate(&contract, &posterior, &ctx);
+        assert!(!outcome.fallback_active);
+        assert_eq!(outcome.action_name, "continue");
+        assert!(outcome.expected_loss < 0.01);
+
+        // Verify evidence ledger entry.
+        let evidence = outcome.audit_entry.to_evidence_ledger();
+        assert_eq!(evidence.component, "test_contract");
+        assert_eq!(evidence.action, "continue");
+        assert!(evidence.is_valid());
+
+        // Now feed "bad" observations to shift posterior.
+        for _ in 0..20 {
+            contract.update_posterior(&mut posterior, 1);
+        }
+        assert!(posterior.probs()[1] > 0.99);
+
+        // Decision should now be "stop".
+        let ctx2 = test_ctx(0.95, 201);
+        let outcome2 = evaluate(&contract, &posterior, &ctx2);
+        assert_eq!(outcome2.action_name, "stop");
+    }
+
+    // -- Concurrent decision safety --
+
+    #[test]
+    fn concurrent_decision_safety() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let contract = Arc::new(TestContract::new());
+        let results: Vec<_> = (0..10)
+            .map(|i| {
+                let c = Arc::clone(&contract);
+                thread::spawn(move || {
+                    let posterior = Posterior::uniform(2);
+                    let ctx = EvalContext {
+                        calibration_score: 0.9,
+                        e_process: 1.0,
+                        ci_width: 0.1,
+                        decision_id: DecisionId::from_parts(1_700_000_000_000, u128::from(i)),
+                        trace_id: TraceId::from_parts(1_700_000_000_000, u128::from(i)),
+                        ts_unix_ms: 1_700_000_000_000 + i,
+                    };
+                    let outcome = evaluate(c.as_ref(), &posterior, &ctx);
+                    assert!(!outcome.action_name.is_empty());
+                    assert_eq!(outcome.expected_losses.len(), 2);
+                    let evidence = outcome.audit_entry.to_evidence_ledger();
+                    assert!(evidence.is_valid());
+                    outcome
+                })
+            })
+            .map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(results.len(), 10);
+        // All should agree on the same action for uniform posterior.
+        let actions: std::collections::HashSet<_> =
+            results.iter().map(|r| r.action_name.clone()).collect();
+        assert_eq!(
+            actions.len(),
+            1,
+            "all threads should choose the same action"
+        );
+    }
+
+    // -- Cross-crate type verification --
+
+    #[test]
+    fn cross_crate_franken_kernel_types() {
+        // Verify DecisionId and TraceId are the franken_kernel versions.
+        let did = DecisionId::from_parts(1_700_000_000_000, 42);
+        assert_eq!(did.timestamp_ms(), 1_700_000_000_000);
+        let tid = TraceId::from_parts(1_700_000_000_000, 1);
+        assert_eq!(tid.timestamp_ms(), 1_700_000_000_000);
+
+        // Verify they work correctly in DecisionAuditEntry.
+        let contract = TestContract::new();
+        let posterior = Posterior::uniform(2);
+        let ctx = EvalContext {
+            calibration_score: 0.9,
+            e_process: 1.0,
+            ci_width: 0.1,
+            decision_id: did,
+            trace_id: tid,
+            ts_unix_ms: 1_700_000_000_000,
+        };
+        let outcome = evaluate(&contract, &posterior, &ctx);
+        assert_eq!(outcome.audit_entry.decision_id, did);
+        assert_eq!(outcome.audit_entry.trace_id, tid);
+    }
+
+    // -- Posterior serde roundtrips --
+
+    #[test]
+    fn posterior_json_roundtrip() {
+        let p = Posterior::new(vec![0.25, 0.75]).unwrap();
+        let json = serde_json::to_string(&p).unwrap();
+        let parsed: Posterior = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, parsed);
+    }
+
+    // -- LossMatrix 3x3 TOML --
+
+    #[test]
+    fn loss_matrix_3x3_toml_roundtrip() {
+        let m = LossMatrix::new(
+            vec!["s0".into(), "s1".into(), "s2".into()],
+            vec!["a0".into(), "a1".into(), "a2".into()],
+            vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        )
+        .unwrap();
+        let toml_str = toml::to_string(&m).unwrap();
+        let parsed: LossMatrix = toml::from_str(&toml_str).unwrap();
+        assert_eq!(m, parsed);
+    }
+
+    // -- DecisionOutcome debug --
+
+    #[test]
+    fn decision_outcome_debug() {
+        let contract = TestContract::new();
+        let posterior = Posterior::uniform(2);
+        let ctx = test_ctx(0.9, 300);
+        let outcome = evaluate(&contract, &posterior, &ctx);
+        let dbg = format!("{outcome:?}");
+        assert!(dbg.contains("DecisionOutcome"));
+        assert!(dbg.contains("action_name"));
+    }
+
+    // -- Fallback all three triggers --
+
+    #[test]
+    fn fallback_multiple_triggers_simultaneously() {
+        let fp = FallbackPolicy::default();
+        // All three conditions breached simultaneously.
+        assert!(fp.should_fallback(0.3, 30.0, 0.9));
+    }
+
+    #[test]
+    fn fallback_no_trigger_at_exact_thresholds() {
+        let fp = FallbackPolicy::default();
+        // Exactly at thresholds: cal=0.7 (not < 0.7), e=20 (not > 20), ci=0.5 (not > 0.5).
+        assert!(!fp.should_fallback(0.7, 20.0, 0.5));
+    }
+
+    // -- Entropy edge cases --
+
+    #[test]
+    fn posterior_entropy_three_state_uniform() {
+        let p = Posterior::uniform(3);
+        // entropy = log2(3) ≈ 1.585
+        assert!((p.entropy() - 3.0_f64.log2()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn posterior_entropy_single_state() {
+        let p = Posterior::new(vec![1.0]).unwrap();
+        assert!((p.entropy()).abs() < 1e-10);
+    }
+
+    // -- ValidationError is std::error::Error --
+
+    #[test]
+    fn validation_error_is_std_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<ValidationError>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property-based tests (proptest)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generate a valid probability vector of length `n`.
+    fn arb_posterior(n: usize) -> impl Strategy<Value = Posterior> {
+        proptest::collection::vec(0.01_f64..=1.0, n).prop_map(|mut v| {
+            let sum: f64 = v.iter().sum();
+            for p in &mut v {
+                *p /= sum;
+            }
+            Posterior::new(v).unwrap()
+        })
+    }
+
+    /// Generate a valid loss matrix of given dimensions.
+    fn arb_loss_matrix(n_states: usize, n_actions: usize) -> impl Strategy<Value = LossMatrix> {
+        let states: Vec<String> = (0..n_states).map(|i| format!("s{i}")).collect();
+        let actions: Vec<String> = (0..n_actions).map(|i| format!("a{i}")).collect();
+        proptest::collection::vec(0.0_f64..=10.0, n_states * n_actions).prop_map(move |values| {
+            LossMatrix::new(states.clone(), actions.clone(), values).unwrap()
+        })
+    }
+
+    // -- Argmin: chosen action minimizes expected loss for any valid posterior --
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn bayes_action_minimizes_expected_loss(
+            matrix in arb_loss_matrix(3, 3),
+            posterior in arb_posterior(3),
+        ) {
+            let chosen = matrix.bayes_action(&posterior);
+            let chosen_loss = matrix.expected_loss(&posterior, chosen);
+            for a in 0..matrix.n_actions() {
+                let other_loss = matrix.expected_loss(&posterior, a);
+                prop_assert!(
+                    chosen_loss <= other_loss + 1e-10,
+                    "action {chosen} (loss {chosen_loss}) should be <= action {a} (loss {other_loss})"
+                );
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn bayes_action_minimizes_2x2(
+            matrix in arb_loss_matrix(2, 2),
+            posterior in arb_posterior(2),
+        ) {
+            let chosen = matrix.bayes_action(&posterior);
+            let chosen_loss = matrix.expected_loss(&posterior, chosen);
+            for a in 0..matrix.n_actions() {
+                prop_assert!(chosen_loss <= matrix.expected_loss(&posterior, a) + 1e-10);
+            }
+        }
+    }
+
+    // -- Posterior update preserves normalization --
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn bayesian_update_preserves_normalization(
+            prior in arb_posterior(4),
+            likelihoods in proptest::collection::vec(0.01_f64..=1.0, 4usize),
+        ) {
+            let mut p = prior;
+            p.bayesian_update(&likelihoods);
+            let sum: f64 = p.probs().iter().sum();
+            prop_assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "posterior sum = {sum}, expected 1.0"
+            );
+            for &prob in p.probs() {
+                prop_assert!(prob >= 0.0, "negative probability: {prob}");
+            }
+        }
+    }
+
+    // -- Posterior: all elements non-negative after update --
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn posterior_all_non_negative_after_update(
+            prior in arb_posterior(3),
+            likelihoods in proptest::collection::vec(0.0_f64..=1.0, 3usize),
+        ) {
+            let mut p = prior;
+            // Only update if likelihoods have positive sum (avoid degenerate case).
+            let lik_sum: f64 = likelihoods.iter().sum();
+            if lik_sum > 0.0 {
+                p.bayesian_update(&likelihoods);
+                for &prob in p.probs() {
+                    prop_assert!(prob >= 0.0, "negative probability: {prob}");
+                }
+            }
+        }
+    }
+
+    // -- FallbackPolicy serde roundtrip --
+
+    proptest! {
+        #[test]
+        fn fallback_policy_serde_roundtrip(
+            cal in 0.0_f64..=1.0,
+            e_proc in 0.0_f64..=100.0,
+            ci in 0.0_f64..=10.0,
+        ) {
+            let fp = FallbackPolicy::new(cal, e_proc, ci).unwrap();
+            let json = serde_json::to_string(&fp).unwrap();
+            let parsed: FallbackPolicy = serde_json::from_str(&json).unwrap();
+            // Use approximate comparison due to f64 JSON round-trip precision.
+            prop_assert!((fp.calibration_drift_threshold - parsed.calibration_drift_threshold).abs() < 1e-12);
+            prop_assert!((fp.e_process_breach_threshold - parsed.e_process_breach_threshold).abs() < 1e-12);
+            prop_assert!((fp.confidence_width_threshold - parsed.confidence_width_threshold).abs() < 1e-12);
+        }
+    }
+
+    // -- LossMatrix serde roundtrip --
+
+    proptest! {
+        #[test]
+        fn loss_matrix_serde_roundtrip(
+            matrix in arb_loss_matrix(2, 3),
+        ) {
+            let json = serde_json::to_string(&matrix).unwrap();
+            let parsed: LossMatrix = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(matrix.state_names(), parsed.state_names());
+            prop_assert_eq!(matrix.action_names(), parsed.action_names());
+            // Use approximate comparison for f64 values.
+            for s in 0..matrix.n_states() {
+                for a in 0..matrix.n_actions() {
+                    prop_assert!((matrix.get(s, a) - parsed.get(s, a)).abs() < 1e-12);
+                }
+            }
+        }
+    }
+
+    // -- Expected loss is a convex combination --
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn expected_loss_within_loss_range(
+            matrix in arb_loss_matrix(3, 3),
+            posterior in arb_posterior(3),
+        ) {
+            for a in 0..matrix.n_actions() {
+                let el = matrix.expected_loss(&posterior, a);
+                let min_loss = (0..matrix.n_states())
+                    .map(|s| matrix.get(s, a))
+                    .fold(f64::INFINITY, f64::min);
+                let max_loss = (0..matrix.n_states())
+                    .map(|s| matrix.get(s, a))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                prop_assert!(
+                    el >= min_loss - 1e-10 && el <= max_loss + 1e-10,
+                    "expected loss {el} outside [{min_loss}, {max_loss}]"
+                );
+            }
+        }
+    }
 }
