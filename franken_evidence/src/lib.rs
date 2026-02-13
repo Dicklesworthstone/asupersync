@@ -43,6 +43,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod render;
+
 use std::collections::HashMap;
 use std::fmt;
 
