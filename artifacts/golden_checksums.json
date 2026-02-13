@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "generated_by": "golden_output benchmark (bd-1e2if.2)",
+  "checksums": {
+    "budget/combine_chain": {
+      "output_hash": "a866e3b1bfe6773ef815fbcc322b1d470bb4b3b796709efb51903ffcfe1ffdbb",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "budget/deadline_check_matrix": {
+      "output_hash": "304c3aa66be027d22bef5012a1510b97f2e83158424a03e9919a1317fe1310f4",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "cancel/cancel_budgets": {
+      "output_hash": "880088a12dbaabbd5481703bdc88075a967f1696e64e7110398bc5179da52f82",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "cancel/tree_propagation_depth_5": {
+      "output_hash": "85dfafed6b9ae886eda10bb758ebdd425a90e3829cee064585577874ae3caa1b",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "channel/mpsc_multi_producer_interleave": {
+      "output_hash": "7862b3c6abc43c253abb6269df13c023654ee8d3dc209bef3c7cc68865fe59f6",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "channel/mpsc_try_send_recv_1000": {
+      "output_hash": "c76dd6f3c17103439dfb85094b25f725c8a46fabf6288b0b9e6743774739eb3e",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "channel/oneshot_send_recv_sequence": {
+      "output_hash": "305d9faa182a3fa58209faf4d462a3bf7cb25180c75e12f779a47e32899f67b4",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "lab/deterministic_schedule_seed_1337": {
+      "output_hash": "27d627326b5b6304467eba5515a5fc0596b14063a1c52a03012ea3a1af9543be",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "lab/deterministic_schedule_seed_42": {
+      "output_hash": "0b0f3192274d644f0658c30b60a6e1acfabfa6df88207c43067b2ff70ca63945",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "obligation/region_cancel_propagation": {
+      "output_hash": "ee61174bb8d04fe27c4e223a0799577d963d4526520c77274cc9fb88df8a5d1f",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "obligation/send_permit_lifecycle": {
+      "output_hash": "ef3a7aeb55ff56d9b045e5bfacb7e093732b13191d9df5df73c343e51cc67a88",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "scheduler/global_inject_then_pop_50": {
+      "output_hash": "077ba6995d23b61f3de629ba45496763d3229769c03737a291904f7220f6e5e0",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "scheduler/mixed_cancel_ready_timed_200": {
+      "output_hash": "ebc8100fd3915f8c0c9f782e7b38cf383ec14c9d1298075d1931fbe812b9db1b",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    },
+    "scheduler/priority_lane_ordering_100": {
+      "output_hash": "aa41a308bff0297fa0dd9d902d1263a9e19cacd3e03b1423bd0876e021904fa3",
+      "git_sha": "b39fa76741e91c92116154117f2f0241eadc9394",
+      "generated_at": "1771009018Z"
+    }
+  }
+}
