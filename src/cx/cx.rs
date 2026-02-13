@@ -647,6 +647,60 @@ impl<Caps> Cx<Caps> {
         Some(cx)
     }
 
+    /// Attenuate with a time limit: the token expires at `deadline_ms`.
+    ///
+    /// Convenience wrapper around [`attenuate`](Self::attenuate) with
+    /// [`CaveatPredicate::TimeBefore`].
+    ///
+    /// Returns `None` if no macaroon is attached.
+    #[must_use]
+    pub fn attenuate_time_limit(&self, deadline_ms: u64) -> Option<Self> {
+        self.attenuate(super::macaroon::CaveatPredicate::TimeBefore(deadline_ms))
+    }
+
+    /// Attenuate with a resource scope restriction.
+    ///
+    /// The `pattern` uses simple glob syntax: `*` matches any single segment,
+    /// `**` matches any number of segments.
+    ///
+    /// Returns `None` if no macaroon is attached.
+    #[must_use]
+    pub fn attenuate_scope(&self, pattern: impl Into<String>) -> Option<Self> {
+        self.attenuate(super::macaroon::CaveatPredicate::ResourceScope(
+            pattern.into(),
+        ))
+    }
+
+    /// Attenuate with a windowed rate limit.
+    ///
+    /// Restricts the token to at most `max_count` uses per `window_secs`.
+    /// The caller is responsible for tracking the sliding window and
+    /// providing `window_use_count` in [`VerificationContext`].
+    ///
+    /// Returns `None` if no macaroon is attached.
+    #[must_use]
+    pub fn attenuate_rate_limit(&self, max_count: u32, window_secs: u32) -> Option<Self> {
+        self.attenuate(super::macaroon::CaveatPredicate::RateLimit {
+            max_count,
+            window_secs,
+        })
+    }
+
+    /// Attenuate with the Cx's current budget deadline.
+    ///
+    /// If the Cx has a finite deadline, adds a `TimeBefore` caveat using it.
+    /// If no deadline is set, the macaroon is returned unchanged.
+    ///
+    /// Returns `None` if no macaroon is attached.
+    #[must_use]
+    pub fn attenuate_from_budget(&self) -> Option<Self> {
+        let budget = self.budget();
+        budget.deadline.map_or_else(
+            || Some(self.clone()),
+            |d| self.attenuate_time_limit(d.as_millis()),
+        )
+    }
+
     /// Verify the attached capability token against a root key and context.
     ///
     /// Checks the HMAC chain integrity and evaluates all caveat predicates.
@@ -701,6 +755,24 @@ impl<Caps> Cx<Caps> {
                     "macaroon verification failed"
                 );
             }
+            #[allow(unused_variables)]
+            Err(VerificationError::MissingDischarge { index, identifier }) => {
+                info!(
+                    token_id = %token.identifier(),
+                    failed_at_caveat = index,
+                    discharge_id = %identifier,
+                    "missing discharge macaroon"
+                );
+            }
+            #[allow(unused_variables)]
+            Err(VerificationError::DischargeInvalid { index, identifier }) => {
+                info!(
+                    token_id = %token.identifier(),
+                    failed_at_caveat = index,
+                    discharge_id = %identifier,
+                    "discharge macaroon verification failed"
+                );
+            }
         }
 
         result
@@ -716,16 +788,19 @@ impl<Caps> Cx<Caps> {
             return;
         };
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = wall_clock_now().as_millis();
 
         let (action, loss) = match result {
             Ok(()) => ("verify_success".to_string(), 0.0),
             Err(VerificationError::InvalidSignature) => ("verify_fail_signature".to_string(), 1.0),
             Err(VerificationError::CaveatFailed { index, .. }) => {
                 (format!("verify_fail_caveat_{index}"), 0.5)
+            }
+            Err(VerificationError::MissingDischarge { index, .. }) => {
+                (format!("verify_fail_missing_discharge_{index}"), 0.8)
+            }
+            Err(VerificationError::DischargeInvalid { index, .. }) => {
+                (format!("verify_fail_discharge_invalid_{index}"), 0.9)
             }
         };
 
