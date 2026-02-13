@@ -153,6 +153,19 @@ impl LocalQueue {
         });
     }
 
+    /// Pushes multiple tasks to the local queue under one arena/queue lock.
+    pub fn push_many(&self, tasks: &[TaskId]) {
+        if tasks.is_empty() {
+            return;
+        }
+        self.tasks.with_tasks_arena_mut(|arena| {
+            let mut stack = self.inner.lock().expect("local queue lock poisoned");
+            for &task in tasks {
+                stack.push(task, arena);
+            }
+        });
+    }
+
     /// Pops a task from the local queue (LIFO).
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
@@ -654,6 +667,18 @@ mod tests {
 
         queue.push(task(3));
         assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_local_queue_push_many_lifo_order() {
+        let queue = queue(4);
+        queue.push_many(&[task(1), task(2), task(3), task(4)]);
+
+        assert_eq!(queue.pop(), Some(task(4)));
+        assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(2)));
         assert_eq!(queue.pop(), Some(task(1)));
         assert_eq!(queue.pop(), None);
     }

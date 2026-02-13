@@ -145,19 +145,24 @@ impl Worker {
                     let trace = &self.trace;
                     let seen = &mut self.seen_io_tokens;
                     let _ = driver.turn_with(Some(Duration::from_millis(1)), |event, interest| {
-                        let token = event.token.0 as u64;
+                        let io_token = event.token.0 as u64;
                         let interest_bits = interest.unwrap_or(event.ready).bits();
-                        if seen.insert(token) {
+                        if seen.insert(io_token) {
                             let seq = trace.next_seq();
                             trace.push_event(TraceEvent::io_requested(
                                 seq,
                                 now,
-                                token,
+                                io_token,
                                 interest_bits,
                             ));
                         }
                         let seq = trace.next_seq();
-                        trace.push_event(TraceEvent::io_ready(seq, now, token, event.ready.bits()));
+                        trace.push_event(TraceEvent::io_ready(
+                            seq,
+                            now,
+                            io_token,
+                            event.ready.bits(),
+                        ));
                     });
 
                     // Loop back to check queues (tasks might have been woken by I/O)
@@ -357,9 +362,7 @@ impl Worker {
                 for waiter in &global_waiters {
                     self.global.push(*waiter);
                 }
-                for waiter in &local_waiters {
-                    self.local.push(*waiter);
-                }
+                self.local.push_many(&local_waiters);
                 self.scratch_local.set(local_waiters);
                 self.scratch_global.set(global_waiters);
                 for (finalizer_task, _) in finalizers {
@@ -378,6 +381,7 @@ impl Worker {
                         if let Some(record) = state.task_mut(task_id) {
                             record.cached_waker = Some((waker, 0));
                         }
+                        let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
                         drop(state);
                     }
                     AnyStoredTask::Local(t) => {
@@ -387,6 +391,7 @@ impl Worker {
                         if let Some(record) = state.task_mut(task_id) {
                             record.cached_waker = Some((waker, 0));
                         }
+                        let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
                         drop(state);
                     }
                 }
@@ -403,10 +408,6 @@ impl Worker {
                         self.global.push(task_id);
                     }
                     self.parker.unpark();
-                }
-
-                if let Ok(mut state) = self.state.lock() {
-                    let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
                 }
             }
         }
