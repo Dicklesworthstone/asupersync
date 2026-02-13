@@ -142,13 +142,15 @@ fn ci_profile_runtime_order_and_bead_links_are_valid() {
     let bead_ids = BEADS_JSONL
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect::<BTreeSet<_>>();
+        .fold(BTreeSet::new(), |mut ids, entry| {
+            if let Some(id) = entry.get("id").and_then(Value::as_str) {
+                ids.insert(id.to_string());
+            }
+            if let Some(external_ref) = entry.get("external_ref").and_then(Value::as_str) {
+                ids.insert(external_ref.to_string());
+            }
+            ids
+        });
 
     for entry in entries {
         let ownership = entry

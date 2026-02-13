@@ -348,6 +348,13 @@ impl<T: Clone> Future for Recv<'_, T> {
 
         // 3. Check if closed
         if inner.sender_count == 0 {
+            // Clear waiter before returning (matches other Ready paths).
+            // When the last Sender drops, retain() already removed our
+            // entry and bumped the arena generation, so this is a no-op,
+            // but clearing the token avoids a redundant remove in Drop.
+            if let Some(token) = this.waiter.take() {
+                inner.wakers.remove(token);
+            }
             return Poll::Ready(Err(RecvError::Closed));
         }
 
@@ -901,5 +908,48 @@ mod tests {
             true
         );
         crate::test_complete!("broadcast_drop_all_senders_closes");
+    }
+
+    #[test]
+    fn recv_closed_clears_waiter_registration() {
+        init_test("recv_closed_clears_waiter_registration");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        // Poll to register a waiter (no messages available).
+        let mut fut = Box::pin(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(fut.as_mut().poll(&mut ctx), Poll::Pending),
+            "poll pending",
+            true,
+            true
+        );
+        let wakers_len = {
+            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            inner.wakers.len()
+        };
+        crate::assert_with_log!(wakers_len == 1, "one waiter registered", 1usize, wakers_len);
+
+        // Drop sender — channel closes, retain() wakes and removes all waiters.
+        drop(tx);
+
+        // Re-poll: should return Closed and clear the stale waiter token.
+        let res = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(res, Poll::Ready(Err(RecvError::Closed))),
+            "closed",
+            "Ready(Err(Closed))",
+            format!("{res:?}")
+        );
+
+        // Drop the future — Drop handler should not panic even though
+        // the waiter was already removed by retain() + cleared by poll.
+        drop(fut);
+
+        crate::test_complete!("recv_closed_clears_waiter_registration");
     }
 }
