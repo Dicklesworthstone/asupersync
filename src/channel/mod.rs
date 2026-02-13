@@ -39,6 +39,7 @@
 //! - [`watch`]: Single-producer, multi-consumer state observation
 
 pub mod broadcast;
+pub mod fault;
 pub mod mpsc;
 pub mod oneshot;
 pub mod session;
