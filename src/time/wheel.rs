@@ -1265,15 +1265,19 @@ mod tests {
         init_test("coalescing_window_boundary_saturates_at_time_max");
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
         let config = TimerWheelConfig::new().max_timer_duration(Duration::MAX);
-        let mut wheel = TimerWheel::with_config(Time::ZERO, config, coalescing);
+        // Start near Time::MAX so we exercise coalescing boundary saturation
+        // without forcing a full-range wheel advance from time zero.
+        let start = Time::from_nanos(u64::MAX.saturating_sub(2_000_000));
+        let deadline = Time::from_nanos(u64::MAX.saturating_sub(500_000));
+        let mut wheel = TimerWheel::with_config(start, config, coalescing);
         let counter = Arc::new(AtomicU64::new(0));
 
-        wheel.register(Time::MAX, counter_waker(counter.clone()));
+        wheel.register(deadline, counter_waker(counter.clone()));
 
-        let wakers = wheel.collect_expired(Time::MAX);
+        let wakers = wheel.collect_expired(deadline);
         crate::assert_with_log!(
             wakers.len() == 1,
-            "timer at Time::MAX fires without coalescing overflow",
+            "near-maximum timer fires without coalescing overflow",
             1,
             wakers.len()
         );
