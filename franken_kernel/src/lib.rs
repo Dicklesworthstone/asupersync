@@ -1,11 +1,32 @@
-//! Suite-wide type substrate for FrankenSuite (bd-1usdh.1).
+//! Suite-wide type substrate for FrankenSuite (bd-1usdh.1, bd-1usdh.2).
 //!
-//! Canonical identifier and version types used across all FrankenSuite
-//! projects for cross-project tracing, decision logging, and schema
-//! compatibility.
+//! Canonical identifier, version, and context types used across all
+//! FrankenSuite projects for cross-project tracing, decision logging,
+//! capability management, and schema compatibility.
+//!
+//! # Identifiers
 //!
 //! All identifier types are 128-bit, `Copy`, `Send + Sync`, and
 //! zero-cost abstractions over `[u8; 16]`.
+//!
+//! # Capability Context
+//!
+//! [`Cx`] is the core context type threaded through all operations.
+//! It carries a [`TraceId`], a [`Budget`] (tropical semiring), and
+//! a capability set generic parameter. Child contexts inherit the
+//! parent's trace and enforce budget monotonicity.
+//!
+//! ```
+//! use franken_kernel::{Cx, Budget, NoCaps, TraceId};
+//!
+//! let trace = TraceId::from_parts(1_700_000_000_000, 42);
+//! let cx = Cx::new(trace, Budget::new(5000), NoCaps);
+//! assert_eq!(cx.budget().remaining_ms(), 5000);
+//!
+//! let child = cx.child(NoCaps, Budget::new(3000));
+//! assert_eq!(child.budget().remaining_ms(), 3000);
+//! assert_eq!(child.depth(), 1);
+//! ```
 
 #![forbid(unsafe_code)]
 #![no_std]
@@ -14,6 +35,8 @@ extern crate alloc;
 
 use alloc::fmt;
 use alloc::string::String;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
 use core::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -294,6 +317,213 @@ impl FromStr for SchemaVersion {
 }
 
 // ---------------------------------------------------------------------------
+// Budget — tropical semiring (min, +)
+// ---------------------------------------------------------------------------
+
+/// Time budget in the tropical semiring (min, +).
+///
+/// Budget decreases additively via [`consume`](Budget::consume) and the
+/// constraint propagates as the minimum of parent and child budgets.
+///
+/// ```
+/// use franken_kernel::Budget;
+///
+/// let b = Budget::new(1000);
+/// let b2 = b.consume(300).unwrap();
+/// assert_eq!(b2.remaining_ms(), 700);
+/// assert!(b2.consume(800).is_none()); // would exceed budget
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Budget {
+    remaining_ms: u64,
+}
+
+impl Budget {
+    /// Create a budget with the given milliseconds remaining.
+    pub const fn new(ms: u64) -> Self {
+        Self { remaining_ms: ms }
+    }
+
+    /// Milliseconds remaining.
+    pub const fn remaining_ms(self) -> u64 {
+        self.remaining_ms
+    }
+
+    /// Consume `ms` milliseconds from the budget.
+    ///
+    /// Returns `None` if insufficient budget remains.
+    pub const fn consume(self, ms: u64) -> Option<Self> {
+        if self.remaining_ms >= ms {
+            Some(Self {
+                remaining_ms: self.remaining_ms - ms,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Whether the budget is fully exhausted.
+    pub const fn is_exhausted(self) -> bool {
+        self.remaining_ms == 0
+    }
+
+    /// Tropical semiring min: returns the tighter (smaller) budget.
+    #[must_use]
+    pub const fn min(self, other: Self) -> Self {
+        if self.remaining_ms <= other.remaining_ms {
+            self
+        } else {
+            other
+        }
+    }
+
+    /// An unlimited budget (max u64 value).
+    pub const UNLIMITED: Self = Self {
+        remaining_ms: u64::MAX,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// CapabilitySet — trait for capability collections
+// ---------------------------------------------------------------------------
+
+/// Trait for capability sets carried by [`Cx`].
+///
+/// Each FrankenSuite project defines its own capability types and
+/// implements this trait. The trait provides introspection for logging
+/// and diagnostics.
+///
+/// Implementations must be `Clone + Send + Sync` to allow context
+/// propagation across async task boundaries.
+pub trait CapabilitySet: Clone + fmt::Debug + Send + Sync {
+    /// Human-readable names of the capabilities in this set.
+    fn capability_names(&self) -> Vec<&str>;
+
+    /// Number of distinct capabilities.
+    fn count(&self) -> usize;
+
+    /// Whether the capability set is empty.
+    fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+}
+
+/// An empty capability set for contexts that carry no capabilities.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NoCaps;
+
+impl CapabilitySet for NoCaps {
+    fn capability_names(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    fn count(&self) -> usize {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cx — capability context
+// ---------------------------------------------------------------------------
+
+/// Capability context threaded through all FrankenSuite operations.
+///
+/// `Cx` carries:
+/// - A [`TraceId`] for distributed tracing across project boundaries.
+/// - A [`Budget`] in the tropical semiring (min, +) for resource limits.
+/// - A generic [`CapabilitySet`] defining available capabilities.
+/// - Nesting depth for diagnostics.
+///
+/// The lifetime parameter `'a` ensures that child contexts cannot
+/// outlive their parent scope, enforcing structured concurrency
+/// invariants.
+///
+/// # Propagation
+///
+/// Child contexts are created via [`child`](Cx::child), which:
+/// - Inherits the parent's `TraceId`.
+/// - Takes the minimum of parent and child budgets (tropical min).
+/// - Increments the nesting depth.
+pub struct Cx<'a, C: CapabilitySet = NoCaps> {
+    trace_id: TraceId,
+    budget: Budget,
+    capabilities: C,
+    depth: u32,
+    _scope: PhantomData<&'a ()>,
+}
+
+impl<C: CapabilitySet> Cx<'_, C> {
+    /// Create a root context with the given trace, budget, and capabilities.
+    pub fn new(trace_id: TraceId, budget: Budget, capabilities: C) -> Self {
+        Self {
+            trace_id,
+            budget,
+            capabilities,
+            depth: 0,
+            _scope: PhantomData,
+        }
+    }
+
+    /// Create a child context.
+    ///
+    /// The child inherits this context's `TraceId` and takes the minimum
+    /// of this context's budget and the provided `budget`.
+    pub fn child(&self, capabilities: C, budget: Budget) -> Cx<'_, C> {
+        Cx {
+            trace_id: self.trace_id,
+            budget: self.budget.min(budget),
+            capabilities,
+            depth: self.depth + 1,
+            _scope: PhantomData,
+        }
+    }
+
+    /// The trace identifier for this context.
+    pub const fn trace_id(&self) -> TraceId {
+        self.trace_id
+    }
+
+    /// The remaining budget.
+    pub const fn budget(&self) -> Budget {
+        self.budget
+    }
+
+    /// The capability set.
+    pub fn capabilities(&self) -> &C {
+        &self.capabilities
+    }
+
+    /// Nesting depth (0 for root contexts).
+    pub const fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// Consume budget from this context in place.
+    ///
+    /// Returns `false` if insufficient budget remains (budget unchanged).
+    pub fn consume_budget(&mut self, ms: u64) -> bool {
+        match self.budget.consume(ms) {
+            Some(new_budget) => {
+                self.budget = new_budget;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl<C: CapabilitySet> fmt::Debug for Cx<'_, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cx")
+            .field("trace_id", &self.trace_id)
+            .field("budget_ms", &self.budget.remaining_ms())
+            .field("capabilities", &self.capabilities)
+            .field("depth", &self.depth)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
 
@@ -534,5 +764,183 @@ mod tests {
         let id = TraceId::from_raw(42);
         let copy = id;
         assert_eq!(id, copy); // Both still usable (Copy).
+    }
+
+    // -- Budget tests --
+
+    #[test]
+    fn budget_new_and_remaining() {
+        let b = Budget::new(5000);
+        assert_eq!(b.remaining_ms(), 5000);
+        assert!(!b.is_exhausted());
+    }
+
+    #[test]
+    fn budget_consume() {
+        let b = Budget::new(1000);
+        let b2 = b.consume(300).unwrap();
+        assert_eq!(b2.remaining_ms(), 700);
+        let b3 = b2.consume(700).unwrap();
+        assert_eq!(b3.remaining_ms(), 0);
+        assert!(b3.is_exhausted());
+    }
+
+    #[test]
+    fn budget_consume_insufficient() {
+        let b = Budget::new(100);
+        assert!(b.consume(200).is_none());
+    }
+
+    #[test]
+    fn budget_min() {
+        let b1 = Budget::new(500);
+        let b2 = Budget::new(300);
+        assert_eq!(b1.min(b2).remaining_ms(), 300);
+        assert_eq!(b2.min(b1).remaining_ms(), 300);
+    }
+
+    #[test]
+    fn budget_unlimited() {
+        let b = Budget::UNLIMITED;
+        assert_eq!(b.remaining_ms(), u64::MAX);
+        assert!(!b.is_exhausted());
+    }
+
+    #[test]
+    fn budget_serde_json() {
+        let b = Budget::new(42);
+        let json = serde_json::to_string(&b).unwrap();
+        let parsed: Budget = serde_json::from_str(&json).unwrap();
+        assert_eq!(b, parsed);
+    }
+
+    #[test]
+    fn budget_copy_semantics() {
+        let b = Budget::new(100);
+        let copy = b;
+        assert_eq!(b, copy); // Both usable (Copy).
+    }
+
+    // -- NoCaps tests --
+
+    #[test]
+    fn no_caps_empty() {
+        let caps = NoCaps;
+        assert_eq!(caps.count(), 0);
+        assert!(caps.is_empty());
+        assert!(caps.capability_names().is_empty());
+    }
+
+    // -- Cx tests --
+
+    #[test]
+    fn cx_root_creation() {
+        let trace = TraceId::from_parts(1_700_000_000_000, 1);
+        let cx = Cx::new(trace, Budget::new(5000), NoCaps);
+        assert_eq!(cx.trace_id(), trace);
+        assert_eq!(cx.budget().remaining_ms(), 5000);
+        assert_eq!(cx.depth(), 0);
+        assert!(cx.capabilities().is_empty());
+    }
+
+    #[test]
+    fn cx_child_inherits_trace() {
+        let trace = TraceId::from_parts(1_700_000_000_000, 42);
+        let cx = Cx::new(trace, Budget::new(5000), NoCaps);
+        let child = cx.child(NoCaps, Budget::new(3000));
+        assert_eq!(child.trace_id(), trace);
+    }
+
+    #[test]
+    fn cx_child_budget_takes_min() {
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(2000), NoCaps);
+        // Child requests less than parent — child gets its request.
+        let child1 = cx.child(NoCaps, Budget::new(1000));
+        assert_eq!(child1.budget().remaining_ms(), 1000);
+        // Child requests more than parent — capped at parent.
+        let child2 = cx.child(NoCaps, Budget::new(5000));
+        assert_eq!(child2.budget().remaining_ms(), 2000);
+    }
+
+    #[test]
+    fn cx_child_increments_depth() {
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), NoCaps);
+        let child = cx.child(NoCaps, Budget::new(1000));
+        assert_eq!(child.depth(), 1);
+        let grandchild = child.child(NoCaps, Budget::new(1000));
+        assert_eq!(grandchild.depth(), 2);
+    }
+
+    #[test]
+    fn cx_consume_budget() {
+        let mut cx = Cx::new(TraceId::from_raw(1), Budget::new(500), NoCaps);
+        assert!(cx.consume_budget(200));
+        assert_eq!(cx.budget().remaining_ms(), 300);
+        assert!(!cx.consume_budget(400)); // insufficient
+        assert_eq!(cx.budget().remaining_ms(), 300); // unchanged
+    }
+
+    #[test]
+    fn cx_debug_format() {
+        let cx = Cx::new(TraceId::from_raw(0xAB), Budget::new(100), NoCaps);
+        let dbg = std::format!("{cx:?}");
+        assert!(dbg.contains("Cx"));
+        assert!(dbg.contains("budget_ms"));
+        assert!(dbg.contains("100"));
+    }
+
+    // -- Custom CapabilitySet --
+
+    #[derive(Clone, Debug)]
+    struct TestCaps {
+        can_read: bool,
+        can_write: bool,
+    }
+
+    impl CapabilitySet for TestCaps {
+        fn capability_names(&self) -> alloc::vec::Vec<&str> {
+            let mut names = alloc::vec::Vec::new();
+            if self.can_read {
+                names.push("read");
+            }
+            if self.can_write {
+                names.push("write");
+            }
+            names
+        }
+
+        fn count(&self) -> usize {
+            usize::from(self.can_read) + usize::from(self.can_write)
+        }
+    }
+
+    #[test]
+    fn cx_with_custom_capabilities() {
+        let caps = TestCaps {
+            can_read: true,
+            can_write: false,
+        };
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), caps);
+        assert_eq!(cx.capabilities().count(), 1);
+        assert_eq!(cx.capabilities().capability_names(), &["read"]);
+    }
+
+    #[test]
+    fn cx_child_with_attenuated_capabilities() {
+        let full_caps = TestCaps {
+            can_read: true,
+            can_write: true,
+        };
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), full_caps);
+        assert_eq!(cx.capabilities().count(), 2);
+
+        // Child gets attenuated (read-only) capabilities.
+        let read_only = TestCaps {
+            can_read: true,
+            can_write: false,
+        };
+        let child = cx.child(read_only, Budget::new(500));
+        assert_eq!(child.capabilities().count(), 1);
+        assert!(!child.capabilities().capability_names().contains(&"write"));
     }
 }
