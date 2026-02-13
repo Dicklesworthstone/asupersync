@@ -355,6 +355,7 @@ impl ThreeLaneScheduler {
     /// future storage/retrieval, LocalQueue push/pop) lock only the task table
     /// instead of the full RuntimeState. Cross-cutting operations
     /// (`task_completed`, `drain_ready_async_finalizers`) still use RuntimeState.
+    #[allow(clippy::too_many_lines)]
     pub fn new_with_options_and_task_table(
         worker_count: usize,
         state: &Arc<ContendedMutex<RuntimeState>>,
@@ -460,6 +461,18 @@ impl ThreeLaneScheduler {
                 governor_interval,
                 preemption_metrics: PreemptionMetrics::default(),
                 evidence_sink: None,
+                decision_contract: if enable_governor {
+                    Some(super::decision_contract::SchedulerDecisionContract::new())
+                } else {
+                    None
+                },
+                decision_posterior: if enable_governor {
+                    Some(franken_decision::Posterior::uniform(
+                        super::decision_contract::state::COUNT,
+                    ))
+                } else {
+                    None
+                },
             });
         }
 
@@ -909,6 +922,10 @@ pub struct ThreeLaneWorker {
     preemption_metrics: PreemptionMetrics,
     /// Optional evidence sink for scheduler decision tracing (bd-1e2if.3).
     evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+    /// Decision contract for principled scheduler action selection (bd-1e2if.6).
+    decision_contract: Option<super::decision_contract::SchedulerDecisionContract>,
+    /// Posterior maintained across governor invocations (bd-1e2if.6).
+    decision_posterior: Option<franken_decision::Posterior>,
 }
 
 /// Per-worker metrics tracking cancel-lane preemption and fairness.
@@ -1259,9 +1276,54 @@ impl ThreeLaneWorker {
         #[allow(clippy::cast_possible_truncation)]
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
-        let suggestion = governor.suggest(&snapshot);
+        let lyapunov_suggestion = governor.suggest(&snapshot);
 
-        // Emit evidence when the scheduling suggestion changes.
+        // Apply decision contract modulation if available (bd-1e2if.6).
+        let suggestion = if let (Some(contract), Some(posterior)) =
+            (&self.decision_contract, &mut self.decision_posterior)
+        {
+            // Update posterior from snapshot observations.
+            let likelihoods =
+                super::decision_contract::SchedulerDecisionContract::snapshot_likelihoods(
+                    &snapshot,
+                );
+            posterior.bayesian_update(&likelihoods);
+
+            // Evaluate the contract.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let ctx = franken_decision::EvalContext {
+                calibration_score: 1.0, // TODO(bd-1e2if.6): wire conformal coverage
+                e_process: 0.0,
+                ci_width: 0.0,
+                decision_id: franken_kernel::DecisionId::from_parts(now_ms, self.id as u128),
+                trace_id: franken_kernel::TraceId::from_parts(now_ms, self.id as u128),
+                ts_unix_ms: now_ms,
+            };
+            let outcome = franken_decision::evaluate(contract, posterior, &ctx);
+
+            // Emit decision audit entry as evidence.
+            if let Some(ref sink) = self.evidence_sink {
+                let evidence = outcome.audit_entry.to_evidence_ledger();
+                sink.emit(&evidence);
+            }
+
+            // Map contract action to scheduling suggestion.
+            match outcome.action_index {
+                super::decision_contract::action::AGGRESSIVE => SchedulingSuggestion::NoPreference,
+                super::decision_contract::action::CONSERVATIVE => {
+                    SchedulingSuggestion::MeetDeadlines
+                }
+                // BALANCED: use the Lyapunov governor's suggestion.
+                _ => lyapunov_suggestion,
+            }
+        } else {
+            lyapunov_suggestion
+        };
+
+        // Emit simple evidence when the scheduling suggestion changes.
         if suggestion != self.cached_suggestion {
             if let Some(ref sink) = self.evidence_sink {
                 let suggestion_str = match suggestion {
@@ -1279,7 +1341,9 @@ impl ThreeLaneWorker {
                     cancel_depth,
                     snapshot.draining_regions,
                     snapshot.ready_queue_depth,
-                    false,
+                    self.decision_contract
+                        .as_ref()
+                        .is_some_and(|_| self.decision_posterior.is_some()),
                 );
             }
         }
