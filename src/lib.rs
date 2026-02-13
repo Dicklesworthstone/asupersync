@@ -162,7 +162,7 @@ pub use remote::{
 };
 pub use types::{
     join_outcomes, Budget, CancelKind, CancelReason, ObligationId, Outcome, OutcomeError,
-    PanicPayload, Policy, RegionId, Severity, TaskId, Time,
+    PanicPayload, Policy, RegionId, Severity, SystemPressure, TaskId, Time,
 };
 
 // Re-export proc macros when the proc-macros feature is enabled

@@ -66,7 +66,9 @@ use crate::time::{timeout, TimeSource, TimerDriverHandle, WallClock};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace};
-use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
+use crate::types::{
+    Budget, CancelKind, CancelReason, CxInner, RegionId, SystemPressure, TaskId, Time,
+};
 use crate::util::{EntropySource, OsEntropy};
 use std::cell::RefCell;
 use std::future::Future;
@@ -161,6 +163,12 @@ pub struct Cx<Caps = cap::All> {
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
     registry: Option<RegistryHandle>,
+    /// Optional system pressure handle for compute budget propagation.
+    ///
+    /// When attached, subsystems can query current system headroom and
+    /// degrade gracefully under load. Shared via `Arc` so all clones
+    /// observe the same pressure state.
+    pressure: Option<Arc<SystemPressure>>,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
 }
@@ -179,6 +187,7 @@ impl<Caps> Clone for Cx<Caps> {
             logical_clock: self.logical_clock.clone(),
             remote_cap: self.remote_cap.clone(),
             registry: self.registry.clone(),
+            pressure: self.pressure.clone(),
             _caps: PhantomData,
         }
     }
@@ -322,6 +331,7 @@ impl<Caps> Cx<Caps> {
             logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
             registry: None,
+            pressure: None,
             _caps: PhantomData,
         }
     }
@@ -414,6 +424,7 @@ impl<Caps> Cx<Caps> {
             logical_clock: LogicalClockHandle::default(),
             remote_cap: None,
             registry: None,
+            pressure: None,
             _caps: PhantomData,
         }
     }
@@ -470,6 +481,7 @@ impl<Caps> Cx<Caps> {
             logical_clock: self.logical_clock.clone(),
             remote_cap: self.remote_cap.clone(),
             registry: self.registry.clone(),
+            pressure: self.pressure.clone(),
             _caps: PhantomData,
         }
     }
@@ -491,6 +503,25 @@ impl<Caps> Cx<Caps> {
     pub fn with_remote_cap(mut self, cap: RemoteCap) -> Self {
         self.remote_cap = Some(Arc::new(cap));
         self
+    }
+
+    /// Attach a system pressure handle for compute budget propagation.
+    ///
+    /// The handle is shared via `Arc` so all clones observe the same pressure
+    /// state. A monitor thread can call [`SystemPressure::set_headroom`] to
+    /// update the value, and any code with `&Cx` can read it lock-free.
+    #[must_use]
+    pub fn with_pressure(mut self, pressure: Arc<SystemPressure>) -> Self {
+        self.pressure = Some(pressure);
+        self
+    }
+
+    /// Read the current system pressure, if attached.
+    ///
+    /// Returns `None` if no pressure handle was attached to this context.
+    #[must_use]
+    pub fn pressure(&self) -> Option<&SystemPressure> {
+        self.pressure.as_deref()
     }
 
     /// Returns a cloned handle to the configured remote capability, if any.
