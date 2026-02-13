@@ -1552,7 +1552,14 @@ impl ThreeLaneWorker {
                 // Take cached wakers to avoid holding the lock during poll
                 let cached_waker = record.cached_waker.take();
                 let cached_cancel_waker = record.cached_cancel_waker.take();
-                Some((task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker))
+                Some((
+                    task_cx,
+                    wake_state,
+                    priority,
+                    cx_inner,
+                    cached_waker,
+                    cached_cancel_waker,
+                ))
             });
             let Some((task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker)) =
                 record_info
