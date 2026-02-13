@@ -93,7 +93,10 @@ pub fn extract_frontier_report(
         .filter(|d| d.severity == LeanDiagnosticSeverity::Error)
     {
         grouped
-            .entry((diagnostic.failure_mode.clone(), diagnostic.error_code.clone()))
+            .entry((
+                diagnostic.failure_mode.clone(),
+                diagnostic.error_code.clone(),
+            ))
             .or_default()
             .push(diagnostic.clone());
     }
@@ -288,8 +291,14 @@ fn classify_failure_mode(error_code: &str) -> &'static str {
         "tactic-max-rec-depth" | "tactic-simp-nested-error" | "simp-no-progress" => {
             "tactic-instability"
         }
-        "application-type-mismatch" | "type-mismatch" | "rewrite-failed" | "subst-failed"
-        | "unsolved-goals" | "no-goals" | "parse-unexpected-token" | "omega-goal-not-proved"
+        "application-type-mismatch"
+        | "type-mismatch"
+        | "rewrite-failed"
+        | "subst-failed"
+        | "unsolved-goals"
+        | "no-goals"
+        | "parse-unexpected-token"
+        | "omega-goal-not-proved"
         | "other" => "proof-shape",
         _ => "proof-shape",
     }

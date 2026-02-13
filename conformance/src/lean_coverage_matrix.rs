@@ -361,11 +361,9 @@ mod tests {
         let mut matrix = valid_matrix();
         matrix.rows[1].depends_on = vec!["missing.row.id".to_string()];
         let errors = matrix.validate().expect_err("should fail");
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("depends_on missing row id"))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("depends_on missing row id")));
     }
 
     #[test]
@@ -381,10 +379,8 @@ mod tests {
         let mut matrix = valid_matrix();
         matrix.rows[0].evidence[0].ci_job = None;
         let errors = matrix.validate().expect_err("should fail");
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("validated-in-ci but has no ci_job"))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("validated-in-ci but has no ci_job")));
     }
 }
