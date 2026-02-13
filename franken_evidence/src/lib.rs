@@ -43,6 +43,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod export;
 pub mod render;
 
 use std::collections::HashMap;
