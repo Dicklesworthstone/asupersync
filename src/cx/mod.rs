@@ -39,6 +39,7 @@
 
 pub mod cap;
 pub mod cx;
+pub mod macaroon;
 pub mod registry;
 pub mod scope;
 pub mod wrappers;
