@@ -401,11 +401,10 @@ impl ThreeLaneScheduler {
         // against it so push/pop/steal avoid the full RuntimeState lock.
         let fast_queues: Vec<LocalQueue> = (0..worker_count)
             .map(|_| {
-                if let Some(tt) = &task_table {
-                    LocalQueue::new_with_task_table(Arc::clone(tt))
-                } else {
-                    LocalQueue::new(Arc::clone(state))
-                }
+                task_table.as_ref().map_or_else(
+                    || LocalQueue::new(Arc::clone(state)),
+                    |tt| LocalQueue::new_with_task_table(Arc::clone(tt)),
+                )
             })
             .collect();
 
