@@ -509,21 +509,34 @@ impl ThreeLaneScheduler {
         self.global.clone()
     }
 
+    /// Read-only task table access for inject/spawn methods.
+    ///
+    /// Uses the sharded task table when available, otherwise falls back to
+    /// RuntimeState's embedded table.
+    fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
+        if let Some(tt) = &self.task_table {
+            let guard = tt.lock().expect("task table lock poisoned");
+            f(&guard)
+        } else {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            f(&state.tasks)
+        }
+    }
+
     /// Injects a task into the cancel lane for cross-thread wakeup.
     ///
     /// Uses `wake_state.notify()` for centralized deduplication.
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        let (is_local, pinned_worker) = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state.task(task).map_or((false, None), |record| {
+        let (is_local, pinned_worker) = self.with_task_table_ref(|tt| {
+            tt.task(task).map_or((false, None), |record| {
                 if record.is_local() {
                     record.wake_state.notify();
                 }
                 (record.is_local(), record.pinned_worker())
             })
-        };
+        });
 
         if is_local {
             if let Some(worker_id) = pinned_worker {
@@ -572,12 +585,10 @@ impl ThreeLaneScheduler {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
-        let should_schedule = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .task(task)
+        let should_schedule = self.with_task_table_ref(|tt| {
+            tt.task(task)
                 .is_none_or(|record| record.wake_state.notify())
-        };
+        });
         if should_schedule {
             self.global.inject_timed(task, deadline);
             self.wake_one();
@@ -597,12 +608,11 @@ impl ThreeLaneScheduler {
     /// owner thread. Injecting them globally would allow them to be stolen
     /// by the wrong worker, causing data loss.
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        let (should_schedule, is_local) = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state.task(task).map_or((true, false), |record| {
+        let (should_schedule, is_local) = self.with_task_table_ref(|tt| {
+            tt.task(task).map_or((true, false), |record| {
                 (record.wake_state.notify(), record.is_local())
             })
-        };
+        });
 
         // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
         // Injecting globally would allow wrong-thread polling = UB.
@@ -648,16 +658,15 @@ impl ThreeLaneScheduler {
     /// attempts to route the task to the pinned worker's `local_ready` queue.
     pub fn spawn(&self, task: TaskId, priority: u8) {
         // Dedup: check wake_state before scheduling anywhere.
-        let (should_schedule, is_local, pinned_worker) = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state.task(task).map_or((true, false, None), |record| {
+        let (should_schedule, is_local, pinned_worker) = self.with_task_table_ref(|tt| {
+            tt.task(task).map_or((true, false, None), |record| {
                 (
                     record.wake_state.notify(),
                     record.is_local(),
                     record.pinned_worker(),
                 )
             })
-        };
+        });
 
         if !should_schedule {
             return;
@@ -728,16 +737,15 @@ impl ThreeLaneScheduler {
     /// attempts to route the task to the pinned worker's `local_ready` queue.
     pub fn wake(&self, task: TaskId, priority: u8) {
         // Dedup check.
-        let (should_schedule, is_local, pinned_worker) = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state.task(task).map_or((true, false, None), |record| {
+        let (should_schedule, is_local, pinned_worker) = self.with_task_table_ref(|tt| {
+            tt.task(task).map_or((true, false, None), |record| {
                 (
                     record.wake_state.notify(),
                     record.is_local(),
                     record.pinned_worker(),
                 )
             })
-        };
+        });
 
         if !should_schedule {
             return;
@@ -1348,12 +1356,10 @@ impl ThreeLaneWorker {
                 if let Some(task) = self.fast_stealers[idx].steal() {
                     // Safety invariant: local tasks must never be in stealable queues.
                     debug_assert!(
-                        !self
-                            .state
-                            .lock()
-                            .expect("runtime state lock poisoned")
-                            .task(task)
-                            .is_some_and(crate::record::task::TaskRecord::is_local),
+                        !self.with_task_table_ref(|tt| {
+                            tt.task(task)
+                                .is_some_and(crate::record::task::TaskRecord::is_local)
+                        }),
                         "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
                     );
                     return Some(task);
@@ -1382,12 +1388,10 @@ impl ThreeLaneWorker {
                     #[cfg(debug_assertions)]
                     {
                         for &(task, _) in &self.steal_buffer[..stolen_count] {
-                            let is_local = self
-                                .state
-                                .lock()
-                                .expect("runtime state lock poisoned")
-                                .task(task)
-                                .is_some_and(crate::record::task::TaskRecord::is_local);
+                            let is_local = self.with_task_table_ref(|tt| {
+                                tt.task(task)
+                                    .is_some_and(crate::record::task::TaskRecord::is_local)
+                            });
                             debug_assert!(
                                 !is_local,
                                 "BUG: stole a local (!Send) task {task:?} from PriorityScheduler"
@@ -1419,12 +1423,10 @@ impl ThreeLaneWorker {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local(&self, task: TaskId, priority: u8) {
-        let should_schedule = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .task(task)
+        let should_schedule = self.with_task_table_ref(|tt| {
+            tt.task(task)
                 .is_none_or(|record| record.wake_state.notify())
-        };
+        });
         if should_schedule {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
             local.schedule(task, priority);
@@ -1441,12 +1443,11 @@ impl ThreeLaneWorker {
     /// but the promotion itself is unconditional: a cancel must not be silently
     /// dropped just because the task was already scheduled in a lower-priority lane.
     pub fn schedule_local_cancel(&self, task: TaskId, priority: u8) {
-        {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            if let Some(record) = state.task(task) {
+        self.with_task_table_ref(|tt| {
+            if let Some(record) = tt.task(task) {
                 record.wake_state.notify();
             }
-        }
+        });
         let _ = remove_from_local_ready(&self.local_ready, task);
         {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
@@ -1461,12 +1462,10 @@ impl ThreeLaneWorker {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local_timed(&self, task: TaskId, deadline: Time) {
-        let should_schedule = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .task(task)
+        let should_schedule = self.with_task_table_ref(|tt| {
+            tt.task(task)
                 .is_none_or(|record| record.wake_state.notify())
-        };
+        });
         if should_schedule {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
             local.schedule_timed(task, deadline);
@@ -1486,22 +1485,18 @@ impl ThreeLaneWorker {
         impl Drop for TaskExecutionGuard<'_> {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
-                    let mut state = self
-                        .worker
-                        .state
-                        .lock()
-                        .expect("runtime state lock poisoned");
-                    if let Some(record) = state.task_mut(self.task_id) {
-                        if !record.state.is_terminal() {
-                            record.complete(crate::types::Outcome::Panicked(
-                                crate::types::outcome::PanicPayload::new(
-                                    "task panicked during poll",
-                                ),
-                            ));
+                    self.worker.with_task_table(|tt| {
+                        if let Some(record) = tt.task_mut(self.task_id) {
+                            if !record.state.is_terminal() {
+                                record.complete(crate::types::Outcome::Panicked(
+                                    crate::types::outcome::PanicPayload::new(
+                                        "task panicked during poll",
+                                    ),
+                                ));
+                            }
                         }
-                    }
-                    // We also need to ensure the task isn't lost if it was in the middle of transition
-                    // But complete() marks it terminal, so it won't be scheduled again.
+                    });
+                    // complete() marks the task terminal, so it won't be scheduled again.
                     // The future itself is lost (owned by the stack frame unwinding).
                 }
             }
@@ -1759,26 +1754,32 @@ impl ThreeLaneWorker {
             }
             Poll::Pending => {
                 guard.completed = true;
-                // Store task back
+                // Store task back: use task table for hot-path when sharded.
                 match stored {
                     AnyStoredTask::Global(t) => {
-                        let mut state = self.state.lock().expect("runtime state lock poisoned");
-                        state.store_spawned_task(task_id, t);
-                        // Cache wakers back in the task record for reuse on next poll
-                        if let Some(record) = state.task_mut(task_id) {
-                            record.cached_waker = Some((waker, priority));
-                            record.cached_cancel_waker = cancel_waker_for_cache;
-                        }
+                        self.with_task_table(|tt| {
+                            tt.store_spawned_task(task_id, t);
+                            // Cache wakers back in the task record for reuse on next poll
+                            if let Some(record) = tt.task_mut(task_id) {
+                                record.cached_waker = Some((waker.clone(), priority));
+                                record
+                                    .cached_cancel_waker
+                                    .clone_from(&cancel_waker_for_cache);
+                            }
+                        });
                     }
                     AnyStoredTask::Local(t) => {
                         crate::runtime::local::store_local_task(task_id, t);
                         // For local tasks, we also want to cache wakers in the global record
                         // (since record is global).
-                        let mut state = self.state.lock().expect("runtime state lock poisoned");
-                        if let Some(record) = state.task_mut(task_id) {
-                            record.cached_waker = Some((waker, priority));
-                            record.cached_cancel_waker = cancel_waker_for_cache;
-                        }
+                        self.with_task_table(|tt| {
+                            if let Some(record) = tt.task_mut(task_id) {
+                                record.cached_waker = Some((waker.clone(), priority));
+                                record
+                                    .cached_cancel_waker
+                                    .clone_from(&cancel_waker_for_cache);
+                            }
+                        });
                     }
                 }
 
@@ -1824,9 +1825,7 @@ impl ThreeLaneWorker {
                     }
                 }
 
-                if let Ok(mut state) = self.state.lock() {
-                    let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
-                }
+                self.consume_cancel_ack(task_id);
             }
         }
     }
@@ -1846,8 +1845,20 @@ impl ThreeLaneWorker {
         true
     }
 
+    /// Consumes a cancel acknowledgement using the task table shard when available.
+    ///
+    /// This is the hot-path variant used in Poll::Pending where only task record
+    /// access is needed.
+    fn consume_cancel_ack(&self, task_id: TaskId) -> bool {
+        self.with_task_table(|tt| Self::consume_cancel_ack_from_table(tt, task_id))
+    }
+
     fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
-        let Some(record) = state.task_mut(task_id) else {
+        Self::consume_cancel_ack_from_table(&mut state.tasks, task_id)
+    }
+
+    fn consume_cancel_ack_from_table(tt: &mut TaskTable, task_id: TaskId) -> bool {
+        let Some(record) = tt.task_mut(task_id) else {
             return false;
         };
         let Some(inner) = record.cx_inner.as_ref() else {
@@ -4387,5 +4398,205 @@ mod tests {
             worker.local_ready.lock().unwrap().is_empty(),
             "global waiter should NOT be in local_ready"
         );
+    }
+
+    // =========================================================================
+    // TaskTable-backed mode tests
+    // =========================================================================
+
+    /// Creates a test scheduler backed by a separate TaskTable shard.
+    ///
+    /// Task records are pre-populated in the sharded TaskTable (not in
+    /// RuntimeState), verifying that hot-path operations use the correct
+    /// table.
+    fn task_table_scheduler(
+        worker_count: usize,
+        max_task_id: u32,
+    ) -> (
+        ThreeLaneScheduler,
+        Arc<ContendedMutex<RuntimeState>>,
+        Arc<ContendedMutex<TaskTable>>,
+    ) {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let task_table = local_queue::LocalQueue::test_task_table(max_task_id);
+        let scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+            worker_count,
+            &state,
+            Some(Arc::clone(&task_table)),
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        );
+        (scheduler, state, task_table)
+    }
+
+    #[test]
+    fn task_table_backed_inject_ready() {
+        let (scheduler, _state, task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+
+        // Verify task record exists in the sharded table, not RuntimeState.
+        assert!(
+            task_table
+                .lock()
+                .expect("task table lock")
+                .task(task_id)
+                .is_some(),
+            "task should be in sharded table"
+        );
+
+        // inject_ready should succeed (uses with_task_table_ref internally).
+        scheduler.inject_ready(task_id, 100);
+
+        let popped = scheduler.global.pop_ready();
+        assert!(popped.is_some(), "task should be in global ready queue");
+        assert_eq!(popped.unwrap().task, task_id);
+    }
+
+    #[test]
+    fn task_table_backed_inject_cancel() {
+        let (scheduler, _state, _task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+
+        scheduler.inject_cancel(task_id, 100);
+
+        let popped = scheduler.global.pop_cancel();
+        assert!(popped.is_some(), "task should be in global cancel queue");
+        assert_eq!(popped.unwrap().task, task_id);
+    }
+
+    #[test]
+    fn task_table_backed_spawn_uses_task_table() {
+        let (scheduler, _state, _task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+
+        // Spawn with no TLS context should go to global injector.
+        scheduler.spawn(task_id, 50);
+
+        let popped = scheduler.global.pop_ready();
+        assert!(popped.is_some(), "task should be in global ready queue");
+        assert_eq!(popped.unwrap().task, task_id);
+    }
+
+    #[test]
+    fn task_table_backed_schedule_local() {
+        let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // schedule_local should use with_task_table_ref to check wake_state.
+        worker.schedule_local(task_id, 50);
+
+        // Task should be in the worker's local scheduler.
+        let next = worker.local.lock().unwrap().pop_ready_only();
+        assert!(next.is_some(), "task should be in local scheduler");
+        assert_eq!(next.unwrap(), task_id);
+    }
+
+    #[test]
+    fn task_table_backed_schedule_local_cancel() {
+        let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // schedule_local_cancel should use with_task_table_ref for wake_state.
+        worker.schedule_local_cancel(task_id, 50);
+
+        // Task should be in the cancel lane.
+        let next = worker.local.lock().unwrap().pop_cancel_only();
+        assert!(next.is_some(), "task should be in local cancel lane");
+        assert_eq!(next.unwrap(), task_id);
+    }
+
+    #[test]
+    fn task_table_backed_schedule_local_timed() {
+        let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        let deadline = Time::from_nanos(1000);
+        worker.schedule_local_timed(task_id, deadline);
+
+        // Task should be in the timed lane.
+        let next = worker
+            .local
+            .lock()
+            .unwrap()
+            .pop_timed_only(Time::from_nanos(2000));
+        assert!(next.is_some(), "task should be in local timed lane");
+        assert_eq!(next.unwrap(), task_id);
+    }
+
+    #[test]
+    fn task_table_backed_wake_state_dedup() {
+        let (scheduler, _state, task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+
+        // First inject succeeds.
+        scheduler.inject_ready(task_id, 50);
+
+        // Second inject is deduplicated by wake_state (already notified).
+        scheduler.inject_ready(task_id, 50);
+
+        // Only one entry should exist.
+        let first = scheduler.global.pop_ready();
+        assert!(first.is_some());
+        let second = scheduler.global.pop_ready();
+        assert!(second.is_none(), "duplicate should be deduplicated");
+
+        // Reset wake_state so we can inject again.
+        {
+            let tt = task_table.lock().expect("task table lock");
+            if let Some(record) = tt.task(task_id) {
+                record.wake_state.clear();
+            }
+        }
+
+        // Now should be injectable again.
+        scheduler.inject_ready(task_id, 50);
+        let third = scheduler.global.pop_ready();
+        assert!(
+            third.is_some(),
+            "should be injectable after wake_state clear"
+        );
+    }
+
+    #[test]
+    fn task_table_backed_consume_cancel_ack() {
+        let (mut scheduler, _state, task_table) = task_table_scheduler(1, 3);
+        let task_id = TaskId::new_for_test(1, 0);
+
+        // Set up cx_inner with cancel_acknowledged flag.
+        let region_id = RegionId::new_for_test(0, 0);
+        let cx_inner = Arc::new(RwLock::new(CxInner::new(
+            region_id,
+            task_id,
+            Budget::INFINITE,
+        )));
+        {
+            let mut tt = task_table.lock().expect("task table lock");
+            if let Some(record) = tt.task_mut(task_id) {
+                record.cx_inner = Some(cx_inner.clone());
+            }
+        }
+        // Set cancel_acknowledged.
+        {
+            let mut guard = cx_inner.write().unwrap();
+            guard.cancel_acknowledged = true;
+        }
+
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // consume_cancel_ack should use the task table path.
+        let result = worker.consume_cancel_ack(task_id);
+        assert!(result, "cancel ack should be consumed from task table");
+
+        // Flag should be cleared.
+        let ack = cx_inner.read().unwrap().cancel_acknowledged;
+        assert!(!ack, "cancel_acknowledged should be cleared");
     }
 }
