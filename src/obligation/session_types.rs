@@ -399,53 +399,30 @@ pub mod lease_compat {
 // Protocol: Reserve → Commit (Two-Phase Effect)
 // ============================================================================
 
-/// Session types for the Reserve → Commit two-phase effect.
-///
-/// Global type:
-/// ```text
-///   Initiator → Executor: Reserve(K)
-///   Initiator → Executor: { Commit.end, Abort(reason).end }
-/// ```
-pub mod two_phase {
-    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
-    use crate::record::ObligationKind;
+// Session types for the Reserve → Commit two-phase effect, generated via
+// `session_protocol!` macro (bd-3u5d3.5).
+//
+// Global type:
+//   Initiator → Executor: Reserve(K)
+//   Initiator → Executor: { Commit.end, Abort(reason).end }
+//
+// Uses parameterized obligation: constructor takes `kind: ObligationKind`.
+asupersync_macros::session_protocol! {
+    two_phase(kind: ObligationKind) {
+        msg ReserveMsg { kind: ObligationKind };
+        msg CommitMsg;
+        msg AbortMsg { reason: String };
 
-    /// Reserve request carrying the obligation kind.
-    #[derive(Debug, Clone, Copy)]
-    pub struct ReserveMsg {
-        /// Which obligation kind is being reserved.
-        pub kind: ObligationKind,
+        send ReserveMsg => select {
+            send CommitMsg => end,
+            send AbortMsg => end,
+        }
     }
+}
 
-    /// Commit notification.
-    pub struct CommitMsg;
-
-    /// Abort notification with reason.
-    #[derive(Debug, Clone)]
-    pub struct AbortMsg {
-        /// Why the obligation was aborted.
-        pub reason: String,
-    }
-
-    /// Initiator's session type: send Reserve, then choose Commit or Abort.
-    pub type InitiatorSession = Send<ReserveMsg, Select<Send<CommitMsg, End>, Send<AbortMsg, End>>>;
-
-    /// Executor's session type: recv Reserve, then offer Commit or Abort.
-    pub type ExecutorSession = Recv<ReserveMsg, Offer<Recv<CommitMsg, End>, Recv<AbortMsg, End>>>;
-
-    /// Create a paired initiator/executor session for two-phase commit.
-    pub fn new_session(
-        channel_id: u64,
-        kind: ObligationKind,
-    ) -> (
-        Chan<Initiator, InitiatorSession>,
-        Chan<Responder, ExecutorSession>,
-    ) {
-        (
-            Chan::new_raw(channel_id, kind),
-            Chan::new_raw(channel_id, kind),
-        )
-    }
+/// Backward-compatible alias for the two-phase protocol.
+pub mod two_phase_compat {
+    pub use super::two_phase::ResponderSession as ExecutorSession;
 }
 
 // ============================================================================
@@ -592,7 +569,7 @@ mod tests {
         let reserve_msg = two_phase::ReserveMsg {
             kind: ObligationKind::SendPermit,
         };
-        let initiator = initiator.send(reserve_msg);
+        let initiator = initiator.send(reserve_msg.clone());
         let initiator = initiator.select_left(); // Commit
         let initiator = initiator.send(two_phase::CommitMsg);
         let proof = initiator.close();
@@ -618,7 +595,7 @@ mod tests {
         let reserve_msg = two_phase::ReserveMsg {
             kind: ObligationKind::Lease,
         };
-        let initiator = initiator.send(reserve_msg);
+        let initiator = initiator.send(reserve_msg.clone());
         let initiator = initiator.select_right(); // Abort
         let abort_msg = two_phase::AbortMsg {
             reason: "timeout".to_string(),
