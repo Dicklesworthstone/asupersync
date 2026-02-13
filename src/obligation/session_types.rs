@@ -363,68 +363,36 @@ pub mod send_permit_compat {
 // Protocol: Lease → Release
 // ============================================================================
 
-/// Session types for the Lease → Release protocol.
-///
-/// Global type:
-/// ```text
-///   Holder → Resource: Acquire
-///   μX. Holder → Resource: { Renew.X, Release.end }
-/// ```
-///
-/// The recursive loop is unrolled one level for typestate encoding.
-/// Each `Renew` returns the channel to the choice point.
-pub mod lease {
-    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
-    use crate::record::ObligationKind;
+// Session types for the Lease → Release protocol, generated via
+// `session_protocol!` macro (bd-3u5d3.4).
+//
+// Global type:
+//   Holder → Resource: Acquire
+//   μX. Holder → Resource: { Renew.X, Release.end }
+//
+// The `loop`/`continue` DSL generates InitiatorLoop/ResponderLoop
+// type aliases and a `renew_loop` constructor for μ-unfolding.
+asupersync_macros::session_protocol! {
+    lease for Lease {
+        msg AcquireMsg;
+        msg RenewMsg;
+        msg ReleaseMsg;
 
-    /// Acquire request marker.
-    pub struct AcquireMsg;
-    /// Renew request marker.
-    pub struct RenewMsg;
-    /// Release notification marker.
-    pub struct ReleaseMsg;
-
-    /// One iteration of the lease loop: choose Renew (continue) or Release (end).
-    ///
-    /// The recursive case (`Renew`) cannot be expressed directly as a Rust
-    /// type alias (infinite type). Instead, the lease holder manually loops
-    /// by calling `renew()` to get back a `HolderLoop` channel.
-    pub type HolderLoop = Select<Send<RenewMsg, End>, Send<ReleaseMsg, End>>;
-
-    /// Holder's session type: send Acquire, then enter loop.
-    pub type HolderSession = Send<AcquireMsg, HolderLoop>;
-
-    /// Resource's session type for one loop iteration.
-    pub type ResourceLoop = Offer<Recv<RenewMsg, End>, Recv<ReleaseMsg, End>>;
-
-    /// Resource's session type: recv Acquire, then enter loop.
-    pub type ResourceSession = Recv<AcquireMsg, ResourceLoop>;
-
-    /// Create a paired holder/resource session for Lease.
-    pub fn new_session(
-        channel_id: u64,
-    ) -> (
-        Chan<Initiator, HolderSession>,
-        Chan<Responder, ResourceSession>,
-    ) {
-        (
-            Chan::new_raw(channel_id, ObligationKind::Lease),
-            Chan::new_raw(channel_id, ObligationKind::Lease),
-        )
+        send AcquireMsg => loop {
+            select {
+                send RenewMsg => continue,
+                send ReleaseMsg => end,
+            }
+        }
     }
+}
 
-    /// After a `Renew`, create a fresh loop iteration.
-    ///
-    /// This simulates the μX unfolding: the holder gets a new
-    /// `HolderLoop` channel and the resource gets a new `ResourceLoop`.
-    pub fn renew_loop(
-        channel_id: u64,
-    ) -> (Chan<Initiator, HolderLoop>, Chan<Responder, ResourceLoop>) {
-        (
-            Chan::new_raw(channel_id, ObligationKind::Lease),
-            Chan::new_raw(channel_id, ObligationKind::Lease),
-        )
-    }
+/// Backward-compatible aliases for the lease protocol.
+pub mod lease_compat {
+    pub use super::lease::InitiatorLoop as HolderLoop;
+    pub use super::lease::InitiatorSession as HolderSession;
+    pub use super::lease::ResponderLoop as ResourceLoop;
+    pub use super::lease::ResponderSession as ResourceSession;
 }
 
 // ============================================================================
