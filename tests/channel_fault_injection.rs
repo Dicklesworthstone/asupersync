@@ -199,7 +199,7 @@ fn idempotent_processing_with_sequence_numbers() {
 
     // All 30 originals should be processed exactly once.
     assert_eq!(processed.len(), 30);
-    processed.sort();
+    processed.sort_unstable();
     let expected: Vec<u32> = (0..30).collect();
     assert_eq!(processed, expected);
 }
@@ -230,7 +230,7 @@ fn eventual_delivery_reorder_only() {
     );
 
     // Verify all values are present.
-    received.sort();
+    received.sort_unstable();
     let expected: Vec<u32> = (0..count).collect();
     assert_eq!(received, expected);
 }
@@ -249,7 +249,7 @@ fn eventual_delivery_large_message_count() {
     block_on(fault_tx.flush(&cx)).expect("flush");
 
     let mut received = drain_receiver(&rx);
-    received.sort();
+    received.sort_unstable();
     received.dedup();
     assert_eq!(
         received.len(),
@@ -283,8 +283,8 @@ fn reorder_actually_reorders() {
     );
 
     // But all values should still be present.
-    let mut sorted = received.clone();
-    sorted.sort();
+    let mut sorted = received;
+    sorted.sort_unstable();
     assert_eq!(sorted, in_order);
 }
 
@@ -515,7 +515,7 @@ fn partial_buffer_flush_on_manual_call() {
     assert_eq!(fault_tx.buffered_count(), 0);
 
     let mut received = drain_receiver(&rx);
-    received.sort();
+    received.sort_unstable();
     assert_eq!(received, vec![0, 1, 2]);
 }
 
