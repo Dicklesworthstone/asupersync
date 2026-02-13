@@ -599,7 +599,19 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use core::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
     use std::string::ToString;
+
+    fn hash_of<T: Hash>(val: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        val.hash(&mut h);
+        h.finish()
+    }
+
+    // -----------------------------------------------------------------------
+    // TraceId tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn trace_id_from_parts_roundtrip() {
@@ -607,7 +619,6 @@ mod tests {
         let random = 0x00AB_CDEF_0123_4567_89AB_u128;
         let id = TraceId::from_parts(ts, random);
         assert_eq!(id.timestamp_ms(), ts);
-        // Lower 80 bits preserved.
         assert_eq!(id.as_u128() & 0xFFFF_FFFF_FFFF_FFFF_FFFF, random);
     }
 
@@ -636,6 +647,34 @@ mod tests {
     }
 
     #[test]
+    fn trace_id_uuidv7_monotonic_ordering_10k() {
+        // Generate 10,000 TraceIds with increasing timestamps; verify monotonic order.
+        let ids: std::vec::Vec<TraceId> = (0..10_000)
+            .map(|i| TraceId::from_parts(1_700_000_000_000 + i, 0))
+            .collect();
+        for window in ids.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "TraceId ordering violated: {:?} >= {:?}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    #[test]
+    fn trace_id_display_parse_roundtrip_many() {
+        // Roundtrip 10,000 random-ish TraceIds through Display -> FromStr.
+        for i in 0..10_000_u128 {
+            let raw = i.wrapping_mul(0x0123_4567_89AB_CDEF) ^ (i << 64);
+            let id = TraceId::from_raw(raw);
+            let hex = id.to_string();
+            let parsed: TraceId = hex.parse().unwrap();
+            assert_eq!(id, parsed, "roundtrip failed for raw={raw:#034x}");
+        }
+    }
+
+    #[test]
     fn trace_id_serde_json() {
         let id = TraceId::from_raw(0xFF);
         let json = serde_json::to_string(&id).unwrap();
@@ -643,6 +682,57 @@ mod tests {
         let parsed: TraceId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
     }
+
+    #[test]
+    fn trace_id_serde_roundtrip_many() {
+        for i in 0..1_000_u128 {
+            let id = TraceId::from_raw(i.wrapping_mul(0xDEAD_BEEF_CAFE_1234));
+            let json = serde_json::to_string(&id).unwrap();
+            let parsed: TraceId = serde_json::from_str(&json).unwrap();
+            assert_eq!(id, parsed);
+        }
+    }
+
+    #[test]
+    fn trace_id_debug_format() {
+        let id = TraceId::from_raw(0xAB);
+        let dbg = std::format!("{id:?}");
+        assert!(dbg.starts_with("TraceId("));
+        assert!(dbg.contains("ab"));
+    }
+
+    #[test]
+    fn trace_id_copy_semantics() {
+        let id = TraceId::from_raw(42);
+        let copy = id;
+        assert_eq!(id, copy); // Both still usable (Copy).
+    }
+
+    #[test]
+    fn trace_id_hash_consistency() {
+        let a = TraceId::from_raw(0xDEAD);
+        let b = TraceId::from_raw(0xDEAD);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn trace_id_zero_and_max() {
+        let zero = TraceId::from_raw(0);
+        assert_eq!(zero.timestamp_ms(), 0);
+        assert_eq!(zero.to_string(), "00000000000000000000000000000000");
+        let roundtrip: TraceId = zero.to_string().parse().unwrap();
+        assert_eq!(zero, roundtrip);
+
+        let max = TraceId::from_raw(u128::MAX);
+        assert_eq!(max.to_string(), "ffffffffffffffffffffffffffffffff");
+        let roundtrip: TraceId = max.to_string().parse().unwrap();
+        assert_eq!(max, roundtrip);
+    }
+
+    // -----------------------------------------------------------------------
+    // DecisionId tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn decision_id_from_parts_roundtrip() {
@@ -662,12 +752,75 @@ mod tests {
     }
 
     #[test]
+    fn decision_id_display_parse_roundtrip_many() {
+        for i in 0..10_000_u128 {
+            let raw = i.wrapping_mul(0xABCD_EF01_2345_6789) ^ (i << 64);
+            let id = DecisionId::from_raw(raw);
+            let hex = id.to_string();
+            let parsed: DecisionId = hex.parse().unwrap();
+            assert_eq!(id, parsed, "roundtrip failed for raw={raw:#034x}");
+        }
+    }
+
+    #[test]
+    fn decision_id_ordering() {
+        let earlier = DecisionId::from_parts(1000, 0);
+        let later = DecisionId::from_parts(2000, 0);
+        assert!(earlier < later);
+    }
+
+    #[test]
+    fn decision_id_monotonic_ordering_10k() {
+        let ids: std::vec::Vec<DecisionId> = (0..10_000)
+            .map(|i| DecisionId::from_parts(1_700_000_000_000 + i, 0))
+            .collect();
+        for window in ids.windows(2) {
+            assert!(window[0] < window[1]);
+        }
+    }
+
+    #[test]
     fn decision_id_serde_json() {
         let id = DecisionId::from_raw(1);
         let json = serde_json::to_string(&id).unwrap();
         let parsed: DecisionId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
     }
+
+    #[test]
+    fn decision_id_debug_format() {
+        let id = DecisionId::from_raw(0xCD);
+        let dbg = std::format!("{id:?}");
+        assert!(dbg.starts_with("DecisionId("));
+        assert!(dbg.contains("cd"));
+    }
+
+    #[test]
+    fn decision_id_copy_semantics() {
+        let id = DecisionId::from_raw(99);
+        let copy = id;
+        assert_eq!(id, copy);
+    }
+
+    #[test]
+    fn decision_id_hash_consistency() {
+        let a = DecisionId::from_raw(0xBEEF);
+        let b = DecisionId::from_raw(0xBEEF);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn decision_id_bytes_roundtrip() {
+        let id = DecisionId::from_raw(0x1234_5678_9ABC_DEF0);
+        let bytes = id.to_bytes();
+        let recovered = DecisionId::from_bytes(bytes);
+        assert_eq!(id, recovered);
+    }
+
+    // -----------------------------------------------------------------------
+    // PolicyId tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn policy_id_display() {
@@ -688,6 +841,28 @@ mod tests {
     }
 
     #[test]
+    fn policy_id_ordering() {
+        let a = PolicyId::new("a.policy", 1);
+        let b = PolicyId::new("b.policy", 1);
+        assert!(a < b, "PolicyId should order lexicographically by name");
+        let v1 = PolicyId::new("same", 1);
+        let v2 = PolicyId::new("same", 2);
+        assert!(v1 < v2, "same name, should order by version");
+    }
+
+    #[test]
+    fn policy_id_hash_consistency() {
+        let a = PolicyId::new("test.policy", 5);
+        let b = PolicyId::new("test.policy", 5);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    // -----------------------------------------------------------------------
+    // SchemaVersion tests
+    // -----------------------------------------------------------------------
+
+    #[test]
     fn schema_version_compatible() {
         let v1_2_3 = SchemaVersion::new(1, 2, 3);
         let v1_5_0 = SchemaVersion::new(1, 5, 0);
@@ -697,11 +872,47 @@ mod tests {
     }
 
     #[test]
+    fn schema_version_0x_edge_cases() {
+        // 0.x versions: 0.1 and 0.2 both have major=0, so they ARE compatible
+        // under our semver rule (same major).
+        let v0_1 = SchemaVersion::new(0, 1, 0);
+        let v0_2 = SchemaVersion::new(0, 2, 0);
+        assert!(
+            v0_1.is_compatible(&v0_2),
+            "0.x versions should be compatible (same major=0)"
+        );
+
+        // 0.x vs 1.x should NOT be compatible.
+        let v1_0 = SchemaVersion::new(1, 0, 0);
+        assert!(!v0_1.is_compatible(&v1_0));
+    }
+
+    #[test]
     fn schema_version_display_parse_roundtrip() {
         let v = SchemaVersion::new(1, 2, 3);
         assert_eq!(v.to_string(), "1.2.3");
         let parsed: SchemaVersion = "1.2.3".parse().unwrap();
         assert_eq!(v, parsed);
+    }
+
+    #[test]
+    fn schema_version_ordering_comprehensive() {
+        let versions = [
+            SchemaVersion::new(1, 0, 0),
+            SchemaVersion::new(1, 0, 1),
+            SchemaVersion::new(1, 1, 0),
+            SchemaVersion::new(2, 0, 0),
+            SchemaVersion::new(2, 1, 0),
+            SchemaVersion::new(10, 0, 0),
+        ];
+        for window in versions.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "{} should be < {}",
+                window[0],
+                window[1]
+            );
+        }
     }
 
     #[test]
@@ -718,6 +929,34 @@ mod tests {
         let parsed: SchemaVersion = serde_json::from_str(&json).unwrap();
         assert_eq!(v, parsed);
     }
+
+    #[test]
+    fn schema_version_copy_semantics() {
+        let v = SchemaVersion::new(1, 0, 0);
+        let copy = v;
+        assert_eq!(v, copy);
+    }
+
+    #[test]
+    fn schema_version_hash_consistency() {
+        let a = SchemaVersion::new(1, 2, 3);
+        let b = SchemaVersion::new(1, 2, 3);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn schema_version_self_compatible() {
+        let v = SchemaVersion::new(5, 3, 1);
+        assert!(
+            v.is_compatible(&v),
+            "version must be compatible with itself"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Error type tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn parse_id_error_display() {
@@ -748,32 +987,29 @@ mod tests {
         assert!("1.2".parse::<SchemaVersion>().is_err());
         assert!("a.b.c".parse::<SchemaVersion>().is_err());
         assert!("1.2.3.4".parse::<SchemaVersion>().is_err());
+        assert!("".parse::<SchemaVersion>().is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Send + Sync static assertions
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn trace_id_debug_format() {
-        let id = TraceId::from_raw(0xAB);
-        let dbg = std::format!("{id:?}");
-        assert!(dbg.starts_with("TraceId("));
-        assert!(dbg.contains("ab"));
+    fn all_types_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<TraceId>();
+        assert_send_sync::<DecisionId>();
+        assert_send_sync::<PolicyId>();
+        assert_send_sync::<SchemaVersion>();
+        assert_send_sync::<Budget>();
+        assert_send_sync::<NoCaps>();
+        // Cx requires C: CapabilitySet which requires Send + Sync.
+        assert_send_sync::<Cx<'_, NoCaps>>();
     }
 
-    #[test]
-    fn decision_id_debug_format() {
-        let id = DecisionId::from_raw(0xCD);
-        let dbg = std::format!("{id:?}");
-        assert!(dbg.starts_with("DecisionId("));
-        assert!(dbg.contains("cd"));
-    }
-
-    #[test]
-    fn trace_id_copy_semantics() {
-        let id = TraceId::from_raw(42);
-        let copy = id;
-        assert_eq!(id, copy); // Both still usable (Copy).
-    }
-
-    // -- Budget tests --
+    // -----------------------------------------------------------------------
+    // Budget tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn budget_new_and_remaining() {
@@ -799,6 +1035,20 @@ mod tests {
     }
 
     #[test]
+    fn budget_consume_exact() {
+        let b = Budget::new(100);
+        let b2 = b.consume(100).unwrap();
+        assert!(b2.is_exhausted());
+    }
+
+    #[test]
+    fn budget_consume_zero() {
+        let b = Budget::new(100);
+        let b2 = b.consume(0).unwrap();
+        assert_eq!(b2.remaining_ms(), 100);
+    }
+
+    #[test]
     fn budget_min() {
         let b1 = Budget::new(500);
         let b2 = Budget::new(300);
@@ -807,10 +1057,23 @@ mod tests {
     }
 
     #[test]
+    fn budget_min_equal() {
+        let b = Budget::new(100);
+        assert_eq!(b.min(b).remaining_ms(), 100);
+    }
+
+    #[test]
     fn budget_unlimited() {
         let b = Budget::UNLIMITED;
         assert_eq!(b.remaining_ms(), u64::MAX);
         assert!(!b.is_exhausted());
+    }
+
+    #[test]
+    fn budget_unlimited_min_with_finite() {
+        let finite = Budget::new(1000);
+        assert_eq!(Budget::UNLIMITED.min(finite).remaining_ms(), 1000);
+        assert_eq!(finite.min(Budget::UNLIMITED).remaining_ms(), 1000);
     }
 
     #[test]
@@ -825,10 +1088,35 @@ mod tests {
     fn budget_copy_semantics() {
         let b = Budget::new(100);
         let copy = b;
-        assert_eq!(b, copy); // Both usable (Copy).
+        assert_eq!(b, copy);
     }
 
-    // -- NoCaps tests --
+    #[test]
+    fn budget_tropical_identity() {
+        // Identity element of min is UNLIMITED (u64::MAX).
+        let b = Budget::new(42);
+        assert_eq!(b.min(Budget::UNLIMITED), b);
+        assert_eq!(Budget::UNLIMITED.min(b), b);
+    }
+
+    #[test]
+    fn budget_tropical_commutativity() {
+        let a = Budget::new(100);
+        let b = Budget::new(200);
+        assert_eq!(a.min(b), b.min(a));
+    }
+
+    #[test]
+    fn budget_tropical_associativity() {
+        let a = Budget::new(100);
+        let b = Budget::new(200);
+        let c = Budget::new(50);
+        assert_eq!(a.min(b).min(c), a.min(b.min(c)));
+    }
+
+    // -----------------------------------------------------------------------
+    // NoCaps tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn no_caps_empty() {
@@ -838,65 +1126,16 @@ mod tests {
         assert!(caps.capability_names().is_empty());
     }
 
-    // -- Cx tests --
-
     #[test]
-    fn cx_root_creation() {
-        let trace = TraceId::from_parts(1_700_000_000_000, 1);
-        let cx = Cx::new(trace, Budget::new(5000), NoCaps);
-        assert_eq!(cx.trace_id(), trace);
-        assert_eq!(cx.budget().remaining_ms(), 5000);
-        assert_eq!(cx.depth(), 0);
-        assert!(cx.capabilities().is_empty());
+    fn no_caps_clone() {
+        let a = NoCaps;
+        let b = a.clone();
+        assert_eq!(a, b);
     }
 
-    #[test]
-    fn cx_child_inherits_trace() {
-        let trace = TraceId::from_parts(1_700_000_000_000, 42);
-        let cx = Cx::new(trace, Budget::new(5000), NoCaps);
-        let child = cx.child(NoCaps, Budget::new(3000));
-        assert_eq!(child.trace_id(), trace);
-    }
-
-    #[test]
-    fn cx_child_budget_takes_min() {
-        let cx = Cx::new(TraceId::from_raw(1), Budget::new(2000), NoCaps);
-        // Child requests less than parent — child gets its request.
-        let child1 = cx.child(NoCaps, Budget::new(1000));
-        assert_eq!(child1.budget().remaining_ms(), 1000);
-        // Child requests more than parent — capped at parent.
-        let child2 = cx.child(NoCaps, Budget::new(5000));
-        assert_eq!(child2.budget().remaining_ms(), 2000);
-    }
-
-    #[test]
-    fn cx_child_increments_depth() {
-        let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), NoCaps);
-        let child = cx.child(NoCaps, Budget::new(1000));
-        assert_eq!(child.depth(), 1);
-        let grandchild = child.child(NoCaps, Budget::new(1000));
-        assert_eq!(grandchild.depth(), 2);
-    }
-
-    #[test]
-    fn cx_consume_budget() {
-        let mut cx = Cx::new(TraceId::from_raw(1), Budget::new(500), NoCaps);
-        assert!(cx.consume_budget(200));
-        assert_eq!(cx.budget().remaining_ms(), 300);
-        assert!(!cx.consume_budget(400)); // insufficient
-        assert_eq!(cx.budget().remaining_ms(), 300); // unchanged
-    }
-
-    #[test]
-    fn cx_debug_format() {
-        let cx = Cx::new(TraceId::from_raw(0xAB), Budget::new(100), NoCaps);
-        let dbg = std::format!("{cx:?}");
-        assert!(dbg.contains("Cx"));
-        assert!(dbg.contains("budget_ms"));
-        assert!(dbg.contains("100"));
-    }
-
-    // -- Custom CapabilitySet --
+    // -----------------------------------------------------------------------
+    // Custom CapabilitySet for testing
+    // -----------------------------------------------------------------------
 
     #[derive(Clone, Debug)]
     struct TestCaps {
@@ -921,6 +1160,84 @@ mod tests {
         }
     }
 
+    /// Layered capability set for testing attenuation chains.
+    #[derive(Clone, Debug)]
+    struct LayeredCaps {
+        level: u32,
+    }
+
+    impl CapabilitySet for LayeredCaps {
+        fn capability_names(&self) -> alloc::vec::Vec<&str> {
+            if self.level > 0 {
+                alloc::vec!["layer"]
+            } else {
+                alloc::vec::Vec::new()
+            }
+        }
+
+        fn count(&self) -> usize {
+            usize::from(self.level > 0)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Cx tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cx_root_creation() {
+        let trace = TraceId::from_parts(1_700_000_000_000, 1);
+        let cx = Cx::new(trace, Budget::new(5000), NoCaps);
+        assert_eq!(cx.trace_id(), trace);
+        assert_eq!(cx.budget().remaining_ms(), 5000);
+        assert_eq!(cx.depth(), 0);
+        assert!(cx.capabilities().is_empty());
+    }
+
+    #[test]
+    fn cx_child_inherits_trace() {
+        let trace = TraceId::from_parts(1_700_000_000_000, 42);
+        let cx = Cx::new(trace, Budget::new(5000), NoCaps);
+        let child = cx.child(NoCaps, Budget::new(3000));
+        assert_eq!(child.trace_id(), trace);
+    }
+
+    #[test]
+    fn cx_child_budget_takes_min() {
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(2000), NoCaps);
+        let child1 = cx.child(NoCaps, Budget::new(1000));
+        assert_eq!(child1.budget().remaining_ms(), 1000);
+        let child2 = cx.child(NoCaps, Budget::new(5000));
+        assert_eq!(child2.budget().remaining_ms(), 2000);
+    }
+
+    #[test]
+    fn cx_child_increments_depth() {
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), NoCaps);
+        let child = cx.child(NoCaps, Budget::new(1000));
+        assert_eq!(child.depth(), 1);
+        let grandchild = child.child(NoCaps, Budget::new(1000));
+        assert_eq!(grandchild.depth(), 2);
+    }
+
+    #[test]
+    fn cx_consume_budget() {
+        let mut cx = Cx::new(TraceId::from_raw(1), Budget::new(500), NoCaps);
+        assert!(cx.consume_budget(200));
+        assert_eq!(cx.budget().remaining_ms(), 300);
+        assert!(!cx.consume_budget(400));
+        assert_eq!(cx.budget().remaining_ms(), 300);
+    }
+
+    #[test]
+    fn cx_debug_format() {
+        let cx = Cx::new(TraceId::from_raw(0xAB), Budget::new(100), NoCaps);
+        let dbg = std::format!("{cx:?}");
+        assert!(dbg.contains("Cx"));
+        assert!(dbg.contains("budget_ms"));
+        assert!(dbg.contains("100"));
+    }
+
     #[test]
     fn cx_with_custom_capabilities() {
         let caps = TestCaps {
@@ -941,7 +1258,6 @@ mod tests {
         let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), full_caps);
         assert_eq!(cx.capabilities().count(), 2);
 
-        // Child gets attenuated (read-only) capabilities.
         let read_only = TestCaps {
             can_read: true,
             can_write: false,
@@ -949,5 +1265,343 @@ mod tests {
         let child = cx.child(read_only, Budget::new(500));
         assert_eq!(child.capabilities().count(), 1);
         assert!(!child.capabilities().capability_names().contains(&"write"));
+    }
+
+    #[test]
+    fn cx_capability_attenuation_chain_10x() {
+        // Create a chain of 10 nested contexts, each with decreasing level.
+        let trace = TraceId::from_raw(0x42);
+        let root = Cx::new(trace, Budget::new(10_000), LayeredCaps { level: 10 });
+        assert_eq!(root.capabilities().level, 10);
+
+        let mut prev_level = 10_u32;
+        let child1 = root.child(LayeredCaps { level: 9 }, Budget::new(9000));
+        assert!(child1.capabilities().level < prev_level);
+        prev_level = child1.capabilities().level;
+
+        let child2 = child1.child(LayeredCaps { level: 8 }, Budget::new(8000));
+        assert!(child2.capabilities().level < prev_level);
+        prev_level = child2.capabilities().level;
+
+        let child3 = child2.child(LayeredCaps { level: 7 }, Budget::new(7000));
+        assert!(child3.capabilities().level < prev_level);
+        prev_level = child3.capabilities().level;
+
+        let child4 = child3.child(LayeredCaps { level: 6 }, Budget::new(6000));
+        assert!(child4.capabilities().level < prev_level);
+        prev_level = child4.capabilities().level;
+
+        let child5 = child4.child(LayeredCaps { level: 5 }, Budget::new(5000));
+        assert!(child5.capabilities().level < prev_level);
+        prev_level = child5.capabilities().level;
+
+        let child6 = child5.child(LayeredCaps { level: 4 }, Budget::new(4000));
+        assert!(child6.capabilities().level < prev_level);
+        prev_level = child6.capabilities().level;
+
+        let child7 = child6.child(LayeredCaps { level: 3 }, Budget::new(3000));
+        assert!(child7.capabilities().level < prev_level);
+        prev_level = child7.capabilities().level;
+
+        let child8 = child7.child(LayeredCaps { level: 2 }, Budget::new(2000));
+        assert!(child8.capabilities().level < prev_level);
+        prev_level = child8.capabilities().level;
+
+        let child9 = child8.child(LayeredCaps { level: 1 }, Budget::new(1000));
+        assert!(child9.capabilities().level < prev_level);
+        prev_level = child9.capabilities().level;
+
+        let child10 = child9.child(LayeredCaps { level: 0 }, Budget::new(500));
+        assert!(child10.capabilities().level < prev_level);
+        assert_eq!(child10.capabilities().level, 0);
+        assert!(child10.capabilities().is_empty());
+        assert_eq!(child10.depth(), 10);
+
+        // Trace propagated through all 10 levels.
+        assert_eq!(child10.trace_id(), trace);
+        // Budget capped by minimum in chain: 500 ms.
+        assert_eq!(child10.budget().remaining_ms(), 500);
+    }
+
+    #[test]
+    fn cx_deep_nesting_budget_monotonic() {
+        // Budget can only decrease or stay the same through nesting.
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(1000), NoCaps);
+        let c1 = cx.child(NoCaps, Budget::new(900));
+        let c2 = c1.child(NoCaps, Budget::new(800));
+        let c3 = c2.child(NoCaps, Budget::new(700));
+        let c4 = c3.child(NoCaps, Budget::new(600));
+
+        assert!(c1.budget().remaining_ms() <= cx.budget().remaining_ms());
+        assert!(c2.budget().remaining_ms() <= c1.budget().remaining_ms());
+        assert!(c3.budget().remaining_ms() <= c2.budget().remaining_ms());
+        assert!(c4.budget().remaining_ms() <= c3.budget().remaining_ms());
+    }
+
+    #[test]
+    fn cx_child_cannot_exceed_parent_budget() {
+        let cx = Cx::new(TraceId::from_raw(1), Budget::new(100), NoCaps);
+        // Child requests much more — capped at parent's 100.
+        let child = cx.child(NoCaps, Budget::UNLIMITED);
+        assert_eq!(child.budget().remaining_ms(), 100);
+    }
+
+    #[test]
+    fn cx_trace_propagation_through_chain() {
+        let trace = TraceId::from_parts(1_700_000_000_000, 0xCAFE);
+        let cx = Cx::new(trace, Budget::UNLIMITED, NoCaps);
+        let c1 = cx.child(NoCaps, Budget::UNLIMITED);
+        let c2 = c1.child(NoCaps, Budget::UNLIMITED);
+        let c3 = c2.child(NoCaps, Budget::UNLIMITED);
+        assert_eq!(c3.trace_id(), trace);
+        assert_eq!(c3.depth(), 3);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property-based tests (proptest)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod proptest_tests {
+    extern crate std;
+
+    use super::*;
+    use core::hash::{Hash, Hasher};
+    use proptest::prelude::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::string::ToString;
+
+    fn hash_of<T: Hash>(val: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        val.hash(&mut h);
+        h.finish()
+    }
+
+    // -- TraceId properties --
+
+    proptest! {
+        #[test]
+        fn trace_id_display_fromstr_roundtrip(raw: u128) {
+            let id = TraceId::from_raw(raw);
+            let hex = id.to_string();
+            let parsed: TraceId = hex.parse().unwrap();
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn trace_id_serde_roundtrip(raw: u128) {
+            let id = TraceId::from_raw(raw);
+            let json = serde_json::to_string(&id).unwrap();
+            let parsed: TraceId = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn trace_id_bytes_roundtrip(raw: u128) {
+            let id = TraceId::from_raw(raw);
+            let bytes = id.to_bytes();
+            let recovered = TraceId::from_bytes(bytes);
+            prop_assert_eq!(id, recovered);
+        }
+
+        #[test]
+        fn trace_id_hash_consistency(a: u128, b: u128) {
+            let id_a = TraceId::from_raw(a);
+            let id_b = TraceId::from_raw(b);
+            if id_a == id_b {
+                prop_assert_eq!(hash_of(&id_a), hash_of(&id_b));
+            }
+        }
+
+        #[test]
+        fn trace_id_from_parts_preserves_timestamp(ts_ms: u64, random: u128) {
+            // Only 48 bits of timestamp are stored.
+            let ts_masked = ts_ms & 0xFFFF_FFFF_FFFF;
+            let id = TraceId::from_parts(ts_masked, random);
+            prop_assert_eq!(id.timestamp_ms(), ts_masked);
+        }
+    }
+
+    // -- DecisionId properties --
+
+    proptest! {
+        #[test]
+        fn decision_id_display_fromstr_roundtrip(raw: u128) {
+            let id = DecisionId::from_raw(raw);
+            let hex = id.to_string();
+            let parsed: DecisionId = hex.parse().unwrap();
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn decision_id_serde_roundtrip(raw: u128) {
+            let id = DecisionId::from_raw(raw);
+            let json = serde_json::to_string(&id).unwrap();
+            let parsed: DecisionId = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn decision_id_hash_consistency(a: u128, b: u128) {
+            let id_a = DecisionId::from_raw(a);
+            let id_b = DecisionId::from_raw(b);
+            if id_a == id_b {
+                prop_assert_eq!(hash_of(&id_a), hash_of(&id_b));
+            }
+        }
+    }
+
+    // -- SchemaVersion properties --
+
+    proptest! {
+        #[test]
+        fn schema_version_parse_roundtrip(major: u32, minor: u32, patch: u32) {
+            let v = SchemaVersion::new(major, minor, patch);
+            let s = v.to_string();
+            let parsed: SchemaVersion = s.parse().unwrap();
+            prop_assert_eq!(v, parsed);
+        }
+
+        #[test]
+        fn schema_version_serde_roundtrip(major: u32, minor: u32, patch: u32) {
+            let v = SchemaVersion::new(major, minor, patch);
+            let json = serde_json::to_string(&v).unwrap();
+            let parsed: SchemaVersion = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(v, parsed);
+        }
+
+        #[test]
+        fn schema_version_compatible_reflexive(major: u32, minor: u32, patch: u32) {
+            let v = SchemaVersion::new(major, minor, patch);
+            prop_assert!(v.is_compatible(&v));
+        }
+
+        #[test]
+        fn schema_version_compatible_symmetric(
+            m1: u32, n1: u32, p1: u32,
+            m2: u32, n2: u32, p2: u32
+        ) {
+            let a = SchemaVersion::new(m1, n1, p1);
+            let b = SchemaVersion::new(m2, n2, p2);
+            prop_assert_eq!(a.is_compatible(&b), b.is_compatible(&a));
+        }
+
+        #[test]
+        fn schema_version_compatible_transitive(
+            m1: u32, n1: u32, p1: u32,
+            n2: u32, p2: u32,
+            n3: u32, p3: u32
+        ) {
+            // If a and b share the same major, and b and c share the same major,
+            // then a and c must share the same major.
+            let a = SchemaVersion::new(m1, n1, p1);
+            let b = SchemaVersion::new(m1, n2, p2);
+            let c = SchemaVersion::new(m1, n3, p3);
+            if a.is_compatible(&b) && b.is_compatible(&c) {
+                prop_assert!(a.is_compatible(&c));
+            }
+        }
+
+        #[test]
+        fn schema_version_hash_consistency(
+            m1: u32, n1: u32, p1: u32,
+            m2: u32, n2: u32, p2: u32
+        ) {
+            let a = SchemaVersion::new(m1, n1, p1);
+            let b = SchemaVersion::new(m2, n2, p2);
+            if a == b {
+                prop_assert_eq!(hash_of(&a), hash_of(&b));
+            }
+        }
+    }
+
+    // -- Budget tropical semiring properties --
+
+    proptest! {
+        #[test]
+        fn budget_min_commutative(a: u64, b: u64) {
+            let ba = Budget::new(a);
+            let bb = Budget::new(b);
+            prop_assert_eq!(ba.min(bb), bb.min(ba));
+        }
+
+        #[test]
+        fn budget_min_associative(a: u64, b: u64, c: u64) {
+            let ba = Budget::new(a);
+            let bb = Budget::new(b);
+            let bc = Budget::new(c);
+            prop_assert_eq!(ba.min(bb).min(bc), ba.min(bb.min(bc)));
+        }
+
+        #[test]
+        fn budget_min_identity(a: u64) {
+            // UNLIMITED is the identity element for min.
+            let ba = Budget::new(a);
+            prop_assert_eq!(ba.min(Budget::UNLIMITED), ba);
+            prop_assert_eq!(Budget::UNLIMITED.min(ba), ba);
+        }
+
+        #[test]
+        fn budget_min_idempotent(a: u64) {
+            let ba = Budget::new(a);
+            prop_assert_eq!(ba.min(ba), ba);
+        }
+
+        #[test]
+        fn budget_consume_additive(total in 0..=10_000_u64, a in 0..=5_000_u64, b in 0..=5_000_u64) {
+            // If we can consume a+b, consuming a then b should give the same result.
+            let budget = Budget::new(total);
+            if a + b <= total {
+                let after_both = budget.consume(a + b).unwrap();
+                let after_a = budget.consume(a).unwrap();
+                let after_ab = after_a.consume(b).unwrap();
+                prop_assert_eq!(after_both.remaining_ms(), after_ab.remaining_ms());
+            }
+        }
+
+        #[test]
+        fn budget_serde_roundtrip(ms: u64) {
+            let b = Budget::new(ms);
+            let json = serde_json::to_string(&b).unwrap();
+            let parsed: Budget = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(b, parsed);
+        }
+
+        #[test]
+        fn budget_hash_consistency(a: u64, b: u64) {
+            let ba = Budget::new(a);
+            let bb = Budget::new(b);
+            if ba == bb {
+                prop_assert_eq!(hash_of(&ba), hash_of(&bb));
+            }
+        }
+    }
+
+    // -- Cx property tests --
+
+    proptest! {
+        #[test]
+        fn cx_child_budget_never_exceeds_parent(parent_ms: u64, child_ms: u64) {
+            let trace = TraceId::from_raw(1);
+            let cx = Cx::new(trace, Budget::new(parent_ms), NoCaps);
+            let child = cx.child(NoCaps, Budget::new(child_ms));
+            prop_assert!(child.budget().remaining_ms() <= cx.budget().remaining_ms());
+        }
+
+        #[test]
+        fn cx_child_trace_always_inherited(raw: u128, budget_ms: u64) {
+            let trace = TraceId::from_raw(raw);
+            let cx = Cx::new(trace, Budget::new(budget_ms), NoCaps);
+            let child = cx.child(NoCaps, Budget::new(budget_ms));
+            prop_assert_eq!(child.trace_id(), trace);
+        }
+
+        #[test]
+        fn cx_child_depth_increments(raw: u128, budget_ms: u64) {
+            let cx = Cx::new(TraceId::from_raw(raw), Budget::new(budget_ms), NoCaps);
+            let child = cx.child(NoCaps, Budget::new(budget_ms));
+            prop_assert_eq!(child.depth(), cx.depth() + 1);
+        }
     }
 }
