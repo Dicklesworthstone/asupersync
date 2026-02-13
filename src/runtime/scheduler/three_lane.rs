@@ -55,7 +55,7 @@ use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::stored_task::AnyStoredTask;
-use crate::runtime::RuntimeState;
+use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{error, trace};
@@ -304,6 +304,11 @@ pub struct ThreeLaneScheduler {
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
     state: Arc<ContendedMutex<RuntimeState>>,
+    /// Optional sharded task table for hot-path task operations.
+    ///
+    /// When present, inject/spawn methods use this instead of the full
+    /// RuntimeState lock for task record lookups (wake_state, is_local, etc.).
+    task_table: Option<Arc<ContendedMutex<TaskTable>>>,
 }
 
 impl ThreeLaneScheduler {
@@ -330,6 +335,30 @@ impl ThreeLaneScheduler {
     pub fn new_with_options(
         worker_count: usize,
         state: &Arc<ContendedMutex<RuntimeState>>,
+        cancel_streak_limit: usize,
+        enable_governor: bool,
+        governor_interval: u32,
+    ) -> Self {
+        Self::new_with_options_and_task_table(
+            worker_count,
+            state,
+            None,
+            cancel_streak_limit,
+            enable_governor,
+            governor_interval,
+        )
+    }
+
+    /// Creates a new 3-lane scheduler with full configuration and a sharded task table.
+    ///
+    /// When `task_table` is `Some`, hot-path operations (task record lookups,
+    /// future storage/retrieval, LocalQueue push/pop) lock only the task table
+    /// instead of the full RuntimeState. Cross-cutting operations
+    /// (`task_completed`, `drain_ready_async_finalizers`) still use RuntimeState.
+    pub fn new_with_options_and_task_table(
+        worker_count: usize,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        task_table: Option<Arc<ContendedMutex<TaskTable>>>,
         cancel_streak_limit: usize,
         enable_governor: bool,
         governor_interval: u32,
@@ -367,9 +396,17 @@ impl ThreeLaneScheduler {
         }
         let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone()));
 
-        // Create fast queues (O(1) IntrusiveStack) for ready-lane fast path
+        // Create fast queues (O(1) IntrusiveStack) for ready-lane fast path.
+        // When a sharded TaskTable is available, back the queues directly
+        // against it so push/pop/steal avoid the full RuntimeState lock.
         let fast_queues: Vec<LocalQueue> = (0..worker_count)
-            .map(|_| LocalQueue::new(Arc::clone(state)))
+            .map(|_| {
+                if let Some(tt) = &task_table {
+                    LocalQueue::new_with_task_table(Arc::clone(tt))
+                } else {
+                    LocalQueue::new(Arc::clone(state))
+                }
+            })
             .collect();
 
         // Create workers with references to all other workers' schedulers
@@ -402,6 +439,7 @@ impl ThreeLaneScheduler {
                 all_local_ready: local_ready.clone(),
                 global: Arc::clone(&global),
                 state: Arc::clone(state),
+                task_table: task_table.clone(),
                 parker,
                 coordinator: Arc::clone(&coordinator),
                 rng: DetRng::new(id as u64),
@@ -435,6 +473,7 @@ impl ThreeLaneScheduler {
             coordinator,
             timer_driver,
             state: Arc::clone(state),
+            task_table,
             cancel_streak_limit,
             steal_batch_size,
             enable_parking,
@@ -816,6 +855,12 @@ pub struct ThreeLaneWorker {
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
     pub state: Arc<ContendedMutex<RuntimeState>>,
+    /// Optional sharded task table for hot-path task operations.
+    ///
+    /// When present, `execute()` and scheduling helpers lock this instead
+    /// of the full RuntimeState for task record access, future storage,
+    /// and wake_state operations.
+    pub task_table: Option<Arc<ContendedMutex<TaskTable>>>,
     /// Parking mechanism for idle workers.
     pub parker: Parker,
     /// Coordination for waking other workers.
@@ -874,6 +919,33 @@ pub struct PreemptionMetrics {
 }
 
 impl ThreeLaneWorker {
+    /// Runs a closure against the task table, using the sharded task table
+    /// when available, otherwise falling back to RuntimeState's embedded table.
+    ///
+    /// This is the hot-path accessor: when `task_table` is `Some`, only the
+    /// task shard lock is acquired, avoiding contention with region/obligation
+    /// mutations.
+    fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
+        if let Some(tt) = &self.task_table {
+            let mut guard = tt.lock().expect("task table lock poisoned");
+            f(&mut guard)
+        } else {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            f(&mut state.tasks)
+        }
+    }
+
+    /// Read-only version of [`with_task_table`] for task record lookups.
+    fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
+        if let Some(tt) = &self.task_table {
+            let guard = tt.lock().expect("task table lock poisoned");
+            f(&guard)
+        } else {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            f(&state.tasks)
+        }
+    }
+
     /// Returns the preemption fairness metrics for this worker.
     #[must_use]
     pub fn preemption_metrics(&self) -> &PreemptionMetrics {
@@ -1447,14 +1519,12 @@ impl ThreeLaneWorker {
             cached_waker,
             cached_cancel_waker,
         ) = {
+            // Remove stored future: use task table for hot-path when sharded.
             let stored = {
-                let mut state = self.state.lock().expect("runtime state lock poisoned");
-
-                // Try global storage first.
-                state.remove_stored_future(task_id).map_or_else(
+                let global_stored = self.with_task_table(|tt| tt.remove_stored_future(task_id));
+                global_stored.map_or_else(
                     || {
                         // Try local storage.
-                        drop(state); // Drop lock to access TLS
                         let local = crate::runtime::local::remove_local_task(task_id);
                         local.map(AnyStoredTask::Local)
                     },
@@ -1466,25 +1536,29 @@ impl ThreeLaneWorker {
                 return;
             };
 
-            let mut state = self.state.lock().expect("runtime state lock poisoned");
-
-            let Some(record) = state.task_mut(task_id) else {
+            // Update task record state: use task table when sharded.
+            let record_info = self.with_task_table(|tt| {
+                let record = tt.task_mut(task_id)?;
+                record.start_running();
+                record.wake_state.begin_poll();
+                let priority = record
+                    .cx_inner
+                    .as_ref()
+                    .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+                    .unwrap_or(0);
+                let task_cx = record.cx.clone();
+                let cx_inner = record.cx_inner.clone();
+                let wake_state = Arc::clone(&record.wake_state);
+                // Take cached wakers to avoid holding the lock during poll
+                let cached_waker = record.cached_waker.take();
+                let cached_cancel_waker = record.cached_cancel_waker.take();
+                Some((task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker))
+            });
+            let Some((task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker)) =
+                record_info
+            else {
                 return;
             };
-            record.start_running();
-            record.wake_state.begin_poll();
-            let priority = record
-                .cx_inner
-                .as_ref()
-                .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
-                .unwrap_or(0);
-            let task_cx = record.cx.clone();
-            let cx_inner = record.cx_inner.clone();
-            let wake_state = Arc::clone(&record.wake_state);
-            // Take cached wakers to avoid holding the lock during poll
-            let cached_waker = record.cached_waker.take();
-            let cached_cancel_waker = record.cached_cancel_waker.take();
-            drop(state);
             (
                 stored,
                 task_cx,
