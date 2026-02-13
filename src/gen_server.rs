@@ -959,7 +959,12 @@ impl<S: GenServer> GenServerHandle<S> {
             }),
             CastOverflowPolicy::DropOldest => {
                 match self.sender.send_evict_oldest(envelope) {
-                    Ok(Some(_evicted)) => {
+                    Ok(Some(evicted)) => {
+                        // If the evicted message was a Call, abort the reply
+                        // obligation to prevent an obligation-token-leak panic.
+                        if let Envelope::Call { reply_permit, .. } = evicted {
+                            let _aborted = reply_permit.abort();
+                        }
                         // Trace the eviction so lossy drops are observable.
                         if let Some(cx) = Cx::current() {
                             cx.trace("gen_server::cast_evicted_oldest");
@@ -1215,7 +1220,12 @@ impl<S: GenServer> GenServerRef<S> {
                 mpsc::SendError::Full(_) => CastError::Full,
             }),
             CastOverflowPolicy::DropOldest => match self.sender.send_evict_oldest(envelope) {
-                Ok(Some(_evicted)) => {
+                Ok(Some(evicted)) => {
+                    // If the evicted message was a Call, abort the reply
+                    // obligation to prevent an obligation-token-leak panic.
+                    if let Envelope::Call { reply_permit, .. } = evicted {
+                        let _aborted = reply_permit.abort();
+                    }
                     if let Some(cx) = Cx::current() {
                         cx.trace("gen_server::cast_evicted_oldest");
                     }
@@ -3144,6 +3154,40 @@ mod tests {
         server_ref.try_cast(TaggedCast::Set(3)).unwrap();
 
         crate::test_complete!("gen_server_drop_oldest_ref_also_evicts");
+    }
+
+    /// DropOldest eviction of a Call envelope must abort the reply obligation
+    /// instead of leaking it. Before the fix, dropping an evicted Call caused
+    /// an "OBLIGATION TOKEN LEAKED" panic.
+    #[test]
+    fn gen_server_drop_oldest_evicting_call_aborts_obligation() {
+        init_test("gen_server_drop_oldest_evicting_call_aborts_obligation");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        // Capacity 1 so we can fill it with one message.
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut state, &cx, DropOldestCounter { count: 0 }, 1)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        // Manually enqueue a Call envelope so it sits in the mailbox.
+        let (reply_tx, _reply_rx) = session::tracked_oneshot::<u64>();
+        let reply_permit = reply_tx.reserve(&cx);
+        let call_envelope: Envelope<DropOldestCounter> = Envelope::Call {
+            request: CounterCall::Get,
+            reply_permit,
+        };
+        handle.sender.try_send(call_envelope).unwrap();
+
+        // Now try_cast with DropOldest should evict the Call and abort its
+        // reply obligation cleanly — no panic.
+        handle.try_cast(TaggedCast::Set(99)).unwrap();
+
+        crate::test_complete!("gen_server_drop_oldest_evicting_call_aborts_obligation");
     }
 
     #[test]
