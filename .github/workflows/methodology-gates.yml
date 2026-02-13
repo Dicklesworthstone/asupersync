@@ -1,0 +1,510 @@
+# Methodology Gates (bd-1e2if.5)
+#
+# Four mandatory artifact gates per the §0 methodology:
+#   1. Baseline benchmark comparison — detect performance regressions
+#   2. Flamegraph gate — require flamegraph for hot-path changes
+#   3. Golden checksum validation — verify behavioral equivalence
+#   4. Proof note gate — require proof notes for safety-critical changes
+#
+# Plus a summary comment posted to the PR.
+
+name: Methodology Gates
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ===========================================================================
+  # Gate 1: Baseline Benchmark Comparison
+  # ===========================================================================
+  baseline-gate:
+    name: "Gate: Baseline Benchmarks"
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.compare.outcome }}
+      summary: ${{ steps.compare.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-methodology-bench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Run methodology baselines
+        run: cargo bench --bench methodology_baselines --all-features -- --noplot
+
+      - name: Compare against baseline
+        id: compare
+        run: |
+          set +e
+
+          BASELINE_FILE="artifacts/baseline.json"
+          GATE_LOG='{"gate_name":"baseline","status":"unknown","duration_ms":0,"artifact_path":"","failure_reason":""}'
+          START_MS=$(date +%s%3N)
+
+          if [ ! -f "$BASELINE_FILE" ]; then
+            END_MS=$(date +%s%3N)
+            DURATION=$(( END_MS - START_MS ))
+            echo '{"gate_name":"baseline","status":"skip","duration_ms":'$DURATION',"artifact_path":"","failure_reason":"No baseline file found"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "summary=No baseline file found — skipping comparison" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract current benchmark results from criterion output
+          RESULTS=""
+          REGRESSIONS=""
+          TOTAL=0
+          REGRESSED=0
+          IMPROVED=0
+
+          for est_file in $(find target/criterion -path '*/new/estimates.json' -type f | sort); do
+            rel="${est_file#target/criterion/}"
+            bench_name="${rel%/new/estimates.json}"
+            current_p50=$(jq -r '.median.point_estimate' "$est_file")
+            ci_lower=$(jq -r '.median.confidence_interval.lower_bound' "$est_file" 2>/dev/null || echo "null")
+            ci_upper=$(jq -r '.median.confidence_interval.upper_bound' "$est_file" 2>/dev/null || echo "null")
+
+            # Find matching baseline entry (match by operation field suffix)
+            baseline_p50=$(jq -r --arg name "$bench_name" \
+              '.baselines[] | select(.operation | endswith($name)) | .p50_ns // empty' \
+              "$BASELINE_FILE" 2>/dev/null | head -1)
+
+            if [ -z "$baseline_p50" ] || [ "$baseline_p50" = "null" ]; then
+              continue
+            fi
+
+            TOTAL=$((TOTAL + 1))
+
+            # Calculate delta percentage
+            delta_pct=$(python3 -c "
+          base=$baseline_p50; cur=$current_p50
+          if base > 0:
+              print(f'{((cur/base)-1)*100:.2f}')
+          else:
+              print('0.00')
+          ")
+
+            # Check for regression > 5%
+            is_regression=$(python3 -c "print('yes' if float('$delta_pct') > 5.0 else 'no')")
+
+            if [ "$is_regression" = "yes" ]; then
+              REGRESSED=$((REGRESSED + 1))
+              REGRESSIONS="${REGRESSIONS}  - ${bench_name}: ${baseline_p50} → ${current_p50} (+${delta_pct}%)\n"
+            fi
+
+            is_improved=$(python3 -c "print('yes' if float('$delta_pct') < -5.0 else 'no')")
+            if [ "$is_improved" = "yes" ]; then
+              IMPROVED=$((IMPROVED + 1))
+            fi
+
+            RESULTS="${RESULTS}| ${bench_name} | ${baseline_p50} | ${current_p50} | ${delta_pct}% |\n"
+          done
+
+          END_MS=$(date +%s%3N)
+          DURATION=$(( END_MS - START_MS ))
+
+          if [ "$REGRESSED" -gt 0 ]; then
+            echo '{"gate_name":"baseline","status":"fail","duration_ms":'$DURATION',"artifact_path":"artifacts/baseline.json","failure_reason":"'$REGRESSED' benchmarks regressed >5%"}' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "summary<<EOF"
+              echo "FAIL: $REGRESSED of $TOTAL benchmarks regressed >5%"
+              echo -e "$REGRESSIONS"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Baseline gate FAILED: $REGRESSED benchmarks regressed >5%"
+            exit 1
+          else
+            echo '{"gate_name":"baseline","status":"pass","duration_ms":'$DURATION',"artifact_path":"artifacts/baseline.json","failure_reason":""}' >> "$GITHUB_STEP_SUMMARY"
+            echo "summary=PASS: $TOTAL benchmarks checked, $IMPROVED improved, 0 regressions" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: methodology-benchmark-results
+          path: target/criterion/
+          retention-days: 14
+
+  # ===========================================================================
+  # Gate 2: Flamegraph Gate
+  # ===========================================================================
+  flamegraph-gate:
+    name: "Gate: Flamegraph"
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.check.outputs.status }}
+      summary: ${{ steps.check.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for hot-path changes
+        id: check
+        run: |
+          START_MS=$(date +%s%3N)
+          HOT_PATH_PATTERNS=(
+            "src/runtime/scheduler/"
+            "src/channel/"
+            "src/obligation/"
+            "src/cancel/"
+            "src/sync/"
+          )
+
+          # Get changed files in this PR
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD~1)
+
+          HOT_PATH_CHANGED=""
+          for pattern in "${HOT_PATH_PATTERNS[@]}"; do
+            matches=$(echo "$CHANGED_FILES" | grep "^${pattern}" || true)
+            if [ -n "$matches" ]; then
+              HOT_PATH_CHANGED="${HOT_PATH_CHANGED}${matches}\n"
+            fi
+          done
+
+          END_MS=$(date +%s%3N)
+          DURATION=$(( END_MS - START_MS ))
+
+          if [ -z "$HOT_PATH_CHANGED" ]; then
+            echo '{"gate_name":"flamegraph","status":"skip","duration_ms":'$DURATION',"artifact_path":"","failure_reason":"No hot-path files changed"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "status=skip" >> "$GITHUB_OUTPUT"
+            echo "summary=SKIP: No hot-path files changed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Hot-path files changed:"
+          echo -e "$HOT_PATH_CHANGED"
+
+          # Check for flamegraph artifact
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          FLAMEGRAPH_PATH="artifacts/flamegraphs/pr-${PR_NUMBER}.svg"
+
+          if [ -f "$FLAMEGRAPH_PATH" ]; then
+            echo '{"gate_name":"flamegraph","status":"pass","duration_ms":'$DURATION',"artifact_path":"'$FLAMEGRAPH_PATH'","failure_reason":""}' >> "$GITHUB_STEP_SUMMARY"
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "summary=PASS: Flamegraph provided at $FLAMEGRAPH_PATH" >> "$GITHUB_OUTPUT"
+          else
+            echo '{"gate_name":"flamegraph","status":"fail","duration_ms":'$DURATION',"artifact_path":"","failure_reason":"Hot-path changes detected but no flamegraph provided"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            {
+              echo "summary<<EOF"
+              echo "FAIL: Hot-path changes detected but no flamegraph provided."
+              echo "Changed hot-path files:"
+              echo -e "$HOT_PATH_CHANGED"
+              echo ""
+              echo "To fix: Generate a flamegraph and commit it at:"
+              echo "  $FLAMEGRAPH_PATH"
+              echo ""
+              echo "Generate with: cargo flamegraph --freq 997 --bench methodology_baselines -o $FLAMEGRAPH_PATH"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Flamegraph gate FAILED: Hot-path changes require a flamegraph artifact"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Gate 3: Golden Checksum Validation
+  # ===========================================================================
+  golden-checksum-gate:
+    name: "Gate: Golden Checksums"
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.verify.outcome }}
+      summary: ${{ steps.verify.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-methodology-golden-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run golden checksum benchmarks
+        id: verify
+        run: |
+          START_MS=$(date +%s%3N)
+
+          # Run the golden output benchmark which validates checksums internally
+          # The bench harness asserts on checksum mismatches
+          set +e
+          OUTPUT=$(cargo bench --bench golden_output --all-features -- --noplot 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          END_MS=$(date +%s%3N)
+          DURATION=$(( END_MS - START_MS ))
+
+          # Count checksums from the artifact file
+          CHECKSUM_FILE="artifacts/golden_checksums.json"
+          if [ -f "$CHECKSUM_FILE" ]; then
+            TOTAL_CHECKSUMS=$(jq '.checksums | length' "$CHECKSUM_FILE")
+          else
+            TOTAL_CHECKSUMS=0
+          fi
+
+          # Check for MISMATCH in output
+          MISMATCHES=$(echo "$OUTPUT" | grep -c "\[GOLDEN\].*MISMATCH" || true)
+
+          if [ "$EXIT_CODE" -ne 0 ] || [ "$MISMATCHES" -gt 0 ]; then
+            MISMATCH_DETAILS=$(echo "$OUTPUT" | grep "\[GOLDEN\].*MISMATCH" || echo "See full output")
+            echo '{"gate_name":"golden_checksum","status":"fail","duration_ms":'$DURATION',"artifact_path":"'$CHECKSUM_FILE'","failure_reason":"'$MISMATCHES' golden checksum mismatches"}' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "summary<<EOF"
+              echo "FAIL: $MISMATCHES golden checksum mismatches out of $TOTAL_CHECKSUMS"
+              echo "$MISMATCH_DETAILS"
+              echo ""
+              echo "To fix: If the behavioral change is intentional, run:"
+              echo "  GOLDEN_UPDATE=1 cargo bench --bench golden_output"
+              echo "and commit the updated artifacts/golden_checksums.json"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Golden checksum gate FAILED: $MISMATCHES mismatches"
+            exit 1
+          else
+            echo '{"gate_name":"golden_checksum","status":"pass","duration_ms":'$DURATION',"artifact_path":"'$CHECKSUM_FILE'","failure_reason":""}' >> "$GITHUB_STEP_SUMMARY"
+            echo "summary=PASS: $TOTAL_CHECKSUMS golden checksums verified" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Also run golden output integration tests
+        run: cargo test --test golden_outputs --all-features -- --nocapture
+
+  # ===========================================================================
+  # Gate 4: Proof Note Gate
+  # ===========================================================================
+  proof-note-gate:
+    name: "Gate: Proof Notes"
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.check.outputs.status }}
+      summary: ${{ steps.check.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for safety-critical changes
+        id: check
+        run: |
+          START_MS=$(date +%s%3N)
+
+          SAFETY_PATTERNS=(
+            "src/obligation/"
+            "src/safety/"
+          )
+
+          # Get changed files
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD~1)
+
+          SAFETY_CHANGED=""
+          UNSAFE_CHANGED=""
+
+          # Check safety-critical directory patterns
+          for pattern in "${SAFETY_PATTERNS[@]}"; do
+            matches=$(echo "$CHANGED_FILES" | grep "^${pattern}" || true)
+            if [ -n "$matches" ]; then
+              SAFETY_CHANGED="${SAFETY_CHANGED}${matches}\n"
+            fi
+          done
+
+          # Check for files with unsafe blocks among changed .rs files
+          for f in $(echo "$CHANGED_FILES" | grep '\.rs$' || true); do
+            if [ -f "$f" ] && grep -q 'unsafe\s*{' "$f" 2>/dev/null; then
+              UNSAFE_CHANGED="${UNSAFE_CHANGED}${f} (contains unsafe blocks)\n"
+            fi
+          done
+
+          END_MS=$(date +%s%3N)
+          DURATION=$(( END_MS - START_MS ))
+
+          if [ -z "$SAFETY_CHANGED" ] && [ -z "$UNSAFE_CHANGED" ]; then
+            echo '{"gate_name":"proof_note","status":"skip","duration_ms":'$DURATION',"artifact_path":"","failure_reason":"No safety-critical changes detected"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "status=skip" >> "$GITHUB_OUTPUT"
+            echo "summary=SKIP: No safety-critical changes detected" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Safety-critical changes detected:"
+          [ -n "$SAFETY_CHANGED" ] && echo -e "Directory matches:\n$SAFETY_CHANGED"
+          [ -n "$UNSAFE_CHANGED" ] && echo -e "Unsafe block changes:\n$UNSAFE_CHANGED"
+
+          # Check for proof note
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PROOF_NOTE="artifacts/proof_notes/pr-${PR_NUMBER}.md"
+
+          if [ -f "$PROOF_NOTE" ]; then
+            # Validate that proof note is non-trivial (>100 bytes)
+            SIZE=$(wc -c < "$PROOF_NOTE")
+            if [ "$SIZE" -lt 100 ]; then
+              echo '{"gate_name":"proof_note","status":"fail","duration_ms":'$DURATION',"artifact_path":"'$PROOF_NOTE'","failure_reason":"Proof note exists but is too short (<100 bytes)"}' >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "summary<<EOF"
+                echo "FAIL: Proof note at $PROOF_NOTE is too short ($SIZE bytes)."
+                echo "Proof notes must contain a substantive correctness argument."
+                echo "EOF"
+              } >> "$GITHUB_OUTPUT"
+              echo "status=fail" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+
+            echo '{"gate_name":"proof_note","status":"pass","duration_ms":'$DURATION',"artifact_path":"'$PROOF_NOTE'","failure_reason":""}' >> "$GITHUB_STEP_SUMMARY"
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "summary=PASS: Proof note provided at $PROOF_NOTE ($SIZE bytes)" >> "$GITHUB_OUTPUT"
+          else
+            echo '{"gate_name":"proof_note","status":"fail","duration_ms":'$DURATION',"artifact_path":"","failure_reason":"Safety-critical changes without proof note"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            {
+              echo "summary<<EOF"
+              echo "FAIL: Safety-critical changes detected but no proof note provided."
+              echo ""
+              [ -n "$SAFETY_CHANGED" ] && echo -e "Safety-critical files changed:\n$SAFETY_CHANGED"
+              [ -n "$UNSAFE_CHANGED" ] && echo -e "Files with unsafe blocks changed:\n$UNSAFE_CHANGED"
+              echo ""
+              echo "To fix: Create a proof note documenting the correctness argument at:"
+              echo "  $PROOF_NOTE"
+              echo ""
+              echo "The proof note should include:"
+              echo "  - What changed and why"
+              echo "  - Invariants preserved"
+              echo "  - Safety argument for any unsafe code"
+              echo "  - Test coverage for the change"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Proof note gate FAILED: Safety-critical changes require a proof note"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Summary Comment
+  # ===========================================================================
+  summary:
+    name: "Post Gate Summary"
+    runs-on: ubuntu-latest
+    needs: [baseline-gate, flamegraph-gate, golden-checksum-gate, proof-note-gate]
+    if: always()
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post summary comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const baselineStatus = '${{ needs.baseline-gate.result }}';
+            const flamegraphStatus = '${{ needs.flamegraph-gate.result }}';
+            const goldenStatus = '${{ needs.golden-checksum-gate.result }}';
+            const proofStatus = '${{ needs.proof-note-gate.result }}';
+
+            const baselineSummary = `${{ needs.baseline-gate.outputs.summary || 'No output' }}`;
+            const flamegraphSummary = `${{ needs.flamegraph-gate.outputs.summary || 'No output' }}`;
+            const goldenSummary = `${{ needs.golden-checksum-gate.outputs.summary || 'No output' }}`;
+            const proofSummary = `${{ needs.proof-note-gate.outputs.summary || 'No output' }}`;
+
+            function statusIcon(s) {
+              if (s === 'success') return ':white_check_mark:';
+              if (s === 'failure') return ':x:';
+              if (s === 'skipped') return ':fast_forward:';
+              return ':grey_question:';
+            }
+
+            const allPassed = [baselineStatus, flamegraphStatus, goldenStatus, proofStatus]
+              .every(s => s === 'success' || s === 'skipped');
+
+            const totalGates = 4;
+            const passed = [baselineStatus, flamegraphStatus, goldenStatus, proofStatus]
+              .filter(s => s === 'success').length;
+            const failed = [baselineStatus, flamegraphStatus, goldenStatus, proofStatus]
+              .filter(s => s === 'failure').length;
+            const skipped = [baselineStatus, flamegraphStatus, goldenStatus, proofStatus]
+              .filter(s => s === 'skipped').length;
+
+            const header = allPassed
+              ? ':white_check_mark: **Methodology Gates: ALL PASSED**'
+              : ':x: **Methodology Gates: FAILED**';
+
+            const body = `${header}
+
+            | Gate | Status | Details |
+            |------|--------|---------|
+            | Baseline Benchmarks | ${statusIcon(baselineStatus)} ${baselineStatus} | ${baselineSummary} |
+            | Flamegraph | ${statusIcon(flamegraphStatus)} ${flamegraphStatus} | ${flamegraphSummary} |
+            | Golden Checksums | ${statusIcon(goldenStatus)} ${goldenStatus} | ${goldenSummary} |
+            | Proof Notes | ${statusIcon(proofStatus)} ${proofStatus} | ${proofSummary} |
+
+            **Summary**: ${totalGates} gates total — ${passed} passed, ${failed} failed, ${skipped} skipped
+
+            <details>
+            <summary>Gate documentation</summary>
+
+            - **Baseline Benchmarks**: Compares PR benchmarks against \`artifacts/baseline.json\`. Fails if any p50 regresses >5%.
+            - **Flamegraph**: Required when hot-path files change (\`src/scheduler/\`, \`src/channel/\`, \`src/obligation/\`). Provide \`artifacts/flamegraphs/pr-<N>.svg\`.
+            - **Golden Checksums**: Verifies behavioral equivalence via \`artifacts/golden_checksums.json\`. Update with \`GOLDEN_UPDATE=1 cargo bench --bench golden_output\`.
+            - **Proof Notes**: Required when safety-critical files change (\`src/obligation/\`, \`src/safety/\`, files with \`unsafe\`). Provide \`artifacts/proof_notes/pr-<N>.md\`.
+
+            </details>
+
+            ---
+            *Methodology gates (bd-1e2if.5) — [docs](artifacts/)*`;
+
+            // Find existing comment to update
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = 'Methodology Gates:';
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
+
+            // Log structured summary
+            const log = {
+              total_gates: totalGates,
+              passed: passed,
+              failed: failed,
+              skipped: skipped,
+              gates: {
+                baseline: baselineStatus,
+                flamegraph: flamegraphStatus,
+                golden_checksum: goldenStatus,
+                proof_note: proofStatus,
+              },
+            };
+            console.log(JSON.stringify(log));
