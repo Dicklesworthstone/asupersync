@@ -767,7 +767,11 @@ impl TimerWheel {
                 .min(u128::from(u64::MAX)) as u64;
             if window_ns > 0 {
                 let now_ns = now.as_nanos();
-                let window_end_ns = ((now_ns / window_ns) + 1) * window_ns;
+                // Compute the next coalescing window boundary with saturation.
+                // At very large logical times, `((now/window)+1)*window` can overflow.
+                let window_end_ns = (now_ns / window_ns)
+                    .saturating_add(1)
+                    .saturating_mul(window_ns);
                 Some(Time::from_nanos(window_end_ns))
             } else {
                 None
@@ -841,7 +845,9 @@ impl TimerWheel {
         }
 
         let now_ns = now.as_nanos();
-        let window_end_ns = ((now_ns / window_ns) + 1) * window_ns;
+        let window_end_ns = (now_ns / window_ns)
+            .saturating_add(1)
+            .saturating_mul(window_ns);
         let coalesced_time = Time::from_nanos(window_end_ns);
 
         let coalesced_count = self
@@ -1252,6 +1258,32 @@ mod tests {
             wakers.len()
         );
         crate::test_complete!("coalescing_min_group_size_enables_window_when_threshold_met");
+    }
+
+    #[test]
+    fn coalescing_window_boundary_saturates_at_time_max() {
+        init_test("coalescing_window_boundary_saturates_at_time_max");
+        let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::MAX);
+        let mut wheel = TimerWheel::with_config(Time::ZERO, config, coalescing);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        wheel.register(Time::MAX, counter_waker(counter.clone()));
+
+        let wakers = wheel.collect_expired(Time::MAX);
+        crate::assert_with_log!(
+            wakers.len() == 1,
+            "timer at Time::MAX fires without coalescing overflow",
+            1,
+            wakers.len()
+        );
+
+        for waker in wakers {
+            waker.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "counter", 1, count);
+        crate::test_complete!("coalescing_window_boundary_saturates_at_time_max");
     }
 
     // =========================================================================
