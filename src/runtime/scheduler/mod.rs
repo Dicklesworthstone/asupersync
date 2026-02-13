@@ -8,6 +8,7 @@
 //! Multi-worker scheduling preserves this strict lane ordering while
 //! supporting work-stealing for load balancing across workers.
 
+pub mod decision_contract;
 pub mod global_injector;
 pub mod global_queue;
 pub mod intrusive;

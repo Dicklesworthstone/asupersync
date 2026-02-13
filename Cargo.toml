@@ -105,7 +105,8 @@ opentelemetry_sdk = { version = "0.28", default-features = false, features = ["m
 tower = { version = "0.5.3", optional = true }
 # Optional proc macros for structured concurrency
 asupersync-macros = { version = "0.1.1", path = "asupersync-macros", optional = true }
-# FrankenSuite evidence ledger and kernel types (bd-1e2if.3)
+# FrankenSuite evidence ledger, kernel types, and decision contracts (bd-1e2if.3, bd-1e2if.6)
+franken-decision = { version = "0.1.0", path = "franken_decision" }
 franken-evidence = { version = "0.1.0", path = "franken_evidence" }
 franken-kernel = { version = "0.1.0", path = "franken_kernel" }
 # Optional conformance tooling (CLI + reports)
