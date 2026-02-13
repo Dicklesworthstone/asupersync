@@ -21,9 +21,17 @@ use syn::{
 struct ProtocolDef {
     name: Ident,
     type_params: Vec<Ident>,
-    obligation: Ident,
+    obligation: ObligationSpec,
     messages: Vec<MessageDef>,
     body: SessionBody,
+}
+
+/// How the obligation kind is specified.
+enum ObligationSpec {
+    /// Fixed variant: `for SendPermit` → `ObligationKind::SendPermit`.
+    Fixed(Ident),
+    /// Parameterized: `(kind: ObligationKind)` → constructor takes `kind` param.
+    Param(Ident, Box<Type>),
 }
 
 struct MessageDef {
@@ -63,13 +71,24 @@ impl Parse for ProtocolDef {
             Vec::new()
         };
 
-        let _: Token![for] = input.parse().map_err(|_| {
-            syn::Error::new(
+        // Parse obligation spec: either `for Variant` or `(param: Type)`
+        let obligation = if input.peek(Token![for]) {
+            let _: Token![for] = input.parse()?;
+            let variant: Ident = input.parse()?;
+            ObligationSpec::Fixed(variant)
+        } else if input.peek(syn::token::Paren) {
+            let paren_content;
+            syn::parenthesized!(paren_content in input);
+            let param_name: Ident = paren_content.parse()?;
+            let _: Token![:] = paren_content.parse()?;
+            let param_type: Type = paren_content.parse()?;
+            ObligationSpec::Param(param_name, Box::new(param_type))
+        } else {
+            return Err(syn::Error::new(
                 input.span(),
-                "expected `for ObligationKind` after protocol name",
-            )
-        })?;
-        let obligation: Ident = input.parse()?;
+                "expected `for ObligationKind` or `(param: Type)` after protocol name",
+            ));
+        };
 
         let content;
         braced!(content in input);
@@ -375,13 +394,18 @@ fn gen_resp_loop(body: &SessionBody) -> TokenStream2 {
 
 fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
     let mod_name = &def.name;
-    let obligation = &def.obligation;
     let tp = &def.type_params;
 
     let tp_clause = if tp.is_empty() {
         quote! {}
     } else {
         quote! { <#(#tp),*> }
+    };
+
+    // Obligation kind expression used in Chan::new_raw calls.
+    let (ob_expr, ob_extra_param) = match &def.obligation {
+        ObligationSpec::Fixed(variant) => (quote! { ObligationKind::#variant }, quote! {}),
+        ObligationSpec::Param(name, ty) => (quote! { #name }, quote! { #name: #ty, }),
     };
 
     let msg_structs: Vec<TokenStream2> = def
@@ -433,13 +457,14 @@ fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
                 /// Create a fresh loop iteration (μ-unfolding).
                 pub fn renew_loop #tp_clause (
                     channel_id: u64,
+                    #ob_extra_param
                 ) -> (
                     Chan<Initiator, InitiatorLoop #tp_clause>,
                     Chan<Responder, ResponderLoop #tp_clause>,
                 ) {
                     (
-                        Chan::new_raw(channel_id, ObligationKind::#obligation),
-                        Chan::new_raw(channel_id, ObligationKind::#obligation),
+                        Chan::new_raw(channel_id, #ob_expr),
+                        Chan::new_raw(channel_id, #ob_expr),
                     )
                 }
             }
@@ -466,13 +491,14 @@ fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
             /// Create a paired initiator/responder session.
             pub fn new_session #tp_clause (
                 channel_id: u64,
+                #ob_extra_param
             ) -> (
                 Chan<Initiator, InitiatorSession #tp_clause>,
                 Chan<Responder, ResponderSession #tp_clause>,
             ) {
                 (
-                    Chan::new_raw(channel_id, ObligationKind::#obligation),
-                    Chan::new_raw(channel_id, ObligationKind::#obligation),
+                    Chan::new_raw(channel_id, #ob_expr),
+                    Chan::new_raw(channel_id, #ob_expr),
                 )
             }
         }
@@ -516,7 +542,7 @@ mod tests {
         });
         assert_eq!(def.name, "test_proto");
         assert!(def.type_params.is_empty());
-        assert_eq!(def.obligation, "SendPermit");
+        assert!(matches!(&def.obligation, ObligationSpec::Fixed(v) if v == "SendPermit"));
         assert_eq!(def.messages.len(), 1);
         assert_eq!(def.messages[0].name, "Foo");
         assert!(def.messages[0].fields.is_empty());
@@ -598,6 +624,16 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn parse_parameterized_obligation() {
+        let def = parse_ok(quote! {
+            proto(kind: ObligationKind) {
+                send Foo => end
+            }
+        });
+        assert!(matches!(&def.obligation, ObligationSpec::Param(n, _) if n == "kind"));
     }
 
     #[test]
@@ -805,6 +841,26 @@ mod tests {
         assert!(
             code.contains("ObligationKind :: Lease"),
             "wrong obligation: {code}"
+        );
+    }
+
+    #[test]
+    fn gen_parameterized_obligation_in_constructor() {
+        let def = parse_ok(quote! {
+            proto(kind: ObligationKind) {
+                send Foo => end
+            }
+        });
+        let code = generate_protocol(&def).to_string();
+        // Constructor should take `kind` parameter
+        assert!(
+            code.contains("kind : ObligationKind"),
+            "missing param: {code}"
+        );
+        // Should use `kind` directly, not `ObligationKind::kind`
+        assert!(
+            !code.contains("ObligationKind :: kind"),
+            "should use param directly: {code}"
         );
     }
 }
