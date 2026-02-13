@@ -17,6 +17,7 @@ pub mod cancel;
 pub mod id;
 pub mod outcome;
 pub mod policy;
+pub mod pressure;
 pub mod resource;
 pub mod rref;
 pub mod symbol;
@@ -33,6 +34,7 @@ pub use cancel::{
 pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;
+pub use pressure::SystemPressure;
 pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
 pub use symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind, DEFAULT_SYMBOL_SIZE};
 pub use symbol_set::{
