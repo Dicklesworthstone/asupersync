@@ -52,6 +52,7 @@
 //! - All capabilities flow through the wrapped Cx
 
 use super::cap;
+use super::macaroon::{MacaroonToken, VerificationContext, VerificationError};
 use super::registry::RegistryHandle;
 use crate::combinator::select::SelectAll;
 use crate::evidence_sink::EvidenceSink;
@@ -171,6 +172,7 @@ pub struct Cx<Caps = cap::All> {
     /// observe the same pressure state.
     pressure: Option<Arc<SystemPressure>>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
+    macaroon: Option<Arc<MacaroonToken>>,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
 }
@@ -191,6 +193,7 @@ impl<Caps> Clone for Cx<Caps> {
             registry: self.registry.clone(),
             pressure: self.pressure.clone(),
             evidence_sink: self.evidence_sink.clone(),
+            macaroon: self.macaroon.clone(),
             _caps: PhantomData,
         }
     }
@@ -336,6 +339,7 @@ impl<Caps> Cx<Caps> {
             registry: None,
             pressure: None,
             evidence_sink: None,
+            macaroon: None,
             _caps: PhantomData,
         }
     }
@@ -430,6 +434,7 @@ impl<Caps> Cx<Caps> {
             registry: None,
             pressure: None,
             evidence_sink: None,
+            macaroon: None,
             _caps: PhantomData,
         }
     }
@@ -488,6 +493,7 @@ impl<Caps> Cx<Caps> {
             registry: self.registry.clone(),
             pressure: self.pressure.clone(),
             evidence_sink: self.evidence_sink.clone(),
+            macaroon: self.macaroon.clone(),
             _caps: PhantomData,
         }
     }
@@ -582,6 +588,160 @@ impl<Caps> Cx<Caps> {
         if let Some(ref sink) = self.evidence_sink {
             sink.emit(entry);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Macaroon-based capability attenuation (bd-2lqyk.2)
+    // -----------------------------------------------------------------
+
+    /// Attaches a Macaroon capability token to this context.
+    ///
+    /// The token is stored in an `Arc` for cheap cloning. Child contexts
+    /// created via [`restrict`](Self::restrict) or [`retype`](Self::retype)
+    /// inherit the macaroon.
+    #[must_use]
+    pub fn with_macaroon(mut self, token: MacaroonToken) -> Self {
+        self.macaroon = Some(Arc::new(token));
+        self
+    }
+
+    /// Attaches a pre-shared Macaroon handle to this context (internal use).
+    #[must_use]
+    pub(crate) fn with_macaroon_handle(mut self, handle: Option<Arc<MacaroonToken>>) -> Self {
+        self.macaroon = handle;
+        self
+    }
+
+    /// Returns a reference to the attached Macaroon token, if any.
+    #[must_use]
+    pub fn macaroon(&self) -> Option<&MacaroonToken> {
+        self.macaroon.as_deref()
+    }
+
+    /// Returns a cloned `Arc` handle to the macaroon, if any.
+    #[must_use]
+    pub(crate) fn macaroon_handle(&self) -> Option<Arc<MacaroonToken>> {
+        self.macaroon.clone()
+    }
+
+    /// Attenuate the capability token by adding a caveat.
+    ///
+    /// Returns a new `Cx` with an attenuated macaroon. The original
+    /// context is unchanged. This does **not** require the root key —
+    /// any holder can add caveats (but nobody can remove them).
+    ///
+    /// Returns `None` if no macaroon is attached.
+    #[must_use]
+    pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
+        let token = self.macaroon.as_ref()?;
+        let attenuated = MacaroonToken::clone(token).add_caveat(predicate);
+
+        info!(
+            token_id = %attenuated.identifier(),
+            caveat_count = attenuated.caveat_count(),
+            "capability attenuated"
+        );
+
+        let mut cx = self.clone();
+        cx.macaroon = Some(Arc::new(attenuated));
+        Some(cx)
+    }
+
+    /// Verify the attached capability token against a root key and context.
+    ///
+    /// Checks the HMAC chain integrity and evaluates all caveat predicates.
+    /// Emits evidence to the attached sink on both success and failure.
+    ///
+    /// Returns `Ok(())` if the token is valid and all caveats pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns `VerificationError` if verification fails (bad signature or
+    /// failed caveat). Returns `Err(VerificationError::InvalidSignature)` if
+    /// no macaroon is attached.
+    pub fn verify_capability(
+        &self,
+        root_key: &crate::security::key::AuthKey,
+        context: &VerificationContext,
+    ) -> Result<(), VerificationError> {
+        let Some(token) = self.macaroon.as_ref() else {
+            return Err(VerificationError::InvalidSignature);
+        };
+
+        let result = token.verify(root_key, context);
+
+        // Emit evidence for the verification decision.
+        self.emit_macaroon_evidence(token, &result);
+
+        match &result {
+            Ok(()) => {
+                info!(
+                    token_id = %token.identifier(),
+                    caveats_checked = token.caveat_count(),
+                    "macaroon verified successfully"
+                );
+            }
+            Err(VerificationError::InvalidSignature) => {
+                error!(
+                    token_id = %token.identifier(),
+                    "HMAC chain integrity violation — possible tampering"
+                );
+            }
+            #[allow(unused_variables)]
+            Err(VerificationError::CaveatFailed {
+                index,
+                predicate,
+                reason,
+            }) => {
+                info!(
+                    token_id = %token.identifier(),
+                    failed_at_caveat = index,
+                    predicate = %predicate,
+                    reason = %reason,
+                    "macaroon verification failed"
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Emit evidence for a macaroon verification decision.
+    fn emit_macaroon_evidence(
+        &self,
+        token: &MacaroonToken,
+        result: &Result<(), VerificationError>,
+    ) {
+        let Some(ref sink) = self.evidence_sink else {
+            return;
+        };
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let (action, loss) = match result {
+            Ok(()) => ("verify_success".to_string(), 0.0),
+            Err(VerificationError::InvalidSignature) => ("verify_fail_signature".to_string(), 1.0),
+            Err(VerificationError::CaveatFailed { index, .. }) => {
+                (format!("verify_fail_caveat_{index}"), 0.5)
+            }
+        };
+
+        let entry = franken_evidence::EvidenceLedger {
+            ts_unix_ms: now_ms,
+            component: "cx_macaroon".to_string(),
+            action: action.clone(),
+            posterior: vec![1.0],
+            expected_loss_by_action: std::collections::HashMap::from([(action, loss)]),
+            chosen_expected_loss: loss,
+            calibration_score: 1.0,
+            fallback_active: false,
+            #[allow(clippy::cast_precision_loss)]
+            top_features: vec![("caveat_count".to_string(), token.caveat_count() as f64)],
+        };
+        sink.emit(&entry);
     }
 
     /// Returns the current logical time without ticking.
@@ -2144,6 +2304,7 @@ impl<Caps> Drop for SpanGuard<Caps> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::macaroon::CaveatPredicate;
     use crate::trace::TraceBufferHandle;
     use crate::util::{ArenaIndex, DetEntropy};
 
@@ -2660,5 +2821,203 @@ mod tests {
         assert!(cx.checkpoint_with(format!("item {}", 42)).is_ok());
 
         assert_eq!(cx.checkpoint_state().checkpoint_count, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Macaroon integration tests (bd-2lqyk.2)
+    // -----------------------------------------------------------------
+
+    fn test_root_key() -> crate::security::key::AuthKey {
+        crate::security::key::AuthKey::from_seed(42)
+    }
+
+    #[test]
+    fn cx_no_macaroon_by_default() {
+        let cx = test_cx();
+        assert!(cx.macaroon().is_none());
+    }
+
+    #[test]
+    fn cx_with_macaroon_attaches_token() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+
+        let m = cx.macaroon().expect("should have macaroon");
+        assert_eq!(m.identifier(), "spawn:r1");
+        assert_eq!(m.location(), "cx/scheduler");
+    }
+
+    #[test]
+    fn cx_macaroon_survives_clone() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "io:net", "cx/io");
+        let cx = test_cx().with_macaroon(token);
+        let cx2 = cx.clone();
+
+        assert_eq!(
+            cx.macaroon().unwrap().identifier(),
+            cx2.macaroon().unwrap().identifier()
+        );
+    }
+
+    #[test]
+    fn cx_macaroon_survives_restrict() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "all:cap", "cx/root");
+        let cx: Cx<cap::All> = test_cx().with_macaroon(token);
+        let narrow: Cx<cap::None> = cx.restrict();
+
+        assert_eq!(
+            cx.macaroon().unwrap().identifier(),
+            narrow.macaroon().unwrap().identifier()
+        );
+    }
+
+    #[test]
+    fn cx_attenuate_adds_caveat() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+
+        let cx2 = cx
+            .attenuate(CaveatPredicate::TimeBefore(5000))
+            .expect("attenuate should succeed");
+
+        // Original unchanged
+        assert_eq!(cx.macaroon().unwrap().caveat_count(), 0);
+        // Attenuated has one caveat
+        assert_eq!(cx2.macaroon().unwrap().caveat_count(), 1);
+        // Both share the same identifier
+        assert_eq!(
+            cx.macaroon().unwrap().identifier(),
+            cx2.macaroon().unwrap().identifier()
+        );
+    }
+
+    #[test]
+    fn cx_attenuate_returns_none_without_macaroon() {
+        let cx = test_cx();
+        assert!(cx.attenuate(CaveatPredicate::MaxUses(10)).is_none());
+    }
+
+    #[test]
+    fn cx_verify_capability_succeeds() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+
+        let ctx = VerificationContext::new().with_time(1000);
+        assert!(cx.verify_capability(&key, &ctx).is_ok());
+    }
+
+    #[test]
+    fn cx_verify_capability_fails_wrong_key() {
+        let key = test_root_key();
+        let wrong_key = crate::security::key::AuthKey::from_seed(99);
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+
+        let ctx = VerificationContext::new();
+        let err = cx.verify_capability(&wrong_key, &ctx).unwrap_err();
+        assert!(matches!(err, VerificationError::InvalidSignature));
+    }
+
+    #[test]
+    fn cx_verify_capability_fails_no_macaroon() {
+        let key = test_root_key();
+        let cx = test_cx();
+
+        let ctx = VerificationContext::new();
+        let err = cx.verify_capability(&key, &ctx).unwrap_err();
+        assert!(matches!(err, VerificationError::InvalidSignature));
+    }
+
+    #[test]
+    fn cx_verify_with_caveats() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler")
+            .add_caveat(CaveatPredicate::TimeBefore(5000))
+            .add_caveat(CaveatPredicate::RegionScope(42));
+
+        let cx = test_cx().with_macaroon(token);
+
+        // Passes with correct context
+        let ctx = VerificationContext::new().with_time(1000).with_region(42);
+        assert!(cx.verify_capability(&key, &ctx).is_ok());
+
+        // Fails with expired time
+        let ctx_expired = VerificationContext::new().with_time(6000).with_region(42);
+        let err = cx.verify_capability(&key, &ctx_expired).unwrap_err();
+        assert!(matches!(
+            err,
+            VerificationError::CaveatFailed { index: 0, .. }
+        ));
+
+        // Fails with wrong region
+        let ctx_wrong_region = VerificationContext::new().with_time(1000).with_region(99);
+        let err = cx.verify_capability(&key, &ctx_wrong_region).unwrap_err();
+        assert!(matches!(
+            err,
+            VerificationError::CaveatFailed { index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn cx_attenuate_then_verify() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "time:sleep", "cx/time");
+        let cx = test_cx().with_macaroon(token);
+
+        // Attenuate with time limit
+        let cx2 = cx.attenuate(CaveatPredicate::TimeBefore(3000)).unwrap();
+
+        // Further attenuate with max uses
+        let cx3 = cx2.attenuate(CaveatPredicate::MaxUses(5)).unwrap();
+
+        // Original has no restrictions
+        let ctx = VerificationContext::new().with_time(1000);
+        assert!(cx.verify_capability(&key, &ctx).is_ok());
+
+        // cx2 has time restriction
+        assert!(cx2.verify_capability(&key, &ctx).is_ok());
+        let ctx_late = VerificationContext::new().with_time(4000);
+        assert!(cx2.verify_capability(&key, &ctx_late).is_err());
+
+        // cx3 has both time + uses restriction
+        let ctx_ok = VerificationContext::new().with_time(1000).with_use_count(3);
+        assert!(cx3.verify_capability(&key, &ctx_ok).is_ok());
+        let ctx_overuse = VerificationContext::new()
+            .with_time(1000)
+            .with_use_count(10);
+        assert!(cx3.verify_capability(&key, &ctx_overuse).is_err());
+    }
+
+    #[test]
+    fn cx_verify_emits_evidence() {
+        use crate::evidence_sink::CollectorSink;
+
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let sink = Arc::new(CollectorSink::new());
+        let cx = test_cx()
+            .with_macaroon(token)
+            .with_evidence_sink(Some(sink.clone() as Arc<dyn EvidenceSink>));
+
+        let ctx = VerificationContext::new();
+
+        // Successful verification should emit evidence
+        cx.verify_capability(&key, &ctx).unwrap();
+        let entries = sink.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].component, "cx_macaroon");
+        assert_eq!(entries[0].action, "verify_success");
+
+        // Failed verification should also emit evidence
+        let wrong_key = crate::security::key::AuthKey::from_seed(99);
+        let _ = cx.verify_capability(&wrong_key, &ctx);
+        let entries = sink.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].action, "verify_fail_signature");
     }
 }
