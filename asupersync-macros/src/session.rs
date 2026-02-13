@@ -447,7 +447,7 @@ fn generate_protocol(def: &ProtocolDef) -> TokenStream2 {
     );
 
     quote! {
-        #[allow(unused_imports)]
+        #[allow(unused_imports, missing_docs)]
         #[allow(clippy::type_complexity)]
         pub mod #mod_name {
             use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};

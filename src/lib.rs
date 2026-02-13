@@ -180,5 +180,5 @@ pub mod proc_macros {
     //!
     //! These are provided for explicit access when the macro_rules! versions
     //! are also in scope.
-    pub use asupersync_macros::{join, join_all, race, scope, spawn};
+    pub use asupersync_macros::{join, join_all, race, scope, session_protocol, spawn};
 }

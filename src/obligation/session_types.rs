@@ -335,40 +335,28 @@ impl<R, S> Drop for Chan<R, S> {
 // Protocol: SendPermit → Ack
 // ============================================================================
 
-/// Session types for the SendPermit → Ack protocol.
-///
-/// Global type:
-/// ```text
-///   Sender → Receiver: Reserve
-///   Sender → Receiver: { Send(T).end, Abort.end }
-/// ```
-pub mod send_permit {
-    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
-    use crate::record::ObligationKind;
+// Session types for the SendPermit → Ack protocol, generated via
+// `session_protocol!` macro (bd-3u5d3.3).
+//
+// Global type:
+//   Sender → Receiver: Reserve
+//   Sender → Receiver: { Send(T).end, Abort.end }
+asupersync_macros::session_protocol! {
+    send_permit<T> for SendPermit {
+        msg ReserveMsg;
+        msg AbortMsg;
 
-    /// Reserve request marker.
-    pub struct ReserveMsg;
-    /// Abort notification marker.
-    pub struct AbortMsg;
-
-    /// Initiator's session type: send Reserve, then choose Send(T) or Abort.
-    pub type SenderSession<T> = Send<ReserveMsg, Select<Send<T, End>, Send<AbortMsg, End>>>;
-
-    /// Responder's session type: recv Reserve, then offer Send(T) or Abort.
-    pub type ReceiverSession<T> = Recv<ReserveMsg, Offer<Recv<T, End>, Recv<AbortMsg, End>>>;
-
-    /// Create a paired sender/receiver session for SendPermit.
-    pub fn new_session<T>(
-        channel_id: u64,
-    ) -> (
-        Chan<Initiator, SenderSession<T>>,
-        Chan<Responder, ReceiverSession<T>>,
-    ) {
-        (
-            Chan::new_raw(channel_id, ObligationKind::SendPermit),
-            Chan::new_raw(channel_id, ObligationKind::SendPermit),
-        )
+        send ReserveMsg => select {
+            send T => end,
+            send AbortMsg => end,
+        }
     }
+}
+
+/// Backward-compatible aliases mapping legacy names to macro-generated types.
+pub mod send_permit_compat {
+    pub use super::send_permit::InitiatorSession as SenderSession;
+    pub use super::send_permit::ResponderSession as ReceiverSession;
 }
 
 // ============================================================================
