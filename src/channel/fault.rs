@@ -395,7 +395,6 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
-    use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
@@ -443,19 +442,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "reorder probability must be in [0.0, 1.0]")]
     fn config_rejects_invalid_reorder_probability() {
-        FaultChannelConfig::new(42).with_reorder(1.5, 4);
+        let _ = FaultChannelConfig::new(42).with_reorder(1.5, 4);
     }
 
     #[test]
     #[should_panic(expected = "reorder buffer size must be > 0")]
     fn config_rejects_zero_buffer_size() {
-        FaultChannelConfig::new(42).with_reorder(0.5, 0);
+        let _ = FaultChannelConfig::new(42).with_reorder(0.5, 0);
     }
 
     #[test]
     #[should_panic(expected = "duplication probability must be in [0.0, 1.0]")]
     fn config_rejects_invalid_duplication_probability() {
-        FaultChannelConfig::new(42).with_duplication(-0.1);
+        let _ = FaultChannelConfig::new(42).with_duplication(-0.1);
     }
 
     #[test]
@@ -509,8 +508,7 @@ mod tests {
 
     #[test]
     fn reorder_buffers_and_flushes() {
-        let collector = Arc::new(CollectorSink::new());
-        let sink: Arc<dyn EvidenceSink> = collector.clone();
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         // 100% reorder probability, buffer size 3.
         let config = FaultChannelConfig::new(42).with_reorder(1.0, 3);
         let (fault_tx, rx) = fault_channel::<u32>(32, config, sink);
@@ -528,7 +526,7 @@ mod tests {
         }
         assert_eq!(received.len(), 3);
         // All values present (eventual delivery).
-        received.sort();
+        received.sort_unstable();
         assert_eq!(received, vec![0, 1, 2]);
 
         let stats = fault_tx.stats();
@@ -561,7 +559,7 @@ mod tests {
             received.push(val);
         }
         assert_eq!(received.len(), 5);
-        received.sort();
+        received.sort_unstable();
         assert_eq!(received, vec![0, 1, 2, 3, 4]);
     }
 
@@ -628,7 +626,7 @@ mod tests {
             received.push(v);
         }
         // Every message must arrive exactly once.
-        received.sort();
+        received.sort_unstable();
         let expected: Vec<u32> = (0..count).collect();
         assert_eq!(received, expected);
     }
@@ -657,7 +655,6 @@ mod tests {
         // With duplication, we may have more messages than sent.
         // With reorder, order may differ. But all originals must be present.
         let stats = fault_tx.stats();
-        let expected_min = count as u64 - stats.messages_reordered + stats.messages_sent;
         assert!(received.len() as u64 >= stats.messages_sent);
 
         // All original values should appear at least once.

@@ -42,6 +42,7 @@ pub mod broadcast;
 pub mod fault;
 pub mod mpsc;
 pub mod oneshot;
+pub mod partition;
 pub mod session;
 pub mod watch;
 

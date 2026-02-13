@@ -335,12 +335,10 @@ impl<R, S> Drop for Chan<R, S> {
 // Protocol: SendPermit → Ack
 // ============================================================================
 
-// Session types for the SendPermit → Ack protocol, generated via
-// `session_protocol!` macro (bd-3u5d3.3).
-//
-// Global type:
-//   Sender → Receiver: Reserve
-//   Sender → Receiver: { Send(T).end, Abort.end }
+// When `proc-macros` is enabled, protocols are generated via `session_protocol!`.
+// Otherwise, hand-written typestate definitions are used as fallback.
+
+#[cfg(feature = "proc-macros")]
 asupersync_macros::session_protocol! {
     send_permit<T> for SendPermit {
         msg ReserveMsg;
@@ -353,25 +351,60 @@ asupersync_macros::session_protocol! {
     }
 }
 
+#[cfg(feature = "proc-macros")]
 /// Backward-compatible aliases mapping legacy names to macro-generated types.
 pub mod send_permit_compat {
     pub use super::send_permit::InitiatorSession as SenderSession;
     pub use super::send_permit::ResponderSession as ReceiverSession;
 }
 
+#[cfg(not(feature = "proc-macros"))]
+/// Session types for the SendPermit → Ack protocol.
+pub mod send_permit {
+    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
+    use crate::record::ObligationKind;
+
+    /// Reserve request marker.
+    pub struct ReserveMsg;
+    /// Abort notification marker.
+    pub struct AbortMsg;
+
+    /// Initiator's session type: send Reserve, then choose Send(T) or Abort.
+    pub type SenderSession<T> = Send<ReserveMsg, Select<Send<T, End>, Send<AbortMsg, End>>>;
+    /// Alias for macro compatibility.
+    pub type InitiatorSession<T> = SenderSession<T>;
+
+    /// Responder's session type: recv Reserve, then offer Send(T) or Abort.
+    pub type ReceiverSession<T> = Recv<ReserveMsg, Offer<Recv<T, End>, Recv<AbortMsg, End>>>;
+    /// Alias for macro compatibility.
+    pub type ResponderSession<T> = ReceiverSession<T>;
+
+    /// Create a paired sender/receiver session for SendPermit.
+    pub fn new_session<T>(
+        channel_id: u64,
+    ) -> (
+        Chan<Initiator, SenderSession<T>>,
+        Chan<Responder, ReceiverSession<T>>,
+    ) {
+        (
+            Chan::new_raw(channel_id, ObligationKind::SendPermit),
+            Chan::new_raw(channel_id, ObligationKind::SendPermit),
+        )
+    }
+}
+
+#[cfg(not(feature = "proc-macros"))]
+/// Backward-compatible aliases for the send_permit protocol.
+pub mod send_permit_compat {
+    pub use super::send_permit::ReceiverSession;
+    pub use super::send_permit::SenderSession;
+}
+
 // ============================================================================
 // Protocol: Lease → Release
 // ============================================================================
 
-// Session types for the Lease → Release protocol, generated via
-// `session_protocol!` macro (bd-3u5d3.4).
-//
-// Global type:
-//   Holder → Resource: Acquire
-//   μX. Holder → Resource: { Renew.X, Release.end }
-//
-// The `loop`/`continue` DSL generates InitiatorLoop/ResponderLoop
-// type aliases and a `renew_loop` constructor for μ-unfolding.
+#[cfg(feature = "proc-macros")]
 asupersync_macros::session_protocol! {
     lease for Lease {
         msg AcquireMsg;
@@ -387,6 +420,7 @@ asupersync_macros::session_protocol! {
     }
 }
 
+#[cfg(feature = "proc-macros")]
 /// Backward-compatible aliases for the lease protocol.
 pub mod lease_compat {
     pub use super::lease::InitiatorLoop as HolderLoop;
@@ -395,18 +429,77 @@ pub mod lease_compat {
     pub use super::lease::ResponderSession as ResourceSession;
 }
 
+#[cfg(not(feature = "proc-macros"))]
+/// Session types for the Lease → Release protocol.
+pub mod lease {
+    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
+    use crate::record::ObligationKind;
+
+    /// Acquire request marker.
+    pub struct AcquireMsg;
+    /// Renew request marker.
+    pub struct RenewMsg;
+    /// Release notification marker.
+    pub struct ReleaseMsg;
+
+    /// One iteration of the lease loop.
+    pub type HolderLoop = Select<Send<RenewMsg, End>, Send<ReleaseMsg, End>>;
+    /// Alias for macro compatibility.
+    pub type InitiatorLoop = HolderLoop;
+
+    /// Holder's session type: send Acquire, then enter loop.
+    pub type HolderSession = Send<AcquireMsg, HolderLoop>;
+    /// Alias for macro compatibility.
+    pub type InitiatorSession = HolderSession;
+
+    /// Resource's session type for one loop iteration.
+    pub type ResourceLoop = Offer<Recv<RenewMsg, End>, Recv<ReleaseMsg, End>>;
+    /// Alias for macro compatibility.
+    pub type ResponderLoop = ResourceLoop;
+
+    /// Resource's session type: recv Acquire, then enter loop.
+    pub type ResourceSession = Recv<AcquireMsg, ResourceLoop>;
+    /// Alias for macro compatibility.
+    pub type ResponderSession = ResourceSession;
+
+    /// Create a paired holder/resource session for Lease.
+    pub fn new_session(
+        channel_id: u64,
+    ) -> (
+        Chan<Initiator, HolderSession>,
+        Chan<Responder, ResourceSession>,
+    ) {
+        (
+            Chan::new_raw(channel_id, ObligationKind::Lease),
+            Chan::new_raw(channel_id, ObligationKind::Lease),
+        )
+    }
+
+    /// After a `Renew`, create a fresh loop iteration.
+    pub fn renew_loop(
+        channel_id: u64,
+    ) -> (Chan<Initiator, HolderLoop>, Chan<Responder, ResourceLoop>) {
+        (
+            Chan::new_raw(channel_id, ObligationKind::Lease),
+            Chan::new_raw(channel_id, ObligationKind::Lease),
+        )
+    }
+}
+
+#[cfg(not(feature = "proc-macros"))]
+/// Backward-compatible aliases for the lease protocol.
+pub mod lease_compat {
+    pub use super::lease::HolderLoop;
+    pub use super::lease::HolderSession;
+    pub use super::lease::ResourceLoop;
+    pub use super::lease::ResourceSession;
+}
+
 // ============================================================================
 // Protocol: Reserve → Commit (Two-Phase Effect)
 // ============================================================================
 
-// Session types for the Reserve → Commit two-phase effect, generated via
-// `session_protocol!` macro (bd-3u5d3.5).
-//
-// Global type:
-//   Initiator → Executor: Reserve(K)
-//   Initiator → Executor: { Commit.end, Abort(reason).end }
-//
-// Uses parameterized obligation: constructor takes `kind: ObligationKind`.
+#[cfg(feature = "proc-macros")]
 asupersync_macros::session_protocol! {
     two_phase(kind: ObligationKind) {
         msg ReserveMsg { kind: ObligationKind };
@@ -420,9 +513,62 @@ asupersync_macros::session_protocol! {
     }
 }
 
+#[cfg(feature = "proc-macros")]
 /// Backward-compatible alias for the two-phase protocol.
 pub mod two_phase_compat {
     pub use super::two_phase::ResponderSession as ExecutorSession;
+}
+
+#[cfg(not(feature = "proc-macros"))]
+/// Session types for the Reserve → Commit two-phase effect.
+pub mod two_phase {
+    use super::{Chan, End, Initiator, Offer, Recv, Responder, Select, Send};
+    use crate::record::ObligationKind;
+
+    /// Reserve request carrying the obligation kind.
+    #[derive(Debug, Clone)]
+    pub struct ReserveMsg {
+        /// Which obligation kind is being reserved.
+        pub kind: ObligationKind,
+    }
+
+    /// Commit notification.
+    pub struct CommitMsg;
+
+    /// Abort notification with reason.
+    #[derive(Debug, Clone)]
+    pub struct AbortMsg {
+        /// Why the obligation was aborted.
+        pub reason: String,
+    }
+
+    /// Initiator's session type: send Reserve, then choose Commit or Abort.
+    pub type InitiatorSession = Send<ReserveMsg, Select<Send<CommitMsg, End>, Send<AbortMsg, End>>>;
+
+    /// Executor's session type: recv Reserve, then offer Commit or Abort.
+    pub type ExecutorSession = Recv<ReserveMsg, Offer<Recv<CommitMsg, End>, Recv<AbortMsg, End>>>;
+    /// Alias for macro compatibility.
+    pub type ResponderSession = ExecutorSession;
+
+    /// Create a paired initiator/executor session for two-phase commit.
+    pub fn new_session(
+        channel_id: u64,
+        kind: ObligationKind,
+    ) -> (
+        Chan<Initiator, InitiatorSession>,
+        Chan<Responder, ExecutorSession>,
+    ) {
+        (
+            Chan::new_raw(channel_id, kind),
+            Chan::new_raw(channel_id, kind),
+        )
+    }
+}
+
+#[cfg(not(feature = "proc-macros"))]
+/// Backward-compatible alias for the two-phase protocol.
+pub mod two_phase_compat {
+    pub use super::two_phase::ExecutorSession;
 }
 
 // ============================================================================
