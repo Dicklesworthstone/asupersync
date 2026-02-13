@@ -1,0 +1,13 @@
+{
+  "_comment": "Known pre-migration type forks. These existed before franken_kernel was created and will be resolved by future migration beads. New forks MUST NOT be added.",
+  "baseline_count": 7,
+  "known_forks": [
+    {"file": "src/types/budget.rs", "type": "Budget"},
+    {"file": "src/types/task_context.rs", "type": "Cx"},
+    {"file": "src/cx/cx.rs", "type": "Cx"},
+    {"file": "src/trace/distributed/id.rs", "type": "TraceId"},
+    {"file": "conformance/src/tests/budget.rs", "type": "Budget"},
+    {"file": "asupersync_v4_api_skeleton.rs", "type": "Budget"},
+    {"file": "asupersync_v4_api_skeleton.rs", "type": "Cx"}
+  ]
+}

@@ -28,6 +28,13 @@
 //! assert_eq!(child.depth(), 1);
 //! ```
 
+// CANONICAL TYPE ENFORCEMENT (bd-1usdh.3):
+// The types defined in this crate (TraceId, DecisionId, PolicyId,
+// SchemaVersion, Budget, Cx, NoCaps) are the SOLE canonical definitions
+// for the entire FrankenSuite. No other crate may define competing types
+// with the same names. Use `scripts/check_type_forks.sh` to verify.
+// See also: `.type_fork_baseline.json` for known pre-migration forks.
+
 #![forbid(unsafe_code)]
 #![no_std]
 
