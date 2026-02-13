@@ -8,7 +8,7 @@ use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 // When tracing integration is enabled, the `debug!/trace!/error!` macros come from `tracing`.
 // Import them explicitly so unqualified macro calls in this module compile under all feature sets.
-#[cfg(feature = "tracing-integration")]
+#[cfg(all(feature = "tracing-integration", feature = "tls"))]
 use crate::tracing_compat::{debug, error, trace};
 
 #[cfg(feature = "tls")]
