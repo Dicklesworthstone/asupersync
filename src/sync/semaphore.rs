@@ -318,7 +318,9 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             .iter_mut()
             .find(|waiter| waiter.id == waiter_id)
         {
-            existing.waker.clone_from(context.waker());
+            if !existing.waker.will_wake(context.waker()) {
+                existing.waker.clone_from(context.waker());
+            }
         } else {
             state.waiters.push_back(Waiter {
                 id: waiter_id,
@@ -529,7 +531,9 @@ impl Future for OwnedAcquireFuture {
             .iter_mut()
             .find(|waiter| waiter.id == waiter_id)
         {
-            existing.waker.clone_from(context.waker());
+            if !existing.waker.will_wake(context.waker()) {
+                existing.waker.clone_from(context.waker());
+            }
         } else {
             state.waiters.push_back(Waiter {
                 id: waiter_id,

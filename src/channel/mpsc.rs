@@ -712,7 +712,11 @@ impl<T> Future for Recv<'_, T> {
             return Poll::Ready(Err(RecvError::Disconnected));
         }
 
-        inner.recv_waker = Some(ctx.waker().clone());
+        // Skip waker clone if unchanged — common on re-poll.
+        match &inner.recv_waker {
+            Some(existing) if existing.will_wake(ctx.waker()) => {}
+            _ => inner.recv_waker = Some(ctx.waker().clone()),
+        }
         Poll::Pending
     }
 }

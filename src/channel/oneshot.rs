@@ -367,8 +367,11 @@ impl<T> Future for RecvFuture<'_, T> {
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
-        // 4. Register waker
-        inner.waker = Some(ctx.waker().clone());
+        // 4. Register waker (skip clone if unchanged — common on re-poll)
+        match &inner.waker {
+            Some(existing) if existing.will_wake(ctx.waker()) => {}
+            _ => inner.waker = Some(ctx.waker().clone()),
+        }
         Poll::Pending
     }
 }
