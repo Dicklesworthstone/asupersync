@@ -559,7 +559,7 @@ impl CircuitBreaker {
                                 } else {
                                     // Increment successes, decrement probes
                                     let new_state = State::HalfOpen {
-                                        probes_active: probes_active - 1,
+                                        probes_active: probes_active.saturating_sub(1),
                                         successes: new_successes,
                                     };
                                     if self
@@ -674,7 +674,7 @@ impl CircuitBreaker {
                             successes,
                         } => {
                             let new_state = State::HalfOpen {
-                                probes_active: probes_active - 1,
+                                probes_active: probes_active.saturating_sub(1),
                                 successes,
                             };
                             if self

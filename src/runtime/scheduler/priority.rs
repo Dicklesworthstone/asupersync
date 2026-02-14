@@ -96,8 +96,7 @@ impl ScheduledSet {
 
     #[inline]
     fn with_capacity(capacity: usize) -> Self {
-        let mut overflow = DetHashSet::with_hasher(DetBuildHasher);
-        overflow.reserve(capacity);
+        let overflow = DetHashSet::with_hasher(DetBuildHasher);
 
         let dense_len = capacity
             .max(1)

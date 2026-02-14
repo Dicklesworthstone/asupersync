@@ -18,6 +18,10 @@ fn wall_clock_now() -> Time {
     CLOCK.get_or_init(WallClock::new).now()
 }
 
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 /// A stream of incoming symbols.
 pub trait SymbolStream: Send {
     /// Receive the next symbol.
@@ -477,7 +481,7 @@ impl<S> TimeoutStream<S> {
     /// Creates a timeout stream using a custom time source.
     pub fn with_time_getter(inner: S, duration: Duration, time_getter: fn() -> Time) -> Self {
         let now = time_getter();
-        let deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
+        let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         let sleep = Sleep::with_time_getter(deadline, time_getter);
         Self {
             inner,
@@ -955,5 +959,47 @@ mod tests {
         );
 
         crate::test_complete!("test_timeout_stream_resets_on_item");
+    }
+
+    #[test]
+    fn test_timeout_stream_duration_max_saturates_deadline() {
+        static NOW: AtomicU64 = AtomicU64::new(0);
+        fn fake_now() -> Time {
+            Time::from_nanos(NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("test_timeout_stream_duration_max_saturates_deadline");
+        NOW.store(123, Ordering::SeqCst);
+
+        let inner = PendingStream;
+        let mut timed = TimeoutStream::with_time_getter(inner, Duration::MAX, fake_now);
+        crate::assert_with_log!(
+            timed.sleep.deadline() == Time::MAX,
+            "deadline saturates to max",
+            Time::MAX,
+            timed.sleep.deadline()
+        );
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let before_max = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(before_max, Poll::Pending),
+            "pending before max time",
+            true,
+            matches!(before_max, Poll::Pending)
+        );
+
+        NOW.store(u64::MAX, Ordering::SeqCst);
+        let at_max = Pin::new(&mut timed).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(at_max, Poll::Ready(Some(Err(StreamError::Timeout)))),
+            "times out at max deadline",
+            true,
+            matches!(at_max, Poll::Ready(Some(Err(StreamError::Timeout))))
+        );
+
+        crate::test_complete!("test_timeout_stream_duration_max_saturates_deadline");
     }
 }
