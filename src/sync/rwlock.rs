@@ -62,7 +62,8 @@ use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use parking_lot::Mutex as ParkingMutex;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -169,7 +170,7 @@ struct Waiter {
 /// acquisition attempts will return `RwLockError::Poisoned`.
 #[derive(Debug)]
 pub struct RwLock<T> {
-    state: StdMutex<State>,
+    state: ParkingMutex<State>,
     data: StdRwLock<T>,
     poisoned: AtomicBool,
 }
@@ -179,7 +180,7 @@ impl<T> RwLock<T> {
     #[must_use]
     pub fn new(value: T) -> Self {
         Self {
-            state: StdMutex::new(State::default()),
+            state: ParkingMutex::new(State::default()),
             data: StdRwLock::new(value),
             poisoned: AtomicBool::new(false),
         }
@@ -278,7 +279,7 @@ impl<T> RwLock<T> {
             return Err(TryReadError::Poisoned);
         }
 
-        let mut state = self.state.lock().expect("rwlock state poisoned");
+        let mut state = self.state.lock();
         if state.writer_active || state.writer_waiters > 0 {
             return Err(TryReadError::Locked);
         }
@@ -293,7 +294,7 @@ impl<T> RwLock<T> {
             return Err(TryWriteError::Poisoned);
         }
 
-        let mut state = self.state.lock().expect("rwlock state poisoned");
+        let mut state = self.state.lock();
         // Do not let try_write() bypass queued async writers. If there are
         // waiters, preserve queue order and report Locked.
         if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
@@ -329,7 +330,7 @@ impl<T> RwLock<T> {
 
     fn release_reader_on_error(&self) {
         let waker = {
-            let mut state = self.state.lock().expect("rwlock state poisoned");
+            let mut state = self.state.lock();
             state.readers = state.readers.saturating_sub(1);
             if state.readers == 0 && state.writer_waiters > 0 {
                 Self::pop_writer_waiter(&mut state)
@@ -344,7 +345,7 @@ impl<T> RwLock<T> {
 
     fn release_writer_on_error(&self) {
         let (writer_waker, reader_wakers) = {
-            let mut state = self.state.lock().expect("rwlock state poisoned");
+            let mut state = self.state.lock();
             state.writer_active = false;
             if state.writer_waiters > 0 {
                 (Self::pop_writer_waiter(&mut state), SmallVec::new())
@@ -362,7 +363,7 @@ impl<T> RwLock<T> {
 
     fn release_reader(&self) {
         let waker = {
-            let mut state = self.state.lock().expect("rwlock state poisoned");
+            let mut state = self.state.lock();
             state.readers = state.readers.saturating_sub(1);
             if state.readers == 0 && state.writer_waiters > 0 {
                 Self::pop_writer_waiter(&mut state)
@@ -377,7 +378,7 @@ impl<T> RwLock<T> {
 
     fn release_writer(&self) {
         let (writer_waker, reader_wakers) = {
-            let mut state = self.state.lock().expect("rwlock state poisoned");
+            let mut state = self.state.lock();
             state.writer_active = false;
             if state.writer_waiters > 0 {
                 (Self::pop_writer_waiter(&mut state), SmallVec::new())
@@ -395,7 +396,7 @@ impl<T> RwLock<T> {
 
     #[cfg(test)]
     fn debug_state(&self) -> State {
-        self.state.lock().expect("rwlock state poisoned").clone()
+        self.state.lock().clone()
     }
 }
 
@@ -441,7 +442,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        let mut state = self.lock.state.lock();
 
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
@@ -523,7 +524,7 @@ impl<T> Drop for ReadFuture<'_, '_, T> {
     fn drop(&mut self) {
         let mut writer_waker = None;
         if let Some(waiter) = self.waiter.as_ref() {
-            let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+            let mut state = self.lock.state.lock();
             let initial_len = state.reader_waiters.len();
             state
                 .reader_waiters
@@ -568,7 +569,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        let mut state = self.lock.state.lock();
         if !self.counted {
             state.writer_waiters += 1;
             self.counted = true;
@@ -660,7 +661,7 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
 
         let mut writer_waker = None;
         let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
-        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        let mut state = self.lock.state.lock();
 
         if let Some(waiter) = self.waiter.as_ref() {
             let initial_len = state.writer_queue.len();
@@ -865,7 +866,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        let mut state = self.lock.state.lock();
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
             if let Some(waiter) = self.waiter.as_ref() {
@@ -919,7 +920,7 @@ impl<T> Drop for OwnedReadFuture<'_, T> {
     fn drop(&mut self) {
         let mut writer_waker = None;
         if let Some(waiter) = self.waiter.as_ref() {
-            let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+            let mut state = self.lock.state.lock();
             let initial_len = state.reader_waiters.len();
             state
                 .reader_waiters
@@ -966,7 +967,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
         // Clone the Arc to avoid borrow conflict with self.counted
         let lock = Arc::clone(&self.lock);
-        let mut state = lock.state.lock().expect("rwlock state poisoned");
+        let mut state = lock.state.lock();
         if !self.counted {
             state.writer_waiters += 1;
             self.counted = true;
@@ -1038,7 +1039,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
 
         let mut writer_waker = None;
         let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
-        let mut state = self.lock.state.lock().expect("rwlock state poisoned");
+        let mut state = self.lock.state.lock();
 
         if let Some(waiter) = self.waiter.as_ref() {
             let already_dequeued = !waiter.load(Ordering::Acquire);
