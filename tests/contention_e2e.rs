@@ -1053,7 +1053,8 @@ fn contention_post_sharding_comparison() {
         let test_name = base["test"].as_str().unwrap_or("?");
 
         // Allow up to 30% variance (timing-dependent measurements).
-        let threshold = (base_contentions as f64 * 1.3).ceil() as u64 + 10;
+        #[allow(clippy::cast_sign_loss)]
+        let threshold = (f64::from(base_contentions as u32) * 1.3).ceil() as u64 + 10;
         assert!(
             mono_contentions <= threshold,
             "Regression in {test_name}: contentions {mono_contentions} exceeds baseline {base_contentions} + 30% margin ({threshold})"
