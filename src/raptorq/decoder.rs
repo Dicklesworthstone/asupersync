@@ -648,6 +648,8 @@ impl InactivationDecoder {
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Flat layout avoids per-row heap allocation and improves cache locality.
+        // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
+        // heap allocation in this hot path.
         let mut a = vec![Gf256::ZERO; n_rows * n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
@@ -658,7 +660,7 @@ impl InactivationDecoder {
                     a[row_off + dense_col] = coef;
                 }
             }
-            b.push(state.rhs[eq_idx].clone());
+            b.push(std::mem::take(&mut state.rhs[eq_idx]));
         }
 
         // Gaussian elimination with partial pivoting.
@@ -781,6 +783,8 @@ impl InactivationDecoder {
             unsolved.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
         // Build flat row-major dense matrix A and RHS vector b.
+        // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
+        // heap allocation in this hot path.
         let mut a = vec![Gf256::ZERO; n_rows * n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
@@ -791,7 +795,7 @@ impl InactivationDecoder {
                     a[row_off + dense_col] = coef;
                 }
             }
-            b.push(state.rhs[eq_idx].clone());
+            b.push(std::mem::take(&mut state.rhs[eq_idx]));
         }
 
         // Gaussian elimination with partial pivoting.
