@@ -759,32 +759,32 @@ mod tests {
 
         // Task B waits on initialization and is first polled with waker A.
         let mut waiter_fut = Box::pin(cell.get_or_init(|| async { 7u32 }));
-        let wake_a = Arc::new(CountWaker::default());
-        let wake_b = Arc::new(CountWaker::default());
-        let waker_a = Waker::from(Arc::clone(&wake_a));
-        let waker_b = Waker::from(Arc::clone(&wake_b));
+        let wake_counter_first = Arc::new(CountWaker::default());
+        let wake_counter_second = Arc::new(CountWaker::default());
+        let task_waker_first = Waker::from(Arc::clone(&wake_counter_first));
+        let task_waker_second = Waker::from(Arc::clone(&wake_counter_second));
 
-        let mut cx_a = Context::from_waker(&waker_a);
+        let mut cx_a = Context::from_waker(&task_waker_first);
         assert!(Future::poll(waiter_fut.as_mut(), &mut cx_a).is_pending());
 
         // Poll again with a different waker while still queued; this should refresh.
-        let mut cx_b = Context::from_waker(&waker_b);
+        let mut cx_b = Context::from_waker(&task_waker_second);
         assert!(Future::poll(waiter_fut.as_mut(), &mut cx_b).is_pending());
 
         // Cancel Task A: waiters are woken. The queued waiter should wake waker B, not stale A.
         drop(init_fut);
 
         crate::assert_with_log!(
-            wake_b.count() > 0,
+            wake_counter_second.count() > 0,
             "latest waker was notified",
             true,
-            wake_b.count() > 0
+            wake_counter_second.count() > 0
         );
         crate::assert_with_log!(
-            wake_a.count() == 0,
+            wake_counter_first.count() == 0,
             "stale waker not notified",
             0usize,
-            wake_a.count()
+            wake_counter_first.count()
         );
         crate::test_complete!("get_or_init_waiter_refreshes_queued_waker");
     }
