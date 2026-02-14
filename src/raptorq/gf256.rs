@@ -1208,10 +1208,12 @@ mod tests {
     #[test]
     fn simd_vs_scalar_mul_equivalence() {
         // Compare SIMD and scalar mul paths at various sizes.
-        for &len in &[16, 17, 31, 64, 71, 128, 1024] {
+        for &len in &[16usize, 17, 31, 64, 71, 128, 1024] {
             for &c_val in &[2u8, 13, 127, 255] {
                 let c = Gf256(c_val);
-                let original: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(37)) as u8).collect();
+                let original: Vec<u8> = (0..len)
+                    .map(|i: usize| (i.wrapping_mul(37)) as u8)
+                    .collect();
                 let table = mul_table_for(c);
 
                 let mut simd_dst = original.clone();
@@ -1229,11 +1231,15 @@ mod tests {
     #[test]
     fn simd_vs_scalar_addmul_equivalence() {
         // Compare SIMD and scalar addmul paths at various sizes.
-        for &len in &[16, 17, 31, 64, 71, 128, 1024] {
+        for &len in &[16usize, 17, 31, 64, 71, 128, 1024] {
             for &c_val in &[2u8, 13, 127, 255] {
                 let c = Gf256(c_val);
-                let src: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(37)) as u8).collect();
-                let dst_init: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(53)) as u8).collect();
+                let src: Vec<u8> = (0..len)
+                    .map(|i: usize| (i.wrapping_mul(37)) as u8)
+                    .collect();
+                let dst_init: Vec<u8> = (0..len)
+                    .map(|i: usize| (i.wrapping_mul(53)) as u8)
+                    .collect();
                 let table = mul_table_for(c);
 
                 let mut simd_dst = dst_init.clone();
