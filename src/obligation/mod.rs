@@ -68,6 +68,7 @@ pub mod lyapunov;
 pub mod marking;
 pub mod recovery;
 pub mod saga;
+pub mod separation_logic;
 pub mod session_types;
 
 pub use leak_check::{
