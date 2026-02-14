@@ -13,7 +13,7 @@
 //! Precode Matrix (A)  ←── LDPC + HDPC + LT constraints
 //!     │
 //!     ▼
-//! Intermediate Symbols (L = K + S + H)
+//! Intermediate Symbols (L = K' + S + H)
 //!     │
 //!     ▼
 //! LT Encode (ISI → repair symbol)
@@ -28,6 +28,7 @@
 #![allow(clippy::many_single_char_names)]
 
 use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::rfc6330::repair_indices_for_esi;
 use crate::util::DetRng;
 
 // ============================================================================
@@ -40,7 +41,7 @@ use crate::util::DetRng;
 /// - K': extended source block size selected from the systematic index table
 /// - L = K' + S + H: total intermediate symbols
 /// - W: number of LT symbols (non-PI symbols), table-driven
-/// - P = H: number of PI symbols (= HDPC symbols for our systematic encoding)
+/// - P = L - W: number of PI symbols
 /// - B = W - S: number of non-LDPC LT symbols
 #[derive(Debug, Clone)]
 pub struct SystematicParams {
@@ -58,7 +59,7 @@ pub struct SystematicParams {
     pub l: usize,
     /// W: number of LT symbols.
     pub w: usize,
-    /// P = H: number of PI symbols.
+    /// P = L - W: number of PI symbols.
     pub p: usize,
     /// B = W - S: number of non-LDPC LT symbols.
     pub b: usize,
@@ -90,7 +91,7 @@ impl SystematicParams {
     /// Derived parameters per RFC 6330 systematic index table:
     /// - K' = smallest table entry >= K
     /// - J, S, H, W selected from that K' row
-    /// - P = H (PI symbols = HDPC for systematic encoding)
+    /// - P = L - W (PI symbols)
     /// - B = W - S (non-LDPC LT symbols)
     /// - L = K' + S + H
     #[must_use]
@@ -116,13 +117,14 @@ impl SystematicParams {
         let max_supported = SYSTEMATIC_INDEX_TABLE
             .last()
             .map_or(0usize, |row| row.0 as usize);
-        let idx = SYSTEMATIC_INDEX_TABLE.partition_point(|row| row.0 < k as u32);
-        if idx == SYSTEMATIC_INDEX_TABLE.len() {
+        if k == 0 || k > max_supported {
             return Err(SystematicParamError::UnsupportedSourceBlockSize {
                 requested: k,
                 max_supported,
             });
         }
+        let idx = SYSTEMATIC_INDEX_TABLE.partition_point(|row| row.0 < k as u32);
+        debug_assert!(idx < SYSTEMATIC_INDEX_TABLE.len());
 
         let (k_prime, j, s, h, w) = SYSTEMATIC_INDEX_TABLE[idx];
         let k_prime = k_prime as usize;
@@ -131,8 +133,12 @@ impl SystematicParams {
         let h = h as usize;
         let w = w as usize;
         let l = k_prime + s + h;
-        let p = h;
-        let b = w - s;
+        let b = w
+            .checked_sub(s)
+            .expect("RFC table invariant violated: W < S");
+        let p = l
+            .checked_sub(w)
+            .expect("RFC table invariant violated: W > L");
 
         Ok(Self {
             k,
@@ -146,6 +152,17 @@ impl SystematicParams {
             b,
             symbol_size,
         })
+    }
+
+    /// Generate the RFC 6330 repair equation (columns + coefficients) for an ESI.
+    ///
+    /// This helper centralizes decoder/encoder tuple semantics so parity checks
+    /// can use one source of truth for RFC tuple expansion.
+    #[must_use]
+    pub fn rfc_repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+        let columns = repair_indices_for_esi(self.j, self.w, self.p, esi);
+        let coefficients = vec![Gf256::ONE; columns.len()];
+        (columns, coefficients)
     }
 }
 
@@ -319,7 +336,7 @@ impl ConstraintMatrix {
     /// ┌─────────────────┐
     /// │  LDPC (S rows)  │  S × L
     /// │  HDPC (H rows)  │  H × L
-    /// │  LT   (K rows)  │  K × L
+    /// │  LT  (K' rows)  │  K' × L
     /// └─────────────────┘
     /// ```
     #[must_use]
@@ -334,7 +351,7 @@ impl ConstraintMatrix {
         // HDPC constraints (rows S..S+H)
         build_hdpc_rows(&mut matrix, params, seed);
 
-        // LT constraints for systematic symbols (rows S+H..S+H+K)
+        // LT constraints for systematic symbols (rows S+H..S+H+K')
         build_lt_rows(&mut matrix, params, seed);
 
         matrix
@@ -455,11 +472,11 @@ fn gf256_mul_slice_inplace(data: &mut [u8], c: Gf256) {
 /// Two parts:
 /// 1. For i = 0..B-1: each source-like intermediate symbol C[i] participates
 ///    in 3 LDPC rows via a circulant pattern with step a = 1 + floor(i/S).
-/// 2. Identity block: row i has coefficient 1 in column B+i (= K+i), tying
-///    each LDPC row to its check symbol C[K+i].
+/// 2. Identity block: row i has coefficient 1 in column B+i, tying
+///    each LDPC row to its check symbol C[B+i].
 ///
-/// This produces a block structure where LDPC rows span columns 0..K+S-1
-/// (source + LDPC check symbols) but never touch PI columns, keeping the
+/// This produces a block structure where LDPC rows span columns 0..W-1
+/// (non-PI symbols) but never touch PI columns, keeping the
 /// overall constraint matrix lower block-triangular with identity diagonal
 /// blocks (LT -> LDPC -> HDPC).
 fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
@@ -565,7 +582,7 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
     }
 }
 
-/// Build LT constraint rows for systematic symbols (rows S+H..S+H+K).
+/// Build LT constraint rows for systematic symbols (rows S+H..S+H+K').
 ///
 /// For the systematic encoding, source symbol i corresponds to
 /// intermediate symbol i. Each LT row i has exactly a 1 in column i,
@@ -605,7 +622,7 @@ pub struct EncodingStats {
     pub ldpc_symbol_count: usize,
     /// Number of HDPC symbols (H).
     pub hdpc_symbol_count: usize,
-    /// Total intermediate symbols (L = K + S + H).
+    /// Total intermediate symbols (L = K' + S + H).
     pub intermediate_symbol_count: usize,
     /// Symbol size in bytes.
     pub symbol_size: usize,
@@ -1128,6 +1145,7 @@ mod tests {
         assert_eq!(p.h, 10);
         assert_eq!(p.w, 17);
         assert_eq!(p.b, p.w - p.s);
+        assert_eq!(p.p, p.l - p.w);
         assert_eq!(p.l, p.k_prime + p.s + p.h);
     }
 
@@ -1141,6 +1159,7 @@ mod tests {
         assert_eq!(p.h, 10);
         assert_eq!(p.w, 113);
         assert_eq!(p.b, p.w - p.s);
+        assert_eq!(p.p, p.l - p.w);
         assert_eq!(p.l, p.k_prime + p.s + p.h);
     }
 
@@ -1162,6 +1181,31 @@ mod tests {
             err,
             SystematicParamError::UnsupportedSourceBlockSize {
                 requested: 56404,
+                max_supported: 56403
+            }
+        );
+    }
+
+    #[test]
+    fn params_lookup_rejects_zero_k() {
+        let err = SystematicParams::try_for_source_block(0, 64).unwrap_err();
+        assert_eq!(
+            err,
+            SystematicParamError::UnsupportedSourceBlockSize {
+                requested: 0,
+                max_supported: 56403
+            }
+        );
+    }
+
+    #[test]
+    fn params_lookup_rejects_wrapped_large_k() {
+        let huge_k = (u32::MAX as usize) + 1;
+        let err = SystematicParams::try_for_source_block(huge_k, 64).unwrap_err();
+        assert_eq!(
+            err,
+            SystematicParamError::UnsupportedSourceBlockSize {
+                requested: huge_k,
                 max_supported: 56403
             }
         );
@@ -1545,7 +1589,7 @@ mod tests {
         let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
 
         let ratio = enc.stats().overhead_ratio();
-        // L = K + S + H, so ratio > 1.0
+        // L = K' + S + H, so ratio > 1.0
         assert!(ratio > 1.0, "overhead ratio should be > 1");
         assert!(ratio < 2.0, "overhead ratio should be reasonable");
     }

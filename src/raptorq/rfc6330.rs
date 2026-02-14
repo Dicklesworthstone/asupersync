@@ -192,14 +192,11 @@ pub fn rand(y: u32, i: u8, m: u32) -> u32 {
 /// # Arguments
 ///
 /// * `v` - Random value from `Rand[X, 0, 2^20]`
-/// * `w` - Number of LT symbols (W)
-/// * `l` - Total intermediate symbols (L)
-///
 /// # Returns
 ///
 /// The degree d for LT encoding.
 #[must_use]
-pub fn deg(v: u32, w: usize, l: usize) -> usize {
+pub fn deg(v: u32) -> usize {
     // Degree table from RFC 6330 Section 5.3.5.2
     // Each entry (threshold, degree): for v < threshold, return degree.
     // Shifted from original so degree 1 occupies [0, 5243) — the original
@@ -241,18 +238,276 @@ pub fn deg(v: u32, w: usize, l: usize) -> usize {
     // Find the degree from the table
     for &(threshold, d) in &DEGREE_TABLE[..30] {
         if v < threshold {
-            return d.min(w.min(l));
+            return d;
         }
     }
 
-    // Default: W + floor(L/W)
-    let result = w + (l / w);
-    result.min(l)
+    // `v` is always generated in [0, 2^20), so this fallback is unreachable.
+    30
+}
+
+/// LT tuple from RFC 6330 Section 5.3.5.4.
+///
+/// The tuple defines the LT and PI symbol walk parameters:
+/// - `(d, a, b)` for LT-side symbol selection over `W`
+/// - `(d1, a1, b1)` for PI-side symbol selection over `P` / `P1`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LtTuple {
+    /// LT degree.
+    pub d: usize,
+    /// LT step.
+    pub a: usize,
+    /// LT start index.
+    pub b: usize,
+    /// PI degree.
+    pub d1: usize,
+    /// PI step.
+    pub a1: usize,
+    /// PI start index over `P1`.
+    pub b1: usize,
+}
+
+/// Return the smallest prime number greater than or equal to `n`.
+#[must_use]
+pub fn next_prime_ge(n: usize) -> usize {
+    if n <= 2 {
+        return 2;
+    }
+
+    let mut candidate = if n.is_multiple_of(2) { n + 1 } else { n };
+    while !is_prime(candidate) {
+        candidate += 2;
+    }
+    candidate
+}
+
+fn is_prime(n: usize) -> bool {
+    if n < 2 {
+        return false;
+    }
+    if n.is_multiple_of(2) {
+        return n == 2;
+    }
+    let mut d = 3usize;
+    while d * d <= n {
+        if n.is_multiple_of(d) {
+            return false;
+        }
+        d += 2;
+    }
+    true
+}
+
+/// Compute RFC 6330 LT tuple for `(J, W, P, P1, X)`.
+///
+/// Reference: RFC 6330 Section 5.3.5.4.
+#[must_use]
+pub fn tuple(
+    systematic_index: usize,
+    lt_width: usize,
+    pi_count: usize,
+    pi_modulus: usize,
+    encoding_symbol_id: u32,
+) -> LtTuple {
+    assert!(lt_width > 1, "W must be > 1");
+    assert!(pi_count > 0, "P must be > 0");
+    assert!(pi_modulus > 1, "P1 must be > 1");
+    assert!(pi_modulus >= pi_count, "P1 must be >= P");
+
+    let mut linear_factor = 53_591u32.wrapping_add(997u32.wrapping_mul(systematic_index as u32));
+    if linear_factor.is_multiple_of(2) {
+        linear_factor = linear_factor.wrapping_add(1);
+    }
+    let constant_offset = 10_267u32.wrapping_mul((systematic_index as u32).wrapping_add(1));
+    let random_input = constant_offset.wrapping_add(encoding_symbol_id.wrapping_mul(linear_factor));
+
+    let degree_input = rand(random_input, 0, 1 << 20);
+    let lt_degree = deg(degree_input);
+    let lt_step = 1 + rand(random_input, 1, (lt_width as u32) - 1) as usize;
+    let lt_start = rand(random_input, 2, lt_width as u32) as usize;
+    let pi_degree = if lt_degree < 4 {
+        2 + rand(encoding_symbol_id, 3, 2) as usize
+    } else {
+        2
+    };
+    let pi_step = 1 + rand(encoding_symbol_id, 4, (pi_modulus as u32) - 1) as usize;
+    let pi_start = rand(encoding_symbol_id, 5, pi_modulus as u32) as usize;
+
+    LtTuple {
+        d: lt_degree,
+        a: lt_step,
+        b: lt_start,
+        d1: pi_degree,
+        a1: pi_step,
+        b1: pi_start,
+    }
+}
+
+/// Compute RFC 6330 LT tuple using `P1 = smallest_prime_ge(P)`.
+#[must_use]
+pub fn tuple_with_prime_p1(j: usize, w: usize, p: usize, x: u32) -> LtTuple {
+    tuple(j, w, p, next_prime_ge(p), x)
+}
+
+/// Build RFC 6330 repair-symbol intermediate indices for an ESI.
+///
+/// This is the shared tuple-expansion path used by encoder/decoder parity code.
+/// Output indices are in `[0, W + P)`.
+#[must_use]
+pub fn repair_indices_for_esi(
+    systematic_index: usize,
+    lt_width: usize,
+    pi_count: usize,
+    encoding_symbol_id: u32,
+) -> Vec<usize> {
+    let pi_modulus = next_prime_ge(pi_count);
+    let lt_tuple = tuple(
+        systematic_index,
+        lt_width,
+        pi_count,
+        pi_modulus,
+        encoding_symbol_id,
+    );
+    tuple_indices(lt_tuple, lt_width, pi_count, pi_modulus)
+}
+
+/// Build intermediate-symbol indices for an RFC tuple.
+///
+/// Output indices are in `[0, W + P)`, where:
+/// - `0..W` are LT symbols
+/// - `W..W+P` are PI symbols
+#[must_use]
+pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize> {
+    assert!(w > 1, "W must be > 1");
+    assert!(p > 0, "P must be > 0");
+    assert!(p1 >= p, "P1 must be >= P");
+
+    let mut out = Vec::with_capacity(tuple.d + tuple.d1);
+
+    // LT side over W
+    let mut x = tuple.b % w;
+    out.push(x);
+    for _ in 1..tuple.d {
+        x = (x + tuple.a) % w;
+        out.push(x);
+    }
+
+    // PI side over P / P1 (RFC 6330 Section 5.3.5.3)
+    let mut x1 = tuple.b1 % p1;
+    while x1 >= p {
+        x1 = (x1 + tuple.a1) % p1;
+    }
+    out.push(w + x1);
+    for _ in 1..tuple.d1 {
+        x1 = (x1 + tuple.a1) % p1;
+        while x1 >= p {
+            x1 = (x1 + tuple.a1) % p1;
+        }
+        out.push(w + x1);
+    }
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy)]
+    struct TupleScenario {
+        scenario_id: &'static str,
+        seed: u64,
+        k: usize,
+        symbol_size: usize,
+        loss_pattern: &'static str,
+        j: usize,
+        w: usize,
+        p: usize,
+        x: u32,
+        expected_tuple: LtTuple,
+        expected_indices: &'static [usize],
+    }
+
+    fn tuple_scenarios() -> [TupleScenario; 3] {
+        [
+            TupleScenario {
+                scenario_id: "RQ-B2-TUPLE-GOLDEN-001",
+                seed: 1234,
+                k: 8,
+                symbol_size: 32,
+                loss_pattern: "none",
+                j: 5,
+                w: 101,
+                p: 17,
+                x: 1234,
+                expected_tuple: LtTuple {
+                    d: 3,
+                    a: 8,
+                    b: 51,
+                    d1: 2,
+                    a1: 10,
+                    b1: 5,
+                },
+                expected_indices: &[51, 59, 67, 106, 116],
+            },
+            TupleScenario {
+                scenario_id: "RQ-B2-TUPLE-GOLDEN-002",
+                seed: 77,
+                k: 16,
+                symbol_size: 64,
+                loss_pattern: "drop_10pct",
+                j: 3,
+                w: 257,
+                p: 29,
+                x: 77,
+                expected_tuple: LtTuple {
+                    d: 3,
+                    a: 129,
+                    b: 223,
+                    d1: 3,
+                    a1: 28,
+                    b1: 20,
+                },
+                expected_indices: &[223, 95, 224, 277, 276, 275],
+            },
+            TupleScenario {
+                scenario_id: "RQ-B2-TUPLE-GOLDEN-003",
+                seed: 999,
+                k: 32,
+                symbol_size: 128,
+                loss_pattern: "drop_25pct_burst",
+                j: 7,
+                w: 503,
+                p: 31,
+                x: 999,
+                expected_tuple: LtTuple {
+                    d: 6,
+                    a: 12,
+                    b: 398,
+                    d1: 2,
+                    a1: 8,
+                    b1: 4,
+                },
+                expected_indices: &[398, 410, 422, 434, 446, 458, 507, 515],
+            },
+        ]
+    }
+
+    fn tuple_context(scenario: &TupleScenario, outcome: &'static str) -> String {
+        format!(
+            "scenario_id={} seed={} k={} symbol_size={} loss_pattern={} outcome={} \
+             artifact_path=artifacts/raptorq_b2_tuple_scenarios_v1.json \
+             fixture_ref=RQ-B2-TUPLE-V1 \
+             repro_cmd='rch exec -- cargo test -p asupersync --lib \
+             rfc6330::tests::tuple_scenario_matrix_deterministic_replay -- --nocapture'",
+            scenario.scenario_id,
+            scenario.seed,
+            scenario.k,
+            scenario.symbol_size,
+            scenario.loss_pattern,
+            outcome
+        )
+    }
 
     #[test]
     fn rand_deterministic() {
@@ -286,15 +541,101 @@ mod tests {
 
     #[test]
     fn deg_basic() {
-        // Degree should be at least 1 and at most min(W, L)
-        let d = deg(0, 100, 120);
-        assert!(d >= 1);
-        assert!(d <= 100);
+        let d = deg(0);
+        assert!((1..=30).contains(&d));
     }
 
     #[test]
     fn deg_deterministic() {
         // Same inputs should produce same outputs
-        assert_eq!(deg(12345, 100, 120), deg(12345, 100, 120));
+        assert_eq!(deg(12_345), deg(12_345));
+    }
+
+    #[test]
+    fn deg_threshold_edges() {
+        assert_eq!(deg(0), 1);
+        assert_eq!(deg(5_242), 1);
+        assert_eq!(deg(5_243), 2);
+        assert_eq!(deg(1_048_575), 30);
+    }
+
+    #[test]
+    fn next_prime_ge_basic() {
+        assert_eq!(next_prime_ge(1), 2);
+        assert_eq!(next_prime_ge(2), 2);
+        assert_eq!(next_prime_ge(3), 3);
+        assert_eq!(next_prime_ge(4), 5);
+        assert_eq!(next_prime_ge(17), 17);
+        assert_eq!(next_prime_ge(18), 19);
+    }
+
+    #[test]
+    fn tuple_deterministic_and_bounded() {
+        let p1 = next_prime_ge(17);
+        let t1 = tuple(5, 101, 17, p1, 1234);
+        let t2 = tuple(5, 101, 17, p1, 1234);
+        assert_eq!(t1, t2);
+
+        assert!((1..=30).contains(&t1.d));
+        assert!(t1.a >= 1 && t1.a < 101);
+        assert!(t1.b < 101);
+        assert!(t1.d1 == 2 || t1.d1 == 3);
+        assert!(t1.a1 >= 1 && t1.a1 < p1);
+        assert!(t1.b1 < p1);
+    }
+
+    #[test]
+    fn tuple_indices_are_in_range() {
+        let w = 257;
+        let p = 29;
+        let p1 = next_prime_ge(p);
+        let t = tuple(3, w, p, p1, 77);
+        let idx = tuple_indices(t, w, p, p1);
+
+        assert_eq!(idx.len(), t.d + t.d1);
+        assert!(idx.iter().all(|i| *i < w + p));
+        assert!(idx.iter().any(|i| *i >= w));
+    }
+
+    #[test]
+    fn tuple_scenario_matrix_golden_vectors() {
+        for scenario in tuple_scenarios() {
+            let p1 = next_prime_ge(scenario.p);
+            let actual_tuple = tuple(scenario.j, scenario.w, scenario.p, p1, scenario.x);
+            let actual_indices = tuple_indices(actual_tuple, scenario.w, scenario.p, p1);
+            let context = tuple_context(&scenario, "golden_vector_compare");
+
+            assert_eq!(
+                actual_tuple, scenario.expected_tuple,
+                "{context} tuple mismatch"
+            );
+            assert_eq!(
+                actual_indices, scenario.expected_indices,
+                "{context} tuple index mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn tuple_scenario_matrix_deterministic_replay() {
+        for scenario in tuple_scenarios() {
+            let p1 = next_prime_ge(scenario.p);
+
+            let tuple_first = tuple(scenario.j, scenario.w, scenario.p, p1, scenario.x);
+            let tuple_second = tuple(scenario.j, scenario.w, scenario.p, p1, scenario.x);
+
+            let indices_first = tuple_indices(tuple_first, scenario.w, scenario.p, p1);
+            let indices_second = tuple_indices(tuple_second, scenario.w, scenario.p, p1);
+
+            let context = tuple_context(&scenario, "deterministic_replay");
+            assert_eq!(
+                tuple_first, tuple_second,
+                "{context} tuple is not deterministic"
+            );
+            assert_eq!(
+                indices_first, indices_second,
+                "{context} tuple index replay mismatch"
+            );
+        }
     }
 }

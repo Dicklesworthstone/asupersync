@@ -183,8 +183,8 @@ impl Equation {
 /// symbols, then extracts the original source data.
 pub struct InactivationDecoder {
     params: SystematicParams,
-    soliton: RobustSoliton,
     seed: u64,
+    soliton: RobustSoliton,
 }
 
 impl InactivationDecoder {
@@ -195,8 +195,8 @@ impl InactivationDecoder {
         let soliton = RobustSoliton::new(params.l, 0.2, 0.05);
         Self {
             params,
-            soliton,
             seed,
+            soliton,
         }
     }
 
@@ -855,6 +855,19 @@ impl InactivationDecoder {
         (columns, coefficients)
     }
 
+    /// Generate the equation (columns + coefficients) using RFC 6330 tuple rules.
+    ///
+    /// This method computes tuple parameters from RFC 6330 Section 5.3.5.4 and
+    /// expands them into intermediate symbol indices using Section 5.3.5.3.
+    ///
+    /// Note: The primary `repair_equation()` currently mirrors the existing
+    /// encoder implementation. This RFC-exact variant is provided to support
+    /// conformance migration while preserving current decode compatibility.
+    #[must_use]
+    pub fn repair_equation_rfc6330(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+        self.params.rfc_repair_equation(esi)
+    }
+
     /// Generate equations for all K source symbols.
     ///
     /// In systematic encoding, source symbol i maps directly to intermediate
@@ -924,6 +937,24 @@ mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
 
+    fn rfc_eq_context(
+        scenario_id: &str,
+        seed: u64,
+        k: usize,
+        symbol_size: usize,
+        loss_pattern: &str,
+        outcome: &str,
+    ) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={seed} k={k} symbol_size={symbol_size} \
+             loss_pattern={loss_pattern} outcome={outcome} \
+             artifact_path=artifacts/raptorq_b2_tuple_scenarios_v1.json \
+             fixture_ref=RQ-B2-TUPLE-V1 \
+             repro_cmd='rch exec -- cargo test -p asupersync --lib \
+             repair_equation_rfc6330 -- --nocapture'"
+        )
+    }
+
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
         (0..k)
             .map(|i| {
@@ -954,6 +985,21 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// Build repair symbol bytes by XOR-folding encoder intermediate symbols.
+    fn build_repair_from_intermediate(
+        encoder: &SystematicEncoder,
+        columns: &[usize],
+        symbol_size: usize,
+    ) -> Vec<u8> {
+        let mut out = vec![0u8; symbol_size];
+        for &col in columns {
+            for (dst, src) in out.iter_mut().zip(encoder.intermediate_symbol(col)) {
+                *dst ^= *src;
+            }
+        }
+        out
     }
 
     #[test]
@@ -1152,5 +1198,170 @@ mod tests {
             result.stats.peeled > 0 || result.stats.inactivated > 0,
             "expected some peeling or inactivation"
         );
+    }
+
+    #[test]
+    fn repair_equation_rfc6330_deterministic() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 42u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let (c1, k1) = decoder.repair_equation_rfc6330(17);
+        let (c2, k2) = decoder.repair_equation_rfc6330(17);
+        let context = rfc_eq_context(
+            "RQ-B2-DECODER-EQ-DET-001",
+            seed,
+            k,
+            symbol_size,
+            "none",
+            "deterministic_replay",
+        );
+        assert_eq!(c1, c2, "{context} column replay mismatch");
+        assert_eq!(k1, k2, "{context} coefficient replay mismatch");
+    }
+
+    #[test]
+    fn repair_equation_rfc6330_indices_within_bounds() {
+        let k = 10;
+        let symbol_size = 32;
+        let seed = 7u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let params = decoder.params();
+        let upper = params.w + params.p;
+        let context = rfc_eq_context(
+            "RQ-B2-DECODER-EQ-BOUNDS-001",
+            seed,
+            k,
+            symbol_size,
+            "none",
+            "index_bounds",
+        );
+        for esi in 0..32u32 {
+            let (cols, coefs) = decoder.repair_equation_rfc6330(esi);
+            assert_eq!(
+                cols.len(),
+                coefs.len(),
+                "{context} len mismatch for esi={esi}"
+            );
+            assert!(!cols.is_empty(), "{context} empty row for esi={esi}");
+            assert!(
+                cols.iter().all(|col| *col < upper),
+                "{context} out-of-range column for esi={esi}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_equation_rfc6330_includes_pi_domain_entries() {
+        let k = 12;
+        let symbol_size = 64;
+        let seed = 99u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let params = decoder.params();
+        let w = params.w;
+        let mut saw_pi = false;
+        for esi in 0..128u32 {
+            let (cols, _) = decoder.repair_equation_rfc6330(esi);
+            if cols.iter().any(|c| *c >= w) {
+                saw_pi = true;
+                break;
+            }
+        }
+        let context = rfc_eq_context(
+            "RQ-B2-DECODER-EQ-PI-001",
+            seed,
+            k,
+            symbol_size,
+            "none",
+            "pi_domain_coverage",
+        );
+        assert!(saw_pi, "{context} expected PI-domain index in sample");
+    }
+
+    #[test]
+    fn repair_equation_rfc6330_matches_systematic_params_helper() {
+        let scenarios = [
+            ("RQ-C1-PARITY-001", 8usize, 32usize, 42u64),
+            ("RQ-C1-PARITY-002", 16usize, 64usize, 77u64),
+            ("RQ-C1-PARITY-003", 32usize, 128usize, 1234u64),
+        ];
+
+        for (scenario_id, k, symbol_size, seed) in scenarios {
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let params = SystematicParams::for_source_block(k, symbol_size);
+            for esi in 0..64u32 {
+                let decoder_eq = decoder.repair_equation_rfc6330(esi);
+                let shared_eq = params.rfc_repair_equation(esi);
+                let context = rfc_eq_context(
+                    scenario_id,
+                    seed,
+                    k,
+                    symbol_size,
+                    "none",
+                    "decoder_params_parity",
+                );
+                assert_eq!(
+                    decoder_eq, shared_eq,
+                    "{context} decoder/params equation mismatch for esi={esi}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_roundtrip_with_rfc_tuple_repair_equations() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .expect("RQ-C1-E2E-001 encoder setup should succeed");
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Start with constraint symbols + systematic source symbols.
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+
+        // Add RFC tuple-driven repair equations and synthesize repair bytes directly
+        // from intermediate symbols to validate decoder-side equation reconstruction.
+        for esi in (k as u32)..(l as u32) {
+            let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
+            let repair_data = build_repair_from_intermediate(&encoder, &columns, symbol_size);
+            received.push(ReceivedSymbol::repair(
+                esi,
+                columns,
+                coefficients,
+                repair_data,
+            ));
+        }
+
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            let context = rfc_eq_context(
+                "RQ-C1-E2E-001",
+                seed,
+                k,
+                symbol_size,
+                "none",
+                "decode_failed",
+            );
+            panic!("{context} unexpected decode failure: {err:?}");
+        });
+
+        for (i, original) in source.iter().enumerate() {
+            let context = rfc_eq_context(
+                "RQ-C1-E2E-001",
+                seed,
+                k,
+                symbol_size,
+                "none",
+                "roundtrip_compare",
+            );
+            assert_eq!(
+                &result.source[i], original,
+                "{context} source symbol mismatch at index {i}"
+            );
+        }
     }
 }
