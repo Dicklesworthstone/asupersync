@@ -1,0 +1,127 @@
+# FrankenLab Example 3: Saga Rollback Under Network Partition
+#
+# A coordinator orchestrates a saga across 10 participants. A network
+# partition isolates 3 participants at T=200ms, then heals at T=800ms.
+# Heavy chaos injects delays, I/O errors, and cancellations throughout.
+#
+# This exercises the full fault injection stack:
+#   - Network partitions (timed faults)
+#   - Clock skew (simulated drift)
+#   - Message loss and reordering (chaos preset)
+#   - Random cancellation injection
+#
+# Run:
+#   frankenlab run 03_saga_partition.yaml
+#   frankenlab explore 03_saga_partition.yaml --seeds 50
+#
+schema_version: 1
+id: example-saga-partition
+description: >
+  Ten-participant saga with network partition and heal. The coordinator
+  must detect the partition, trigger compensation for isolated
+  participants, and converge after heal. All obligations must be
+  resolved and no tasks may leak.
+
+lab:
+  seed: 314159
+  entropy_seed: 271828
+  worker_count: 8
+  trace_capacity: 32768
+  max_steps: 500000
+  panic_on_obligation_leak: true
+  panic_on_futurelock: true
+  futurelock_max_idle_steps: 20000
+
+chaos:
+  preset: heavy
+
+network:
+  preset: lan
+  links:
+    "coordinator->participant-7":
+      packet_loss: 0.02
+    "coordinator->participant-8":
+      packet_loss: 0.02
+    "coordinator->participant-9":
+      packet_loss: 0.02
+
+faults:
+  # Partition: isolate participants 7-9 at T=200ms
+  - at_ms: 200
+    action: partition
+    args:
+      from: "coordinator"
+      to: "participant-7"
+  - at_ms: 200
+    action: partition
+    args:
+      from: "coordinator"
+      to: "participant-8"
+  - at_ms: 200
+    action: partition
+    args:
+      from: "coordinator"
+      to: "participant-9"
+  # Clock skew on participant-8 at T=300ms
+  - at_ms: 300
+    action: clock_skew
+    args:
+      target: "participant-8"
+      drift_ms: 50
+  # Heal: restore connectivity at T=800ms
+  - at_ms: 800
+    action: heal
+    args:
+      from: "coordinator"
+      to: "participant-7"
+  - at_ms: 800
+    action: heal
+    args:
+      from: "coordinator"
+      to: "participant-8"
+  - at_ms: 800
+    action: heal
+    args:
+      from: "coordinator"
+      to: "participant-9"
+  # Reset clock at T=850ms
+  - at_ms: 850
+    action: clock_reset
+    args:
+      target: "participant-8"
+
+participants:
+  - name: coordinator
+    role: saga-coordinator
+  - name: participant-0
+    role: saga-participant
+  - name: participant-1
+    role: saga-participant
+  - name: participant-2
+    role: saga-participant
+  - name: participant-3
+    role: saga-participant
+  - name: participant-4
+    role: saga-participant
+  - name: participant-5
+    role: saga-participant
+  - name: participant-6
+    role: saga-participant
+  - name: participant-7
+    role: saga-participant
+  - name: participant-8
+    role: saga-participant
+  - name: participant-9
+    role: saga-participant
+
+cancellation:
+  strategy: probabilistic
+  probability: 0.02
+
+oracles:
+  - all
+
+metadata:
+  category: saga
+  difficulty: advanced
+  tags: partition,compensation,clock-skew,chaos

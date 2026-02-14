@@ -1,3 +1,15 @@
+[workspace]
+members = [
+    ".",
+    "asupersync-macros",
+    "conformance",
+    "franken_kernel",
+    "franken_evidence",
+    "franken_decision",
+    "frankenlab",
+]
+exclude = ["fuzz"]
+
 [package]
 name = "asupersync"
 version = "0.1.1"
