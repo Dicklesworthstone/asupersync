@@ -289,7 +289,8 @@ impl std::ops::MulAssign for Gf256 {
 
 /// XOR `src` into `dst` element-wise: `dst[i] ^= src[i]`.
 ///
-/// Uses 8-byte-wide XOR via `u64` for throughput on aligned bulk data.
+/// Uses 32-byte-wide XOR (4×u64) for throughput on bulk data, falling back
+/// to 8-byte and scalar loops for the tail.
 ///
 /// # Panics
 ///
@@ -297,19 +298,47 @@ impl std::ops::MulAssign for Gf256 {
 #[inline]
 pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
-    let mut d_chunks = dst.chunks_exact_mut(8);
-    let mut s_chunks = src.chunks_exact(8);
+
+    // Wide path: 32 bytes (4×u64) per iteration.
+    let mut d_chunks = dst.chunks_exact_mut(32);
+    let mut s_chunks = src.chunks_exact(32);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
-        let d_arr: [u8; 8] = d_chunk.try_into().expect("8 bytes");
-        let s_arr: [u8; 8] = s_chunk.try_into().expect("8 bytes");
+        let mut d_words = [
+            u64::from_ne_bytes(d_chunk[0..8].try_into().unwrap()),
+            u64::from_ne_bytes(d_chunk[8..16].try_into().unwrap()),
+            u64::from_ne_bytes(d_chunk[16..24].try_into().unwrap()),
+            u64::from_ne_bytes(d_chunk[24..32].try_into().unwrap()),
+        ];
+        let s_words = [
+            u64::from_ne_bytes(s_chunk[0..8].try_into().unwrap()),
+            u64::from_ne_bytes(s_chunk[8..16].try_into().unwrap()),
+            u64::from_ne_bytes(s_chunk[16..24].try_into().unwrap()),
+            u64::from_ne_bytes(s_chunk[24..32].try_into().unwrap()),
+        ];
+        d_words[0] ^= s_words[0];
+        d_words[1] ^= s_words[1];
+        d_words[2] ^= s_words[2];
+        d_words[3] ^= s_words[3];
+        d_chunk[0..8].copy_from_slice(&d_words[0].to_ne_bytes());
+        d_chunk[8..16].copy_from_slice(&d_words[1].to_ne_bytes());
+        d_chunk[16..24].copy_from_slice(&d_words[2].to_ne_bytes());
+        d_chunk[24..32].copy_from_slice(&d_words[3].to_ne_bytes());
+    }
+
+    // 8-byte tail.
+    let d_rem = d_chunks.into_remainder();
+    let s_rem = s_chunks.remainder();
+    let mut d8 = d_rem.chunks_exact_mut(8);
+    let mut s8 = s_rem.chunks_exact(8);
+    for (d_chunk, s_chunk) in d8.by_ref().zip(s8.by_ref()) {
+        let d_arr: [u8; 8] = d_chunk.try_into().unwrap();
+        let s_arr: [u8; 8] = s_chunk.try_into().unwrap();
         let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
         d_chunk.copy_from_slice(&result.to_ne_bytes());
     }
-    for (d, s) in d_chunks
-        .into_remainder()
-        .iter_mut()
-        .zip(s_chunks.remainder())
-    {
+
+    // Scalar tail.
+    for (d, s) in d8.into_remainder().iter_mut().zip(s8.remainder()) {
         *d ^= s;
     }
 }
@@ -354,13 +383,13 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     }
 }
 
-/// Inner loop for `gf256_mul_slice`: batch 8 table lookups per iteration,
-/// writing results as `u64` to avoid per-byte store overhead.
+/// Inner loop for `gf256_mul_slice`: batch 16 table lookups per iteration,
+/// writing results to avoid per-byte store overhead.
 ///
-/// Uses `chunks_exact_mut(8)` iterators so the compiler can elide bounds
-/// checks in the hot loop.
+/// Processing 16 bytes per iteration doubles instruction-level parallelism.
 fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
-    let mut chunks = dst.chunks_exact_mut(8);
+    // Wide path: 16 bytes per iteration.
+    let mut chunks = dst.chunks_exact_mut(16);
     for chunk in chunks.by_ref() {
         let t = [
             table[chunk[0] as usize],
@@ -371,24 +400,34 @@ fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
             table[chunk[5] as usize],
             table[chunk[6] as usize],
             table[chunk[7] as usize],
+            table[chunk[8] as usize],
+            table[chunk[9] as usize],
+            table[chunk[10] as usize],
+            table[chunk[11] as usize],
+            table[chunk[12] as usize],
+            table[chunk[13] as usize],
+            table[chunk[14] as usize],
+            table[chunk[15] as usize],
         ];
         chunk.copy_from_slice(&t);
     }
+    // Scalar tail.
     for d in chunks.into_remainder() {
         *d = table[*d as usize];
     }
 }
 
-/// Inner loop for `gf256_addmul_slice`: batch 8 table lookups, then wide-XOR
-/// the results into `dst` via `u64`.
+/// Inner loop for `gf256_addmul_slice`: batch 16 table lookups per iteration,
+/// then wide-XOR the results into `dst` via two `u64` operations.
 ///
-/// Uses `chunks_exact_mut(8)` / `chunks_exact(8)` iterators so the compiler
-/// can elide per-iteration bounds checks in the hot loop.
+/// Processing 16 bytes per iteration doubles instruction-level parallelism
+/// for the table lookups while keeping the XOR accumulation wide.
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
-    let mut d_chunks = dst.chunks_exact_mut(8);
-    let mut s_chunks = src.chunks_exact(8);
+    // Wide path: 16 bytes (2×u64) per iteration.
+    let mut d_chunks = dst.chunks_exact_mut(16);
+    let mut s_chunks = src.chunks_exact(16);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
-        let t = [
+        let t_lo = [
             table[s_chunk[0] as usize],
             table[s_chunk[1] as usize],
             table[s_chunk[2] as usize],
@@ -398,10 +437,25 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
             table[s_chunk[6] as usize],
             table[s_chunk[7] as usize],
         ];
-        let d_arr: [u8; 8] = <[u8; 8]>::try_from(&d_chunk[..]).expect("8 bytes");
-        let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(t);
-        d_chunk.copy_from_slice(&result.to_ne_bytes());
+        let t_hi = [
+            table[s_chunk[8] as usize],
+            table[s_chunk[9] as usize],
+            table[s_chunk[10] as usize],
+            table[s_chunk[11] as usize],
+            table[s_chunk[12] as usize],
+            table[s_chunk[13] as usize],
+            table[s_chunk[14] as usize],
+            table[s_chunk[15] as usize],
+        ];
+        let d_lo: [u8; 8] = d_chunk[0..8].try_into().unwrap();
+        let d_hi: [u8; 8] = d_chunk[8..16].try_into().unwrap();
+        let r_lo = u64::from_ne_bytes(d_lo) ^ u64::from_ne_bytes(t_lo);
+        let r_hi = u64::from_ne_bytes(d_hi) ^ u64::from_ne_bytes(t_hi);
+        d_chunk[0..8].copy_from_slice(&r_lo.to_ne_bytes());
+        d_chunk[8..16].copy_from_slice(&r_hi.to_ne_bytes());
     }
+
+    // Scalar tail.
     for (d, s) in d_chunks
         .into_remainder()
         .iter_mut()
