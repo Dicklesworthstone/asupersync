@@ -67,6 +67,7 @@ pub mod ledger;
 pub mod lyapunov;
 pub mod marking;
 pub mod no_aliasing_proof;
+pub mod no_leak_proof;
 pub mod recovery;
 pub mod saga;
 pub mod separation_logic;
