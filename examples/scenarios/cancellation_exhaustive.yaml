@@ -1,0 +1,30 @@
+# FrankenLab Scenario: Exhaustive cancellation injection
+# Tests every await point for correct cancellation handling.
+schema_version: 1
+id: cancellation-exhaustive
+description: >
+  Run the target protocol once to discover await points, then
+  re-run with cancellation injected at every point (N+1 runs).
+  Verifies all cancellation paths release obligations.
+
+lab:
+  seed: 42
+  worker_count: 1
+  trace_capacity: 4096
+  max_steps: 50000
+  panic_on_obligation_leak: true
+
+chaos:
+  preset: "off"
+
+network:
+  preset: ideal
+
+cancellation:
+  strategy: all_points
+
+oracles:
+  - obligation_leak
+  - loser_drain
+  - quiescence
+  - cancellation_protocol

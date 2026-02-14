@@ -1,0 +1,62 @@
+# FrankenLab Scenario: Network partition and heal
+# Verifies saga compensation triggers under partition and recovery
+# after partition heal.
+schema_version: 1
+id: partition-heal-saga
+description: >
+  Three-node scenario: coordinator, participant-a, participant-b.
+  A network partition isolates participant-b at T=100ms and heals
+  at T=500ms.  Verifies correct compensation and convergence.
+
+lab:
+  seed: 314159
+  entropy_seed: 271828
+  worker_count: 4
+  trace_capacity: 16384
+  max_steps: 500000
+
+chaos:
+  preset: heavy
+
+network:
+  preset: lan
+  links:
+    "coordinator->participant-b":
+      packet_loss: 0.01
+
+faults:
+  - at_ms: 100
+    action: partition
+    args:
+      from: "coordinator"
+      to: "participant-b"
+  - at_ms: 100
+    action: partition
+    args:
+      from: "participant-a"
+      to: "participant-b"
+  - at_ms: 500
+    action: heal
+    args:
+      from: "coordinator"
+      to: "participant-b"
+  - at_ms: 500
+    action: heal
+    args:
+      from: "participant-a"
+      to: "participant-b"
+
+participants:
+  - name: coordinator
+    role: saga-coordinator
+  - name: participant-a
+    role: saga-participant
+  - name: participant-b
+    role: saga-participant
+
+oracles:
+  - all
+
+metadata:
+  author: frankenlab
+  tags: partition,saga,compensation

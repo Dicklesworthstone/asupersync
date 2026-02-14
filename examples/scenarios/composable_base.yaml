@@ -1,0 +1,25 @@
+# FrankenLab Scenario: Base configuration for composition
+# Other scenarios can include this to inherit common settings.
+schema_version: 1
+id: base-ci
+description: >
+  Standard CI base configuration.  Include this in other scenarios
+  to get sensible defaults for CI execution.
+
+lab:
+  seed: 42
+  worker_count: 2
+  trace_capacity: 8192
+  max_steps: 100000
+  panic_on_obligation_leak: true
+  panic_on_futurelock: true
+  futurelock_max_idle_steps: 10000
+
+chaos:
+  preset: light
+
+network:
+  preset: local
+
+oracles:
+  - all

@@ -1945,7 +1945,7 @@ mod tests {
             any::<u64>().prop_map(CaveatPredicate::RegionScope),
             any::<u64>().prop_map(CaveatPredicate::TaskScope),
             any::<u32>().prop_map(CaveatPredicate::MaxUses),
-            "[a-z]{1,8}".prop_map(|p| CaveatPredicate::ResourceScope(p)),
+            "[a-z]{1,8}".prop_map(CaveatPredicate::ResourceScope),
             (1u32..1000, 1u32..86400).prop_map(|(m, w)| CaveatPredicate::RateLimit {
                 max_count: m,
                 window_secs: w,
@@ -2153,10 +2153,10 @@ mod tests {
         bytes[mid] ^= 0x01;
 
         // Either parsing fails or signature doesn't match.
-        match MacaroonToken::from_binary(&bytes) {
-            Some(t) => assert!(!t.verify_signature(&key)),
-            None => {} // Parse failure is also acceptable
+        if let Some(t) = MacaroonToken::from_binary(&bytes) {
+            assert!(!t.verify_signature(&key));
         }
+        // Parse failure is also acceptable
     }
 
     // --- E2E: full delegation chain ---
@@ -2284,13 +2284,13 @@ mod tests {
         // Verify the full chain.
         let ctx = VerificationContext::new().with_time(5000).with_region(1);
         assert!(token
-            .verify_with_discharges(&root_key, &ctx, &[bound.clone()])
+            .verify_with_discharges(&root_key, &ctx, std::slice::from_ref(&bound))
             .is_ok());
 
         // Fail: first-party caveat violated (wrong region).
         let bad_ctx = VerificationContext::new().with_time(5000).with_region(99);
         assert!(token
-            .verify_with_discharges(&root_key, &bad_ctx, &[bound.clone()])
+            .verify_with_discharges(&root_key, &bad_ctx, std::slice::from_ref(&bound))
             .is_err());
 
         // Fail: missing discharge.

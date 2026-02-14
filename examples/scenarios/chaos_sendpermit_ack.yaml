@@ -1,0 +1,34 @@
+# FrankenLab Scenario: SendPermit/Ack under chaos
+# Exercises the obligation protocol with cancellations, delays,
+# and I/O errors to verify correct cleanup.
+schema_version: 1
+id: chaos-sendpermit-ack
+description: >
+  Two participants exchange SendPermit/Ack messages under light chaos.
+  Verifies obligation release on all paths including cancellation.
+
+lab:
+  seed: 7
+  worker_count: 2
+  trace_capacity: 8192
+  max_steps: 100000
+  panic_on_obligation_leak: true
+
+chaos:
+  preset: light
+
+network:
+  preset: local
+
+participants:
+  - name: alice
+    role: sender
+  - name: bob
+    role: receiver
+
+cancellation:
+  strategy: random_sample
+  count: 50
+
+oracles:
+  - all

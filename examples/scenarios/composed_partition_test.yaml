@@ -1,0 +1,31 @@
+# FrankenLab Scenario: Composed scenario using base
+# Inherits CI defaults from composable_base.yaml and adds
+# partition-specific faults.
+schema_version: 1
+id: composed-partition-test
+description: >
+  Extends base-ci with a simple partition/heal schedule.
+
+include:
+  - path: composable_base.yaml
+
+lab:
+  seed: 55555
+
+faults:
+  - at_ms: 200
+    action: partition
+    args:
+      from: "node-a"
+      to: "node-b"
+  - at_ms: 800
+    action: heal
+    args:
+      from: "node-a"
+      to: "node-b"
+
+participants:
+  - name: node-a
+    role: primary
+  - name: node-b
+    role: replica

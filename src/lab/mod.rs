@@ -61,6 +61,7 @@ pub mod opportunity;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
+pub mod scenario;
 pub mod snapshot_restore;
 pub mod spork_harness;
 pub mod virtual_time_wheel;
@@ -122,6 +123,11 @@ pub use replay::{
 pub use runtime::{
     HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary, LabRunReport, LabRuntime,
     LabTraceCertificateSummary, SporkHarnessReport,
+};
+pub use scenario::{
+    CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, IncludeRef,
+    LabSection, LatencySpec, LinkConditions, NetworkPreset, NetworkSection, Participant, Scenario,
+    ValidationError as ScenarioValidationError, SCENARIO_SCHEMA_VERSION,
 };
 pub use snapshot_restore::{
     RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,

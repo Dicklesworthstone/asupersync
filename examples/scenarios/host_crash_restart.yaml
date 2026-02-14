@@ -1,0 +1,46 @@
+# FrankenLab Scenario: Host crash and restart
+# Verifies supervision and state recovery after a host crash.
+schema_version: 1
+id: host-crash-restart
+description: >
+  Crash host worker-b at T=150ms, restart at T=400ms.
+  Verifies supervision tree restarts, no obligation leaks,
+  and quiescence after recovery.
+
+lab:
+  seed: 8675309
+  worker_count: 3
+  trace_capacity: 16384
+  max_steps: 300000
+  panic_on_obligation_leak: true
+
+chaos:
+  preset: "off"
+
+network:
+  preset: local
+
+faults:
+  - at_ms: 150
+    action: host_crash
+    args:
+      target: "worker-b"
+  - at_ms: 400
+    action: host_restart
+    args:
+      target: "worker-b"
+
+participants:
+  - name: supervisor
+    role: supervisor
+  - name: worker-a
+    role: worker
+  - name: worker-b
+    role: worker
+
+oracles:
+  - obligation_leak
+  - quiescence
+  - supervision
+  - task_leak
+  - actor_leak

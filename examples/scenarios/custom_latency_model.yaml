@@ -1,0 +1,64 @@
+# FrankenLab Scenario: Custom per-link latency models
+# Demonstrates heterogeneous network topology with different
+# latency models per link.
+schema_version: 1
+id: custom-latency-topology
+description: >
+  Four-node topology with varied latency models: fixed for local,
+  uniform for WAN, normal for satellite.  Exercises network
+  simulation with mixed conditions.
+
+lab:
+  seed: 42
+  worker_count: 4
+  trace_capacity: 16384
+  max_steps: 500000
+
+chaos:
+  preset: light
+
+network:
+  preset: ideal
+  links:
+    "a->b":
+      latency:
+        model: fixed
+        ms: 1
+      packet_loss: 0.0
+    "a->c":
+      latency:
+        model: uniform
+        min_ms: 20
+        max_ms: 80
+      packet_loss: 0.001
+    "a->d":
+      latency:
+        model: normal
+        mean_ms: 600
+        stddev_ms: 50
+      packet_loss: 0.01
+      bandwidth: 1000000
+    "b->c":
+      latency:
+        model: fixed
+        ms: 5
+    "c->d":
+      latency:
+        model: uniform
+        min_ms: 100
+        max_ms: 200
+      packet_duplicate: 0.005
+      packet_reorder: 0.01
+
+participants:
+  - name: a
+    role: hub
+  - name: b
+    role: local-peer
+  - name: c
+    role: wan-peer
+  - name: d
+    role: satellite-peer
+
+oracles:
+  - all

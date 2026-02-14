@@ -1,0 +1,24 @@
+# FrankenLab Scenario: Happy-path smoke test
+# Verifies basic task spawn/complete under ideal conditions.
+schema_version: 1
+id: smoke-happy-path
+description: >
+  Minimal smoke test: spawn a task, let it complete, verify
+  no obligation leaks and quiescence is reached.
+
+lab:
+  seed: 42
+  worker_count: 1
+  trace_capacity: 4096
+  max_steps: 10000
+  panic_on_obligation_leak: true
+  panic_on_futurelock: true
+
+chaos:
+  preset: "off"
+
+network:
+  preset: ideal
+
+oracles:
+  - all

@@ -1,0 +1,43 @@
+# FrankenLab Scenario: Clock skew + lease expiry
+# Verifies lease-based obligations handle clock drift correctly.
+schema_version: 1
+id: clock-skew-lease
+description: >
+  Two-node scenario where node-b experiences clock skew.
+  Verifies lease expiry, renewal, and cleanup under drift.
+
+lab:
+  seed: 2718
+  worker_count: 2
+  trace_capacity: 8192
+  max_steps: 200000
+
+chaos:
+  preset: "off"
+
+network:
+  preset: local
+
+faults:
+  - at_ms: 50
+    action: clock_skew
+    args:
+      target: "node-b"
+      drift_ns_per_sec: 1000000
+  - at_ms: 300
+    action: clock_reset
+    args:
+      target: "node-b"
+
+participants:
+  - name: node-a
+    role: lease-holder
+  - name: node-b
+    role: lease-grantor
+    properties:
+      initial_lease_ms: 100
+
+oracles:
+  - obligation_leak
+  - quiescence
+  - determinism

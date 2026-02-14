@@ -1,0 +1,44 @@
+# FrankenLab Scenario: 10K task stress test
+# Spawns many concurrent tasks with random obligations to verify
+# no leaks at scale.
+schema_version: 1
+id: stress-10k-tasks
+description: >
+  Stress test: 10,000 tasks with random SendPermit/Lease obligations,
+  heavy chaos, WAN conditions.  Verifies zero obligation leaks.
+
+lab:
+  seed: 999
+  worker_count: 8
+  trace_capacity: 65536
+  max_steps: 10000000
+  panic_on_obligation_leak: true
+  futurelock_max_idle_steps: 50000
+  replay_recording: true
+
+chaos:
+  preset: custom
+  cancel_probability: 0.02
+  delay_probability: 0.1
+  delay_min_ms: 0
+  delay_max_ms: 50
+  io_error_probability: 0.05
+  wakeup_storm_probability: 0.01
+  budget_exhaustion_probability: 0.005
+
+network:
+  preset: wan
+
+cancellation:
+  strategy: probabilistic
+  probability: 0.01
+
+oracles:
+  - obligation_leak
+  - task_leak
+  - loser_drain
+  - quiescence
+
+metadata:
+  category: stress
+  expected_duration_secs: "300"
