@@ -672,6 +672,8 @@ impl LabRuntime {
         // Record initial RNG seed
         replay_recorder.record_rng_seed(config.seed);
 
+        crate::tracing_compat::info!("virtual clock initialized: start_time_ms=0");
+
         Self {
             state,
             lab_reactor,
@@ -795,9 +797,18 @@ impl LabRuntime {
         // Record time advancement
         self.replay_recorder
             .record_time_advanced(from, self.virtual_time);
+
+        crate::tracing_compat::debug!(
+            "virtual clock advanced: delta_ms={}, new_time_ms={}",
+            nanos / 1_000_000,
+            self.virtual_time.as_nanos() / 1_000_000
+        );
     }
 
     /// Advances time to the given absolute time.
+    ///
+    /// If the target time is before the current time, logs an error
+    /// and does nothing (time cannot go backward).
     pub fn advance_time_to(&mut self, time: Time) {
         if time > self.virtual_time {
             let from = self.virtual_time;
@@ -808,6 +819,18 @@ impl LabRuntime {
             // Record time advancement
             self.replay_recorder
                 .record_time_advanced(from, self.virtual_time);
+
+            crate::tracing_compat::debug!(
+                "virtual clock advanced: delta_ms={}, new_time_ms={}",
+                (time.as_nanos() - from.as_nanos()) / 1_000_000,
+                time.as_nanos() / 1_000_000
+            );
+        } else if time < self.virtual_time {
+            crate::tracing_compat::error!(
+                "virtual clock attempt to go backward: current_ms={}, requested_ms={}",
+                self.virtual_time.as_nanos() / 1_000_000,
+                time.as_nanos() / 1_000_000
+            );
         }
     }
 
