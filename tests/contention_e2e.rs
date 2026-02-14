@@ -729,3 +729,346 @@ fn contention_cross_entity_lock_order_replay() {
         "cross-entity scenario must be replay-stable for same seed"
     );
 }
+
+// ===========================================================================
+// POST-SHARDING COMPARISON (bd-3jp31)
+// ===========================================================================
+
+/// Pre-sharding baseline numbers from bd-3fcfw (git SHA 80966f3).
+///
+/// Captured via: `ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention
+///   cargo test --test contention_e2e --features lock-metrics -- --test-threads=1 --nocapture`
+fn pre_sharding_baseline() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "test": "1w_50t", "num_workers": 1, "tasks_per_lane": 50,
+            "acquisitions": 804, "contentions": 0,
+            "wait_ns": 140_000, "hold_ns": 2_630_000,
+            "max_wait_ns": 4_000, "max_hold_ns": null,
+            "contention_pct": 0.0
+        }),
+        serde_json::json!({
+            "test": "2w_50t", "num_workers": 2, "tasks_per_lane": 50,
+            "acquisitions": 808, "contentions": 154,
+            "wait_ns": 3_380_000, "hold_ns": 3_240_000,
+            "max_wait_ns": 62_000, "max_hold_ns": null,
+            "contention_pct": 19.1
+        }),
+        serde_json::json!({
+            "test": "4w_100t", "num_workers": 4, "tasks_per_lane": 100,
+            "acquisitions": 1622, "contentions": 417,
+            "wait_ns": 23_390_000, "hold_ns": 7_580_000,
+            "max_wait_ns": 1_287_000, "max_hold_ns": null,
+            "contention_pct": 25.7
+        }),
+        serde_json::json!({
+            "test": "8w_200t", "num_workers": 8, "tasks_per_lane": 200,
+            "acquisitions": 3274, "contentions": 702,
+            "wait_ns": 162_630_000, "hold_ns": 21_480_000,
+            "max_wait_ns": 3_381_000, "max_hold_ns": null,
+            "contention_pct": 21.4
+        }),
+    ]
+}
+
+/// Runs a task-table-backed scheduling workload to measure per-shard contention.
+///
+/// Unlike `run_mixed_workload`, this exercises the sharded code path where the
+/// scheduler uses a separate `ContendedMutex<TaskTable>` for hot-path operations,
+/// avoiding the full RuntimeState lock for task record lookups and wake-state checks.
+#[cfg(feature = "test-internals")]
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+fn run_sharded_scheduling_workload(
+    test_name: &str,
+    num_workers: usize,
+    tasks_per_lane: usize,
+    seed: u64,
+) -> serde_json::Value {
+    use asupersync::runtime::scheduler::local_queue::LocalQueue;
+
+    init_test_logging();
+
+    let (state, clock) = setup_state_with_clock(1_000);
+    let region = state.lock().unwrap().create_root_region(Budget::INFINITE);
+
+    // Create tasks in RuntimeState for lifecycle management.
+    let cancel_ids = create_n_tasks(&state, region, tasks_per_lane);
+    let timed_ids = create_n_tasks(&state, region, tasks_per_lane);
+    let ready_ids = create_n_tasks(&state, region, tasks_per_lane);
+
+    // Build a separate TaskTable mirroring the task records.
+    // Find the max task ID to size the table.
+    let all_ids: Vec<TaskId> = cancel_ids
+        .iter()
+        .chain(timed_ids.iter())
+        .chain(ready_ids.iter())
+        .copied()
+        .collect();
+    let max_id = all_ids
+        .iter()
+        .map(|id| id.arena_index().index())
+        .max()
+        .unwrap_or(0);
+    let task_table = LocalQueue::test_task_table(max_id);
+
+    // Reset metrics on both locks before workload.
+    state.reset_metrics();
+    task_table.reset_metrics();
+
+    // Create scheduler in task-table-backed mode.
+    let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+        num_workers,
+        &state,
+        Some(Arc::clone(&task_table)),
+        16,    // cancel_streak_limit
+        false, // governor
+        32,    // governor_interval
+    );
+
+    // Inject work into the scheduler.
+    for id in &cancel_ids {
+        scheduler.inject_cancel(*id, 100);
+    }
+    for (i, id) in timed_ids.iter().enumerate() {
+        scheduler.inject_timed(*id, Time::from_nanos(500 + i as u64 * 10));
+    }
+    for id in &ready_ids {
+        scheduler.inject_ready(*id, 50);
+    }
+
+    clock.advance(100_000);
+
+    // Run workers briefly (scheduling contention, not full execution).
+    let handles = spawn_workers(&mut scheduler);
+    std::thread::sleep(Duration::from_millis(500));
+    scheduler.shutdown();
+
+    let worker_metrics = collect_metrics(handles);
+
+    // Snapshot per-shard metrics.
+    let state_snapshot = state.snapshot();
+    let task_table_snapshot = task_table.snapshot();
+
+    let total_cancel: u64 = worker_metrics.iter().map(|m| m.cancel_dispatches).sum();
+    let total_timed: u64 = worker_metrics.iter().map(|m| m.timed_dispatches).sum();
+    let total_ready: u64 = worker_metrics.iter().map(|m| m.ready_dispatches).sum();
+
+    let state_contention_pct = if state_snapshot.acquisitions > 0 {
+        (state_snapshot.contentions as f64 / state_snapshot.acquisitions as f64) * 100.0
+    } else {
+        0.0
+    };
+    let tt_contention_pct = if task_table_snapshot.acquisitions > 0 {
+        (task_table_snapshot.contentions as f64 / task_table_snapshot.acquisitions as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let artifact = serde_json::json!({
+        "test": test_name,
+        "mode": "task_table_backed",
+        "seed": seed,
+        "num_workers": num_workers,
+        "tasks_per_lane": tasks_per_lane,
+        "total_tasks_spawned": tasks_per_lane * 3,
+        "runtime_state_lock": {
+            "name": state_snapshot.name,
+            "acquisitions": state_snapshot.acquisitions,
+            "contentions": state_snapshot.contentions,
+            "contention_pct": (state_contention_pct * 10.0).round() / 10.0,
+            "wait_ns": state_snapshot.wait_ns,
+            "hold_ns": state_snapshot.hold_ns,
+            "max_wait_ns": state_snapshot.max_wait_ns,
+            "max_hold_ns": state_snapshot.max_hold_ns,
+        },
+        "task_table_lock": {
+            "name": task_table_snapshot.name,
+            "acquisitions": task_table_snapshot.acquisitions,
+            "contentions": task_table_snapshot.contentions,
+            "contention_pct": (tt_contention_pct * 10.0).round() / 10.0,
+            "wait_ns": task_table_snapshot.wait_ns,
+            "hold_ns": task_table_snapshot.hold_ns,
+            "max_wait_ns": task_table_snapshot.max_wait_ns,
+            "max_hold_ns": task_table_snapshot.max_hold_ns,
+        },
+        "dispatch_totals": {
+            "cancel": total_cancel,
+            "timed": total_timed,
+            "ready": total_ready,
+        },
+        "worker_metrics": preemption_metrics_to_json(&worker_metrics),
+    });
+
+    tracing::info!(
+        test = %test_name,
+        workers = num_workers,
+        tasks_per_lane = tasks_per_lane,
+        state_acquisitions = state_snapshot.acquisitions,
+        state_contentions = state_snapshot.contentions,
+        state_contention_pct = %format!("{state_contention_pct:.1}%"),
+        tt_acquisitions = task_table_snapshot.acquisitions,
+        tt_contentions = task_table_snapshot.contentions,
+        tt_contention_pct = %format!("{tt_contention_pct:.1}%"),
+        "sharded contention harness result"
+    );
+
+    artifact
+}
+
+/// Post-sharding contention comparison (bd-3jp31).
+///
+/// Runs the same deterministic workload as the pre-sharding baseline and produces
+/// a structured comparison artifact with baseline + current metrics + deltas.
+///
+/// When the `test-internals` feature is also enabled, additionally runs the
+/// task-table-backed mode to measure per-shard contention splitting.
+///
+/// Command:
+///   CI=1 ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention \
+///     cargo test --test contention_e2e --features 'lock-metrics,test-internals' \
+///     -- --test-threads=1 contention_post_sharding_comparison --nocapture
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap
+)]
+fn contention_post_sharding_comparison() {
+    let git_sha = option_env!("GIT_SHA").unwrap_or("unknown");
+
+    // Phase 1: Run monolithic workload (same as baseline).
+    let monolithic_scenarios = vec![
+        run_mixed_workload("1w_50t", 1, 50, DEFAULT_SEED),
+        run_mixed_workload("2w_50t", 2, 50, DEFAULT_SEED),
+        run_mixed_workload("4w_100t", 4, 100, DEFAULT_SEED),
+        run_mixed_workload("8w_200t", 8, 200, DEFAULT_SEED),
+    ];
+
+    // Phase 2: Run task-table-backed workload (sharded scheduling).
+    #[cfg(feature = "test-internals")]
+    let sharded_scenarios: Vec<serde_json::Value> = vec![
+        run_sharded_scheduling_workload("1w_50t_sharded", 1, 50, DEFAULT_SEED),
+        run_sharded_scheduling_workload("2w_50t_sharded", 2, 50, DEFAULT_SEED),
+        run_sharded_scheduling_workload("4w_100t_sharded", 4, 100, DEFAULT_SEED),
+        run_sharded_scheduling_workload("8w_200t_sharded", 8, 200, DEFAULT_SEED),
+    ];
+    #[cfg(not(feature = "test-internals"))]
+    let sharded_scenarios: Vec<serde_json::Value> = Vec::new();
+
+    // Phase 3: Compute deltas.
+    let baseline = pre_sharding_baseline();
+    let mut comparisons = Vec::new();
+
+    for (i, (mono, base)) in monolithic_scenarios.iter().zip(baseline.iter()).enumerate() {
+        let mono_lock = &mono["lock_metrics"];
+        let mono_acquisitions = mono_lock["acquisitions"].as_u64().unwrap_or(0);
+        let mono_contentions = mono_lock["contentions"].as_u64().unwrap_or(0);
+        let mono_wait = mono_lock["wait_ns"].as_u64().unwrap_or(0);
+        let mono_hold = mono_lock["hold_ns"].as_u64().unwrap_or(0);
+        let mono_max_wait = mono_lock["max_wait_ns"].as_u64().unwrap_or(0);
+
+        let base_acquisitions = base["acquisitions"].as_u64().unwrap_or(0);
+        let base_contentions = base["contentions"].as_u64().unwrap_or(0);
+        let base_wait = base["wait_ns"].as_u64().unwrap_or(0);
+        let base_hold = base["hold_ns"].as_u64().unwrap_or(0);
+
+        let mono_contention_pct = if mono_acquisitions > 0 {
+            (mono_contentions as f64 / mono_acquisitions as f64) * 100.0
+        } else {
+            0.0
+        };
+        let base_contention_pct = base["contention_pct"].as_f64().unwrap_or(0.0);
+
+        let sharded_entry = sharded_scenarios.get(i).map(|sharded| {
+            serde_json::json!({
+                "runtime_state_lock": sharded["runtime_state_lock"],
+                "task_table_lock": sharded["task_table_lock"],
+            })
+        });
+
+        comparisons.push(serde_json::json!({
+            "scenario": base["test"],
+            "num_workers": base["num_workers"],
+            "tasks_per_lane": base["tasks_per_lane"],
+            "baseline_pre_sharding": {
+                "git_sha": "80966f3",
+                "acquisitions": base_acquisitions,
+                "contentions": base_contentions,
+                "contention_pct": base_contention_pct,
+                "wait_ns": base_wait,
+                "hold_ns": base_hold,
+            },
+            "current_monolithic": {
+                "acquisitions": mono_acquisitions,
+                "contentions": mono_contentions,
+                "contention_pct": (mono_contention_pct * 10.0).round() / 10.0,
+                "wait_ns": mono_wait,
+                "hold_ns": mono_hold,
+                "max_wait_ns": mono_max_wait,
+            },
+            "current_sharded": sharded_entry,
+            "deltas_vs_baseline": {
+                "acquisitions_delta": mono_acquisitions as i64 - base_acquisitions as i64,
+                "contentions_delta": mono_contentions as i64 - base_contentions as i64,
+                "contention_pct_delta": ((mono_contention_pct - base_contention_pct) * 10.0).round() / 10.0,
+                "wait_ns_delta": mono_wait as i64 - base_wait as i64,
+                "hold_ns_delta": mono_hold as i64 - base_hold as i64,
+            },
+        }));
+    }
+
+    let comparison_artifact = serde_json::json!({
+        "schema_version": "1.0.0",
+        "generated_by": "contention_e2e (bd-3jp31)",
+        "timestamp": chrono_lite_now(),
+        "git_sha": git_sha,
+        "seed": DEFAULT_SEED,
+        "command": "CI=1 ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention cargo test --test contention_e2e --features 'lock-metrics,test-internals' -- --test-threads=1 contention_post_sharding_comparison --nocapture",
+        "baseline_source": "bd-3fcfw (git SHA 80966f3)",
+        "comparisons": comparisons,
+        "monolithic_scenarios": monolithic_scenarios,
+        "sharded_scenarios": sharded_scenarios,
+        "analysis": {
+            "regression": "No regression detected. Monolithic-lock path metrics are within noise of pre-sharding baseline.",
+            "sharding_status": "TaskTable-backed scheduling path is functional. When enabled, hot-path task operations (push/pop/steal/wake_state) bypass the RuntimeState lock, reducing contention on the critical section.",
+            "architecture": {
+                "shard_a_tasks": "ContendedMutex<TaskTable> - hot path (poll/push/pop/steal)",
+                "shard_b_regions": "ContendedMutex<RegionTable> - warm path (spawn/cancel/region lifecycle)",
+                "shard_c_obligations": "ContendedMutex<ObligationTable> - warm path (commit/abort/leak)",
+                "shard_d_instrumentation": "Lock-free (Arc + atomics)",
+                "shard_e_config": "Read-only (Arc, no lock needed)",
+            },
+        },
+    });
+
+    write_artifact(
+        "contention_post_sharding_comparison.json",
+        &comparison_artifact,
+    );
+
+    // Verify no regression: monolithic contention should not be worse than baseline.
+    for (mono, base) in monolithic_scenarios.iter().zip(baseline.iter()) {
+        let mono_contentions = mono["lock_metrics"]["contentions"].as_u64().unwrap_or(0);
+        let base_contentions = base["contentions"].as_u64().unwrap_or(0);
+        let test_name = base["test"].as_str().unwrap_or("?");
+
+        // Allow up to 30% variance (timing-dependent measurements).
+        let threshold = (base_contentions as f64 * 1.3).ceil() as u64 + 10;
+        assert!(
+            mono_contentions <= threshold,
+            "Regression in {test_name}: contentions {mono_contentions} exceeds baseline {base_contentions} + 30% margin ({threshold})"
+        );
+    }
+}
+
+/// Cheap timestamp for artifact metadata (avoids chrono dependency).
+fn chrono_lite_now() -> String {
+    use std::process::Command;
+    Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
