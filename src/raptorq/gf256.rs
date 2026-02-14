@@ -13,6 +13,46 @@
 //!
 //! All operations are deterministic and platform-independent. Table generation
 //! is `const`-evaluated at compile time.
+//!
+//! # Kernel Dispatch
+//!
+//! Bulk slice operations dispatch through a deterministic kernel selector:
+//! - x86/x86_64 with AVX2 support -> `Gf256Kernel::X86Avx2`
+//! - aarch64 with NEON support -> `Gf256Kernel::Aarch64Neon`
+//! - otherwise -> `Gf256Kernel::Scalar`
+//!
+//! # Feature Detection and Build Flags
+//!
+//! - Runtime detection:
+//!   - x86/x86_64 uses `is_x86_feature_detected!("avx2")`
+//!   - aarch64 uses `is_aarch64_feature_detected!("neon")`
+//! - Compile-time gating:
+//!   - AVX2 implementation is compiled only on `target_arch = "x86" | "x86_64"`
+//!   - NEON implementation is compiled only on `target_arch = "aarch64"`
+//! - Scalar fallback:
+//!   - always compiled and selected when feature checks fail or ISA code is unavailable.
+//! - Determinism:
+//!   - dispatch decision is memoized in `OnceLock`, so kernel selection is stable
+//!     for process lifetime.
+
+#![allow(unsafe_code)]
+
+#[cfg(target_arch = "aarch64")]
+use core::arch::aarch64::{
+    uint8x16_t, vandq_u8, vdupq_n_u8, veorq_u8, vld1q_u8, vqtbl1q_u8, vshrq_n_u8, vst1q_u8,
+};
+#[cfg(target_arch = "x86")]
+use core::arch::x86::{
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
+};
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::{
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
+};
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
 ///
@@ -111,6 +151,115 @@ const fn build_mul_tables() -> [[u8; 256]; 256] {
 }
 
 static MUL_TABLES: [[u8; 256]; 256] = build_mul_tables();
+
+use std::simd::prelude::*;
+
+/// Precomputed nibble-decomposed multiplication tables for SIMD (Halevi-Shacham).
+///
+/// For a scalar `c`, stores `lo[i] = c * i` for `i in 0..16` and
+/// `hi[i] = c * (i << 4)` for `i in 0..16`. This enables 16-byte-at-a-time
+/// multiplication via `c * x = lo[x & 0x0F] ^ hi[x >> 4]`, where each lookup
+/// is a single SIMD shuffle (`swizzle_dyn` → PSHUFB on x86).
+struct NibbleTables {
+    lo: Simd<u8, 16>,
+    hi: Simd<u8, 16>,
+}
+
+impl NibbleTables {
+    #[inline]
+    fn for_scalar(c: Gf256) -> Self {
+        let t = &MUL_TABLES[c.0 as usize];
+        Self {
+            lo: Simd::from_array([
+                t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12],
+                t[13], t[14], t[15],
+            ]),
+            hi: Simd::from_array([
+                t[0x00], t[0x10], t[0x20], t[0x30], t[0x40], t[0x50], t[0x60], t[0x70], t[0x80],
+                t[0x90], t[0xA0], t[0xB0], t[0xC0], t[0xD0], t[0xE0], t[0xF0],
+            ]),
+        }
+    }
+
+    /// Multiply 16 bytes by the precomputed scalar via nibble decomposition.
+    #[inline]
+    fn mul16(&self, x: Simd<u8, 16>) -> Simd<u8, 16> {
+        let mask_lo = Simd::splat(0x0F);
+        let lo_nibbles = x & mask_lo;
+        let hi_nibbles = (x >> 4) & mask_lo;
+        self.lo.swizzle_dyn(lo_nibbles) ^ self.hi.swizzle_dyn(hi_nibbles)
+    }
+}
+
+/// Runtime-selected kernel family for bulk GF(256) operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gf256Kernel {
+    /// Portable fallback used everywhere.
+    Scalar,
+    /// x86/x86_64 AVX2-capable lane.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    X86Avx2,
+    /// aarch64 NEON-capable lane.
+    #[cfg(target_arch = "aarch64")]
+    Aarch64Neon,
+}
+
+type AddSliceKernel = fn(&mut [u8], &[u8]);
+type MulSliceKernel = fn(&mut [u8], Gf256);
+type AddMulSliceKernel = fn(&mut [u8], &[u8], Gf256);
+
+#[derive(Clone, Copy)]
+struct Gf256Dispatch {
+    kind: Gf256Kernel,
+    add_slice: AddSliceKernel,
+    mul_slice: MulSliceKernel,
+    addmul_slice: AddMulSliceKernel,
+}
+
+static DISPATCH: std::sync::OnceLock<Gf256Dispatch> = std::sync::OnceLock::new();
+
+fn dispatch() -> &'static Gf256Dispatch {
+    DISPATCH.get_or_init(detect_dispatch)
+}
+
+fn detect_dispatch() -> Gf256Dispatch {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return Gf256Dispatch {
+                kind: Gf256Kernel::X86Avx2,
+                add_slice: gf256_add_slice_x86_avx2,
+                mul_slice: gf256_mul_slice_x86_avx2,
+                addmul_slice: gf256_addmul_slice_x86_avx2,
+            };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return Gf256Dispatch {
+                kind: Gf256Kernel::Aarch64Neon,
+                add_slice: gf256_add_slice_aarch64_neon,
+                mul_slice: gf256_mul_slice_aarch64_neon,
+                addmul_slice: gf256_addmul_slice_aarch64_neon,
+            };
+        }
+    }
+
+    Gf256Dispatch {
+        kind: Gf256Kernel::Scalar,
+        add_slice: gf256_add_slice_scalar,
+        mul_slice: gf256_mul_slice_scalar,
+        addmul_slice: gf256_addmul_slice_scalar,
+    }
+}
+
+/// Returns the active runtime-selected GF(256) bulk kernel family.
+#[must_use]
+pub fn active_kernel() -> Gf256Kernel {
+    dispatch().kind
+}
 
 // ============================================================================
 // Field element wrapper
@@ -297,6 +446,10 @@ impl std::ops::MulAssign for Gf256 {
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
+    (dispatch().add_slice)(dst, src);
+}
+
+fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
 
     // Wide path: 32 bytes (4×u64) per iteration.
@@ -343,6 +496,18 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn gf256_add_slice_x86_avx2(dst: &mut [u8], src: &[u8]) {
+    // Dispatch scaffold: AVX2 lane currently reuses scalar core.
+    gf256_add_slice_scalar(dst, src);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn gf256_add_slice_aarch64_neon(dst: &mut [u8], src: &[u8]) {
+    // Dispatch scaffold: NEON lane currently reuses scalar core.
+    gf256_add_slice_scalar(dst, src);
+}
+
 /// Minimum slice length to amortise building a 256-byte multiplication table.
 ///
 /// The table build is 255 lookups; above this threshold the per-element
@@ -355,6 +520,18 @@ fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
     &MUL_TABLES[c.0 as usize]
 }
 
+fn mul_nibble_tables(c: Gf256) -> ([u8; 16], [u8; 16]) {
+    let mut low = [0u8; 16];
+    let mut high = [0u8; 16];
+    let mut i = 0usize;
+    while i < 16 {
+        low[i] = gf256_mul_const(i as u8, c.0);
+        high[i] = gf256_mul_const((i as u8) << 4, c.0);
+        i += 1;
+    }
+    (low, high)
+}
+
 /// Multiply every element of `dst` by scalar `c` in GF(256).
 ///
 /// For slices >= `MUL_TABLE_THRESHOLD` bytes, a pre-built 256-entry table
@@ -363,6 +540,10 @@ fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
 /// If `c` is zero, the entire slice is zeroed. If `c` is one, this is a no-op.
 #[inline]
 pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
+    (dispatch().mul_slice)(dst, c);
+}
+
+fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
     if c.is_zero() {
         dst.fill(0);
         return;
@@ -371,8 +552,9 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
         return;
     }
     if dst.len() >= MUL_TABLE_THRESHOLD {
+        let nib = NibbleTables::for_scalar(c);
         let table = mul_table_for(c);
-        mul_with_table_wide(dst, table);
+        mul_with_table_wide(dst, &nib, table);
     } else {
         let log_c = LOG[c.0 as usize] as usize;
         for d in dst.iter_mut() {
@@ -383,12 +565,73 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     }
 }
 
-/// Inner loop for `gf256_mul_slice`: batch 8 table lookups per iteration,
-/// writing results as `u64` to avoid per-byte store overhead.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn gf256_mul_slice_x86_avx2(dst: &mut [u8], c: Gf256) {
+    if c.is_zero() {
+        dst.fill(0);
+        return;
+    }
+    if c == Gf256::ONE {
+        return;
+    }
+    if dst.len() < 32 {
+        gf256_mul_slice_scalar(dst, c);
+        return;
+    }
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: CPU feature is checked at runtime above, and the function
+        // only reads/writes within `dst` bounds.
+        unsafe {
+            gf256_mul_slice_x86_avx2_impl(dst, c);
+        }
+    } else {
+        gf256_mul_slice_scalar(dst, c);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn gf256_mul_slice_aarch64_neon(dst: &mut [u8], c: Gf256) {
+    if c.is_zero() {
+        dst.fill(0);
+        return;
+    }
+    if c == Gf256::ONE {
+        return;
+    }
+    if dst.len() < 16 {
+        gf256_mul_slice_scalar(dst, c);
+        return;
+    }
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        // SAFETY: CPU feature is checked at runtime above, and the function
+        // only reads/writes within `dst` bounds.
+        unsafe {
+            gf256_mul_slice_aarch64_neon_impl(dst, c);
+        }
+    } else {
+        gf256_mul_slice_scalar(dst, c);
+    }
+}
+
+/// SIMD inner loop for `gf256_mul_slice`: processes 16 bytes per iteration
+/// via Halevi-Shacham nibble decomposition (`swizzle_dyn` → PSHUFB on x86).
 ///
-/// Uses `chunks_exact_mut(8)` iterators so the compiler can elide bounds
-/// checks in the hot loop.
-fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
+/// Falls back to scalar table lookups for the remainder (< 16 bytes).
+fn mul_with_table_wide(dst: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
+    let mut chunks = dst.chunks_exact_mut(16);
+    for chunk in chunks.by_ref() {
+        let x = Simd::<u8, 16>::from_slice(chunk);
+        let result = nib.mul16(x);
+        chunk.copy_from_slice(result.as_array());
+    }
+    for d in chunks.into_remainder() {
+        *d = table[*d as usize];
+    }
+}
+
+/// Scalar inner loop for `gf256_mul_slice` (retained for test comparison).
+#[cfg(test)]
+fn mul_with_table_scalar(dst: &mut [u8], table: &[u8; 256]) {
     let mut chunks = dst.chunks_exact_mut(8);
     for chunk in chunks.by_ref() {
         let t = [
@@ -408,12 +651,31 @@ fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
     }
 }
 
-/// Inner loop for `gf256_addmul_slice`: batch 8 table lookups, then wide-XOR
-/// the results into `dst` via `u64`.
+/// SIMD inner loop for `gf256_addmul_slice`: processes 16 bytes per iteration
+/// via Halevi-Shacham nibble decomposition, XORing the products into `dst`.
 ///
-/// Uses `chunks_exact_mut(8)` / `chunks_exact(8)` iterators so the compiler
-/// can elide per-iteration bounds checks in the hot loop.
-fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
+/// Falls back to scalar table lookups for the remainder (< 16 bytes).
+fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], nib: &NibbleTables, table: &[u8; 256]) {
+    let mut d_chunks = dst.chunks_exact_mut(16);
+    let mut s_chunks = src.chunks_exact(16);
+    for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
+        let s = Simd::<u8, 16>::from_slice(s_chunk);
+        let d = Simd::<u8, 16>::from_slice(d_chunk);
+        let result = d ^ nib.mul16(s);
+        d_chunk.copy_from_slice(result.as_array());
+    }
+    for (d, s) in d_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks.remainder())
+    {
+        *d ^= table[*s as usize];
+    }
+}
+
+/// Scalar inner loop for `gf256_addmul_slice` (retained for test comparison).
+#[cfg(test)]
+fn addmul_with_table_scalar(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
     let mut d_chunks = dst.chunks_exact_mut(8);
     let mut s_chunks = src.chunks_exact(8);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
@@ -452,6 +714,10 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
+    (dispatch().addmul_slice)(dst, src, c);
+}
+
+fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
     const ADDMUL_TABLE_THRESHOLD: usize = 64;
 
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
@@ -459,18 +725,193 @@ pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
         return;
     }
     if c == Gf256::ONE {
-        gf256_add_slice(dst, src);
+        gf256_add_slice_scalar(dst, src);
         return;
     }
     if src.len() >= ADDMUL_TABLE_THRESHOLD {
+        let nib = NibbleTables::for_scalar(c);
         let table = mul_table_for(c);
-        addmul_with_table_wide(dst, src, table);
+        addmul_with_table_wide(dst, src, &nib, table);
         return;
     }
     let log_c = LOG[c.0 as usize] as usize;
     for (d, s) in dst.iter_mut().zip(src.iter()) {
         if *s != 0 {
             *d ^= EXP[LOG[*s as usize] as usize + log_c];
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn gf256_addmul_slice_x86_avx2(dst: &mut [u8], src: &[u8], c: Gf256) {
+    assert_eq!(dst.len(), src.len(), "slice length mismatch");
+    if c.is_zero() {
+        return;
+    }
+    if c == Gf256::ONE {
+        gf256_add_slice_x86_avx2(dst, src);
+        return;
+    }
+    if src.len() < 32 {
+        gf256_addmul_slice_scalar(dst, src, c);
+        return;
+    }
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: CPU feature is checked at runtime above, and both slices are
+        // length-checked to match before vectorized processing.
+        unsafe {
+            gf256_addmul_slice_x86_avx2_impl(dst, src, c);
+        }
+    } else {
+        gf256_addmul_slice_scalar(dst, src, c);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn gf256_addmul_slice_aarch64_neon(dst: &mut [u8], src: &[u8], c: Gf256) {
+    assert_eq!(dst.len(), src.len(), "slice length mismatch");
+    if c.is_zero() {
+        return;
+    }
+    if c == Gf256::ONE {
+        gf256_add_slice_aarch64_neon(dst, src);
+        return;
+    }
+    if src.len() < 16 {
+        gf256_addmul_slice_scalar(dst, src, c);
+        return;
+    }
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        // SAFETY: CPU feature is checked at runtime above, and both slices are
+        // length-checked to match before vectorized processing.
+        unsafe {
+            gf256_addmul_slice_aarch64_neon_impl(dst, src, c);
+        }
+    } else {
+        gf256_addmul_slice_scalar(dst, src, c);
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf256_mul_slice_x86_avx2_impl(dst: &mut [u8], c: Gf256) {
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr() as *const __m128i) };
+    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr() as *const __m128i) };
+    let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
+    let high_tbl_256 = _mm256_broadcastsi128_si256(high_tbl_128);
+    let nibble_mask = _mm256_set1_epi8(0x0f_i8);
+
+    let mut i = 0usize;
+    while i + 32 <= dst.len() {
+        let ptr = unsafe { dst.as_mut_ptr().add(i) };
+        let input = unsafe { _mm256_loadu_si256(ptr as *const __m256i) };
+        let low_nibbles = _mm256_and_si256(input, nibble_mask);
+        let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(input, 4), nibble_mask);
+        let low_mul = _mm256_shuffle_epi8(low_tbl_256, low_nibbles);
+        let high_mul = _mm256_shuffle_epi8(high_tbl_256, high_nibbles);
+        let result = _mm256_xor_si256(low_mul, high_mul);
+        unsafe { _mm256_storeu_si256(ptr as *mut __m256i, result) };
+        i += 32;
+    }
+
+    if i < dst.len() {
+        let table = mul_table_for(c);
+        for d in &mut dst[i..] {
+            *d = table[*d as usize];
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf256_addmul_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8], c: Gf256) {
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr() as *const __m128i) };
+    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr() as *const __m128i) };
+    let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
+    let high_tbl_256 = _mm256_broadcastsi128_si256(high_tbl_128);
+    let nibble_mask = _mm256_set1_epi8(0x0f_i8);
+
+    let mut i = 0usize;
+    while i + 32 <= src.len() {
+        let src_ptr = unsafe { src.as_ptr().add(i) };
+        let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
+        let src_v = unsafe { _mm256_loadu_si256(src_ptr as *const __m256i) };
+        let dst_v = unsafe { _mm256_loadu_si256(dst_ptr as *const __m256i) };
+        let low_nibbles = _mm256_and_si256(src_v, nibble_mask);
+        let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(src_v, 4), nibble_mask);
+        let low_mul = _mm256_shuffle_epi8(low_tbl_256, low_nibbles);
+        let high_mul = _mm256_shuffle_epi8(high_tbl_256, high_nibbles);
+        let product = _mm256_xor_si256(low_mul, high_mul);
+        let result = _mm256_xor_si256(dst_v, product);
+        unsafe { _mm256_storeu_si256(dst_ptr as *mut __m256i, result) };
+        i += 32;
+    }
+
+    if i < src.len() {
+        let table = mul_table_for(c);
+        for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
+            *d ^= table[*s as usize];
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn gf256_mul_slice_aarch64_neon_impl(dst: &mut [u8], c: Gf256) {
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    let low_tbl: uint8x16_t = unsafe { vld1q_u8(low_tbl_arr.as_ptr()) };
+    let high_tbl: uint8x16_t = unsafe { vld1q_u8(high_tbl_arr.as_ptr()) };
+    let nibble_mask = vdupq_n_u8(0x0f);
+
+    let mut i = 0usize;
+    while i + 16 <= dst.len() {
+        let ptr = unsafe { dst.as_mut_ptr().add(i) };
+        let input = unsafe { vld1q_u8(ptr) };
+        let low_nibbles = vandq_u8(input, nibble_mask);
+        let high_nibbles = vandq_u8(vshrq_n_u8(input, 4), nibble_mask);
+        let low_mul = vqtbl1q_u8(low_tbl, low_nibbles);
+        let high_mul = vqtbl1q_u8(high_tbl, high_nibbles);
+        let result = veorq_u8(low_mul, high_mul);
+        unsafe { vst1q_u8(ptr, result) };
+        i += 16;
+    }
+
+    if i < dst.len() {
+        let table = mul_table_for(c);
+        for d in &mut dst[i..] {
+            *d = table[*d as usize];
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn gf256_addmul_slice_aarch64_neon_impl(dst: &mut [u8], src: &[u8], c: Gf256) {
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    let low_tbl: uint8x16_t = unsafe { vld1q_u8(low_tbl_arr.as_ptr()) };
+    let high_tbl: uint8x16_t = unsafe { vld1q_u8(high_tbl_arr.as_ptr()) };
+    let nibble_mask = vdupq_n_u8(0x0f);
+
+    let mut i = 0usize;
+    while i + 16 <= src.len() {
+        let src_ptr = unsafe { src.as_ptr().add(i) };
+        let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
+        let src_v = unsafe { vld1q_u8(src_ptr) };
+        let dst_v = unsafe { vld1q_u8(dst_ptr) };
+        let low_nibbles = vandq_u8(src_v, nibble_mask);
+        let high_nibbles = vandq_u8(vshrq_n_u8(src_v, 4), nibble_mask);
+        let low_mul = vqtbl1q_u8(low_tbl, low_nibbles);
+        let high_mul = vqtbl1q_u8(high_tbl, high_nibbles);
+        let product = veorq_u8(low_mul, high_mul);
+        let result = veorq_u8(dst_v, product);
+        unsafe { vst1q_u8(dst_ptr, result) };
+        i += 16;
+    }
+
+    if i < src.len() {
+        let table = mul_table_for(c);
+        for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
+            *d ^= table[*s as usize];
         }
     }
 }
@@ -733,5 +1174,107 @@ mod tests {
         let expected: Vec<u8> = src.iter().map(|&s| (Gf256(s) * c).0).collect();
         gf256_addmul_slice(&mut dst, &src, c);
         assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn active_kernel_is_stable_within_process() {
+        let first = active_kernel();
+        for _ in 0..16 {
+            assert_eq!(active_kernel(), first);
+        }
+    }
+
+    // -- SIMD nibble decomposition verification --
+
+    #[test]
+    fn nibble_tables_exhaustive() {
+        // Verify nibble decomposition for all 256×256 (c, x) pairs.
+        for c in 0u16..=255 {
+            let gc = Gf256(c as u8);
+            let nib = NibbleTables::for_scalar(gc);
+            for x in 0u16..=255 {
+                let expected = (gc * Gf256(x as u8)).0;
+                let v = Simd::<u8, 16>::splat(x as u8);
+                let result = nib.mul16(v);
+                assert_eq!(
+                    result[0], expected,
+                    "nibble decomp mismatch: c={c}, x={x}, got={}, expected={expected}",
+                    result[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simd_vs_scalar_mul_equivalence() {
+        // Compare SIMD and scalar mul paths at various sizes.
+        for &len in &[16, 17, 31, 64, 71, 128, 1024] {
+            for &c_val in &[2u8, 13, 127, 255] {
+                let c = Gf256(c_val);
+                let original: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(37)) as u8).collect();
+                let table = mul_table_for(c);
+
+                let mut simd_dst = original.clone();
+                let nib = NibbleTables::for_scalar(c);
+                mul_with_table_wide(&mut simd_dst, &nib, table);
+
+                let mut scalar_dst = original;
+                mul_with_table_scalar(&mut scalar_dst, table);
+
+                assert_eq!(simd_dst, scalar_dst, "mul mismatch: len={len}, c={c_val}");
+            }
+        }
+    }
+
+    #[test]
+    fn simd_vs_scalar_addmul_equivalence() {
+        // Compare SIMD and scalar addmul paths at various sizes.
+        for &len in &[16, 17, 31, 64, 71, 128, 1024] {
+            for &c_val in &[2u8, 13, 127, 255] {
+                let c = Gf256(c_val);
+                let src: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(37)) as u8).collect();
+                let dst_init: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(53)) as u8).collect();
+                let table = mul_table_for(c);
+
+                let mut simd_dst = dst_init.clone();
+                let nib = NibbleTables::for_scalar(c);
+                addmul_with_table_wide(&mut simd_dst, &src, &nib, table);
+
+                let mut scalar_dst = dst_init;
+                addmul_with_table_scalar(&mut scalar_dst, &src, table);
+
+                assert_eq!(
+                    simd_dst, scalar_dst,
+                    "addmul mismatch: len={len}, c={c_val}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dispatched_paths_match_scalar_reference() {
+        const LEN: usize = 96;
+
+        let src: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let original: Vec<u8> = (0..LEN).map(|i| (255u16 - i as u16) as u8).collect();
+        let c = Gf256(29);
+
+        let mut add_dispatch = original.clone();
+        let mut add_scalar = original.clone();
+        gf256_add_slice(&mut add_dispatch, &src);
+        gf256_add_slice_scalar(&mut add_scalar, &src);
+        assert_eq!(add_dispatch, add_scalar);
+
+        let mut mul_dispatch = original.clone();
+        let mut mul_scalar = original.clone();
+        gf256_mul_slice(&mut mul_dispatch, c);
+        gf256_mul_slice_scalar(&mut mul_scalar, c);
+        assert_eq!(mul_dispatch, mul_scalar);
+
+        let mut addmul_dispatch = original.clone();
+        let mut addmul_scalar = original;
+        gf256_addmul_slice(&mut addmul_dispatch, &src, c);
+        gf256_addmul_slice_scalar(&mut addmul_scalar, &src, c);
+        assert_eq!(addmul_dispatch, addmul_scalar);
     }
 }
