@@ -1123,7 +1123,23 @@ impl fmt::Display for TraceEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monitor::DownReason;
+    use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
+    use crate::trace::distributed::LamportTime;
+    use crate::types::CancelReason;
     use std::collections::BTreeSet;
+
+    fn task(n: u32) -> TaskId {
+        TaskId::new_for_test(n, 1)
+    }
+    fn region(n: u32) -> RegionId {
+        RegionId::new_for_test(n, 1)
+    }
+    fn obligation(n: u32) -> ObligationId {
+        ObligationId::new_for_test(n, 1)
+    }
+
+    // ── TraceEventKind basics ──────────────────────────────────────
 
     #[test]
     fn trace_event_version_is_set() {
@@ -1150,5 +1166,1108 @@ mod tests {
                 kind.stable_name()
             );
         }
+    }
+
+    #[test]
+    fn all_array_has_36_kinds() {
+        assert_eq!(TraceEventKind::ALL.len(), 36);
+    }
+
+    #[test]
+    fn all_kinds_are_distinct() {
+        let set: BTreeSet<TraceEventKind> = TraceEventKind::ALL.iter().copied().collect();
+        assert_eq!(set.len(), TraceEventKind::ALL.len());
+    }
+
+    #[test]
+    fn display_delegates_to_stable_name() {
+        for kind in TraceEventKind::ALL {
+            assert_eq!(format!("{kind}"), kind.stable_name());
+        }
+    }
+
+    #[test]
+    fn kind_ord_is_consistent_with_eq() {
+        for a in TraceEventKind::ALL {
+            for b in TraceEventKind::ALL {
+                if a == b {
+                    assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+                } else {
+                    assert_ne!(a.cmp(&b), std::cmp::Ordering::Equal);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn required_fields_non_empty_for_all() {
+        for kind in TraceEventKind::ALL {
+            assert!(
+                !kind.required_fields().is_empty(),
+                "required_fields empty for {:?}",
+                kind
+            );
+        }
+    }
+
+    // ── Constructor tests ──────────────────────────────────────────
+
+    #[test]
+    fn spawn_constructor() {
+        let e = TraceEvent::spawn(1, Time::ZERO, task(10), region(20));
+        assert_eq!(e.kind, TraceEventKind::Spawn);
+        assert_eq!(e.seq, 1);
+        assert_eq!(
+            e.data,
+            TraceData::Task {
+                task: task(10),
+                region: region(20)
+            }
+        );
+    }
+
+    #[test]
+    fn schedule_constructor() {
+        let e = TraceEvent::schedule(2, Time::from_nanos(100), task(1), region(2));
+        assert_eq!(e.kind, TraceEventKind::Schedule);
+        assert_eq!(
+            e.data,
+            TraceData::Task {
+                task: task(1),
+                region: region(2)
+            }
+        );
+    }
+
+    #[test]
+    fn yield_task_constructor() {
+        let e = TraceEvent::yield_task(3, Time::ZERO, task(5), region(6));
+        assert_eq!(e.kind, TraceEventKind::Yield);
+        assert_eq!(
+            e.data,
+            TraceData::Task {
+                task: task(5),
+                region: region(6)
+            }
+        );
+    }
+
+    #[test]
+    fn wake_constructor() {
+        let e = TraceEvent::wake(4, Time::ZERO, task(7), region(8));
+        assert_eq!(e.kind, TraceEventKind::Wake);
+        assert_eq!(
+            e.data,
+            TraceData::Task {
+                task: task(7),
+                region: region(8)
+            }
+        );
+    }
+
+    #[test]
+    fn poll_constructor() {
+        let e = TraceEvent::poll(5, Time::ZERO, task(9), region(10));
+        assert_eq!(e.kind, TraceEventKind::Poll);
+        assert_eq!(
+            e.data,
+            TraceData::Task {
+                task: task(9),
+                region: region(10)
+            }
+        );
+    }
+
+    #[test]
+    fn complete_constructor() {
+        let e = TraceEvent::complete(6, Time::ZERO, task(11), region(12));
+        assert_eq!(e.kind, TraceEventKind::Complete);
+        assert_eq!(
+            e.data,
+            TraceData::Task {
+                task: task(11),
+                region: region(12)
+            }
+        );
+    }
+
+    #[test]
+    fn cancel_request_constructor() {
+        let e =
+            TraceEvent::cancel_request(7, Time::ZERO, task(1), region(2), CancelReason::timeout());
+        assert_eq!(e.kind, TraceEventKind::CancelRequest);
+        match &e.data {
+            TraceData::Cancel {
+                task: t,
+                region: r,
+                reason,
+            } => {
+                assert_eq!(*t, task(1));
+                assert_eq!(*r, region(2));
+                assert_eq!(reason.kind(), crate::types::CancelKind::Timeout);
+            }
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn region_created_constructor_with_parent() {
+        let e = TraceEvent::region_created(8, Time::ZERO, region(3), Some(region(1)));
+        assert_eq!(e.kind, TraceEventKind::RegionCreated);
+        assert_eq!(
+            e.data,
+            TraceData::Region {
+                region: region(3),
+                parent: Some(region(1))
+            }
+        );
+    }
+
+    #[test]
+    fn region_created_constructor_without_parent() {
+        let e = TraceEvent::region_created(9, Time::ZERO, region(3), None);
+        assert_eq!(e.kind, TraceEventKind::RegionCreated);
+        assert_eq!(
+            e.data,
+            TraceData::Region {
+                region: region(3),
+                parent: None
+            }
+        );
+    }
+
+    #[test]
+    fn region_cancelled_constructor() {
+        let e = TraceEvent::region_cancelled(10, Time::ZERO, region(5), CancelReason::shutdown());
+        assert_eq!(e.kind, TraceEventKind::RegionCancelled);
+        match &e.data {
+            TraceData::RegionCancel { region: r, .. } => assert_eq!(*r, region(5)),
+            other => panic!("expected RegionCancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn time_advance_constructor() {
+        let e =
+            TraceEvent::time_advance(11, Time::ZERO, Time::from_nanos(0), Time::from_nanos(100));
+        assert_eq!(e.kind, TraceEventKind::TimeAdvance);
+        assert_eq!(
+            e.data,
+            TraceData::Time {
+                old: Time::from_nanos(0),
+                new: Time::from_nanos(100)
+            }
+        );
+    }
+
+    #[test]
+    fn timer_scheduled_constructor() {
+        let e = TraceEvent::timer_scheduled(12, Time::ZERO, 42, Time::from_millis(500));
+        assert_eq!(e.kind, TraceEventKind::TimerScheduled);
+        assert_eq!(
+            e.data,
+            TraceData::Timer {
+                timer_id: 42,
+                deadline: Some(Time::from_millis(500))
+            }
+        );
+    }
+
+    #[test]
+    fn timer_fired_constructor() {
+        let e = TraceEvent::timer_fired(13, Time::ZERO, 42);
+        assert_eq!(e.kind, TraceEventKind::TimerFired);
+        assert_eq!(
+            e.data,
+            TraceData::Timer {
+                timer_id: 42,
+                deadline: None
+            }
+        );
+    }
+
+    #[test]
+    fn timer_cancelled_constructor() {
+        let e = TraceEvent::timer_cancelled(14, Time::ZERO, 42);
+        assert_eq!(e.kind, TraceEventKind::TimerCancelled);
+        assert_eq!(
+            e.data,
+            TraceData::Timer {
+                timer_id: 42,
+                deadline: None
+            }
+        );
+    }
+
+    #[test]
+    fn io_requested_constructor() {
+        let e = TraceEvent::io_requested(15, Time::ZERO, 99, 0x03);
+        assert_eq!(e.kind, TraceEventKind::IoRequested);
+        assert_eq!(
+            e.data,
+            TraceData::IoRequested {
+                token: 99,
+                interest: 0x03
+            }
+        );
+    }
+
+    #[test]
+    fn io_ready_constructor() {
+        let e = TraceEvent::io_ready(16, Time::ZERO, 99, 0x01);
+        assert_eq!(e.kind, TraceEventKind::IoReady);
+        assert_eq!(
+            e.data,
+            TraceData::IoReady {
+                token: 99,
+                readiness: 0x01
+            }
+        );
+    }
+
+    #[test]
+    fn io_result_constructor() {
+        let e = TraceEvent::io_result(17, Time::ZERO, 99, 1024);
+        assert_eq!(e.kind, TraceEventKind::IoResult);
+        assert_eq!(
+            e.data,
+            TraceData::IoResult {
+                token: 99,
+                bytes: 1024
+            }
+        );
+    }
+
+    #[test]
+    fn io_result_negative_bytes() {
+        let e = TraceEvent::io_result(18, Time::ZERO, 99, -1);
+        assert_eq!(
+            e.data,
+            TraceData::IoResult {
+                token: 99,
+                bytes: -1
+            }
+        );
+    }
+
+    #[test]
+    fn io_error_constructor() {
+        let e = TraceEvent::io_error(19, Time::ZERO, 99, 13);
+        assert_eq!(e.kind, TraceEventKind::IoError);
+        assert_eq!(
+            e.data,
+            TraceData::IoError {
+                token: 99,
+                kind: 13
+            }
+        );
+    }
+
+    #[test]
+    fn rng_seed_constructor() {
+        let e = TraceEvent::rng_seed(20, Time::ZERO, 0xDEAD_BEEF);
+        assert_eq!(e.kind, TraceEventKind::RngSeed);
+        assert_eq!(e.data, TraceData::RngSeed { seed: 0xDEAD_BEEF });
+    }
+
+    #[test]
+    fn rng_value_constructor() {
+        let e = TraceEvent::rng_value(21, Time::ZERO, 42);
+        assert_eq!(e.kind, TraceEventKind::RngValue);
+        assert_eq!(e.data, TraceData::RngValue { value: 42 });
+    }
+
+    #[test]
+    fn checkpoint_constructor() {
+        let e = TraceEvent::checkpoint(22, Time::ZERO, 7, 3, 2);
+        assert_eq!(e.kind, TraceEventKind::Checkpoint);
+        assert_eq!(
+            e.data,
+            TraceData::Checkpoint {
+                sequence: 7,
+                active_tasks: 3,
+                active_regions: 2
+            }
+        );
+    }
+
+    #[test]
+    fn obligation_reserve_constructor() {
+        let e = TraceEvent::obligation_reserve(
+            23,
+            Time::ZERO,
+            obligation(1),
+            task(2),
+            region(3),
+            ObligationKind::SendPermit,
+        );
+        assert_eq!(e.kind, TraceEventKind::ObligationReserve);
+        match &e.data {
+            TraceData::Obligation {
+                state,
+                duration_ns,
+                abort_reason,
+                ..
+            } => {
+                assert_eq!(*state, ObligationState::Reserved);
+                assert_eq!(*duration_ns, None);
+                assert_eq!(*abort_reason, None);
+            }
+            other => panic!("expected Obligation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn obligation_commit_constructor() {
+        let e = TraceEvent::obligation_commit(
+            24,
+            Time::ZERO,
+            obligation(1),
+            task(2),
+            region(3),
+            ObligationKind::Ack,
+            5000,
+        );
+        assert_eq!(e.kind, TraceEventKind::ObligationCommit);
+        match &e.data {
+            TraceData::Obligation {
+                state,
+                duration_ns,
+                abort_reason,
+                ..
+            } => {
+                assert_eq!(*state, ObligationState::Committed);
+                assert_eq!(*duration_ns, Some(5000));
+                assert_eq!(*abort_reason, None);
+            }
+            other => panic!("expected Obligation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn obligation_abort_constructor() {
+        let e = TraceEvent::obligation_abort(
+            25,
+            Time::ZERO,
+            obligation(1),
+            task(2),
+            region(3),
+            ObligationKind::Lease,
+            3000,
+            ObligationAbortReason::Cancel,
+        );
+        assert_eq!(e.kind, TraceEventKind::ObligationAbort);
+        match &e.data {
+            TraceData::Obligation {
+                state,
+                duration_ns,
+                abort_reason,
+                ..
+            } => {
+                assert_eq!(*state, ObligationState::Aborted);
+                assert_eq!(*duration_ns, Some(3000));
+                assert_eq!(*abort_reason, Some(ObligationAbortReason::Cancel));
+            }
+            other => panic!("expected Obligation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn obligation_leak_constructor() {
+        let e = TraceEvent::obligation_leak(
+            26,
+            Time::ZERO,
+            obligation(1),
+            task(2),
+            region(3),
+            ObligationKind::IoOp,
+            9000,
+        );
+        assert_eq!(e.kind, TraceEventKind::ObligationLeak);
+        match &e.data {
+            TraceData::Obligation {
+                state,
+                duration_ns,
+                abort_reason,
+                ..
+            } => {
+                assert_eq!(*state, ObligationState::Leaked);
+                assert_eq!(*duration_ns, Some(9000));
+                assert_eq!(*abort_reason, None);
+            }
+            other => panic!("expected Obligation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_created_constructor() {
+        let e = TraceEvent::monitor_created(27, Time::ZERO, 100, task(1), region(2), task(3));
+        assert_eq!(e.kind, TraceEventKind::MonitorCreated);
+        assert_eq!(
+            e.data,
+            TraceData::Monitor {
+                monitor_ref: 100,
+                watcher: task(1),
+                watcher_region: region(2),
+                monitored: task(3),
+            }
+        );
+    }
+
+    #[test]
+    fn monitor_dropped_constructor() {
+        let e = TraceEvent::monitor_dropped(28, Time::ZERO, 100, task(1), region(2), task(3));
+        assert_eq!(e.kind, TraceEventKind::MonitorDropped);
+        assert_eq!(
+            e.data,
+            TraceData::Monitor {
+                monitor_ref: 100,
+                watcher: task(1),
+                watcher_region: region(2),
+                monitored: task(3),
+            }
+        );
+    }
+
+    #[test]
+    fn down_delivered_constructor() {
+        let e = TraceEvent::down_delivered(
+            29,
+            Time::ZERO,
+            100,
+            task(1),
+            task(3),
+            Time::from_nanos(500),
+            DownReason::Normal,
+        );
+        assert_eq!(e.kind, TraceEventKind::DownDelivered);
+        assert_eq!(
+            e.data,
+            TraceData::Down {
+                monitor_ref: 100,
+                watcher: task(1),
+                monitored: task(3),
+                completion_vt: Time::from_nanos(500),
+                reason: DownReason::Normal,
+            }
+        );
+    }
+
+    #[test]
+    fn link_created_constructor() {
+        let e =
+            TraceEvent::link_created(30, Time::ZERO, 200, task(1), region(2), task(3), region(4));
+        assert_eq!(e.kind, TraceEventKind::LinkCreated);
+        assert_eq!(
+            e.data,
+            TraceData::Link {
+                link_ref: 200,
+                task_a: task(1),
+                region_a: region(2),
+                task_b: task(3),
+                region_b: region(4),
+            }
+        );
+    }
+
+    #[test]
+    fn link_dropped_constructor() {
+        let e =
+            TraceEvent::link_dropped(31, Time::ZERO, 200, task(1), region(2), task(3), region(4));
+        assert_eq!(e.kind, TraceEventKind::LinkDropped);
+        assert_eq!(
+            e.data,
+            TraceData::Link {
+                link_ref: 200,
+                task_a: task(1),
+                region_a: region(2),
+                task_b: task(3),
+                region_b: region(4),
+            }
+        );
+    }
+
+    #[test]
+    fn exit_delivered_constructor() {
+        let e = TraceEvent::exit_delivered(
+            32,
+            Time::ZERO,
+            200,
+            task(1),
+            task(3),
+            Time::from_nanos(999),
+            DownReason::Normal,
+        );
+        assert_eq!(e.kind, TraceEventKind::ExitDelivered);
+        assert_eq!(
+            e.data,
+            TraceData::Exit {
+                link_ref: 200,
+                from: task(1),
+                to: task(3),
+                failure_vt: Time::from_nanos(999),
+                reason: DownReason::Normal,
+            }
+        );
+    }
+
+    #[test]
+    fn user_trace_constructor() {
+        let e = TraceEvent::user_trace(33, Time::ZERO, "hello");
+        assert_eq!(e.kind, TraceEventKind::UserTrace);
+        assert_eq!(e.data, TraceData::Message("hello".into()));
+    }
+
+    #[test]
+    fn user_trace_accepts_string() {
+        let e = TraceEvent::user_trace(34, Time::ZERO, String::from("world"));
+        assert_eq!(e.data, TraceData::Message("world".into()));
+    }
+
+    // ── with_logical_time ──────────────────────────────────────────
+
+    #[test]
+    fn with_logical_time_sets_field() {
+        let lt = LogicalTime::Lamport(LamportTime::from_raw(42));
+        let e = TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None)
+            .with_logical_time(lt);
+        assert_eq!(
+            e.logical_time,
+            Some(LogicalTime::Lamport(LamportTime::from_raw(42)))
+        );
+    }
+
+    #[test]
+    fn default_logical_time_is_none() {
+        let e = TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
+        assert_eq!(e.logical_time, None);
+    }
+
+    // ── Display formatting ─────────────────────────────────────────
+
+    #[test]
+    fn display_task_event() {
+        let e = TraceEvent::spawn(1, Time::ZERO, task(10), region(20));
+        let s = format!("{e}");
+        assert!(s.contains("spawn"), "expected 'spawn' in {s}");
+        assert!(s.contains("[000001]"), "expected seq in {s}");
+    }
+
+    #[test]
+    fn display_region_with_parent() {
+        let e = TraceEvent::region_created(2, Time::ZERO, region(3), Some(region(1)));
+        let s = format!("{e}");
+        assert!(s.contains("region_created"), "expected kind in {s}");
+        assert!(s.contains("parent"), "expected parent in {s}");
+    }
+
+    #[test]
+    fn display_region_without_parent() {
+        let e = TraceEvent::region_created(3, Time::ZERO, region(3), None);
+        let s = format!("{e}");
+        assert!(s.contains("region_created"), "expected kind in {s}");
+        assert!(!s.contains("parent"), "should not contain parent: {s}");
+    }
+
+    #[test]
+    fn display_obligation_with_duration_and_abort() {
+        let e = TraceEvent::obligation_abort(
+            4,
+            Time::ZERO,
+            obligation(1),
+            task(2),
+            region(3),
+            ObligationKind::Lease,
+            5000,
+            ObligationAbortReason::Error,
+        );
+        let s = format!("{e}");
+        assert!(s.contains("obligation_abort"), "expected kind in {s}");
+        assert!(s.contains("duration=5000ns"), "expected duration in {s}");
+        assert!(s.contains("abort_reason="), "expected abort_reason in {s}");
+    }
+
+    #[test]
+    fn display_obligation_reserve_no_duration() {
+        let e = TraceEvent::obligation_reserve(
+            5,
+            Time::ZERO,
+            obligation(1),
+            task(2),
+            region(3),
+            ObligationKind::SendPermit,
+        );
+        let s = format!("{e}");
+        assert!(
+            !s.contains("duration="),
+            "reserve should not show duration: {s}"
+        );
+        assert!(
+            !s.contains("abort_reason="),
+            "reserve should not show abort_reason: {s}"
+        );
+    }
+
+    #[test]
+    fn display_cancel_event() {
+        let e =
+            TraceEvent::cancel_request(6, Time::ZERO, task(1), region(2), CancelReason::timeout());
+        let s = format!("{e}");
+        assert!(s.contains("cancel_request"), "expected kind in {s}");
+        assert!(s.contains("reason="), "expected reason in {s}");
+    }
+
+    #[test]
+    fn display_region_cancel() {
+        let e = TraceEvent::region_cancelled(7, Time::ZERO, region(5), CancelReason::shutdown());
+        let s = format!("{e}");
+        assert!(s.contains("region_cancelled"), "expected kind in {s}");
+        assert!(s.contains("reason="), "expected reason in {s}");
+    }
+
+    #[test]
+    fn display_time_advance() {
+        let e = TraceEvent::time_advance(8, Time::ZERO, Time::from_nanos(0), Time::from_nanos(100));
+        let s = format!("{e}");
+        assert!(s.contains("time_advance"), "expected kind in {s}");
+        assert!(s.contains("->"), "expected arrow in {s}");
+    }
+
+    #[test]
+    fn display_timer_with_deadline() {
+        let e = TraceEvent::timer_scheduled(9, Time::ZERO, 42, Time::from_millis(500));
+        let s = format!("{e}");
+        assert!(s.contains("timer=42"), "expected timer id in {s}");
+        assert!(s.contains("deadline="), "expected deadline in {s}");
+    }
+
+    #[test]
+    fn display_timer_without_deadline() {
+        let e = TraceEvent::timer_fired(10, Time::ZERO, 42);
+        let s = format!("{e}");
+        assert!(s.contains("timer=42"), "expected timer id in {s}");
+        assert!(!s.contains("deadline="), "should not show deadline: {s}");
+    }
+
+    #[test]
+    fn display_io_requested() {
+        let e = TraceEvent::io_requested(11, Time::ZERO, 99, 0x03);
+        let s = format!("{e}");
+        assert!(s.contains("io_requested"), "expected kind in {s}");
+        assert!(s.contains("token=99"), "expected token in {s}");
+        assert!(s.contains("interest=3"), "expected interest in {s}");
+    }
+
+    #[test]
+    fn display_io_ready() {
+        let e = TraceEvent::io_ready(12, Time::ZERO, 99, 0x01);
+        let s = format!("{e}");
+        assert!(s.contains("io_ready"), "expected kind in {s}");
+        assert!(s.contains("readiness=1"), "expected readiness in {s}");
+    }
+
+    #[test]
+    fn display_io_result() {
+        let e = TraceEvent::io_result(13, Time::ZERO, 99, 1024);
+        let s = format!("{e}");
+        assert!(s.contains("io_result"), "expected kind in {s}");
+        assert!(s.contains("bytes=1024"), "expected bytes in {s}");
+    }
+
+    #[test]
+    fn display_io_error() {
+        let e = TraceEvent::io_error(14, Time::ZERO, 99, 13);
+        let s = format!("{e}");
+        assert!(s.contains("io_error"), "expected kind in {s}");
+        assert!(s.contains("kind=13"), "expected kind in {s}");
+    }
+
+    #[test]
+    fn display_rng_seed() {
+        let e = TraceEvent::rng_seed(15, Time::ZERO, 0xCAFE);
+        let s = format!("{e}");
+        assert!(s.contains("rng_seed=51966"), "expected seed in {s}");
+    }
+
+    #[test]
+    fn display_rng_value() {
+        let e = TraceEvent::rng_value(16, Time::ZERO, 42);
+        let s = format!("{e}");
+        assert!(s.contains("rng_value=42"), "expected value in {s}");
+    }
+
+    #[test]
+    fn display_checkpoint() {
+        let e = TraceEvent::checkpoint(17, Time::ZERO, 7, 3, 2);
+        let s = format!("{e}");
+        assert!(s.contains("checkpoint"), "expected kind in {s}");
+        assert!(s.contains("seq=7"), "expected seq in {s}");
+        assert!(s.contains("tasks=3"), "expected tasks in {s}");
+        assert!(s.contains("regions=2"), "expected regions in {s}");
+    }
+
+    #[test]
+    fn display_futurelock_empty_held() {
+        let e = TraceEvent::new(
+            18,
+            Time::ZERO,
+            TraceEventKind::FuturelockDetected,
+            TraceData::Futurelock {
+                task: task(1),
+                region: region(2),
+                idle_steps: 10,
+                held: vec![],
+            },
+        );
+        let s = format!("{e}");
+        assert!(s.contains("futurelock"), "expected kind in {s}");
+        assert!(s.contains("idle=10"), "expected idle in {s}");
+        assert!(s.contains("held=[]"), "expected empty held in {s}");
+    }
+
+    #[test]
+    fn display_futurelock_with_held() {
+        let e = TraceEvent::new(
+            19,
+            Time::ZERO,
+            TraceEventKind::FuturelockDetected,
+            TraceData::Futurelock {
+                task: task(1),
+                region: region(2),
+                idle_steps: 5,
+                held: vec![(obligation(10), ObligationKind::SendPermit)],
+            },
+        );
+        let s = format!("{e}");
+        assert!(s.contains("held=["), "expected held in {s}");
+        assert!(s.contains("SendPermit"), "expected kind in {s}");
+    }
+
+    #[test]
+    fn display_monitor() {
+        let e = TraceEvent::monitor_created(20, Time::ZERO, 100, task(1), region(2), task(3));
+        let s = format!("{e}");
+        assert!(s.contains("monitor_ref=100"), "expected ref in {s}");
+    }
+
+    #[test]
+    fn display_down() {
+        let e = TraceEvent::down_delivered(
+            21,
+            Time::ZERO,
+            100,
+            task(1),
+            task(3),
+            Time::from_nanos(500),
+            DownReason::Normal,
+        );
+        let s = format!("{e}");
+        assert!(s.contains("down"), "expected down in {s}");
+        assert!(s.contains("monitor_ref=100"), "expected ref in {s}");
+    }
+
+    #[test]
+    fn display_link() {
+        let e =
+            TraceEvent::link_created(22, Time::ZERO, 200, task(1), region(2), task(3), region(4));
+        let s = format!("{e}");
+        assert!(s.contains("link_ref=200"), "expected ref in {s}");
+    }
+
+    #[test]
+    fn display_exit() {
+        let e = TraceEvent::exit_delivered(
+            23,
+            Time::ZERO,
+            200,
+            task(1),
+            task(3),
+            Time::from_nanos(999),
+            DownReason::Normal,
+        );
+        let s = format!("{e}");
+        assert!(s.contains("exit"), "expected exit in {s}");
+        assert!(s.contains("link_ref=200"), "expected ref in {s}");
+    }
+
+    #[test]
+    fn display_message() {
+        let e = TraceEvent::user_trace(24, Time::ZERO, "hello world");
+        let s = format!("{e}");
+        assert!(s.contains("\"hello world\""), "expected msg in {s}");
+    }
+
+    #[test]
+    fn display_chaos_with_task() {
+        let e = TraceEvent::new(
+            25,
+            Time::ZERO,
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "delay".into(),
+                task: Some(task(1)),
+                detail: "200ns".into(),
+            },
+        );
+        let s = format!("{e}");
+        assert!(s.contains("chaos:delay"), "expected kind in {s}");
+        assert!(s.contains("task="), "expected task in {s}");
+        assert!(s.contains("200ns"), "expected detail in {s}");
+    }
+
+    #[test]
+    fn display_chaos_without_task() {
+        let e = TraceEvent::new(
+            26,
+            Time::ZERO,
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind: "budget_exhaust".into(),
+                task: None,
+                detail: "all".into(),
+            },
+        );
+        let s = format!("{e}");
+        assert!(s.contains("chaos:budget_exhaust"), "expected kind in {s}");
+        assert!(!s.contains("task="), "should not show task: {s}");
+    }
+
+    #[test]
+    fn display_none_data() {
+        let e = TraceEvent::new(27, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
+        let s = format!("{e}");
+        // Should have seq, time, kind but nothing else
+        assert!(s.contains("user_trace"), "expected kind in {s}");
+    }
+
+    #[test]
+    fn display_with_logical_time() {
+        let lt = LogicalTime::Lamport(LamportTime::from_raw(42));
+        let e = TraceEvent::new(28, Time::ZERO, TraceEventKind::UserTrace, TraceData::None)
+            .with_logical_time(lt);
+        let s = format!("{e}");
+        assert!(s.contains("@"), "expected @lt in {s}");
+    }
+
+    // ── Equality and Clone ─────────────────────────────────────────
+
+    #[test]
+    fn events_equal_same_fields() {
+        let a = TraceEvent::spawn(1, Time::ZERO, task(1), region(2));
+        let b = TraceEvent::spawn(1, Time::ZERO, task(1), region(2));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn events_differ_on_seq() {
+        let a = TraceEvent::spawn(1, Time::ZERO, task(1), region(2));
+        let b = TraceEvent::spawn(2, Time::ZERO, task(1), region(2));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn events_differ_on_kind() {
+        let a = TraceEvent::spawn(1, Time::ZERO, task(1), region(2));
+        let b = TraceEvent::schedule(1, Time::ZERO, task(1), region(2));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn events_differ_on_data() {
+        let a = TraceEvent::spawn(1, Time::ZERO, task(1), region(2));
+        let b = TraceEvent::spawn(1, Time::ZERO, task(1), region(3));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn trace_data_clone() {
+        let data = TraceData::Task {
+            task: task(1),
+            region: region(2),
+        };
+        let cloned = data.clone();
+        assert_eq!(data, cloned);
+    }
+
+    #[test]
+    fn trace_data_message_eq() {
+        let a = TraceData::Message("hello".into());
+        let b = TraceData::Message("hello".into());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn trace_data_message_ne() {
+        let a = TraceData::Message("hello".into());
+        let b = TraceData::Message("world".into());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn trace_data_none_variant() {
+        assert_eq!(TraceData::None, TraceData::None);
+    }
+
+    #[test]
+    fn trace_event_clone() {
+        let e = TraceEvent::spawn(1, Time::ZERO, task(1), region(2));
+        let c = e.clone();
+        assert_eq!(e, c);
+    }
+
+    // ── Obligation all-kinds coverage ──────────────────────────────
+
+    #[test]
+    fn obligation_reserve_all_kinds() {
+        for kind in [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+        ] {
+            let e = TraceEvent::obligation_reserve(
+                1,
+                Time::ZERO,
+                obligation(1),
+                task(2),
+                region(3),
+                kind,
+            );
+            match &e.data {
+                TraceData::Obligation { kind: k, .. } => assert_eq!(*k, kind),
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn obligation_abort_all_reasons() {
+        for reason in [
+            ObligationAbortReason::Cancel,
+            ObligationAbortReason::Error,
+            ObligationAbortReason::Explicit,
+        ] {
+            let e = TraceEvent::obligation_abort(
+                1,
+                Time::ZERO,
+                obligation(1),
+                task(2),
+                region(3),
+                ObligationKind::SendPermit,
+                1000,
+                reason,
+            );
+            match &e.data {
+                TraceData::Obligation { abort_reason, .. } => {
+                    assert_eq!(*abort_reason, Some(reason));
+                }
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
+    // ── Down with error variant ────────────────────────────────────
+
+    #[test]
+    fn down_delivered_with_error_reason() {
+        let e = TraceEvent::down_delivered(
+            1,
+            Time::ZERO,
+            50,
+            task(1),
+            task(2),
+            Time::from_nanos(100),
+            DownReason::Error("boom".into()),
+        );
+        match &e.data {
+            TraceData::Down { reason, .. } => {
+                assert_eq!(*reason, DownReason::Error("boom".into()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn exit_delivered_with_cancelled_reason() {
+        let e = TraceEvent::exit_delivered(
+            1,
+            Time::ZERO,
+            50,
+            task(1),
+            task(2),
+            Time::from_nanos(100),
+            DownReason::Cancelled(CancelReason::timeout()),
+        );
+        match &e.data {
+            TraceData::Exit { reason, .. } => {
+                matches!(reason, DownReason::Cancelled(_));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // ── Edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn seq_zero() {
+        let e = TraceEvent::new(0, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
+        assert_eq!(e.seq, 0);
+    }
+
+    #[test]
+    fn seq_max() {
+        let e = TraceEvent::new(
+            u64::MAX,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::None,
+        );
+        assert_eq!(e.seq, u64::MAX);
+    }
+
+    #[test]
+    fn time_max() {
+        let e = TraceEvent::new(1, Time::MAX, TraceEventKind::UserTrace, TraceData::None);
+        assert_eq!(e.time, Time::MAX);
+    }
+
+    #[test]
+    fn io_result_zero_bytes() {
+        let e = TraceEvent::io_result(1, Time::ZERO, 0, 0);
+        assert_eq!(e.data, TraceData::IoResult { token: 0, bytes: 0 });
+    }
+
+    #[test]
+    fn checkpoint_zero_counts() {
+        let e = TraceEvent::checkpoint(1, Time::ZERO, 0, 0, 0);
+        assert_eq!(
+            e.data,
+            TraceData::Checkpoint {
+                sequence: 0,
+                active_tasks: 0,
+                active_regions: 0
+            }
+        );
+    }
+
+    #[test]
+    fn futurelock_many_held() {
+        let held: Vec<_> = (0..100)
+            .map(|i| (obligation(i), ObligationKind::SendPermit))
+            .collect();
+        let e = TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::FuturelockDetected,
+            TraceData::Futurelock {
+                task: task(1),
+                region: region(2),
+                idle_steps: 1000,
+                held,
+            },
+        );
+        let s = format!("{e}");
+        // Should contain all 100 entries
+        assert!(s.matches("SendPermit").count() == 100);
     }
 }
