@@ -249,7 +249,8 @@
       "failure_mode": "model-code-mismatch",
       "summary": "Mismatch triage process remains immature, increasing risk of unresolved model/code drift.",
       "evidence_refs": [
-        "formal/lean/coverage/README.md"
+        "formal/lean/coverage/README.md",
+        "formal/lean/coverage/runtime_state_refinement_map.json"
       ],
       "linked_beads": [
         "bd-1b2iv",

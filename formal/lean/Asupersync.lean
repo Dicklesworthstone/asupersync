@@ -3147,18 +3147,18 @@ theorem step_preserves_wellformed {Value Error Panic : Type}
       (by simpa [getTask, setRegion] using hTask)
       rfl
   -- Cancel protocol: task-only transitions
-  | cancelMasked hTask _ _ hUpdate =>
+  | cancelMasked _ _ hTask _ _ hUpdate =>
     subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
-  | cancelAcknowledge hTask _ _ _ hUpdate =>
+  | cancelAcknowledge _ _ hTask _ _ hUpdate =>
     subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
-  | cancelFinalize hTask _ _ hUpdate =>
+  | cancelFinalize _ _ hTask _ hUpdate =>
     subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
-  | cancelComplete hTask _ _ hUpdate =>
+  | cancelComplete _ _ hTask _ hUpdate =>
     subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
-  | cancelChild _ _ _ hTask _ hUpdate =>
+  | cancelChild _ _ _ _ _ hTask _ hUpdate =>
     subst hUpdate; exact setTask_same_region_preserves_wellformed hWF hTask rfl
   -- Cancel propagation: region-only structural change
-  | cancelPropagate _ _ _ hSub hUpdate =>
+  | cancelPropagate _ _ _ _ hSub hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hSub rfl rfl rfl
   -- Region close lifecycle: region-only structural changes
   | closeBegin hRegion _ hUpdate =>
@@ -3169,7 +3169,7 @@ theorem step_preserves_wellformed {Value Error Panic : Type}
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   | closeRunFinalizer hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
-  | close _ hRegion _ _ hUpdate =>
+  | close _ hRegion _ _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   -- Time advancement
   | tick hUpdate =>
@@ -3448,23 +3448,35 @@ theorem stuttering_preserves_wellformed
     fun o => show s'.obligations o = s.obligations o from congrFun hO.symm o
   exact {
     task_region_exists := fun t task hTask => by
-      rw [hGR]; exact hWF.task_region_exists t task (by rw [hGT] at hTask; exact hTask)
+      have hTask_s : getTask s t = some task := by simpa [hGT t] using hTask
+      obtain ⟨region, hRegion_s⟩ := hWF.task_region_exists t task hTask_s
+      exact ⟨region, by simpa [hGR task.region] using hRegion_s⟩
     obligation_region_exists := fun o ob hOb => by
-      rw [hGR]; exact hWF.obligation_region_exists o ob (by rw [hGO] at hOb; exact hOb)
+      have hOb_s : getObligation s o = some ob := by simpa [hGO o] using hOb
+      obtain ⟨region, hRegion_s⟩ := hWF.obligation_region_exists o ob hOb_s
+      exact ⟨region, by simpa [hGR ob.region] using hRegion_s⟩
     obligation_holder_exists := fun o ob hOb => by
-      rw [hGT]; exact hWF.obligation_holder_exists o ob (by rw [hGO] at hOb; exact hOb)
+      have hOb_s : getObligation s o = some ob := by simpa [hGO o] using hOb
+      obtain ⟨task, hTask_s⟩ := hWF.obligation_holder_exists o ob hOb_s
+      exact ⟨task, by simpa [hGT ob.holder] using hTask_s⟩
     ledger_obligations_reserved := fun r region hRegion o hMem => by
+      have hRegion_s : getRegion s r = some region := by simpa [hGR r] using hRegion
       obtain ⟨ob, hOb, hState, hReg⟩ :=
-        hWF.ledger_obligations_reserved r region (by rw [hGR] at hRegion; exact hRegion) o hMem
-      exact ⟨ob, by rw [← hGO]; exact hOb, hState, hReg⟩
+        hWF.ledger_obligations_reserved r region hRegion_s o hMem
+      have hOb_s' : getObligation s' o = some ob := by simpa [hGO o] using hOb
+      exact ⟨ob, hOb_s', hState, hReg⟩
     children_exist := fun r region hRegion t hMem => by
+      have hRegion_s : getRegion s r = some region := by simpa [hGR r] using hRegion
       obtain ⟨task, hTask⟩ :=
-        hWF.children_exist r region (by rw [hGR] at hRegion; exact hRegion) t hMem
-      exact ⟨task, by rw [← hGT]; exact hTask⟩
+        hWF.children_exist r region hRegion_s t hMem
+      have hTask_s' : getTask s' t = some task := by simpa [hGT t] using hTask
+      exact ⟨task, hTask_s'⟩
     subregions_exist := fun r region hRegion r' hMem => by
+      have hRegion_s : getRegion s r = some region := by simpa [hGR r] using hRegion
       obtain ⟨sub, hSub⟩ :=
-        hWF.subregions_exist r region (by rw [hGR] at hRegion; exact hRegion) r' hMem
-      exact ⟨sub, by rw [← hGR]; exact hSub⟩
+        hWF.subregions_exist r region hRegion_s r' hMem
+      have hSub_s' : getRegion s' r' = some sub := by simpa [hGR r'] using hSub
+      exact ⟨sub, hSub_s'⟩
   }
 
 -- ==========================================================================
@@ -3520,12 +3532,22 @@ theorem cancel_step_strengthens_reason
         getRegion s' r = some region' ∧
         region'.cancel = some (strengthenOpt region.cancel reason) := by
   cases hStep with
-  | cancelRequest _ _ hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+  | cancelRequest reason cleanup hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+    rename_i t task region
     subst hUpdate
-    exact ⟨_, _, hRegion, by simp [getRegion, setRegion, setTask], rfl⟩
-  | closeCancelChildren hRegion hState hHasLive hUpdate =>
+    refine ⟨region, { region with cancel := some (strengthenOpt region.cancel reason) }, hRegion, ?_, ?_⟩
+    · simp [getRegion, setRegion, setTask]
+    · simp
+  | closeCancelChildren reason hRegion hState hHasLive hUpdate =>
+    rename_i region
     subst hUpdate
-    exact ⟨_, _, hRegion, by simp [getRegion, setRegion], rfl⟩
+    refine ⟨region, {
+      region with
+      state := RegionState.draining,
+      cancel := some (strengthenOpt region.cancel reason)
+    }, hRegion, ?_, ?_⟩
+    · simp [getRegion, setRegion]
+    · simp
 
 /-- Close effect: region transitions to closed state with outcome.
     Matches RegionRecord final close in the implementation. -/
@@ -3536,9 +3558,10 @@ theorem close_produces_closed_region
     : ∃ region', getRegion s' r = some region' ∧
         region'.state = RegionState.closed outcome := by
   cases hStep with
-  | close _ hRegion _ _ hUpdate =>
+  | close _ hRegion _ _ _ hUpdate =>
+    rename_i region hState hFinalizers hQuiescent
     subst hUpdate
-    exact ⟨_, by simp [getRegion, setRegion], rfl⟩
+    exact ⟨{ region with state := RegionState.closed outcome }, by simp [getRegion, setRegion], rfl⟩
 
 /-- Commit effect: obligation transitions to committed, removed from ledger.
     Matches ObligationRecord::commit() in src/record/obligation.rs. -/

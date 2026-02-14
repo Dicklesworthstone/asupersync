@@ -7,6 +7,8 @@ This directory contains the canonical machine-readable artifacts for Lean proof 
 - `theorem_surface_inventory.json` - complete theorem declaration inventory from `Asupersync.lean`
 - `step_constructor_coverage.json` - constructor-by-constructor coverage status and theorem mappings
 - `theorem_rule_traceability_ledger.json` - theorem-to-rule traceability ledger for stale-link detection
+- `runtime_state_refinement_map.json` - explicit RuntimeState cross-entity operation map to Lean Step labels/theorem obligations
+- `runtime_state_refinement_map.json` also carries the deterministic divergence triage decision matrix (`code-first` vs `model-first` vs `assumptions-or-harness-first`) and canonical triage examples
 - `invariant_status_inventory.json` - non-negotiable invariant status map with theorem/test linkage
 - `invariant_theorem_test_link_map.json` - canonical invariant -> theorem witness -> executable test map
 - `gap_risk_sequencing_plan.json` - deterministic gap classification, risk scoring, and execution sequencing plan
@@ -81,6 +83,18 @@ The Rust model in `conformance/src/lean_coverage_matrix.rs` enforces:
 - deterministic scoring (`priority_score = 2*product_risk + unblock_potential - implementation_effort`)
 - first-class blockers and critical path for Tracks 2-6
 - explicit dependency edges and phase exits for execution planning
+
+## Divergence Repair Routing (Track-4)
+
+`runtime_state_refinement_map.json` is the canonical source for deterministic divergence routing.
+
+- `divergence_triage_decision_matrix` defines route selection rules:
+- `code-first`: patch Rust runtime/conformance when executable behavior drifts from stable mapped proofs.
+- `model-first`: patch Lean theorem/helper structure when frontier evidence shows proof-shape or declaration-order instability.
+- `assumptions-or-harness-first`: patch assumptions/comparability harness when mismatch is due to stale fixtures or profile drift.
+- `divergence_triage_examples` provides auditable historical examples with route choice, evidence artifacts, and sign-off roles.
+
+For bead `bd-3mo4f`, the recorded example `triage-example.bd-cspxm.2026-02-11` demonstrates a `model-first` route with deterministic frontier evidence and explicit ownership.
 
 Validation for this artifact is enforced in `tests/lean_gap_risk_sequencing_plan.rs`, including:
 - scoring formula consistency

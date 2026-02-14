@@ -1,0 +1,398 @@
+{
+  "schema_version": "1.0.0",
+  "map_id": "lean.runtime_state_refinement_map.v1",
+  "title": "RuntimeState Cross-Entity Operations to Lean Formal Rules",
+  "scope": "Explicit Rust RuntimeState cross-entity operation mappings to Lean Step labels and theorem obligations for Track-4 refinement closure (bd-23hq7).",
+  "source_files": [
+    "src/runtime/state.rs",
+    "formal/lean/Asupersync.lean",
+    "formal/lean/coverage/theorem_surface_inventory.json",
+    "formal/lean/coverage/step_constructor_coverage.json"
+  ],
+  "divergence_triage_decision_matrix": {
+    "matrix_id": "lean.divergence_repair_decision.v1",
+    "purpose": "Deterministic routing policy for Rust-vs-Lean divergence triage in Track-4.",
+    "required_inputs": [
+      "first_divergence_signature",
+      "failing_theorems_with_lines",
+      "affected_runtime_operation_ids",
+      "counterexample_or_replay_trace",
+      "assumption_or_harness_delta"
+    ],
+    "decision_routes": [
+      {
+        "route_id": "code-first",
+        "trigger_conditions": [
+          "Lean theorem is stable and mapped to operation IDs touched by recent Rust changes.",
+          "Executable conformance and/or replay evidence shows runtime behavior violating mapped theorem assumptions."
+        ],
+        "required_evidence": [
+          "Rust diff touches mapped operation",
+          "Conformance mismatch or replay divergence artifact",
+          "No unresolved model-side theorem obligations for the failing rule family"
+        ],
+        "patch_targets": [
+          "src/runtime/**",
+          "tests/refinement_conformance.rs"
+        ],
+        "sign_off_roles": [
+          "Rust runtime owner",
+          "Formal owner",
+          "Conformance owner"
+        ]
+      },
+      {
+        "route_id": "model-first",
+        "trigger_conditions": [
+          "Mismatch is caused by missing/unstable Lean proof obligations or helper ordering/shape issues.",
+          "Rust behavior is consistent with existing executable tests and intended invariants."
+        ],
+        "required_evidence": [
+          "Lean frontier bucket and theorem failure logs",
+          "Traceability row showing mapping exists but theorem branch is incomplete",
+          "No contradictory Rust conformance failure for the same operation"
+        ],
+        "patch_targets": [
+          "formal/lean/Asupersync.lean",
+          "formal/lean/coverage/*.json"
+        ],
+        "sign_off_roles": [
+          "Formal owner",
+          "Rust runtime owner",
+          "CI/governance owner"
+        ]
+      },
+      {
+        "route_id": "assumptions-or-harness-first",
+        "trigger_conditions": [
+          "Observed mismatch is due to stale assumptions, missing fixture constraints, or harness comparability drift.",
+          "Neither Rust implementation nor Lean model needs semantic change after evidence reconciliation."
+        ],
+        "required_evidence": [
+          "Assumption mismatch checklist",
+          "Harness/profile mismatch report",
+          "Updated deterministic repro command proving resolution"
+        ],
+        "patch_targets": [
+          "formal/lean/coverage/ci_verification_profiles.json",
+          "tests/*refinement*",
+          "docs/replay-debugging.md"
+        ],
+        "sign_off_roles": [
+          "Conformance owner",
+          "Formal owner",
+          "Runtime owner"
+        ]
+      }
+    ],
+    "audit_requirements": [
+      "Every divergence note must record selected route_id and rejected alternatives.",
+      "Every route must list concrete artifacts and owning sign-off roles before closure.",
+      "Route changes require an explicit note update in the owning bead thread."
+    ]
+  },
+  "divergence_triage_examples": [
+    {
+      "example_id": "triage-example.bd-cspxm.2026-02-11",
+      "bead_id": "bd-cspxm",
+      "summary": "Lean preservation proofs failed due to proof-shape/declaration-order issues in setTask/setRegion cancellation branches.",
+      "selected_route": "model-first",
+      "decision_rationale": [
+        "Failure frontier was concentrated in Lean theorem proof-shape errors, not runtime behavior drift.",
+        "Rust conformance behavior for mapped operations remained consistent during the same window.",
+        "Fixes were localized to Lean helper ordering and branch proof structure."
+      ],
+      "evidence": [
+        {
+          "artifact": "target/lean-e2e/bd-cspxm_frontier.json",
+          "kind": "lean_frontier",
+          "note": "Diagnostics reduced from 113 to 86 with declaration-order bucket elimination."
+        },
+        {
+          "artifact": "target/lean-e2e/bd-cspxm_lake_build.log",
+          "kind": "lean_build_log",
+          "note": "Captured deterministic failure classes before/after proof refactor."
+        },
+        {
+          "artifact": "formal/lean/Asupersync.lean",
+          "kind": "model_patch_surface",
+          "note": "Refactor applied to substitution/rewrite helpers and cancelRequest preservation branch binders."
+        }
+      ],
+      "sign_off_roles": [
+        "Formal owner",
+        "Rust runtime owner",
+        "CI/governance owner"
+      ],
+      "outcome": "Route held as model-first; Track-2 frontier buckets moved from 8 to 7 while keeping runtime mapping intact."
+    }
+  ],
+  "mappings": [
+    {
+      "operation_id": "runtime_state.create_obligation",
+      "rust_method": {
+        "name": "create_obligation",
+        "file_path": "src/runtime/state.rs",
+        "line": 1129
+      },
+      "formal_labels": [
+        "step.reserve"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "reserve_creates_reserved",
+          "line": 1032
+        },
+        {
+          "theorem": "reserve_preserves_wellformed",
+          "line": 1987
+        }
+      ],
+      "assumptions": [
+        "Target region exists and is admission-open for obligations.",
+        "Caller provides a holder TaskId that belongs to the target region under runtime ownership invariants."
+      ],
+      "disambiguation_notes": []
+    },
+    {
+      "operation_id": "runtime_state.commit_obligation",
+      "rust_method": {
+        "name": "commit_obligation",
+        "file_path": "src/runtime/state.rs",
+        "line": 1197
+      },
+      "formal_labels": [
+        "step.commit"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "commit_resolves",
+          "line": 675
+        },
+        {
+          "theorem": "commit_removes_from_ledger",
+          "line": 723
+        },
+        {
+          "theorem": "commit_preserves_wellformed",
+          "line": 2277
+        },
+        {
+          "theorem": "commit_resolves_obligation",
+          "line": 3505
+        }
+      ],
+      "assumptions": [
+        "Obligation exists in Reserved state before commit.",
+        "Region record remains reachable so pending-obligation counters are decremented.",
+        "advance_region_state is invoked after resolution to propagate close progress."
+      ],
+      "disambiguation_notes": []
+    },
+    {
+      "operation_id": "runtime_state.abort_obligation",
+      "rust_method": {
+        "name": "abort_obligation",
+        "file_path": "src/runtime/state.rs",
+        "line": 1245
+      },
+      "formal_labels": [
+        "step.abort"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "abort_resolves",
+          "line": 691
+        },
+        {
+          "theorem": "abort_removes_from_ledger",
+          "line": 747
+        },
+        {
+          "theorem": "abort_preserves_wellformed",
+          "line": 2286
+        },
+        {
+          "theorem": "abort_resolves_obligation",
+          "line": 3518
+        }
+      ],
+      "assumptions": [
+        "Obligation exists in Reserved state before abort.",
+        "Abort reason classification is implementation-only metadata and does not alter Step.abort semantics.",
+        "advance_region_state is invoked after resolution to propagate close progress."
+      ],
+      "disambiguation_notes": []
+    },
+    {
+      "operation_id": "runtime_state.mark_obligation_leaked",
+      "rust_method": {
+        "name": "mark_obligation_leaked",
+        "file_path": "src/runtime/state.rs",
+        "line": 1300
+      },
+      "formal_labels": [
+        "step.leak"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "leak_marks_leaked",
+          "line": 707
+        },
+        {
+          "theorem": "leak_removes_from_ledger",
+          "line": 770
+        },
+        {
+          "theorem": "leak_preserves_wellformed",
+          "line": 2295
+        }
+      ],
+      "assumptions": [
+        "Obligation exists and is unresolved when leak is marked.",
+        "Leak response policy (panic/recover/silent) is an implementation-level control that wraps, but does not replace, Step.leak semantics.",
+        "advance_region_state is invoked after leak resolution bookkeeping."
+      ],
+      "disambiguation_notes": []
+    },
+    {
+      "operation_id": "runtime_state.cancel_request",
+      "rust_method": {
+        "name": "cancel_request",
+        "file_path": "src/runtime/state.rs",
+        "line": 1530
+      },
+      "formal_labels": [
+        "step.cancelRequest",
+        "step.cancelPropagate",
+        "step.cancelChild"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "cancelRequest_preserves_wellformed",
+          "line": 2373
+        },
+        {
+          "theorem": "cancel_step_strengthens_reason",
+          "line": 3475
+        },
+        {
+          "theorem": "cancel_propagation_bounded",
+          "line": 3333
+        },
+        {
+          "theorem": "cancel_protocol_terminates",
+          "line": 3254
+        }
+      ],
+      "assumptions": [
+        "Target region exists; descendants are collected from the region tree and processed parent-first.",
+        "Task-level acknowledgement/finalize/complete transitions occur in later scheduler polls after CancelRequested is installed.",
+        "Cause-chain strengthening follows attribution limits configured in RuntimeState."
+      ],
+      "disambiguation_notes": [
+        "The root region request maps to step.cancelRequest, while descendant propagation maps to step.cancelPropagate/step.cancelChild.",
+        "This method does not itself execute cancelAcknowledge/cancelFinalize/cancelComplete constructors; those occur in subsequent task polling."
+      ]
+    },
+    {
+      "operation_id": "runtime_state.task_completed",
+      "rust_method": {
+        "name": "task_completed",
+        "file_path": "src/runtime/state.rs",
+        "line": 1805
+      },
+      "formal_labels": [
+        "step.complete",
+        "step.abort",
+        "step.closeChildrenDone"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "complete_preserves_region",
+          "line": 1279
+        },
+        {
+          "theorem": "complete_preserves_wellformed",
+          "line": 1558
+        },
+        {
+          "theorem": "abort_preserves_wellformed",
+          "line": 2286
+        },
+        {
+          "theorem": "close_children_exist_completed",
+          "line": 1407
+        }
+      ],
+      "assumptions": [
+        "Completed task is removed from task table and owner region membership.",
+        "Pending obligations held by the completed task are aborted to preserve close progress.",
+        "Region progression effects are delegated to advance_region_state."
+      ],
+      "disambiguation_notes": [
+        "Primary transition is step.complete for the finished task.",
+        "Additional step.abort obligations can be emitted for orphaned permits during cleanup.",
+        "Region-close progress signaling is represented by step.closeChildrenDone and subsequent close-phase constructors via advance_region_state."
+      ]
+    },
+    {
+      "operation_id": "runtime_state.advance_region_state",
+      "rust_method": {
+        "name": "advance_region_state",
+        "file_path": "src/runtime/state.rs",
+        "line": 2120
+      },
+      "formal_labels": [
+        "step.closeBegin",
+        "step.closeCancelChildren",
+        "step.closeChildrenDone",
+        "step.closeRunFinalizer",
+        "step.close"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "close_begin_step",
+          "line": 1747
+        },
+        {
+          "theorem": "close_cancel_children_step",
+          "line": 1757
+        },
+        {
+          "theorem": "close_children_done_step",
+          "line": 1782
+        },
+        {
+          "theorem": "close_run_finalizer_step",
+          "line": 1794
+        },
+        {
+          "theorem": "close_complete_step",
+          "line": 1806
+        },
+        {
+          "theorem": "close_implies_quiescent",
+          "line": 794
+        },
+        {
+          "theorem": "close_implies_ledger_empty",
+          "line": 808
+        },
+        {
+          "theorem": "close_produces_closed_region",
+          "line": 3492
+        }
+      ],
+      "assumptions": [
+        "Region exists and is already in a close-phase state (Closing/Draining/Finalizing).",
+        "Final close requires no children, no live tasks, no pending obligations, and finalizers drained.",
+        "Async finalizers create scheduling barriers until completion."
+      ],
+      "disambiguation_notes": [
+        "advance_region_state is an iterative driver and can realize multiple close-phase constructors within one call.",
+        "Whether closeCancelChildren or closeChildrenDone is taken depends on current region liveness and child/subregion sets."
+      ]
+    }
+  ]
+}

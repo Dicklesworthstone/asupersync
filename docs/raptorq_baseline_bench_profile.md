@@ -1,4 +1,4 @@
-# RaptorQ Baseline Bench/Profile Corpus (bd-3s8zu)
+# RaptorQ Baseline Bench/Profile Corpus (bd-3s8zu) + G1 Budgets (bd-3v1cs)
 
 This document records the deterministic baseline packet for the RaptorQ RFC-6330 program track.
 
@@ -8,6 +8,13 @@ This document records the deterministic baseline packet for the RaptorQ RFC-6330
 - Baseline metric snapshot: `target/perf-results/perf_20260214_143734/artifacts/baseline_current.json`
 - Git SHA: `621e54283fef7b81101ad8af8b0aab2444279551`
 - Seed: `424242`
+
+This artifact now also carries the Track-G budget draft for bead `bd-3v1cs`:
+
+- Workload taxonomy for `fast` / `full` / `forensics`
+- Draft SLO budgets and regression thresholds
+- Deterministic evaluation and confidence policy
+- Gate-profile mapping tied to correctness evidence
 
 ## Quickstart Commands
 
@@ -25,6 +32,82 @@ rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_b
 ```bash
 rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02
 ```
+
+## Canonical Workload Taxonomy (G1)
+
+| Workload ID | Family | Intent | Primary Metric |
+|---|---|---|---|
+| `RQ-G1-ENC-SMALL` | Encode (`k=32`, `sym=1024`) | Hot-path encode latency for common small block | `median_ns`, `p95_ns` |
+| `RQ-G1-DEC-SOURCE` | Decode source-only (`k=32`, `sym=1024`) | Best-case decode latency floor | `median_ns`, `p95_ns` |
+| `RQ-G1-DEC-REPAIR` | Decode repair-only (`k=32`, `sym=1024`) | Repair-heavy decode robustness | `median_ns`, `p95_ns` |
+| `RQ-G1-GF256-ADDMUL` | GF256 kernel (`addmul_slice/4096`) | Arithmetic hotspot sensitivity | `median_ns`, `p95_ns` |
+| `RQ-G1-SOLVER-MARKOWITZ` | Dense solve (`solve_markowitz/64`) | Worst-case decode solver pressure | `median_ns`, `p95_ns` |
+| `RQ-G1-PIPE-64K` | Pipeline throughput (`send_receive/65536`) | Small object end-to-end throughput | `throughput_mib_s` |
+| `RQ-G1-PIPE-256K` | Pipeline throughput (`send_receive/262144`) | Mid-size object throughput | `throughput_mib_s` |
+| `RQ-G1-PIPE-1M` | Pipeline throughput (`send_receive/1048576`) | Large object throughput stability | `throughput_kib_s` |
+
+## Draft Budget Sheet (G1)
+
+Budget source: `baseline_current.json` and phase0 throughput logs listed above. Values below are draft guardrails for CI profile wiring and should be recalibrated after D1/D5/D6 evidence is fully green.
+
+| Workload ID | Baseline | Warning Budget | Fail Budget |
+|---|---:|---:|---:|
+| `RQ-G1-ENC-SMALL` (`median_ns`) | 123455.74 | 145000.00 | 160000.00 |
+| `RQ-G1-ENC-SMALL` (`p95_ns`) | 125662.90 | 155000.00 | 170000.00 |
+| `RQ-G1-DEC-SOURCE` (`median_ns`) | 18542.03 | 24000.00 | 30000.00 |
+| `RQ-G1-DEC-REPAIR` (`median_ns`) | 76791.45 | 95000.00 | 110000.00 |
+| `RQ-G1-GF256-ADDMUL` (`median_ns`) | 698.37 | 850.00 | 1000.00 |
+| `RQ-G1-SOLVER-MARKOWITZ` (`median_ns`) | 606508.43 | 750000.00 | 900000.00 |
+| `RQ-G1-PIPE-64K` (`throughput_mib_s`) | 11.5620 | 10.5000 | 9.5000 |
+| `RQ-G1-PIPE-256K` (`throughput_mib_s`) | 2.6734 | 2.3500 | 2.1500 |
+| `RQ-G1-PIPE-1M` (`throughput_kib_s`) | 354.6400 | 325.0000 | 300.0000 |
+
+## Confidence + Threshold Policy (G1)
+
+- Use deterministic seed `424242` for all profile gates.
+- Treat `median_ns` as primary, `p95_ns` as tail-protection metric.
+- For criterion-style metrics, warning and fail are both required to be reproducible in two consecutive runs before escalation from yellow to red.
+- Any single-run value crossing fail budget by `>= 20%` is an immediate red gate (hard stop).
+- Throughput budgets are lower bounds; latency budgets are upper bounds.
+- Keep benchmark command lines stable when comparing directional movement.
+
+## Profile-to-Gate Mapping (G1)
+
+| Profile | Command Surface | Required Workloads | Gate Intent |
+|---|---|---|---|
+| `fast` | direct benchmark invocation (quickstart fast) | `RQ-G1-ENC-SMALL` | PR/smoke directional signal |
+| `full` | `scripts/run_perf_e2e.sh --bench ... --seed 424242` | all workload IDs in taxonomy table | merge/release evidence |
+| `forensics` | callgrind + artifact capture (quickstart forensics) | `RQ-G1-ENC-SMALL`, `RQ-G1-GF256-ADDMUL`, `RQ-G1-SOLVER-MARKOWITZ` | deep regression root-cause packet |
+
+## Correctness Prerequisites for Performance Claims
+
+Performance budget outcomes are advisory-only until these are present and green:
+
+- D1 (`bd-1rxlv`): RFC/canonical golden vector suite
+- D5 (`bd-61s90`): comprehensive unit matrix
+- D6 (`bd-3bvdj`): deterministic E2E scenario suite
+- D7 (`bd-oeql8`) and D9 (`bd-26pqk`): structured forensic logging + replay catalog
+
+No optimization decision record (`bd-7toum`) or CI gate closure (`bd-322jd`) should treat G1 budgets as authoritative without these prerequisites.
+
+## Structured Logging Fields for G1 Gate Outputs
+
+Every budget-check event should include:
+
+- `workload_id`
+- `profile` (`fast`|`full`|`forensics`)
+- `seed`
+- `metric_name`
+- `observed_value`
+- `warning_budget`
+- `fail_budget`
+- `decision` (`pass`|`warn`|`fail`)
+- `artifact_path`
+- `replay_ref`
+
+## Phase Note
+
+This document satisfies the G1 draft-definition phase (workload taxonomy + budget scaffolding + gate mapping). Final bead closure requires calibration refresh against fully implemented golden-vector correctness evidence and stabilized baseline corpus runs.
 
 ## Representative Criterion Results
 

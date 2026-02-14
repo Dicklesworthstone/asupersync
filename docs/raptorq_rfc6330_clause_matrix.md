@@ -35,6 +35,30 @@ Scope: Current in-repo RaptorQ implementation surface (`src/raptorq/*`) and dete
 | Deterministic end-to-end scenario reporting with stable artifact shape | `tests/raptorq_conformance.rs:729`, `tests/raptorq_conformance.rs:1179`, `tests/raptorq_conformance.rs:1209` | `tests/raptorq_conformance.rs:1209` | `tests/raptorq_conformance.rs:1209` | `tests/raptorq_conformance.rs:1209` (serialized report stability assertions) | partial | Track D | `bd-3bvdj`, `bd-oeql8`, `bd-26pqk`, `bd-mztvq` |
 | Comprehensive unit matrix + deterministic E2E suite + structured logging contract (program requirement) | current unit corpus: `tests/raptorq_conformance.rs`, `tests/raptorq_perf_invariants.rs`, `src/raptorq/tests.rs` | present but not yet matrix-governed | present but not yet full scenario catalog-governed | mixed: deterministic JSON report exists; other areas still use ad-hoc stderr logs (`tests/raptorq_perf_invariants.rs:667`) | partial | Track D + G | `bd-61s90`, `bd-3bvdj`, `bd-oeql8`, `bd-26pqk`, `bd-322jd` |
 
+## Track-B Execution Contract (`bd-erfxv`)
+
+Track-B is considered complete only when all four child beads are finished and validated:
+
+| Child bead | Scope | Required outputs |
+|---|---|---|
+| `bd-1cjjy` (B1) | Table-driven systematic index + `(K', J, S, H, W)` lookup | deterministic unit tests for representative + edge `K` values; explicit unsupported-range behavior |
+| `bd-1g5ww` (B2) | RFC degree + tuple generator parity | deterministic tuple/degree fixtures with fixed seeds; encoder/decoder parity checks |
+| `bd-2o5g6` (B3) | LT/repair equation construction from tuple semantics | deterministic E2E encode/decode scenarios covering sparse and high-loss cases |
+| `bd-10hic` (B4) | remove/quarantine legacy heuristics | guard rails preventing accidental legacy-path execution; explicit quarantine docs/tests |
+
+Validation/logging gates for each Track-B child:
+- Unit tests: deterministic, seed-pinned, and line-linked in this matrix.
+- E2E scenarios: deterministic fixture set with stable scenario IDs and reproducible command lines.
+- Structured logging: each changed flow must emit at least `scenario_id`, `seed`, `k`, `symbol_size`, `loss_pattern`, `outcome`, `artifact_path`.
+- Repro path: every failure must include a direct command and fixture/seed reference.
+
+Suggested verification commands (CPU-heavy commands offloaded with `rch`):
+```bash
+rch exec -- cargo test --test raptorq_conformance -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants -- --nocapture
+rch exec -- cargo test -p asupersync raptorq -- --nocapture
+```
+
 ## Notes on Explicit Gaps
 - Parameter derivation is now table-driven from RFC 6330 Table 2 (`src/raptorq/rfc6330_systematic_index_table.inc`), but downstream tuple/equation semantics and full scenario coverage still need completion (`bd-1g5ww`, `bd-2o5g6`, `bd-61s90`).
 - Tuple/degree semantics are deterministic but not yet fully RFC-exact for supported scope; this maps to `bd-1g5ww` and `bd-2o5g6`.
