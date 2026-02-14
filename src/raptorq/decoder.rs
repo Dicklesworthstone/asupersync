@@ -173,13 +173,22 @@ impl Equation {
     }
 
     /// Substitute: eliminate `col` using `pivot_coef * pivot_rhs`.
-    fn eliminate(&mut self, _col: usize, pivot_terms: &[(usize, Gf256)], factor: Gf256) {
+    ///
+    /// Uses the provided `scratch` buffer to avoid per-call heap allocation.
+    /// The scratch buffer is cleared and reused across calls.
+    fn eliminate_into(
+        &mut self,
+        _col: usize,
+        pivot_terms: &[(usize, Gf256)],
+        factor: Gf256,
+        scratch: &mut Vec<(usize, Gf256)>,
+    ) {
         // self -= factor * pivot (for the column `col`)
         // This effectively does: self.terms = self.terms XOR (factor * pivot.terms)
         // but only for terms that would affect our equation.
 
-        // Build new terms by merging
-        let mut new_terms = Vec::with_capacity(self.terms.len() + pivot_terms.len());
+        // Merge into scratch buffer (reused allocation)
+        scratch.clear();
         let mut i = 0;
         let mut j = 0;
 
@@ -189,12 +198,12 @@ impl Equation {
 
             match self_col.cmp(&pivot_col) {
                 std::cmp::Ordering::Less => {
-                    new_terms.push(self.terms[i]);
+                    scratch.push(self.terms[i]);
                     i += 1;
                 }
                 std::cmp::Ordering::Greater => {
                     let (c, coef) = pivot_terms[j];
-                    new_terms.push((c, factor * coef));
+                    scratch.push((c, factor * coef));
                     j += 1;
                 }
                 std::cmp::Ordering::Equal => {
@@ -202,7 +211,7 @@ impl Equation {
                     let pivot_coef = pivot_terms[j].1;
                     let new_coef = self_coef + factor * pivot_coef;
                     if !new_coef.is_zero() {
-                        new_terms.push((self_col, new_coef));
+                        scratch.push((self_col, new_coef));
                     }
                     i += 1;
                     j += 1;
@@ -210,7 +219,7 @@ impl Equation {
             }
         }
 
-        self.terms = new_terms;
+        std::mem::swap(&mut self.terms, scratch);
     }
 }
 
