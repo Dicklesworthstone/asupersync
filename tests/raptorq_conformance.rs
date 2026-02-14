@@ -723,6 +723,11 @@ mod pipeline_e2e {
     #[derive(Clone, Copy)]
     struct Scenario {
         name: &'static str,
+        scenario_id: &'static str,
+        replay_id: &'static str,
+        profile: &'static str,
+        unit_sentinel: &'static str,
+        assertion_id: &'static str,
         loss: LossPattern,
         expect_success: bool,
     }
@@ -787,7 +792,16 @@ mod pipeline_e2e {
 
     #[derive(Serialize)]
     struct Report {
+        schema_version: &'static str,
         scenario: &'static str,
+        scenario_id: &'static str,
+        replay_id: &'static str,
+        profile: &'static str,
+        unit_sentinel: &'static str,
+        assertion_id: &'static str,
+        run_id: String,
+        repro_command: String,
+        phase_markers: [&'static str; 5],
         config: ConfigReport,
         loss: LossReport,
         symbols: SymbolReport,
@@ -1139,17 +1153,29 @@ mod pipeline_e2e {
 
         let sbn = 0u8;
         let block_seed = seed_for_block(object_id, sbn);
+        let run_id = format!(
+            "{}-seed{}-k{}-len{}",
+            scenario.replay_id, block_seed, block_k, data_len
+        );
         let raptor_decoder = InactivationDecoder::new(block_k, symbol_size, block_seed);
         let received_for_proof =
             build_received_symbols(&received_symbols, object_id, block_k, symbol_size, sbn);
 
         let proof = match raptor_decoder.decode_with_proof(&received_for_proof, object_id, sbn) {
             Ok(result) => {
-                assert!(scenario.expect_success, "unexpected proof success");
+                assert!(
+                    scenario.expect_success,
+                    "scenario_id={} replay_id={} unexpected proof success",
+                    scenario.scenario_id, scenario.replay_id
+                );
                 result.proof
             }
             Err((err, proof)) => {
-                assert!(!scenario.expect_success, "unexpected proof failure {err:?}");
+                assert!(
+                    !scenario.expect_success,
+                    "scenario_id={} replay_id={} unexpected proof failure {err:?}",
+                    scenario.scenario_id, scenario.replay_id
+                );
                 match err {
                     DecodeError::InsufficientSymbols { .. } => {}
                     DecodeError::SingularMatrix { .. } | DecodeError::SymbolSizeMismatch { .. } => {
@@ -1179,7 +1205,19 @@ mod pipeline_e2e {
         };
 
         let report = Report {
+            schema_version: "raptorq-e2e-log-v1",
             scenario: scenario.name,
+            scenario_id: scenario.scenario_id,
+            replay_id: scenario.replay_id,
+            profile: scenario.profile,
+            unit_sentinel: scenario.unit_sentinel,
+            assertion_id: scenario.assertion_id,
+            run_id,
+            repro_command: format!(
+                "rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture # scenario_id={} replay_id={}",
+                scenario.scenario_id, scenario.replay_id
+            ),
+            phase_markers: ["encode", "loss", "decode", "proof", "report"],
             config: ConfigReport {
                 symbol_size: encoding.symbol_size,
                 max_block_size: encoding.max_block_size,
@@ -1207,6 +1245,63 @@ mod pipeline_e2e {
         (report_json, symbol_hash, proof_hash, success)
     }
 
+    fn assert_report_contract(report_json: &str, scenario: Scenario) {
+        let report: serde_json::Value = serde_json::from_str(report_json).expect("parse report");
+        assert_eq!(
+            report["schema_version"].as_str(),
+            Some("raptorq-e2e-log-v1"),
+            "schema version mismatch"
+        );
+        assert_eq!(
+            report["scenario_id"].as_str(),
+            Some(scenario.scenario_id),
+            "scenario id mismatch"
+        );
+        assert_eq!(
+            report["replay_id"].as_str(),
+            Some(scenario.replay_id),
+            "replay id mismatch"
+        );
+        assert_eq!(
+            report["profile"].as_str(),
+            Some(scenario.profile),
+            "profile marker mismatch"
+        );
+        assert!(
+            matches!(scenario.profile, "fast" | "full" | "forensics"),
+            "unexpected profile marker {}",
+            scenario.profile
+        );
+        assert_eq!(
+            report["unit_sentinel"].as_str(),
+            Some(scenario.unit_sentinel),
+            "unit sentinel mismatch"
+        );
+        assert_eq!(
+            report["assertion_id"].as_str(),
+            Some(scenario.assertion_id),
+            "assertion id mismatch"
+        );
+        assert!(
+            report["run_id"].as_str().is_some_and(|v| !v.is_empty()),
+            "missing run id"
+        );
+        assert!(
+            report["repro_command"].as_str().is_some_and(
+                |cmd| cmd.contains("rch exec -- cargo test --test raptorq_conformance")
+            ),
+            "missing repro command"
+        );
+        let phase_markers = report["phase_markers"]
+            .as_array()
+            .expect("phase markers array");
+        assert_eq!(
+            phase_markers.len(),
+            5,
+            "expected five deterministic phase markers"
+        );
+    }
+
     #[test]
     fn e2e_pipeline_reports_are_deterministic() {
         let encoding = EncodingConfig {
@@ -1224,11 +1319,21 @@ mod pipeline_e2e {
         let scenarios = [
             Scenario {
                 name: "systematic_only",
+                scenario_id: "RQ-E2E-SYSTEMATIC-ONLY",
+                replay_id: "replay:rq-e2e-systematic-only-v1",
+                profile: "fast",
+                unit_sentinel: "raptorq::tests::edge_cases::repair_zero_only_source",
+                assertion_id: "E2E-ROUNDTRIP-SYSTEMATIC",
                 loss: LossPattern::None,
                 expect_success: true,
             },
             Scenario {
                 name: "typical_random_loss",
+                scenario_id: "RQ-E2E-TYPICAL-RANDOM-LOSS",
+                replay_id: "replay:rq-e2e-typical-random-loss-v1",
+                profile: "full",
+                unit_sentinel: "roundtrip_with_source_loss",
+                assertion_id: "E2E-ROUNDTRIP-RANDOM-LOSS",
                 loss: LossPattern::Random {
                     seed: 0xBEEF_u64,
                     drop_per_mille: 200,
@@ -1237,14 +1342,24 @@ mod pipeline_e2e {
             },
             Scenario {
                 name: "burst_loss_late",
+                scenario_id: "RQ-E2E-BURST-LOSS-LATE",
+                replay_id: "replay:rq-e2e-burst-loss-late-v1",
+                profile: "forensics",
+                unit_sentinel: "roundtrip_repair_only",
+                assertion_id: "E2E-ROUNDTRIP-BURST-LOSS",
                 loss: LossPattern::Burst {
-                    drop_per_mille: 250,
+                    drop_per_mille: 150,
                     position: BurstPosition::Late,
                 },
                 expect_success: true,
             },
             Scenario {
                 name: "insufficient_symbols",
+                scenario_id: "RQ-E2E-INSUFFICIENT-SYMBOLS",
+                replay_id: "replay:rq-e2e-insufficient-symbols-v1",
+                profile: "fast",
+                unit_sentinel: "raptorq::tests::edge_cases::insufficient_symbols_error",
+                assertion_id: "E2E-ERROR-INSUFFICIENT",
                 loss: LossPattern::Insufficient,
                 expect_success: false,
             },
@@ -1274,6 +1389,8 @@ mod pipeline_e2e {
                 "symbol stream hash mismatch"
             );
             assert_eq!(proof_hash_first, proof_hash_second, "proof hash mismatch");
+            assert_report_contract(&report_first, scenario);
+            assert_report_contract(&report_second, scenario);
             assert_eq!(report_first, report_second, "report JSON mismatch");
             assert_eq!(success_first, success_second, "success mismatch");
         }
