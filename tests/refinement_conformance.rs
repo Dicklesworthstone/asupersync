@@ -50,7 +50,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
 use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::runtime::yield_now;
-use asupersync::trace::trace_fingerprint;
+use asupersync::trace::{trace_fingerprint, TraceEvent};
 use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
 use common::*;
 
@@ -642,4 +642,83 @@ fn refinement_semantics_trace_golden() {
     );
 
     test_complete!("refinement_semantics_trace_golden");
+}
+
+/// Refinement validation should treat benign interleaving differences as equivalent.
+///
+/// This is the core anti-noise guard for Track-4 divergence triage: raw event order
+/// can differ while the canonical trace class remains identical.
+#[test]
+fn refinement_trace_equivalence_filters_schedule_noise() {
+    init_test("refinement_trace_equivalence_filters_schedule_noise");
+
+    // Two independent task timelines with different raw interleavings.
+    let trace_a = vec![
+        TraceEvent::spawn(1, t(1), task(1), region(1)),
+        TraceEvent::spawn(2, t(2), task(2), region(2)),
+        TraceEvent::complete(3, t(3), task(1), region(1)),
+        TraceEvent::complete(4, t(4), task(2), region(2)),
+    ];
+    let trace_b = vec![
+        TraceEvent::spawn(10, t(1), task(2), region(2)),
+        TraceEvent::spawn(11, t(2), task(1), region(1)),
+        TraceEvent::complete(12, t(3), task(2), region(2)),
+        TraceEvent::complete(13, t(4), task(1), region(1)),
+    ];
+
+    assert_with_log!(
+        trace_a != trace_b,
+        "raw traces differ under schedule noise",
+        true,
+        trace_a != trace_b
+    );
+
+    let fp_a = trace_fingerprint(&trace_a);
+    let fp_b = trace_fingerprint(&trace_b);
+    assert_with_log!(
+        fp_a == fp_b,
+        "equivalence fingerprint ignores benign ordering differences",
+        fp_a,
+        fp_b
+    );
+
+    // Determinism: repeated fingerprint computation must be stable.
+    let fp_a_again = trace_fingerprint(&trace_a);
+    assert_with_log!(
+        fp_a == fp_a_again,
+        "fingerprint deterministic for same trace",
+        fp_a,
+        fp_a_again
+    );
+
+    test_complete!("refinement_trace_equivalence_filters_schedule_noise");
+}
+
+/// Refinement validation should still flag semantic mismatches.
+///
+/// Reordering dependent events for the same task must produce a different
+/// equivalence fingerprint.
+#[test]
+fn refinement_trace_equivalence_detects_semantic_mismatch() {
+    init_test("refinement_trace_equivalence_detects_semantic_mismatch");
+
+    let baseline = vec![
+        TraceEvent::spawn(20, t(1), task(3), region(3)),
+        TraceEvent::complete(21, t(2), task(3), region(3)),
+    ];
+    let mismatch = vec![
+        TraceEvent::complete(30, t(1), task(3), region(3)),
+        TraceEvent::spawn(31, t(2), task(3), region(3)),
+    ];
+
+    let baseline_fp = trace_fingerprint(&baseline);
+    let mismatch_fp = trace_fingerprint(&mismatch);
+    assert_with_log!(
+        baseline_fp != mismatch_fp,
+        "semantic mismatch is not normalized away",
+        baseline_fp,
+        mismatch_fp
+    );
+
+    test_complete!("refinement_trace_equivalence_detects_semantic_mismatch");
 }

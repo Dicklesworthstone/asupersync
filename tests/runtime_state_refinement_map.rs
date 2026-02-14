@@ -82,6 +82,8 @@ fn runtime_state_refinement_map_covers_required_operations() {
         "runtime_state.cancel_request",
         "runtime_state.task_completed",
         "runtime_state.advance_region_state",
+        "scheduler.three_lane.next_task",
+        "scope.race_all_loser_drain",
     ]);
 
     let mapped_ids = mappings
@@ -222,6 +224,55 @@ fn runtime_state_refinement_map_links_valid_rules_and_theorems() {
                 !disambiguation_notes.is_empty(),
                 "multi-label mapping must include disambiguation notes for {operation_id}"
             );
+        }
+
+        if matches!(
+            operation_id,
+            "scheduler.three_lane.next_task" | "scope.race_all_loser_drain"
+        ) {
+            let signatures = mapping
+                .get("expected_trace_signatures")
+                .and_then(Value::as_array)
+                .expect("expected_trace_signatures must be an array for scheduler/combinator rows");
+            assert!(
+                !signatures.is_empty(),
+                "expected_trace_signatures must be non-empty for {operation_id}"
+            );
+            let signature_values = signatures
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("expected_trace_signatures values must be strings")
+                })
+                .collect::<Vec<_>>();
+            let unique_signatures = signature_values.iter().copied().collect::<BTreeSet<_>>();
+            assert_eq!(
+                signature_values.len(),
+                unique_signatures.len(),
+                "expected_trace_signatures must not contain duplicates for {operation_id}"
+            );
+            for signature in &signature_values {
+                assert!(
+                    !signature.trim().is_empty(),
+                    "expected_trace_signatures entries must be non-empty for {operation_id}"
+                );
+            }
+
+            let conformance_links = mapping
+                .get("conformance_test_links")
+                .and_then(Value::as_array)
+                .expect("conformance_test_links must be an array for scheduler/combinator rows");
+            assert!(
+                !conformance_links.is_empty(),
+                "conformance_test_links must be non-empty for {operation_id}"
+            );
+            for link in conformance_links {
+                assert!(
+                    link.as_str().is_some_and(|value| !value.trim().is_empty()),
+                    "conformance_test_links entries must be non-empty for {operation_id}"
+                );
+            }
         }
     }
 }
