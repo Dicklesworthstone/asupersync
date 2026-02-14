@@ -204,7 +204,7 @@ impl Resolver {
         }
 
         // Default TTL since std::net doesn't provide it
-        let ttl = Duration::from_secs(300);
+        let ttl = Duration::from_mins(5);
 
         Ok(LookupIp::new(addrs, ttl))
     }
@@ -456,7 +456,7 @@ mod tests {
         let _ = Resolver::query_ip_sync("localhost");
         resolver1.cache.put_ip(
             "test.example",
-            &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_secs(300)),
+            &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_mins(5)),
         );
 
         // Should be visible on resolver2 (shared cache)
