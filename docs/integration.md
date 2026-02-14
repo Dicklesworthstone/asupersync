@@ -527,6 +527,58 @@ Guardrail-gap escalation rule:
 - Any `fail` item without an immediate fix must create a blocker bead (prefix: `[GUARDRAIL-GAP]`) before merge/sign-off.
 - Blocker bead must include: impacted assumption class, violated checklist item, reproducible command/artifact, and owner.
 
+### Proof-Safe Hot-Path Refactor Checklist (Track-6 T6.1b)
+
+Use this checklist for performance-oriented refactors that touch hot paths in:
+- `src/runtime/scheduler/**`
+- `src/cancel/**`
+- `src/obligation/**`
+- `src/runtime/task_table.rs` and `src/runtime/sharded_state.rs`
+
+Deterministic checklist (mark each item `pass`/`fail`/`n/a`):
+
+1. `scheduler_lane_contract`: cancel > timed > ready dispatch ordering preserved, including fairness bounds for cancel streaks.
+2. `lock_order_contract`: lock acquisition still follows `E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)`.
+3. `cancel_protocol_contract`: request -> drain -> finalize ordering remains intact in modified paths.
+4. `obligation_contract`: reserve/commit/abort pathways remain total, and no new leak/futurelock surface is introduced.
+5. `determinism_contract`: no ambient time/randomness or non-deterministic iteration is introduced on hot paths.
+6. `theorem_anchor_contract`: touched behavior is mapped to `formal/lean/coverage/runtime_state_refinement_map.json` and invariant witnesses in `formal/lean/coverage/invariant_theorem_test_link_map.json`.
+7. `conformance_contract`: executable checks tied to touched constraints are run and recorded.
+
+Required evidence commands for checklist completion:
+
+```bash
+rch exec -- cargo check --all-targets
+rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- cargo test --test refinement_conformance -- --nocapture
+rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture
+```
+
+Performance-change review evidence example (bd-2pja4):
+
+```yaml
+proof_safe_hot_path_review:
+  bead: bd-2pja4
+  review_scope:
+    - scheduler dispatch fast-path
+    - cancellation drain behavior
+    - obligation discharge paths
+  checklist:
+    scheduler_lane_contract: pass
+    lock_order_contract: pass
+    cancel_protocol_contract: pass
+    obligation_contract: pass
+    determinism_contract: pass
+    theorem_anchor_contract: pass
+    conformance_contract: pass
+  theorem_artifacts:
+    - formal/lean/coverage/runtime_state_refinement_map.json
+    - formal/lean/coverage/invariant_theorem_test_link_map.json
+  conformance_evidence:
+    - tests/refinement_conformance.rs
+    - tests/lean_invariant_theorem_test_link_map.rs
+```
+
 ---
 
 ## API Reference Orientation
