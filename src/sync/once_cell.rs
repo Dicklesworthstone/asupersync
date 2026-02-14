@@ -434,7 +434,9 @@ impl<T> OnceCell<T> {
                 if let Some(existing) = guard.waiters.iter_mut().find(|entry| {
                     Arc::ptr_eq(&entry.queued, flag) && entry.queued.load(Ordering::Acquire)
                 }) {
-                    existing.waker.clone_from(waker);
+                    if !existing.waker.will_wake(waker) {
+                        existing.waker.clone_from(waker);
+                    }
                 }
                 None
             }

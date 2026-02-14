@@ -176,6 +176,24 @@ impl<T> WatchInner<T> {
         }
         waiters.push(waiter);
     }
+
+    /// Update the waker for an already-queued waiter without pre-cloning.
+    /// Returns `true` if the waiter was found and refreshed, `false` if not found
+    /// (caller should fall back to `register_waker` with a new `WatchWaiter`).
+    fn refresh_waker(&self, queued: &Arc<AtomicBool>, new_waker: &Waker) -> bool {
+        let mut waiters = self.waiters.lock().expect("watch lock poisoned");
+        waiters.retain(|entry| Arc::strong_count(&entry.queued) > 1);
+        if let Some(existing) = waiters
+            .iter_mut()
+            .find(|entry| Arc::ptr_eq(&entry.queued, queued))
+        {
+            if !existing.waker.will_wake(new_waker) {
+                existing.waker.clone_from(new_waker);
+            }
+            return true;
+        }
+        false
+    }
 }
 
 /// Creates a new watch channel with an initial value.
@@ -482,11 +500,15 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
             }
             Some(w) => {
                 // Still queued, but the task's waker may have changed.
-                // Refresh stored waker to avoid waking a stale task.
-                this.receiver.inner.register_waker(WatchWaiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(w),
-                });
+                // Refresh in-place without pre-cloning — avoids Waker clone +
+                // Arc::clone on the common re-poll path.
+                if !this.receiver.inner.refresh_waker(w, context.waker()) {
+                    // Waiter was pruned (stale); re-register with a fresh entry.
+                    this.receiver.inner.register_waker(WatchWaiter {
+                        waker: context.waker().clone(),
+                        queued: Arc::clone(w),
+                    });
+                }
             }
             None => {
                 // First poll — create a new waiter.

@@ -350,8 +350,12 @@ impl Future for Notified<'_> {
                             self.state = NotifiedState::Done;
                             return Poll::Ready(());
                         }
-                        // Update waker while we have the lock.
-                        waiters.entries[index].waker = Some(cx.waker().clone());
+                        // Update waker while we have the lock, but only if it changed.
+                        match &mut waiters.entries[index].waker {
+                            Some(existing) if existing.will_wake(cx.waker()) => {}
+                            Some(existing) => existing.clone_from(cx.waker()),
+                            slot @ None => *slot = Some(cx.waker().clone()),
+                        }
                     } else {
                         // Entry was popped by tail shrinking. This only
                         // happens if our waker was taken by notify_one/notify_waiters,

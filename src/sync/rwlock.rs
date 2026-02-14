@@ -491,7 +491,9 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
                     .iter_mut()
                     .find(|w| Arc::ptr_eq(&w.queued, waiter))
                 {
-                    existing.waker.clone_from(context.waker());
+                    if !existing.waker.will_wake(context.waker()) {
+                        existing.waker.clone_from(context.waker());
+                    }
                 }
             }
             None => {
@@ -622,7 +624,9 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
                     .iter_mut()
                     .find(|w| Arc::ptr_eq(&w.queued, waiter))
                 {
-                    existing.waker.clone_from(context.waker());
+                    if !existing.waker.will_wake(context.waker()) {
+                        existing.waker.clone_from(context.waker());
+                    }
                 }
             }
             None => {
@@ -880,7 +884,9 @@ impl<T> Future for OwnedReadFuture<'_, T> {
                     .iter_mut()
                     .find(|w| Arc::ptr_eq(&w.queued, waiter))
                 {
-                    existing.waker.clone_from(context.waker());
+                    if !existing.waker.will_wake(context.waker()) {
+                        existing.waker.clone_from(context.waker());
+                    }
                 }
             }
             None => {
@@ -993,7 +999,9 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                     .iter_mut()
                     .find(|w| Arc::ptr_eq(&w.queued, waiter))
                 {
-                    existing.waker.clone_from(context.waker());
+                    if !existing.waker.will_wake(context.waker()) {
+                        existing.waker.clone_from(context.waker());
+                    }
                 }
             }
             None => {
