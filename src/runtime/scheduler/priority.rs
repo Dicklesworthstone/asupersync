@@ -251,7 +251,7 @@ pub struct Scheduler {
     scratch_timed: Vec<TimedEntry>,
 }
 
-const DEFAULT_SCHEDULER_CAPACITY: usize = 256;
+const DEFAULT_SCHEDULER_CAPACITY: usize = 64;
 const DEFAULT_SCRATCH_CAPACITY: usize = 8;
 
 impl Default for Scheduler {
