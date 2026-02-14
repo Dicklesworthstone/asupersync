@@ -286,38 +286,38 @@ fn dynamic_no_aliasing_rejects_duplicate_allocation() {
 /// 50 regions × 10 tasks × random obligations = all resolved at quiescence.
 #[test]
 fn dynamic_no_leak_50_regions_10_tasks() {
-    let regions = 50;
-    let tasks_per_region = 10;
+    let regions: u32 = 50;
+    let tasks_per_region: u32 = 10;
     let mut events = Vec::new();
     let mut time: u64 = 0;
     let mut obl_id: u32 = 0;
 
     for reg in 0..regions {
         for task_idx in 0..tasks_per_region {
-            let task = (reg * tasks_per_region + task_idx) as u32;
+            let task = reg * tasks_per_region + task_idx;
             let kind = ALL_KINDS[(obl_id as usize) % 4];
 
-            events.push(reserve(time, o(obl_id), kind, t(task), r(reg as u32)));
+            events.push(reserve(time, o(obl_id), kind, t(task), r(reg)));
             time += 1;
             obl_id += 1;
         }
 
         // Resolve all obligations in this region.
-        let start_obl = obl_id - tasks_per_region as u32;
+        let start_obl = obl_id - tasks_per_region;
         for i in 0..tasks_per_region {
-            let oid = start_obl + i as u32;
+            let oid = start_obl + i;
             let kind = ALL_KINDS[(oid as usize) % 4];
             // Vary the resolution path.
             let event = match i % 3 {
-                0 => commit(time, o(oid), r(reg as u32), kind),
-                1 => abort(time, o(oid), r(reg as u32), kind),
-                _ => leak(time, o(oid), r(reg as u32), kind),
+                0 => commit(time, o(oid), r(reg), kind),
+                1 => abort(time, o(oid), r(reg), kind),
+                _ => leak(time, o(oid), r(reg), kind),
             };
             events.push(event);
             time += 1;
         }
 
-        events.push(close(time, r(reg as u32)));
+        events.push(close(time, r(reg)));
         time += 1;
     }
 
@@ -325,7 +325,7 @@ fn dynamic_no_leak_50_regions_10_tasks() {
     let result = prover.check(&events);
     assert!(result.is_verified(), "50 regions × 10 tasks: {result}");
     assert_eq!(result.ghost_counter_final, 0);
-    assert_eq!(result.total_reserved, (regions * tasks_per_region) as u64);
+    assert_eq!(result.total_reserved, u64::from(regions * tasks_per_region));
     assert_eq!(result.paths_exercised.paths_covered(), 3);
 }
 
@@ -674,9 +674,9 @@ fn transfer_use_after_release_rejected() {
 /// 500 obligations across 25 regions and 50 tasks — full lifecycle.
 #[test]
 fn stress_500_obligations_full_lifecycle() {
-    let n_obligations = 500;
-    let n_regions = 25;
-    let n_tasks = 50;
+    let n_obligations: u32 = 500;
+    let n_regions: u32 = 25;
+    let n_tasks: u32 = 50;
     let mut events = Vec::new();
     let mut time: u64 = 0;
 
@@ -697,7 +697,7 @@ fn stress_500_obligations_full_lifecycle() {
         let kind = ALL_KINDS[(i as usize) % 4];
         let region = r(i % n_regions);
         let event = match i % 5 {
-            0 | 1 | 2 => commit(time, o(i), region, kind),
+            0..=2 => commit(time, o(i), region, kind),
             3 => abort(time, o(i), region, kind),
             _ => leak(time, o(i), region, kind),
         };
@@ -727,7 +727,7 @@ fn stress_500_obligations_full_lifecycle() {
     let leak_result = leak_prover.check(&events);
     assert!(leak_result.is_verified(), "leak 500-stress: {leak_result}");
     assert_eq!(leak_result.ghost_counter_final, 0);
-    assert_eq!(leak_result.total_reserved, n_obligations as u64);
+    assert_eq!(leak_result.total_reserved, u64::from(n_obligations));
     assert_eq!(leak_result.paths_exercised.paths_covered(), 3);
 }
 

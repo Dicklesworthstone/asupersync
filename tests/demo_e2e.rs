@@ -285,15 +285,22 @@ fn artifact_hash_stability() {
 
     // Compute hashes.
     let elements = extract_elements(seed);
-    let elements_str: String = elements.iter().map(|e| format!("{e}\n")).collect();
+    let elements_str = elements.iter().fold(String::new(), |mut acc, e| {
+        use std::fmt::Write;
+        writeln!(acc, "{e}").ok();
+        acc
+    });
     let elements_hash = sha256_hex(elements_str.as_bytes());
 
     let report = TraceMinimizer::minimize(&elements, check_for_leak);
-    let minimized_str: String = report
-        .minimized_elements()
-        .iter()
-        .map(|e| format!("{e}\n"))
-        .collect();
+    let minimized_str = report.minimized_elements().iter().fold(
+        String::new(),
+        |mut acc, e| {
+            use std::fmt::Write;
+            writeln!(acc, "{e}").ok();
+            acc
+        },
+    );
     let minimized_hash = sha256_hex(minimized_str.as_bytes());
 
     // Verify against golden values from demo_benchmark run.
@@ -348,22 +355,28 @@ fn hash_stability_10_runs() {
 
     let first = TraceMinimizer::minimize(&elements, check_for_leak);
     let first_hash = {
-        let s: String = first
-            .minimized_elements()
-            .iter()
-            .map(|e| format!("{e}\n"))
-            .collect();
+        let s = first.minimized_elements().iter().fold(
+            String::new(),
+            |mut acc, e| {
+                use std::fmt::Write;
+                writeln!(acc, "{e}").ok();
+                acc
+            },
+        );
         sha256_hex(s.as_bytes())
     };
 
     for run in 1..10 {
         let report = TraceMinimizer::minimize(&elements, check_for_leak);
         let hash = {
-            let s: String = report
-                .minimized_elements()
-                .iter()
-                .map(|e| format!("{e}\n"))
-                .collect();
+            let s = report.minimized_elements().iter().fold(
+                String::new(),
+                |mut acc, e| {
+                    use std::fmt::Write;
+                    writeln!(acc, "{e}").ok();
+                    acc
+                },
+            );
             sha256_hex(s.as_bytes())
         };
         assert_eq!(
