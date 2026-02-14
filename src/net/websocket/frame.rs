@@ -673,10 +673,10 @@ impl Encoder<Frame> for FrameCodec {
         if payload_len <= 125 {
             dst.put_u8(mask_bit | (payload_len as u8));
         } else if payload_len <= 65535 {
-            dst.put_u8(mask_bit | 126);
+            dst.put_u8(mask_bit | 0x7E);
             dst.put_u16(payload_len as u16);
         } else {
-            dst.put_u8(mask_bit | 127);
+            dst.put_u8(mask_bit | 0x7F);
             dst.put_u64(payload_len as u64);
         }
 

@@ -289,8 +289,8 @@ fn detect_dual_policy() -> DualKernelPolicy {
         .ok()
         .as_deref()
     {
-        Some("off") | Some("sequential") => DualKernelOverride::ForceSequential,
-        Some("fused") | Some("force_fused") => DualKernelOverride::ForceFused,
+        Some("off" | "sequential") => DualKernelOverride::ForceSequential,
+        Some("fused" | "force_fused") => DualKernelOverride::ForceFused,
         _ => DualKernelOverride::Auto,
     };
 
@@ -1561,17 +1561,17 @@ mod tests {
 
         let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
         let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
-        let mut dst_a_fused: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
-        let mut dst_b_fused: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
-        let mut dst_a_seq = dst_a_fused.clone();
-        let mut dst_b_seq = dst_b_fused.clone();
+        let mut accum_left: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut accum_right: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_left = accum_left.clone();
+        let mut expected_right = accum_right.clone();
 
-        gf256_addmul_slices2(&mut dst_a_fused, &src_a, &mut dst_b_fused, &src_b, c);
-        gf256_addmul_slice(&mut dst_a_seq, &src_a, c);
-        gf256_addmul_slice(&mut dst_b_seq, &src_b, c);
+        gf256_addmul_slices2(&mut accum_left, &src_a, &mut accum_right, &src_b, c);
+        gf256_addmul_slice(&mut expected_left, &src_a, c);
+        gf256_addmul_slice(&mut expected_right, &src_b, c);
 
-        assert_eq!(dst_a_fused, dst_a_seq);
-        assert_eq!(dst_b_fused, dst_b_seq);
+        assert_eq!(accum_left, expected_left);
+        assert_eq!(accum_right, expected_right);
     }
 
     #[test]
