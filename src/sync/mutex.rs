@@ -23,12 +23,12 @@
 
 #![allow(unsafe_code)]
 
+use parking_lot::Mutex as ParkingMutex;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use parking_lot::Mutex as ParkingMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -133,11 +133,7 @@ impl<T> Mutex<T> {
     /// Returns the number of tasks currently waiting for the lock.
     #[must_use]
     pub fn waiters(&self) -> usize {
-        self.state
-            .lock()
-            .expect("mutex state lock poisoned")
-            .waiters
-            .len()
+        self.state.lock().waiters.len()
     }
 
     /// Acquires the mutex asynchronously.

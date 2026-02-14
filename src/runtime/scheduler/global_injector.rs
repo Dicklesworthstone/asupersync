@@ -5,9 +5,9 @@
 
 use crate::types::{TaskId, Time};
 use crossbeam_queue::SegQueue;
+use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A scheduled task with its priority metadata.

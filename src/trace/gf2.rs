@@ -370,11 +370,7 @@ impl BoundaryMatrix {
 
         for j in 0..reduced.cols() {
             // Reduce column j until its pivot is unique or it becomes zero
-            loop {
-                let Some(pivot) = reduced.column_pivot(j) else {
-                    break; // Column is zero
-                };
-
+            while let Some(pivot) = reduced.column_pivot(j) {
                 let Some(existing_col) = pivot_map[pivot] else {
                     // No column has this pivot yet — record and stop
                     pivot_map[pivot] = Some(j);
@@ -695,6 +691,17 @@ mod tests {
                 "pivot mismatch at column {j}"
             );
         }
+    }
+
+    #[test]
+    fn reduce_keeps_zero_column_zero() {
+        let mut d = BoundaryMatrix::zeros(4, 3);
+        d.set(0, 0);
+        d.set(1, 0);
+        d.set(2, 2);
+
+        let reduced = d.reduce();
+        assert_eq!(reduced.matrix.column_pivot(1), None);
     }
 
     #[test]

@@ -56,13 +56,13 @@
 //! write.push(4);
 //! ```
 
+use parking_lot::Mutex as ParkingMutex;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex as ParkingMutex;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::task::{Context, Poll, Waker};
 

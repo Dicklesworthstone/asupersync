@@ -9,10 +9,10 @@
 //! - `notified().await`: Cancel-safe, waiter is removed on cancellation
 //! - Notifications before any waiter: Stored and delivered to next waiter
 
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 

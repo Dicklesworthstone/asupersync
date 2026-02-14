@@ -24,10 +24,10 @@
 //! drop(permit);
 //! ```
 
+use parking_lot::Mutex as ParkingMutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex as ParkingMutex;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -202,10 +202,7 @@ pub struct AcquireFuture<'a, 'b> {
 impl Drop for AcquireFuture<'_, '_> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let mut state = self
-                .semaphore
-                .state
-                .lock();
+            let mut state = self.semaphore.state.lock();
 
             // If we are at the front, we need to wake the next waiter when we leave,
             // otherwise the signal (permits available) might be lost.
@@ -228,10 +225,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
-                let mut state = self
-                    .semaphore
-                    .state
-                    .lock();
+                let mut state = self.semaphore.state.lock();
 
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
@@ -254,10 +248,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             id
         } else {
             let id = {
-                let mut state = self
-                    .semaphore
-                    .state
-                    .lock();
+                let mut state = self.semaphore.state.lock();
                 let id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 id
@@ -266,10 +257,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             id
         };
 
-        let mut state = self
-            .semaphore
-            .state
-            .lock();
+        let mut state = self.semaphore.state.lock();
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
@@ -416,10 +404,7 @@ struct OwnedAcquireFuture {
 impl Drop for OwnedAcquireFuture {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let mut state = self
-                .semaphore
-                .state
-                .lock();
+            let mut state = self.semaphore.state.lock();
 
             // If we are at the front, we need to wake the next waiter when we leave,
             // otherwise the signal (permits available) might be lost.
@@ -443,10 +428,7 @@ impl Future for OwnedAcquireFuture {
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
                 {
-                    let mut state = self
-                        .semaphore
-                        .state
-                        .lock();
+                    let mut state = self.semaphore.state.lock();
                     let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
                     state.waiters.retain(|waiter| waiter.id != waiter_id);
                     if was_front {
@@ -467,10 +449,7 @@ impl Future for OwnedAcquireFuture {
             id
         } else {
             let id = {
-                let mut state = self
-                    .semaphore
-                    .state
-                    .lock();
+                let mut state = self.semaphore.state.lock();
                 let id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 id
@@ -479,10 +458,7 @@ impl Future for OwnedAcquireFuture {
             id
         };
 
-        let mut state = self
-            .semaphore
-            .state
-            .lock();
+        let mut state = self.semaphore.state.lock();
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
