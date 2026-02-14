@@ -50,6 +50,7 @@ impl fmt::Debug for ArenaIndex {
 }
 
 impl Hash for ArenaIndex {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         let packed = (u64::from(self.index) << 32) | u64::from(self.generation);
         state.write_u64(packed);

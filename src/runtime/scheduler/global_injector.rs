@@ -42,6 +42,7 @@ impl TimedTask {
 }
 
 impl Ord for TimedTask {
+    #[inline]
     fn cmp(&self, other: &Self) -> CmpOrdering {
         // Reverse ordering for min-heap (earliest deadline first).
         // For equal deadlines, lower generation (earlier insertion) comes first.
@@ -53,6 +54,7 @@ impl Ord for TimedTask {
 }
 
 impl PartialOrd for TimedTask {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
     }
