@@ -4,6 +4,7 @@ This document records the deterministic baseline packet for the RaptorQ RFC-6330
 
 - Bead: `bd-3s8zu`
 - Artifact JSON: `artifacts/raptorq_baseline_bench_profile_v1.json`
+- Replay catalog artifact: `artifacts/raptorq_replay_catalog_v1.json`
 - Baseline run report: `target/perf-results/perf_20260214_143734/report.json`
 - Baseline metric snapshot: `target/perf-results/perf_20260214_143734/artifacts/baseline_current.json`
 - Git SHA: `621e54283fef7b81101ad8af8b0aab2444279551`
@@ -89,6 +90,12 @@ Performance budget outcomes are advisory-only until these are present and green:
 - D7 (`bd-oeql8`) and D9 (`bd-26pqk`): structured forensic logging + replay catalog
 
 No optimization decision record (`bd-7toum`) or CI gate closure (`bd-322jd`) should treat G1 budgets as authoritative without these prerequisites.
+
+Replay-catalog source of truth for deterministic reproduction:
+
+- `artifacts/raptorq_replay_catalog_v1.json` (`schema_version=raptorq-replay-catalog-v1`)
+- fixture reference `RQ-D9-REPLAY-CATALOG-V1`
+- stable `replay_ref` IDs mapped to unit+E2E surfaces with remote repro commands
 
 ## Structured Logging Fields for G1 Gate Outputs
 
