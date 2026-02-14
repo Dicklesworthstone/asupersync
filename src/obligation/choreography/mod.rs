@@ -81,6 +81,7 @@
 //! communications can be batched for coordination-free execution.
 
 pub mod codegen;
+pub mod pipeline;
 
 use crate::obligation::calm::Monotonicity;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
