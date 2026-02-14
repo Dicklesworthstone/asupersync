@@ -402,6 +402,7 @@ struct ReaderCountGuard<'a, T> {
 }
 
 impl<T> Drop for ReaderCountGuard<'_, T> {
+    #[inline]
     fn drop(&mut self) {
         self.lock.release_reader();
     }
@@ -412,6 +413,7 @@ struct WriterActiveGuard<'a, T> {
 }
 
 impl<T> Drop for WriterActiveGuard<'_, T> {
+    #[inline]
     fn drop(&mut self) {
         self.lock.release_writer();
     }

@@ -456,6 +456,7 @@ impl<T> OnceCell<T> {
 }
 
 impl<T> Default for OnceCell<T> {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -488,6 +489,7 @@ impl<T: PartialEq> PartialEq for OnceCell<T> {
 impl<T: Eq> Eq for OnceCell<T> {}
 
 impl<T> From<T> for OnceCell<T> {
+    #[inline]
     fn from(value: T) -> Self {
         Self::with_value(value)
     }

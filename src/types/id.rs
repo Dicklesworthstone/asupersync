@@ -76,12 +76,14 @@ impl RegionId {
 }
 
 impl fmt::Debug for RegionId {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "RegionId({}:{})", self.0.index(), self.0.generation())
     }
 }
 
 impl fmt::Display for RegionId {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "R{}", self.0.index())
     }
@@ -188,12 +190,14 @@ impl TaskId {
 }
 
 impl fmt::Debug for TaskId {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TaskId({}:{})", self.0.index(), self.0.generation())
     }
 }
 
 impl fmt::Display for TaskId {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "T{}", self.0.index())
     }
@@ -261,6 +265,7 @@ impl ObligationId {
 }
 
 impl fmt::Debug for ObligationId {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -272,6 +277,7 @@ impl fmt::Debug for ObligationId {
 }
 
 impl fmt::Display for ObligationId {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "O{}", self.0.index())
     }
@@ -379,6 +385,7 @@ impl Time {
 impl Add<Duration> for Time {
     type Output = Self;
 
+    #[inline]
     fn add(self, rhs: Duration) -> Self::Output {
         let nanos: u64 = rhs.as_nanos().min(u128::from(u64::MAX)) as u64;
         self.saturating_add_nanos(nanos)
@@ -386,6 +393,7 @@ impl Add<Duration> for Time {
 }
 
 impl fmt::Debug for Time {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Time({}ns)", self.0)
     }
