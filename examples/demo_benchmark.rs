@@ -463,11 +463,14 @@ fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
     let minimize_ms = minimize_start.elapsed().as_millis() as u64;
 
     // Hash the minimized elements (canonical string representation).
-    let minimized_str: String = report
-        .minimized_elements()
-        .iter()
-        .map(|e| format!("{e}\n"))
-        .collect();
+    let minimized_str = report.minimized_elements().iter().fold(
+        String::new(),
+        |mut acc, e| {
+            use std::fmt::Write;
+            writeln!(acc, "{e}").ok();
+            acc
+        },
+    );
     let minimized_hash = sha256_hex(minimized_str.as_bytes());
     eprintln!(
         "    minimized: {}/{} elements, hash={}...",
@@ -492,7 +495,11 @@ fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
     eprintln!("  phase 4: consistency checks");
 
     // Elements hash (full scenario for the failing seed).
-    let elements_str: String = elements.iter().map(|e| format!("{e}\n")).collect();
+    let elements_str = elements.iter().fold(String::new(), |mut acc, e| {
+        use std::fmt::Write;
+        writeln!(acc, "{e}").ok();
+        acc
+    });
     checksums.insert(
         "demo/original_elements".into(),
         sha256_hex(elements_str.as_bytes()),
@@ -571,7 +578,7 @@ fn main() {
 
         let status = match expected {
             Some(exp) if exp == actual_hash => "PASS",
-            Some(exp) if exp == "GENERATE" => {
+            Some("GENERATE") => {
                 if update_mode {
                     "GENERATED"
                 } else {
