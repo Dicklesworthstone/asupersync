@@ -57,6 +57,7 @@
 //! ```
 
 pub mod calm;
+pub mod choreography;
 pub mod crdt;
 pub mod dialectica;
 pub mod eprocess;
