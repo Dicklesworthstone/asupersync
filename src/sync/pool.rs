@@ -1365,7 +1365,16 @@ where
             }
         }
 
-        self.try_get_idle().map(|(resource, created_at)| {
+        while let Some((resource, created_at)) = self.try_get_idle() {
+            if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
+                // Unhealthy: undo the active count bump from try_get_idle.
+                let mut state = self.state.lock().expect("pool state lock poisoned");
+                state.active = state.active.saturating_sub(1);
+                state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
+                drop(state);
+                continue;
+            }
+
             // Record metrics for the acquire
             #[cfg(feature = "metrics")]
             if let Some(ref metrics) = self.metrics {
@@ -1373,8 +1382,14 @@ where
                 self.update_metrics_gauges();
             }
 
-            PooledResource::new_with_created_at(resource, self.return_tx.clone(), created_at)
-        })
+            return Some(PooledResource::new_with_created_at(
+                resource,
+                self.return_tx.clone(),
+                created_at,
+            ));
+        }
+
+        None
     }
 
     fn stats(&self) -> PoolStats {
@@ -2439,6 +2454,43 @@ mod tests {
         );
 
         crate::test_complete!("health_check_disabled_skips_check");
+    }
+
+    #[test]
+    fn try_acquire_skips_unhealthy_idle_resources_when_health_check_enabled() {
+        init_test("try_acquire_skips_unhealthy_idle_resources_when_health_check_enabled");
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(5).health_check_on_acquire(true);
+        let pool = GenericPool::new(factory, config).with_health_check(|id: &u32| *id != 0);
+
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Seed two idle resources: #0 (unhealthy), then #1 (healthy).
+        let r0 = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("second acquire");
+        assert_eq!(*r0, 0);
+        assert_eq!(*r1, 1);
+        r0.return_to_pool();
+        r1.return_to_pool();
+
+        // try_acquire should skip #0 and return #1.
+        let picked = pool
+            .try_acquire()
+            .expect("should acquire healthy idle resource");
+        assert_eq!(*picked, 1, "try_acquire should skip unhealthy idle resource");
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 1, "one resource checked out");
+        assert_eq!(stats.idle, 0, "no healthy idle resources left");
+
+        crate::test_complete!("try_acquire_skips_unhealthy_idle_resources_when_health_check_enabled");
     }
 
     // ========================================================================
