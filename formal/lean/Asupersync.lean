@@ -3561,7 +3561,9 @@ theorem close_produces_closed_region
   | close _ hRegion _ _ _ hUpdate =>
     rename_i region hState hFinalizers hQuiescent
     subst hUpdate
-    exact ⟨{ region with state := RegionState.closed outcome }, by simp [getRegion, setRegion], rfl⟩
+    refine ⟨{ region with state := RegionState.closed outcome }, ?_, ?_⟩
+    · simp [getRegion, setRegion]
+    · simp
 
 /-- Commit effect: obligation transitions to committed, removed from ledger.
     Matches ObligationRecord::commit() in src/record/obligation.rs. -/
