@@ -424,12 +424,14 @@ impl<R> PooledResource<R> {
     }
 
     /// Access the resource.
+    #[inline]
     #[must_use]
     pub fn get(&self) -> &R {
         self.resource.as_ref().expect("resource taken")
     }
 
     /// Mutably access the resource.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut R {
         self.resource.as_mut().expect("resource taken")
     }
@@ -505,12 +507,14 @@ impl<R> Drop for PooledResource<R> {
 impl<R> std::ops::Deref for PooledResource<R> {
     type Target = R;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.get()
     }
 }
 
 impl<R> std::ops::DerefMut for PooledResource<R> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.get_mut()
     }

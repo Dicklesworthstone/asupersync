@@ -22,18 +22,21 @@ pub struct ArenaIndex {
 
 impl ArenaIndex {
     /// Creates a new arena index (primarily for testing).
+    #[inline]
     #[must_use]
     pub const fn new(index: u32, generation: u32) -> Self {
         Self { index, generation }
     }
 
     /// Returns the raw index value.
+    #[inline]
     #[must_use]
     pub const fn index(self) -> u32 {
         self.index
     }
 
     /// Returns the generation counter.
+    #[inline]
     #[must_use]
     pub const fn generation(self) -> u32 {
         self.generation

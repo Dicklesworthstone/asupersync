@@ -334,12 +334,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for MutexGuard<'_, T> {
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &T {
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<T> DerefMut for MutexGuard<'_, T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }
@@ -490,12 +492,14 @@ impl<T> OwnedMutexGuard<T> {
 
 impl<T> Deref for OwnedMutexGuard<T> {
     type Target = T;
+    #[inline]
     fn deref(&self) -> &T {
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<T> DerefMut for OwnedMutexGuard<T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }

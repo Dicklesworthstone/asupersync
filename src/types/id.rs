@@ -21,6 +21,7 @@ pub struct RegionId(pub(crate) ArenaIndex);
 
 impl RegionId {
     /// Creates a new region ID from an arena index (internal use).
+    #[inline]
     #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) const fn from_arena(index: ArenaIndex) -> Self {
@@ -28,6 +29,7 @@ impl RegionId {
     }
 
     /// Returns the underlying arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg(not(feature = "test-internals"))]
@@ -36,6 +38,7 @@ impl RegionId {
     }
 
     /// Returns the underlying arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg(feature = "test-internals")]
@@ -132,6 +135,7 @@ pub struct TaskId(pub(crate) ArenaIndex);
 
 impl TaskId {
     /// Creates a new task ID from an arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
@@ -140,6 +144,7 @@ impl TaskId {
     }
 
     /// Returns the underlying arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg(not(feature = "test-internals"))]
@@ -148,6 +153,7 @@ impl TaskId {
     }
 
     /// Returns the underlying arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg(feature = "test-internals")]
@@ -221,6 +227,7 @@ pub struct ObligationId(pub(crate) ArenaIndex);
 
 impl ObligationId {
     /// Creates a new obligation ID from an arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     pub(crate) const fn from_arena(index: ArenaIndex) -> Self {
@@ -228,6 +235,7 @@ impl ObligationId {
     }
 
     /// Returns the underlying arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg(not(feature = "test-internals"))]
@@ -236,6 +244,7 @@ impl ObligationId {
     }
 
     /// Returns the underlying arena index (internal use).
+    #[inline]
     #[must_use]
     #[allow(dead_code)]
     #[cfg(feature = "test-internals")]
@@ -302,48 +311,56 @@ impl Time {
     pub const MAX: Self = Self(u64::MAX);
 
     /// Creates a new time from nanoseconds since epoch.
+    #[inline]
     #[must_use]
     pub const fn from_nanos(nanos: u64) -> Self {
         Self(nanos)
     }
 
     /// Creates a new time from milliseconds since epoch.
+    #[inline]
     #[must_use]
     pub const fn from_millis(millis: u64) -> Self {
         Self(millis.saturating_mul(1_000_000))
     }
 
     /// Creates a new time from seconds since epoch.
+    #[inline]
     #[must_use]
     pub const fn from_secs(secs: u64) -> Self {
         Self(secs.saturating_mul(1_000_000_000))
     }
 
     /// Returns the time as nanoseconds since epoch.
+    #[inline]
     #[must_use]
     pub const fn as_nanos(self) -> u64 {
         self.0
     }
 
     /// Returns the time as milliseconds since epoch (truncated).
+    #[inline]
     #[must_use]
     pub const fn as_millis(self) -> u64 {
         self.0 / 1_000_000
     }
 
     /// Returns the time as seconds since epoch (truncated).
+    #[inline]
     #[must_use]
     pub const fn as_secs(self) -> u64 {
         self.0 / 1_000_000_000
     }
 
     /// Adds a duration in nanoseconds, saturating on overflow.
+    #[inline]
     #[must_use]
     pub const fn saturating_add_nanos(self, nanos: u64) -> Self {
         Self(self.0.saturating_add(nanos))
     }
 
     /// Subtracts a duration in nanoseconds, saturating at zero.
+    #[inline]
     #[must_use]
     pub const fn saturating_sub_nanos(self, nanos: u64) -> Self {
         Self(self.0.saturating_sub(nanos))
@@ -352,6 +369,7 @@ impl Time {
     /// Returns the duration between two times in nanoseconds.
     ///
     /// Returns 0 if `self` is before `earlier`.
+    #[inline]
     #[must_use]
     pub const fn duration_since(self, earlier: Self) -> u64 {
         self.0.saturating_sub(earlier.0)

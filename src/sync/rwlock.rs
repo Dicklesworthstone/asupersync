@@ -704,6 +704,7 @@ pub struct RwLockReadGuard<'a, T> {
 impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.guard.as_ref().expect("guard accessed after drop")
     }
@@ -732,12 +733,14 @@ pub struct RwLockWriteGuard<'a, T> {
 impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.guard.as_ref().expect("guard accessed after drop")
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<'_, T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.guard.as_mut().expect("guard accessed after drop")
     }

@@ -91,6 +91,7 @@ impl WorkerCoordinator {
         }
     }
 
+    #[inline]
     pub(crate) fn wake_one(&self) {
         let count = self.parkers.len();
         if count == 0 {
@@ -100,12 +101,14 @@ impl WorkerCoordinator {
         self.parkers[idx % count].unpark();
     }
 
+    #[inline]
     pub(crate) fn wake_worker(&self, worker_id: WorkerId) {
         if let Some(parker) = self.parkers.get(worker_id) {
             parker.unpark();
         }
     }
 
+    #[inline]
     pub(crate) fn wake_all(&self) {
         for parker in &self.parkers {
             parker.unpark();

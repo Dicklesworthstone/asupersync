@@ -12,8 +12,9 @@ use crate::types::TaskId;
 #[cfg(any(test, feature = "test-internals"))]
 use crate::types::{Budget, RegionId};
 use crate::util::Arena;
+use parking_lot::Mutex;
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 thread_local! {
     static CURRENT_QUEUE: RefCell<Option<LocalQueue>> = const { RefCell::new(None) };
@@ -150,7 +151,7 @@ impl LocalQueue {
     #[inline]
     pub fn push(&self, task: TaskId) {
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock().expect("local queue lock poisoned");
+            let mut stack = self.inner.lock();
             stack.push(task, arena);
         });
     }
@@ -162,7 +163,7 @@ impl LocalQueue {
             return;
         }
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock().expect("local queue lock poisoned");
+            let mut stack = self.inner.lock();
             for &task in tasks {
                 stack.push(task, arena);
             }
@@ -174,7 +175,7 @@ impl LocalQueue {
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock().expect("local queue lock poisoned");
+            let mut stack = self.inner.lock();
             stack.pop(arena)
         })
     }
@@ -183,7 +184,7 @@ impl LocalQueue {
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let stack = self.inner.lock().expect("local queue lock poisoned");
+        let stack = self.inner.lock();
         stack.is_empty()
     }
 
@@ -223,7 +224,7 @@ impl Stealer {
     #[must_use]
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock().expect("local queue lock poisoned");
+            let mut stack = self.inner.lock();
             let task_id = stack.steal_one(arena)?;
             let is_local = arena
                 .get(task_id.arena_index())
@@ -254,7 +255,7 @@ impl Stealer {
 
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stolen = 0usize;
-            let mut src = self.inner.lock().expect("local queue lock poisoned");
+            let mut src = self.inner.lock();
 
             let initial_len = src.len();
             if initial_len == 0 {
@@ -263,7 +264,7 @@ impl Stealer {
             let steal_limit = (initial_len / 2).max(1);
             let mut remaining_attempts = initial_len;
 
-            let mut dest_stack = dest.inner.lock().expect("local queue lock poisoned");
+            let mut dest_stack = dest.inner.lock();
             while stolen < steal_limit && remaining_attempts > 0 {
                 remaining_attempts -= 1;
                 let Some(task_id) = src.steal_one(arena) else {
