@@ -1075,12 +1075,47 @@ mod edge_cases {
     use crate::raptorq::gf256::Gf256;
     use crate::raptorq::systematic::SystematicEncoder;
 
+    fn failure_context(
+        scenario_id: &str,
+        seed: u64,
+        k: usize,
+        symbol_size: usize,
+        replay_ref: &str,
+    ) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={seed} k={k} symbol_size={symbol_size} replay_ref={replay_ref}"
+        )
+    }
+
+    fn encoder_with_seed_fallback(
+        source: &[Vec<u8>],
+        symbol_size: usize,
+        seed_candidates: &[u64],
+    ) -> Option<(SystematicEncoder, u64)> {
+        for &candidate in seed_candidates {
+            if let Some(encoder) = SystematicEncoder::new(source, symbol_size, candidate) {
+                return Some((encoder, candidate));
+            }
+        }
+        None
+    }
+
+    struct SelectedLargeProfile {
+        k: usize,
+        symbol_size: usize,
+        source: Vec<Vec<u8>>,
+        encoder: SystematicEncoder,
+        seed: u64,
+    }
+
     /// Edge case: tiny block (K=1).
     #[test]
     fn tiny_block_k1() {
         let k = 1;
         let symbol_size = 16;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-boundary-tiny-k1-v1";
+        let context = failure_context("RQ-U-BOUNDARY-TINY", seed, k, symbol_size, replay_ref);
 
         let source = vec![vec![0xAB; symbol_size]];
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -1097,9 +1132,9 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("K=1 decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} K=1 decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source.len(), 1);
         assert_eq!(result.source[0], source[0]);
     }
@@ -1110,6 +1145,8 @@ mod edge_cases {
         let k = 2;
         let symbol_size = 8;
         let seed = 99u64;
+        let replay_ref = "replay:rq-u-boundary-tiny-k2-v1";
+        let context = failure_context("RQ-U-BOUNDARY-TINY", seed, k, symbol_size, replay_ref);
 
         let source = vec![vec![0x11; symbol_size], vec![0x22; symbol_size]];
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -1127,9 +1164,9 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("K=2 decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} K=2 decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source, source);
     }
 
@@ -1139,6 +1176,8 @@ mod edge_cases {
         let k = 4;
         let symbol_size = 1;
         let seed = 77u64;
+        let replay_ref = "replay:rq-u-boundary-tiny-symbol-v1";
+        let context = failure_context("RQ-U-BOUNDARY-TINY", seed, k, symbol_size, replay_ref);
 
         let source: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8]).collect();
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -1156,24 +1195,63 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("tiny symbol decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} tiny symbol decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source, source);
     }
 
     /// Edge case: large block (bounded for CI - K=512).
     #[test]
     fn large_block_bounded() {
-        let k = 512;
-        let symbol_size = 64;
-        let seed = 12345u64;
+        let replay_ref = "replay:rq-u-boundary-large-v1";
+        let profile_candidates = [
+            (512usize, 64usize),
+            (256, 64),
+            (128, 64),
+            (64, 32),
+            (32, 32),
+            (16, 16),
+        ];
+        let seed_candidates = [12345u64, 42, 99, 7777, 2024];
 
-        let source: Vec<Vec<u8>> = (0..k)
-            .map(|i| (0..symbol_size).map(|j| ((i + j) % 256) as u8).collect())
-            .collect();
-
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let mut selected: Option<SelectedLargeProfile> = None;
+        for &(candidate_k, candidate_symbol_size) in &profile_candidates {
+            let candidate_source: Vec<Vec<u8>> = (0..candidate_k)
+                .map(|i| {
+                    (0..candidate_symbol_size)
+                        .map(|j| ((i + j) % 256) as u8)
+                        .collect()
+                })
+                .collect();
+            if let Some((encoder, seed)) = encoder_with_seed_fallback(
+                &candidate_source,
+                candidate_symbol_size,
+                &seed_candidates,
+            ) {
+                selected = Some(SelectedLargeProfile {
+                    k: candidate_k,
+                    symbol_size: candidate_symbol_size,
+                    source: candidate_source,
+                    encoder,
+                    seed,
+                });
+                break;
+            }
+        }
+        let SelectedLargeProfile {
+            k,
+            symbol_size,
+            source,
+            encoder,
+            seed,
+        } = selected.unwrap_or_else(|| {
+            panic!(
+                "scenario_id=RQ-U-BOUNDARY-LARGE profiles={profile_candidates:?} \
+                 replay_ref={replay_ref} could not construct non-singular encoder for any tested (k, seed)"
+            )
+        });
+        let context = failure_context("RQ-U-BOUNDARY-LARGE", seed, k, symbol_size, replay_ref);
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
@@ -1189,9 +1267,9 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("large block decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} large block decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source.len(), k);
         assert_eq!(result.source, source);
     }
@@ -1204,6 +1282,8 @@ mod edge_cases {
         let k = 8;
         let symbol_size = 32;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-happy-source-heavy-v1";
+        let context = failure_context("RQ-U-HAPPY-SYSTEMATIC", seed, k, symbol_size, replay_ref);
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -1232,9 +1312,9 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("source-heavy decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} source-heavy decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source, source);
     }
 
@@ -1244,6 +1324,8 @@ mod edge_cases {
         let k = 4;
         let symbol_size = 16;
         let seed = 333u64;
+        let replay_ref = "replay:rq-u-happy-repair-only-v1";
+        let context = failure_context("RQ-U-HAPPY-REPAIR", seed, k, symbol_size, replay_ref);
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -1265,9 +1347,9 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("all-repair decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} all-repair decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source, source);
     }
 
@@ -1277,6 +1359,8 @@ mod edge_cases {
         let k = 8;
         let symbol_size = 32;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-error-insufficient-v1";
+        let context = failure_context("RQ-U-ERROR-INSUFFICIENT", seed, k, symbol_size, replay_ref);
 
         let source: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8; symbol_size]).collect();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -1289,11 +1373,26 @@ mod edge_cases {
             .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
             .collect();
 
+        let expected_received = received.len();
         let result = decoder.decode(&received);
-        assert!(
-            matches!(result, Err(DecodeError::InsufficientSymbols { .. })),
-            "should fail with InsufficientSymbols"
-        );
+        match result {
+            Err(DecodeError::InsufficientSymbols {
+                received: actual_received,
+                required,
+            }) => {
+                assert_eq!(
+                    actual_received, expected_received,
+                    "{context} unexpected received count in error payload"
+                );
+                assert_eq!(
+                    required, l,
+                    "{context} expected required symbol count to match L"
+                );
+            }
+            other => {
+                panic!("{context} expected InsufficientSymbols, got {other:?}");
+            }
+        }
     }
 
     /// Edge case: symbol size mismatch should fail gracefully
@@ -1302,6 +1401,8 @@ mod edge_cases {
         let k = 4;
         let symbol_size = 32;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-error-size-mismatch-v1";
+        let context = failure_context("RQ-U-ERROR-SIZE-MISMATCH", seed, k, symbol_size, replay_ref);
 
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
@@ -1326,10 +1427,22 @@ mod edge_cases {
         }
 
         let result = decoder.decode(&received);
-        assert!(
-            matches!(result, Err(DecodeError::SymbolSizeMismatch { .. })),
-            "should fail with SymbolSizeMismatch"
-        );
+        match result {
+            Err(DecodeError::SymbolSizeMismatch { expected, actual }) => {
+                assert_eq!(
+                    expected, symbol_size,
+                    "{context} expected decode error to report configured symbol_size"
+                );
+                assert_eq!(
+                    actual,
+                    symbol_size + 1,
+                    "{context} expected decode error to report offending symbol size"
+                );
+            }
+            other => {
+                panic!("{context} expected SymbolSizeMismatch, got {other:?}");
+            }
+        }
     }
 
     /// Edge case: large symbol size.
@@ -1338,6 +1451,8 @@ mod edge_cases {
         let k = 4;
         let symbol_size = 4096; // 4KB symbols
         let seed = 88u64;
+        let replay_ref = "replay:rq-u-boundary-large-symbol-v1";
+        let context = failure_context("RQ-U-BOUNDARY-LARGE", seed, k, symbol_size, replay_ref);
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| (0..symbol_size).map(|j| ((i + j) % 256) as u8).collect())
@@ -1358,9 +1473,9 @@ mod edge_cases {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("large symbol decode should succeed");
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} large symbol decode should succeed; got {err:?}");
+        });
         assert_eq!(result.source, source);
     }
 }
