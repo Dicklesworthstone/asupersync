@@ -434,10 +434,20 @@ fn bench_raptorq_pipeline(c: &mut Criterion) {
             let config = raptorq_config_for_size(size);
             let params = object_params_for(&config, size);
             let object_id = params.object_id;
+            // Transport capacity must hold all source + repair symbols since the
+            // benchmark sends everything before the receiver starts reading.
+            let symbol_size = config.encoding.symbol_size as usize;
+            let source_symbols = size.div_ceil(symbol_size);
+            #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+            let total_with_overhead =
+                (source_symbols as f64 * config.encoding.repair_overhead).ceil() as usize;
+            let transport_capacity = total_with_overhead + total_with_overhead / 4; // 25% headroom
 
             b.iter_batched(
                 || {
-                    let (sink, stream) = sim_channel(SimTransportConfig::reliable());
+                    let mut transport_config = SimTransportConfig::reliable();
+                    transport_config.capacity = transport_capacity;
+                    let (sink, stream) = sim_channel(transport_config);
                     let sender = RaptorQSenderBuilder::new()
                         .config(config.clone())
                         .transport(sink)
