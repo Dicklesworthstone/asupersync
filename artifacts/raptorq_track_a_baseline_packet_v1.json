@@ -1,11 +1,11 @@
 {
   "schema_version": "1.0.0",
-  "generated_at": "2026-02-14T20:39:54Z",
+  "generated_at": "2026-02-14T21:14:38Z",
   "track_bead": "bd-1lgy2",
   "program_bead": "bd-3uox5",
-  "status": "in_progress",
+  "status": "ready_for_close",
   "owner": "WildWaterfall",
-  "summary": "Track-A deterministic baseline integration packet. A1 and A3 evidence are now available; A2 remains in progress.",
+  "summary": "Track-A deterministic baseline integration packet. A1, A2, and A3 evidence are all available and integrated.",
   "subdeliverables": {
     "A1_clause_matrix": {
       "bead": "bd-2wlqm",
@@ -18,13 +18,15 @@
     },
     "A2_baseline_bench_profile": {
       "bead": "bd-3s8zu",
-      "status": "in_progress",
+      "status": "closed",
       "assignee": "MagentaGorge",
-      "expected_evidence_paths": [
+      "evidence_paths": [
         "artifacts/raptorq_baseline_bench_profile_v1.json",
-        "docs/raptorq_baseline_bench_profile.md"
+        "docs/raptorq_baseline_bench_profile.md",
+        "target/perf-results/perf_20260214_143734/report.json",
+        "target/perf-results/perf_20260214_143734/artifacts/baseline_current.json"
       ],
-      "notes": "Pending completion. Track-A cannot close until this baseline packet is finalized with reproducible command inventory and environment metadata."
+      "notes": "Completed: deterministic baseline benchmark/profile corpus with reproducible command inventory and host/tool metadata."
     },
     "A3_gap_taxonomy": {
       "bead": "bd-xgw8t",
@@ -39,20 +41,19 @@
   },
   "acceptance_criteria_status": {
     "1_clause_mapping_precision": {
-      "state": "partially_satisfied",
+      "state": "satisfied",
       "evidence": [
         "docs/raptorq_rfc6330_clause_matrix.md"
       ],
-      "remaining": [
-        "Cross-check any moved source/test paths after concurrent changes."
-      ]
+      "remaining": []
     },
     "2_reproducible_baseline_packet": {
-      "state": "pending",
-      "evidence": [],
-      "remaining": [
-        "Finalize A2 benchmark/profile packet with reproducible commands and host/tool metadata."
-      ]
+      "state": "satisfied",
+      "evidence": [
+        "artifacts/raptorq_baseline_bench_profile_v1.json",
+        "docs/raptorq_baseline_bench_profile.md"
+      ],
+      "remaining": []
     },
     "3_gap_taxonomy_with_risk_and_unblock": {
       "state": "satisfied",
@@ -71,13 +72,12 @@
       ]
     },
     "5_structured_logging_contract_and_example_bundles": {
-      "state": "partially_satisfied",
+      "state": "satisfied",
       "evidence": [
-        "artifacts/raptorq_track_a_baseline_packet_v1.json"
+        "artifacts/raptorq_track_a_baseline_packet_v1.json",
+        "artifacts/raptorq_baseline_bench_profile_v1.json"
       ],
-      "remaining": [
-        "Replace example bundle placeholders with concrete A2 outputs."
-      ]
+      "remaining": []
     }
   },
   "testability_planning": {
@@ -165,7 +165,7 @@
   },
   "command_inventory": {
     "fast": [
-      "rch exec -- cargo test --lib raptorq -- --nocapture",
+      "rch exec -- cargo test raptorq -- --nocapture",
       "rch exec -- cargo test --test golden_outputs"
     ],
     "full": [
@@ -178,8 +178,7 @@
     ]
   },
   "next_actions": [
-    "Ingest final A2 outputs once bd-3s8zu publishes artifacts.",
-    "Replace placeholder example bundles with concrete run bundles.",
-    "Re-evaluate Track-A closure readiness and update bd-1lgy2 accordingly."
+    "Close bd-1lgy2 and unblock downstream tracks (Track-B and Track-E gates).",
+    "Keep this packet updated when Track-A evidence paths rotate or schema contracts evolve."
   ]
 }

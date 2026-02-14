@@ -19,6 +19,59 @@
 - [ ] Formatting verified (`cargo fmt --check`)
 - [ ] Tests pass (`cargo test`)
 - [ ] Documentation updated (if applicable)
+- [ ] Bead references included for any scope change (`bd-...` / `asupersync-...`)
+
+## Proof + Conformance Impact Declaration
+
+<!-- Required when touching runtime-critical modules:
+src/runtime/, src/cx/, src/cancel/, src/channel/, src/obligation/, src/trace/, src/lab/, formal/lean/ -->
+
+### Change Path Classification (choose one)
+
+- [ ] Code-first repair (Rust implementation changed to match formal/declared behavior)
+- [ ] Model-first repair (Lean/spec artifact changed to match implementation behavior)
+- [ ] Assumption/harness-first repair (test/gate/assumption changed without direct code/model semantic change)
+
+### Invariant and Theorem Impact
+
+| Invariant ID | Impact (none/clarify/behavior) | Theorem / witness touched | Why unchanged or safe |
+|--------------|--------------------------------|---------------------------|-----------------------|
+| `inv.structured_concurrency.single_owner` | | | |
+| `inv.region_close.quiescence` | | | |
+| `inv.cancel.protocol` | | | |
+| `inv.race.losers_drained` | | | |
+| `inv.obligation.no_leaks` | | | |
+| `inv.authority.no_ambient` | | | |
+
+### Conformance Touchpoint Declaration
+
+| Touchpoint Type | ID / Test / Profile | Result / Artifact |
+|-----------------|----------------------|-------------------|
+| Rust tests | | |
+| Conformance checks | | |
+| Lean coverage artifacts | | |
+| CI verification profile (`smoke` / `frontier` / `full`) | | |
+
+### Divergence Handling Declaration
+
+If a model-code divergence was found, record the selected path and evidence:
+- [ ] Divergence found and classified
+- [ ] Required evidence attached (trace/log/theorem/test)
+- [ ] Follow-up governance bead filed for any unresolved deviation
+- Governance bead(s): <!-- bd-... -->
+
+## Deterministic Review Rubric
+
+Reviewer marks pass/fail per row. All rows must pass, or the PR must reference a governance bead.
+
+| Rubric Check | Pass Criteria | Pass |
+|--------------|---------------|------|
+| Impact declaration complete | All touched invariants/theorems and touchpoints are filled | [ ] |
+| Conformance linkage | At least one executable conformance/test link is present | [ ] |
+| Determinism preserved | Seed, ordering, and tie-break behavior are unchanged or explicitly justified | [ ] |
+| Cancellation semantics preserved | Request -> drain -> finalize semantics are unchanged or intentionally evolved with evidence | [ ] |
+| Obligation safety preserved | No new leak path; obligations resolve commit/abort/nack correctly | [ ] |
+| Governance tracking | Every unresolved exception has a governance bead with owner + closure path | [ ] |
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "bead_id": "bd-xgw8t",
-  "generated_at": "2026-02-14T20:35:09Z",
+  "generated_at": "2026-02-14T21:14:38Z",
   "source": {
     "project": "asupersync",
     "issue_snapshot_command": "br list --status open --label raptorq --json",
@@ -185,7 +185,7 @@
       "bead": "bd-xgw8t",
       "title": "Gap taxonomy/risk-priority scoring publication incomplete",
       "owner_lane": "track_a_baseline",
-      "status": "in_progress",
+      "status": "closed",
       "severity": 4,
       "interop_risk": 4,
       "unblock_value": 4,
@@ -231,7 +231,6 @@
       },
       "score": 3.913,
       "blocked_by": [
-        "bd-xgw8t",
         "bd-erfxv"
       ],
       "execution_beads": [
@@ -247,7 +246,7 @@
       "bead": "bd-61s90",
       "title": "Comprehensive deterministic unit matrix incomplete",
       "owner_lane": "track_d_validation",
-      "status": "open",
+      "status": "in_progress",
       "severity": 4,
       "interop_risk": 4,
       "unblock_value": 3,
@@ -261,7 +260,6 @@
       },
       "score": 3.713,
       "blocked_by": [
-        "bd-2wlqm",
         "bd-3vckk"
       ],
       "execution_beads": [
@@ -308,7 +306,7 @@
       "bead": "bd-1cjjy",
       "title": "Systematic index + table lookup still not RFC-exact",
       "owner_lane": "track_b_encoder",
-      "status": "open",
+      "status": "in_progress",
       "severity": 5,
       "interop_risk": 5,
       "unblock_value": 1,
@@ -322,7 +320,6 @@
       },
       "score": 3.625,
       "blocked_by": [
-        "bd-xgw8t",
         "bd-erfxv"
       ],
       "execution_beads": [
@@ -337,7 +334,7 @@
       "bead": "bd-2wlqm",
       "title": "Clause-to-code traceability matrix is not yet complete",
       "owner_lane": "track_a_baseline",
-      "status": "in_progress",
+      "status": "closed",
       "severity": 4,
       "interop_risk": 4,
       "unblock_value": 2,
@@ -397,7 +394,7 @@
       "bead": "bd-3s8zu",
       "title": "Baseline bench/profile corpus not yet captured for this program",
       "owner_lane": "track_a_baseline",
-      "status": "open",
+      "status": "closed",
       "severity": 3,
       "interop_risk": 2,
       "unblock_value": 3,
@@ -441,7 +438,6 @@
       },
       "score": 2.625,
       "blocked_by": [
-        "bd-xgw8t",
         "bd-83wox"
       ],
       "execution_beads": [
@@ -502,7 +498,6 @@
       },
       "score": 2.375,
       "blocked_by": [
-        "bd-3s8zu",
         "bd-ot7ze"
       ],
       "execution_beads": [
