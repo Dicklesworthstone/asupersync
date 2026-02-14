@@ -19,6 +19,11 @@ use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, Syste
 use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
 
+const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
+const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
+const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
+const REPLAY_SEED_SWEEP_SCENARIO: &str = "RQ-U-SEED-SWEEP-STRUCTURED";
+
 // ============================================================================
 // Test helpers
 // ============================================================================
@@ -79,6 +84,14 @@ fn build_received_symbols(
     }
 
     received
+}
+
+fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &str) -> String {
+    format!(
+        "replay_ref={replay_ref} scenario_id={scenario_id} seed={seed} outcome={outcome} \
+         fixture_ref={REPLAY_FIXTURE_REF} artifact_path={REPLAY_CATALOG_ARTIFACT_PATH} \
+         repro_cmd='rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture'"
+    )
 }
 
 // ============================================================================
@@ -688,8 +701,14 @@ fn seed_sweep_structured_logging() {
         match decoder.decode(&received) {
             Ok(result) => {
                 successes += 1;
+                let context = replay_log_context(
+                    REPLAY_SEED_SWEEP_ID,
+                    REPLAY_SEED_SWEEP_SCENARIO,
+                    seed,
+                    "ok",
+                );
                 eprintln!(
-                    "seed={seed} k={k} loss={loss_pct}% dropped={} peeled={} inact={} gauss={} pivots={} OK",
+                    "{context} k={k} loss={loss_pct}% dropped={} peeled={} inact={} gauss={} pivots={} OK",
                     drop.len(),
                     result.stats.peeled,
                     result.stats.inactivated,
@@ -699,15 +718,28 @@ fn seed_sweep_structured_logging() {
 
                 for (i, original) in source.iter().enumerate() {
                     assert_eq!(
-                        &result.source[i], original,
-                        "seed={seed}, symbol {i} mismatch"
+                        &result.source[i],
+                        original,
+                        "{} symbol={i} mismatch",
+                        replay_log_context(
+                            REPLAY_SEED_SWEEP_ID,
+                            REPLAY_SEED_SWEEP_SCENARIO,
+                            seed,
+                            "symbol_mismatch"
+                        )
                     );
                 }
             }
             Err(e) => {
                 failures += 1;
+                let context = replay_log_context(
+                    REPLAY_SEED_SWEEP_ID,
+                    REPLAY_SEED_SWEEP_SCENARIO,
+                    seed,
+                    "decode_failure",
+                );
                 eprintln!(
-                    "seed={seed} k={k} loss={loss_pct}% dropped={} FAIL: {e:?}",
+                    "{context} k={k} loss={loss_pct}% dropped={} FAIL: {e:?}",
                     drop.len()
                 );
             }
@@ -720,6 +752,75 @@ fn seed_sweep_structured_logging() {
         successes >= 45,
         "expected >= 45/{total} successes, got {successes}"
     );
+}
+
+/// Validate replay catalog schema and linkage guarantees for deterministic repro.
+#[test]
+fn replay_catalog_schema_and_linkage() {
+    let catalog_json = include_str!("../artifacts/raptorq_replay_catalog_v1.json");
+    let catalog: serde_json::Value =
+        serde_json::from_str(catalog_json).expect("replay catalog must be valid JSON");
+
+    assert_eq!(
+        catalog["schema_version"].as_str(),
+        Some("raptorq-replay-catalog-v1"),
+        "unexpected replay catalog schema version"
+    );
+    assert_eq!(
+        catalog["fixture_ref"].as_str(),
+        Some(REPLAY_FIXTURE_REF),
+        "fixture reference mismatch"
+    );
+
+    let entries = catalog["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert!(
+        !entries.is_empty(),
+        "replay catalog must contain at least one entry"
+    );
+
+    for entry in entries {
+        let replay_ref = entry["replay_ref"]
+            .as_str()
+            .expect("entry missing replay_ref");
+        let scenario_id = entry["scenario_id"]
+            .as_str()
+            .expect("entry missing scenario_id");
+        let unit_tests = entry["unit_tests"]
+            .as_array()
+            .expect("entry missing unit_tests");
+        let e2e_scripts = entry["e2e_scripts"]
+            .as_array()
+            .expect("entry missing e2e_scripts");
+        let profile_tags = entry["profile_tags"]
+            .as_array()
+            .expect("entry missing profile_tags");
+        let repro_cmd = entry["repro_cmd"]
+            .as_str()
+            .expect("entry missing repro_cmd");
+
+        assert!(
+            !replay_ref.is_empty() && replay_ref.starts_with("replay:"),
+            "invalid replay_ref for scenario {scenario_id}"
+        );
+        assert!(
+            !unit_tests.is_empty(),
+            "replay entry {replay_ref} must link at least one unit test"
+        );
+        assert!(
+            !e2e_scripts.is_empty(),
+            "replay entry {replay_ref} must link at least one deterministic E2E script"
+        );
+        assert!(
+            !profile_tags.is_empty(),
+            "replay entry {replay_ref} must define at least one profile tag"
+        );
+        assert!(
+            repro_cmd.contains("rch exec --"),
+            "replay entry {replay_ref} must include remote repro command"
+        );
+    }
 }
 
 // ============================================================================

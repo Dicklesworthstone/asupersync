@@ -594,7 +594,7 @@ fn io_cancel_registration_count_tracking() {
     server.set_nonblocking(true).expect("nonblocking");
 
     // Create async stream and trigger registration
-    let mut stream = TcpStream::from_std(server);
+    let mut stream = TcpStream::from_std(server).expect("wrap stream");
     let mut buf = [0u8; 8];
     let mut read_buf = ReadBuf::new(&mut buf);
     let waker = noop_waker();
@@ -641,7 +641,7 @@ fn io_cancel_wouldblock_registers_interest() {
     client.set_nonblocking(true).expect("client nonblocking");
     server.set_nonblocking(true).expect("server nonblocking");
 
-    let mut stream = TcpStream::from_std(server);
+    let mut stream = TcpStream::from_std(server).expect("wrap stream");
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
 

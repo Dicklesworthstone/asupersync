@@ -352,6 +352,7 @@ fn send_symbols_directly() {
 
 mod conformance {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use crate::raptorq::gf256::gf256_addmul_slice;
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::types::symbol::ObjectId;
     use std::collections::hash_map::DefaultHasher;
@@ -402,6 +403,40 @@ mod conformance {
             repair_hash, repair_hash_2,
             "repair symbols must be deterministic"
         );
+    }
+
+    #[test]
+    fn repair_symbol_matches_rfc_equation_projection() {
+        let k = 10;
+        let symbol_size = 24;
+        let seed = 123u64;
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| ((i * 17 + j * 29 + 5) % 256) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        for esi in (k as u32)..(k as u32 + 8) {
+            let repair = encoder.repair_symbol(esi);
+            let (columns, coefficients) = encoder.params().rfc_repair_equation(esi);
+            let mut expected = vec![0u8; symbol_size];
+
+            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                gf256_addmul_slice(
+                    &mut expected,
+                    encoder.intermediate_symbol(column),
+                    coefficient,
+                );
+            }
+
+            assert_eq!(
+                repair, expected,
+                "repair symbol must equal projection of RFC equation for esi={esi}"
+            );
+        }
     }
 
     /// Known vector: medium block (K=32, symbol_size=64, seed=12345)

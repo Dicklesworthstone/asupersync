@@ -12,7 +12,10 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::{gf256_add_slice, gf256_addmul_slice, gf256_mul_slice, Gf256};
+use asupersync::raptorq::gf256::{
+    gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
+    Gf256,
+};
 use asupersync::raptorq::linalg::{row_scale_add, row_xor, DenseRow, GaussianSolver};
 use asupersync::raptorq::systematic::SystematicEncoder;
 
@@ -98,6 +101,49 @@ fn validate_gf256_bit_exactness(scenario: &Gf256BenchScenario, src: &[u8], c_val
     reference_addmul_slice(&mut addmul_expected, src, c_val);
     let addmul_ctx = gf256_bench_context(scenario, "addmul_slice_bit_exact");
     assert_eq!(addmul_actual, addmul_expected, "{addmul_ctx} mismatch");
+
+    // Validate fused dual multiply path against sequential baseline.
+    let mut mul_a_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7001);
+    let mut mul_b_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7002);
+    let mut mul_a_expected = mul_a_actual.clone();
+    let mut mul_b_expected = mul_b_actual.clone();
+    gf256_mul_slices2(&mut mul_a_actual, &mut mul_b_actual, c_val);
+    gf256_mul_slice(&mut mul_a_expected, c_val);
+    gf256_mul_slice(&mut mul_b_expected, c_val);
+    let mul2_ctx = gf256_bench_context(scenario, "mul_slices2_bit_exact");
+    assert_eq!(
+        mul_a_actual, mul_a_expected,
+        "{mul2_ctx} mismatch on lane_a"
+    );
+    assert_eq!(
+        mul_b_actual, mul_b_expected,
+        "{mul2_ctx} mismatch on lane_b"
+    );
+
+    // Validate fused dual addmul path against sequential baseline.
+    let src2 = deterministic_bytes(scenario.len, scenario.seed ^ 0xABCD_0123);
+    let mut addmul_a_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_1001);
+    let mut addmul_b_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_1002);
+    let mut addmul_a_expected = addmul_a_actual.clone();
+    let mut addmul_b_expected = addmul_b_actual.clone();
+    gf256_addmul_slices2(
+        &mut addmul_a_actual,
+        src,
+        &mut addmul_b_actual,
+        &src2,
+        c_val,
+    );
+    gf256_addmul_slice(&mut addmul_a_expected, src, c_val);
+    gf256_addmul_slice(&mut addmul_b_expected, &src2, c_val);
+    let addmul2_ctx = gf256_bench_context(scenario, "addmul_slices2_bit_exact");
+    assert_eq!(
+        addmul_a_actual, addmul_a_expected,
+        "{addmul2_ctx} mismatch on lane_a"
+    );
+    assert_eq!(
+        addmul_b_actual, addmul_b_expected,
+        "{addmul2_ctx} mismatch on lane_b"
+    );
 }
 
 fn gf256_scenarios() -> [Gf256BenchScenario; 5] {
@@ -193,6 +239,68 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                 let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0x55AA_55AA);
                 b.iter(|| {
                     gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(c_val));
+                });
+            },
+        );
+
+        // Benchmark fused dual mul against sequential mul+mul.
+        group.bench_with_input(
+            BenchmarkId::new("mul_slices2_fused", &label),
+            &scenario,
+            |b, _| {
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0x1111_2222);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0x3333_4444);
+                b.iter(|| {
+                    gf256_mul_slices2(
+                        black_box(&mut dst_a),
+                        black_box(&mut dst_b),
+                        black_box(c_val),
+                    );
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("mul_slices2_sequential", &label),
+            &scenario,
+            |b, _| {
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0x1111_2222);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0x3333_4444);
+                b.iter(|| {
+                    gf256_mul_slice(black_box(&mut dst_a), black_box(c_val));
+                    gf256_mul_slice(black_box(&mut dst_b), black_box(c_val));
+                });
+            },
+        );
+
+        // Benchmark fused dual addmul against sequential addmul+addmul.
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slices2_fused", &label),
+            &scenario,
+            |b, _| {
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFEBABE);
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0101);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0202);
+                b.iter(|| {
+                    gf256_addmul_slices2(
+                        black_box(&mut dst_a),
+                        black_box(&src),
+                        black_box(&mut dst_b),
+                        black_box(&src_b),
+                        black_box(c_val),
+                    );
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slices2_sequential", &label),
+            &scenario,
+            |b, _| {
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFEBABE);
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0101);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0202);
+                b.iter(|| {
+                    gf256_addmul_slice(black_box(&mut dst_a), black_box(&src), black_box(c_val));
+                    gf256_addmul_slice(black_box(&mut dst_b), black_box(&src_b), black_box(c_val));
                 });
             },
         );

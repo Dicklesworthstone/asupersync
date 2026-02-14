@@ -2,10 +2,8 @@
 //! Run: cargo test --test golden_probe -- --nocapture
 
 use asupersync::raptorq::decoder::InactivationDecoder;
-use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, tuple, tuple_indices};
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
-use asupersync::util::DetRng;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
