@@ -429,7 +429,15 @@ impl<T> OnceCell<T> {
                 });
                 None
             }
-            Some(_) => None, // Still queued, don't add again
+            Some(flag) => {
+                // Already queued: refresh to the latest task waker.
+                if let Some(existing) = guard.waiters.iter_mut().find(|entry| {
+                    Arc::ptr_eq(&entry.queued, flag) && entry.queued.load(Ordering::Acquire)
+                }) {
+                    existing.waker.clone_from(waker);
+                }
+                None
+            }
             None => {
                 // First time - create new waiter
                 let flag = Arc::new(AtomicBool::new(true));
@@ -555,6 +563,27 @@ mod tests {
         }
 
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[derive(Default)]
+    struct CountWaker {
+        wakes: AtomicUsize,
+    }
+
+    impl CountWaker {
+        fn count(&self) -> usize {
+            self.wakes.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -715,6 +744,49 @@ mod tests {
             "cell should be initialized by waiter"
         );
         crate::test_complete!("get_or_init_waiter_retries_after_cancelled_init");
+    }
+
+    #[test]
+    fn get_or_init_waiter_refreshes_queued_waker() {
+        init_test("get_or_init_waiter_refreshes_queued_waker");
+        let cell: OnceCell<u32> = OnceCell::new();
+
+        // Task A starts initialization and stays pending.
+        let mut init_fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+        assert!(Future::poll(init_fut.as_mut(), &mut noop_cx).is_pending());
+
+        // Task B waits on initialization and is first polled with waker A.
+        let mut waiter_fut = Box::pin(cell.get_or_init(|| async { 7u32 }));
+        let wake_a = Arc::new(CountWaker::default());
+        let wake_b = Arc::new(CountWaker::default());
+        let waker_a = Waker::from(Arc::clone(&wake_a));
+        let waker_b = Waker::from(Arc::clone(&wake_b));
+
+        let mut cx_a = Context::from_waker(&waker_a);
+        assert!(Future::poll(waiter_fut.as_mut(), &mut cx_a).is_pending());
+
+        // Poll again with a different waker while still queued; this should refresh.
+        let mut cx_b = Context::from_waker(&waker_b);
+        assert!(Future::poll(waiter_fut.as_mut(), &mut cx_b).is_pending());
+
+        // Cancel Task A: waiters are woken. The queued waiter should wake waker B, not stale A.
+        drop(init_fut);
+
+        crate::assert_with_log!(
+            wake_b.count() > 0,
+            "latest waker was notified",
+            true,
+            wake_b.count() > 0
+        );
+        crate::assert_with_log!(
+            wake_a.count() == 0,
+            "stale waker not notified",
+            0usize,
+            wake_a.count()
+        );
+        crate::test_complete!("get_or_init_waiter_refreshes_queued_waker");
     }
 
     #[test]
