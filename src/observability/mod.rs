@@ -44,6 +44,7 @@ pub mod metrics;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
+pub mod resource_accounting;
 pub mod task_inspector;
 
 pub use collector::LogCollector;
@@ -65,6 +66,9 @@ pub use obligation_tracker::{
 pub use otel::{
     CardinalityOverflow, ExportError, InMemoryExporter, MetricsConfig, MetricsExporter,
     MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
+};
+pub use resource_accounting::{
+    AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
 };
 pub use task_inspector::{
     TaskDetails, TaskInspector, TaskInspectorConfig, TaskStateInfo, TaskSummary,
