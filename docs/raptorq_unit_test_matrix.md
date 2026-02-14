@@ -18,12 +18,12 @@ Canonical deterministic scenario IDs used in this matrix:
 - `RQ-U-LINALG-RANK` (solver rank/pivot behavior)
 - `RQ-U-GF256-ALGEBRA` (field arithmetic invariants)
 
-Deterministic E2E scenario IDs from `tests/raptorq_conformance.rs:1211`:
+Deterministic E2E scenario IDs from `tests/raptorq_conformance.rs:1310`:
 
-- `RQ-E2E-systematic_only`
-- `RQ-E2E-typical_random_loss`
-- `RQ-E2E-burst_loss_late`
-- `RQ-E2E-insufficient_symbols`
+- `RQ-E2E-SYSTEMATIC-ONLY`
+- `RQ-E2E-TYPICAL-RANDOM-LOSS`
+- `RQ-E2E-BURST-LOSS-LATE`
+- `RQ-E2E-INSUFFICIENT-SYMBOLS`
 
 ## Unit Coverage Matrix
 
@@ -71,6 +71,24 @@ Status:
 - structured fields are fully present in deterministic E2E report flow
 - unit-level structured context is present for key edge-case success+failure paths; full suite-wide replay-id propagation remains **partial** pending D7/D9 integration
 
+## Replay Catalog (D9)
+
+Canonical replay catalog artifact: `artifacts/raptorq_replay_catalog_v1.json`.
+
+- Schema version: `raptorq-replay-catalog-v1`
+- Fixture reference: `RQ-D9-REPLAY-CATALOG-V1`
+- Stable replay IDs are tracked for both success and failure scenarios.
+- Every catalog entry links:
+  - at least one comprehensive unit test
+  - at least one deterministic E2E script
+  - a remote repro command (`rch exec -- ...`)
+
+Profile tags represented in catalog entries:
+
+- `fast`
+- `full`
+- `forensics`
+
 ## Gaps and Follow-ups
 
 Open gaps identified during matrix pass:
@@ -95,4 +113,7 @@ rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deter
 
 # Structured logging sentinel in perf invariants
 rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture
+
+# Replay catalog schema/linkage validation
+rch exec -- cargo test --test raptorq_perf_invariants replay_catalog_schema_and_linkage -- --nocapture
 ```
