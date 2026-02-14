@@ -276,6 +276,8 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
+            drop(state);
+            self.waiter_id = None;
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
@@ -489,6 +491,8 @@ impl Future for OwnedAcquireFuture {
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
+            drop(state);
+            self.waiter_id = None;
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
