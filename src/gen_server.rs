@@ -1591,8 +1591,15 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 Ok((named, stored))
             }
             Err(e) => {
-                // Registration failed: the server task was created but we cannot
-                // store it. Drop the handle (task will never be scheduled).
+                // Registration failed: clean up the task record that was created
+                // by spawn_gen_server to prevent a region quiescence leak.
+                // Without this cleanup, the region would have a child task that
+                // is never scheduled and can never complete, blocking region close.
+                let task_id = handle.task_id();
+                if let Some(region_record) = state.region(self.region_id()) {
+                    region_record.remove_task(task_id);
+                }
+                state.remove_task(task_id);
                 Err(NamedSpawnError::NameTaken(e))
             }
         }
@@ -4877,6 +4884,16 @@ mod tests {
 
         // Original is still registered.
         assert_eq!(registry.whereis("singleton"), Some(h1.task_id()));
+
+        // Verify the orphaned task record from the failed spawn was cleaned up.
+        // The region should only contain the first task; no leaked task record
+        // that would prevent region quiescence.
+        let region_tasks = runtime.state.region(region).unwrap().task_ids();
+        assert_eq!(
+            region_tasks,
+            vec![h1.task_id()],
+            "region should only have the first task; orphaned task must be removed"
+        );
 
         h1.stop_and_release().unwrap();
 
