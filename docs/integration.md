@@ -447,6 +447,52 @@ and are tagged **v4.0.0**. This is the ground-truth model for regions, tasks,
 obligations, cancellation, scheduler lanes, and trace equivalence. It is intended
 to be mechanically translatable to TLA+/Lean/Coq without a rewrite.
 
+### Proof-Impact Classification and Routing (Track-6 T6.3b)
+
+Use this deterministic classification for runtime-facing changes:
+
+| Class | Deterministic criteria | Required routing |
+|------|-------------------------|------------------|
+| `none` | Changes only in `docs/**`, `examples/**`, non-conformance test text artifacts, or comments/formatting with no behavior change | 1 maintainer review |
+| `local` | Behavioral/code changes confined to one subsystem path (single `src/<subsystem>/**`) and no formal schema/refinement/conformance contract edits | Subsystem owner + 1 reviewer from same domain |
+| `cross-cutting` | Any of: touches multiple subsystems, touches `src/cx/**`/`src/runtime/**`/`src/cancel/**`/`src/obligation/**`/`src/lab/**`/`src/trace/**`, touches `formal/lean/**` coverage artifacts, touches conformance/refinement contracts, or changes public API/trace schema | Runtime core owner + formal/refinement owner + conformance owner (all required) |
+
+Module ownership routing map:
+
+| Path prefix | Owner group |
+|------------|-------------|
+| `src/runtime/**`, `src/cx/**`, `src/cancel/**`, `src/obligation/**` | Runtime Core |
+| `src/lab/**`, `src/trace/**`, `formal/lean/**`, `formal/lean/coverage/**` | Formal + Determinism |
+| `conformance/**`, `tests/*conformance*`, `tests/*refinement*` | Conformance |
+| `src/raptorq/**`, `src/encoding/**`, `src/decoding/**` | RaptorQ |
+| `src/security/**`, `src/observability/**` | Security/Observability |
+
+If multiple prefixes match, union all owner groups and treat as `cross-cutting`.
+
+PR/review artifact requirement for critical modules:
+
+```yaml
+proof_impact:
+  class: none|local|cross-cutting
+  touched_paths:
+    - <path>
+  matched_routing_rules:
+    - <rule id or sentence>
+  owner_groups_required:
+    - <group>
+  reviewers_requested:
+    - <reviewer/owner>
+  conformance_touchpoints:
+    - <test or suite name>
+  refinement_or_schema_impact: none|yes
+  evidence_commands:
+    - rch exec -- cargo check --all-targets
+    - rch exec -- cargo clippy --all-targets -- -D warnings
+```
+
+Reviewers should reject PRs touching critical modules when this block is missing
+or when `class` does not match touched paths.
+
 ---
 
 ## API Reference Orientation
