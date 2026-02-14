@@ -142,6 +142,22 @@ fn combined_waker(read: Option<&Waker>, write: Option<&Waker>) -> Waker {
     }))
 }
 
+#[inline]
+fn registration_interest(read_waiter: bool, write_waiter: bool, fallback: Interest) -> Interest {
+    let mut interest = Interest::empty();
+    if read_waiter {
+        interest |= Interest::READABLE;
+    }
+    if write_waiter {
+        interest |= Interest::WRITABLE;
+    }
+    if interest.is_empty() {
+        fallback
+    } else {
+        interest
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Owned split halves
 // ---------------------------------------------------------------------------
@@ -212,6 +228,11 @@ impl UnixStreamInner {
 
         // Build combined waker before dropping the lock.
         let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+        let register_interest = registration_interest(
+            guard.read_waker.is_some(),
+            guard.write_waker.is_some(),
+            interest,
+        );
         drop(guard);
 
         let Some(current) = Cx::current() else {
@@ -223,7 +244,7 @@ impl UnixStreamInner {
             return Ok(());
         };
 
-        match driver.register(&*self.stream, interest, waker) {
+        match driver.register(&*self.stream, register_interest, waker) {
             Ok(registration) => {
                 self.state.lock().expect("lock poisoned").registration = Some(registration);
                 Ok(())
@@ -465,5 +486,17 @@ mod tests {
         // Should fail - different streams
         let err = read1.reunite(write2).expect_err("reunite should fail");
         assert!(err.to_string().contains("not from the same socket"));
+    }
+
+    #[test]
+    fn registration_interest_prefers_waiter_union() {
+        let both = registration_interest(true, true, Interest::READABLE);
+        assert_eq!(both, Interest::READABLE | Interest::WRITABLE);
+
+        let write_only = registration_interest(false, true, Interest::READABLE);
+        assert_eq!(write_only, Interest::WRITABLE);
+
+        let fallback = registration_interest(false, false, Interest::READABLE);
+        assert_eq!(fallback, Interest::READABLE);
     }
 }
