@@ -27,6 +27,7 @@ struct SchedulerEntry {
 }
 
 impl Ord for SchedulerEntry {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         // Higher priority first (BinaryHeap is max-heap)
         // For equal priorities, earlier generation (lower number) comes first
@@ -37,6 +38,7 @@ impl Ord for SchedulerEntry {
 }
 
 impl PartialOrd for SchedulerEntry {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -54,6 +56,7 @@ struct TimedEntry {
 }
 
 impl Ord for TimedEntry {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         // Earlier deadline first (reverse comparison for min-heap behavior via max-heap)
         // For equal deadlines, earlier generation comes first
@@ -65,6 +68,7 @@ impl Ord for TimedEntry {
 }
 
 impl PartialOrd for TimedEntry {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -375,16 +379,34 @@ impl Scheduler {
     /// O(log n) pop via binary heap.
     #[inline]
     pub fn pop(&mut self) -> Option<TaskId> {
+        if self.cancel_lane.len() == 1 {
+            let task = self.cancel_lane.peek().expect("len checked").task;
+            self.cancel_lane.clear();
+            self.scheduled.remove(task);
+            return Some(task);
+        }
         if let Some(entry) = self.cancel_lane.pop() {
             self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
+        if self.timed_lane.len() == 1 {
+            let task = self.timed_lane.peek().expect("len checked").task;
+            self.timed_lane.clear();
+            self.scheduled.remove(task);
+            return Some(task);
+        }
         if let Some(entry) = self.timed_lane.pop() {
             self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
+        if self.ready_lane.len() == 1 {
+            let task = self.ready_lane.peek().expect("len checked").task;
+            self.ready_lane.clear();
+            self.scheduled.remove(task);
+            return Some(task);
+        }
         if let Some(entry) = self.ready_lane.pop() {
             self.scheduled.remove(entry.task);
             return Some(entry.task);
@@ -468,7 +490,13 @@ impl Scheduler {
         scratch: &mut Vec<SchedulerEntry>,
     ) -> Option<SchedulerEntry> {
         let first = lane.pop()?;
+        if lane.is_empty() {
+            return Some(first);
+        }
         let priority = first.priority;
+        if lane.peek().is_some_and(|peek| peek.priority != priority) {
+            return Some(first);
+        }
         scratch.clear();
         scratch.push(first);
 
@@ -494,7 +522,13 @@ impl Scheduler {
         scratch: &mut Vec<TimedEntry>,
     ) -> Option<TimedEntry> {
         let first = lane.pop()?;
+        if lane.is_empty() {
+            return Some(first);
+        }
         let deadline = first.deadline;
+        if lane.peek().is_some_and(|peek| peek.deadline != deadline) {
+            return Some(first);
+        }
         scratch.clear();
         scratch.push(first);
 

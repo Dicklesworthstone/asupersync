@@ -383,13 +383,13 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     }
 }
 
-/// Inner loop for `gf256_mul_slice`: batch 16 table lookups per iteration,
-/// writing results to avoid per-byte store overhead.
+/// Inner loop for `gf256_mul_slice`: batch 8 table lookups per iteration,
+/// writing results as `u64` to avoid per-byte store overhead.
 ///
-/// Processing 16 bytes per iteration doubles instruction-level parallelism.
+/// Uses `chunks_exact_mut(8)` iterators so the compiler can elide bounds
+/// checks in the hot loop.
 fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
-    // Wide path: 16 bytes per iteration.
-    let mut chunks = dst.chunks_exact_mut(16);
+    let mut chunks = dst.chunks_exact_mut(8);
     for chunk in chunks.by_ref() {
         let t = [
             table[chunk[0] as usize],
@@ -400,34 +400,24 @@ fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
             table[chunk[5] as usize],
             table[chunk[6] as usize],
             table[chunk[7] as usize],
-            table[chunk[8] as usize],
-            table[chunk[9] as usize],
-            table[chunk[10] as usize],
-            table[chunk[11] as usize],
-            table[chunk[12] as usize],
-            table[chunk[13] as usize],
-            table[chunk[14] as usize],
-            table[chunk[15] as usize],
         ];
         chunk.copy_from_slice(&t);
     }
-    // Scalar tail.
     for d in chunks.into_remainder() {
         *d = table[*d as usize];
     }
 }
 
-/// Inner loop for `gf256_addmul_slice`: batch 16 table lookups per iteration,
-/// then wide-XOR the results into `dst` via two `u64` operations.
+/// Inner loop for `gf256_addmul_slice`: batch 8 table lookups, then wide-XOR
+/// the results into `dst` via `u64`.
 ///
-/// Processing 16 bytes per iteration doubles instruction-level parallelism
-/// for the table lookups while keeping the XOR accumulation wide.
+/// Uses `chunks_exact_mut(8)` / `chunks_exact(8)` iterators so the compiler
+/// can elide per-iteration bounds checks in the hot loop.
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
-    // Wide path: 16 bytes (2×u64) per iteration.
-    let mut d_chunks = dst.chunks_exact_mut(16);
-    let mut s_chunks = src.chunks_exact(16);
+    let mut d_chunks = dst.chunks_exact_mut(8);
+    let mut s_chunks = src.chunks_exact(8);
     for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
-        let t_lo = [
+        let t = [
             table[s_chunk[0] as usize],
             table[s_chunk[1] as usize],
             table[s_chunk[2] as usize],
@@ -437,25 +427,10 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
             table[s_chunk[6] as usize],
             table[s_chunk[7] as usize],
         ];
-        let t_hi = [
-            table[s_chunk[8] as usize],
-            table[s_chunk[9] as usize],
-            table[s_chunk[10] as usize],
-            table[s_chunk[11] as usize],
-            table[s_chunk[12] as usize],
-            table[s_chunk[13] as usize],
-            table[s_chunk[14] as usize],
-            table[s_chunk[15] as usize],
-        ];
-        let d_lo: [u8; 8] = d_chunk[0..8].try_into().unwrap();
-        let d_hi: [u8; 8] = d_chunk[8..16].try_into().unwrap();
-        let r_lo = u64::from_ne_bytes(d_lo) ^ u64::from_ne_bytes(t_lo);
-        let r_hi = u64::from_ne_bytes(d_hi) ^ u64::from_ne_bytes(t_hi);
-        d_chunk[0..8].copy_from_slice(&r_lo.to_ne_bytes());
-        d_chunk[8..16].copy_from_slice(&r_hi.to_ne_bytes());
+        let d_arr: [u8; 8] = d_chunk[..].try_into().unwrap();
+        let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(t);
+        d_chunk.copy_from_slice(&result.to_ne_bytes());
     }
-
-    // Scalar tail.
     for (d, s) in d_chunks
         .into_remainder()
         .iter_mut()
