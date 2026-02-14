@@ -117,6 +117,7 @@ impl<T> Arena<T> {
     }
 
     /// Inserts a value into the arena and returns its index.
+    #[inline]
     pub fn insert(&mut self, value: T) -> ArenaIndex {
         if let Some(free_index) = self.free_head {
             let slot = &mut self.slots[free_index as usize];
@@ -228,6 +229,7 @@ impl<T> Arena<T> {
     /// Returns a reference to the value at the given index.
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
+    #[inline]
     #[must_use]
     pub fn get(&self, index: ArenaIndex) -> Option<&T> {
         match self.slots.get(index.index as usize)? {
@@ -239,6 +241,7 @@ impl<T> Arena<T> {
     /// Returns a mutable reference to the value at the given index.
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
+    #[inline]
     pub fn get_mut(&mut self, index: ArenaIndex) -> Option<&mut T> {
         match self.slots.get_mut(index.index as usize)? {
             Slot::Occupied { value, generation } if *generation == index.generation => Some(value),
