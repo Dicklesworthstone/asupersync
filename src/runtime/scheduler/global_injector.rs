@@ -75,6 +75,8 @@ pub struct GlobalInjector {
     ready_queue: SegQueue<PriorityTask>,
     /// Approximate count of pending tasks (for metrics/decisions).
     pending_count: AtomicUsize,
+    /// Approximate count of ready-lane tasks only.
+    ready_count: AtomicUsize,
 }
 
 /// Thread-safe EDF queue for timed tasks.
@@ -93,6 +95,7 @@ impl Default for GlobalInjector {
             timed_queue: Mutex::new(TimedQueue::default()),
             ready_queue: SegQueue::new(),
             pending_count: AtomicUsize::new(0),
+            ready_count: AtomicUsize::new(0),
         }
     }
 }
@@ -133,6 +136,7 @@ impl GlobalInjector {
     /// ordering is applied by the local `PriorityScheduler` after stealing.
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         self.ready_queue.push(PriorityTask { task, priority });
+        self.ready_count.fetch_add(1, Ordering::Relaxed);
         self.pending_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -199,6 +203,7 @@ impl GlobalInjector {
     pub fn pop_ready(&self) -> Option<PriorityTask> {
         let result = self.ready_queue.pop();
         if result.is_some() {
+            self.ready_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
         }
         result
@@ -244,6 +249,12 @@ impl GlobalInjector {
     #[must_use]
     pub fn has_ready_work(&self) -> bool {
         !self.ready_queue.is_empty()
+    }
+
+    /// Returns the approximate number of tasks in the ready lane.
+    #[must_use]
+    pub fn ready_count(&self) -> usize {
+        self.ready_count.load(Ordering::Relaxed)
     }
 }
 

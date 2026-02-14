@@ -309,6 +309,8 @@ pub struct ThreeLaneScheduler {
     /// When present, inject/spawn methods use this instead of the full
     /// RuntimeState lock for task record lookups (wake_state, is_local, etc.).
     task_table: Option<Arc<ContendedMutex<TaskTable>>>,
+    /// Maximum global ready queue depth (0 = unbounded).
+    global_queue_limit: usize,
 }
 
 impl ThreeLaneScheduler {
@@ -490,6 +492,7 @@ impl ThreeLaneScheduler {
             cancel_streak_limit,
             steal_batch_size,
             enable_parking,
+            global_queue_limit: 0,
         }
     }
 
@@ -515,6 +518,16 @@ impl ThreeLaneScheduler {
         for worker in &mut self.workers {
             worker.enable_parking = enable;
         }
+    }
+
+    /// Sets the global ready queue depth limit (0 = unbounded).
+    ///
+    /// When the limit is non-zero and the global ready queue reaches this
+    /// depth, new injections emit a trace warning. The task is still
+    /// scheduled (dropping it would violate structured concurrency) but the
+    /// warning signals backpressure to the caller.
+    pub fn set_global_queue_limit(&mut self, limit: usize) {
+        self.global_queue_limit = limit;
     }
 
     /// Returns a reference to the global injector.
@@ -643,6 +656,15 @@ impl ThreeLaneScheduler {
         }
 
         if should_schedule {
+            if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
+                crate::warn!(
+                    ?task,
+                    priority,
+                    limit = self.global_queue_limit,
+                    current = self.global.ready_count(),
+                    "inject_ready: global ready queue at capacity, scheduling anyway"
+                );
+            }
             self.global.inject_ready(task, priority);
             self.wake_one();
             trace!(

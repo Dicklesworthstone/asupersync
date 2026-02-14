@@ -945,6 +945,10 @@ struct RuntimeInner {
     root_region: crate::types::RegionId,
     /// Blocking pool for synchronous operations.
     blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
+    /// Shutdown signal for the deadline monitor thread.
+    deadline_monitor_shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Deadline monitor background thread handle.
+    deadline_monitor_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RuntimeInner {
@@ -991,6 +995,7 @@ impl RuntimeInner {
         );
         scheduler.set_steal_batch_size(config.steal_batch_size);
         scheduler.set_enable_parking(config.enable_parking);
+        scheduler.set_global_queue_limit(config.global_queue_limit);
 
         let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
         if config.worker_threads > 0 {
@@ -1030,23 +1035,10 @@ impl RuntimeInner {
             }
         }
 
-        // Create blocking pool if configured
-        let blocking_pool = if config.blocking.max_threads > 0 {
-            let options = crate::runtime::blocking_pool::BlockingPoolOptions {
-                idle_timeout: Duration::from_secs(10),
-                thread_name_prefix: format!("{}-blocking", config.thread_name_prefix),
-                on_thread_start: config.on_thread_start.clone(),
-                on_thread_stop: config.on_thread_stop.clone(),
-            };
-            Some(crate::runtime::blocking_pool::BlockingPool::with_config(
-                config.blocking.min_threads,
-                config.blocking.max_threads,
-                options,
-            ))
-        } else {
-            None
-        };
+        let (deadline_monitor_shutdown, deadline_monitor_thread) =
+            Self::start_deadline_monitor(&config, &state);
 
+        let blocking_pool = Self::create_blocking_pool(&config);
         if let Some(pool) = blocking_pool.as_ref() {
             let mut guard = state.lock().expect("runtime state lock poisoned");
             guard.set_blocking_pool(pool.handle());
@@ -1059,7 +1051,74 @@ impl RuntimeInner {
             worker_threads: Mutex::new(worker_threads),
             root_region,
             blocking_pool,
+            deadline_monitor_shutdown,
+            deadline_monitor_thread,
         })
+    }
+
+    /// Creates the blocking pool if configured with non-zero max threads.
+    fn create_blocking_pool(
+        config: &RuntimeConfig,
+    ) -> Option<crate::runtime::blocking_pool::BlockingPool> {
+        if config.blocking.max_threads == 0 {
+            return None;
+        }
+        let options = crate::runtime::blocking_pool::BlockingPoolOptions {
+            idle_timeout: Duration::from_secs(10),
+            thread_name_prefix: format!("{}-blocking", config.thread_name_prefix),
+            on_thread_start: config.on_thread_start.clone(),
+            on_thread_stop: config.on_thread_stop.clone(),
+        };
+        Some(crate::runtime::blocking_pool::BlockingPool::with_config(
+            config.blocking.min_threads,
+            config.blocking.max_threads,
+            options,
+        ))
+    }
+
+    /// Starts the deadline monitor background thread if configured and enabled.
+    fn start_deadline_monitor(
+        config: &RuntimeConfig,
+        state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    ) -> (
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+        Option<std::thread::JoinHandle<()>>,
+    ) {
+        use crate::runtime::deadline_monitor::DeadlineMonitor;
+        use std::sync::atomic::AtomicBool;
+
+        let monitor_config = match config.deadline_monitor {
+            Some(ref mc) if mc.enabled => mc,
+            _ => return (None, None),
+        };
+
+        let dm_shutdown = Arc::new(AtomicBool::new(false));
+        let dm_shutdown_clone = Arc::clone(&dm_shutdown);
+        let dm_state = Arc::clone(state);
+        let check_interval = monitor_config.check_interval;
+        let mut monitor = DeadlineMonitor::new(monitor_config.clone());
+        if let Some(ref handler) = config.deadline_warning_handler {
+            let handler = Arc::clone(handler);
+            monitor.on_warning(move |w| handler(w));
+        }
+        monitor.set_metrics_provider(Arc::clone(&config.metrics_provider));
+
+        let thread_name = format!("{}-deadline-monitor", config.thread_name_prefix);
+        let thread = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                while !dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(check_interval);
+                    if dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let guard = dm_state.lock().expect("runtime state lock poisoned");
+                    let now = guard.now;
+                    monitor.check(now, guard.tasks_iter().map(|(_, record)| record));
+                }
+            })
+            .ok();
+        (Some(dm_shutdown), thread)
     }
 
     fn spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
@@ -1100,6 +1159,13 @@ impl RuntimeInner {
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
+        // Signal deadline monitor to stop, then join its thread.
+        if let Some(shutdown) = self.deadline_monitor_shutdown.take() {
+            shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(thread) = self.deadline_monitor_thread.take() {
+            let _ = thread.join();
+        }
         self.scheduler.shutdown();
         // Shutdown blocking pool first (it may have tasks that need to drain)
         if let Some(pool) = self.blocking_pool.take() {
