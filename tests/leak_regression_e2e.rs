@@ -19,12 +19,15 @@
 //!   Graded type tests:    src/obligation/graded.rs
 //!   Commutativity tests:  tests/repro_leak_check_commutativity.rs
 
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::obligation::graded::{GradedObligation, GradedScope, Resolution};
 use asupersync::obligation::marking::{MarkingAnalyzer, MarkingEvent, MarkingEventKind};
 use asupersync::obligation::{BodyBuilder, LeakChecker};
-use asupersync::record::ObligationKind;
+use asupersync::observability::resource_accounting::ResourceAccounting;
+use asupersync::record::region::{AdmissionKind, RegionLimits};
+use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::test_utils::init_test_logging;
-use asupersync::types::{ObligationId, RegionId, TaskId, Time};
+use asupersync::types::{Budget, ObligationId, RegionId, TaskId, Time};
 
 // ===========================================================================
 // HELPERS
@@ -1159,4 +1162,760 @@ fn static_checker_realistic_io_without_cleanup() {
         !result.is_clean(),
         "missing error cleanup should be detected"
     );
+}
+
+// ===========================================================================
+// RESOURCE ACCOUNTING: INTEGRATION WITH LAB RUNTIME
+// ===========================================================================
+
+/// Run a lab runtime schedule while tracking obligations with ResourceAccounting.
+/// Returns (accounting, runtime_pending_count).
+fn run_accounting_schedule(
+    seed: u64,
+    max_tasks: u32,
+    max_obligations_per_task: u32,
+    limits: Option<RegionLimits>,
+) -> (ResourceAccounting, usize) {
+    let accounting = ResourceAccounting::new();
+    let mut rng = SplitMix64::new(seed);
+
+    let config = LabConfig::new(seed)
+        .panic_on_leak(false)
+        .panic_on_futurelock(false)
+        .max_steps(10_000)
+        .trace_capacity(64);
+
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    // Apply region limits if provided.
+    if let Some(lim) = limits {
+        runtime.state.set_region_limits(root, lim);
+    }
+
+    let num_tasks = 1 + rng.next_u32(max_tasks);
+    let mut all_obligations: Vec<(ObligationId, ObligationKind, bool)> = Vec::new();
+
+    for _ in 0..num_tasks {
+        let Ok((task_id, _handle)) = runtime.state.create_task(root, Budget::INFINITE, async {})
+        else {
+            accounting.admission_rejected(AdmissionKind::Task);
+            continue;
+        };
+        accounting.admission_succeeded(AdmissionKind::Task);
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+        let num_obligations = rng.next_u32(max_obligations_per_task + 1);
+        for _ in 0..num_obligations {
+            let kind = ALL_OBLIGATION_KINDS[rng.next_u32(4) as usize];
+            let should_commit = rng.chance(60);
+
+            match runtime.state.create_obligation(kind, task_id, root, None) {
+                Ok(obl_id) => {
+                    accounting.obligation_reserved(kind);
+                    accounting.admission_succeeded(AdmissionKind::Obligation);
+                    all_obligations.push((obl_id, kind, should_commit));
+                }
+                Err(_) => {
+                    accounting.admission_rejected(AdmissionKind::Obligation);
+                }
+            }
+        }
+    }
+
+    // Fisher-Yates shuffle.
+    let len = all_obligations.len();
+    for i in (1..len).rev() {
+        let j = rng.next_u32((i + 1) as u32) as usize;
+        all_obligations.swap(i, j);
+    }
+
+    // Resolve all obligations.
+    for &(obl_id, kind, should_commit) in &all_obligations {
+        if should_commit {
+            let _ = runtime.state.commit_obligation(obl_id);
+            accounting.obligation_committed(kind);
+        } else {
+            let reason = [
+                ObligationAbortReason::Cancel,
+                ObligationAbortReason::Error,
+                ObligationAbortReason::Explicit,
+            ][rng.next_u32(3) as usize];
+            let _ = runtime.state.abort_obligation(obl_id, reason);
+            accounting.obligation_aborted(kind);
+        }
+    }
+
+    runtime.advance_time(1_000_000);
+    runtime.run_until_quiescent();
+
+    let pending = runtime.state.pending_obligation_count();
+    (accounting, pending)
+}
+
+/// All obligation kinds for random selection.
+const ALL_OBLIGATION_KINDS: [ObligationKind; 4] = [
+    ObligationKind::SendPermit,
+    ObligationKind::Ack,
+    ObligationKind::Lease,
+    ObligationKind::IoOp,
+];
+
+/// Minimal deterministic RNG (splitmix64) for schedule generation.
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed.wrapping_add(1),
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn next_u32(&mut self, n: u32) -> u32 {
+        (self.next_u64() % u64::from(n)) as u32
+    }
+
+    fn chance(&mut self, percent: u32) -> bool {
+        self.next_u32(100) < percent
+    }
+}
+
+#[test]
+fn resource_accounting_tracks_lab_obligations() {
+    init_test_logging();
+
+    let (accounting, pending) = run_accounting_schedule(0xCAFE_BABE, 4, 3, None);
+    let snap = accounting.snapshot();
+
+    assert_eq!(pending, 0, "runtime should have no pending obligations");
+    assert_eq!(
+        snap.obligations_pending, 0,
+        "accounting should agree: zero pending"
+    );
+    assert!(snap.is_leak_free(), "no leaks should be recorded");
+    assert!(snap.total_reserved() > 0, "should have created obligations");
+
+    // Verify accounting invariant: reserved = committed + aborted + leaked + pending
+    for stats in &snap.obligation_stats {
+        let resolved = stats.committed + stats.aborted + stats.leaked;
+        assert_eq!(
+            stats.reserved, resolved,
+            "{:?}: reserved ({}) != committed ({}) + aborted ({}) + leaked ({})",
+            stats.kind, stats.reserved, stats.committed, stats.aborted, stats.leaked
+        );
+    }
+}
+
+#[test]
+fn resource_accounting_determinism() {
+    init_test_logging();
+
+    let seed = 0xDEAD_BEEF_CAFE_1234;
+    let (acc1, p1) = run_accounting_schedule(seed, 4, 3, None);
+    let (acc2, p2) = run_accounting_schedule(seed, 4, 3, None);
+
+    let s1 = acc1.snapshot();
+    let s2 = acc2.snapshot();
+
+    assert_eq!(p1, p2, "pending count must be deterministic");
+    assert_eq!(
+        s1.total_reserved(),
+        s2.total_reserved(),
+        "reserved count must be deterministic"
+    );
+
+    for i in 0..s1.obligation_stats.len() {
+        assert_eq!(
+            s1.obligation_stats[i].reserved, s2.obligation_stats[i].reserved,
+            "per-kind reserved must be deterministic for {:?}",
+            s1.obligation_stats[i].kind
+        );
+        assert_eq!(
+            s1.obligation_stats[i].committed, s2.obligation_stats[i].committed,
+            "per-kind committed must be deterministic for {:?}",
+            s1.obligation_stats[i].kind
+        );
+    }
+}
+
+#[test]
+fn resource_accounting_multi_seed_no_leaks() {
+    init_test_logging();
+
+    let num_seeds = 500;
+    let mut total_obligations: u64 = 0;
+    let mut leak_count: u64 = 0;
+
+    for i in 0u64..num_seeds {
+        let seed = i
+            .wrapping_mul(0x517c_c1b7_2722_0a95)
+            .wrapping_add(0x6c62_272e_07bb_0142);
+        let (accounting, pending) = run_accounting_schedule(seed, 6, 4, None);
+        let snap = accounting.snapshot();
+
+        total_obligations += snap.total_reserved();
+        if !snap.is_leak_free() || pending > 0 {
+            leak_count += 1;
+        }
+
+        // Accounting invariant must hold for every seed.
+        for stats in &snap.obligation_stats {
+            let resolved = stats.committed + stats.aborted + stats.leaked;
+            assert_eq!(
+                stats.reserved, resolved,
+                "accounting invariant violated at seed {seed} for {:?}",
+                stats.kind
+            );
+        }
+    }
+
+    assert_eq!(
+        leak_count, 0,
+        "expected zero leaks across {num_seeds} seeds ({total_obligations} obligations)"
+    );
+    assert!(
+        total_obligations > 1000,
+        "should have tested substantial obligations, got {total_obligations}"
+    );
+}
+
+// ===========================================================================
+// ADMISSION CONTROL STRESS
+// ===========================================================================
+
+#[test]
+fn admission_limits_reject_excess_obligations() {
+    init_test_logging();
+
+    let limits = RegionLimits {
+        max_children: None,
+        max_tasks: None,
+        max_obligations: Some(3),
+        max_heap_bytes: None,
+        curve_budget: None,
+    };
+
+    let accounting = ResourceAccounting::new();
+    let config = LabConfig::new(42)
+        .panic_on_leak(false)
+        .panic_on_futurelock(false)
+        .max_steps(5_000)
+        .trace_capacity(64);
+
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    runtime.state.set_region_limits(root, limits);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async {})
+        .expect("task creation should succeed");
+    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+    let mut created = Vec::new();
+    let mut rejected_count: u32 = 0;
+
+    // Try to create 10 obligations with a limit of 3.
+    for _ in 0..10 {
+        if let Ok(obl_id) =
+            runtime
+                .state
+                .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+        {
+            accounting.obligation_reserved(ObligationKind::SendPermit);
+            accounting.admission_succeeded(AdmissionKind::Obligation);
+            created.push(obl_id);
+        } else {
+            accounting.admission_rejected(AdmissionKind::Obligation);
+            rejected_count += 1;
+        }
+    }
+
+    assert_eq!(created.len(), 3, "should admit exactly 3 obligations");
+    assert_eq!(rejected_count, 7, "should reject 7 obligations");
+
+    // Resolve all and verify accounting.
+    for obl_id in &created {
+        let _ = runtime.state.commit_obligation(*obl_id);
+        accounting.obligation_committed(ObligationKind::SendPermit);
+    }
+
+    runtime.advance_time(100_000);
+    runtime.run_until_quiescent();
+
+    let snap = accounting.snapshot();
+    assert_eq!(snap.total_reserved(), 3);
+    assert!(snap.is_leak_free());
+    assert_eq!(
+        snap.admission_stats
+            .iter()
+            .find(|s| s.kind == AdmissionKind::Obligation)
+            .unwrap()
+            .rejections,
+        7
+    );
+    assert_eq!(runtime.state.pending_obligation_count(), 0);
+}
+
+#[test]
+fn admission_limits_task_cap() {
+    init_test_logging();
+
+    let limits = RegionLimits {
+        max_children: None,
+        max_tasks: Some(2),
+        max_obligations: None,
+        max_heap_bytes: None,
+        curve_budget: None,
+    };
+
+    let accounting = ResourceAccounting::new();
+    let config = LabConfig::new(99)
+        .panic_on_leak(false)
+        .panic_on_futurelock(false)
+        .max_steps(5_000)
+        .trace_capacity(64);
+
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    runtime.state.set_region_limits(root, limits);
+
+    let mut tasks_created = 0u32;
+    let mut tasks_rejected = 0u32;
+
+    for _ in 0..5 {
+        if let Ok((_task_id, _handle)) = runtime.state.create_task(root, Budget::INFINITE, async {})
+        {
+            accounting.admission_succeeded(AdmissionKind::Task);
+            tasks_created += 1;
+        } else {
+            accounting.admission_rejected(AdmissionKind::Task);
+            tasks_rejected += 1;
+        }
+    }
+
+    assert_eq!(tasks_created, 2, "should admit exactly 2 tasks");
+    assert_eq!(tasks_rejected, 3, "should reject 3 tasks");
+
+    let snap = accounting.snapshot();
+    assert_eq!(
+        snap.admission_stats
+            .iter()
+            .find(|s| s.kind == AdmissionKind::Task)
+            .unwrap()
+            .rejections,
+        3
+    );
+}
+
+#[test]
+fn admission_limits_under_stress() {
+    init_test_logging();
+
+    // Run multiple seeds with tight limits.
+    let limits = RegionLimits {
+        max_children: None,
+        max_tasks: Some(4),
+        max_obligations: Some(8),
+        max_heap_bytes: None,
+        curve_budget: None,
+    };
+
+    let num_seeds = 200;
+    let mut total_rejections: u64 = 0;
+    let mut total_obligations: u64 = 0;
+
+    for i in 0..num_seeds {
+        let seed = 0xBAD_CAFE_0000 + i;
+        let (accounting, pending) = run_accounting_schedule(seed, 8, 6, Some(limits.clone()));
+        let snap = accounting.snapshot();
+
+        total_obligations += snap.total_reserved();
+        total_rejections += snap.total_rejections();
+
+        assert_eq!(
+            pending, 0,
+            "pending should be zero at seed {seed}, got {pending}"
+        );
+        assert!(
+            snap.is_leak_free(),
+            "leaks detected at seed {seed}: {:?}",
+            snap.obligation_stats
+                .iter()
+                .filter(|s| s.leaked > 0)
+                .collect::<Vec<_>>()
+        );
+
+        // Accounting invariant.
+        for stats in &snap.obligation_stats {
+            let resolved = stats.committed + stats.aborted + stats.leaked;
+            assert_eq!(
+                stats.reserved, resolved,
+                "accounting invariant violated at seed {seed} for {:?}",
+                stats.kind
+            );
+        }
+    }
+
+    assert!(
+        total_rejections > 0,
+        "tight limits should cause some rejections across {num_seeds} seeds"
+    );
+    assert!(
+        total_obligations > 500,
+        "should have tested many obligations, got {total_obligations}"
+    );
+}
+
+// ===========================================================================
+// CROSS-VALIDATION: RESOURCE ACCOUNTING + MARKING ANALYSIS
+// ===========================================================================
+
+#[test]
+fn resource_accounting_agrees_with_marking_analyzer() {
+    init_test_logging();
+
+    let accounting = ResourceAccounting::new();
+    let mut events = Vec::new();
+    let r0 = region(0);
+    let mut time = 0u64;
+
+    // Simulate a mix of obligation lifecycles and track both ways.
+    let test_cases: Vec<(u32, ObligationKind, bool)> = vec![
+        (0, ObligationKind::SendPermit, true),  // commit
+        (1, ObligationKind::Ack, false),        // abort
+        (2, ObligationKind::Lease, true),       // commit
+        (3, ObligationKind::IoOp, true),        // commit
+        (4, ObligationKind::SendPermit, false), // abort
+        (5, ObligationKind::Ack, true),         // commit
+        (6, ObligationKind::Lease, false),      // abort
+        (7, ObligationKind::IoOp, false),       // abort
+    ];
+
+    for &(idx, kind, commit) in &test_cases {
+        let o = obligation(idx);
+
+        // ResourceAccounting
+        accounting.obligation_reserved(kind);
+
+        // MarkingAnalyzer
+        events.push(make_event(
+            time,
+            MarkingEventKind::Reserve {
+                obligation: o,
+                kind,
+                task: task(0),
+                region: r0,
+            },
+        ));
+        time += 5;
+
+        if commit {
+            accounting.obligation_committed(kind);
+            events.push(make_event(
+                time,
+                MarkingEventKind::Commit {
+                    obligation: o,
+                    region: r0,
+                    kind,
+                },
+            ));
+        } else {
+            accounting.obligation_aborted(kind);
+            events.push(make_event(
+                time,
+                MarkingEventKind::Abort {
+                    obligation: o,
+                    region: r0,
+                    kind,
+                },
+            ));
+        }
+        time += 5;
+    }
+
+    events.push(make_event(
+        time,
+        MarkingEventKind::RegionClose { region: r0 },
+    ));
+
+    // Compare results.
+    let mut analyzer = MarkingAnalyzer::new();
+    let marking_result = analyzer.analyze(&events);
+    let snap = accounting.snapshot();
+
+    assert!(marking_result.is_safe());
+    assert!(snap.is_leak_free());
+
+    // Both should agree on totals.
+    assert_eq!(
+        snap.total_reserved(),
+        u64::from(marking_result.stats.total_reserved),
+        "reserved count mismatch"
+    );
+    assert_eq!(
+        snap.obligation_stats
+            .iter()
+            .map(|s| s.committed)
+            .sum::<u64>(),
+        u64::from(marking_result.stats.total_committed),
+        "committed count mismatch"
+    );
+    assert_eq!(
+        snap.obligation_stats.iter().map(|s| s.aborted).sum::<u64>(),
+        u64::from(marking_result.stats.total_aborted),
+        "aborted count mismatch"
+    );
+    assert_eq!(snap.obligations_pending, 0);
+}
+
+#[test]
+fn resource_accounting_detects_leak_matches_marking() {
+    init_test_logging();
+
+    let accounting = ResourceAccounting::new();
+    let mut events = Vec::new();
+    let r0 = region(0);
+
+    // Reserve 3, commit 1, abort 1, leak 1.
+    events.push(make_event(
+        0,
+        MarkingEventKind::Reserve {
+            obligation: obligation(0),
+            kind: ObligationKind::SendPermit,
+            task: task(0),
+            region: r0,
+        },
+    ));
+    accounting.obligation_reserved(ObligationKind::SendPermit);
+
+    events.push(make_event(
+        5,
+        MarkingEventKind::Reserve {
+            obligation: obligation(1),
+            kind: ObligationKind::Lease,
+            task: task(0),
+            region: r0,
+        },
+    ));
+    accounting.obligation_reserved(ObligationKind::Lease);
+
+    events.push(make_event(
+        10,
+        MarkingEventKind::Reserve {
+            obligation: obligation(2),
+            kind: ObligationKind::IoOp,
+            task: task(0),
+            region: r0,
+        },
+    ));
+    accounting.obligation_reserved(ObligationKind::IoOp);
+
+    // Commit SendPermit, abort Lease, leak IoOp.
+    events.push(make_event(
+        15,
+        MarkingEventKind::Commit {
+            obligation: obligation(0),
+            region: r0,
+            kind: ObligationKind::SendPermit,
+        },
+    ));
+    accounting.obligation_committed(ObligationKind::SendPermit);
+
+    events.push(make_event(
+        20,
+        MarkingEventKind::Abort {
+            obligation: obligation(1),
+            region: r0,
+            kind: ObligationKind::Lease,
+        },
+    ));
+    accounting.obligation_aborted(ObligationKind::Lease);
+
+    // Explicitly mark IoOp as leaked.
+    accounting.obligation_leaked(ObligationKind::IoOp);
+
+    events.push(make_event(30, MarkingEventKind::RegionClose { region: r0 }));
+
+    let mut analyzer = MarkingAnalyzer::new();
+    let marking_result = analyzer.analyze(&events);
+    let snap = accounting.snapshot();
+
+    // Marking detects the unresolved IoOp as a leak on region close.
+    assert!(!marking_result.is_safe());
+    assert_eq!(marking_result.leak_count(), 1);
+    assert_eq!(marking_result.leaks[0].kind, ObligationKind::IoOp);
+
+    // Accounting also shows the leak.
+    assert!(!snap.is_leak_free());
+    assert_eq!(snap.total_leaked(), 1);
+    assert_eq!(
+        snap.obligation_stats
+            .iter()
+            .find(|s| s.kind == ObligationKind::IoOp)
+            .unwrap()
+            .leaked,
+        1
+    );
+    assert_eq!(snap.obligations_pending, 0, "leaked decrements pending");
+}
+
+// ===========================================================================
+// RESOURCE ACCOUNTING: SNAPSHOT SUMMARY AS ARTIFACT
+// ===========================================================================
+
+#[test]
+fn resource_accounting_snapshot_summary_artifact() {
+    init_test_logging();
+
+    // Run a representative schedule and produce a summary artifact.
+    let (accounting, _pending) = run_accounting_schedule(0x1234_5678, 6, 4, None);
+    let snap = accounting.snapshot();
+    let summary = snap.summary();
+
+    // Verify summary contains expected sections.
+    assert!(summary.contains("Resource Accounting Snapshot"));
+    assert!(summary.contains("Obligations:"));
+    assert!(summary.contains("send_permit"));
+    assert!(summary.contains("ack"));
+    assert!(summary.contains("lease"));
+    assert!(summary.contains("io_op"));
+    assert!(summary.contains("Budget:"));
+    assert!(summary.contains("Admission Control:"));
+    assert!(summary.contains("High-Water Marks:"));
+
+    // Write artifact if directory is configured.
+    if let Ok(dir) = std::env::var("LEAK_REGRESSION_ARTIFACT_DIR") {
+        let path = std::path::Path::new(&dir);
+        let _ = std::fs::create_dir_all(path);
+        let artifact_path = path.join("resource_accounting_summary.txt");
+        std::fs::write(&artifact_path, &summary).expect("failed to write artifact");
+    }
+}
+
+// ===========================================================================
+// CHILD REGION: ADMISSION WITH NESTED REGIONS
+// ===========================================================================
+
+#[test]
+fn child_region_admission_tracked() {
+    init_test_logging();
+
+    let accounting = ResourceAccounting::new();
+    let limits = RegionLimits {
+        max_children: Some(2),
+        max_tasks: None,
+        max_obligations: None,
+        max_heap_bytes: None,
+        curve_budget: None,
+    };
+
+    let config = LabConfig::new(777)
+        .panic_on_leak(false)
+        .panic_on_futurelock(false)
+        .max_steps(5_000)
+        .trace_capacity(64);
+
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    runtime.state.set_region_limits(root, limits);
+
+    let mut children_created = 0u32;
+    let mut children_rejected = 0u32;
+
+    for _ in 0..5 {
+        if let Ok(_child_id) = runtime.state.create_child_region(root, Budget::INFINITE) {
+            accounting.admission_succeeded(AdmissionKind::Child);
+            children_created += 1;
+        } else {
+            accounting.admission_rejected(AdmissionKind::Child);
+            children_rejected += 1;
+        }
+    }
+
+    assert_eq!(children_created, 2, "should admit exactly 2 children");
+    assert_eq!(children_rejected, 3, "should reject 3 children");
+
+    let snap = accounting.snapshot();
+    assert_eq!(
+        snap.admission_stats
+            .iter()
+            .find(|s| s.kind == AdmissionKind::Child)
+            .unwrap()
+            .rejections,
+        3
+    );
+}
+
+// ===========================================================================
+// BUDGET CONSUMPTION TRACKING
+// ===========================================================================
+
+#[test]
+fn budget_consumption_tracked_in_accounting() {
+    init_test_logging();
+
+    let accounting = ResourceAccounting::new();
+
+    // Simulate budget consumption events from multiple tasks.
+    for _ in 0..10 {
+        accounting.poll_consumed(3);
+        accounting.cost_consumed(15);
+    }
+    accounting.poll_quota_exhausted();
+    accounting.cost_quota_exhausted();
+    accounting.deadline_missed();
+
+    let snap = accounting.snapshot();
+    assert_eq!(snap.poll_quota_consumed, 30);
+    assert_eq!(snap.cost_quota_consumed, 150);
+    assert_eq!(snap.poll_quota_exhaustions, 1);
+    assert_eq!(snap.cost_quota_exhaustions, 1);
+    assert_eq!(snap.deadline_misses, 1);
+}
+
+// ===========================================================================
+// HIGH-WATER MARKS UNDER STRESS
+// ===========================================================================
+
+#[test]
+fn high_water_marks_track_peaks() {
+    init_test_logging();
+
+    let accounting = ResourceAccounting::new();
+
+    // Simulate tasks ramping up and down.
+    for n in 0..20i64 {
+        accounting.update_tasks_peak(n);
+    }
+    accounting.update_tasks_peak(5); // Should not reduce peak.
+    assert_eq!(accounting.tasks_peak(), 19);
+
+    // Simulate children count.
+    accounting.update_children_peak(3);
+    accounting.update_children_peak(7);
+    accounting.update_children_peak(2);
+    assert_eq!(accounting.children_peak(), 7);
+
+    // Simulate heap bytes.
+    accounting.update_heap_bytes_peak(1024);
+    accounting.update_heap_bytes_peak(4096);
+    accounting.update_heap_bytes_peak(2048);
+    assert_eq!(accounting.heap_bytes_peak(), 4096);
+
+    // Verify snapshot captures peaks.
+    let snap = accounting.snapshot();
+    assert_eq!(snap.tasks_peak, 19);
+    assert_eq!(snap.children_peak, 7);
+    assert_eq!(snap.heap_bytes_peak, 4096);
 }
