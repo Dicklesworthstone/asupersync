@@ -92,11 +92,11 @@ impl ScheduledSet {
     const DENSE_COLLISION: u64 = u64::MAX;
     // Hard cap to avoid pathological allocations if someone schedules a very high-index TaskId.
     const MAX_DENSE_LEN: usize = 1 << 20; // 1,048,576 slots => 8 MiB
-    const MIN_DENSE_LEN: usize = 256;
+    const MIN_DENSE_LEN: usize = 64;
 
     #[inline]
     fn with_capacity(capacity: usize) -> Self {
-        let overflow = DetHashSet::with_hasher(DetBuildHasher);
+        let overflow = DetHashSet::with_capacity_and_hasher(capacity, DetBuildHasher);
 
         let dense_len = capacity
             .max(1)
@@ -1165,6 +1165,15 @@ mod tests {
             second
         );
         crate::test_complete!("timed_lane_priority_over_ready");
+    }
+
+    #[test]
+    fn scheduler_with_capacity_preallocates_overflow_set() {
+        init_test("scheduler_with_capacity_preallocates_overflow_set");
+        let sched = Scheduler::with_capacity(1024);
+        let has_capacity = sched.scheduled.overflow.capacity() >= 1024;
+        crate::assert_with_log!(has_capacity, "overflow preallocation", true, has_capacity);
+        crate::test_complete!("scheduler_with_capacity_preallocates_overflow_set");
     }
 
     #[test]
