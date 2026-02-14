@@ -92,8 +92,16 @@ impl Decoder for GrpcCodec {
             return Ok(None);
         }
 
-        // Parse header
-        let compressed = src[0] != 0;
+        // Parse header.
+        let compressed = match src[0] {
+            0 => false,
+            1 => true,
+            flag => {
+                return Err(GrpcError::protocol(format!(
+                    "invalid gRPC compression flag: {flag}"
+                )));
+            }
+        };
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
         // Validate message size
@@ -218,8 +226,13 @@ impl<C: Codec> FramedCodec<C> {
             .encode(item)
             .map_err(|e| GrpcError::invalid_message(e.to_string()))?;
 
-        // Create framed message
-        // TODO: Implement compression when use_compression is true
+        // Compression has not been implemented yet; fail explicitly instead of
+        // silently emitting uncompressed frames when compression was requested.
+        if self.use_compression {
+            return Err(GrpcError::compression("compression not supported"));
+        }
+
+        // Create framed message.
         let message = GrpcMessage::new(data);
 
         // Encode with framing
@@ -344,6 +357,23 @@ mod tests {
     }
 
     #[test]
+    fn test_grpc_codec_rejects_invalid_compression_flag() {
+        init_test("test_grpc_codec_rejects_invalid_compression_flag");
+        let mut codec = GrpcCodec::new();
+        let mut buf = BytesMut::new();
+
+        // Invalid flag value 2 (spec allows only 0/1).
+        buf.put_u8(2);
+        buf.put_u32(3);
+        buf.extend_from_slice(b"abc");
+
+        let result = codec.decode(&mut buf);
+        let ok = matches!(result, Err(GrpcError::Protocol(_)));
+        crate::assert_with_log!(ok, "invalid compression flag rejected", true, ok);
+        crate::test_complete!("test_grpc_codec_rejects_invalid_compression_flag");
+    }
+
+    #[test]
     fn test_identity_codec() {
         init_test("test_identity_codec");
         let mut codec = IdentityCodec;
@@ -369,5 +399,19 @@ mod tests {
         let decoded = codec.decode_message(&mut buf).unwrap().unwrap();
         crate::assert_with_log!(decoded == original, "decoded", original, decoded);
         crate::test_complete!("test_framed_codec_roundtrip");
+    }
+
+    #[test]
+    fn test_framed_codec_with_compression_errors_on_encode() {
+        init_test("test_framed_codec_with_compression_errors_on_encode");
+        let mut codec = FramedCodec::new(IdentityCodec).with_compression();
+        let mut buf = BytesMut::new();
+
+        let original = Bytes::from_static(b"hello gRPC");
+        let result = codec.encode_message(&original, &mut buf);
+
+        let ok = matches!(result, Err(GrpcError::Compression(_)));
+        crate::assert_with_log!(ok, "compression unsupported", true, ok);
+        crate::test_complete!("test_framed_codec_with_compression_errors_on_encode");
     }
 }
