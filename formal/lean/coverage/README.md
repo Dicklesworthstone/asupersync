@@ -170,6 +170,22 @@ Validation for this artifact is enforced in `tests/lean_invariant_theorem_test_l
 Validation for profile structure, runtime ordering, and bead-link integrity is enforced in
 `tests/lean_ci_verification_profiles.rs`.
 
+## Proof-Safe Hot-Path Refactor Checklist (Track-6 T6.1b)
+
+Canonical checklist location:
+- `docs/integration.md` under **Proof-Safe Hot-Path Refactor Checklist (Track-6 T6.1b)**.
+
+When performance refactors touch scheduler/cancellation/obligation hot paths, review artifacts
+must include:
+- checklist completion status for lane ordering, lock ordering, cancellation protocol, and
+  obligation totality;
+- theorem/invariant anchors from:
+  - `formal/lean/coverage/runtime_state_refinement_map.json`
+  - `formal/lean/coverage/invariant_theorem_test_link_map.json`;
+- deterministic executable evidence from:
+  - `tests/refinement_conformance.rs`
+  - `tests/lean_invariant_theorem_test_link_map.rs`.
+
 ## Waiver Lifecycle Policy (Track-5.3a)
 
 `ci_verification_profiles.json` now includes `waiver_policy` for proof-debt exception control:
