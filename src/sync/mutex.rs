@@ -28,8 +28,9 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use parking_lot::Mutex as ParkingMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -82,7 +83,7 @@ pub struct Mutex<T> {
     /// Whether the mutex is poisoned.
     poisoned: AtomicBool,
     /// Internal state for fairness and locking.
-    state: StdMutex<MutexState>,
+    state: ParkingMutex<MutexState>,
 }
 
 // Safety: Mutex is Send/Sync if T is Send.
@@ -110,7 +111,7 @@ impl<T> Mutex<T> {
         Self {
             data: UnsafeCell::new(value),
             poisoned: AtomicBool::new(false),
-            state: StdMutex::new(MutexState {
+            state: ParkingMutex::new(MutexState {
                 locked: false,
                 waiters: VecDeque::new(),
             }),
@@ -126,7 +127,7 @@ impl<T> Mutex<T> {
     /// Returns true if the mutex is currently locked.
     #[must_use]
     pub fn is_locked(&self) -> bool {
-        self.state.lock().expect("mutex state lock poisoned").locked
+        self.state.lock().locked
     }
 
     /// Returns the number of tasks currently waiting for the lock.
@@ -154,7 +155,7 @@ impl<T> Mutex<T> {
             return Err(TryLockError::Poisoned);
         }
 
-        let mut state = self.state.lock().expect("mutex state lock poisoned");
+        let mut state = self.state.lock();
         if state.locked {
             return Err(TryLockError::Locked);
         }
@@ -186,7 +187,7 @@ impl<T> Mutex<T> {
         // Waking while holding the lock can cause priority inversion or deadlock
         // if the woken task tries to acquire another mutex.
         let waker_to_wake = {
-            let mut state = self.state.lock().expect("mutex state lock poisoned");
+            let mut state = self.state.lock();
             state.locked = false;
             loop {
                 match state.waiters.pop_front() {
@@ -231,7 +232,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
-        let mut state = self.mutex.state.lock().expect("mutex state lock poisoned");
+        let mut state = self.mutex.state.lock();
 
         if !state.locked {
             // Acquire lock
@@ -292,7 +293,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 impl<T> Drop for LockFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(waiter) = self.waiter.as_ref() {
-            let mut state = self.mutex.state.lock().expect("mutex state lock poisoned");
+            let mut state = self.mutex.state.lock();
 
             // Try to remove from queue
             let initial_len = state.waiters.len();
@@ -382,7 +383,7 @@ impl<T> OwnedMutexGuard<T> {
         impl<T> Drop for OwnedLockFuture<T> {
             fn drop(&mut self) {
                 if let Some(waiter) = self.waiter.as_ref() {
-                    let mut state = self.mutex.state.lock().expect("mutex state lock poisoned");
+                    let mut state = self.mutex.state.lock();
 
                     // Try to remove from queue
                     let initial_len = state.waiters.len();
@@ -415,7 +416,7 @@ impl<T> OwnedMutexGuard<T> {
                 if self.mutex.is_poisoned() {
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
-                let mut state = self.mutex.state.lock().expect("mutex state poisoned");
+                let mut state = self.mutex.state.lock();
                 if !state.locked {
                     state.locked = true;
                     if let Some(waiter) = self.waiter.as_ref() {
@@ -480,7 +481,7 @@ impl<T> OwnedMutexGuard<T> {
             return Err(TryLockError::Poisoned);
         }
         {
-            let mut state = mutex.state.lock().expect("mutex state poisoned");
+            let mut state = mutex.state.lock();
             if state.locked {
                 return Err(TryLockError::Locked);
             }
