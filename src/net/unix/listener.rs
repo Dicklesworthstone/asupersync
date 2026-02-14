@@ -167,8 +167,7 @@ impl UnixListener {
     pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
         match self.inner.accept() {
             Ok((stream, addr)) => {
-                stream.set_nonblocking(true)?;
-                Poll::Ready(Ok((UnixStream::from_std(stream), addr)))
+                Poll::Ready(UnixStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(err) = self.register_interest(cx) {

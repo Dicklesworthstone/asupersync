@@ -12,7 +12,7 @@ use std::net::Shutdown;
 use std::os::unix::net;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Borrowed read half of a [`UnixStream`](super::UnixStream).
 ///
@@ -106,45 +106,112 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Combined waker for split halves
+// ---------------------------------------------------------------------------
+
+/// Waker that dispatches to per-direction wakers for owned split halves.
+///
+/// When `OwnedReadHalf` and `OwnedWriteHalf` are polled from different tasks,
+/// each stores its own waker. The shared `IoRegistration` receives this
+/// combined waker so that both halves are notified on any I/O readiness event.
+struct CombinedWaker {
+    read: Option<Waker>,
+    write: Option<Waker>,
+}
+
+impl Wake for CombinedWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Some(w) = &self.read {
+            w.wake_by_ref();
+        }
+        if let Some(w) = &self.write {
+            w.wake_by_ref();
+        }
+    }
+}
+
+fn combined_waker(read: Option<&Waker>, write: Option<&Waker>) -> Waker {
+    Waker::from(Arc::new(CombinedWaker {
+        read: read.cloned(),
+        write: write.cloned(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Owned split halves
+// ---------------------------------------------------------------------------
+
+/// Per-direction waker state for owned split halves.
+struct SplitIoState {
+    registration: Option<IoRegistration>,
+    read_waker: Option<Waker>,
+    write_waker: Option<Waker>,
+}
+
 /// Shared state for owned split halves.
 ///
-/// Both owned halves share the same reactor registration so that interest and
-/// waker updates are coordinated.
+/// Both owned halves share the same reactor registration. Each half stores
+/// its own waker in [`SplitIoState`]; the `IoRegistration` receives a
+/// combined waker that dispatches to both, preventing lost wakeups when
+/// halves are polled from different tasks.
 pub(crate) struct UnixStreamInner {
     stream: Arc<net::UnixStream>,
-    registration: Mutex<Option<IoRegistration>>,
+    state: Mutex<SplitIoState>,
 }
 
 impl std::fmt::Debug for UnixStreamInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnixStreamInner")
             .field("stream", &self.stream)
-            .field("registration", &"...")
+            .field("state", &"...")
             .finish()
     }
 }
 
 impl UnixStreamInner {
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut guard = self.registration.lock().expect("lock poisoned");
+        let mut guard = self.state.lock().expect("lock poisoned");
 
-        if let Some(registration) = guard.as_mut() {
-            let combined = registration.interest() | interest;
-            // Oneshoot registration: always re-arm.
-            if let Err(err) = registration.set_interest(combined) {
-                if err.kind() == io::ErrorKind::NotConnected {
-                    *guard = None;
-                    cx.waker().wake_by_ref();
-                    return Ok(());
-                }
-                return Err(err);
-            }
-            if registration.update_waker(cx.waker().clone()) {
-                return Ok(());
-            }
-            *guard = None;
+        // Store this direction's waker for combined dispatch.
+        if interest.is_readable() {
+            guard.read_waker = Some(cx.waker().clone());
+        } else {
+            guard.write_waker = Some(cx.waker().clone());
         }
 
+        // Destructure to enable independent field borrows through the MutexGuard.
+        {
+            let SplitIoState {
+                registration,
+                read_waker,
+                write_waker,
+            } = &mut *guard;
+            if let Some(reg) = registration.as_mut() {
+                let combined_interest = reg.interest() | interest;
+                // Oneshot registration: always re-arm.
+                if let Err(err) = reg.set_interest(combined_interest) {
+                    if err.kind() == io::ErrorKind::NotConnected {
+                        *registration = None;
+                        cx.waker().wake_by_ref();
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+                if reg.update_waker(waker) {
+                    return Ok(());
+                }
+                *registration = None;
+            }
+        }
+
+        // Build combined waker before dropping the lock.
+        let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
         drop(guard);
 
         let Some(current) = Cx::current() else {
@@ -156,9 +223,9 @@ impl UnixStreamInner {
             return Ok(());
         };
 
-        match driver.register(&*self.stream, interest, cx.waker().clone()) {
+        match driver.register(&*self.stream, interest, waker) {
             Ok(registration) => {
-                *self.registration.lock().expect("lock poisoned") = Some(registration);
+                self.state.lock().expect("lock poisoned").registration = Some(registration);
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
@@ -186,7 +253,11 @@ impl OwnedReadHalf {
     ) -> (Self, OwnedWriteHalf) {
         let inner = Arc::new(UnixStreamInner {
             stream,
-            registration: Mutex::new(registration),
+            state: Mutex::new(SplitIoState {
+                registration,
+                read_waker: None,
+                write_waker: None,
+            }),
         });
         (
             Self {
@@ -212,9 +283,10 @@ impl OwnedReadHalf {
 
             let registration = self
                 .inner
-                .registration
+                .state
                 .lock()
                 .expect("lock poisoned")
+                .registration
                 .take();
             Ok(super::UnixStream::from_parts(
                 self.inner.stream.clone(),
@@ -361,7 +433,7 @@ mod tests {
         let (s1, _s2) = net::UnixStream::pair().expect("pair failed");
         s1.set_nonblocking(true).expect("set_nonblocking failed");
 
-        let stream = super::super::UnixStream::from_std(s1);
+        let stream = super::super::UnixStream::from_std(s1).expect("wrap stream");
         let (_read, _write) = stream.into_split();
     }
 
@@ -370,7 +442,7 @@ mod tests {
         let (s1, _s2) = net::UnixStream::pair().expect("pair failed");
         s1.set_nonblocking(true).expect("set_nonblocking failed");
 
-        let stream = super::super::UnixStream::from_std(s1);
+        let stream = super::super::UnixStream::from_std(s1).expect("wrap stream");
         let (read, write) = stream.into_split();
 
         // Should succeed - same stream
@@ -384,8 +456,8 @@ mod tests {
         s1.set_nonblocking(true).expect("set_nonblocking failed");
         s2.set_nonblocking(true).expect("set_nonblocking failed");
 
-        let stream1 = super::super::UnixStream::from_std(s1);
-        let stream2 = super::super::UnixStream::from_std(s2);
+        let stream1 = super::super::UnixStream::from_std(s1).expect("wrap stream1");
+        let stream2 = super::super::UnixStream::from_std(s2).expect("wrap stream2");
 
         let (read1, _write1) = stream1.into_split();
         let (_read2, write2) = stream2.into_split();

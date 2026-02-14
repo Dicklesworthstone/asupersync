@@ -276,7 +276,7 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
             }
 
             let listener: std::net::TcpListener = socket.into();
-            return Ok(super::listener::TcpListener::from_std(listener));
+            return super::listener::TcpListener::from_std(listener);
         }
 
         Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))

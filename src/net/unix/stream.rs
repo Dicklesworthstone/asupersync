@@ -198,13 +198,17 @@ impl UnixStream {
     ///
     /// For proper reactor integration, use this only with newly created
     /// streams that haven't been registered elsewhere.
-    #[must_use]
-    pub fn from_std(stream: net::UnixStream) -> Self {
-        // Non-blocking is set by caller for streams from accept()
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setting non-blocking mode fails.
+    pub fn from_std(stream: net::UnixStream) -> io::Result<Self> {
+        // Ensure async poll paths do not inherit blocking sockets.
+        stream.set_nonblocking(true)?;
+        Ok(Self {
             inner: Arc::new(stream),
             registration: Mutex::new(None), // Lazy registration on first I/O
-        }
+        })
     }
 
     /// Returns the socket address of the local end.
@@ -719,7 +723,9 @@ fn recv_with_ancillary_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
     use std::io::{self, IoSlice, IoSliceMut, Read};
+    use std::os::fd::AsRawFd;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -831,11 +837,16 @@ mod tests {
     fn test_from_std() {
         init_test("test_from_std");
         let (std_s1, _std_s2) = net::UnixStream::pair().expect("pair failed");
-        std_s1
-            .set_nonblocking(true)
-            .expect("set_nonblocking failed");
-
-        let _stream = UnixStream::from_std(std_s1);
+        let stream = UnixStream::from_std(std_s1).expect("wrap stream");
+        let flags =
+            fcntl(stream.inner.as_ref().as_raw_fd(), FcntlArg::F_GETFL).expect("read stream flags");
+        let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
+        crate::assert_with_log!(
+            is_nonblocking,
+            "from_std should force nonblocking mode",
+            true,
+            is_nonblocking
+        );
         crate::test_complete!("test_from_std");
     }
 

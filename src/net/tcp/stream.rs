@@ -111,14 +111,15 @@ impl TcpStream {
     /// Create a TcpStream from a standard library TcpStream.
     ///
     /// This is used for testing to wrap a synchronous stream into an async one.
-    #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
-    pub(crate) fn from_std(stream: net::TcpStream) -> Self {
-        Self {
+    pub(crate) fn from_std(stream: net::TcpStream) -> io::Result<Self> {
+        // Ensure async poll paths do not inherit blocking sockets.
+        stream.set_nonblocking(true)?;
+        Ok(Self {
             inner: Arc::new(stream),
             registration: None,
             shutdown_on_drop: true,
-        }
+        })
     }
 
     /// Reconstruct a TcpStream from its parts (used by reunite).
@@ -560,10 +561,14 @@ mod tests {
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId, Time};
     use futures_lite::future;
+    #[cfg(unix)]
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
     use std::future::poll_fn;
     use std::future::Future;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -726,7 +731,7 @@ mod tests {
         );
         let _guard = Cx::set_current(Some(cx));
 
-        let mut stream = TcpStream::from_std(client);
+        let mut stream = TcpStream::from_std(client).expect("wrap stream");
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut buf = [0u8; 8];
@@ -735,6 +740,24 @@ mod tests {
         let poll = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
         assert!(matches!(poll, Poll::Pending));
         assert!(stream.registration.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tcp_stream_from_std_forces_nonblocking_mode() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+
+        let stream = TcpStream::from_std(client).expect("wrap stream");
+        let flags =
+            fcntl(stream.inner.as_ref().as_raw_fd(), FcntlArg::F_GETFL).expect("read stream flags");
+        let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
+        assert!(
+            is_nonblocking,
+            "TcpStream::from_std should force nonblocking mode"
+        );
     }
 
     #[test]

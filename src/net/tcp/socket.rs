@@ -119,7 +119,7 @@ impl TcpSocket {
         let listener = net::TcpListener::bind(addr)?;
         listener.set_nonblocking(true)?;
 
-        Ok(TcpListener::from_std(listener))
+        TcpListener::from_std(listener)
     }
 
     /// Connects this socket, returning a TCP stream.

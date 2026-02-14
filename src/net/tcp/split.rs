@@ -14,7 +14,7 @@ use std::io::{self, Read, Write};
 use std::net::{self, Shutdown};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// Borrowed read half of a split TCP stream.
 ///
@@ -106,24 +106,138 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Combined waker for split halves
+// ---------------------------------------------------------------------------
+
+/// Waker that dispatches to per-direction wakers for owned split halves.
+///
+/// When `OwnedReadHalf` and `OwnedWriteHalf` are polled from different tasks,
+/// each stores its own waker. The shared `IoRegistration` receives this
+/// combined waker so that both halves are notified on any I/O readiness event.
+struct CombinedWaker {
+    read: Option<Waker>,
+    write: Option<Waker>,
+}
+
+impl Wake for CombinedWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if let Some(w) = &self.read {
+            w.wake_by_ref();
+        }
+        if let Some(w) = &self.write {
+            w.wake_by_ref();
+        }
+    }
+}
+
+fn combined_waker(read: Option<&Waker>, write: Option<&Waker>) -> Waker {
+    Waker::from(Arc::new(CombinedWaker {
+        read: read.cloned(),
+        write: write.cloned(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Owned split halves
+// ---------------------------------------------------------------------------
+
+/// Per-direction waker state for owned split halves.
+struct SplitIoState {
+    registration: Option<IoRegistration>,
+    read_waker: Option<Waker>,
+    write_waker: Option<Waker>,
+}
+
 /// Shared state for owned split halves.
 ///
-/// Both [`OwnedReadHalf`] and [`OwnedWriteHalf`] share this state via `Arc`,
-/// ensuring proper reactor registration sharing and cleanup.
+/// Both [`OwnedReadHalf`] and [`OwnedWriteHalf`] share this state via `Arc`.
+/// Each half stores its own waker in [`SplitIoState`]; the `IoRegistration`
+/// receives a combined waker that dispatches to both, preventing lost wakeups
+/// when halves are polled from different tasks.
 pub(crate) struct TcpStreamInner {
     /// The underlying TCP stream.
     stream: Arc<net::TcpStream>,
-    /// Shared reactor registration with interior mutability.
-    /// Both halves can update interest and waker through this.
-    registration: Mutex<Option<IoRegistration>>,
+    /// Per-direction wakers and shared reactor registration.
+    state: Mutex<SplitIoState>,
 }
 
 impl std::fmt::Debug for TcpStreamInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpStreamInner")
             .field("stream", &self.stream)
-            .field("registration", &"...")
+            .field("state", &"...")
             .finish()
+    }
+}
+
+impl TcpStreamInner {
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let mut guard = self.state.lock().unwrap();
+
+        // Store this direction's waker for combined dispatch.
+        if interest.is_readable() {
+            guard.read_waker = Some(cx.waker().clone());
+        } else {
+            guard.write_waker = Some(cx.waker().clone());
+        }
+
+        // Destructure to enable independent field borrows through the MutexGuard.
+        {
+            let SplitIoState {
+                registration,
+                read_waker,
+                write_waker,
+            } = &mut *guard;
+            if let Some(reg) = registration.as_mut() {
+                let combined_interest = reg.interest() | interest;
+                // Always call set_interest to re-arm the reactor registration.
+                // The polling crate uses oneshot-style notifications: after an event
+                // fires, the registration is disarmed and must be re-armed via modify().
+                if let Err(err) = reg.set_interest(combined_interest) {
+                    if err.kind() == io::ErrorKind::NotConnected {
+                        *registration = None;
+                        cx.waker().wake_by_ref();
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
+                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+                if reg.update_waker(waker) {
+                    return Ok(());
+                }
+                *registration = None;
+            }
+        }
+
+        // Build combined waker before dropping the lock.
+        let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+        drop(guard);
+
+        let Some(current) = Cx::current() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+
+        match driver.register(&*self.stream, interest, waker) {
+            Ok(registration) => {
+                self.state.lock().unwrap().registration = Some(registration);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                cx.waker().wake_by_ref();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -142,7 +256,11 @@ impl OwnedReadHalf {
         Self {
             inner: Arc::new(TcpStreamInner {
                 stream,
-                registration: Mutex::new(registration),
+                state: Mutex::new(SplitIoState {
+                    registration,
+                    read_waker: None,
+                    write_waker: None,
+                }),
             }),
         }
     }
@@ -154,7 +272,11 @@ impl OwnedReadHalf {
     ) -> (Self, OwnedWriteHalf) {
         let inner = Arc::new(TcpStreamInner {
             stream,
-            registration: Mutex::new(registration),
+            state: Mutex::new(SplitIoState {
+                registration,
+                read_waker: None,
+                write_waker: None,
+            }),
         });
         (
             Self {
@@ -190,7 +312,7 @@ impl OwnedReadHalf {
             write.shutdown_on_drop = false;
 
             // Take the registration back
-            let registration = self.inner.registration.lock().unwrap().take();
+            let registration = self.inner.state.lock().unwrap().registration.take();
 
             Ok(super::stream::TcpStream::from_parts(
                 self.inner.stream.clone(),
@@ -198,52 +320,6 @@ impl OwnedReadHalf {
             ))
         } else {
             Err(ReuniteError { read: self, write })
-        }
-    }
-
-    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut guard = self.inner.registration.lock().unwrap();
-
-        if let Some(registration) = guard.as_mut() {
-            let combined = registration.interest() | interest;
-            // Always call set_interest to re-arm the reactor registration.
-            // The polling crate uses oneshot-style notifications: after an event
-            // fires, the registration is disarmed and must be re-armed via modify().
-            if let Err(err) = registration.set_interest(combined) {
-                if err.kind() == io::ErrorKind::NotConnected {
-                    *guard = None;
-                    cx.waker().wake_by_ref();
-                    return Ok(());
-                }
-                return Err(err);
-            }
-            if registration.update_waker(cx.waker().clone()) {
-                return Ok(());
-            }
-            *guard = None;
-        }
-
-        drop(guard); // Release lock before accessing Cx
-
-        let Some(current) = Cx::current() else {
-            cx.waker().wake_by_ref();
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            cx.waker().wake_by_ref();
-            return Ok(());
-        };
-
-        match driver.register(&*self.inner.stream, interest, cx.waker().clone()) {
-            Ok(registration) => {
-                *self.inner.registration.lock().unwrap() = Some(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                cx.waker().wake_by_ref();
-                Ok(())
-            }
-            Err(err) => Err(err),
         }
     }
 }
@@ -261,7 +337,7 @@ impl AsyncRead for OwnedReadHalf {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                if let Err(err) = self.inner.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(err));
                 }
                 Poll::Pending
@@ -310,52 +386,6 @@ impl OwnedWriteHalf {
     pub fn set_shutdown_on_drop(&mut self, shutdown: bool) {
         self.shutdown_on_drop = shutdown;
     }
-
-    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut guard = self.inner.registration.lock().unwrap();
-
-        if let Some(registration) = guard.as_mut() {
-            let combined = registration.interest() | interest;
-            // Always call set_interest to re-arm the reactor registration.
-            // The polling crate uses oneshot-style notifications: after an event
-            // fires, the registration is disarmed and must be re-armed via modify().
-            if let Err(err) = registration.set_interest(combined) {
-                if err.kind() == io::ErrorKind::NotConnected {
-                    *guard = None;
-                    cx.waker().wake_by_ref();
-                    return Ok(());
-                }
-                return Err(err);
-            }
-            if registration.update_waker(cx.waker().clone()) {
-                return Ok(());
-            }
-            *guard = None;
-        }
-
-        drop(guard); // Release lock before accessing Cx
-
-        let Some(current) = Cx::current() else {
-            cx.waker().wake_by_ref();
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            cx.waker().wake_by_ref();
-            return Ok(());
-        };
-
-        match driver.register(&*self.inner.stream, interest, cx.waker().clone()) {
-            Ok(registration) => {
-                *self.inner.registration.lock().unwrap() = Some(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                cx.waker().wake_by_ref();
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
 }
 
 impl AsyncWrite for OwnedWriteHalf {
@@ -368,7 +398,7 @@ impl AsyncWrite for OwnedWriteHalf {
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
                 }
                 Poll::Pending
@@ -382,7 +412,7 @@ impl AsyncWrite for OwnedWriteHalf {
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
                 }
                 Poll::Pending
@@ -513,7 +543,7 @@ mod tests {
         let client = std::net::TcpStream::connect(addr).expect("connect");
         let (mut server, _) = listener.accept().expect("accept");
 
-        let stream = TcpStream::from_std(client);
+        let stream = TcpStream::from_std(client).expect("wrap stream");
         let (_read_half, write_half) = stream.into_split();
 
         let mut stream_ref = write_half.inner.stream.as_ref();
