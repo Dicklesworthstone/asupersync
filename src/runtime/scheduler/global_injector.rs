@@ -7,8 +7,8 @@ use crate::types::{TaskId, Time};
 use crossbeam_queue::SegQueue;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -124,7 +124,7 @@ impl GlobalInjector {
     /// Timed tasks are scheduled by their deadline (earliest deadline first)
     /// and have priority over ready tasks but not cancel tasks.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
-        let mut queue = self.timed_queue.lock().unwrap();
+        let mut queue = self.timed_queue.lock();
         let generation = queue.next_generation;
         queue.next_generation += 1;
         queue.heap.push(TimedTask::new(task, deadline, generation));
@@ -163,7 +163,7 @@ impl GlobalInjector {
     /// The caller should check if the deadline is due before executing.
     #[must_use]
     pub fn pop_timed(&self) -> Option<TimedTask> {
-        let mut queue = self.timed_queue.lock().unwrap();
+        let mut queue = self.timed_queue.lock();
         let result = queue.heap.pop();
         drop(queue);
         if result.is_some() {
@@ -177,7 +177,7 @@ impl GlobalInjector {
     /// Returns `None` if the timed lane is empty.
     #[must_use]
     pub fn peek_earliest_deadline(&self) -> Option<Time> {
-        let queue = self.timed_queue.lock().unwrap();
+        let queue = self.timed_queue.lock();
         queue.heap.peek().map(|t| t.deadline)
     }
 
@@ -187,7 +187,7 @@ impl GlobalInjector {
     /// deadline is still in the future.
     #[must_use]
     pub fn pop_timed_if_due(&self, now: Time) -> Option<TimedTask> {
-        let mut queue = self.timed_queue.lock().unwrap();
+        let mut queue = self.timed_queue.lock();
         if let Some(entry) = queue.heap.peek() {
             if entry.deadline <= now {
                 let result = queue.heap.pop();
@@ -219,7 +219,7 @@ impl GlobalInjector {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cancel_queue.is_empty()
-            && self.timed_queue.lock().unwrap().heap.is_empty()
+            && self.timed_queue.lock().heap.is_empty()
             && self.ready_queue.is_empty()
     }
 
@@ -229,7 +229,7 @@ impl GlobalInjector {
         if !self.cancel_queue.is_empty() || !self.ready_queue.is_empty() {
             return true;
         }
-        let queue = self.timed_queue.lock().unwrap();
+        let queue = self.timed_queue.lock();
         queue.heap.peek().is_some_and(|t| t.deadline <= now)
     }
 
@@ -248,7 +248,7 @@ impl GlobalInjector {
     /// Returns true if the timed lane has pending work.
     #[must_use]
     pub fn has_timed_work(&self) -> bool {
-        !self.timed_queue.lock().unwrap().heap.is_empty()
+        !self.timed_queue.lock().heap.is_empty()
     }
 
     /// Returns true if the ready lane has pending work.
