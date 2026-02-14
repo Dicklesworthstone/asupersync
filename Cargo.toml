@@ -96,7 +96,7 @@ required-features = ["cli"]
 thiserror = "2.0"
 crossbeam-queue = "0.3"
 parking_lot = "0.12"
-polling = "2.8"
+polling = "3.11"
 slab = "0.4"
 smallvec = "1.13"
 pin-project = "1.1"
@@ -115,8 +115,8 @@ tracing = { version = "0.1", optional = true }
 # Optional tracing subscriber for test-internals feature
 tracing-subscriber = { version = "0.3", optional = true }
 # Optional OpenTelemetry metrics provider
-opentelemetry = { version = "0.28", default-features = false, features = ["metrics"], optional = true }
-opentelemetry_sdk = { version = "0.28", default-features = false, features = ["metrics"], optional = true }
+opentelemetry = { version = "0.31", default-features = false, features = ["metrics"], optional = true }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics"], optional = true }
 # Optional Tower trait integration
 tower = { version = "0.5.3", optional = true }
 # Optional proc macros for structured concurrency
@@ -186,7 +186,7 @@ conformance = { package = "asupersync-conformance", version = "0.1.1", path = "c
 tempfile = "3.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-opentelemetry_sdk = { version = "0.28", default-features = false, features = ["metrics", "testing"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
 lz4_flex = "0.12"
 toml = "1.0"
 # Certificate generation for TLS/QUIC tests
