@@ -1,10 +1,10 @@
-# AGENTS.md — Asupersync
+# AGENTS.md — asupersync
 
 > Guidelines for AI coding agents working in this Rust async runtime codebase.
 
 ---
 
-## RULE 0 - THE FUNDAMENTAL OVERRIDE PEROGATIVE
+## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
 
 If I tell you to do something, even if it goes against what follows below, YOU MUST LISTEN TO ME. I AM IN CHARGE, NOT YOU.
 
@@ -20,8 +20,6 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
 
-> **Note:** Treat destructive commands as break-glass. If there's any doubt, stop and ask.
-
 1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
 2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
 3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
@@ -30,25 +28,113 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## Git Branch: ONLY Use `main`, NEVER `master`
+
+**The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
+
+- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
+- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
+- **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
+  ```bash
+  git push origin main:master
+  ```
+
+**If you see `master` referenced anywhere:**
+1. Update it to `main`
+2. Ensure `master` is synchronized: `git push origin main:master`
+
+---
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition/toolchain:** Follow `rust-toolchain.toml` (if present). Do not assume stable vs nightly.
-- **Dependencies:** Explicit versions for stability; keep the set minimal.
-- **Configuration:** Cargo.toml only
-- **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
+- **Edition:** Rust 2021 (nightly required — see `rust-toolchain.toml`)
+- **Dependency versions:** Explicit versions for stability; keep the set minimal
+- **Configuration:** Cargo.toml workspace with members pattern
+- **Unsafe code:** Denied by default (`#![deny(unsafe_code)]`) — specific modules that require unsafe (e.g., epoll reactor FFI) can use `#[allow(unsafe_code)]`
 
-### Dependency Policy (Asupersync)
+### Async Runtime: THIS IS IT (NO TOKIO)
 
-- Prefer `std`/`core` and small, focused crates.
-- **Do not** introduce another executor/runtime (tokio/async-std/etc.) into core.
-- Any new crate must preserve determinism in the lab runtime and avoid ambient globals.
+**This project IS the async runtime. Tokio and the entire tokio ecosystem are FORBIDDEN.**
+
+- **Structured concurrency**: `Cx`, `Scope`, `region()` — no orphan tasks
+- **Cancel-correct channels**: Two-phase `reserve()/send()` — no data loss on cancellation
+- **Sync primitives**: `asupersync::sync::Mutex`, `RwLock`, `OnceCell`, `Semaphore`, `Pool` — cancel-aware
+- **Deterministic testing**: `LabRuntime` with virtual time, DPOR, oracles
+- **Capability security**: All effects flow through explicit `Cx`; no ambient authority
+
+**Forbidden crates**: `tokio`, `hyper`, `reqwest`, `axum`, `tower` (tokio adapter only — the `tower` feature flag exists for trait compat), `async-std`, `smol`, or any crate that transitively depends on tokio.
+
+**Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
+
+### Dependency Policy
+
+- Prefer `std`/`core` and small, focused crates
+- **Do not** introduce another executor/runtime into core
+- Any new crate must preserve determinism in the lab runtime and avoid ambient globals
+- Phase 0: Dependencies added must preserve determinism in the lab runtime
+
+### Key Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `thiserror` | Ergonomic error type derivation |
+| `crossbeam-queue` | Lock-free concurrent queues |
+| `parking_lot` | Fast synchronization primitives |
+| `polling` | Portable epoll/kqueue/IOCP polling |
+| `slab` | Pre-allocated storage for fixed-size records |
+| `smallvec` | Stack-allocated small vectors |
+| `pin-project` | Safe pin projections |
+| `serde` + `serde_json` | Serialization |
+| `socket2` | Low-level socket configuration |
+| `rustls` | TLS support (optional, via `tls` feature) |
+| `rusqlite` | SQLite async wrapper (optional, via `sqlite` feature) |
+| `proptest` | Property-based testing (dev) |
+| `criterion` | Benchmarking (dev) |
+| `rayon` | Data parallelism for CPU-bound work (dev/bench only) |
+
+### Workspace Members
+
+| Crate | Purpose |
+|-------|---------|
+| `asupersync` | Main runtime crate — scheduler, regions, channels, sync, IO, net, HTTP |
+| `asupersync-macros` | Proc macros for structured concurrency (`scope!`, `spawn!`, `join!`, `race!`) |
+| `conformance` | Conformance test suite for async runtime specifications |
+| `franken_kernel` | FrankenSuite type substrate (`TraceId`, `DecisionId`, `PolicyId`, `SchemaVersion`) |
+| `franken_evidence` | Canonical `EvidenceLedger` schema for FrankenSuite decision tracing |
+| `franken_decision` | Decision Contract schema and runtime for FrankenSuite |
+| `frankenlab` | Deterministic testing harness: record, replay, and minimize concurrency bugs |
+
+### Feature Flags
+
+```toml
+[features]
+default = ["test-internals"]
+test-internals = [...]         # Internal test helpers (Cx::new(), etc.) — NOT for production
+metrics = [...]                # OpenTelemetry metrics provider
+tracing-integration = [...]    # Structured logging and spans (zero-cost when disabled)
+proc-macros = [...]            # scope!, spawn!, join!, race! macros
+tower = [...]                  # Optional Tower adapter for AsupersyncService
+trace-compression = [...]      # LZ4 compression for trace files
+debug-server = []              # Debug HTTP server for runtime inspection
+config-file = [...]            # TOML config file loading for RuntimeBuilder
+lock-metrics = []              # ContendedMutex wait/hold time tracking
+io-uring = [...]               # Linux io_uring reactor (kernel 5.1+)
+tls = [...]                    # TLS support via rustls
+tls-native-roots = [...]       # Native root certificates for TLS
+tls-webpki-roots = [...]       # webpki root certificates for TLS
+cli = [...]                    # CLI tooling (trace inspection)
+sqlite = [...]                 # SQLite async wrapper with blocking pool
+postgres = []                  # PostgreSQL async client with wire protocol
+mysql = []                     # MySQL async client with wire protocol
+kafka = [...]                  # Kafka client integration via rdkafka
+loom-tests = [...]             # Loom concurrency tests for scheduler verification
+```
 
 ### Release Profile
 
-Use the release profile defined in `Cargo.toml`. If you need to change it, justify the
-performance/size tradeoff and how it impacts determinism and cancellation behavior.
+Use the release profile defined in `Cargo.toml`. If you need to change it, justify the performance/size tradeoff and how it impacts determinism and cancellation behavior.
 
 ---
 
@@ -116,7 +202,22 @@ If you see errors, **carefully understand and resolve each issue**. Read suffici
 
 ## Testing
 
-### Unit & Property Tests
+### Testing Policy
+
+Every module includes inline `#[cfg(test)]` unit tests alongside the implementation. Tests must cover:
+- Happy path
+- Edge cases (empty input, max values, boundary conditions)
+- Error conditions
+
+When adding or changing primitives, add tests that assert the core invariants:
+- No task leaks
+- No obligation leaks
+- Losers are drained after races
+- Region close implies quiescence
+
+Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
+
+### Unit Tests
 
 ```bash
 # Run all tests
@@ -124,72 +225,175 @@ cargo test
 
 # Run with output
 cargo test -- --nocapture
+
+# Run tests for a specific module
+cargo test --lib <module_name>
+
+# Run tests for a workspace member
+cargo test -p asupersync-macros
+cargo test -p asupersync-conformance
+cargo test -p franken-kernel
+cargo test -p franken-evidence
+cargo test -p franken-decision
+cargo test -p frankenlab
 ```
 
-When adding or changing primitives, add tests that assert the core invariants:
+### Test Categories
 
-- no task leaks
-- no obligation leaks
-- losers are drained after races
-- region close implies quiescence
-
-Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
-
----
-
-## CI/CD Expectations
-
-If CI is configured, it should at minimum run:
-
-- `cargo fmt --check`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo test`
-
-If deterministic lab or schedule exploration tests exist, they should be part of CI.
-
----
-
-## Asupersync Non-Negotiable Invariants
-
-- **Structured concurrency:** every task/fiber/actor is owned by exactly one region.
-- **Region close = quiescence:** no live children + all finalizers done.
-- **Cancellation is a protocol:** request → drain → finalize (idempotent).
-- **Losers are drained:** races must cancel and fully drain losers.
-- **No obligation leaks:** permits/acks/leases must be committed or aborted.
-- **No ambient authority:** effects flow through `Cx` and explicit capabilities.
+| Area | Focus |
+|------|-------|
+| `types/` | Identifiers, outcomes, budgets, policies, serialization round-trips |
+| `record/` | Task/region/obligation record creation, state transitions |
+| `runtime/` | Scheduler fairness, state management, region lifecycle |
+| `cx/` | Capability context, scope API, structured concurrency contracts |
+| `channel/` | Two-phase reserve/send, MPSC/oneshot, cancel-correctness |
+| `sync/` | Mutex, RwLock, Semaphore, Pool, Barrier, OnceLock — cancel-awareness |
+| `combinator/` | Join, race, timeout, bulkhead, retry — loser drain correctness |
+| `cancel/` | Cancellation protocol, symbol cancel, drain/finalize lifecycle |
+| `obligation/` | Permit/ack/lease commit/abort, no-leak invariant |
+| `lab/` | Virtual time, deterministic scheduling, DPOR, oracles |
+| `net/` + `io/` | Async I/O adapters, socket integration |
+| `http/` | HTTP/1.1, HTTP/2 protocol correctness |
+| `codec/` | Framing, encoding/decoding round-trips |
+| `conformance/` | Cross-component conformance suite |
+| `benches/` | Scheduler, timer wheel, reactor, cancel/drain, RaptorQ throughput |
 
 ---
 
 ## Third-Party Library Usage
 
-If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and mid-2025 best practices.
+If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
 
 ---
 
 ## Asupersync — This Project
 
-**This is the project you're working on.** Asupersync is a spec-first async runtime
-with structured concurrency, explicit cancellation, and deterministic testing.
+**This is the project you're working on.** Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust with structured concurrency, explicit cancellation, and deterministic testing.
 
-### Architecture (Conceptual)
+### What It Does
+
+Provides a complete async runtime where every task is owned by a region that closes to quiescence. Cancellation is a first-class protocol (request, drain, finalize), not a silent drop. Effects require explicit capabilities flowing through `Cx`.
+
+### Architecture
 
 ```
 User Future → Scope/Region → Scheduler → Cancellation/Obligations → Trace
+     │              │              │               │                    │
+     Cx ────────────┘──────────────┘───────────────┘────────────────────┘
 ```
 
-### Key Files (Current Docs)
+### Asupersync Non-Negotiable Invariants
+
+- **Structured concurrency:** every task/fiber/actor is owned by exactly one region
+- **Region close = quiescence:** no live children + all finalizers done
+- **Cancellation is a protocol:** request → drain → finalize (idempotent)
+- **Losers are drained:** races must cancel and fully drain losers
+- **No obligation leaks:** permits/acks/leases must be committed or aborted
+- **No ambient authority:** effects flow through `Cx` and explicit capabilities
+
+### Lock Ordering
+
+When acquiring multiple locks, the strict order is:
+
+```
+E(Config) → D(Instrumentation) → B(Regions) → A(Tasks) → C(Obligations)
+```
+
+Violating this order causes deadlocks. `ShardedState` with `ContendedMutex` provides independent locking.
+
+### Workspace Structure
+
+```
+asupersync/
+├── Cargo.toml                         # Workspace root
+├── src/                               # Main runtime (~377K lines, 499 files)
+│   ├── types/                         # Core types (IDs, outcomes, budgets, policies)
+│   ├── record/                        # Internal records for tasks, regions, obligations
+│   ├── runtime/                       # Scheduler and runtime state management
+│   ├── cx/                            # Capability context and scope API
+│   ├── channel/                       # Two-phase channel primitives (MPSC, oneshot, sessions)
+│   ├── sync/                          # Sync primitives (mutex, rwlock, semaphore, pool, barrier)
+│   ├── combinator/                    # Join, race, timeout, bulkhead, retry
+│   ├── cancel/                        # Cancellation protocol and symbol cancellation
+│   ├── obligation/                    # Obligation tracking and recovery
+│   ├── lab/                           # Deterministic lab runtime with virtual time
+│   ├── trace/                         # Tracing infrastructure for deterministic replay
+│   ├── time/                          # Sleep and timeout primitives
+│   ├── io/                            # Async I/O traits and adapters
+│   ├── net/                           # Async networking primitives
+│   ├── bytes/                         # Zero-copy buffer types (Bytes, BytesMut, Buf, BufMut)
+│   ├── codec/                         # Encoding/decoding primitives and framing
+│   ├── http/                          # HTTP/1.1, HTTP/2 implementations
+│   ├── tls/                           # TLS support via rustls
+│   ├── grpc/                          # gRPC client/server with health checks
+│   ├── database/                      # SQLite, PostgreSQL, MySQL async wrappers
+│   ├── transport/                     # Low-level transport and routing
+│   ├── stream/                        # Stream combinators and operations
+│   ├── plan/                          # Plan DAG IR for combinator rewrites
+│   ├── observability/                 # Structured logging, metrics, diagnostics
+│   ├── security/                      # Symbol authentication and security
+│   ├── distributed/                   # Consistent hashing, distribution, snapshots
+│   ├── raptorq/                       # RaptorQ encoding pipeline
+│   ├── util/                          # Internal utilities (RNG, arenas)
+│   ├── actor.rs                       # Actor model primitives
+│   ├── supervision.rs                 # Supervision trees
+│   ├── gen_server.rs                  # Generic server pattern
+│   ├── config.rs                      # Runtime configuration
+│   ├── error.rs                       # Error types
+│   └── ...                            # ~30 additional single-file modules
+├── asupersync-macros/                 # Proc macros (scope!, spawn!, join!, race!)
+├── conformance/                       # Conformance test suite
+├── franken_kernel/                    # FrankenSuite type substrate
+├── franken_evidence/                  # FrankenSuite evidence ledger
+├── franken_decision/                  # FrankenSuite decision contracts
+├── frankenlab/                        # Deterministic testing harness
+├── tests/                             # Integration tests
+├── benches/                           # Performance benchmarks
+├── examples/                          # Usage examples
+├── docs/                              # Documentation
+├── formal/                            # Formal specifications
+└── .beads/                            # Beads issue tracking
+```
+
+### Key Documentation Files
 
 | File | Purpose |
 |------|---------|
 | `asupersync_plan_v4.md` | Design bible and core invariants |
 | `asupersync_v4_formal_semantics.md` | Small-step operational semantics |
-| `asupersync_v4_api_skeleton.rs` | API skeleton aligned to the plan |
+| `TESTING.md` | Comprehensive testing guide |
+| `README.md` | Project overview |
+
+### Core Types Quick Reference
+
+| Type | Purpose |
+|------|---------|
+| `Cx` | Capability context — passed to all async operations, no ambient authority |
+| `Outcome<T, E>` | Four-valued result: Ok, Err, Cancelled, Panicked |
+| `Budget` | Bounded cleanup time — sufficient conditions, not hopes |
+| `Region` | Structured concurrency scope — owns tasks, closes to quiescence |
+| `Scope` | API for creating child regions and spawning tasks |
+| `TaskId` / `RegionId` | Identifiers for tasks and regions |
+| `Obligation` | Tracked permit/ack/lease — must be committed or aborted |
+| `CancelToken` | Cancellation signal propagation |
+| `LabRuntime` | Deterministic runtime with virtual time for testing |
 
 ### Performance Requirements
 
-- Zero unnecessary allocations on the hot path (esp. scheduling/cancel checks).
-- Deterministic lab runtime: behavior must be schedule-replayable.
-- Cancellation and drain paths are latency-sensitive; avoid extra work there.
+- Zero unnecessary allocations on the hot path (scheduling, cancel checks)
+- Deterministic lab runtime: behavior must be schedule-replayable
+- Cancellation and drain paths are latency-sensitive; avoid extra work there
+- Lock ordering must be respected for deadlock freedom
+
+### Key Design Decisions
+
+- **`#![deny(unsafe_code)]`** with per-module `#[allow(unsafe_code)]` where required (e.g., `pool.rs` for `unsafe impl Send`)
+- **Lock ordering enforcement** with `ShardGuard` variants and label system (23 tests)
+- **Channel waker dedup** pattern: `Arc<AtomicBool>` on mpsc `SendWaiter`, broadcast, and watch `WatchWaiter`
+- **`ShardedState`** with `ContendedMutex` for independent locking across task/region/obligation tables
+- **Two-phase effects** (reserve/commit) prevent data loss on cancellation
+- **FrankenSuite integration** — evidence ledger, decision contracts, and kernel types for runtime verification
+- **Phase 0 complete, Phase 1 in progress** — dead code allowances for stubs, core types stabilizing
 
 ---
 
@@ -244,9 +448,9 @@ A mail-like layer that lets coding agents coordinate asynchronously via MCP tool
 
 ## Beads (br) — Dependency-Aware Issue Tracking
 
-Beads provides a lightweight, dependency-aware issue database and CLI (`br` / beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
+Beads provides a lightweight, dependency-aware issue database and CLI (`br` - beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
 
-**Note:** `br` is non-invasive—it never executes git commands directly. You must run git commands manually after `br sync --flush-only`.
+**Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
 
 ### Conventions
 
@@ -275,7 +479,8 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` / be
 
 5. **Complete and release:**
    ```bash
-   br close br-123 --reason "Completed"
+   br close 123 --reason "Completed"
+   br sync --flush-only  # Export to JSONL (no git operations)
    ```
    ```
    release_file_reservations(project_key, agent_name, paths=["src/**"])
@@ -424,6 +629,33 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 
 ---
 
+## RCH — Remote Compilation Helper
+
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
+
+**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
+
+To manually offload a build:
+```bash
+rch exec -- cargo build --release
+rch exec -- cargo test
+rch exec -- cargo clippy
+```
+
+Quick commands:
+```bash
+rch doctor                    # Health check
+rch workers probe --all       # Test connectivity to all 8 workers
+rch status                    # Overview of current state
+rch queue                     # See active/waiting builds
+```
+
+If rch or its workers are unavailable, it fails open — builds run locally as normal.
+
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
+
+---
+
 ## ast-grep vs ripgrep
 
 **Use `ast-grep` when structure matters.** It parses code and matches AST nodes, ignoring comments/strings, and can **safely rewrite** code.
@@ -447,7 +679,7 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 
 ```bash
 # Find structured code (ignores comments)
-ast-grep run -l Rust -p 'fn $NAME($$$ARGS) -> $RET { $$$BODY }'
+ast-grep run -l Rust -p 'fn $NAME($$ARGS) -> $RET { $$BODY }'
 
 # Find all unwrap() calls
 ast-grep run -l Rust -p '$EXPR.unwrap()'
@@ -473,9 +705,9 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 | Scenario | Tool | Why |
 |----------|------|-----|
-| "How is pattern matching implemented?" | `warp_grep` | Exploratory; don't know where to start |
-| "Where is the quick reject filter?" | `warp_grep` | Need to understand architecture |
-| "Find all uses of `Regex::new`" | `ripgrep` | Targeted literal search |
+| "How does the cancellation protocol work?" | `warp_grep` | Exploratory; don't know where to start |
+| "Where is the region close logic?" | `warp_grep` | Need to understand architecture |
+| "Find all uses of `Cx::trace`" | `ripgrep` | Targeted literal search |
 | "Find files with `println!`" | `ripgrep` | Simple pattern |
 | "Replace all `unwrap()` with `expect()`" | `ast-grep` | Structural refactor |
 
@@ -483,8 +715,8 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/path/to/dcg",
-  query: "How does the safe pattern whitelist work?"
+  repoPath: "/data/projects/asupersync",
+  query: "How does the structured concurrency scope API work?"
 )
 ```
 
@@ -502,9 +734,9 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 ## Beads Workflow Integration
 
-This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
 
-**Note:** `br` is non-invasive—it never executes git commands directly. You must run git commands manually after `br sync --flush-only`.
+**Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
 
 ### Essential Commands
 
@@ -518,9 +750,9 @@ br list --status=open # All open issues
 br show <id>          # Full issue details with dependencies
 br create --title="..." --type=task --priority=2
 br update <id> --status=in_progress
-br close <id> --reason="Completed"
+br close <id> --reason "Completed"
 br close <id1> <id2>  # Close multiple issues at once
-br sync --flush-only  # Export to JSONL (then manually: git add .beads/ && git commit)
+br sync --flush-only  # Export to JSONL (NO git operations)
 ```
 
 ### Workflow Pattern
@@ -529,7 +761,7 @@ br sync --flush-only  # Export to JSONL (then manually: git add .beads/ && git c
 2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
 4. **Complete**: Use `br close <id>`
-5. **Sync**: Run `br sync --flush-only`, then `git add .beads/ && git commit -m "Update beads"`
+5. **Sync**: Run `br sync --flush-only` then manually commit
 
 ### Key Concepts
 
@@ -547,7 +779,7 @@ git status              # Check what changed
 git add <files>         # Stage code changes
 br sync --flush-only    # Export beads to JSONL
 git add .beads/         # Stage beads changes
-git commit -m "..."     # Commit code and beads
+git commit -m "..."     # Commit everything together
 git push                # Push to remote
 ```
 
@@ -557,37 +789,21 @@ git push                # Push to remote
 - Update status as you work (in_progress → closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Always run `br sync --flush-only` then commit .beads/ before ending session
+- Always `br sync --flush-only && git add .beads/` before ending session
 
 <!-- end-bv-agent-instructions -->
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session**, you MUST complete ALL steps below.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   br sync --flush-only
-   git add .beads/
-   git commit -m "Update beads"
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
 
 ---
 
@@ -620,7 +836,7 @@ Treat cass as a way to avoid re-solving problems other agents already handled.
 
 ---
 
-## Note for Codex/GPT-5.2
+Note for Codex/GPT-5.2:
 
 You constantly bother me and stop working with concerned questions that look similar to this:
 
