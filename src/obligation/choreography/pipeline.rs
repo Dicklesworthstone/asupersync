@@ -1367,36 +1367,36 @@ mod tests {
         let worker_a = &output.participants["worker_a"];
 
         // proxy_a sends request_a, receives response_a
-        let proxy_sends: Vec<_> = proxy_a
+        let proxy_send_count = proxy_a
             .saga_plan
             .steps
             .iter()
             .filter(|s| s.op == SagaOpKind::Send)
-            .collect();
-        let proxy_recvs: Vec<_> = proxy_a
+            .count();
+        let proxy_recv_count = proxy_a
             .saga_plan
             .steps
             .iter()
             .filter(|s| s.op == SagaOpKind::Recv)
-            .collect();
-        assert_eq!(proxy_sends.len(), 1, "proxy_a should send once");
-        assert_eq!(proxy_recvs.len(), 1, "proxy_a should recv once");
+            .count();
+        assert_eq!(proxy_send_count, 1, "proxy_a should send once");
+        assert_eq!(proxy_recv_count, 1, "proxy_a should recv once");
 
         // worker_a receives request_a, sends response_a
-        let worker_sends: Vec<_> = worker_a
+        let worker_send_count = worker_a
             .saga_plan
             .steps
             .iter()
             .filter(|s| s.op == SagaOpKind::Send)
-            .collect();
-        let worker_recvs: Vec<_> = worker_a
+            .count();
+        let worker_recv_count = worker_a
             .saga_plan
             .steps
             .iter()
             .filter(|s| s.op == SagaOpKind::Recv)
-            .collect();
-        assert_eq!(worker_sends.len(), 1, "worker_a should send once");
-        assert_eq!(worker_recvs.len(), 1, "worker_a should recv once");
+            .count();
+        assert_eq!(worker_send_count, 1, "worker_a should send once");
+        assert_eq!(worker_recv_count, 1, "worker_a should recv once");
     }
 
     #[test]
@@ -1615,9 +1615,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{}: generate failed: {e}", protocol.name));
 
             for (name, p) in &output.participants {
-                let (plan, exec) = pipe
-                    .plan_only(protocol, name)
-                    .unwrap_or_else(|e| panic!("{}: plan_only failed for {name}: {e}", protocol.name));
+                let (plan, exec) = pipe.plan_only(protocol, name).unwrap_or_else(|e| {
+                    panic!("{}: plan_only failed for {name}: {e}", protocol.name)
+                });
 
                 // Same step count
                 assert_eq!(
@@ -1732,7 +1732,7 @@ mod tests {
             .generate_with_locals(&protocol)
             .expect("pipeline failed");
 
-        for (_, p) in &output.participants {
+        for p in output.participants.values() {
             // Header should contain CALM batch info
             assert!(
                 p.source_code.contains("CALM batches:"),
