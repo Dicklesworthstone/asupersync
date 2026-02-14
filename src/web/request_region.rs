@@ -122,6 +122,7 @@ impl<'a> RequestRegion<'a> {
     ///
     /// For Phase 0 (synchronous execution), use [`run`](Self::run) instead.
     /// This method exists to establish the async API surface for Phase 1+.
+    #[allow(clippy::result_large_err)]
     pub fn run_sync<F>(self, handler: F) -> RegionOutcome
     where
         F: FnOnce(&RequestContext<'_>) -> Result<Response, Error>,
@@ -391,6 +392,7 @@ fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
     use crate::cx::Cx;
