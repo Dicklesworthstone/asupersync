@@ -77,7 +77,11 @@ fn budget_type_identity() {
 #[test]
 fn cx_type_identity() {
     let trace = franken_kernel::TraceId::from_parts(1_700_000_000_000, 42);
-    let cx = franken_kernel::Cx::new(trace, franken_kernel::Budget::new(5000), franken_kernel::NoCaps);
+    let cx = franken_kernel::Cx::new(
+        trace,
+        franken_kernel::Budget::new(5000),
+        franken_kernel::NoCaps,
+    );
     assert_eq!(cx.budget().remaining_ms(), 5000);
     assert_eq!(cx.depth(), 0);
 
@@ -348,8 +352,8 @@ fn calm_classification_consistency() {
 /// ensures no new forks were accidentally introduced.
 #[test]
 fn type_fork_baseline_unchanged() {
-    let baseline_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(".type_fork_baseline.json");
+    let baseline_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".type_fork_baseline.json");
 
     if !baseline_path.exists() {
         // Baseline file is optional; skip if not present.

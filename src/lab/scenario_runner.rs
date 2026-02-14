@@ -26,8 +26,6 @@ use super::meta::mutation::ALL_ORACLE_INVARIANTS;
 use super::oracle::OracleReport;
 use super::runtime::{LabRunReport, LabRuntime};
 use super::scenario::{FaultAction, Scenario, ValidationError};
-use crate::trace::canonicalize::trace_fingerprint;
-use crate::trace::certificate::TraceCertificate;
 use crate::trace::replay::ReplayTrace;
 use crate::types::Time;
 use std::collections::BTreeMap;
@@ -186,7 +184,7 @@ impl FilteredOracleReport {
             full_report
                 .entries
                 .iter()
-                .filter(|e| oracle_names.iter().any(|n| e.invariant == *n))
+                .filter(|e| oracle_names.contains(&e.invariant))
                 .cloned()
                 .collect()
         };
@@ -269,7 +267,7 @@ impl ScenarioExplorationResult {
             "failed": self.failed,
             "unique_fingerprints": self.unique_fingerprints,
             "first_failure_seed": self.first_failure_seed,
-            "runs": self.runs.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
+            "runs": self.runs.iter().map(ExplorationRunSummary::to_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -329,10 +327,14 @@ impl ScenarioRunner {
 
     /// Create a `LabConfig` from a scenario, always enabling replay recording.
     fn lab_config_for(scenario: &Scenario, seed_override: Option<u64>) -> LabConfig {
-        let mut config = scenario.to_lab_config();
-        if let Some(seed) = seed_override {
-            config = config.with_seed(seed);
-        }
+        let config = seed_override.map_or_else(
+            || scenario.to_lab_config(),
+            |seed| {
+                let mut modified = scenario.clone();
+                modified.lab.seed = seed;
+                modified.to_lab_config()
+            },
+        );
         // Always enable replay recording so we get trace certificates
         config.with_default_replay_recording()
     }
@@ -367,13 +369,17 @@ impl ScenarioRunner {
             };
             let seq = runtime.state.next_trace_seq();
             let now = runtime.now();
-            runtime.state.trace.push_event(
-                crate::trace::TraceEvent::user_trace(
+            runtime
+                .state
+                .trace
+                .push_event(crate::trace::TraceEvent::user_trace(
                     seq,
                     now,
-                    format!("fault:{action_name}:{}", Self::fault_args_summary(&fault.args)),
-                ),
-            );
+                    format!(
+                        "fault:{action_name}:{}",
+                        Self::fault_args_summary(&fault.args)
+                    ),
+                ));
             injected += 1;
         }
 
@@ -571,8 +577,7 @@ impl ScenarioRunner {
 mod tests {
     use super::*;
     use crate::lab::scenario::{
-        CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent,
-        LabSection, NetworkSection, Scenario,
+        ChaosSection, FaultAction, FaultEvent, LabSection, NetworkSection, Scenario,
     };
     use std::collections::BTreeMap;
 
@@ -729,7 +734,10 @@ mod tests {
         scenario.oracles = vec!["task_leak".to_string(), "obligation_leak".to_string()];
         let result = ScenarioRunner::run(&scenario).unwrap();
         assert_eq!(result.oracle_report.checked.len(), 2);
-        assert!(result.oracle_report.checked.contains(&"task_leak".to_string()));
+        assert!(result
+            .oracle_report
+            .checked
+            .contains(&"task_leak".to_string()));
         assert!(result
             .oracle_report
             .checked

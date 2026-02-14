@@ -131,8 +131,8 @@ pub use scenario::{
     ValidationError as ScenarioValidationError, SCENARIO_SCHEMA_VERSION,
 };
 pub use scenario_runner::{
-    ExplorationRunSummary, FilteredOracleReport, ScenarioExplorationResult, ScenarioRunner,
-    ScenarioRunResult, ScenarioRunnerError as FrankenLabRunnerError, TraceCertificateSnapshot,
+    ExplorationRunSummary, FilteredOracleReport, ScenarioExplorationResult, ScenarioRunResult,
+    ScenarioRunner, ScenarioRunnerError as FrankenLabRunnerError, TraceCertificateSnapshot,
 };
 pub use snapshot_restore::{
     RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,

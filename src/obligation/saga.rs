@@ -1058,7 +1058,7 @@ mod tests {
     fn monotone_batch_order_independent() {
         // Execute the same 4 monotone steps in 24 permutations.
         // All should produce the same merged state.
-        let steps = vec![
+        let steps = [
             SagaStep::new(SagaOpKind::Reserve, "r1"),
             SagaStep::new(SagaOpKind::Send, "s1"),
             SagaStep::new(SagaOpKind::Acquire, "a1"),
