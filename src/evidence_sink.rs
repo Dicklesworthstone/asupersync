@@ -126,7 +126,7 @@ impl CollectorSink {
 
     /// Number of collected entries.
     pub fn len(&self) -> usize {
-        self.entries.lock().map(|g| g.len()).unwrap_or(0)
+        self.entries.lock().map_or(0, |g| g.len())
     }
 
     /// Returns `true` if no entries have been collected.
@@ -160,8 +160,7 @@ pub fn emit_scheduler_evidence(
 ) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let total = f64::from((cancel_depth + timed_depth + ready_depth).max(1));
     let posterior = vec![
@@ -203,8 +202,7 @@ pub fn emit_cancel_evidence(
 ) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
@@ -240,8 +238,7 @@ pub fn emit_budget_evidence(
 ) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,

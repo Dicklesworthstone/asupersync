@@ -343,8 +343,7 @@ pub fn partition_channel<T>(
 fn emit_partition_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, src: ActorId, dst: ActorId) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     #[allow(clippy::cast_precision_loss)]
     let entry = EvidenceLedger {

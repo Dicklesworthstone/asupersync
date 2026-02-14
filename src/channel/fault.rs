@@ -295,7 +295,7 @@ impl<T: Clone> FaultSender<T> {
 
     /// Returns the number of messages currently buffered for reordering.
     pub fn buffered_count(&self) -> usize {
-        self.reorder_buffer.lock().map(|b| b.len()).unwrap_or(0)
+        self.reorder_buffer.lock().map_or(0, |b| b.len())
     }
 
     /// Returns a reference to the underlying sender.
@@ -331,8 +331,7 @@ impl<T: Clone> FaultSender<T> {
 fn emit_fault_evidence(sink: &dyn EvidenceSink, fault_type: &str, context: &str) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,

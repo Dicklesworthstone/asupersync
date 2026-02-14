@@ -184,8 +184,7 @@ impl LabConfig {
         use std::time::{SystemTime, UNIX_EPOCH};
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(42);
+            .map_or(42, |d| d.as_nanos() as u64);
         Self::new(seed)
     }
 

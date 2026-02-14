@@ -1082,13 +1082,8 @@ impl ThreeLaneWorker {
                 let local_has_runnable = self
                     .local
                     .lock()
-                    .map(|local| local.has_runnable_work(now))
-                    .unwrap_or(false);
-                let local_ready_has_work = self
-                    .local_ready
-                    .lock()
-                    .map(|q| !q.is_empty())
-                    .unwrap_or(false);
+                    .is_ok_and(|local| local.has_runnable_work(now));
+                let local_ready_has_work = self.local_ready.lock().is_ok_and(|q| !q.is_empty());
                 if self.global.has_runnable_work(now) || local_has_runnable || local_ready_has_work
                 {
                     break;
@@ -1297,7 +1292,7 @@ impl ThreeLaneWorker {
         };
 
         // Enrich with local queue depth.
-        let queue_depth = self.local.lock().map(|local| local.len()).unwrap_or(0);
+        let queue_depth = self.local.lock().map_or(0, |local| local.len());
         #[allow(clippy::cast_possible_truncation)]
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
@@ -1317,8 +1312,7 @@ impl ThreeLaneWorker {
             // Evaluate the contract.
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_millis() as u64);
             let ctx = franken_decision::EvalContext {
                 calibration_score: 1.0, // TODO(bd-1e2if.6): wire conformal coverage
                 e_process: 0.0,
@@ -1660,7 +1654,7 @@ impl ThreeLaneWorker {
                     .cx_inner
                     .as_ref()
                     .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
-                    .unwrap_or(0);
+                    .unwrap_or_default();
                 let task_cx = record.cx.clone();
                 let cx_inner = record.cx_inner.clone();
                 let wake_state = Arc::clone(&record.wake_state);
@@ -1825,7 +1819,7 @@ impl ThreeLaneWorker {
                             .cx_inner
                             .as_ref()
                             .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
-                            .unwrap_or(0);
+                            .unwrap_or_default();
                         if record.wake_state.notify() {
                             if record.is_local() {
                                 if let Some(worker_id) = record.pinned_worker() {
@@ -2014,7 +2008,7 @@ impl ThreeLaneWaker {
                 .cx_inner
                 .upgrade()
                 .and_then(|inner| inner.read().ok().map(|g| g.budget.priority))
-                .unwrap_or(0);
+                .unwrap_or_default();
 
             self.global.inject_ready(self.task_id, priority);
             self.coordinator.wake_one();

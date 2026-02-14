@@ -856,10 +856,7 @@ impl std::fmt::Debug for SymbolDispatcher {
             .field("total_failures", &self.total_failures)
             .field(
                 "sinks",
-                &format_args!(
-                    "<{} sinks>",
-                    self.sinks.read().map(|s| s.len()).unwrap_or(0)
-                ),
+                &format_args!("<{} sinks>", self.sinks.read().map_or(0, |s| s.len())),
             )
             .finish()
     }

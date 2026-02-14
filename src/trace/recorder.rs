@@ -707,8 +707,7 @@ impl TraceRecorder {
         let mut new_meta = metadata;
         new_meta.recorded_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos() as u64);
         self.metadata = Some(new_meta);
         self.seed_recorded = false;
         self.stopped = false;

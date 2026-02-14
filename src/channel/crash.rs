@@ -498,8 +498,7 @@ pub fn crash_channel<T>(
 fn emit_crash_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, count: u32) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,

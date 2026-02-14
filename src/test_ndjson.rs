@@ -314,7 +314,7 @@ fn thread_id_u64() -> u64 {
     s.trim_start_matches("ThreadId(")
         .trim_end_matches(')')
         .parse::<u64>()
-        .unwrap_or(0)
+        .unwrap_or_default()
 }
 
 // ============================================================================
@@ -337,8 +337,7 @@ impl NdjsonLogger {
     #[must_use]
     pub fn new(level: TestLogLevel, ctx: Option<TestContext>) -> Self {
         let ndjson_enabled = std::env::var("ASUPERSYNC_TEST_NDJSON")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         Self {
             inner: TestLogger::new(level),
             ctx,

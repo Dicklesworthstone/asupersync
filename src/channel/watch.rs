@@ -193,6 +193,7 @@ impl<T> WatchInner<T> {
             }
             return true;
         }
+        drop(waiters);
         false
     }
 }

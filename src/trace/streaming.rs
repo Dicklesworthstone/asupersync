@@ -191,8 +191,7 @@ impl ReplayCheckpoint {
             metadata_hash: Self::hash_metadata(metadata),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_nanos() as u64),
         }
     }
 

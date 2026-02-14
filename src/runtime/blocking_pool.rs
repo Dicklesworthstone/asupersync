@@ -79,12 +79,7 @@ pub struct BlockingPool {
 
 impl fmt::Debug for BlockingPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let handles_len = self
-            .inner
-            .thread_handles
-            .lock()
-            .map(|h| h.len())
-            .unwrap_or(0);
+        let handles_len = self.inner.thread_handles.lock().map_or(0, |h| h.len());
         f.debug_struct("BlockingPool")
             .field("min_threads", &self.inner.min_threads)
             .field("max_threads", &self.inner.max_threads)

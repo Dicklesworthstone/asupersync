@@ -530,9 +530,9 @@ impl RateLimiter {
                     metrics.max_wait_time = wait_duration;
                 }
 
-                if metrics.total_waited > 0 {
-                    let total_ms = metrics.total_wait_time.as_millis() as u64;
-                    metrics.avg_wait_time = Duration::from_millis(total_ms / metrics.total_waited);
+                let total_ms = metrics.total_wait_time.as_millis() as u64;
+                if let Some(avg_ms) = total_ms.checked_div(metrics.total_waited) {
+                    metrics.avg_wait_time = Duration::from_millis(avg_ms);
                 }
             } else {
                 // Stop at first ungrantable entry to preserve FIFO order?
