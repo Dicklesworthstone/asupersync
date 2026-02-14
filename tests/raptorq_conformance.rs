@@ -1396,3 +1396,801 @@ mod pipeline_e2e {
         }
     }
 }
+
+// ============================================================================
+// RFC 6330 Golden Vector Conformance Suite (bd-1rxlv / D1)
+//
+// Deterministic golden-vector tests sourced from RFC 6330 tables and
+// internally curated canonical vectors. Every expected value is hardcoded
+// so any implementation drift triggers an immediate regression failure.
+// ============================================================================
+
+mod golden_vectors {
+    use super::*;
+    use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, tuple, tuple_indices, LtTuple};
+
+    // ----------------------------------------------------------------
+    // G1: Systematic Parameter Lookup (RFC 6330 Table 2)
+    //
+    // For each K, verify K', J, S, H, W, L, B against the RFC table.
+    // These pin down the table-driven parameter derivation path.
+    // ----------------------------------------------------------------
+
+    struct ParamVector {
+        scenario_id: &'static str,
+        k: usize,
+        expected_k_prime: usize,
+        expected_j: usize,
+        expected_s: usize,
+        expected_h: usize,
+        expected_w: usize,
+        expected_l: usize,
+        expected_b: usize,
+    }
+
+    const PARAM_VECTORS: &[ParamVector] = &[
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-001",
+            k: 1,
+            expected_k_prime: 10,
+            expected_j: 254,
+            expected_s: 7,
+            expected_h: 10,
+            expected_w: 17,
+            expected_l: 27,
+            expected_b: 10,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-002",
+            k: 8,
+            expected_k_prime: 10,
+            expected_j: 254,
+            expected_s: 7,
+            expected_h: 10,
+            expected_w: 17,
+            expected_l: 27,
+            expected_b: 10,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-003",
+            k: 10,
+            expected_k_prime: 10,
+            expected_j: 254,
+            expected_s: 7,
+            expected_h: 10,
+            expected_w: 17,
+            expected_l: 27,
+            expected_b: 10,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-004",
+            k: 16,
+            expected_k_prime: 18,
+            expected_j: 682,
+            expected_s: 11,
+            expected_h: 10,
+            expected_w: 29,
+            expected_l: 39,
+            expected_b: 18,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-005",
+            k: 20,
+            expected_k_prime: 20,
+            expected_j: 293,
+            expected_s: 11,
+            expected_h: 10,
+            expected_w: 31,
+            expected_l: 41,
+            expected_b: 20,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-006",
+            k: 32,
+            expected_k_prime: 32,
+            expected_j: 860,
+            expected_s: 11,
+            expected_h: 10,
+            expected_w: 43,
+            expected_l: 53,
+            expected_b: 32,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-007",
+            k: 50,
+            expected_k_prime: 55,
+            expected_j: 520,
+            expected_s: 13,
+            expected_h: 10,
+            expected_w: 67,
+            expected_l: 78,
+            expected_b: 54,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-008",
+            k: 64,
+            expected_k_prime: 69,
+            expected_j: 157,
+            expected_s: 13,
+            expected_h: 10,
+            expected_w: 79,
+            expected_l: 92,
+            expected_b: 66,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-009",
+            k: 100,
+            expected_k_prime: 101,
+            expected_j: 562,
+            expected_s: 17,
+            expected_h: 10,
+            expected_w: 113,
+            expected_l: 128,
+            expected_b: 96,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-010",
+            k: 256,
+            expected_k_prime: 257,
+            expected_j: 265,
+            expected_s: 29,
+            expected_h: 10,
+            expected_w: 271,
+            expected_l: 296,
+            expected_b: 242,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-011",
+            k: 500,
+            expected_k_prime: 511,
+            expected_j: 800,
+            expected_s: 37,
+            expected_h: 10,
+            expected_w: 523,
+            expected_l: 558,
+            expected_b: 486,
+        },
+        ParamVector {
+            scenario_id: "RQ-D1-PARAMS-012",
+            k: 1000,
+            expected_k_prime: 1002,
+            expected_j: 299,
+            expected_s: 59,
+            expected_h: 10,
+            expected_w: 1021,
+            expected_l: 1071,
+            expected_b: 962,
+        },
+    ];
+
+    #[test]
+    fn golden_rfc6330_systematic_params() {
+        for v in PARAM_VECTORS {
+            let params = SystematicParams::for_source_block(v.k, 64);
+            let ctx = format!(
+                "scenario_id={} K={} repro='cargo test --test raptorq_conformance golden_rfc6330_systematic_params'",
+                v.scenario_id, v.k
+            );
+            assert_eq!(params.k_prime, v.expected_k_prime, "{ctx}: K' mismatch");
+            assert_eq!(params.j, v.expected_j, "{ctx}: J mismatch");
+            assert_eq!(params.s, v.expected_s, "{ctx}: S mismatch");
+            assert_eq!(params.h, v.expected_h, "{ctx}: H mismatch");
+            assert_eq!(params.w, v.expected_w, "{ctx}: W mismatch");
+            assert_eq!(params.l, v.expected_l, "{ctx}: L mismatch");
+            assert_eq!(params.b, v.expected_b, "{ctx}: B mismatch");
+            // Structural invariants
+            assert_eq!(
+                params.l,
+                params.k_prime + params.s + params.h,
+                "{ctx}: L != K'+S+H"
+            );
+            assert_eq!(params.b, params.w - params.s, "{ctx}: B != W-S");
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G2: PRNG Golden Vectors (RFC 6330 Section 5.3.5.1)
+    //
+    // Rand(y, i, m) = (V0[x0] ^ V1[x1] ^ V2[x2] ^ V3[x3]) % m
+    // where x_j = ((y >> (8*j)) + i) & 0xFF
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_rfc6330_rand_prng() {
+        // (y, i, m) -> expected result
+        let vectors: &[(u32, u8, u32, u32)] = &[
+            (0, 0, 256, 25),
+            (0, 0, 1000, 529),
+            (1, 0, 256, 214),
+            (1, 0, 1000, 638),
+            (42, 0, 1_048_576, 555_578),
+            (42, 1, 100, 34),
+            (42, 2, 100, 92),
+            (0xDEAD_BEEF, 0, 256, 86),
+            (0xDEAD_BEEF, 0, 1000, 326),
+            (0xCAFE_BABE, 3, 500, 483),
+            (12_345, 0, 1_048_576, 690_767),
+            (12_345, 1, 65_536, 18_106),
+        ];
+
+        for &(y, i, m, expected) in vectors {
+            let actual = rand(y, i, m);
+            assert_eq!(
+                actual, expected,
+                "Rand({y}, {i}, {m}): expected {expected}, got {actual}. \
+                 repro='cargo test --test raptorq_conformance golden_rfc6330_rand_prng'"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G3: Degree Generator Golden Vectors (RFC 6330 Section 5.3.5.2)
+    //
+    // deg(v) maps v in [0, 2^20) to degree d in [1, 30] via threshold table.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_rfc6330_degree_distribution() {
+        // (v, expected_degree)
+        let vectors: &[(u32, usize)] = &[
+            (0, 1),
+            (1, 1),
+            (5_242, 1),      // last value in degree-1 range
+            (5_243, 2),      // first value in degree-2 range
+            (100_000, 2),    // mid degree-2
+            (529_530, 2),    // last value in degree-2 range
+            (529_531, 3),    // first value in degree-3 range
+            (704_293, 3),    // last value in degree-3 range
+            (704_294, 4),    // first value in degree-4 range
+            (1_000_000, 20), // deep in high-degree range
+            (1_017_661, 29), // last value in degree-29 range
+            (1_017_662, 30), // first value in degree-30 range
+            (1_048_575, 30), // max valid input (2^20 - 1)
+        ];
+
+        for &(v, expected) in vectors {
+            let actual = deg(v);
+            assert_eq!(
+                actual, expected,
+                "deg({v}): expected {expected}, got {actual}. \
+                 repro='cargo test --test raptorq_conformance golden_rfc6330_degree_distribution'"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G4: LT Tuple Golden Vectors (RFC 6330 Section 5.3.5.4)
+    //
+    // tuple(J, W, P, P1, X) -> (d, a, b, d1, a1, b1) + expanded indices
+    // ----------------------------------------------------------------
+
+    struct TupleVector {
+        scenario_id: &'static str,
+        j: usize,
+        w: usize,
+        p: usize,
+        x: u32,
+        expected_tuple: LtTuple,
+        expected_indices: &'static [usize],
+    }
+
+    const TUPLE_VECTORS: &[TupleVector] = &[
+        // K=10 parameter space (K'=10, J=254, W=17, P=10)
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-001",
+            j: 254,
+            w: 17,
+            p: 10,
+            x: 0,
+            expected_tuple: LtTuple {
+                d: 2,
+                a: 4,
+                b: 9,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            },
+            expected_indices: &[9, 13, 18, 23],
+        },
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-002",
+            j: 254,
+            w: 17,
+            p: 10,
+            x: 1,
+            expected_tuple: LtTuple {
+                d: 7,
+                a: 6,
+                b: 12,
+                d1: 2,
+                a1: 1,
+                b1: 3,
+            },
+            expected_indices: &[12, 1, 7, 13, 2, 8, 14, 20, 21],
+        },
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-003",
+            j: 254,
+            w: 17,
+            p: 10,
+            x: 10,
+            expected_tuple: LtTuple {
+                d: 2,
+                a: 15,
+                b: 15,
+                d1: 2,
+                a1: 10,
+                b1: 7,
+            },
+            expected_indices: &[15, 13, 24, 23],
+        },
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-004",
+            j: 254,
+            w: 17,
+            p: 10,
+            x: 100,
+            expected_tuple: LtTuple {
+                d: 2,
+                a: 13,
+                b: 10,
+                d1: 2,
+                a1: 8,
+                b1: 5,
+            },
+            expected_indices: &[10, 6, 22, 19],
+        },
+        // K=20 parameter space (K'=20, J=293, W=31, P=10)
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-005",
+            j: 293,
+            w: 31,
+            p: 10,
+            x: 0,
+            expected_tuple: LtTuple {
+                d: 11,
+                a: 15,
+                b: 10,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            },
+            expected_indices: &[10, 25, 9, 24, 8, 23, 7, 22, 6, 21, 5, 32, 37],
+        },
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-006",
+            j: 293,
+            w: 31,
+            p: 10,
+            x: 50,
+            expected_tuple: LtTuple {
+                d: 3,
+                a: 3,
+                b: 28,
+                d1: 2,
+                a1: 4,
+                b1: 0,
+            },
+            expected_indices: &[28, 0, 3, 31, 35],
+        },
+        // K=100 parameter space (K'=101, J=562, W=113, P=15)
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-007",
+            j: 562,
+            w: 113,
+            p: 15,
+            x: 0,
+            expected_tuple: LtTuple {
+                d: 2,
+                a: 30,
+                b: 4,
+                d1: 2,
+                a1: 5,
+                b1: 12,
+            },
+            expected_indices: &[4, 34, 125, 113],
+        },
+        TupleVector {
+            scenario_id: "RQ-D1-TUPLE-008",
+            j: 562,
+            w: 113,
+            p: 15,
+            x: 200,
+            expected_tuple: LtTuple {
+                d: 2,
+                a: 109,
+                b: 107,
+                d1: 3,
+                a1: 15,
+                b1: 7,
+            },
+            expected_indices: &[107, 103, 120, 118, 116],
+        },
+    ];
+
+    #[test]
+    fn golden_rfc6330_lt_tuples() {
+        for v in TUPLE_VECTORS {
+            let p1 = next_prime_ge(v.p);
+            let actual_tuple = tuple(v.j, v.w, v.p, p1, v.x);
+            let actual_indices = tuple_indices(actual_tuple, v.w, v.p, p1);
+            let ctx = format!(
+                "scenario_id={} J={} W={} P={} X={} \
+                 repro='cargo test --test raptorq_conformance golden_rfc6330_lt_tuples'",
+                v.scenario_id, v.j, v.w, v.p, v.x
+            );
+            assert_eq!(actual_tuple, v.expected_tuple, "{ctx}: tuple mismatch");
+            assert_eq!(
+                actual_indices, v.expected_indices,
+                "{ctx}: indices mismatch"
+            );
+            // Structural: LT indices < W, PI indices in [W, W+P)
+            for &idx in &actual_indices[..actual_tuple.d] {
+                assert!(idx < v.w, "{ctx}: LT index {idx} >= W={}", v.w);
+            }
+            for &idx in &actual_indices[actual_tuple.d..] {
+                assert!(
+                    idx >= v.w && idx < v.w + v.p,
+                    "{ctx}: PI index {idx} out of [W, W+P)"
+                );
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G5: Constraint Matrix Structure Vectors
+    //
+    // For K=10 seed=42, pin down LDPC row sparsity patterns.
+    // These catch any drift in build_ldpc_rows / build_hdpc_rows.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_constraint_matrix_structure() {
+        let k = 10;
+        let seed = 42u64;
+        let params = SystematicParams::for_source_block(k, 64);
+        let constraints = ConstraintMatrix::build(&params, seed);
+
+        // Dimensions
+        assert_eq!(constraints.rows, 27, "matrix rows");
+        assert_eq!(constraints.cols, 27, "matrix cols");
+
+        // LDPC row 0: nonzero at columns [0, 5, 6, 7, 10] with GF(1) coefficients
+        let (cols0, coefs0) = super::constraint_row_equation(&constraints, 0);
+        assert_eq!(cols0, vec![0, 5, 6, 7, 10], "LDPC row 0 columns");
+        assert!(coefs0.iter().all(|c| c.raw() == 1), "LDPC row 0 all-ones");
+
+        // LDPC row 1: nonzero at columns [0, 1, 6, 8, 11]
+        let (cols1, _) = super::constraint_row_equation(&constraints, 1);
+        assert_eq!(cols1, vec![0, 1, 6, 8, 11], "LDPC row 1 columns");
+
+        // LDPC row 2: nonzero at columns [0, 1, 2, 7, 9, 12]
+        let (cols2, _) = super::constraint_row_equation(&constraints, 2);
+        assert_eq!(cols2, vec![0, 1, 2, 7, 9, 12], "LDPC row 2 columns");
+
+        // HDPC rows: verify nonzero counts (denser than LDPC)
+        let hdpc_row_7_nnz = (0..constraints.cols)
+            .filter(|&col| !constraints.get(7, col).is_zero())
+            .count();
+        assert_eq!(hdpc_row_7_nnz, 6, "HDPC row 7 nonzero count");
+
+        let hdpc_row_8_nnz = (0..constraints.cols)
+            .filter(|&col| !constraints.get(8, col).is_zero())
+            .count();
+        assert_eq!(hdpc_row_8_nnz, 7, "HDPC row 8 nonzero count");
+
+        let hdpc_row_9_nnz = (0..constraints.cols)
+            .filter(|&col| !constraints.get(9, col).is_zero())
+            .count();
+        assert_eq!(hdpc_row_9_nnz, 10, "HDPC row 9 nonzero count");
+    }
+
+    // ----------------------------------------------------------------
+    // G6: End-to-End Encode/Decode Fingerprint Vectors
+    //
+    // Fixed (K, symbol_size, seed, patterned data) -> pinned hashes of
+    // intermediate symbols, repair symbols, and decode statistics.
+    // Any change in encoder/decoder logic triggers a regression.
+    // ----------------------------------------------------------------
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    struct E2eVector {
+        scenario_id: &'static str,
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        expected_intermediate_hash: u64,
+        expected_repair_hash: u64,
+        expected_peeled: usize,
+        expected_inactivated: usize,
+        expected_gauss_ops: usize,
+    }
+
+    const E2E_VECTORS: &[E2eVector] = &[
+        E2eVector {
+            scenario_id: "RQ-D1-E2E-001",
+            k: 8,
+            symbol_size: 64,
+            seed: 42,
+            expected_intermediate_hash: 0x579f_9e2c_82de_fa6e,
+            expected_repair_hash: 0x423d_1c47_449f_1164,
+            expected_peeled: 27,
+            expected_inactivated: 0,
+            expected_gauss_ops: 0,
+        },
+        E2eVector {
+            scenario_id: "RQ-D1-E2E-002",
+            k: 10,
+            symbol_size: 32,
+            seed: 123,
+            expected_intermediate_hash: 0xe5d2_2d12_0286_3324,
+            expected_repair_hash: 0x7d5e_22c9_b3a0_73d4,
+            expected_peeled: 27,
+            expected_inactivated: 0,
+            expected_gauss_ops: 0,
+        },
+        E2eVector {
+            scenario_id: "RQ-D1-E2E-003",
+            k: 16,
+            symbol_size: 64,
+            seed: 789,
+            expected_intermediate_hash: 0x561d_3e08_946d_dc38,
+            expected_repair_hash: 0x4052_2112_cdad_996f,
+            expected_peeled: 39,
+            expected_inactivated: 0,
+            expected_gauss_ops: 0,
+        },
+        E2eVector {
+            scenario_id: "RQ-D1-E2E-004",
+            k: 32,
+            symbol_size: 128,
+            seed: 456,
+            expected_intermediate_hash: 0x644a_bddf_63a0_08bd,
+            expected_repair_hash: 0x6c9c_2e69_8309_03d1,
+            expected_peeled: 53,
+            expected_inactivated: 0,
+            expected_gauss_ops: 0,
+        },
+    ];
+
+    #[test]
+    fn golden_e2e_encode_decode_fingerprint() {
+        for v in E2E_VECTORS {
+            let source = make_patterned_source(v.k, v.symbol_size);
+            let encoder = SystematicEncoder::new(&source, v.symbol_size, v.seed).unwrap();
+            let params = encoder.params();
+            let ctx = format!(
+                "scenario_id={} K={} sym={} seed={} \
+                 repro='cargo test --test raptorq_conformance golden_e2e_encode_decode_fingerprint'",
+                v.scenario_id, v.k, v.symbol_size, v.seed
+            );
+
+            // Pin intermediate symbol hash
+            let mut intermediate_hasher = DefaultHasher::new();
+            for i in 0..params.l {
+                let sym = encoder.intermediate_symbol(i);
+                sym.hash(&mut intermediate_hasher);
+            }
+            assert_eq!(
+                intermediate_hasher.finish(),
+                v.expected_intermediate_hash,
+                "{ctx}: intermediate symbol hash drift"
+            );
+
+            // Pin repair symbol hash (first 5 repair symbols after K)
+            let mut repair_hasher = DefaultHasher::new();
+            for esi in (v.k as u32)..((v.k + 5) as u32) {
+                let repair = encoder.repair_symbol(esi);
+                repair.hash(&mut repair_hasher);
+            }
+            assert_eq!(
+                repair_hasher.finish(),
+                v.expected_repair_hash,
+                "{ctx}: repair symbol hash drift"
+            );
+
+            // Decode and pin stats
+            let decoder = InactivationDecoder::new(v.k, v.symbol_size, v.seed);
+            let received = build_received_symbols(
+                &encoder,
+                &decoder,
+                &source,
+                &[],
+                decoder.params().l as u32,
+                v.seed,
+            );
+            let result = decoder
+                .decode(&received)
+                .unwrap_or_else(|e| panic!("{ctx}: decode failed: {e:?}"));
+
+            // Verify roundtrip
+            for (i, original) in source.iter().enumerate() {
+                assert_eq!(
+                    &result.source[i], original,
+                    "{ctx}: source symbol {i} mismatch"
+                );
+            }
+
+            // Pin decode statistics
+            assert_eq!(
+                result.stats.peeled, v.expected_peeled,
+                "{ctx}: peeled count drift"
+            );
+            assert_eq!(
+                result.stats.inactivated, v.expected_inactivated,
+                "{ctx}: inactivated count drift"
+            );
+            assert_eq!(
+                result.stats.gauss_ops, v.expected_gauss_ops,
+                "{ctx}: gauss_ops count drift"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G7: Cross-seed Determinism
+    //
+    // Verify that the same (K, data, seed) always produces identical
+    // intermediate and repair symbols across separate encoder instances.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_cross_seed_determinism() {
+        let seeds = [1u64, 42, 999, 0xDEAD_BEEF, 0xCAFE_0000_BABE_1234];
+        let k = 16;
+        let symbol_size = 48;
+        let source = make_patterned_source(k, symbol_size);
+
+        for seed in seeds {
+            let enc1 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let enc2 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+            // All L intermediate symbols must be bitwise identical
+            for i in 0..enc1.params().l {
+                assert_eq!(
+                    enc1.intermediate_symbol(i),
+                    enc2.intermediate_symbol(i),
+                    "seed={seed:#x}: intermediate symbol {i} differs"
+                );
+            }
+
+            // Repair symbols at arbitrary ESIs must match
+            for esi in [0u32, 1, 10, 50, 100, 999] {
+                assert_eq!(
+                    enc1.repair_symbol(esi),
+                    enc2.repair_symbol(esi),
+                    "seed={seed:#x}: repair ESI={esi} differs"
+                );
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G8: Parameter Invariant Sweep
+    //
+    // For every K in [1, 256], verify structural invariants hold:
+    // L = K' + S + H, B = W - S, K' >= K, W >= S, H >= 1, S >= 2.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_param_invariant_sweep() {
+        for k in 1..=256 {
+            let params = SystematicParams::for_source_block(k, 64);
+            let ctx = format!("K={k}");
+
+            assert!(params.k_prime >= k, "{ctx}: K' < K");
+            assert!(params.s >= 2, "{ctx}: S < 2");
+            assert!(params.h >= 1, "{ctx}: H < 1");
+            assert!(params.w >= params.s, "{ctx}: W < S");
+            assert_eq!(
+                params.l,
+                params.k_prime + params.s + params.h,
+                "{ctx}: L != K'+S+H"
+            );
+            assert_eq!(params.b, params.w - params.s, "{ctx}: B != W-S");
+            // P = L - W = K' + H - B
+            let p = params.l - params.w;
+            assert!(p >= 1, "{ctx}: P < 1");
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G9: PRNG Boundary & Exhaustive Properties
+    //
+    // Verify PRNG range, determinism, and sensitivity to all four
+    // byte lanes of the input word y.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_rand_properties() {
+        // Range: output must be in [0, m) for all tested inputs
+        for y in [0u32, 1, 0xFF, 0xFF00, 0xFF_0000, 0xFF00_0000, u32::MAX] {
+            for i in 0..8u8 {
+                for m in [1, 2, 3, 7, 256, 1000, 1_048_576] {
+                    let r = rand(y, i, m);
+                    assert!(r < m, "Rand({y:#x}, {i}, {m}) = {r} >= {m}");
+                }
+            }
+        }
+
+        // Each byte lane matters: shifting y by 8 bits should change output
+        let base = rand(0x01_02_03_04, 0, 1000);
+        let shift_b0 = rand(0x01_02_03_05, 0, 1000); // change byte 0
+        let shift_b1 = rand(0x01_02_04_04, 0, 1000); // change byte 1
+        let shift_b2 = rand(0x01_03_03_04, 0, 1000); // change byte 2
+        let shift_b3 = rand(0x02_02_03_04, 0, 1000); // change byte 3
+
+        // At least 3 of 4 lane changes should produce different results
+        let diffs = [
+            shift_b0 != base,
+            shift_b1 != base,
+            shift_b2 != base,
+            shift_b3 != base,
+        ]
+        .iter()
+        .filter(|&&d| d)
+        .count();
+        assert!(
+            diffs >= 3,
+            "PRNG not sensitive to byte lanes: only {diffs}/4 differ"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // G10: Degree Distribution Coverage
+    //
+    // Verify the full degree table boundary sweep: every threshold
+    // transition from degree d to d+1 is exercised.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn golden_degree_boundary_sweep() {
+        // (last_v_for_degree, degree, first_v_for_next_degree, next_degree)
+        let boundaries: &[(u32, usize, u32, usize)] = &[
+            (5_242, 1, 5_243, 2),
+            (529_530, 2, 529_531, 3),
+            (704_293, 3, 704_294, 4),
+            (791_674, 4, 791_675, 5),
+            (844_103, 5, 844_104, 6),
+            (879_056, 6, 879_057, 7),
+            (904_022, 7, 904_023, 8),
+            (922_746, 8, 922_747, 9),
+            (937_310, 9, 937_311, 10),
+            (948_961, 10, 948_962, 11),
+            (958_493, 11, 958_494, 12),
+            (966_437, 12, 966_438, 13),
+            (973_159, 13, 973_160, 14),
+            (978_920, 14, 978_921, 15),
+            (983_913, 15, 983_914, 16),
+            (988_282, 16, 988_283, 17),
+            (992_137, 17, 992_138, 18),
+            (995_564, 18, 995_565, 19),
+            (998_630, 19, 998_631, 20),
+            (1_001_390, 20, 1_001_391, 21),
+            (1_003_886, 21, 1_003_887, 22),
+            (1_006_156, 22, 1_006_157, 23),
+            (1_008_228, 23, 1_008_229, 24),
+            (1_010_128, 24, 1_010_129, 25),
+            (1_011_875, 25, 1_011_876, 26),
+            (1_013_489, 26, 1_013_490, 27),
+            (1_014_982, 27, 1_014_983, 28),
+            (1_016_369, 28, 1_016_370, 29),
+            (1_017_661, 29, 1_017_662, 30),
+        ];
+
+        for &(last_v, d, first_v_next, d_next) in boundaries {
+            assert_eq!(
+                deg(last_v),
+                d,
+                "deg({last_v}) should be {d} (last value in degree-{d} range)"
+            );
+            assert_eq!(
+                deg(first_v_next),
+                d_next,
+                "deg({first_v_next}) should be {d_next} (first value in degree-{d_next} range)"
+            );
+        }
+    }
+}

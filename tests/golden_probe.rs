@@ -15,7 +15,13 @@ fn probe_systematic_params() {
         let params = SystematicParams::for_source_block(k, 64);
         eprintln!(
             "K={k}: K'={}, J={}, S={}, H={}, W={}, L={}, B={}, P={}",
-            params.k_prime, params.j, params.s, params.h, params.w, params.l, params.b,
+            params.k_prime,
+            params.j,
+            params.s,
+            params.h,
+            params.w,
+            params.l,
+            params.b,
             params.l - params.w
         );
     }
@@ -46,8 +52,8 @@ fn probe_rand_values() {
 #[test]
 fn probe_degree_values() {
     let v_values = [
-        0, 1, 5242, 5243, 100_000, 529_530, 529_531, 704_293, 704_294,
-        1_000_000, 1_017_661, 1_017_662, 1_048_575,
+        0, 1, 5242, 5243, 100_000, 529_530, 529_531, 704_293, 704_294, 1_000_000, 1_017_661,
+        1_017_662, 1_048_575,
     ];
 
     for v in v_values {
@@ -60,14 +66,14 @@ fn probe_tuple_golden() {
     // Additional tuples beyond the 3 existing in rfc6330.rs
     let cases: Vec<(usize, usize, usize, u32)> = vec![
         // (J, W, P, ESI)
-        (254, 17, 10, 0),   // K=10 params, ESI=0
-        (254, 17, 10, 1),   // K=10 params, ESI=1
-        (254, 17, 10, 10),  // K=10 params, first repair
-        (254, 17, 10, 100), // K=10 params, ESI=100
-        (293, 31, 10, 0),   // K=20 params, ESI=0
-        (293, 31, 10, 50),  // K=20 params, ESI=50
-        (562, 113, 15, 0),  // K=100 params, ESI=0
-        (562, 113, 15, 200),// K=100 params, ESI=200
+        (254, 17, 10, 0),    // K=10 params, ESI=0
+        (254, 17, 10, 1),    // K=10 params, ESI=1
+        (254, 17, 10, 10),   // K=10 params, first repair
+        (254, 17, 10, 100),  // K=10 params, ESI=100
+        (293, 31, 10, 0),    // K=20 params, ESI=0
+        (293, 31, 10, 50),   // K=20 params, ESI=50
+        (562, 113, 15, 0),   // K=100 params, ESI=0
+        (562, 113, 15, 200), // K=100 params, ESI=200
     ];
 
     for (j, w, p, x) in cases {
@@ -89,7 +95,10 @@ fn probe_constraint_matrix_structure() {
     let params = SystematicParams::for_source_block(k, 64);
     let constraints = ConstraintMatrix::build(&params, seed);
 
-    eprintln!("K={k}: rows={}, cols={}, S={}, H={}", constraints.rows, constraints.cols, params.s, params.h);
+    eprintln!(
+        "K={k}: rows={}, cols={}, S={}, H={}",
+        constraints.rows, constraints.cols, params.s, params.h
+    );
 
     // Sample LDPC rows (0..S)
     for row in 0..params.s.min(3) {
@@ -119,12 +128,8 @@ fn probe_constraint_matrix_structure() {
 #[test]
 fn probe_e2e_fingerprint() {
     // Fixed test vectors for E2E encode/decode
-    let cases: Vec<(usize, usize, u64)> = vec![
-        (8, 64, 42),
-        (10, 32, 123),
-        (16, 64, 789),
-        (32, 128, 456),
-    ];
+    let cases: Vec<(usize, usize, u64)> =
+        vec![(8, 64, 42), (10, 32, 123), (16, 64, 789), (32, 128, 456)];
 
     for (k, symbol_size, seed) in cases {
         let source: Vec<Vec<u8>> = (0..k)
@@ -183,13 +188,21 @@ fn probe_e2e_fingerprint() {
         for esi in (k as u32)..l as u32 {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
-            received.push(asupersync::raptorq::decoder::ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            received.push(asupersync::raptorq::decoder::ReceivedSymbol::repair(
+                esi,
+                cols,
+                coefs,
+                repair_data,
+            ));
         }
 
         let result = decoder.decode(&received);
         let decode_ok = result.is_ok();
         let stats_str = if let Ok(ref r) = result {
-            format!("peeled={} inactivated={} gauss_ops={}", r.stats.peeled, r.stats.inactivated, r.stats.gauss_ops)
+            format!(
+                "peeled={} inactivated={} gauss_ops={}",
+                r.stats.peeled, r.stats.inactivated, r.stats.gauss_ops
+            )
         } else {
             format!("FAIL: {:?}", result.err())
         };
