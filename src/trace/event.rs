@@ -1204,8 +1204,7 @@ mod tests {
         for kind in TraceEventKind::ALL {
             assert!(
                 !kind.required_fields().is_empty(),
-                "required_fields empty for {:?}",
-                kind
+                "required_fields empty for {kind:?}"
             );
         }
     }
@@ -2046,7 +2045,7 @@ mod tests {
         let e = TraceEvent::new(28, Time::ZERO, TraceEventKind::UserTrace, TraceData::None)
             .with_logical_time(lt);
         let s = format!("{e}");
-        assert!(s.contains("@"), "expected @lt in {s}");
+        assert!(s.contains('@'), "expected @lt in {s}");
     }
 
     // ── Equality and Clone ─────────────────────────────────────────

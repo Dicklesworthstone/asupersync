@@ -1321,8 +1321,7 @@ mod tests {
             message: "bad".into(),
         });
 
-        let fatal: Vec<_> = result.fatal_issues().collect();
-        assert_eq!(fatal.len(), 2);
+        assert_eq!(result.fatal_issues().count(), 2);
     }
 
     #[test]
