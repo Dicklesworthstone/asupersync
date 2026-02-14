@@ -333,7 +333,7 @@ impl Resolver {
             .map_or(Err(DnsError::Timeout), |result| result)?;
 
         // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
-        Ok(TcpStream::from_std(result))
+        TcpStream::from_std(result).map_err(|e| DnsError::Io(e.to_string()))
     }
 
     /// Looks up MX records for a domain.

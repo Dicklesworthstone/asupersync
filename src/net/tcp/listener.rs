@@ -25,11 +25,14 @@ pub struct TcpListener {
 }
 
 impl TcpListener {
-    pub(crate) fn from_std(inner: net::TcpListener) -> Self {
-        Self {
+    pub(crate) fn from_std(inner: net::TcpListener) -> io::Result<Self> {
+        // Ensure accept polling never blocks when callers pass a default
+        // blocking std listener.
+        inner.set_nonblocking(true)?;
+        Ok(Self {
             inner,
             registration: Mutex::new(None),
-        }
+        })
     }
 
     /// Bind to address.
@@ -47,7 +50,7 @@ impl TcpListener {
             match net::TcpListener::bind(addr) {
                 Ok(inner) => {
                     inner.set_nonblocking(true)?;
-                    return Ok(Self::from_std(inner));
+                    return Self::from_std(inner);
                 }
                 Err(err) => last_err = Some(err),
             }
@@ -65,8 +68,7 @@ impl TcpListener {
     pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
         match self.inner.accept() {
             Ok((stream, addr)) => {
-                stream.set_nonblocking(true)?;
-                Poll::Ready(Ok((TcpStream::from_std(stream), addr)))
+                Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(err) = self.register_interest(cx) {
@@ -200,7 +202,11 @@ mod tests {
     use super::*;
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId};
+    #[cfg(unix)]
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
     use std::net::SocketAddr;
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
@@ -243,7 +249,7 @@ mod tests {
         );
         let _guard = Cx::set_current(Some(cx));
 
-        let listener = TcpListener::from_std(raw);
+        let listener = TcpListener::from_std(raw).expect("wrap listener");
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -255,5 +261,19 @@ mod tests {
             .expect("lock poisoned")
             .is_some();
         assert!(registered);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listener_from_std_forces_nonblocking_mode() {
+        let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let listener = TcpListener::from_std(raw).expect("wrap listener");
+        let flags =
+            fcntl(listener.inner.as_raw_fd(), FcntlArg::F_GETFL).expect("read listener flags");
+        let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
+        assert!(
+            is_nonblocking,
+            "TcpListener::from_std should force nonblocking mode"
+        );
     }
 }
