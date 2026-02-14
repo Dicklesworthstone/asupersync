@@ -176,6 +176,7 @@ toml = "0.8"
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.13"
 rayon = "1.10"
+serde_yaml = "0.9"
 
 [[bench]]
 name = "phase0_baseline"

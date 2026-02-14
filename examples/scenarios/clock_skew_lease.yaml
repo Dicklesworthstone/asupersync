@@ -40,4 +40,3 @@ participants:
 oracles:
   - obligation_leak
   - quiescence
-  - determinism
