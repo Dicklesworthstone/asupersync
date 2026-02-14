@@ -2377,7 +2377,7 @@ private theorem setTask_same_region_preserves_wellformed_aux {Value Error Panic 
       by_cases hEq : t' = t
       · subst t'
         simp [getTask, setTask] at h
-        have hTaskEq : task' = newTask := by simpa using h
+        have hTaskEq : task' = newTask := by simpa using h.symm
         subst task'
         obtain ⟨region, hReg⟩ := hWF.task_region_exists t task hTask
         exact ⟨region, by simpa [getRegion, setTask, hSameRegion] using hReg⟩
@@ -2538,7 +2538,7 @@ theorem committed_obligation_stable {Value Error Panic : Type}
       cases hState
     · exact ⟨ob, by simp [getObligation, setRegion, setObligation, hEq]; exact hOb, hCommitted⟩
   | leak outcome hTask hTaskState hOb' hHolder hState hRegion hUpdate =>
-    rename_i tStep oStep taskStep regionStep obStep
+    rename_i tStep oStep taskStep obStep regionStep
     subst hUpdate
     by_cases hEq : o = oStep
     · subst hEq
@@ -2586,7 +2586,7 @@ theorem popNext_cancel_priority (sched : SchedulerState)
     (hCancel : sched.cancelLane ≠ [])
     : ∃ t rest, popNext sched = some (t, { sched with cancelLane := rest }) := by
   cases h : sched.cancelLane with
-  | nil => exact (hCancel (by simpa [h]))
+  | nil => exfalso; exact hCancel (by simpa [h])
   | cons t rest =>
     exact ⟨t, rest, by simp [popNext, popLane, h]⟩
 
@@ -2600,7 +2600,7 @@ theorem popNext_timed_priority (sched : SchedulerState)
     (hTimed : sched.timedLane ≠ [])
     : ∃ t rest, popNext sched = some (t, { sched with timedLane := rest }) := by
   cases h : sched.timedLane with
-  | nil => exact (hTimed (by simpa [h]))
+  | nil => exfalso; exact hTimed (by simpa [h])
   | cons t rest =>
     exact ⟨t, rest, by simp [popNext, popLane, hCancel, h]⟩
 
@@ -2614,7 +2614,7 @@ theorem popNext_ready_when_others_empty (sched : SchedulerState)
     (hReady : sched.readyLane ≠ [])
     : ∃ t rest, popNext sched = some (t, { sched with readyLane := rest }) := by
   cases h : sched.readyLane with
-  | nil => exact (hReady (by simpa [h]))
+  | nil => exfalso; exact hReady (by simpa [h])
   | cons t rest =>
     exact ⟨t, rest, by simp [popNext, popLane, hCancel, hTimed, h]⟩
 
@@ -2664,7 +2664,7 @@ theorem popNextFair_timed_when_limit_reached (sched : SchedulerState)
   have hNot : ¬ cancelStreak < limit := by
     exact Nat.not_lt_of_ge hLimit
   cases h : sched.timedLane with
-  | nil => exact (hTimed (by simpa [h]))
+  | nil => exfalso; exact hTimed (by simpa [h])
   | cons t rest =>
     exact ⟨t, rest, by simp [popNextFair, hNot, popLane, h]⟩
 
@@ -2680,7 +2680,7 @@ theorem popNextFair_ready_when_limit_reached (sched : SchedulerState)
   have hNot : ¬ cancelStreak < limit := by
     exact Nat.not_lt_of_ge hLimit
   cases h : sched.readyLane with
-  | nil => exact (hReady (by simpa [h]))
+  | nil => exfalso; exact hReady (by simpa [h])
   | cons t rest =>
     exact ⟨t, rest, by simp [popNextFair, hNot, popLane, hTimed, h]⟩
 
@@ -2713,7 +2713,7 @@ theorem popNextFair_yields_non_cancel (sched : SchedulerState)
       | inl h => exact (False.elim (h (by simpa [hTimed])))
       | inr h => exact h
     cases hReady' : sched.readyLane with
-    | nil => exact (hReady (by simpa [hReady']))
+    | nil => exfalso; exact hReady (by simpa [hReady'])
     | cons t rest =>
       refine ⟨t, { sched with readyLane := rest }, ?_, ?_⟩
       · simp [popNextFair, hNot, popLane, hTimed, hReady']
@@ -2735,7 +2735,8 @@ theorem spawned_task_created {Value Error Panic : Type}
   cases hStep with
   | spawn hRegion hOpen hAbsent hUpdate =>
     subst hUpdate
-    exact ⟨_, by simp [getTask, setRegion, setTask], rfl⟩
+    refine ⟨{ region := r, state := TaskState.created, mask := 0, waiters := [] }, ?_, rfl⟩
+    simp [getTask, setRegion, setTask]
 
 -- ==========================================================================
 -- Safety: spawned task is a child of its region (bd-330st)
@@ -2748,8 +2749,11 @@ theorem spawned_task_in_region {Value Error Panic : Type}
     : ∃ region, getRegion s' r = some region ∧ t ∈ region.children := by
   cases hStep with
   | spawn hRegion hOpen hAbsent hUpdate =>
+    rename_i region
     subst hUpdate
-    exact ⟨_, by simp [getRegion, setRegion, setTask], by simp [List.mem_append]⟩
+    refine ⟨{ region with children := region.children ++ [t] }, ?_, ?_⟩
+    · simp [getRegion, setRegion, setTask]
+    · simp [List.mem_append]
 
 -- ==========================================================================
 -- General preservation helper: changing only the scheduler preserves WF
@@ -2928,7 +2932,7 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
       cases hState
     · exact ⟨ob, by simp [getObligation, setRegion, setObligation, hEq]; exact hOb, hAborted⟩
   | leak outcome hTask hTaskState hOb' hHolder hState hRegion hUpdate =>
-    rename_i tStep oStep taskStep regionStep obStep
+    rename_i tStep oStep taskStep obStep regionStep
     subst hUpdate
     by_cases hEq : o0 = oStep
     · subst hEq
@@ -3030,7 +3034,7 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     · refine ⟨ob, ?_, hLeaked⟩
       simpa [getObligation, setRegion, setObligation, hEq] using hOb
   | leak outcome hTask hTaskState hOb' hHolder hState hRegion hUpdate =>
-    rename_i tStep oStep taskStep regionStep obStep
+    rename_i tStep oStep taskStep obStep regionStep
     subst hUpdate
     by_cases hEq : o0 = oStep
     · subst hEq
@@ -3265,7 +3269,7 @@ theorem cancelComplete_potential_reaches_zero {Value Error Panic : Type}
       cancel_potential task' = some 0 ∧
       ∃ n, cancel_potential task = some n ∧ n > 0 := by
   simp only [cancel_potential, hState]
-  exact ⟨rfl, 1, rfl, by omega⟩
+  exact ⟨by simp, 1, rfl, by omega⟩
 
 /-- The cancellation potential is bounded by mask + 3 at entry.
     Combined with strict decrease, this gives an upper bound on the
@@ -3359,7 +3363,7 @@ theorem cancel_steps_testable_bound {Value Error Panic : Type}
     : ∃ n, cancel_potential task = some n ∧ n ≤ maxMaskDepth + 3 := by
   exact ⟨task.mask + 3,
     cancel_potential_bounded_at_entry hState,
-    by unfold maxMaskDepth; omega⟩
+    Nat.add_le_add_right hBound 3⟩
 
 /-- Global cancel potential: sum of per-task cancel potentials for a set of tasks.
     Tasks not in a cancel-protocol state contribute 0. -/

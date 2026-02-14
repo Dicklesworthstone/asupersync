@@ -1,10 +1,12 @@
 {
   "schema_version": "1.0.0",
   "map_id": "lean.runtime_state_refinement_map.v1",
-  "title": "RuntimeState Cross-Entity Operations to Lean Formal Rules",
-  "scope": "Explicit Rust RuntimeState cross-entity operation mappings to Lean Step labels and theorem obligations for Track-4 refinement closure (bd-23hq7).",
+  "title": "RuntimeState + Scheduler/Combinator Operations to Lean Formal Rules",
+  "scope": "Explicit Rust RuntimeState plus scheduler/combinator operation mappings to Lean Step labels and theorem obligations for Track-4 refinement closure (bd-23hq7).",
   "source_files": [
     "src/runtime/state.rs",
+    "src/runtime/scheduler/three_lane.rs",
+    "src/cx/scope.rs",
     "formal/lean/Asupersync.lean",
     "formal/lean/coverage/theorem_surface_inventory.json",
     "formal/lean/coverage/step_constructor_coverage.json"
@@ -392,6 +394,108 @@
       "disambiguation_notes": [
         "advance_region_state is an iterative driver and can realize multiple close-phase constructors within one call.",
         "Whether closeCancelChildren or closeChildrenDone is taken depends on current region liveness and child/subregion sets."
+      ]
+    },
+    {
+      "operation_id": "scheduler.three_lane.next_task",
+      "rust_method": {
+        "name": "next_task",
+        "file_path": "src/runtime/scheduler/three_lane.rs",
+        "line": 1161
+      },
+      "formal_labels": [
+        "step.scheduleStep",
+        "step.schedule",
+        "step.tick"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "scheduler_change_preserves_wellformed",
+          "line": 2721
+        },
+        {
+          "theorem": "scheduleStep_preserves_wellformed_constructor",
+          "line": 3800
+        },
+        {
+          "theorem": "schedule_preserves_wellformed_constructor",
+          "line": 3809
+        },
+        {
+          "theorem": "stuttering_preserves_wellformed",
+          "line": 3397
+        }
+      ],
+      "assumptions": [
+        "Lane selection is deterministic under fixed queue contents and deterministic harness seed.",
+        "Fairness-yield paths keep scheduler progress bounded by cancel_streak_limit when non-cancel work exists.",
+        "Dispatch updates are represented by scheduleStep/schedule transitions; no-dispatch iterations are represented as stuttering/tick."
+      ],
+      "disambiguation_notes": [
+        "step.scheduleStep models dequeue/selection of next runnable task; step.schedule models the selected task-state progression.",
+        "Fairness-yield and idle loop iterations are modeled by stuttering/tick signatures rather than semantic state transitions."
+      ],
+      "expected_trace_signatures": [
+        "sched.schedule_step.dispatches_selected_task",
+        "sched.cancel_streak_yield.ready_or_timed_visible",
+        "sched.stuttering.idle_or_fairness_yield"
+      ],
+      "conformance_test_links": [
+        "tests/refinement_conformance.rs:446",
+        "tests/refinement_conformance.rs:587",
+        "src/runtime/scheduler/three_lane.rs:3604"
+      ]
+    },
+    {
+      "operation_id": "scope.race_all_loser_drain",
+      "rust_method": {
+        "name": "race_all",
+        "file_path": "src/cx/scope.rs",
+        "line": 1044
+      },
+      "formal_labels": [
+        "step.cancelRequest",
+        "step.cancelAcknowledge",
+        "step.cancelFinalize",
+        "step.cancelComplete",
+        "step.closeChildrenDone"
+      ],
+      "theorem_obligations": [
+        {
+          "theorem": "cancel_protocol_terminates",
+          "line": 3254
+        },
+        {
+          "theorem": "cancel_propagation_bounded",
+          "line": 3333
+        },
+        {
+          "theorem": "close_implies_quiescent",
+          "line": 794
+        },
+        {
+          "theorem": "close_quiescence_decomposition",
+          "line": 889
+        }
+      ],
+      "assumptions": [
+        "Winner index selection is deterministic under fixed harness seed and stable task polling order.",
+        "All loser handles receive cancel reason race_loser and are awaited to terminal join state before return.",
+        "Scope returns to caller only after loser-drain completes, preserving quiescence for the raced child set."
+      ],
+      "disambiguation_notes": [
+        "cancelRequest/cancelAcknowledge/cancelFinalize/cancelComplete may span multiple scheduler polls and are linked by the race_loser cause chain.",
+        "closeChildrenDone becomes observable after loser drain and finalizer progress complete for the raced subregion."
+      ],
+      "expected_trace_signatures": [
+        "race_all.winner_selected.index_stable_under_seed",
+        "race_all.loser_cancelled_with_race_loser",
+        "race_all.losers_drained_before_return"
+      ],
+      "conformance_test_links": [
+        "src/cx/scope.rs:1832",
+        "tests/refinement_conformance.rs:487",
+        "tests/refinement_conformance.rs:587"
       ]
     }
   ]

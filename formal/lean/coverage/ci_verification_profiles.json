@@ -145,6 +145,71 @@
       }
     }
   ],
+  "waiver_policy": {
+    "policy_id": "lean.proof_debt.waiver_lifecycle.v1",
+    "governance_reference_time_utc": "2026-02-14T00:00:00Z",
+    "required_fields": [
+      "waiver_id",
+      "owner",
+      "reason",
+      "risk_class",
+      "expires_at_utc",
+      "closure_dependency_path",
+      "status"
+    ],
+    "risk_classes": [
+      "low",
+      "medium",
+      "high",
+      "critical"
+    ],
+    "status_values": [
+      "active",
+      "closed"
+    ],
+    "governance_checks": [
+      {
+        "check_id": "waiver.expiry.enforced",
+        "rule": "Any waiver with status=active and expires_at_utc <= governance_reference_time_utc fails governance checks."
+      },
+      {
+        "check_id": "waiver.closure_path.required",
+        "rule": "Every waiver must include a non-empty closure_dependency_path to prevent permanent proof-debt exceptions."
+      },
+      {
+        "check_id": "waiver.closed_requires_closure_bead",
+        "rule": "Closed waivers must include closure_bead and closed_at_utc."
+      }
+    ],
+    "waivers": [
+      {
+        "waiver_id": "waiver.frontier.bucket.example.2026-02-14",
+        "owner": "MagentaBridge",
+        "reason": "Temporary frontier mismatch while Track-2 proof-shape bucket is being burned down.",
+        "risk_class": "medium",
+        "expires_at_utc": "2026-02-21T00:00:00Z",
+        "closure_dependency_path": [
+          "bd-k6fj1",
+          "bd-cspxm"
+        ],
+        "status": "active"
+      },
+      {
+        "waiver_id": "waiver.constructor.coverage.example.2026-02-01",
+        "owner": "SilverLake",
+        "reason": "Short-lived constructor coverage mismatch during artifact schema migration.",
+        "risk_class": "low",
+        "expires_at_utc": "2026-02-05T00:00:00Z",
+        "closure_dependency_path": [
+          "bd-rook4",
+          "bd-2ruh1"
+        ],
+        "status": "closed",
+        "closure_bead": "bd-n5tqv",
+        "closed_at_utc": "2026-02-04T18:00:00Z"
+      }
+    ]
+  },
   "promotion_policy": {
     "smoke_to_frontier": "Frontier is required when smoke detects coverage drift or when gap sequencing artifacts change.",
     "frontier_to_full": "Full is required for merge/release and any ontology/status taxonomy change.",

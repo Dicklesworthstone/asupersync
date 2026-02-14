@@ -7,7 +7,7 @@ This directory contains the canonical machine-readable artifacts for Lean proof 
 - `theorem_surface_inventory.json` - complete theorem declaration inventory from `Asupersync.lean`
 - `step_constructor_coverage.json` - constructor-by-constructor coverage status and theorem mappings
 - `theorem_rule_traceability_ledger.json` - theorem-to-rule traceability ledger for stale-link detection
-- `runtime_state_refinement_map.json` - explicit RuntimeState cross-entity operation map to Lean Step labels/theorem obligations
+- `runtime_state_refinement_map.json` - explicit RuntimeState + scheduler/combinator operation map to Lean Step labels/theorem obligations
 - `runtime_state_refinement_map.json` also carries the deterministic divergence triage decision matrix (`code-first` vs `model-first` vs `assumptions-or-harness-first`) and canonical triage examples
 - `invariant_status_inventory.json` - non-negotiable invariant status map with theorem/test linkage
 - `invariant_theorem_test_link_map.json` - canonical invariant -> theorem witness -> executable test map
@@ -96,6 +96,45 @@ The Rust model in `conformance/src/lean_coverage_matrix.rs` enforces:
 
 For bead `bd-3mo4f`, the recorded example `triage-example.bd-cspxm.2026-02-11` demonstrates a `model-first` route with deterministic frontier evidence and explicit ownership.
 
+## Refinement Trace Equivalence Noise Filter (Track-4.2a)
+
+Refinement mismatch triage uses deterministic trace-class comparison to avoid
+false positives from benign scheduling reordering.
+
+Algorithm (deterministic):
+1. Capture the two traces under comparison (reference vs candidate).
+2. Compute canonical class fingerprints with `trace_fingerprint(...)`.
+3. Classify as schedule-noise equivalent when fingerprints match.
+4. Classify as semantic mismatch when fingerprints differ.
+5. Keep the raw traces for audit so reviewers can distinguish "different order"
+   from "different behavior".
+
+Primary executable checks:
+- `tests/refinement_conformance.rs`:
+  - `refinement_trace_equivalence_filters_schedule_noise`
+  - `refinement_trace_equivalence_detects_semantic_mismatch`
+
+Repro commands:
+
+```bash
+rch exec -- cargo test --test refinement_conformance refinement_trace_equivalence_filters_schedule_noise -- --nocapture
+rch exec -- cargo test --test refinement_conformance refinement_trace_equivalence_detects_semantic_mismatch -- --nocapture
+```
+
+## Scheduler and Combinator Mapping Rows (Track-4.1b)
+
+`runtime_state_refinement_map.json` now carries explicit scheduler/combinator rows for:
+- `scheduler.three_lane.next_task`
+- `scope.race_all_loser_drain`
+
+Each row includes:
+- formal transition labels
+- theorem obligations with line anchors
+- deterministic `expected_trace_signatures` used by conformance checks
+- `conformance_test_links` to executable regression coverage
+
+Validation for these rows is enforced in `tests/runtime_state_refinement_map.rs`.
+
 Validation for this artifact is enforced in `tests/lean_gap_risk_sequencing_plan.rs`, including:
 - scoring formula consistency
 - bead link existence
@@ -130,6 +169,16 @@ Validation for this artifact is enforced in `tests/lean_invariant_theorem_test_l
 
 Validation for profile structure, runtime ordering, and bead-link integrity is enforced in
 `tests/lean_ci_verification_profiles.rs`.
+
+## Waiver Lifecycle Policy (Track-5.3a)
+
+`ci_verification_profiles.json` now includes `waiver_policy` for proof-debt exception control:
+- required waiver template fields: owner, reason, risk class, expiry, closure dependency path, status
+- governance checks that fail on any active waiver whose expiry is at/before reference time
+- closure requirements for closed waivers (`closure_bead`, `closed_at_utc`)
+
+This policy is machine-enforced in `tests/lean_ci_verification_profiles.rs` to prevent permanent
+exception creep.
 
 ## Frontier Extractor and Buckets
 
