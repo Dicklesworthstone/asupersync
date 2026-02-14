@@ -599,23 +599,25 @@ fn params_consistency() {
         let params = SystematicParams::for_source_block(k, 64);
 
         assert_eq!(params.k, k, "k mismatch");
+        assert!(params.k_prime >= params.k, "k={k}: K' must satisfy K' >= K");
         assert!(params.s >= 2, "k={k}: S should be at least 2");
         assert!(params.h >= 1, "k={k}: H should be at least 1");
         assert_eq!(
             params.l,
-            params.k + params.s + params.h,
-            "k={k}: L = K + S + H"
+            params.k_prime + params.s + params.h,
+            "k={k}: L = K' + S + H"
         );
+        assert!(params.w >= params.s, "k={k}: W should be >= S");
+        assert_eq!(params.b, params.w - params.s, "k={k}: B = W - S");
     }
 }
 
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn params_overhead_bounded() {
-    // Overhead = (L - K) / K should decrease as K grows. For small K the
-    // fixed minimum LDPC (S >= 7) and HDPC (H >= 3) counts dominate, so we
-    // use a per-K bound: 150% for k=10, trending toward <25% for k=500.
-    for (k, max_overhead) in [(10, 1.5), (50, 0.5), (100, 0.35), (500, 0.25)] {
+    // Overhead = (L - K) / K should remain bounded with RFC table lookup and
+    // improve as K grows. K' rounding increases small-K overhead.
+    for (k, max_overhead) in [(10, 1.8), (50, 0.65), (100, 0.35), (500, 0.25)] {
         let params = SystematicParams::for_source_block(k, 64);
         let overhead = params.l - params.k;
         let overhead_ratio = overhead as f64 / k as f64;

@@ -1,0 +1,529 @@
+{
+  "schema_version": "1.0.0",
+  "bead_id": "bd-xgw8t",
+  "generated_at": "2026-02-14T20:35:09Z",
+  "source": {
+    "project": "asupersync",
+    "issue_snapshot_command": "br list --status open --label raptorq --json",
+    "issue_detail_command": "br show <id> --json"
+  },
+  "scope": {
+    "program_epic": "bd-3uox5",
+    "track": "bd-1lgy2",
+    "goal": "Prioritize RaptorQ RFC-6330 gaps by severity, interoperability risk, unblock value, and coverage risk."
+  },
+  "scoring_model": {
+    "weights": {
+      "severity": 0.30,
+      "interop_risk": 0.30,
+      "unblock_value": 0.25,
+      "coverage_risk": 0.15
+    },
+    "scale": "1-5 (higher is worse/more urgent)",
+    "coverage_risk_components": [
+      "unit_tests",
+      "deterministic_e2e",
+      "structured_logging",
+      "reproducibility"
+    ],
+    "unblock_value_mapping": {
+      "1": "1 downstream bead",
+      "2": "2 downstream beads",
+      "3": "3-4 downstream beads",
+      "4": "5 downstream beads",
+      "5": "6+ downstream beads"
+    },
+    "formula": "score = 0.30*severity + 0.30*interop_risk + 0.25*unblock_value + 0.15*coverage_risk"
+  },
+  "owner_lanes": {
+    "track_a_baseline": "Track-A Baseline Evidence & Planning",
+    "track_b_encoder": "Track-B RFC-Exact Encoder",
+    "track_c_decoder": "Track-C Decoder Correctness",
+    "track_d_validation": "Track-D Validation & Forensics",
+    "track_e_kernels": "Track-E GF256 Kernels",
+    "track_g_governance": "Track-G Performance Governance"
+  },
+  "gaps": [
+    {
+      "rank": 1,
+      "gap_id": "GAP-C2",
+      "bead": "bd-13sw8",
+      "title": "Harden solver pivoting/rank detection with deterministic failure semantics",
+      "owner_lane": "track_c_decoder",
+      "status": "open",
+      "severity": 5,
+      "interop_risk": 5,
+      "unblock_value": 5,
+      "downstream_count": 6,
+      "coverage_risk": 3.50,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 4,
+        "structured_logging": 3,
+        "reproducibility": 3
+      },
+      "score": 4.775,
+      "blocked_by": [
+        "bd-2x68w",
+        "bd-3hr6l"
+      ],
+      "execution_beads": [
+        "bd-13sw8",
+        "bd-3frm1",
+        "bd-k1iw5",
+        "bd-mmdji",
+        "bd-1vv3t",
+        "bd-1ivvk",
+        "bd-28sx2"
+      ],
+      "notes": "Core correctness gate for decoder trustworthiness and no-silent-corruption guarantees."
+    },
+    {
+      "rank": 2,
+      "gap_id": "GAP-D7",
+      "bead": "bd-oeql8",
+      "title": "Structured test logging + artifact schema for deterministic forensics",
+      "owner_lane": "track_d_validation",
+      "status": "open",
+      "severity": 5,
+      "interop_risk": 4,
+      "unblock_value": 5,
+      "downstream_count": 6,
+      "coverage_risk": 4.50,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 4,
+        "structured_logging": 5,
+        "reproducibility": 5
+      },
+      "score": 4.625,
+      "blocked_by": [
+        "bd-26pqk",
+        "bd-3bvdj",
+        "bd-61s90",
+        "bd-3vckk"
+      ],
+      "execution_beads": [
+        "bd-oeql8",
+        "bd-2bd8e",
+        "bd-3dail",
+        "bd-3pqn4",
+        "bd-mztvq",
+        "bd-23vwz",
+        "bd-322jd"
+      ],
+      "notes": "Primary observability/triage blocker; downstream automation depends on stable schema fields."
+    },
+    {
+      "rank": 3,
+      "gap_id": "GAP-D6",
+      "bead": "bd-3bvdj",
+      "title": "Deterministic E2E scenario suite not yet published",
+      "owner_lane": "track_d_validation",
+      "status": "open",
+      "severity": 4,
+      "interop_risk": 4,
+      "unblock_value": 4,
+      "downstream_count": 5,
+      "coverage_risk": 4.25,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 5,
+        "structured_logging": 4,
+        "reproducibility": 4
+      },
+      "score": 4.038,
+      "blocked_by": [
+        "bd-26pqk",
+        "bd-61s90",
+        "bd-3vckk"
+      ],
+      "execution_beads": [
+        "bd-3bvdj",
+        "bd-oeql8",
+        "bd-3pqn4",
+        "bd-mztvq",
+        "bd-3syrq",
+        "bd-136cm"
+      ],
+      "notes": "Needed for deterministic full-pipeline regression safety and confidence in validation claims."
+    },
+    {
+      "rank": 4,
+      "gap_id": "GAP-B3",
+      "bead": "bd-2o5g6",
+      "title": "Encoder LT/repair equation construction still not RFC-tuple driven",
+      "owner_lane": "track_b_encoder",
+      "status": "open",
+      "severity": 5,
+      "interop_risk": 5,
+      "unblock_value": 2,
+      "downstream_count": 2,
+      "coverage_risk": 3.00,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 4,
+        "structured_logging": 2,
+        "reproducibility": 2
+      },
+      "score": 3.950,
+      "blocked_by": [
+        "bd-1g5ww",
+        "bd-1cjjy",
+        "bd-erfxv"
+      ],
+      "execution_beads": [
+        "bd-2o5g6",
+        "bd-2x68w",
+        "bd-10hic"
+      ],
+      "notes": "High interoperability risk; invalid equation semantics can silently poison decode correctness."
+    },
+    {
+      "rank": 5,
+      "gap_id": "GAP-A3",
+      "bead": "bd-xgw8t",
+      "title": "Gap taxonomy/risk-priority scoring publication incomplete",
+      "owner_lane": "track_a_baseline",
+      "status": "in_progress",
+      "severity": 4,
+      "interop_risk": 4,
+      "unblock_value": 4,
+      "downstream_count": 5,
+      "coverage_risk": 3.50,
+      "coverage_risk_breakdown": {
+        "unit_tests": 3,
+        "deterministic_e2e": 3,
+        "structured_logging": 4,
+        "reproducibility": 4
+      },
+      "score": 3.925,
+      "blocked_by": [
+        "bd-1lgy2"
+      ],
+      "execution_beads": [
+        "bd-xgw8t",
+        "bd-1g5ww",
+        "bd-1cjjy",
+        "bd-23vwz",
+        "bd-7toum",
+        "bd-3v1cs"
+      ],
+      "notes": "This bead controls sequencing quality and owner-lane clarity for multiple downstream efforts."
+    },
+    {
+      "rank": 6,
+      "gap_id": "GAP-B2",
+      "bead": "bd-1g5ww",
+      "title": "RFC degree/tuple generator exactness not implemented",
+      "owner_lane": "track_b_encoder",
+      "status": "open",
+      "severity": 5,
+      "interop_risk": 5,
+      "unblock_value": 2,
+      "downstream_count": 2,
+      "coverage_risk": 2.75,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 3,
+        "structured_logging": 2,
+        "reproducibility": 2
+      },
+      "score": 3.913,
+      "blocked_by": [
+        "bd-xgw8t",
+        "bd-erfxv"
+      ],
+      "execution_beads": [
+        "bd-1g5ww",
+        "bd-2x68w",
+        "bd-2o5g6"
+      ],
+      "notes": "Tuple/degree correctness is foundational for RFC behavior and parity checks."
+    },
+    {
+      "rank": 7,
+      "gap_id": "GAP-D5",
+      "bead": "bd-61s90",
+      "title": "Comprehensive deterministic unit matrix incomplete",
+      "owner_lane": "track_d_validation",
+      "status": "open",
+      "severity": 4,
+      "interop_risk": 4,
+      "unblock_value": 3,
+      "downstream_count": 3,
+      "coverage_risk": 3.75,
+      "coverage_risk_breakdown": {
+        "unit_tests": 5,
+        "deterministic_e2e": 4,
+        "structured_logging": 3,
+        "reproducibility": 3
+      },
+      "score": 3.713,
+      "blocked_by": [
+        "bd-2wlqm",
+        "bd-3vckk"
+      ],
+      "execution_beads": [
+        "bd-61s90",
+        "bd-26pqk",
+        "bd-oeql8",
+        "bd-3bvdj"
+      ],
+      "notes": "Unit coverage is currently a gating contract for nearly all verification tracks."
+    },
+    {
+      "rank": 8,
+      "gap_id": "GAP-C1",
+      "bead": "bd-2x68w",
+      "title": "Decoder equation reconstruction parity with tuple rules missing",
+      "owner_lane": "track_c_decoder",
+      "status": "open",
+      "severity": 5,
+      "interop_risk": 5,
+      "unblock_value": 1,
+      "downstream_count": 1,
+      "coverage_risk": 3.00,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 4,
+        "structured_logging": 2,
+        "reproducibility": 2
+      },
+      "score": 3.700,
+      "blocked_by": [
+        "bd-2o5g6",
+        "bd-1g5ww",
+        "bd-3hr6l"
+      ],
+      "execution_beads": [
+        "bd-2x68w",
+        "bd-13sw8"
+      ],
+      "notes": "Parity break here makes solver improvements unsafe regardless of performance gains."
+    },
+    {
+      "rank": 9,
+      "gap_id": "GAP-B1",
+      "bead": "bd-1cjjy",
+      "title": "Systematic index + table lookup still not RFC-exact",
+      "owner_lane": "track_b_encoder",
+      "status": "open",
+      "severity": 5,
+      "interop_risk": 5,
+      "unblock_value": 1,
+      "downstream_count": 1,
+      "coverage_risk": 2.50,
+      "coverage_risk_breakdown": {
+        "unit_tests": 3,
+        "deterministic_e2e": 3,
+        "structured_logging": 2,
+        "reproducibility": 2
+      },
+      "score": 3.625,
+      "blocked_by": [
+        "bd-xgw8t",
+        "bd-erfxv"
+      ],
+      "execution_beads": [
+        "bd-1cjjy",
+        "bd-2o5g6"
+      ],
+      "notes": "Parameter derivation inaccuracies propagate through all encoded symbol construction."
+    },
+    {
+      "rank": 10,
+      "gap_id": "GAP-A1",
+      "bead": "bd-2wlqm",
+      "title": "Clause-to-code traceability matrix is not yet complete",
+      "owner_lane": "track_a_baseline",
+      "status": "in_progress",
+      "severity": 4,
+      "interop_risk": 4,
+      "unblock_value": 2,
+      "downstream_count": 2,
+      "coverage_risk": 3.75,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 4,
+        "structured_logging": 4,
+        "reproducibility": 3
+      },
+      "score": 3.463,
+      "blocked_by": [
+        "bd-1lgy2"
+      ],
+      "execution_beads": [
+        "bd-2wlqm",
+        "bd-61s90",
+        "bd-1rxlv"
+      ],
+      "notes": "Matrix completeness is the primary audit anchor for follow-on verification beads."
+    },
+    {
+      "rank": 11,
+      "gap_id": "GAP-D9",
+      "bead": "bd-26pqk",
+      "title": "Replay catalog coverage incomplete for deterministic regression reproduction",
+      "owner_lane": "track_d_validation",
+      "status": "open",
+      "severity": 4,
+      "interop_risk": 3,
+      "unblock_value": 3,
+      "downstream_count": 3,
+      "coverage_risk": 4.00,
+      "coverage_risk_breakdown": {
+        "unit_tests": 3,
+        "deterministic_e2e": 4,
+        "structured_logging": 4,
+        "reproducibility": 5
+      },
+      "score": 3.450,
+      "blocked_by": [
+        "bd-61s90",
+        "bd-3vckk"
+      ],
+      "execution_beads": [
+        "bd-26pqk",
+        "bd-oeql8",
+        "bd-3bvdj",
+        "bd-mztvq"
+      ],
+      "notes": "High diagnostic value; required for replay-based postmortems and CI artifact utility."
+    },
+    {
+      "rank": 12,
+      "gap_id": "GAP-A2",
+      "bead": "bd-3s8zu",
+      "title": "Baseline bench/profile corpus not yet captured for this program",
+      "owner_lane": "track_a_baseline",
+      "status": "open",
+      "severity": 3,
+      "interop_risk": 2,
+      "unblock_value": 3,
+      "downstream_count": 3,
+      "coverage_risk": 3.25,
+      "coverage_risk_breakdown": {
+        "unit_tests": 3,
+        "deterministic_e2e": 3,
+        "structured_logging": 3,
+        "reproducibility": 4
+      },
+      "score": 2.738,
+      "blocked_by": [
+        "bd-1lgy2"
+      ],
+      "execution_beads": [
+        "bd-3s8zu",
+        "bd-3g5em",
+        "bd-1ivvk",
+        "bd-35j7t"
+      ],
+      "notes": "Performance decisions are weakly grounded until baseline evidence is locked and reproducible."
+    },
+    {
+      "rank": 13,
+      "gap_id": "GAP-G1",
+      "bead": "bd-3v1cs",
+      "title": "Performance budgets/SLO workloads are still undefined",
+      "owner_lane": "track_g_governance",
+      "status": "open",
+      "severity": 3,
+      "interop_risk": 2,
+      "unblock_value": 3,
+      "downstream_count": 3,
+      "coverage_risk": 2.50,
+      "coverage_risk_breakdown": {
+        "unit_tests": 2,
+        "deterministic_e2e": 2,
+        "structured_logging": 3,
+        "reproducibility": 3
+      },
+      "score": 2.625,
+      "blocked_by": [
+        "bd-xgw8t",
+        "bd-83wox"
+      ],
+      "execution_beads": [
+        "bd-3v1cs",
+        "bd-2bd8e",
+        "bd-7toum",
+        "bd-322jd"
+      ],
+      "notes": "Without explicit budgets, optimization and CI-gate decisions are inconsistent and high-noise."
+    },
+    {
+      "rank": 14,
+      "gap_id": "GAP-E2",
+      "bead": "bd-128em",
+      "title": "AVX2/NEON kernels for GF256 addmul/mul are unimplemented",
+      "owner_lane": "track_e_kernels",
+      "status": "open",
+      "severity": 3,
+      "interop_risk": 2,
+      "unblock_value": 2,
+      "downstream_count": 2,
+      "coverage_risk": 2.75,
+      "coverage_risk_breakdown": {
+        "unit_tests": 4,
+        "deterministic_e2e": 3,
+        "structured_logging": 2,
+        "reproducibility": 2
+      },
+      "score": 2.413,
+      "blocked_by": [
+        "bd-35j7t",
+        "bd-ot7ze"
+      ],
+      "execution_beads": [
+        "bd-128em",
+        "bd-1j3gh",
+        "bd-2finy"
+      ],
+      "notes": "Major perf upside, but lower urgency than correctness and validation blockers."
+    },
+    {
+      "rank": 15,
+      "gap_id": "GAP-E1",
+      "bead": "bd-35j7t",
+      "title": "SIMD dispatch framework for GF256 kernels not in place",
+      "owner_lane": "track_e_kernels",
+      "status": "open",
+      "severity": 3,
+      "interop_risk": 2,
+      "unblock_value": 2,
+      "downstream_count": 2,
+      "coverage_risk": 2.50,
+      "coverage_risk_breakdown": {
+        "unit_tests": 3,
+        "deterministic_e2e": 3,
+        "structured_logging": 2,
+        "reproducibility": 2
+      },
+      "score": 2.375,
+      "blocked_by": [
+        "bd-3s8zu",
+        "bd-ot7ze"
+      ],
+      "execution_beads": [
+        "bd-35j7t",
+        "bd-1j3gh",
+        "bd-128em"
+      ],
+      "notes": "Enabler for kernel acceleration track; keep behind deterministic fallback guardrails."
+    }
+  ],
+  "immediate_execution_order": [
+    "bd-13sw8",
+    "bd-oeql8",
+    "bd-3bvdj",
+    "bd-2o5g6",
+    "bd-1g5ww",
+    "bd-61s90"
+  ],
+  "assumptions": [
+    "Downstream-count values are taken from current bead graph snapshot and will drift over time.",
+    "Coverage-risk scores are intentionally conservative and should be re-scored after D5/D6/D7 deliverables land.",
+    "This taxonomy is for sequencing priority; it does not replace technical design reviews per bead."
+  ]
+}

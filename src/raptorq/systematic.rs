@@ -37,53 +37,107 @@ use crate::util::DetRng;
 /// Systematic encoding parameters for a single source block.
 ///
 /// RFC 6330 defines several derived parameters:
-/// - L = K + S + H: total intermediate symbols
-/// - W = K + S: number of LT symbols (non-PI symbols)
+/// - K': extended source block size selected from the systematic index table
+/// - L = K' + S + H: total intermediate symbols
+/// - W: number of LT symbols (non-PI symbols), table-driven
 /// - P = H: number of PI symbols (= HDPC symbols for our systematic encoding)
-/// - B = W - S = K: number of non-LDPC LT symbols
+/// - B = W - S: number of non-LDPC LT symbols
 #[derive(Debug, Clone)]
 pub struct SystematicParams {
     /// K: number of source symbols in this block.
     pub k: usize,
+    /// K': RFC 6330 extended source block size selected for K.
+    pub k_prime: usize,
+    /// J(K'): RFC 6330 systematic index.
+    pub j: usize,
     /// S: number of LDPC symbols.
     pub s: usize,
     /// H: number of HDPC (Half-Distance) symbols.
     pub h: usize,
-    /// L = K + S + H: total intermediate symbols.
+    /// L = K' + S + H: total intermediate symbols.
     pub l: usize,
-    /// W = K + S: number of LT symbols.
+    /// W: number of LT symbols.
     pub w: usize,
     /// P = H: number of PI symbols.
     pub p: usize,
-    /// B = K: number of non-LDPC LT symbols.
+    /// B = W - S: number of non-LDPC LT symbols.
     pub b: usize,
     /// Symbol size in bytes.
     pub symbol_size: usize,
 }
 
+/// RFC 6330 Table 2 rows: `(K', J(K'), S(K'), H(K'), W(K'))`.
+///
+/// Source: RFC 6330 Section 5.6.
+const SYSTEMATIC_INDEX_TABLE: &[(u32, u16, u16, u8, u32)] =
+    &include!("rfc6330_systematic_index_table.inc");
+
+/// Explicit lookup failure for source block parameter derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystematicParamError {
+    /// Requested `K` is larger than the maximum K' covered by RFC 6330 Table 2.
+    UnsupportedSourceBlockSize {
+        /// Requested source block symbol count.
+        requested: usize,
+        /// Largest supported source block symbol count in this implementation.
+        max_supported: usize,
+    },
+}
+
 impl SystematicParams {
     /// Compute encoding parameters for `k` source symbols of given size.
     ///
-    /// S and H are chosen to provide good erasure protection:
-    /// - S ≈ ceil(0.01 * K) + X where X provides LDPC density
-    /// - H ≈ ceil(sqrt(K)) for half-distance check coverage
-    ///
-    /// Derived parameters per RFC 6330:
-    /// - W = K + S (LT symbols)
+    /// Derived parameters per RFC 6330 systematic index table:
+    /// - K' = smallest table entry >= K
+    /// - J, S, H, W selected from that K' row
     /// - P = H (PI symbols = HDPC for systematic encoding)
-    /// - B = K (non-LDPC LT symbols)
-    /// - L = W + P = K + S + H
+    /// - B = W - S (non-LDPC LT symbols)
+    /// - L = K' + S + H
     #[must_use]
     pub fn for_source_block(k: usize, symbol_size: usize) -> Self {
         assert!(k > 0, "source block must have at least one symbol");
-        let s = compute_s(k);
-        let h = compute_h(k);
-        let l = k + s + h;
-        let w = k + s; // LT symbols
-        let p = h; // PI symbols = HDPC
-        let b = k; // non-LDPC LT symbols = source symbols
-        Self {
+        Self::try_for_source_block(k, symbol_size).unwrap_or_else(|err| match err {
+            SystematicParamError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            } => {
+                panic!(
+                    "unsupported source block size K={requested}; supported range is 1..={max_supported}"
+                )
+            }
+        })
+    }
+
+    /// Fallible parameter lookup from the RFC 6330 systematic index table.
+    pub fn try_for_source_block(
+        k: usize,
+        symbol_size: usize,
+    ) -> Result<Self, SystematicParamError> {
+        let max_supported = SYSTEMATIC_INDEX_TABLE
+            .last()
+            .map_or(0usize, |row| row.0 as usize);
+        let idx = SYSTEMATIC_INDEX_TABLE.partition_point(|row| row.0 < k as u32);
+        if idx == SYSTEMATIC_INDEX_TABLE.len() {
+            return Err(SystematicParamError::UnsupportedSourceBlockSize {
+                requested: k,
+                max_supported,
+            });
+        }
+
+        let (k_prime, j, s, h, w) = SYSTEMATIC_INDEX_TABLE[idx];
+        let k_prime = k_prime as usize;
+        let j = j as usize;
+        let s = s as usize;
+        let h = h as usize;
+        let w = w as usize;
+        let l = k_prime + s + h;
+        let p = h;
+        let b = w - s;
+
+        Ok(Self {
             k,
+            k_prime,
+            j,
             s,
             h,
             l,
@@ -91,84 +145,8 @@ impl SystematicParams {
             p,
             b,
             symbol_size,
-        }
+        })
     }
-}
-
-/// Compute S (LDPC symbol count) for given K.
-///
-/// S must be **prime** so that the LDPC circulant step sizes are coprime
-/// with S, guaranteeing that 3 consecutive positions modulo S are always
-/// distinct and producing linearly independent rows. RFC 6330 Table 2
-/// always picks S as a prime >= 7.
-fn compute_s(k: usize) -> usize {
-    let target = k.div_ceil(100)
-        + if k <= 40 {
-            6
-        } else if k <= 200 {
-            8
-        } else {
-            10
-        };
-    next_prime_gte(target.max(7))
-}
-
-/// Compute H (HDPC symbol count) for given K.
-///
-/// H >= ceil(sqrt(K)) provides half-distance parity coverage. The HDPC
-/// identity block in the constraint matrix has size H, so H must be large
-/// enough for GAMMA x MT to produce H independent rows. Minimum of 3.
-fn compute_h(k: usize) -> usize {
-    ceil_isqrt(k).max(3)
-}
-
-/// Integer ceiling square root.
-fn ceil_isqrt(value: usize) -> usize {
-    if value <= 1 {
-        return value;
-    }
-    let target = value as u128;
-    let mut lo = 1u128;
-    let mut hi = target;
-    while lo < hi {
-        let mid = u128::midpoint(lo, hi);
-        if mid * mid < target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo as usize
-}
-
-/// Simple primality test (sufficient for our small parameter range).
-const fn is_prime(n: usize) -> bool {
-    if n < 2 {
-        return false;
-    }
-    if n < 4 {
-        return true;
-    }
-    if n.is_multiple_of(2) || n.is_multiple_of(3) {
-        return false;
-    }
-    let mut i = 5;
-    while i * i <= n {
-        if n.is_multiple_of(i) || n.is_multiple_of(i + 2) {
-            return false;
-        }
-        i += 6;
-    }
-    true
-}
-
-/// Smallest prime >= n.
-fn next_prime_gte(n: usize) -> usize {
-    let mut candidate = n.max(2);
-    while !is_prime(candidate) {
-        candidate += 1;
-    }
-    candidate
 }
 
 // ============================================================================
@@ -347,7 +325,7 @@ impl ConstraintMatrix {
     #[must_use]
     pub fn build(params: &SystematicParams, seed: u64) -> Self {
         let l = params.l;
-        let total_rows = params.s + params.h + params.k;
+        let total_rows = params.s + params.h + params.k_prime;
         let mut matrix = Self::zeros(total_rows, l);
 
         // LDPC constraints (rows 0..S)
@@ -507,10 +485,10 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 
     // Part 2: LDPC check symbol identity block.
     // RFC 6330: For i = 0, ..., S-1: A[i][B+i] = 1
-    // Each LDPC row i is tied to check symbol C[B+i] = C[K+i].
-    let k = params.k;
+    // Each LDPC row i is tied to check symbol C[B+i].
+    let b = params.b;
     for i in 0..s {
-        matrix.set(i, k + i, Gf256::ONE);
+        matrix.set(i, b + i, Gf256::ONE);
     }
 }
 
@@ -599,12 +577,13 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
     let h = params.h;
-    let k = params.k;
+    let k_prime = params.k_prime;
 
-    for i in 0..k {
+    for i in 0..k_prime {
         let row = s + h + i;
-        // Systematic: source symbol i maps directly to intermediate symbol i
-        // C[i] = source[i], ensuring intermediate[0..K] = source_symbols
+        // Systematic constraints over K' rows:
+        // - i < K: source symbol i maps directly to intermediate symbol i
+        // - i >= K: padded source symbols are constrained to zero via RHS
         matrix.set(row, i, Gf256::ONE);
     }
 }
@@ -812,13 +791,17 @@ impl SystematicEncoder {
         let params = SystematicParams::for_source_block(k, symbol_size);
         let matrix = ConstraintMatrix::build(&params, seed);
 
-        // Build RHS: zeros for LDPC/HDPC rows, source data for LT rows
+        // Build RHS: zeros for LDPC/HDPC rows, source data for K LT rows,
+        // then explicit zeros for the padded LT rows (K..K').
         let mut rhs = Vec::with_capacity(matrix.rows);
         for _ in 0..params.s + params.h {
             rhs.push(vec![0u8; symbol_size]);
         }
         for sym in source_symbols {
             rhs.push(sym.clone());
+        }
+        for _ in k..params.k_prime {
+            rhs.push(vec![0u8; symbol_size]);
         }
 
         let intermediate = matrix.solve(&rhs)?;
@@ -1139,20 +1122,49 @@ mod tests {
     fn params_small() {
         let p = SystematicParams::for_source_block(4, 64);
         assert_eq!(p.k, 4);
-        assert!(p.s >= 7, "S must be prime >= 7, got {}", p.s);
-        assert!(is_prime(p.s), "S={} must be prime", p.s);
-        assert!(p.h >= 3, "H must be >= 3, got {}", p.h);
-        assert_eq!(p.l, p.k + p.s + p.h);
+        assert_eq!(p.k_prime, 10);
+        assert_eq!(p.j, 254);
+        assert_eq!(p.s, 7);
+        assert_eq!(p.h, 10);
+        assert_eq!(p.w, 17);
+        assert_eq!(p.b, p.w - p.s);
+        assert_eq!(p.l, p.k_prime + p.s + p.h);
     }
 
     #[test]
     fn params_medium() {
         let p = SystematicParams::for_source_block(100, 256);
         assert_eq!(p.k, 100);
-        assert!(p.s >= 7, "S must be >= 7, got {}", p.s);
-        assert!(is_prime(p.s), "S={} must be prime", p.s);
-        assert!(p.h >= 10, "H must be >= 10, got {}", p.h);
-        assert_eq!(p.l, p.k + p.s + p.h);
+        assert_eq!(p.k_prime, 101);
+        assert_eq!(p.j, 562);
+        assert_eq!(p.s, 17);
+        assert_eq!(p.h, 10);
+        assert_eq!(p.w, 113);
+        assert_eq!(p.b, p.w - p.s);
+        assert_eq!(p.l, p.k_prime + p.s + p.h);
+    }
+
+    #[test]
+    fn params_lookup_uses_smallest_k_prime_ge_k() {
+        let p = SystematicParams::for_source_block(11, 64);
+        assert_eq!(p.k, 11);
+        assert_eq!(p.k_prime, 12);
+        assert_eq!(p.j, 630);
+        assert_eq!(p.s, 7);
+        assert_eq!(p.h, 10);
+        assert_eq!(p.w, 19);
+    }
+
+    #[test]
+    fn params_lookup_reports_unsupported_k() {
+        let err = SystematicParams::try_for_source_block(56404, 64).unwrap_err();
+        assert_eq!(
+            err,
+            SystematicParamError::UnsupportedSourceBlockSize {
+                requested: 56404,
+                max_supported: 56403
+            }
+        );
     }
 
     #[test]
@@ -1287,7 +1299,7 @@ mod tests {
     fn constraint_matrix_dimensions() {
         let params = SystematicParams::for_source_block(10, 32);
         let matrix = ConstraintMatrix::build(&params, 42);
-        assert_eq!(matrix.rows, params.s + params.h + params.k);
+        assert_eq!(matrix.rows, params.s + params.h + params.k_prime);
         assert_eq!(matrix.cols, params.l);
     }
 
