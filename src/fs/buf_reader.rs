@@ -131,4 +131,22 @@ mod tests {
         });
         crate::test_complete!("test_buf_reader_lines");
     }
+
+    #[test]
+    fn test_buf_reader_lines_zero_capacity() {
+        init_test("test_buf_reader_lines_zero_capacity");
+        futures_lite::future::block_on(async {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("test_lines_zero_cap.txt");
+            crate::fs::write(&path, b"line-a\nline-b\n").await.unwrap();
+
+            let file = File::open(&path).await.unwrap();
+            let reader = BufReader::with_capacity(0, file);
+            let lines: Vec<_> = reader.lines().try_collect().await.unwrap();
+
+            let expected = vec!["line-a", "line-b"];
+            crate::assert_with_log!(lines == expected, "lines", expected, lines);
+        });
+        crate::test_complete!("test_buf_reader_lines_zero_capacity");
+    }
 }

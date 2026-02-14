@@ -50,6 +50,7 @@ impl<R> BufReader<R> {
     /// Creates a new `BufReader` with the specified buffer capacity.
     #[must_use]
     pub fn with_capacity(capacity: usize, inner: R) -> Self {
+        let capacity = capacity.max(1);
         Self {
             inner,
             buf: vec![0u8; capacity].into_boxed_slice(),
@@ -312,6 +313,33 @@ mod tests {
         let within = len <= 32;
         crate::assert_with_log!(within, "len <= 32", true, within);
         crate::test_complete!("buf_reader_large_read_bypasses_buffer");
+    }
+
+    #[test]
+    fn buf_reader_zero_capacity_is_clamped() {
+        init_test("buf_reader_zero_capacity_is_clamped");
+        let data: &[u8] = b"x";
+        let reader = BufReader::with_capacity(0, data);
+        let capacity = reader.capacity();
+        crate::assert_with_log!(capacity == 1, "capacity", 1, capacity);
+        crate::test_complete!("buf_reader_zero_capacity_is_clamped");
+    }
+
+    #[test]
+    fn buf_reader_zero_capacity_fill_buf_progresses() {
+        init_test("buf_reader_zero_capacity_fill_buf_progresses");
+        let data: &[u8] = b"xyz";
+        let mut reader = BufReader::with_capacity(0, data);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut reader).poll_fill_buf(&mut cx);
+        let filled = match poll {
+            Poll::Ready(Ok(bytes)) => bytes.to_vec(),
+            other => panic!("expected Poll::Ready(Ok(_)), got {other:?}"),
+        };
+        crate::assert_with_log!(filled == b"x", "filled", b"x", filled);
+        crate::test_complete!("buf_reader_zero_capacity_fill_buf_progresses");
     }
 
     #[test]
