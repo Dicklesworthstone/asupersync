@@ -48,6 +48,7 @@ pub mod certificate;
 pub mod compat;
 pub mod compression;
 pub mod crashpack;
+pub mod delta_debug;
 pub mod distributed;
 pub mod divergence;
 pub mod dpor;
@@ -60,6 +61,7 @@ pub mod geodesic;
 pub mod gf2;
 pub mod independence;
 pub mod integrity;
+pub mod minimizer;
 pub mod recorder;
 pub mod replay;
 pub mod replayer;
@@ -84,6 +86,10 @@ pub use compression::{compress as compress_trace, CompressedTrace, Level as Comp
 pub use crashpack::{
     CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest, EvidenceEntrySnapshot,
     FailureInfo, FailureOutcome, SupervisionSnapshot, CRASHPACK_SCHEMA_VERSION,
+};
+pub use delta_debug::{
+    generate_narrative, minimize as delta_debug_minimize, DeltaDebugConfig, DeltaDebugResult,
+    MinimizationStats,
 };
 pub use divergence::{
     diagnose_divergence, minimal_divergent_prefix, minimize_divergent_prefix, AffectedEntities,
@@ -117,6 +123,10 @@ pub use independence::{
 pub use integrity::{
     find_first_corruption, is_trace_valid_quick, verify_trace, IntegrityIssue, IssueSeverity,
     VerificationOptions, VerificationResult,
+};
+pub use minimizer::{
+    generate_narrative as generate_scenario_narrative, MinimizationReport, MinimizationStep,
+    ScenarioElement, StepKind, TraceMinimizer,
 };
 pub use recorder::{
     LimitAction, LimitKind, LimitReached, RecorderConfig, TraceRecorder, DEFAULT_MAX_FILE_SIZE,

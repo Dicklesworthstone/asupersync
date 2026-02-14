@@ -8,8 +8,8 @@ mod common;
 
 use asupersync::obligation::calm::{self, Monotonicity};
 use asupersync::obligation::saga::{
-    BatchResult, Lattice, MonotoneSagaExecutor, SagaExecutionPlan, SagaExecutionResult,
-    SagaOpKind, SagaPlan, SagaStep, StepExecutor,
+    BatchResult, Lattice, MonotoneSagaExecutor, SagaExecutionPlan, SagaExecutionResult, SagaOpKind,
+    SagaPlan, SagaStep, StepExecutor,
 };
 use asupersync::trace::distributed::lattice::LatticeState;
 use common::{init_test_logging, test_proptest_config};
@@ -524,7 +524,9 @@ fn order_independence_1000_random_orderings() {
         // Fisher-Yates shuffle.
         let mut indices: Vec<usize> = (0..ops.len()).collect();
         for i in (1..indices.len()).rev() {
-            rng_state = rng_state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            rng_state = rng_state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             let j = (rng_state >> 33) as usize % (i + 1);
             indices.swap(i, j);
         }
