@@ -9,6 +9,7 @@
 //! - `notified().await`: Cancel-safe, waiter is removed on cancellation
 //! - Notifications before any waiter: Stored and delivered to next waiter
 
+use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -177,8 +178,8 @@ impl Notify {
         // Increment generation to signal all waiters.
         self.generation.fetch_add(1, Ordering::SeqCst);
 
-        // Collect all wakers.
-        let wakers: Vec<Waker> = {
+        // Collect all wakers (SmallVec avoids heap allocation for ≤8 waiters).
+        let wakers: SmallVec<[Waker; 8]> = {
             let mut waiters = match self.waiters.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),

@@ -38,6 +38,7 @@
 //! tx.send(new_config)?;
 //! ```
 
+use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,7 +124,7 @@ struct WatchInner<T> {
     /// Whether the sender has been dropped.
     sender_dropped: Mutex<bool>,
     /// Wakers for receivers waiting on value changes.
-    waiters: Mutex<Vec<WatchWaiter>>,
+    waiters: Mutex<SmallVec<[WatchWaiter; 4]>>,
 }
 
 impl<T> WatchInner<T> {
@@ -132,7 +133,7 @@ impl<T> WatchInner<T> {
             value: RwLock::new((initial, 0)),
             receiver_count: Mutex::new(1), // Counts the Receiver returned by channel()
             sender_dropped: Mutex::new(false),
-            waiters: Mutex::new(Vec::new()),
+            waiters: Mutex::new(SmallVec::new()),
         }
     }
 
@@ -149,7 +150,7 @@ impl<T> WatchInner<T> {
     }
 
     fn wake_all_waiters(&self) {
-        let waiters: Vec<WatchWaiter> = {
+        let waiters: SmallVec<[WatchWaiter; 4]> = {
             let mut w = self.waiters.lock().expect("watch lock poisoned");
             std::mem::take(&mut *w)
         };

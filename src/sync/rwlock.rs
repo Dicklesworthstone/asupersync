@@ -56,6 +56,7 @@
 //! write.push(4);
 //! ```
 
+use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
@@ -314,8 +315,8 @@ impl<T> RwLock<T> {
         }
     }
 
-    fn drain_reader_waiters(state: &mut State) -> Vec<Waker> {
-        let mut wakers = Vec::new();
+    fn drain_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
+        let mut wakers = SmallVec::new();
         while let Some(waiter) = state.reader_waiters.pop_front() {
             if waiter.queued.swap(false, Ordering::AcqRel) {
                 wakers.push(waiter.waker);
@@ -344,7 +345,7 @@ impl<T> RwLock<T> {
             let mut state = self.state.lock().expect("rwlock state poisoned");
             state.writer_active = false;
             if state.writer_waiters > 0 {
-                (Self::pop_writer_waiter(&mut state), Vec::new())
+                (Self::pop_writer_waiter(&mut state), SmallVec::new())
             } else {
                 (None, Self::drain_reader_waiters(&mut state))
             }
@@ -377,7 +378,7 @@ impl<T> RwLock<T> {
             let mut state = self.state.lock().expect("rwlock state poisoned");
             state.writer_active = false;
             if state.writer_waiters > 0 {
-                (Self::pop_writer_waiter(&mut state), Vec::new())
+                (Self::pop_writer_waiter(&mut state), SmallVec::new())
             } else {
                 (None, Self::drain_reader_waiters(&mut state))
             }
@@ -656,7 +657,7 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
         }
 
         let mut writer_waker = None;
-        let mut reader_wakers = Vec::new();
+        let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
         let mut state = self.lock.state.lock().expect("rwlock state poisoned");
 
         if let Some(waiter) = self.waiter.as_ref() {
@@ -1034,7 +1035,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         }
 
         let mut writer_waker = None;
-        let mut reader_wakers = Vec::new();
+        let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
         let mut state = self.lock.state.lock().expect("rwlock state poisoned");
 
         if let Some(waiter) = self.waiter.as_ref() {

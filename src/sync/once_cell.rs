@@ -11,6 +11,7 @@
 //! - Racing initializers: Only one will succeed; others will wait or
 //!   get the initialized value.
 
+use smallvec::SmallVec;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -390,7 +391,7 @@ impl<T> OnceCell<T> {
 
     /// Wakes all async waiters.
     fn wake_all(&self) {
-        let wakers: Vec<(Waker, Arc<AtomicBool>)> = {
+        let wakers: SmallVec<[(Waker, Arc<AtomicBool>); 4]> = {
             let mut guard = match self.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
