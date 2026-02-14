@@ -171,56 +171,6 @@ impl Equation {
             .map(|idx| self.terms[idx].1)
             .unwrap_or(Gf256::ZERO)
     }
-
-    /// Substitute: eliminate `col` using `pivot_coef * pivot_rhs`.
-    ///
-    /// Uses the provided `scratch` buffer to avoid per-call heap allocation.
-    /// The scratch buffer is cleared and reused across calls.
-    fn eliminate_into(
-        &mut self,
-        _col: usize,
-        pivot_terms: &[(usize, Gf256)],
-        factor: Gf256,
-        scratch: &mut Vec<(usize, Gf256)>,
-    ) {
-        // self -= factor * pivot (for the column `col`)
-        // This effectively does: self.terms = self.terms XOR (factor * pivot.terms)
-        // but only for terms that would affect our equation.
-
-        // Merge into scratch buffer (reused allocation)
-        scratch.clear();
-        let mut i = 0;
-        let mut j = 0;
-
-        while i < self.terms.len() || j < pivot_terms.len() {
-            let self_col = self.terms.get(i).map_or(usize::MAX, |(c, _)| *c);
-            let pivot_col = pivot_terms.get(j).map_or(usize::MAX, |(c, _)| *c);
-
-            match self_col.cmp(&pivot_col) {
-                std::cmp::Ordering::Less => {
-                    scratch.push(self.terms[i]);
-                    i += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    let (c, coef) = pivot_terms[j];
-                    scratch.push((c, factor * coef));
-                    j += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    let self_coef = self.terms[i].1;
-                    let pivot_coef = pivot_terms[j].1;
-                    let new_coef = self_coef + factor * pivot_coef;
-                    if !new_coef.is_zero() {
-                        scratch.push((self_col, new_coef));
-                    }
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
-
-        std::mem::swap(&mut self.terms, scratch);
-    }
 }
 
 // ============================================================================
@@ -531,8 +481,11 @@ impl InactivationDecoder {
                 }
                 // rhs[i] -= eq_coef * solution
                 gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
-                // Remove the term from the equation
-                eq.terms.retain(|(c, _)| *c != col);
+                // Remove the term from the equation.
+                // Binary search is efficient since terms are sorted by column index.
+                if let Ok(pos) = eq.terms.binary_search_by_key(&col, |(c, _)| *c) {
+                    eq.terms.remove(pos);
+                }
             }
 
             // Move solution instead of cloning (avoids allocation)
@@ -590,8 +543,11 @@ impl InactivationDecoder {
                 }
                 // rhs[i] -= eq_coef * solution
                 gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
-                // Remove the term from the equation
-                eq.terms.retain(|(c, _)| *c != col);
+                // Remove the term from the equation.
+                // Binary search is efficient since terms are sorted by column index.
+                if let Ok(pos) = eq.terms.binary_search_by_key(&col, |(c, _)| *c) {
+                    eq.terms.remove(pos);
+                }
             }
 
             // Move solution instead of cloning (avoids allocation)
