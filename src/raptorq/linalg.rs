@@ -32,7 +32,9 @@
 //! row_scale_add(r1.as_mut_slice(), r2.as_slice(), Gf256::new(7));
 //! ```
 
-use super::gf256::{gf256_add_slice, gf256_addmul_slice, Gf256};
+use super::gf256::{
+    gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slices2, Gf256,
+};
 
 // ============================================================================
 // Dense Row Representation
@@ -683,8 +685,11 @@ impl GaussianSolver {
             let pivot_inv = pivot_val.inv();
 
             // Scale pivot row so pivot element becomes 1
-            row_scale(&mut self.matrix[pivot_col], pivot_inv);
-            row_scale(self.rhs[pivot_col].as_mut_slice(), pivot_inv);
+            gf256_mul_slices2(
+                &mut self.matrix[pivot_col],
+                self.rhs[pivot_col].as_mut_slice(),
+                pivot_inv,
+            );
 
             // Eliminate in rows below pivot
             for row in (pivot_col + 1)..self.rows {
@@ -731,8 +736,11 @@ impl GaussianSolver {
             let pivot_val = Gf256::new(self.matrix[pivot_col][pivot_col]);
             let pivot_inv = pivot_val.inv();
 
-            row_scale(&mut self.matrix[pivot_col], pivot_inv);
-            row_scale(self.rhs[pivot_col].as_mut_slice(), pivot_inv);
+            gf256_mul_slices2(
+                &mut self.matrix[pivot_col],
+                self.rhs[pivot_col].as_mut_slice(),
+                pivot_inv,
+            );
 
             for row in (pivot_col + 1)..self.rows {
                 let factor = Gf256::new(self.matrix[row][pivot_col]);
@@ -796,8 +804,8 @@ impl GaussianSolver {
             return;
         }
 
-        // Eliminate in coefficient matrix using bulk operation.
-        // Use split_at_mut to get separate mutable/immutable references.
+        // Eliminate in coefficient matrix/RHS. Use split_at_mut to get
+        // separate mutable/immutable references for each surface.
         let (target_row, pivot_row) = if target < pivot {
             let (lo, hi) = self.matrix.split_at_mut(pivot);
             (&mut lo[target], hi[0].as_slice())
@@ -805,7 +813,6 @@ impl GaussianSolver {
             let (lo, hi) = self.matrix.split_at_mut(target);
             (&mut hi[0], lo[pivot].as_slice())
         };
-        gf256_addmul_slice(target_row, pivot_row, factor);
 
         // Eliminate in RHS - use split_at_mut to satisfy borrow checker
         let rhs_len = self.rhs[pivot].len();
@@ -823,11 +830,15 @@ impl GaussianSolver {
                 (&mut hi[0], &lo[pivot])
             };
 
-            row_scale_add(
+            gf256_addmul_slices2(
+                target_row,
+                pivot_row,
                 &mut lower.as_mut_slice()[..rhs_len],
                 &upper.as_slice()[..rhs_len],
                 factor,
             );
+        } else {
+            gf256_addmul_slice(target_row, pivot_row, factor);
         }
     }
 }

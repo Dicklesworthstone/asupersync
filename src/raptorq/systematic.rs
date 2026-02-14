@@ -21,14 +21,15 @@
 //!
 //! # Determinism
 //!
-//! All randomness flows through [`DetRng`] with seeds derived from
-//! `(object_id, sbn, esi)`. For a fixed seed and input, the output
-//! is identical across runs and platforms.
+//! Randomness is used in precode-constraint generation only; repair
+//! equations follow RFC tuple semantics for each ESI. For a fixed
+//! `(source, symbol_size, seed)` input, output is identical across runs.
 
 #![allow(clippy::many_single_char_names)]
 
 use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::rfc6330::repair_indices_for_esi;
+#[cfg(test)]
 use crate::util::DetRng;
 
 // ============================================================================
@@ -778,8 +779,6 @@ pub struct SystematicEncoder {
     source_symbols: Vec<Vec<u8>>,
     /// Seed for deterministic repair generation.
     seed: u64,
-    /// Robust soliton distribution for repair encoding.
-    soliton: RobustSoliton,
     /// Running statistics.
     stats: EncodingStats,
     /// Whether systematic symbols have been emitted via `emit_systematic()`.
@@ -823,8 +822,6 @@ impl SystematicEncoder {
 
         let intermediate = matrix.solve(&rhs)?;
 
-        let soliton = RobustSoliton::new(params.l, 0.2, 0.05);
-
         // Initialize stats
         let stats = EncodingStats {
             source_symbol_count: k,
@@ -847,7 +844,6 @@ impl SystematicEncoder {
             intermediate,
             source_symbols: source_symbols.to_vec(),
             seed,
-            soliton,
             stats,
             systematic_emitted: false,
             next_repair_esi: k as u32,
@@ -884,8 +880,7 @@ impl SystematicEncoder {
             buf.len(),
             self.params.symbol_size
         );
-        let mut seen = Vec::new();
-        self.repair_symbol_into_with_degree(esi, buf, &mut seen);
+        self.repair_symbol_into_with_degree(esi, buf);
     }
 
     /// Returns a reference to intermediate symbol `i`.
@@ -956,13 +951,12 @@ impl SystematicEncoder {
         let symbol_size = self.params.symbol_size;
         let mut result = Vec::with_capacity(count);
 
-        // Reuse buffer and bitset across iterations to avoid per-symbol allocation.
+        // Reuse buffer across iterations to avoid per-symbol allocation.
         let mut buf = vec![0u8; symbol_size];
-        let mut seen = Vec::new();
 
         for i in 0..count {
             let esi = start_esi + i as u32;
-            let degree = self.repair_symbol_into_with_degree(esi, &mut buf, &mut seen);
+            let degree = self.repair_symbol_into_with_degree(esi, &mut buf);
             let data = buf[..symbol_size].to_vec();
 
             // Update stats
@@ -1031,60 +1025,42 @@ impl SystematicEncoder {
         self.systematic_emitted
     }
 
-    /// Generate a repair symbol into `buf` and return the degree.
+    /// Generate a repair symbol into `buf` using RFC tuple-derived equation terms.
     ///
     /// `buf` must be at least `symbol_size` bytes; it is zeroed then filled.
-    /// Uses a `Vec<bool>` bitset (size L, typically 20-50) instead of
-    /// `Vec::contains` for O(1) duplicate checking during index sampling.
-    fn repair_symbol_into_with_degree(
-        &self,
-        esi: u32,
-        buf: &mut [u8],
-        seen: &mut Vec<bool>,
-    ) -> usize {
+    fn repair_symbol_into_with_degree(&self, esi: u32, buf: &mut [u8]) -> usize {
         let symbol_size = self.params.symbol_size;
-        let l = self.params.l;
         buf[..symbol_size].fill(0);
 
-        // Reset bitset (reuse allocation across calls)
-        seen.clear();
-        seen.resize(l, false);
+        let (columns, coefficients) = self.params.rfc_repair_equation(esi);
+        debug_assert_eq!(
+            columns.len(),
+            coefficients.len(),
+            "RFC repair equation columns/coefficients mismatch"
+        );
+        debug_assert!(
+            columns.iter().all(|&idx| idx < self.params.l),
+            "RFC repair equation index out of range"
+        );
 
-        // Seed per-symbol RNG from block seed + ESI
-        let sym_seed = self
-            .seed
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(u64::from(esi));
-        let mut rng = DetRng::new(sym_seed);
-
-        let degree = self.soliton.sample(rng.next_u64() as u32);
-
-        // Sample distinct intermediate symbol indices (without replacement)
-        // to avoid XOR cancellation of duplicate entries.
-        let capped_degree = degree.min(l);
-        for _ in 0..capped_degree {
-            let mut idx = rng.next_usize(l);
-            // Rejection-sample to avoid duplicates (O(1) via bitset).
-            while seen[idx] {
-                idx = rng.next_usize(l);
+        for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+            if coefficient.is_zero() {
+                continue;
             }
-            seen[idx] = true;
-            for (r, &s) in buf[..symbol_size]
-                .iter_mut()
-                .zip(self.intermediate[idx].iter())
-            {
-                *r ^= s;
-            }
+            gf256_addmul_slice(
+                &mut buf[..symbol_size],
+                &self.intermediate[column],
+                coefficient,
+            );
         }
 
-        degree
+        columns.len()
     }
 
     /// Generate a repair symbol and return both data and degree.
     fn repair_symbol_with_degree(&self, esi: u32) -> (Vec<u8>, usize) {
         let mut result = vec![0u8; self.params.symbol_size];
-        let mut seen = Vec::new();
-        let degree = self.repair_symbol_into_with_degree(esi, &mut result, &mut seen);
+        let degree = self.repair_symbol_into_with_degree(esi, &mut result);
         (result, degree)
     }
 }
@@ -1391,6 +1367,48 @@ mod tests {
             r0 != r1 && r1 != r2,
             "repair symbols should generally differ"
         );
+    }
+
+    #[test]
+    fn repair_symbol_matches_rfc_equation_terms() {
+        let k = 12;
+        let symbol_size = 32;
+        let source = make_source_symbols(k, symbol_size);
+        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        for esi in (k as u32)..(k as u32 + 8) {
+            let repair = enc.repair_symbol(esi);
+            let (columns, coefficients) = enc.params().rfc_repair_equation(esi);
+            let mut expected = vec![0u8; symbol_size];
+
+            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                gf256_addmul_slice(&mut expected, enc.intermediate_symbol(column), coefficient);
+            }
+
+            assert_eq!(
+                repair, expected,
+                "repair symbol must equal RFC tuple-derived equation expansion for esi={esi}"
+            );
+        }
+    }
+
+    #[test]
+    fn emitted_repair_degree_matches_rfc_equation_width() {
+        let k = 10;
+        let symbol_size = 24;
+        let source = make_source_symbols(k, symbol_size);
+        let mut enc = SystematicEncoder::new(&source, symbol_size, 7).unwrap();
+        let emitted = enc.emit_repair(6);
+
+        for symbol in emitted {
+            let (columns, _) = enc.params().rfc_repair_equation(symbol.esi);
+            assert_eq!(
+                symbol.degree,
+                columns.len(),
+                "degree metadata must match RFC tuple term count for esi={}",
+                symbol.esi
+            );
+        }
     }
 
     #[test]

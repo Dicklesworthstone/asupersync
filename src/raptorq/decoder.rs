@@ -15,9 +15,8 @@ use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, PeelingTrace, ReceivedSummary,
 };
-use crate::raptorq::systematic::{ConstraintMatrix, RobustSoliton, SystematicParams};
+use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::types::ObjectId;
-use crate::util::DetRng;
 
 use std::collections::BTreeSet;
 
@@ -168,8 +167,7 @@ impl Equation {
     fn coef(&self, col: usize) -> Gf256 {
         self.terms
             .binary_search_by_key(&col, |(c, _)| *c)
-            .map(|idx| self.terms[idx].1)
-            .unwrap_or(Gf256::ZERO)
+            .map_or(Gf256::ZERO, |idx| self.terms[idx].1)
     }
 }
 
@@ -184,7 +182,6 @@ impl Equation {
 pub struct InactivationDecoder {
     params: SystematicParams,
     seed: u64,
-    soliton: RobustSoliton,
 }
 
 impl InactivationDecoder {
@@ -192,12 +189,7 @@ impl InactivationDecoder {
     #[must_use]
     pub fn new(k: usize, symbol_size: usize, seed: u64) -> Self {
         let params = SystematicParams::for_source_block(k, symbol_size);
-        let soliton = RobustSoliton::new(params.l, 0.2, 0.05);
-        Self {
-            params,
-            seed,
-            soliton,
-        }
+        Self { params, seed }
     }
 
     /// Returns the encoding parameters.
@@ -820,39 +812,13 @@ impl InactivationDecoder {
         Ok(())
     }
 
-    /// Generate the equation (columns + coefficients) for a repair symbol.
+    /// Generate the RFC 6330 tuple-derived equation (columns + coefficients) for a repair symbol.
     ///
-    /// This reconstructs the LT encoding pattern for the given ESI.
-    /// Must exactly mirror `SystematicEncoder::repair_symbol_with_degree`:
-    /// degree is capped to L and indices are rejection-sampled without
-    /// replacement so the RNG state stays in sync.
+    /// This must stay in parity with `SystematicEncoder::repair_symbol` so that
+    /// decoder row construction exactly matches encoder repair bytes.
     #[must_use]
     pub fn repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        let l = self.params.l;
-
-        let sym_seed = self
-            .seed
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(u64::from(esi));
-        let mut rng = DetRng::new(sym_seed);
-
-        let degree = self.soliton.sample(rng.next_u64() as u32);
-        let capped_degree = degree.min(l);
-
-        let mut columns = Vec::with_capacity(capped_degree);
-        let mut coefficients = Vec::with_capacity(capped_degree);
-
-        for _ in 0..capped_degree {
-            let mut idx = rng.next_usize(l);
-            // Rejection-sample to avoid duplicates (matches encoder exactly).
-            while columns.contains(&idx) {
-                idx = rng.next_usize(l);
-            }
-            columns.push(idx);
-            coefficients.push(Gf256::ONE); // XOR-based LT uses coefficient 1
-        }
-
-        (columns, coefficients)
+        self.params.rfc_repair_equation(esi)
     }
 
     /// Generate the equation (columns + coefficients) using RFC 6330 tuple rules.
@@ -860,12 +826,10 @@ impl InactivationDecoder {
     /// This method computes tuple parameters from RFC 6330 Section 5.3.5.4 and
     /// expands them into intermediate symbol indices using Section 5.3.5.3.
     ///
-    /// Note: The primary `repair_equation()` currently mirrors the existing
-    /// encoder implementation. This RFC-exact variant is provided to support
-    /// conformance migration while preserving current decode compatibility.
+    /// This is kept as an explicit alias used by RFC conformance tests.
     #[must_use]
     pub fn repair_equation_rfc6330(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        self.params.rfc_repair_equation(esi)
+        self.repair_equation(esi)
     }
 
     /// Generate equations for all K source symbols.
