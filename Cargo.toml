@@ -31,7 +31,7 @@ include = [
 ]
 
 [features]
-default = ["test-internals"]
+default = ["test-internals", "simd-intrinsics"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
@@ -75,6 +75,10 @@ mysql = []
 # Re-enable when a tokio-free QUIC stack is available.
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
+# Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
+# When disabled, the safe portable SIMD fallback (std::simd) still provides ~2-3x
+# over scalar table lookups. Disable to keep the raptorq module free of unsafe code.
+simd-intrinsics = []
 # Enable Loom concurrency tests for scheduler verification.
 loom-tests = ["dep:loom"]
 

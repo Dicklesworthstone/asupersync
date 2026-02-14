@@ -35,19 +35,19 @@
 //!   - dispatch decision is memoized in `OnceLock`, so kernel selection is stable
 //!     for process lifetime.
 
-#![allow(unsafe_code)]
+#![cfg_attr(feature = "simd-intrinsics", allow(unsafe_code))]
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 use core::arch::aarch64::{
     uint8x16_t, vandq_u8, vdupq_n_u8, veorq_u8, vld1q_u8, vqtbl1q_u8, vshrq_n_u8, vst1q_u8,
 };
-#[cfg(target_arch = "x86")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
     __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
     _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
     _mm256_xor_si256, _mm_loadu_si128,
 };
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
     __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
     _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
@@ -196,11 +196,14 @@ impl NibbleTables {
 pub enum Gf256Kernel {
     /// Portable fallback used everywhere.
     Scalar,
-    /// x86/x86_64 AVX2-capable lane.
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    /// x86/x86_64 AVX2-capable lane (requires `simd-intrinsics` feature).
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
     X86Avx2,
-    /// aarch64 NEON-capable lane.
-    #[cfg(target_arch = "aarch64")]
+    /// aarch64 NEON-capable lane (requires `simd-intrinsics` feature).
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     Aarch64Neon,
 }
 
@@ -217,13 +220,17 @@ struct Gf256Dispatch {
 }
 
 static DISPATCH: std::sync::OnceLock<Gf256Dispatch> = std::sync::OnceLock::new();
+static DUAL_POLICY: std::sync::OnceLock<DualKernelPolicy> = std::sync::OnceLock::new();
 
 fn dispatch() -> &'static Gf256Dispatch {
     DISPATCH.get_or_init(detect_dispatch)
 }
 
 fn detect_dispatch() -> Gf256Dispatch {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
     {
         if std::is_x86_feature_detected!("avx2") {
             return Gf256Dispatch {
@@ -235,7 +242,7 @@ fn detect_dispatch() -> Gf256Dispatch {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     {
         if std::arch::is_aarch64_feature_detected!("neon") {
             return Gf256Dispatch {
@@ -252,6 +259,136 @@ fn detect_dispatch() -> Gf256Dispatch {
         add_slice: gf256_add_slice_scalar,
         mul_slice: gf256_mul_slice_scalar,
         addmul_slice: gf256_addmul_slice_scalar,
+    }
+}
+
+/// Deterministic policy for dual-slice fused kernels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DualKernelOverride {
+    Auto,
+    ForceSequential,
+    ForceFused,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DualKernelPolicy {
+    mode: DualKernelOverride,
+    mul_min_total: usize,
+    mul_max_total: usize,
+    addmul_min_total: usize,
+    addmul_max_total: usize,
+    max_lane_ratio: usize,
+}
+
+fn dual_policy() -> &'static DualKernelPolicy {
+    DUAL_POLICY.get_or_init(detect_dual_policy)
+}
+
+fn detect_dual_policy() -> DualKernelPolicy {
+    let mode = match std::env::var("ASUPERSYNC_GF256_DUAL_POLICY")
+        .ok()
+        .as_deref()
+    {
+        Some("off") | Some("sequential") => DualKernelOverride::ForceSequential,
+        Some("fused") | Some("force_fused") => DualKernelOverride::ForceFused,
+        _ => DualKernelOverride::Auto,
+    };
+
+    let mut policy = match dispatch().kind {
+        Gf256Kernel::Scalar => DualKernelPolicy {
+            mode,
+            mul_min_total: usize::MAX,
+            mul_max_total: 0,
+            addmul_min_total: usize::MAX,
+            addmul_max_total: 0,
+            max_lane_ratio: 1,
+        },
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        Gf256Kernel::X86Avx2 => DualKernelPolicy {
+            mode,
+            // Conservative default: prefer fused dual mul on medium-size windows
+            // and disable on large windows where some workers regress.
+            mul_min_total: 8 * 1024,
+            mul_max_total: 24 * 1024,
+            // Addmul has thinner margins; keep fused window narrower.
+            addmul_min_total: 8 * 1024,
+            addmul_max_total: 16 * 1024,
+            max_lane_ratio: 8,
+        },
+        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+        Gf256Kernel::Aarch64Neon => DualKernelPolicy {
+            mode,
+            mul_min_total: 8 * 1024,
+            mul_max_total: 24 * 1024,
+            addmul_min_total: 8 * 1024,
+            addmul_max_total: 16 * 1024,
+            max_lane_ratio: 8,
+        },
+    };
+
+    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL") {
+        policy.mul_min_total = v;
+    }
+    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL") {
+        policy.mul_max_total = v;
+    }
+    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL") {
+        policy.addmul_min_total = v;
+    }
+    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL") {
+        policy.addmul_max_total = v;
+    }
+    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO") {
+        policy.max_lane_ratio = v.max(1);
+    }
+
+    policy
+}
+
+fn parse_usize_env(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.parse::<usize>().ok()
+}
+
+#[inline]
+fn lane_ratio_within(len_a: usize, len_b: usize, max_ratio: usize) -> bool {
+    let lo = len_a.min(len_b);
+    let hi = len_a.max(len_b);
+    lo > 0 && lo.saturating_mul(max_ratio) >= hi
+}
+
+#[inline]
+fn in_window(total: usize, min_total: usize, max_total: usize) -> bool {
+    min_total <= max_total && (min_total..=max_total).contains(&total)
+}
+
+#[inline]
+fn should_use_dual_mul_fused(len_a: usize, len_b: usize) -> bool {
+    let policy = dual_policy();
+    match policy.mode {
+        DualKernelOverride::ForceSequential => false,
+        DualKernelOverride::ForceFused => true,
+        DualKernelOverride::Auto => {
+            let total = len_a.saturating_add(len_b);
+            in_window(total, policy.mul_min_total, policy.mul_max_total)
+                && lane_ratio_within(len_a, len_b, policy.max_lane_ratio)
+        }
+    }
+}
+
+#[inline]
+fn should_use_dual_addmul_fused(len_a: usize, len_b: usize) -> bool {
+    let policy = dual_policy();
+    match policy.mode {
+        DualKernelOverride::ForceSequential => false,
+        DualKernelOverride::ForceFused => true,
+        DualKernelOverride::Auto => {
+            let total = len_a.saturating_add(len_b);
+            in_window(total, policy.addmul_min_total, policy.addmul_max_total)
+                && lane_ratio_within(len_a, len_b, policy.max_lane_ratio)
+        }
     }
 }
 
@@ -496,13 +633,16 @@ fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 fn gf256_add_slice_x86_avx2(dst: &mut [u8], src: &[u8]) {
     // Dispatch scaffold: AVX2 lane currently reuses scalar core.
     gf256_add_slice_scalar(dst, src);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 fn gf256_add_slice_aarch64_neon(dst: &mut [u8], src: &[u8]) {
     // Dispatch scaffold: NEON lane currently reuses scalar core.
     gf256_add_slice_scalar(dst, src);
@@ -520,6 +660,7 @@ fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
     &MUL_TABLES[c.0 as usize]
 }
 
+#[cfg(feature = "simd-intrinsics")]
 fn mul_nibble_tables(c: Gf256) -> ([u8; 16], [u8; 16]) {
     let mut low = [0u8; 16];
     let mut high = [0u8; 16];
@@ -541,6 +682,62 @@ fn mul_nibble_tables(c: Gf256) -> ([u8; 16], [u8; 16]) {
 #[inline]
 pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     (dispatch().mul_slice)(dst, c);
+}
+
+/// Multiply two slices by the same scalar in one fused dispatch.
+///
+/// This superkernel amortizes table/nibble derivation and ISA dispatch across
+/// both slices: `dst_a[i] *= c` and `dst_b[i] *= c`.
+#[inline]
+pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
+    if c.is_zero() {
+        dst_a.fill(0);
+        dst_b.fill(0);
+        return;
+    }
+    if c == Gf256::ONE {
+        return;
+    }
+    if !should_use_dual_mul_fused(dst_a.len(), dst_b.len()) {
+        gf256_mul_slice(dst_a, c);
+        gf256_mul_slice(dst_b, c);
+        return;
+    }
+
+    let table = mul_table_for(c);
+    #[cfg(feature = "simd-intrinsics")]
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    if matches!(dispatch().kind, Gf256Kernel::X86Avx2) && std::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support is checked above and pointers remain within
+        // bounds of the provided slices.
+        unsafe {
+            gf256_mul_slice_x86_avx2_impl_tables(dst_a, &low_tbl_arr, &high_tbl_arr, table);
+            gf256_mul_slice_x86_avx2_impl_tables(dst_b, &low_tbl_arr, &high_tbl_arr, table);
+        }
+        return;
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    if matches!(dispatch().kind, Gf256Kernel::Aarch64Neon)
+        && std::arch::is_aarch64_feature_detected!("neon")
+    {
+        // SAFETY: NEON support is checked above and pointers remain within
+        // bounds of the provided slices.
+        unsafe {
+            gf256_mul_slice_aarch64_neon_impl_tables(dst_a, &low_tbl_arr, &high_tbl_arr, table);
+            gf256_mul_slice_aarch64_neon_impl_tables(dst_b, &low_tbl_arr, &high_tbl_arr, table);
+        }
+        return;
+    }
+
+    let nib = NibbleTables::for_scalar(c);
+    mul_with_table_wide(dst_a, &nib, table);
+    mul_with_table_wide(dst_b, &nib, table);
 }
 
 fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
@@ -565,7 +762,10 @@ fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 fn gf256_mul_slice_x86_avx2(dst: &mut [u8], c: Gf256) {
     if c.is_zero() {
         dst.fill(0);
@@ -589,7 +789,7 @@ fn gf256_mul_slice_x86_avx2(dst: &mut [u8], c: Gf256) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 fn gf256_mul_slice_aarch64_neon(dst: &mut [u8], c: Gf256) {
     if c.is_zero() {
         dst.fill(0);
@@ -717,6 +917,99 @@ pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
     (dispatch().addmul_slice)(dst, src, c);
 }
 
+/// Multiply-accumulate two independent pairs using one fused scalar path.
+///
+/// Applies:
+/// - `dst_a[i] += c * src_a[i]`
+/// - `dst_b[i] += c * src_b[i]`
+///
+/// with shared kernel setup for both pairs.
+///
+/// # Panics
+///
+/// Panics if `dst_a.len() != src_a.len()` or `dst_b.len() != src_b.len()`.
+#[inline]
+pub fn gf256_addmul_slices2(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+    c: Gf256,
+) {
+    assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
+    assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
+    if c.is_zero() {
+        return;
+    }
+    if c == Gf256::ONE {
+        gf256_add_slice(dst_a, src_a);
+        gf256_add_slice(dst_b, src_b);
+        return;
+    }
+    if !should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
+        gf256_addmul_slice(dst_a, src_a, c);
+        gf256_addmul_slice(dst_b, src_b, c);
+        return;
+    }
+
+    let table = mul_table_for(c);
+    #[cfg(feature = "simd-intrinsics")]
+    let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    if matches!(dispatch().kind, Gf256Kernel::X86Avx2) && std::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support is checked above and both pairs are length-checked.
+        unsafe {
+            gf256_addmul_slice_x86_avx2_impl_tables(
+                dst_a,
+                src_a,
+                &low_tbl_arr,
+                &high_tbl_arr,
+                table,
+            );
+            gf256_addmul_slice_x86_avx2_impl_tables(
+                dst_b,
+                src_b,
+                &low_tbl_arr,
+                &high_tbl_arr,
+                table,
+            );
+        }
+        return;
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    if matches!(dispatch().kind, Gf256Kernel::Aarch64Neon)
+        && std::arch::is_aarch64_feature_detected!("neon")
+    {
+        // SAFETY: NEON support is checked above and both pairs are length-checked.
+        unsafe {
+            gf256_addmul_slice_aarch64_neon_impl_tables(
+                dst_a,
+                src_a,
+                &low_tbl_arr,
+                &high_tbl_arr,
+                table,
+            );
+            gf256_addmul_slice_aarch64_neon_impl_tables(
+                dst_b,
+                src_b,
+                &low_tbl_arr,
+                &high_tbl_arr,
+                table,
+            );
+        }
+        return;
+    }
+
+    let nib = NibbleTables::for_scalar(c);
+    addmul_with_table_wide(dst_a, src_a, &nib, table);
+    addmul_with_table_wide(dst_b, src_b, &nib, table);
+}
+
 fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
     const ADDMUL_TABLE_THRESHOLD: usize = 64;
 
@@ -742,7 +1035,10 @@ fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 fn gf256_addmul_slice_x86_avx2(dst: &mut [u8], src: &[u8], c: Gf256) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
     if c.is_zero() {
@@ -767,7 +1063,7 @@ fn gf256_addmul_slice_x86_avx2(dst: &mut [u8], src: &[u8], c: Gf256) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 fn gf256_addmul_slice_aarch64_neon(dst: &mut [u8], src: &[u8], c: Gf256) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
     if c.is_zero() {
@@ -792,10 +1088,28 @@ fn gf256_addmul_slice_aarch64_neon(dst: &mut [u8], src: &[u8], c: Gf256) {
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 #[target_feature(enable = "avx2")]
 unsafe fn gf256_mul_slice_x86_avx2_impl(dst: &mut [u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    gf256_mul_slice_x86_avx2_impl_tables(dst, &low_tbl_arr, &high_tbl_arr, mul_table_for(c));
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf256_mul_slice_x86_avx2_impl_tables(
+    dst: &mut [u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees AVX2 support.
     let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr() as *const __m128i) };
     let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr() as *const __m128i) };
     let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
@@ -805,6 +1119,7 @@ unsafe fn gf256_mul_slice_x86_avx2_impl(dst: &mut [u8], c: Gf256) {
     let mut i = 0usize;
     while i + 32 <= dst.len() {
         let ptr = unsafe { dst.as_mut_ptr().add(i) };
+        // SAFETY: pointer range is in-bounds and unaligned loads/stores are used.
         let input = unsafe { _mm256_loadu_si256(ptr as *const __m256i) };
         let low_nibbles = _mm256_and_si256(input, nibble_mask);
         let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(input, 4), nibble_mask);
@@ -815,18 +1130,40 @@ unsafe fn gf256_mul_slice_x86_avx2_impl(dst: &mut [u8], c: Gf256) {
         i += 32;
     }
 
-    if i < dst.len() {
-        let table = mul_table_for(c);
-        for d in &mut dst[i..] {
-            *d = table[*d as usize];
-        }
+    for d in &mut dst[i..] {
+        *d = table[*d as usize];
     }
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
 #[target_feature(enable = "avx2")]
 unsafe fn gf256_addmul_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    gf256_addmul_slice_x86_avx2_impl_tables(
+        dst,
+        src,
+        &low_tbl_arr,
+        &high_tbl_arr,
+        mul_table_for(c),
+    );
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf256_addmul_slice_x86_avx2_impl_tables(
+    dst: &mut [u8],
+    src: &[u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees AVX2 support and matching lengths.
     let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr() as *const __m128i) };
     let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr() as *const __m128i) };
     let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
@@ -837,6 +1174,7 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8], c: Gf256)
     while i + 32 <= src.len() {
         let src_ptr = unsafe { src.as_ptr().add(i) };
         let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
+        // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
         let src_v = unsafe { _mm256_loadu_si256(src_ptr as *const __m256i) };
         let dst_v = unsafe { _mm256_loadu_si256(dst_ptr as *const __m256i) };
         let low_nibbles = _mm256_and_si256(src_v, nibble_mask);
@@ -849,17 +1187,25 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8], c: Gf256)
         i += 32;
     }
 
-    if i < src.len() {
-        let table = mul_table_for(c);
-        for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
-            *d ^= table[*s as usize];
-        }
+    for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
+        *d ^= table[*s as usize];
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 unsafe fn gf256_mul_slice_aarch64_neon_impl(dst: &mut [u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    gf256_mul_slice_aarch64_neon_impl_tables(dst, &low_tbl_arr, &high_tbl_arr, mul_table_for(c));
+}
+
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+unsafe fn gf256_mul_slice_aarch64_neon_impl_tables(
+    dst: &mut [u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees NEON support.
     let low_tbl: uint8x16_t = unsafe { vld1q_u8(low_tbl_arr.as_ptr()) };
     let high_tbl: uint8x16_t = unsafe { vld1q_u8(high_tbl_arr.as_ptr()) };
     let nibble_mask = vdupq_n_u8(0x0f);
@@ -877,17 +1223,32 @@ unsafe fn gf256_mul_slice_aarch64_neon_impl(dst: &mut [u8], c: Gf256) {
         i += 16;
     }
 
-    if i < dst.len() {
-        let table = mul_table_for(c);
-        for d in &mut dst[i..] {
-            *d = table[*d as usize];
-        }
+    for d in &mut dst[i..] {
+        *d = table[*d as usize];
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 unsafe fn gf256_addmul_slice_aarch64_neon_impl(dst: &mut [u8], src: &[u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+    gf256_addmul_slice_aarch64_neon_impl_tables(
+        dst,
+        src,
+        &low_tbl_arr,
+        &high_tbl_arr,
+        mul_table_for(c),
+    );
+}
+
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+unsafe fn gf256_addmul_slice_aarch64_neon_impl_tables(
+    dst: &mut [u8],
+    src: &[u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees NEON support and matching lengths.
     let low_tbl: uint8x16_t = unsafe { vld1q_u8(low_tbl_arr.as_ptr()) };
     let high_tbl: uint8x16_t = unsafe { vld1q_u8(high_tbl_arr.as_ptr()) };
     let nibble_mask = vdupq_n_u8(0x0f);
@@ -908,11 +1269,8 @@ unsafe fn gf256_addmul_slice_aarch64_neon_impl(dst: &mut [u8], src: &[u8], c: Gf
         i += 16;
     }
 
-    if i < src.len() {
-        let table = mul_table_for(c);
-        for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
-            *d ^= table[*s as usize];
-        }
+    for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
+        *d ^= table[*s as usize];
     }
 }
 
@@ -1177,6 +1535,46 @@ mod tests {
     }
 
     #[test]
+    fn mul_slices2_matches_two_independent_mul_slice_calls() {
+        const LEN_A: usize = 73;
+        const LEN_B: usize = 131;
+        let c = Gf256(29);
+
+        let mut a_fused: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(7)) as u8).collect();
+        let mut b_fused: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(11)) as u8).collect();
+        let mut a_seq = a_fused.clone();
+        let mut b_seq = b_fused.clone();
+
+        gf256_mul_slices2(&mut a_fused, &mut b_fused, c);
+        gf256_mul_slice(&mut a_seq, c);
+        gf256_mul_slice(&mut b_seq, c);
+
+        assert_eq!(a_fused, a_seq);
+        assert_eq!(b_fused, b_seq);
+    }
+
+    #[test]
+    fn addmul_slices2_matches_two_independent_addmul_slice_calls() {
+        const LEN_A: usize = 79;
+        const LEN_B: usize = 149;
+        let c = Gf256(71);
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut dst_a_fused: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut dst_b_fused: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut dst_a_seq = dst_a_fused.clone();
+        let mut dst_b_seq = dst_b_fused.clone();
+
+        gf256_addmul_slices2(&mut dst_a_fused, &src_a, &mut dst_b_fused, &src_b, c);
+        gf256_addmul_slice(&mut dst_a_seq, &src_a, c);
+        gf256_addmul_slice(&mut dst_b_seq, &src_b, c);
+
+        assert_eq!(dst_a_fused, dst_a_seq);
+        assert_eq!(dst_b_fused, dst_b_seq);
+    }
+
+    #[test]
     fn active_kernel_is_stable_within_process() {
         let first = active_kernel();
         for _ in 0..16 {
@@ -1282,5 +1680,22 @@ mod tests {
         gf256_addmul_slice(&mut addmul_dispatch, &src, c);
         gf256_addmul_slice_scalar(&mut addmul_scalar, &src, c);
         assert_eq!(addmul_dispatch, addmul_scalar);
+    }
+
+    #[test]
+    fn dual_policy_ratio_gate_behaves_as_expected() {
+        assert!(lane_ratio_within(1024, 1024, 1));
+        assert!(lane_ratio_within(1024, 4096, 4));
+        assert!(!lane_ratio_within(1024, 4097, 4));
+        assert!(!lane_ratio_within(0, 1024, 8));
+    }
+
+    #[test]
+    fn dual_policy_window_gate_behaves_as_expected() {
+        assert!(in_window(8192, 8192, 16384));
+        assert!(in_window(12000, 8192, 16384));
+        assert!(!in_window(4096, 8192, 16384));
+        assert!(!in_window(20000, 8192, 16384));
+        assert!(!in_window(12000, 20000, 10000));
     }
 }
