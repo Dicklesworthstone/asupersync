@@ -128,7 +128,7 @@ franken-kernel = { version = "0.1.0", path = "franken_kernel" }
 # Optional conformance tooling (CLI + reports)
 conformance = { package = "asupersync-conformance", version = "0.1.1", path = "conformance", optional = true }
 # Optional LZ4 compression for trace files
-lz4_flex = { version = "0.11", optional = true }
+lz4_flex = { version = "0.12", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
 # Tempfile helper for test-internals and test logging utilities.
@@ -139,7 +139,7 @@ rustls-pki-types = { version = "1.12", optional = true }
 # Optional native root certificates
 rustls-native-certs = { version = "0.8", optional = true }
 # Optional webpki root certificates
-webpki-roots = { version = "0.26", optional = true }
+webpki-roots = { version = "1.0", optional = true }
 # PEM file parsing for TLS certificates
 rustls-pemfile = { version = "2.2", optional = true }
 # Base64 encoding for WebSocket handshake and certificate pins
@@ -187,7 +187,7 @@ tempfile = "3.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.28", default-features = false, features = ["metrics", "testing"] }
-lz4_flex = "0.11"
+lz4_flex = "0.12"
 toml = "0.8"
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.13"
