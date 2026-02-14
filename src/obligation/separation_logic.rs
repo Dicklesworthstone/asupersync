@@ -1711,7 +1711,7 @@ mod tests {
         init_test("resource_predicate_display");
         let p = ResourcePredicate::reserved(o(0), ObligationKind::Lease, t(1), r(2));
         let s = format!("{p}");
-        let has_lease = s.contains("Lease");
+        let has_lease = s.contains("lease");
         crate::assert_with_log!(has_lease, "display has kind", true, has_lease);
         crate::test_complete!("resource_predicate_display");
     }
