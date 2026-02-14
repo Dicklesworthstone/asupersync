@@ -27,7 +27,8 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
+use parking_lot::Mutex as ParkingMutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -68,7 +69,7 @@ impl std::error::Error for TryAcquireError {}
 #[derive(Debug)]
 pub struct Semaphore {
     /// Internal state for permits and waiters.
-    state: StdMutex<SemaphoreState>,
+    state: ParkingMutex<SemaphoreState>,
     /// Maximum permits (initial count).
     max_permits: usize,
 }
@@ -96,7 +97,7 @@ impl Semaphore {
     #[must_use]
     pub fn new(permits: usize) -> Self {
         Self {
-            state: StdMutex::new(SemaphoreState {
+            state: ParkingMutex::new(SemaphoreState {
                 permits,
                 closed: false,
                 waiters: VecDeque::new(),
@@ -109,7 +110,7 @@ impl Semaphore {
     /// Returns the number of currently available permits.
     #[must_use]
     pub fn available_permits(&self) -> usize {
-        self.state.lock().expect("semaphore lock poisoned").permits
+        self.state.lock().permits
     }
 
     /// Returns the maximum number of permits (initial count).
@@ -121,12 +122,12 @@ impl Semaphore {
     /// Returns true if the semaphore is closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.state.lock().expect("semaphore lock poisoned").closed
+        self.state.lock().closed
     }
 
     /// Closes the semaphore.
     pub fn close(&self) {
-        let mut state = self.state.lock().expect("semaphore lock poisoned");
+        let mut state = self.state.lock();
         state.closed = true;
         for waiter in state.waiters.drain(..) {
             waiter.waker.wake();
@@ -156,7 +157,7 @@ impl Semaphore {
             "cannot acquire more permits than semaphore capacity"
         );
 
-        let mut state = self.state.lock().expect("semaphore lock poisoned");
+        let mut state = self.state.lock();
         let result = if state.closed {
             Err(TryAcquireError)
         } else if !state.waiters.is_empty() {
@@ -179,7 +180,7 @@ impl Semaphore {
     ///
     /// Saturates at `usize::MAX` if adding would overflow.
     pub fn add_permits(&self, count: usize) {
-        let mut state = self.state.lock().expect("semaphore lock poisoned");
+        let mut state = self.state.lock();
         state.permits = state.permits.saturating_add(count);
         // Only wake the first waiter since FIFO ordering means only it can acquire.
         // Waking all waiters wastes CPU when only the front can make progress.
@@ -204,8 +205,7 @@ impl Drop for AcquireFuture<'_, '_> {
             let mut state = self
                 .semaphore
                 .state
-                .lock()
-                .expect("semaphore lock poisoned");
+                .lock();
 
             // If we are at the front, we need to wake the next waiter when we leave,
             // otherwise the signal (permits available) might be lost.
@@ -422,8 +422,7 @@ impl Drop for OwnedAcquireFuture {
             let mut state = self
                 .semaphore
                 .state
-                .lock()
-                .expect("semaphore lock poisoned");
+                .lock();
 
             // If we are at the front, we need to wake the next waiter when we leave,
             // otherwise the signal (permits available) might be lost.
@@ -696,14 +695,14 @@ mod tests {
         let mut fut = sem.acquire(&cx, 1);
         let pending = poll_once(&mut fut).is_none();
         crate::assert_with_log!(pending, "acquire pending", true, pending);
-        let waiter_len = sem.state.lock().unwrap().waiters.len();
+        let waiter_len = sem.state.lock().waiters.len();
         crate::assert_with_log!(waiter_len == 1, "waiter queued", 1usize, waiter_len);
 
         cx.set_cancel_requested(true);
         let result = poll_once(&mut fut).expect("cancel poll");
         let cancelled = matches!(result, Err(AcquireError::Cancelled));
         crate::assert_with_log!(cancelled, "cancelled error", true, cancelled);
-        let waiter_len = sem.state.lock().unwrap().waiters.len();
+        let waiter_len = sem.state.lock().waiters.len();
         crate::assert_with_log!(waiter_len == 0, "waiter removed", 0usize, waiter_len);
         crate::test_complete!("cancel_removes_waiter");
     }
@@ -718,11 +717,11 @@ mod tests {
         let mut fut = sem.acquire(&cx, 1);
         let pending = poll_once(&mut fut).is_none();
         crate::assert_with_log!(pending, "acquire pending", true, pending);
-        let waiter_len = sem.state.lock().unwrap().waiters.len();
+        let waiter_len = sem.state.lock().waiters.len();
         crate::assert_with_log!(waiter_len == 1, "waiter queued", 1usize, waiter_len);
 
         drop(fut);
-        let waiter_len = sem.state.lock().unwrap().waiters.len();
+        let waiter_len = sem.state.lock().waiters.len();
         crate::assert_with_log!(waiter_len == 0, "waiter removed", 0usize, waiter_len);
         crate::test_complete!("drop_removes_waiter");
     }
