@@ -329,6 +329,9 @@ impl UdpSocket {
 
 impl From<StdUdpSocket> for UdpSocket {
     fn from(socket: StdUdpSocket) -> Self {
+        // Ensure async poll paths never block even when callers pass a
+        // freshly-created std socket in its default blocking mode.
+        let _ = socket.set_nonblocking(true);
         Self {
             inner: Arc::new(socket),
             registration: None,
@@ -402,6 +405,10 @@ mod tests {
     use crate::stream::StreamExt;
     use crate::types::{Budget, RegionId, TaskId};
     use futures_lite::future;
+    #[cfg(unix)]
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -535,6 +542,20 @@ mod tests {
             // Cloned socket should have no registration
             assert!(cloned.registration.is_none());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn udp_from_std_forces_nonblocking_mode() {
+        let std_socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind socket");
+        let socket = UdpSocket::from(std_socket);
+        let flags =
+            fcntl(socket.inner.as_ref().as_raw_fd(), FcntlArg::F_GETFL).expect("read socket flags");
+        let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
+        assert!(
+            is_nonblocking,
+            "UdpSocket::from should force nonblocking mode"
+        );
     }
 
     #[test]

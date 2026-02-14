@@ -92,7 +92,7 @@ impl ScheduledSet {
     const DENSE_COLLISION: u64 = u64::MAX;
     // Hard cap to avoid pathological allocations if someone schedules a very high-index TaskId.
     const MAX_DENSE_LEN: usize = 1 << 20; // 1,048,576 slots => 8 MiB
-    const MIN_DENSE_LEN: usize = 1024;
+    const MIN_DENSE_LEN: usize = 256;
 
     #[inline]
     fn with_capacity(capacity: usize) -> Self {

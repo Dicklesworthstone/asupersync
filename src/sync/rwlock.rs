@@ -294,7 +294,9 @@ impl<T> RwLock<T> {
         }
 
         let mut state = self.state.lock().expect("rwlock state poisoned");
-        if state.writer_active || state.readers > 0 {
+        // Do not let try_write() bypass queued async writers. If there are
+        // waiters, preserve queue order and report Locked.
+        if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
             return Err(TryWriteError::Locked);
         }
 
@@ -1206,6 +1208,35 @@ mod tests {
         drop(read_guard);
         let _ = handle.join();
         crate::test_complete!("writer_waiting_blocks_new_readers");
+    }
+
+    #[test]
+    fn try_write_does_not_bypass_waiting_writer_turn() {
+        init_test("try_write_does_not_bypass_waiting_writer_turn");
+        let cx = test_cx();
+        let lock = RwLock::new(1_u32);
+
+        // Hold a read lock so the writer must queue first.
+        let read_guard = read_blocking(&lock, &cx);
+        let mut queued_writer = lock.write(&cx);
+        let pending = poll_once(&mut queued_writer).is_none();
+        crate::assert_with_log!(pending, "writer queued while reader held", true, pending);
+
+        // Releasing the reader wakes the queued writer, but before that writer
+        // is polled again, try_write() must not barge ahead.
+        drop(read_guard);
+
+        let try_write_locked = matches!(lock.try_write(), Err(TryWriteError::Locked));
+        crate::assert_with_log!(
+            try_write_locked,
+            "try_write must not bypass queued writer",
+            true,
+            try_write_locked
+        );
+
+        let queued_guard = poll_until_ready(queued_writer).expect("queued writer should acquire");
+        drop(queued_guard);
+        crate::test_complete!("try_write_does_not_bypass_waiting_writer_turn");
     }
 
     #[test]
