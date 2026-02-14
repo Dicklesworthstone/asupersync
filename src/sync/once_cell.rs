@@ -538,6 +538,23 @@ impl<T> Future for WaitInit<'_, T> {
     }
 }
 
+impl<T> Drop for WaitInit<'_, T> {
+    fn drop(&mut self) {
+        if let Some(waiter) = self.waiter.as_ref() {
+            // Remove canceled waiter registrations immediately so repeated
+            // cancel/drop cycles don't accumulate until wake_all() drains.
+            waiter.store(false, Ordering::Release);
+            let mut guard = match self.cell.waiters.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .waiters
+                .retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +804,41 @@ mod tests {
             wake_counter_first.count()
         );
         crate::test_complete!("get_or_init_waiter_refreshes_queued_waker");
+    }
+
+    #[test]
+    fn get_or_init_cancelled_waiters_do_not_accumulate() {
+        init_test("get_or_init_cancelled_waiters_do_not_accumulate");
+        let cell: OnceCell<u32> = OnceCell::new();
+
+        // Hold cell in INITIALIZING so waiters will queue.
+        let mut init_fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+        assert!(Future::poll(init_fut.as_mut(), &mut noop_cx).is_pending());
+
+        // Repeatedly create + cancel waiters while initialization is pending.
+        for _ in 0..128 {
+            let mut waiter_fut = Box::pin(cell.get_or_init(|| async { 11u32 }));
+            assert!(Future::poll(waiter_fut.as_mut(), &mut noop_cx).is_pending());
+            drop(waiter_fut);
+        }
+
+        let queued_waiters = cell
+            .waiters
+            .lock()
+            .expect("waiters lock poisoned")
+            .waiters
+            .len();
+        crate::assert_with_log!(
+            queued_waiters == 0,
+            "canceled waiters are removed immediately",
+            0usize,
+            queued_waiters
+        );
+
+        drop(init_fut);
+        crate::test_complete!("get_or_init_cancelled_waiters_do_not_accumulate");
     }
 
     #[test]
