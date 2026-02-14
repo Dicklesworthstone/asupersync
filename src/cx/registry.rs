@@ -1047,6 +1047,18 @@ impl NameRegistry {
     /// in the region. The caller is responsible for resolving the corresponding
     /// obligations (leases released/aborted; permits aborted).
     pub fn cleanup_region(&mut self, region: RegionId) -> Vec<String> {
+        self.cleanup_region_at(region, Time::ZERO)
+    }
+
+    /// Remove all names held by tasks in the given region, granting freed
+    /// names to eligible waiters at the given virtual time.
+    ///
+    /// Returns the names that were removed (sorted deterministically).
+    ///
+    /// Note: this removes active leases, pending permits, and waiters held
+    /// in the region. The caller is responsible for resolving the corresponding
+    /// obligations (leases released/aborted; permits aborted).
+    pub fn cleanup_region_at(&mut self, region: RegionId, now: Time) -> Vec<String> {
         // Region close semantics: watchers owned by the region are removed before
         // ownership-change notifications are emitted.
         let _removed_watchers = self.cleanup_name_watchers_region(region);
@@ -1074,8 +1086,8 @@ impl NameRegistry {
             self.pending.remove(name);
         }
         active_removed.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, holder, holder_region) in active_removed {
-            self.emit_name_change(&name, holder, holder_region, NameOwnershipKind::Released);
+        for (name, holder, holder_region) in &active_removed {
+            self.emit_name_change(name, *holder, *holder_region, NameOwnershipKind::Released);
         }
         // Abort and remove granted leases belonging to this region to prevent
         // orphaned obligation-token drop-bomb panics.
@@ -1092,6 +1104,10 @@ impl NameRegistry {
             queue.retain(|w| w.region != region);
         }
         self.waiters.retain(|_, q| !q.is_empty());
+        // Grant freed names to eligible waiters from other regions.
+        for (name, _, _) in &active_removed {
+            self.try_grant_to_first_waiter(name, now);
+        }
         to_remove
     }
 
@@ -1103,6 +1119,18 @@ impl NameRegistry {
     /// by the task. The caller is responsible for resolving the corresponding
     /// obligations.
     pub fn cleanup_task(&mut self, task: TaskId) -> Vec<String> {
+        self.cleanup_task_at(task, Time::ZERO)
+    }
+
+    /// Remove all names held by a specific task, granting freed names to
+    /// eligible waiters at the given virtual time.
+    ///
+    /// Returns the names that were removed (sorted deterministically).
+    ///
+    /// Note: this removes active leases, pending permits, and waiters held
+    /// by the task. The caller is responsible for resolving the corresponding
+    /// obligations.
+    pub fn cleanup_task_at(&mut self, task: TaskId, now: Time) -> Vec<String> {
         let mut active_removed: Vec<(String, TaskId, RegionId)> = self
             .leases
             .iter()
@@ -1127,8 +1155,8 @@ impl NameRegistry {
             self.pending.remove(name);
         }
         active_removed.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, holder, region) in active_removed {
-            self.emit_name_change(&name, holder, region, NameOwnershipKind::Released);
+        for (name, holder, region) in &active_removed {
+            self.emit_name_change(name, *holder, *region, NameOwnershipKind::Released);
         }
         // Abort and remove granted leases belonging to this task to prevent
         // orphaned obligation-token drop-bomb panics.
@@ -1145,6 +1173,10 @@ impl NameRegistry {
             queue.retain(|w| w.holder != task);
         }
         self.waiters.retain(|_, q| !q.is_empty());
+        // Grant freed names to eligible waiters from other tasks.
+        for (name, _, _) in &active_removed {
+            self.try_grant_to_first_waiter(name, now);
+        }
         to_remove
     }
 }
@@ -3202,5 +3234,85 @@ mod tests {
         assert!(err.to_string().contains("budget"));
 
         crate::test_complete!("wait_budget_exceeded_display");
+    }
+
+    /// When cleanup_region removes a lease and a waiter from a *different*
+    /// region is queued, the waiter should be granted the name.
+    #[test]
+    fn cleanup_region_grants_to_cross_region_waiter() {
+        init_test("cleanup_region_grants_to_cross_region_waiter");
+
+        let mut reg = NameRegistry::new();
+        // Task 1 in region 0 holds "svc".
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Task 2 in region 1 waits for "svc".
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(1),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Cleanup region 0 (holder region) should free "svc" and grant to task 2.
+        reg.cleanup_region_at(rid(0), Time::from_secs(2));
+        // The original lease obligation must be resolved even though cleanup
+        // removed it from the registry.
+        lease.abort().unwrap();
+        assert_eq!(reg.waiter_count(), 0);
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        // The granted lease should be available.
+        let granted = reg.take_granted();
+        assert_eq!(granted.len(), 1);
+        assert_eq!(granted[0].name, "svc");
+        let mut granted_lease = granted.into_iter().next().unwrap().lease;
+        granted_lease.release().unwrap();
+
+        crate::test_complete!("cleanup_region_grants_to_cross_region_waiter");
+    }
+
+    /// When cleanup_task removes a lease and a waiter from a *different*
+    /// task is queued, the waiter should be granted the name.
+    #[test]
+    fn cleanup_task_grants_to_other_task_waiter() {
+        init_test("cleanup_task_grants_to_other_task_waiter");
+
+        let mut reg = NameRegistry::new();
+        // Task 1 holds "svc".
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Task 2 waits for "svc".
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Cleanup task 1 should free "svc" and grant to task 2.
+        reg.cleanup_task_at(tid(1), Time::from_secs(2));
+        // The original lease obligation must be resolved even though cleanup
+        // removed it from the registry.
+        lease.abort().unwrap();
+        assert_eq!(reg.waiter_count(), 0);
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        let granted = reg.take_granted();
+        assert_eq!(granted.len(), 1);
+        let mut granted_lease = granted.into_iter().next().unwrap().lease;
+        granted_lease.release().unwrap();
+
+        crate::test_complete!("cleanup_task_grants_to_other_task_waiter");
     }
 }
