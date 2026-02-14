@@ -12,8 +12,8 @@
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex as StdMutex;
 use std::task::{Context, Poll, Waker};
 
 /// A notify primitive for signaling events.
@@ -43,7 +43,7 @@ pub struct Notify {
     /// Number of stored notifications (for notify_one before wait).
     stored_notifications: AtomicUsize,
     /// Queue of waiters (protected by mutex).
-    waiters: StdMutex<WaiterSlab>,
+    waiters: Mutex<WaiterSlab>,
 }
 
 /// Slab-like storage for waiters that reuses freed slots to prevent
@@ -121,7 +121,7 @@ impl Notify {
         Self {
             generation: AtomicU64::new(0),
             stored_notifications: AtomicUsize::new(0),
-            waiters: StdMutex::new(WaiterSlab::new()),
+            waiters: Mutex::new(WaiterSlab::new()),
         }
     }
 
@@ -145,10 +145,7 @@ impl Notify {
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
     pub fn notify_one(&self) {
-        let mut waiters = match self.waiters.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut waiters = self.waiters.lock();
 
         // Find a waiter to notify.
         for entry in &mut waiters.entries {
@@ -180,10 +177,7 @@ impl Notify {
 
         // Collect all wakers (SmallVec avoids heap allocation for ≤8 waiters).
         let wakers: SmallVec<[Waker; 8]> = {
-            let mut waiters = match self.waiters.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut waiters = self.waiters.lock();
 
             waiters
                 .entries
@@ -210,10 +204,7 @@ impl Notify {
     /// Returns the number of tasks currently waiting.
     #[must_use]
     pub fn waiter_count(&self) -> usize {
-        let waiters = match self.waiters.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let waiters = self.waiters.lock();
         waiters.active_count()
     }
 }
@@ -284,10 +275,7 @@ impl Future for Notified<'_> {
                 }
 
                 // Register as a waiter.
-                let mut waiters = match self.notify.waiters.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
+                let mut waiters = self.notify.waiters.lock();
 
                 // Re-check stored notifications and generation while holding the waiter lock.
                 // This closes races where a notifier runs between the lock-free checks above and
@@ -339,10 +327,7 @@ impl Future for Notified<'_> {
 
                 // Check if we were notified.
                 if let Some(index) = self.waiter_index {
-                    let mut waiters = match self.notify.waiters.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
+                    let mut waiters = self.notify.waiters.lock();
 
                     if index < waiters.entries.len() {
                         if waiters.entries[index].notified {
@@ -379,10 +364,7 @@ impl Notified<'_> {
     /// Cleanup waiter registration.
     fn cleanup(&mut self) {
         if let Some(index) = self.waiter_index.take() {
-            let mut waiters = match self.notify.waiters.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut waiters = self.notify.waiters.lock();
 
             waiters.remove(index);
             drop(waiters);
@@ -626,7 +608,7 @@ mod tests {
         crate::assert_with_log!(count == 2, "two waiters after middle drop", 2usize, count);
 
         // Check that the Vec hasn't grown unboundedly: entries should be <= 3
-        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        let entries_len = notify.waiters.lock().entries.len();
         crate::assert_with_log!(entries_len <= 3, "entries bounded", true, entries_len <= 3);
 
         // Cancel all and verify full cleanup
@@ -637,13 +619,13 @@ mod tests {
         crate::assert_with_log!(count == 0, "no waiters after all drops", 0usize, count);
 
         // Vec should be empty after all waiters gone
-        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        let entries_len = notify.waiters.lock().entries.len();
         crate::assert_with_log!(entries_len == 0, "entries empty", 0usize, entries_len);
 
         // Verify slot reuse: register new waiters, they should reuse freed slots
         let mut fut_a = notify.notified();
         assert!(poll_once(&mut fut_a).is_pending());
-        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        let entries_len = notify.waiters.lock().entries.len();
         crate::assert_with_log!(entries_len == 1, "reused slot", 1usize, entries_len);
         drop(fut_a);
 
@@ -663,7 +645,7 @@ mod tests {
         }
 
         // After all cancellations, the slab should be empty
-        let entries_len = notify.waiters.lock().unwrap().entries.len();
+        let entries_len = notify.waiters.lock().entries.len();
         crate::assert_with_log!(entries_len == 0, "no growth", 0usize, entries_len);
 
         crate::test_complete!("test_repeated_cancel_no_growth");
@@ -676,7 +658,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
 
         // Hold the waiter lock so we can queue up both the notifier and the waiter registration.
-        let gate = notify.waiters.lock().expect("lock poisoned");
+        let gate = notify.waiters.lock();
 
         // Start the notifier first so it is likely to acquire the waiter lock first once we drop
         // `gate`. This makes the pre-fix lost-wakeup interleaving reproducible.
@@ -758,7 +740,7 @@ mod tests {
         let count = notify.waiter_count();
         crate::assert_with_log!(count == 0, "no waiters remain", 0usize, count);
 
-        let entries_len = notify.waiters.lock().expect("lock poisoned").entries.len();
+        let entries_len = notify.waiters.lock().entries.len();
         crate::assert_with_log!(
             entries_len == 0,
             "slab tail fully shrinks after broadcast",
