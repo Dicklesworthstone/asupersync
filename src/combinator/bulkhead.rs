@@ -886,7 +886,7 @@ mod tests {
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
             max_queue: 10,
-            queue_timeout: Duration::from_secs(60),
+            queue_timeout: Duration::from_mins(1),
             ..Default::default()
         });
 
@@ -911,7 +911,7 @@ mod tests {
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 2,
             max_queue: 10,
-            queue_timeout: Duration::from_secs(60),
+            queue_timeout: Duration::from_mins(1),
             ..Default::default()
         });
 
@@ -966,7 +966,7 @@ mod tests {
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
             max_queue: 10,
-            queue_timeout: Duration::from_secs(60),
+            queue_timeout: Duration::from_mins(1),
             ..Default::default()
         });
 

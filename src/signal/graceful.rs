@@ -338,14 +338,14 @@ mod tests {
         let receiver = controller.subscribe();
 
         let builder = GracefulBuilder::new(receiver)
-            .grace_period(Duration::from_secs(60))
+            .grace_period(Duration::from_mins(1))
             .logging(false);
 
         let grace_period = builder.config().grace_period;
         crate::assert_with_log!(
-            grace_period == Duration::from_secs(60),
+            grace_period == Duration::from_mins(1),
             "grace_period",
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             grace_period
         );
         let log_events = builder.config().log_events;
