@@ -80,6 +80,8 @@
 //! annotation. When projecting to saga execution plans, monotone
 //! communications can be batched for coordination-free execution.
 
+pub mod codegen;
+
 use crate::obligation::calm::Monotonicity;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
