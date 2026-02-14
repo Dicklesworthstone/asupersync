@@ -185,7 +185,13 @@ pub struct LookupMx {
 impl LookupMx {
     /// Creates a new MX lookup result.
     #[must_use]
-    pub fn new(records: Vec<MxRecord>) -> Self {
+    pub fn new(mut records: Vec<MxRecord>) -> Self {
+        // Keep MX records in RFC-priority order so callers can iterate directly.
+        records.sort_by(|a, b| {
+            a.preference
+                .cmp(&b.preference)
+                .then_with(|| a.exchange.cmp(&b.exchange))
+        });
         Self { records }
     }
 
@@ -326,5 +332,48 @@ mod tests {
         let v6_count = lookup.ipv6_addrs().count();
         crate::assert_with_log!(v6_count == 1, "ipv6 count", 1, v6_count);
         crate::test_complete!("lookup_ip_accessors");
+    }
+
+    #[test]
+    fn lookup_mx_new_sorts_by_preference() {
+        init_test("lookup_mx_new_sorts_by_preference");
+        let lookup = LookupMx::new(vec![
+            MxRecord {
+                preference: 20,
+                exchange: "mx2.example".to_string(),
+            },
+            MxRecord {
+                preference: 10,
+                exchange: "mx1.example".to_string(),
+            },
+            MxRecord {
+                preference: 10,
+                exchange: "mx0.example".to_string(),
+            },
+        ]);
+        let records: Vec<_> = lookup.records().collect();
+
+        let first_pref = records[0].preference;
+        let second_pref = records[1].preference;
+        let third_pref = records[2].preference;
+        crate::assert_with_log!(first_pref == 10, "first preference", 10, first_pref);
+        crate::assert_with_log!(second_pref == 10, "second preference", 10, second_pref);
+        crate::assert_with_log!(third_pref == 20, "third preference", 20, third_pref);
+
+        let first_exchange = records[0].exchange.as_str();
+        let second_exchange = records[1].exchange.as_str();
+        crate::assert_with_log!(
+            first_exchange == "mx0.example",
+            "first exchange",
+            "mx0.example",
+            first_exchange
+        );
+        crate::assert_with_log!(
+            second_exchange == "mx1.example",
+            "second exchange",
+            "mx1.example",
+            second_exchange
+        );
+        crate::test_complete!("lookup_mx_new_sorts_by_preference");
     }
 }
