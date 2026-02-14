@@ -787,12 +787,16 @@ impl std::error::Error for SupervisorCompileError {}
 pub enum SupervisorSpawnError {
     /// Failed to create supervisor region.
     RegionCreate(RegionCreateError),
-    /// Child start failed.
+    /// Child start failed. The supervisor region has been closed (begin_close +
+    /// begin_drain) so that previously-started children are not orphaned.
     ChildStartFailed {
         /// Child name.
         child: ChildName,
         /// Underlying spawn error.
         err: SpawnError,
+        /// Region that was created for the supervisor. It has been closed but
+        /// is returned for caller awareness / logging.
+        region: RegionId,
     },
 }
 
@@ -800,8 +804,13 @@ impl std::fmt::Display for SupervisorSpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RegionCreate(e) => write!(f, "supervisor region create failed: {e}"),
-            Self::ChildStartFailed { child, err } => {
-                write!(f, "child start failed: child={child} err={err}")
+            Self::ChildStartFailed {
+                child, err, region, ..
+            } => {
+                write!(
+                    f,
+                    "child start failed: child={child} region={region:?} err={err}"
+                )
             }
         }
     }
@@ -1443,9 +1452,17 @@ impl CompiledSupervisor {
                 Err(err) => {
                     cx.trace("supervisor_child_start_failed");
                     if child.required {
+                        // Close the region to avoid orphaning previously-started
+                        // children. begin_close + begin_drain initiates the
+                        // cancellation cascade; the region cannot leak.
+                        if let Some(record) = state.region(region) {
+                            record.begin_close(None);
+                            record.begin_drain();
+                        }
                         return Err(SupervisorSpawnError::ChildStartFailed {
                             child: child.name.clone(),
                             err,
+                            region,
                         });
                     }
                 }
@@ -6299,8 +6316,21 @@ mod tests {
                 "required child failure should fail supervisor"
             );
             match result.unwrap_err() {
-                SupervisorSpawnError::ChildStartFailed { child, .. } => {
+                SupervisorSpawnError::ChildStartFailed { child, region, .. } => {
                     assert_eq!(child, "required_fail");
+                    // Verify the region was closed (not leaked).
+                    let record = state.region(region).expect("region should exist");
+                    let rs = record.state();
+                    assert!(
+                        matches!(
+                            rs,
+                            crate::record::region::RegionState::Closing
+                                | crate::record::region::RegionState::Draining
+                                | crate::record::region::RegionState::Finalizing
+                                | crate::record::region::RegionState::Closed
+                        ),
+                        "region should not be Open after partial spawn failure, got {rs:?}"
+                    );
                 }
                 other @ SupervisorSpawnError::RegionCreate(_) => {
                     unreachable!("expected ChildStartFailed, got {other:?}");
