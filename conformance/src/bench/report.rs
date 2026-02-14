@@ -39,8 +39,8 @@ pub fn render_console_summary(summary: &BenchRunSummary) -> String {
 
 /// Write a JSON report for any serializable summary.
 pub fn write_json_report<T: Serialize>(summary: &T, path: &Path) -> io::Result<()> {
-    let data = serde_json::to_vec_pretty(summary)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    let data =
+        serde_json::to_vec_pretty(summary).map_err(|err| io::Error::other(err.to_string()))?;
     fs::write(path, data)
 }
 
@@ -89,11 +89,7 @@ pub fn write_html_report(summary: &BenchRunSummary, path: &Path) -> io::Result<(
                 bytes_avg
             ));
         } else {
-            let error = result
-                .error
-                .as_ref()
-                .map(String::as_str)
-                .unwrap_or("Unknown error");
+            let error = result.error.as_deref().unwrap_or("Unknown error");
             html.push_str(&format!(
                 "<tr><td>{}</td><td colspan=\"8\"></td><td class=\"error\">{}</td></tr>",
                 result.benchmark_name, error

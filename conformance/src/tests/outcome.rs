@@ -486,11 +486,11 @@ pub fn oc_008_join_err_cancelled<RT: RuntimeInterface>() -> ConformanceTest<RT> 
                 );
 
                 // Both should be errors of different kinds
-                if !bad_result.is_err() {
+                if bad_result.is_ok() {
                     return TestResult::failed("Expected error from closed channel");
                 }
 
-                if !cancelled_result.is_err() {
+                if cancelled_result.is_ok() {
                     return TestResult::failed("Expected timeout error");
                 }
 
@@ -633,11 +633,11 @@ pub fn oc_011_into_result_conversion<RT: RuntimeInterface>() -> ConformanceTest<
                     }),
                 );
 
-                if !ok_result.is_ok() {
+                if ok_result.is_err() {
                     return TestResult::failed("Ok outcome should convert to Result::Ok");
                 }
 
-                if !err_result.is_err() {
+                if err_result.is_ok() {
                     return TestResult::failed("Err outcome should convert to Result::Err");
                 }
 

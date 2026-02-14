@@ -36,7 +36,7 @@ pub fn render_console_summary(summary: &SuiteResult) -> String {
 
 /// Write a JSON report for any serializable summary.
 pub fn write_json_report<T: Serialize>(summary: &T, path: &Path) -> io::Result<()> {
-    let data = serde_json::to_vec_pretty(summary)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    let data =
+        serde_json::to_vec_pretty(summary).map_err(|err| io::Error::other(err.to_string()))?;
     fs::write(path, data)
 }

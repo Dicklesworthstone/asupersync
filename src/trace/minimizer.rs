@@ -664,7 +664,9 @@ mod tests {
             let r = TraceMinimizer::minimize(&elems, leak_checker(sz / 2));
             counts.push(r.replay_attempts);
         }
+        #[allow(clippy::cast_precision_loss)]
         let ratio = counts[2] as f64 / counts[0] as f64;
+        #[allow(clippy::cast_precision_loss)]
         let size_ratio = sizes[2] as f64 / sizes[0] as f64;
         assert!(
             ratio < size_ratio,

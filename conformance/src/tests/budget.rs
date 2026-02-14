@@ -683,13 +683,13 @@ pub fn pq_002_poll_consumption<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 );
 
                 // First 5 should succeed
-                for i in 0..5 {
-                    if consumed[i].1 != Some(5 - i as u32) {
+                for (i, item) in consumed.iter().enumerate().take(5) {
+                    if item.1 != Some(5 - i as u32) {
                         return TestResult::failed(format!(
                             "consume_poll #{} should return Some({}), got {:?}",
                             i,
                             5 - i,
-                            consumed[i].1
+                            item.1
                         ));
                     }
                 }

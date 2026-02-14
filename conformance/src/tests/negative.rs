@@ -788,7 +788,7 @@ fn neg_tm_002_very_long_timeout<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 }
 
                 match result {
-                    Ok(value) if value == 42 => TestResult::passed(),
+                    Ok(42) => TestResult::passed(),
                     Ok(value) => TestResult::failed(format!("Expected 42, got {}", value)),
                     Err(_) => TestResult::failed("Fast future should not timeout".to_string()),
                 }
@@ -967,7 +967,7 @@ fn perf_002_channel_throughput<RT: RuntimeInterface>() -> ConformanceTest<RT> {
 
                 // Spawn receiver
                 let _receiver = rt.spawn(async move {
-                    while let Some(_) = rx.recv().await {
+                    while rx.recv().await.is_some() {
                         counter_recv.fetch_add(1, Ordering::SeqCst);
                     }
                 });

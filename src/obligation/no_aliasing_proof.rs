@@ -1604,7 +1604,7 @@ mod tests {
         // Create 10 concurrent permits.
         for i in 0..10 {
             events.push(reserve(
-                i as u64,
+                u64::from(i),
                 o(i),
                 ObligationKind::SendPermit,
                 t(i),
@@ -1615,7 +1615,7 @@ mod tests {
         // Commit them in reverse order (interleaved).
         for i in (0..10).rev() {
             events.push(commit(
-                (10 + i) as u64,
+                u64::from(10 + i),
                 o(i),
                 r(0),
                 ObligationKind::SendPermit,
