@@ -1,0 +1,194 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "raptorq_baseline_bench_profile_v1",
+  "bead_id": "bd-3s8zu",
+  "generated_at_utc": "2026-02-14T21:06:29Z",
+  "git_sha": "621e54283fef7b81101ad8af8b0aab2444279551",
+  "host": {
+    "os": "Linux",
+    "arch": "x86_64",
+    "kernel_release": "6.17.0-14-generic",
+    "cpu_model": "AMD EPYC 7282 16-Core Processor",
+    "cpu_count": 64,
+    "threads_per_core": 2,
+    "cores_per_socket": 16,
+    "sockets": 2
+  },
+  "toolchain": {
+    "rustc": "rustc 1.95.0-nightly (47611e160 2026-02-12)",
+    "cargo": "cargo 1.95.0-nightly (ce69df6f7 2026-02-12)",
+    "criterion": "0.5.1"
+  },
+  "baseline_run": {
+    "seed": 424242,
+    "runner": "scripts/run_perf_e2e.sh",
+    "command": "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare",
+    "report_path": "target/perf-results/perf_20260214_143734/report.json",
+    "baseline_current_path": "target/perf-results/perf_20260214_143734/artifacts/baseline_current.json",
+    "saved_baseline_path": "baselines/baseline_latest.json",
+    "benchmarks": [
+      {
+        "name": "raptorq_benchmark",
+        "exit_code": 0,
+        "duration_sec": 463,
+        "log_file": "target/perf-results/perf_20260214_143734/logs/raptorq_benchmark_20260214_143734.log"
+      },
+      {
+        "name": "phase0_baseline",
+        "exit_code": 0,
+        "duration_sec": 863,
+        "log_file": "target/perf-results/perf_20260214_143734/logs/phase0_baseline_20260214_143734.log"
+      }
+    ]
+  },
+  "criterion_summary": {
+    "raptorq_e2e_ns": [
+      {
+        "name": "raptorq_e2e/encode/k=32_sym=1024",
+        "median_ns": 123455.73866959065,
+        "p95_ns": 125662.90342487374
+      },
+      {
+        "name": "raptorq_e2e/decode_source_only/k=32_sym=1024",
+        "median_ns": 18542.03420479303,
+        "p95_ns": 18995.6062100894
+      },
+      {
+        "name": "raptorq_e2e/decode_repair_only/k=32_sym=1024",
+        "median_ns": 76791.45179610307,
+        "p95_ns": 81979.40842490841
+      }
+    ],
+    "kernel_hotspots_ns": [
+      {
+        "name": "gf256_primitives/addmul_slice/4096",
+        "median_ns": 698.3702880847599,
+        "p95_ns": 797.9004453166517
+      },
+      {
+        "name": "linalg_operations/row_scale_add/4096",
+        "median_ns": 717.4231450946249,
+        "p95_ns": 1246.2831576967355
+      },
+      {
+        "name": "gaussian_elimination/solve_markowitz/64",
+        "median_ns": 606508.433982684,
+        "p95_ns": 610781.317051282
+      }
+    ],
+    "pipeline_throughput_from_phase0_log": [
+      {
+        "name": "raptorq/pipeline/send_receive/65536",
+        "time_range": "[5.3824 ms 5.4056 ms 5.4248 ms]",
+        "throughput_range": "[11.521 MiB/s 11.562 MiB/s 11.612 MiB/s]"
+      },
+      {
+        "name": "raptorq/pipeline/send_receive/262144",
+        "time_range": "[92.222 ms 93.515 ms 94.862 ms]",
+        "throughput_range": "[2.6354 MiB/s 2.6734 MiB/s 2.7108 MiB/s]"
+      },
+      {
+        "name": "raptorq/pipeline/send_receive/1048576",
+        "time_range": "[2.8780 s 2.8874 s 2.8992 s]",
+        "throughput_range": "[353.20 KiB/s 354.64 KiB/s 355.80 KiB/s]"
+      }
+    ]
+  },
+  "profiler": {
+    "perf_attempt": {
+      "command": "rch exec -- perf stat -x, -o target/perf-results/perf_20260214_143734/artifacts/perf_stat_raptorq_encode_k32.csv -- cargo bench --bench raptorq_benchmark raptorq_e2e/encode/k=32_sym=1024 -- --noplot --sample-size 20 --measurement-time 1 --warm-up-time 1",
+      "status": "blocked",
+      "reason": "perf_event_paranoid=4 denies non-privileged perf counters"
+    },
+    "callgrind_fallback": {
+      "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02",
+      "artifact_path": "target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out",
+      "ir_refs_total": 1448085214,
+      "annotation_path": "generated ad hoc via callgrind_annotate",
+      "note": "release binary is not fully symbolized; top entries are unresolved addresses"
+    },
+    "resource_profile_time_v": {
+      "command": "rch exec -- /usr/bin/time -v target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02",
+      "elapsed_wall": "0:00.10",
+      "cpu_percent": 1074,
+      "max_rss_kb": 22316,
+      "minor_page_faults": 10605,
+      "voluntary_context_switches": 3431,
+      "involuntary_context_switches": 5918
+    }
+  },
+  "validation_harness_inventory": {
+    "comprehensive_unit_tests": [
+      "src/raptorq/tests.rs",
+      "tests/raptorq_conformance.rs",
+      "tests/raptorq_perf_invariants.rs"
+    ],
+    "deterministic_e2e_scenarios": [
+      {
+        "command": "rch exec -- ./scripts/run_phase6_e2e.sh",
+        "suite": "raptorq_conformance",
+        "artifact_path": "target/phase6-e2e/report_<timestamp>.txt"
+      },
+      {
+        "command": "rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture",
+        "coverage": "pipeline report determinism + proof/hash stability",
+        "source": "tests/raptorq_conformance.rs"
+      }
+    ],
+    "runtime_profile_tiers": [
+      {
+        "tier": "fast",
+        "command": "rch exec -- target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+      },
+      {
+        "tier": "full",
+        "command": "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare"
+      },
+      {
+        "tier": "forensics",
+        "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+      }
+    ],
+    "structured_logging_contract": {
+      "schema_source": "tests/raptorq_conformance.rs (Report struct around scenario/block/loss/proof fields)",
+      "required_fields": [
+        "scenario",
+        "expect_success",
+        "block.k",
+        "block.symbol_size",
+        "block.seed",
+        "loss.received_count",
+        "loss.drop_count",
+        "proof.success",
+        "proof.replay_ok",
+        "proof.summary_sha256"
+      ],
+      "artifact_paths": [
+        "target/perf-results/perf_20260214_143734/report.json",
+        "target/perf-results/perf_20260214_143734/artifacts/baseline_current.json",
+        "target/perf-results/perf_20260214_143734/logs/raptorq_benchmark_20260214_143734.log",
+        "target/perf-results/perf_20260214_143734/logs/phase0_baseline_20260214_143734.log",
+        "target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out",
+        "target/phase6-e2e/report_<timestamp>.txt"
+      ]
+    }
+  },
+  "reproducibility": {
+    "directional_consistency_rule": "rerun on same host/toolchain/seed and compare median+p95 directional deltas, not absolute nanosecond equality",
+    "rerun_consistency_check": {
+      "command": "rch exec -- target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02",
+      "run_1_time_range": "[326.64 us 328.41 us 330.75 us]",
+      "run_2_time_range": "[328.09 us 329.94 us 332.57 us]",
+      "conclusion": "same-host reruns are directionally consistent (median remains ~329 us)"
+    },
+    "rerun_commands": [
+      "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare",
+      "rch exec -- target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+    ]
+  },
+  "status": "complete_with_known_limits",
+  "known_limits": [
+    "perf stat is blocked on this host by kernel perf_event_paranoid policy",
+    "callgrind fallback uses release binary with partial symbol visibility"
+  ]
+}

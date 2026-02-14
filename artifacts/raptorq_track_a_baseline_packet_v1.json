@@ -1,0 +1,185 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-14T20:39:54Z",
+  "track_bead": "bd-1lgy2",
+  "program_bead": "bd-3uox5",
+  "status": "in_progress",
+  "owner": "WildWaterfall",
+  "summary": "Track-A deterministic baseline integration packet. A1 and A3 evidence are now available; A2 remains in progress.",
+  "subdeliverables": {
+    "A1_clause_matrix": {
+      "bead": "bd-2wlqm",
+      "status": "closed",
+      "assignee": "ScarletMarsh",
+      "evidence_paths": [
+        "docs/raptorq_rfc6330_clause_matrix.md"
+      ],
+      "notes": "Clause-to-code/test matrix artifact exists and is now part of Track-A baseline inputs."
+    },
+    "A2_baseline_bench_profile": {
+      "bead": "bd-3s8zu",
+      "status": "in_progress",
+      "assignee": "MagentaGorge",
+      "expected_evidence_paths": [
+        "artifacts/raptorq_baseline_bench_profile_v1.json",
+        "docs/raptorq_baseline_bench_profile.md"
+      ],
+      "notes": "Pending completion. Track-A cannot close until this baseline packet is finalized with reproducible command inventory and environment metadata."
+    },
+    "A3_gap_taxonomy": {
+      "bead": "bd-xgw8t",
+      "status": "closed",
+      "assignee": "WildWaterfall",
+      "evidence_paths": [
+        "artifacts/raptorq_gap_taxonomy_v1.json",
+        "docs/benchmarking.md"
+      ],
+      "notes": "Prioritized gap taxonomy with weighted scoring and owner-lane/execution-bead mapping is published."
+    }
+  },
+  "acceptance_criteria_status": {
+    "1_clause_mapping_precision": {
+      "state": "partially_satisfied",
+      "evidence": [
+        "docs/raptorq_rfc6330_clause_matrix.md"
+      ],
+      "remaining": [
+        "Cross-check any moved source/test paths after concurrent changes."
+      ]
+    },
+    "2_reproducible_baseline_packet": {
+      "state": "pending",
+      "evidence": [],
+      "remaining": [
+        "Finalize A2 benchmark/profile packet with reproducible commands and host/tool metadata."
+      ]
+    },
+    "3_gap_taxonomy_with_risk_and_unblock": {
+      "state": "satisfied",
+      "evidence": [
+        "artifacts/raptorq_gap_taxonomy_v1.json"
+      ],
+      "remaining": []
+    },
+    "4_testability_planning_for_unit_e2e_logs": {
+      "state": "satisfied",
+      "evidence": [
+        "artifacts/raptorq_gap_taxonomy_v1.json"
+      ],
+      "remaining": [
+        "Validate planned fields are emitted by final A2/A3-linked test artifacts."
+      ]
+    },
+    "5_structured_logging_contract_and_example_bundles": {
+      "state": "partially_satisfied",
+      "evidence": [
+        "artifacts/raptorq_track_a_baseline_packet_v1.json"
+      ],
+      "remaining": [
+        "Replace example bundle placeholders with concrete A2 outputs."
+      ]
+    }
+  },
+  "testability_planning": {
+    "comprehensive_unit_tests": {
+      "anchor_bead": "bd-61s90",
+      "required_contract": {
+        "must_emit": [
+          "schema_version",
+          "run_id",
+          "scenario_id",
+          "seed",
+          "fixture_id",
+          "phase",
+          "assertion_id",
+          "outcome",
+          "artifact_path",
+          "replay_command"
+        ],
+        "profiles": [
+          "fast",
+          "full",
+          "forensics"
+        ]
+      }
+    },
+    "deterministic_e2e_scripts": {
+      "anchor_bead": "bd-3bvdj",
+      "required_contract": {
+        "must_emit": [
+          "schema_version",
+          "run_id",
+          "scenario_id",
+          "seed",
+          "params",
+          "step",
+          "assertion_id",
+          "outcome",
+          "artifact_bundle",
+          "replay_command"
+        ],
+        "profiles": [
+          "fast",
+          "full",
+          "forensics"
+        ]
+      }
+    },
+    "structured_logging_schema": {
+      "schema_version": "raptorq-test-log-v1",
+      "required_fields": [
+        "schema_version",
+        "run_id",
+        "scenario_id",
+        "seed",
+        "fixture_id",
+        "phase",
+        "assertion_id",
+        "outcome",
+        "artifact_path",
+        "replay_command"
+      ]
+    }
+  },
+  "example_artifact_bundles": {
+    "unit_bundle_example": {
+      "bundle_id": "unit-fast-sample",
+      "profile": "fast",
+      "expected_paths": [
+        "target/raptorq/unit/unit-fast-sample/log.jsonl",
+        "target/raptorq/unit/unit-fast-sample/assertions.json",
+        "target/raptorq/unit/unit-fast-sample/repro.sh"
+      ],
+      "replay_command": "./target/raptorq/unit/unit-fast-sample/repro.sh"
+    },
+    "e2e_bundle_example": {
+      "bundle_id": "e2e-forensics-sample",
+      "profile": "forensics",
+      "expected_paths": [
+        "target/raptorq/e2e/e2e-forensics-sample/log.jsonl",
+        "target/raptorq/e2e/e2e-forensics-sample/timeline.json",
+        "target/raptorq/e2e/e2e-forensics-sample/repro.sh"
+      ],
+      "replay_command": "./target/raptorq/e2e/e2e-forensics-sample/repro.sh"
+    }
+  },
+  "command_inventory": {
+    "fast": [
+      "rch exec -- cargo test --lib raptorq -- --nocapture",
+      "rch exec -- cargo test --test golden_outputs"
+    ],
+    "full": [
+      "rch exec -- cargo test",
+      "rch exec -- cargo bench --bench raptorq_benchmark"
+    ],
+    "forensics": [
+      "rch exec -- cargo test -- --nocapture",
+      "rch exec -- cargo bench -- --save-baseline raptorq_track_a --noplot"
+    ]
+  },
+  "next_actions": [
+    "Ingest final A2 outputs once bd-3s8zu publishes artifacts.",
+    "Replace placeholder example bundles with concrete run bundles.",
+    "Re-evaluate Track-A closure readiness and update bd-1lgy2 accordingly."
+  ]
+}

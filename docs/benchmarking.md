@@ -703,3 +703,28 @@ trendlines across commits and to attribute regressions to specific benches.
 - **Throughput tracking**: Elements/sec and bytes/sec for batch operations
 - **Outlier detection**: Criterion flags statistical outliers automatically
 - **No system-dependent behavior**: Golden tests use virtual time and deterministic scheduling
+
+## RaptorQ Gap Taxonomy (bd-xgw8t)
+
+Track-A publishes a machine-readable risk-priority taxonomy at:
+
+- `artifacts/raptorq_gap_taxonomy_v1.json`
+
+This artifact is intended for sequencing and triage, not as a replacement for
+technical design review on individual beads.
+
+### Quick Queries
+
+```bash
+# Top 5 highest-priority gaps by weighted score
+jq '.gaps | sort_by(-.score) | .[:5] | map({rank, bead, score, owner_lane})' \
+  artifacts/raptorq_gap_taxonomy_v1.json
+
+# Coverage-risk-heavy gaps (>= 4.0)
+jq '.gaps | map(select(.coverage_risk >= 4.0)) | map({bead, coverage_risk, coverage_risk_breakdown})' \
+  artifacts/raptorq_gap_taxonomy_v1.json
+
+# Gaps grouped by owner lane
+jq '.gaps | group_by(.owner_lane) | map({owner_lane: .[0].owner_lane, beads: map(.bead)})' \
+  artifacts/raptorq_gap_taxonomy_v1.json
+```
