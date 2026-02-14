@@ -151,60 +151,7 @@ impl SagaPipeline {
     /// Validates, projects, converts to saga plans, and renders Rust source
     /// code with Cx integration, compensation handlers, and evidence emission.
     pub fn generate(&self, protocol: &GlobalProtocol) -> Result<SagaPipelineOutput, PipelineError> {
-        // Step 1: Compile all projections
-        let projections = self.compiler.compile_all(protocol)?;
-
-        if projections.is_empty() {
-            return Err(PipelineError::NoParticipants);
-        }
-
-        // Step 2: For each participant, build saga plan + generate code
-        let mut participants = BTreeMap::new();
-
-        for (name, projection) in &projections {
-            // Convert choreographic local type to saga plan
-            let saga_plan =
-                choreography_to_saga_plan(&protocol.name, name, &protocol.interaction, name);
-
-            // CALM-batch the saga plan
-            let execution_plan = SagaExecutionPlan::from_plan(&saga_plan);
-
-            // Render the full Rust module with Cx + evidence + compensation
-            let source_code = render_saga_module(
-                &protocol.name,
-                name,
-                &projection.participant_role,
-                projection,
-                &saga_plan,
-                &execution_plan,
-            );
-
-            participants.insert(
-                name.clone(),
-                SagaParticipantCode {
-                    participant_name: name.clone(),
-                    participant_role: projection.participant_role.clone(),
-                    protocol_name: protocol.name.clone(),
-                    saga_plan,
-                    execution_plan,
-                    projection: projection.clone(),
-                    source_code,
-                },
-            );
-        }
-
-        // Step 3: Generate lab test scaffold
-        let lab_test_code = if self.generate_lab_tests {
-            render_lab_test(&protocol.name, &participants)
-        } else {
-            String::new()
-        };
-
-        Ok(SagaPipelineOutput {
-            protocol_name: protocol.name.clone(),
-            participants,
-            lab_test_code,
-        })
+        self.generate_with_locals(protocol)
     }
 
     /// Generate a saga plan only (without full code generation).
