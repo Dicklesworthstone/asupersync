@@ -38,11 +38,13 @@ pub trait AsyncReadExt: AsyncRead {
     where
         Self: Unpin,
     {
+        let start_len = buf.len();
         ReadToString {
             reader: self,
             buf,
             pending_utf8: Vec::new(),
             read: 0,
+            start_len,
         }
     }
 
@@ -180,9 +182,15 @@ pub struct ReadToString<'a, R: ?Sized> {
     buf: &'a mut String,
     pending_utf8: Vec<u8>,
     read: usize,
+    start_len: usize,
 }
 
 impl<R: ?Sized> ReadToString<'_, R> {
+    fn rollback_utf8_error(&mut self) {
+        self.buf.truncate(self.start_len);
+        self.pending_utf8.clear();
+    }
+
     fn push_valid_prefix(&mut self) -> io::Result<()> {
         match std::str::from_utf8(&self.pending_utf8) {
             Ok(s) => {
@@ -232,6 +240,7 @@ where
                         if this.pending_utf8.is_empty() {
                             return Poll::Ready(Ok(this.read));
                         }
+                        this.rollback_utf8_error();
                         return Poll::Ready(Err(io::Error::new(
                             ErrorKind::InvalidData,
                             "incomplete utf-8 sequence",
@@ -239,7 +248,10 @@ where
                     }
                     this.read += n;
                     this.pending_utf8.extend_from_slice(read_buf.filled());
-                    this.push_valid_prefix()?;
+                    if let Err(err) = this.push_valid_prefix() {
+                        this.rollback_utf8_error();
+                        return Poll::Ready(Err(err));
+                    }
                 }
             }
         }
@@ -415,6 +427,52 @@ mod tests {
         let empty = buf.is_empty();
         crate::assert_with_log!(empty, "buf empty", true, empty);
         crate::test_complete!("read_to_string_incomplete_utf8_errors");
+    }
+
+    #[test]
+    fn read_to_string_invalid_utf8_rolls_back_after_long_valid_prefix() {
+        init_test("read_to_string_invalid_utf8_rolls_back_after_long_valid_prefix");
+        let mut input = vec![b'a'; 1024];
+        input.push(0xFF);
+        let mut reader: &[u8] = &input;
+        let mut buf = String::from("seed");
+        let mut fut = reader.read_to_string(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap_err();
+        let kind = err.kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            kind
+        );
+        crate::assert_with_log!(buf == "seed", "buf rollback", "seed", buf);
+        crate::test_complete!("read_to_string_invalid_utf8_rolls_back_after_long_valid_prefix");
+    }
+
+    #[test]
+    fn read_to_string_incomplete_utf8_rolls_back_after_long_valid_prefix() {
+        init_test("read_to_string_incomplete_utf8_rolls_back_after_long_valid_prefix");
+        let mut input = vec![b'a'; 1024];
+        input.extend_from_slice(&[0xF0, 0x9F, 0x92]);
+        let mut reader: &[u8] = &input;
+        let mut buf = String::from("seed");
+        let mut fut = reader.read_to_string(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap_err();
+        let kind = err.kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            kind
+        );
+        crate::assert_with_log!(buf == "seed", "buf rollback", "seed", buf);
+        crate::test_complete!("read_to_string_incomplete_utf8_rolls_back_after_long_valid_prefix");
     }
 
     #[test]
