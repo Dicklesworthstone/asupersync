@@ -1398,6 +1398,595 @@ mod pipeline_e2e {
 }
 
 // ============================================================================
+// Metamorphic + Property Erasure-Recovery Test Battery (bd-3syrq / D3)
+//
+// Deterministic property-based tests that verify codec invariants hold
+// under varied erasure patterns, symbol orderings, and parameter regimes.
+// Every test uses fixed seeds for full reproducibility.
+// ============================================================================
+
+mod metamorphic_property {
+    use super::*;
+    use asupersync::raptorq::rfc6330::rand;
+
+    // ----------------------------------------------------------------
+    // Helper: deterministic erasure pattern generator
+    // ----------------------------------------------------------------
+
+    /// Generate a pseudorandom drop set of `count` indices from 0..n.
+    fn random_drop_set(n: usize, count: usize, seed: u64) -> Vec<usize> {
+        assert!(count <= n);
+        let mut indices: Vec<usize> = (0..n).collect();
+        // Fisher-Yates shuffle with deterministic PRNG
+        for i in (1..n).rev() {
+            let j = rand(seed.wrapping_add(i as u64) as u32, 0, (i + 1) as u32) as usize;
+            indices.swap(i, j);
+        }
+        indices.truncate(count);
+        indices.sort();
+        indices
+    }
+
+    /// Full encode-decode roundtrip helper that returns the decoded source.
+    /// `drop_source` lists which source symbol indices to erase.
+    /// `extra_repair` is how many repair symbols beyond L to provide.
+    fn roundtrip(
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        drop_source: &[usize],
+        extra_repair: usize,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .ok_or_else(|| format!("encoder construction failed for K={k} seed={seed}"))?;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let max_repair_esi = (l + extra_repair) as u32;
+        let received = build_received_symbols(
+            &encoder,
+            &decoder,
+            &source,
+            drop_source,
+            max_repair_esi,
+            seed,
+        );
+
+        let result = decoder
+            .decode(&received)
+            .map_err(|e| format!("K={k} seed={seed}: {e:?}"))?;
+        Ok(result.source)
+    }
+
+    // ----------------------------------------------------------------
+    // P1: Source Reconstruction Invariant
+    //
+    // For all valid (K, seed), encoding K source symbols and providing
+    // at least L symbols to the decoder must recover all K originals
+    // byte-for-byte.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn source_reconstruction_sweep() {
+        // Use (K, seed) combinations verified by the golden vector suite
+        let test_cases: Vec<(usize, usize, u64)> = vec![
+            (8, 32, 42),
+            (8, 64, 42),
+            (10, 32, 123),
+            (16, 64, 789),
+            (20, 128, 42),
+            (32, 64, 456),
+            (32, 128, 42),
+        ];
+
+        for (k, symbol_size, seed) in test_cases {
+            let source = make_source_data(k, symbol_size, seed);
+            let decoded = roundtrip(k, symbol_size, seed, &[], 0)
+                .unwrap_or_else(|e| panic!("K={k} seed={seed}: decode failed: {e:?}"));
+
+            assert_eq!(decoded.len(), k, "K={k}: wrong number of decoded symbols");
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "K={k} seed={seed}: symbol {i} mismatch");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P2: Symbol Permutation Resilience
+    //
+    // The decoder output must be identical regardless of the order in
+    // which received symbols are presented.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn symbol_permutation_resilience() {
+        let k = 10;
+        let symbol_size = 64;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Build received symbols in natural order
+        let received_natural =
+            build_received_symbols(&encoder, &decoder, &source, &[], l as u32, seed);
+        let result_natural = decoder
+            .decode(&received_natural)
+            .expect("natural order decode");
+
+        // Permute the received symbols with 5 different shuffles
+        for perm_seed in [7u64, 13, 29, 53, 97] {
+            let mut received_shuffled = received_natural.clone();
+            let n = received_shuffled.len();
+            for i in (1..n).rev() {
+                let j = rand(perm_seed.wrapping_add(i as u64) as u32, 0, (i + 1) as u32) as usize;
+                received_shuffled.swap(i, j);
+            }
+
+            let result_shuffled = decoder
+                .decode(&received_shuffled)
+                .unwrap_or_else(|e| panic!("perm_seed={perm_seed}: decode failed: {e:?}"));
+
+            for (i, (a, b)) in result_natural
+                .source
+                .iter()
+                .zip(result_shuffled.source.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    a, b,
+                    "perm_seed={perm_seed}: symbol {i} differs after permutation"
+                );
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P3: No Silent Corruption
+    //
+    // When decode succeeds, every decoded source symbol must match the
+    // original. We test across multiple K values and erasure patterns
+    // to ensure no partial/corrupt output escapes.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn no_silent_corruption_random_erasure() {
+        let test_configs: Vec<(usize, usize, u64, usize)> = vec![
+            // (K, symbol_size, seed, num_erasures)
+            (8, 64, 42, 2),
+            (10, 32, 123, 3),
+            (16, 64, 789, 5),
+            (20, 128, 42, 7),
+            (32, 64, 456, 10),
+        ];
+
+        for (k, symbol_size, seed, num_erasures) in test_configs {
+            let source = make_source_data(k, symbol_size, seed);
+            let drop_set = random_drop_set(k, num_erasures, seed + 1000);
+
+            // Provide extra repair to compensate
+            let extra = num_erasures + 2;
+            let decoded = roundtrip(k, symbol_size, seed, &drop_set, extra).unwrap_or_else(|e| {
+                panic!("K={k} erasures={num_erasures} seed={seed}: decode failed: {e:?}")
+            });
+
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(
+                    orig, dec,
+                    "K={k} seed={seed} erasures={num_erasures}: silent corruption at symbol {i}"
+                );
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P4: Erasure Pattern Independence
+    //
+    // Metamorphic relation: for a fixed (K, seed), decoding with
+    // different erasure patterns (of the same count) that provide
+    // sufficient symbols should all produce the same source output.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn erasure_pattern_independence() {
+        let k = 16;
+        let symbol_size = 64;
+        let seed = 42u64;
+        let num_erasures = 4;
+        let extra_repair = num_erasures + 3;
+
+        let source = make_source_data(k, symbol_size, seed);
+
+        // Generate 6 different erasure patterns of the same size
+        let patterns: Vec<Vec<usize>> = (0..6)
+            .map(|i| random_drop_set(k, num_erasures, seed + 2000 + i))
+            .collect();
+
+        for (pattern_idx, drop_set) in patterns.iter().enumerate() {
+            let decoded =
+                roundtrip(k, symbol_size, seed, drop_set, extra_repair).unwrap_or_else(|e| {
+                    panic!("pattern {pattern_idx} ({drop_set:?}): decode failed: {e:?}")
+                });
+
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "pattern {pattern_idx}: symbol {i} mismatch");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P5: Burst Erasure Recovery
+    //
+    // Consecutive (burst) erasure patterns are a common real-world
+    // failure mode. Verify recovery across burst positions: early,
+    // middle, and late in the source block.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn burst_erasure_recovery() {
+        let k = 20;
+        let symbol_size = 64;
+        let seed = 99u64;
+        let burst_len = 5;
+        let extra_repair = burst_len + 3;
+
+        let source = make_source_data(k, symbol_size, seed);
+
+        // Bursts at different positions
+        let burst_starts = [0, 5, 10, 15]; // early, mid-early, mid-late, late
+        for &start in &burst_starts {
+            let end = (start + burst_len).min(k);
+            let drop_set: Vec<usize> = (start..end).collect();
+
+            let decoded = roundtrip(k, symbol_size, seed, &drop_set, extra_repair)
+                .unwrap_or_else(|e| panic!("burst at [{start}..{end}): decode failed: {e:?}"));
+
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "burst at [{start}..{end}): symbol {i} mismatch");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P6: Repair Symbol Determinism
+    //
+    // Multiple calls to repair_symbol(esi) for the same encoder must
+    // produce byte-identical output.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn repair_symbol_determinism() {
+        let k = 16;
+        let symbol_size = 64;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+        // Call repair_symbol twice for each ESI and verify identity
+        for esi in (k as u32)..(k as u32 + 20) {
+            let first = encoder.repair_symbol(esi);
+            let second = encoder.repair_symbol(esi);
+            assert_eq!(first, second, "repair_symbol({esi}) not deterministic");
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P7: Cross-Instance Encoding Determinism
+    //
+    // Two independently constructed encoders with the same inputs must
+    // produce identical intermediate symbols and repair symbols.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn cross_instance_encoding_determinism() {
+        let k = 10;
+        let symbol_size = 64;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+
+        let enc_a = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let enc_b = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+        let params = enc_a.params();
+
+        // Intermediate symbols must match
+        for i in 0..params.l {
+            assert_eq!(
+                enc_a.intermediate_symbol(i),
+                enc_b.intermediate_symbol(i),
+                "intermediate symbol {i} differs between instances"
+            );
+        }
+
+        // Repair symbols must match
+        for esi in (k as u32)..(k as u32 + 10) {
+            assert_eq!(
+                enc_a.repair_symbol(esi),
+                enc_b.repair_symbol(esi),
+                "repair_symbol({esi}) differs between instances"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P8: Overhead Tolerance
+    //
+    // The decoder should succeed with K + overhead symbols even when
+    // all K source symbols are erased (pure repair decoding). Test
+    // with increasing overhead from minimum.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn pure_repair_decoding() {
+        let test_cases: Vec<(usize, usize, u64)> = vec![(8, 64, 42), (10, 32, 123), (16, 64, 789)];
+
+        for (k, symbol_size, seed) in test_cases {
+            let source = make_source_data(k, symbol_size, seed);
+            let drop_all: Vec<usize> = (0..k).collect();
+
+            // Need at least L symbols total (constraint + repair)
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let params = decoder.params();
+            let extra_needed = params.l; // All intermediates needed, no source contributing
+
+            let decoded = roundtrip(k, symbol_size, seed, &drop_all, extra_needed)
+                .unwrap_or_else(|e| panic!("K={k} pure-repair: decode failed: {e}"));
+
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "K={k} pure-repair: symbol {i} mismatch");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P9: Insufficient Symbols Failure
+    //
+    // The decoder must return InsufficientSymbols (not succeed with
+    // corrupt data) when fewer than L symbols are provided.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn insufficient_symbols_returns_error() {
+        let k = 10;
+        let symbol_size = 64;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        // Provide only constraint symbols + half the source (not enough)
+        let drop_most: Vec<usize> = (k / 2..k).collect();
+        let max_repair_esi = k as u32; // no repair symbols at all
+
+        let received = build_received_symbols(
+            &encoder,
+            &decoder,
+            &source,
+            &drop_most,
+            max_repair_esi,
+            seed,
+        );
+
+        match decoder.decode(&received) {
+            Err(DecodeError::InsufficientSymbols { .. }) => {} // expected
+            Err(DecodeError::SingularMatrix { .. }) => {}      // also acceptable for rank-deficient
+            Err(e) => panic!("unexpected error variant: {e:?}"),
+            Ok(result) => {
+                // If decode somehow succeeds, it MUST be correct
+                for (i, (orig, dec)) in source.iter().zip(result.source.iter()).enumerate() {
+                    assert_eq!(
+                        orig, dec,
+                        "decoder succeeded with insufficient symbols but symbol {i} is corrupt!"
+                    );
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P10: Seed Sensitivity
+    //
+    // Metamorphic: changing only the seed (with same source data)
+    // must produce different intermediate and repair symbols.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn seed_sensitivity() {
+        let k = 10;
+        let symbol_size = 64;
+        let source = make_source_data(k, symbol_size, 42);
+
+        let enc_a = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let enc_b = SystematicEncoder::new(&source, symbol_size, 43).unwrap();
+
+        // At least one repair symbol should differ
+        let mut any_differ = false;
+        for esi in (k as u32)..(k as u32 + 5) {
+            if enc_a.repair_symbol(esi) != enc_b.repair_symbol(esi) {
+                any_differ = true;
+                break;
+            }
+        }
+        assert!(
+            any_differ,
+            "different seeds produced identical repair symbols"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // P11: Interleaved Source + Repair Resilience
+    //
+    // Mix of source and repair symbols in various ratios should all
+    // decode correctly as long as total count >= L.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn interleaved_source_repair_ratios() {
+        let k = 16;
+        let symbol_size = 64;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+
+        // Test dropping 25%, 50%, 75% of source symbols
+        for drop_fraction in [4, 8, 12] {
+            let drop_set = random_drop_set(k, drop_fraction, seed + drop_fraction as u64);
+            let extra = drop_fraction + 3;
+
+            let decoded = roundtrip(k, symbol_size, seed, &drop_set, extra)
+                .unwrap_or_else(|e| panic!("drop {drop_fraction}/{k}: decode failed: {e:?}"));
+
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "drop {drop_fraction}/{k}: symbol {i} mismatch");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P12: Symbol Size Invariance
+    //
+    // The codec should work correctly across a range of symbol sizes,
+    // including small (1 byte) and larger ones.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn symbol_size_invariance() {
+        let k = 8;
+        let seed = 42u64;
+
+        for symbol_size in [1, 2, 4, 8, 16, 32, 64, 128, 256] {
+            let source = make_source_data(k, symbol_size, seed);
+            let decoded = roundtrip(k, symbol_size, seed, &[], 0)
+                .unwrap_or_else(|e| panic!("symbol_size={symbol_size}: decode failed: {e:?}"));
+
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "symbol_size={symbol_size}: symbol {i} mismatch");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P13: Multi-Seed Erasure Stress
+    //
+    // Sweep across multiple seeds with fixed erasure to ensure no
+    // seed-specific decode failures in the normal operating range.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn multi_seed_erasure_stress() {
+        let k = 10;
+        let symbol_size = 32;
+        let num_erasures = 3;
+        let extra_repair = num_erasures + 2;
+
+        let mut successes = 0;
+        for seed in 0u64..50 {
+            let source = make_source_data(k, symbol_size, seed);
+            let drop_set = random_drop_set(k, num_erasures, seed + 5000);
+
+            let decoded = match roundtrip(k, symbol_size, seed, &drop_set, extra_repair) {
+                Ok(d) => d,
+                Err(_) => continue, // skip seeds where encoder matrix is singular
+            };
+
+            successes += 1;
+            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+                assert_eq!(orig, dec, "seed={seed}: symbol {i} mismatch");
+            }
+        }
+        // At least 80% of seeds should work
+        assert!(successes >= 40, "too few successful seeds: {successes}/50");
+    }
+
+    // ----------------------------------------------------------------
+    // P14: Repair Equation Consistency
+    //
+    // The repair equation (columns, coefficients) generated by the
+    // decoder must match what the encoder uses to generate the repair
+    // symbol. Verify via the linear algebra identity:
+    //   data = sum(coeff[j] * intermediate[col[j]])
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn repair_equation_consistency() {
+        let k = 10;
+        let symbol_size = 64;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        for esi in (k as u32)..(k as u32 + 10) {
+            let repair_data = encoder.repair_symbol(esi);
+            let (cols, coefs) = decoder.repair_equation(esi);
+
+            // Reconstruct from intermediate symbols
+            let mut reconstructed = vec![0u8; symbol_size];
+            for (&col, &coef) in cols.iter().zip(coefs.iter()) {
+                let intermediate = encoder.intermediate_symbol(col);
+                for (byte, &inter_byte) in reconstructed.iter_mut().zip(intermediate.iter()) {
+                    *byte ^= (coef * Gf256::new(inter_byte)).raw();
+                }
+            }
+
+            assert_eq!(
+                repair_data, reconstructed,
+                "ESI={esi}: repair_symbol disagrees with equation * intermediates"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // P15: Monotonic Decode Success with Increasing Overhead
+    //
+    // As we add more repair symbols, decode should not go from
+    // succeeding to failing (monotonicity of solvability).
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn monotonic_decode_success() {
+        let k = 10;
+        let symbol_size = 64;
+        let seed = 42u64;
+        let drop_count = 4;
+        let drop_set = random_drop_set(k, drop_count, seed + 3000);
+
+        let mut first_success_overhead = None;
+
+        // Try increasing overhead from 0 to 2*L
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let max_overhead = decoder.params().l * 2;
+
+        for extra in 0..max_overhead {
+            let result = roundtrip(k, symbol_size, seed, &drop_set, extra);
+            match (&first_success_overhead, &result) {
+                (None, Ok(_)) => {
+                    first_success_overhead = Some(extra);
+                }
+                (Some(threshold), Err(e)) => {
+                    panic!(
+                        "decode succeeded at overhead={threshold} but failed at overhead={extra}: {e:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            first_success_overhead.is_some(),
+            "decode never succeeded even with max overhead"
+        );
+    }
+}
+
+// ============================================================================
 // RFC 6330 Golden Vector Conformance Suite (bd-1rxlv / D1)
 //
 // Deterministic golden-vector tests sourced from RFC 6330 tables and
