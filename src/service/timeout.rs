@@ -195,8 +195,6 @@ where
 pub struct TimeoutFuture<F> {
     inner: F,
     sleep: Sleep,
-    /// Track when we started for relative timeout calculation.
-    started: bool,
 }
 
 impl<F> TimeoutFuture<F> {
@@ -206,7 +204,6 @@ impl<F> TimeoutFuture<F> {
         Self {
             inner,
             sleep: Sleep::new(deadline),
-            started: false,
         }
     }
 
@@ -216,7 +213,6 @@ impl<F> TimeoutFuture<F> {
         Self {
             inner,
             sleep: Sleep::with_time_getter(deadline, time_getter),
-            started: false,
         }
     }
 
@@ -240,18 +236,19 @@ impl<F> TimeoutFuture<F> {
     where
         F: Future<Output = Result<T, E>> + Unpin,
     {
-        // Check timeout first
-        if self.sleep.poll_with_time(now).is_ready() {
-            return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
-                self.sleep.deadline(),
-            ))));
-        }
-
-        // Try the inner future
+        // Prefer completed work at the timeout boundary.
         match Pin::new(&mut self.inner).poll(cx) {
             Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
             Poll::Ready(Err(e)) => Poll::Ready(Err(TimeoutError::Inner(e))),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if self.sleep.poll_with_time(now).is_ready() {
+                    Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                        self.sleep.deadline(),
+                    ))))
+                } else {
+                    Poll::Pending
+                }
+            }
         }
     }
 }
@@ -263,21 +260,30 @@ where
     type Output = Result<T, TimeoutError<E>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Without explicit time source, use the sleep's internal mechanism
         let this = self.get_mut();
 
-        // Check if sleep has elapsed using its internal time tracking
-        if let Some(getter) = this.sleep.time_getter {
-            let now = getter();
-            return this.poll_with_time(now, cx);
+        match Pin::new(&mut this.inner).poll(cx) {
+            Poll::Ready(Ok(response)) => return Poll::Ready(Ok(response)),
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(TimeoutError::Inner(e))),
+            Poll::Pending => {}
         }
 
-        // Fallback: just poll the inner future without timeout
-        // This handles the case where no time source is configured
-        match Pin::new(&mut this.inner).poll(cx) {
-            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(TimeoutError::Inner(e))),
-            Poll::Pending => Poll::Pending,
+        if let Some(getter) = this.sleep.time_getter {
+            let now = getter();
+            if this.sleep.poll_with_time(now).is_ready() {
+                Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                    this.sleep.deadline(),
+                ))))
+            } else {
+                Poll::Pending
+            }
+        } else {
+            match Pin::new(&mut this.sleep).poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                    this.sleep.deadline(),
+                )))),
+                Poll::Pending => Poll::Pending,
+            }
         }
     }
 }
@@ -396,6 +402,27 @@ mod tests {
         let result: Poll<Result<(), TimeoutError<()>>> =
             future.poll_with_time(Time::from_secs(5), &mut cx);
         assert!(result.is_pending());
+    }
+
+    #[test]
+    fn timeout_future_boundary_prefers_ready_inner_result() {
+        let mut future = TimeoutFuture::new(ready(Ok::<_, ()>(7)), Time::from_secs(5));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = future.poll_with_time(Time::from_secs(5), &mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(7))));
+    }
+
+    #[test]
+    fn timeout_future_poll_enforces_timeout_without_custom_time_source() {
+        let mut future = TimeoutFuture::new(pending::<Result<(), ()>>(), Time::ZERO);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut future);
+
+        let result: Poll<Result<(), TimeoutError<()>>> = Future::poll(pinned.as_mut(), &mut cx);
+        assert!(matches!(result, Poll::Ready(Err(TimeoutError::Elapsed(_)))));
     }
 
     #[test]
