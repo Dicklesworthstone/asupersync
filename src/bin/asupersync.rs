@@ -76,6 +76,8 @@ enum Command {
     Trace(TraceArgs),
     /// Conformance tooling
     Conformance(ConformanceArgs),
+    /// FrankenLab scenario testing (bd-1hu19.4)
+    Lab(LabArgs),
 }
 
 #[derive(Args, Debug)]
@@ -136,6 +138,82 @@ struct ConformanceMatrixArgs {
     #[arg(long = "fail-on-missing", action = ArgAction::SetTrue)]
     fail_on_missing: bool,
 }
+
+// =========================================================================
+// FrankenLab CLI (bd-1hu19.4)
+// =========================================================================
+
+#[derive(Args, Debug)]
+struct LabArgs {
+    #[command(subcommand)]
+    command: LabCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum LabCommand {
+    /// Run a FrankenLab scenario from a YAML file
+    Run(LabRunArgs),
+    /// Validate a scenario YAML file without executing it
+    Validate(LabValidateArgs),
+    /// Replay a scenario and verify determinism
+    Replay(LabReplayArgs),
+    /// Explore multiple seeds to find violations
+    Explore(LabExploreArgs),
+}
+
+#[derive(Args, Debug)]
+struct LabRunArgs {
+    /// Path to the scenario YAML file
+    scenario: PathBuf,
+
+    /// Override the seed from the scenario file
+    #[arg(long = "seed")]
+    seed: Option<u64>,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct LabValidateArgs {
+    /// Path to the scenario YAML file
+    scenario: PathBuf,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct LabReplayArgs {
+    /// Path to the scenario YAML file
+    scenario: PathBuf,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct LabExploreArgs {
+    /// Path to the scenario YAML file
+    scenario: PathBuf,
+
+    /// Number of seeds to explore (default: 100)
+    #[arg(long = "seeds", default_value_t = 100)]
+    seeds: u64,
+
+    /// Starting seed for exploration
+    #[arg(long = "start-seed", default_value_t = 0)]
+    start_seed: u64,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+// =========================================================================
 
 #[derive(Args, Debug)]
 struct TraceInfoArgs {
@@ -401,6 +479,7 @@ fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
     match command {
         Command::Trace(trace_args) => run_trace(trace_args, output),
         Command::Conformance(args) => run_conformance(args, output),
+        Command::Lab(args) => run_lab(args, output),
     }
 }
 
@@ -446,6 +525,335 @@ fn run_conformance(args: ConformanceArgs, output: &mut Output) -> Result<(), Cli
         ConformanceCommand::Matrix(args) => conformance_matrix(args, output),
     }
 }
+
+// =========================================================================
+// Lab (FrankenLab) handlers (bd-1hu19.4)
+// =========================================================================
+
+fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
+    match args.command {
+        LabCommand::Run(run_args) => lab_run(run_args, output),
+        LabCommand::Validate(validate_args) => lab_validate(validate_args, output),
+        LabCommand::Replay(replay_args) => lab_replay(replay_args, output),
+        LabCommand::Explore(explore_args) => lab_explore(explore_args, output),
+    }
+}
+
+fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
+    let yaml = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
+    serde_yaml::from_str(&yaml).map_err(|err| {
+        CliError::new("scenario_parse_error", "Failed to parse scenario YAML")
+            .detail(format!("{err}. Hint: check indentation and field names"))
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })
+}
+
+fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerError) -> CliError {
+    match err {
+        asupersync::lab::scenario_runner::ScenarioRunnerError::Validation(errors) => {
+            let detail = errors
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            CliError::new("scenario_validation", "Scenario validation failed")
+                .detail(detail)
+                .exit_code(ExitCode::RUNTIME_ERROR)
+        }
+        asupersync::lab::scenario_runner::ScenarioRunnerError::UnknownOracle(name) => {
+            CliError::new("unknown_oracle", "Unknown oracle name in scenario")
+                .detail(format!(
+                    "Oracle '{name}' not found. Available: {}",
+                    asupersync::lab::meta::mutation::ALL_ORACLE_INVARIANTS.join(", ")
+                ))
+                .exit_code(ExitCode::RUNTIME_ERROR)
+        }
+        asupersync::lab::scenario_runner::ScenarioRunnerError::ReplayDivergence {
+            seed,
+            first,
+            second,
+        } => CliError::new("replay_divergence", "Deterministic replay divergence detected")
+            .detail(format!(
+                "Seed {seed}: run1(event_hash={}, steps={}) != run2(event_hash={}, steps={})",
+                first.event_hash, first.steps, second.event_hash, second.steps,
+            ))
+            .exit_code(ExitCode::TEST_FAILURE),
+    }
+}
+
+fn lab_run(args: LabRunArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = load_scenario(&args.scenario)?;
+    let result = asupersync::lab::scenario_runner::ScenarioRunner::run_with_seed(
+        &scenario,
+        args.seed,
+    )
+    .map_err(scenario_runner_error)?;
+
+    let passed = result.passed();
+
+    if args.json {
+        let json = result.to_json();
+        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
+        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+    } else {
+        let report = LabRunOutput::from_result(&result);
+        output.write(&report).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if !passed {
+        return Err(
+            CliError::new("scenario_failed", "Scenario assertions failed")
+                .exit_code(ExitCode::TEST_FAILURE),
+        );
+    }
+
+    Ok(())
+}
+
+fn lab_validate(args: LabValidateArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = load_scenario(&args.scenario)?;
+    let errors = scenario.validate();
+
+    let report = LabValidateOutput {
+        scenario: args.scenario.display().to_string(),
+        scenario_id: scenario.id.clone(),
+        valid: errors.is_empty(),
+        errors: errors.iter().map(|e| e.to_string()).collect(),
+    };
+
+    if args.json {
+        let json = serde_json::to_value(&report).map_err(output_cli_error)?;
+        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
+        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+    } else {
+        output.write(&report).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if !errors.is_empty() {
+        return Err(
+            CliError::new("scenario_invalid", "Scenario validation failed")
+                .exit_code(ExitCode::RUNTIME_ERROR),
+        );
+    }
+
+    Ok(())
+}
+
+fn lab_replay(args: LabReplayArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = load_scenario(&args.scenario)?;
+    let result = asupersync::lab::scenario_runner::ScenarioRunner::validate_replay(&scenario)
+        .map_err(scenario_runner_error)?;
+
+    let report = LabReplayOutput {
+        scenario: args.scenario.display().to_string(),
+        scenario_id: result.scenario_id.clone(),
+        deterministic: true,
+        seed: result.seed,
+        event_hash: result.certificate.event_hash,
+        schedule_hash: result.certificate.schedule_hash,
+    };
+
+    if args.json {
+        let json = serde_json::to_value(&report).map_err(output_cli_error)?;
+        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
+        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+    } else {
+        output.write(&report).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn lab_explore(args: LabExploreArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = load_scenario(&args.scenario)?;
+    let result = asupersync::lab::scenario_runner::ScenarioRunner::explore_seeds(
+        &scenario,
+        args.start_seed,
+        args.seeds as usize,
+    )
+    .map_err(scenario_runner_error)?;
+
+    let all_passed = result.all_passed();
+
+    if args.json {
+        let json = result.to_json();
+        let pretty = serde_json::to_string_pretty(&json).map_err(output_cli_error)?;
+        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+    } else {
+        let report = LabExploreOutput::from_result(&result);
+        output.write(&report).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if !all_passed {
+        return Err(CliError::new("exploration_failures", "Some seeds failed")
+            .detail(format!(
+                "{} of {} seeds failed. First failure at seed {}",
+                result.failed,
+                result.seeds_explored,
+                result.first_failure_seed.unwrap_or(0),
+            ))
+            .exit_code(ExitCode::TEST_FAILURE));
+    }
+
+    Ok(())
+}
+
+// =========================================================================
+// Lab output types
+// =========================================================================
+
+#[derive(Debug, serde::Serialize)]
+struct LabRunOutput {
+    scenario_id: String,
+    seed: u64,
+    passed: bool,
+    steps: u64,
+    faults_injected: usize,
+    oracles_checked: usize,
+    oracles_passed: usize,
+    oracles_failed: usize,
+    invariant_violations: Vec<String>,
+    event_hash: u64,
+    schedule_hash: u64,
+}
+
+impl LabRunOutput {
+    fn from_result(result: &asupersync::lab::scenario_runner::ScenarioRunResult) -> Self {
+        Self {
+            scenario_id: result.scenario_id.clone(),
+            seed: result.seed,
+            passed: result.passed(),
+            steps: result.lab_report.steps_total,
+            faults_injected: result.faults_injected,
+            oracles_checked: result.oracle_report.checked.len(),
+            oracles_passed: result.oracle_report.passed_count,
+            oracles_failed: result.oracle_report.failed_count,
+            invariant_violations: result.lab_report.invariant_violations.clone(),
+            event_hash: result.certificate.event_hash,
+            schedule_hash: result.certificate.schedule_hash,
+        }
+    }
+}
+
+impl Outputtable for LabRunOutput {
+    fn human_format(&self) -> String {
+        let status = if self.passed { "PASS" } else { "FAIL" };
+        let mut lines = vec![
+            format!("Scenario: {} [{}]", self.scenario_id, status),
+            format!("Seed: {}", self.seed),
+            format!("Steps: {}", self.steps),
+            format!("Faults injected: {}", self.faults_injected),
+            format!(
+                "Oracles: {}/{} passed",
+                self.oracles_passed, self.oracles_checked
+            ),
+        ];
+        if !self.invariant_violations.is_empty() {
+            lines.push(format!(
+                "Invariant violations: {}",
+                self.invariant_violations.join(", ")
+            ));
+        }
+        lines.push(format!(
+            "Certificate: event_hash={}, schedule_hash={}",
+            self.event_hash, self.schedule_hash
+        ));
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabValidateOutput {
+    scenario: String,
+    scenario_id: String,
+    valid: bool,
+    errors: Vec<String>,
+}
+
+impl Outputtable for LabValidateOutput {
+    fn human_format(&self) -> String {
+        if self.valid {
+            format!("Scenario '{}' is valid", self.scenario_id)
+        } else {
+            let mut lines = vec![format!("Scenario '{}' has errors:", self.scenario_id)];
+            for err in &self.errors {
+                lines.push(format!("  - {err}"));
+            }
+            lines.join("\n")
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabReplayOutput {
+    scenario: String,
+    scenario_id: String,
+    deterministic: bool,
+    seed: u64,
+    event_hash: u64,
+    schedule_hash: u64,
+}
+
+impl Outputtable for LabReplayOutput {
+    fn human_format(&self) -> String {
+        format!(
+            "Replay verified: {} (seed={}, event_hash={}, schedule_hash={})",
+            self.scenario_id, self.seed, self.event_hash, self.schedule_hash
+        )
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabExploreOutput {
+    scenario_id: String,
+    seeds_explored: usize,
+    passed: usize,
+    failed: usize,
+    unique_fingerprints: usize,
+    first_failure_seed: Option<u64>,
+}
+
+impl LabExploreOutput {
+    fn from_result(result: &asupersync::lab::scenario_runner::ScenarioExplorationResult) -> Self {
+        Self {
+            scenario_id: result.scenario_id.clone(),
+            seeds_explored: result.seeds_explored,
+            passed: result.passed,
+            failed: result.failed,
+            unique_fingerprints: result.unique_fingerprints,
+            first_failure_seed: result.first_failure_seed,
+        }
+    }
+}
+
+impl Outputtable for LabExploreOutput {
+    fn human_format(&self) -> String {
+        let status = if self.failed == 0 { "PASS" } else { "FAIL" };
+        let mut lines = vec![
+            format!("Exploration: {} [{}]", self.scenario_id, status),
+            format!("Seeds: {}/{} passed", self.passed, self.seeds_explored),
+            format!("Unique fingerprints: {}", self.unique_fingerprints),
+        ];
+        if let Some(seed) = self.first_failure_seed {
+            lines.push(format!("First failure at seed: {seed}"));
+        }
+        lines.join("\n")
+    }
+}
+
+// =========================================================================
+// Conformance handler
+// =========================================================================
 
 fn conformance_matrix(args: ConformanceMatrixArgs, output: &mut Output) -> Result<(), CliError> {
     if let Some(min) = args.min_coverage {
@@ -525,6 +933,338 @@ fn conformance_matrix(args: ConformanceMatrixArgs, output: &mut Output) -> Resul
 
     Ok(())
 }
+
+// =========================================================================
+// FrankenLab CLI implementation (bd-1hu19.4)
+// =========================================================================
+
+fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
+    match args.command {
+        LabCommand::Run(args) => lab_run(args, output),
+        LabCommand::Validate(args) => lab_validate(args, output),
+        LabCommand::Replay(args) => lab_replay(args, output),
+        LabCommand::Explore(args) => lab_explore(args, output),
+    }
+}
+
+fn lab_load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
+    let raw = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
+    serde_yaml::from_str(&raw).map_err(|err| {
+        CliError::new("invalid_scenario", "Failed to parse scenario YAML")
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabRunOutput {
+    scenario_id: String,
+    seed: u64,
+    passed: bool,
+    steps: u64,
+    faults_injected: usize,
+    oracle_checked: usize,
+    oracle_passed: usize,
+    oracle_failed: usize,
+    invariant_violations: Vec<String>,
+    certificate: LabCertificateOutput,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabCertificateOutput {
+    event_hash: u64,
+    schedule_hash: u64,
+    trace_fingerprint: u64,
+}
+
+impl Outputtable for LabRunOutput {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        let status = if self.passed { "PASS" } else { "FAIL" };
+        lines.push(format!("Scenario: {} [{}]", self.scenario_id, status));
+        lines.push(format!("Seed: {}", self.seed));
+        lines.push(format!("Steps: {}", self.steps));
+        if self.faults_injected > 0 {
+            lines.push(format!("Faults injected: {}", self.faults_injected));
+        }
+        lines.push(format!(
+            "Oracles: {}/{} passed",
+            self.oracle_passed, self.oracle_checked
+        ));
+        if !self.invariant_violations.is_empty() {
+            lines.push("Invariant violations:".to_string());
+            for v in &self.invariant_violations {
+                lines.push(format!("  - {v}"));
+            }
+        }
+        lines.push(format!(
+            "Fingerprint: {:016x}",
+            self.certificate.trace_fingerprint
+        ));
+        lines.join("\n")
+    }
+}
+
+fn lab_run(args: LabRunArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = lab_load_scenario(&args.scenario)?;
+    let result =
+        asupersync::lab::scenario_runner::ScenarioRunner::run_with_seed(&scenario, args.seed)
+            .map_err(|err| scenario_runner_error(&err))?;
+
+    let out = LabRunOutput {
+        scenario_id: result.scenario_id.clone(),
+        seed: result.seed,
+        passed: result.passed(),
+        steps: result.lab_report.steps_total,
+        faults_injected: result.faults_injected,
+        oracle_checked: result.oracle_report.checked.len(),
+        oracle_passed: result.oracle_report.passed_count,
+        oracle_failed: result.oracle_report.failed_count,
+        invariant_violations: result.lab_report.invariant_violations.clone(),
+        certificate: LabCertificateOutput {
+            event_hash: result.certificate.event_hash,
+            schedule_hash: result.certificate.schedule_hash,
+            trace_fingerprint: result.certificate.trace_fingerprint,
+        },
+    };
+
+    if args.json {
+        let json = serde_json::to_string_pretty(&out).map_err(output_cli_error)?;
+        let mut stdout = io::stdout();
+        writeln!(stdout, "{json}").map_err(output_cli_error)?;
+    } else {
+        output.write(&out).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if !result.passed() {
+        return Err(CliError::new("scenario_failed", "Scenario did not pass")
+            .detail(format!(
+                "{} oracle failures, {} invariant violations",
+                result.oracle_report.failed_count,
+                result.lab_report.invariant_violations.len()
+            ))
+            .exit_code(ExitCode::TEST_FAILURE));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabValidateOutput {
+    scenario_id: String,
+    valid: bool,
+    errors: Vec<String>,
+}
+
+impl Outputtable for LabValidateOutput {
+    fn human_format(&self) -> String {
+        if self.valid {
+            format!("Scenario '{}': valid", self.scenario_id)
+        } else {
+            let mut lines = vec![format!("Scenario '{}': invalid", self.scenario_id)];
+            for e in &self.errors {
+                lines.push(format!("  - {e}"));
+            }
+            lines.join("\n")
+        }
+    }
+}
+
+fn lab_validate(args: LabValidateArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = lab_load_scenario(&args.scenario)?;
+    let errors = scenario.validate();
+    let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
+
+    let out = LabValidateOutput {
+        scenario_id: scenario.id.clone(),
+        valid: errors.is_empty(),
+        errors: error_strings,
+    };
+
+    if args.json {
+        let json = serde_json::to_string_pretty(&out).map_err(output_cli_error)?;
+        let mut stdout = io::stdout();
+        writeln!(stdout, "{json}").map_err(output_cli_error)?;
+    } else {
+        output.write(&out).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if !errors.is_empty() {
+        return Err(
+            CliError::new("validation_failed", "Scenario validation failed")
+                .detail(format!("{} errors", errors.len()))
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabReplayOutput {
+    scenario_id: String,
+    deterministic: bool,
+    seed: u64,
+    fingerprint: u64,
+}
+
+impl Outputtable for LabReplayOutput {
+    fn human_format(&self) -> String {
+        if self.deterministic {
+            format!(
+                "Scenario '{}': deterministic (seed={}, fingerprint={:016x})",
+                self.scenario_id, self.seed, self.fingerprint
+            )
+        } else {
+            format!(
+                "Scenario '{}': NON-DETERMINISTIC (seed={})",
+                self.scenario_id, self.seed
+            )
+        }
+    }
+}
+
+fn lab_replay(args: LabReplayArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = lab_load_scenario(&args.scenario)?;
+    match asupersync::lab::scenario_runner::ScenarioRunner::validate_replay(&scenario) {
+        Ok(result) => {
+            let out = LabReplayOutput {
+                scenario_id: result.scenario_id.clone(),
+                deterministic: true,
+                seed: result.seed,
+                fingerprint: result.certificate.trace_fingerprint,
+            };
+
+            if args.json {
+                let json = serde_json::to_string_pretty(&out).map_err(output_cli_error)?;
+                let mut stdout = io::stdout();
+                writeln!(stdout, "{json}").map_err(output_cli_error)?;
+            } else {
+                output.write(&out).map_err(|e| {
+                    CliError::new("output_error", "Failed to write output").detail(e.to_string())
+                })?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            let is_divergence = matches!(
+                err,
+                asupersync::lab::scenario_runner::ScenarioRunnerError::ReplayDivergence { .. }
+            );
+            let cli_err = scenario_runner_error(&err);
+            if is_divergence {
+                return Err(cli_err.exit_code(ExitCode::DETERMINISM_FAILURE));
+            }
+            Err(cli_err)
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LabExploreOutput {
+    scenario_id: String,
+    seeds_explored: usize,
+    passed: usize,
+    failed: usize,
+    unique_fingerprints: usize,
+    first_failure_seed: Option<u64>,
+}
+
+impl Outputtable for LabExploreOutput {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Scenario: {}", self.scenario_id));
+        lines.push(format!(
+            "Seeds explored: {} ({} passed, {} failed)",
+            self.seeds_explored, self.passed, self.failed
+        ));
+        lines.push(format!("Unique fingerprints: {}", self.unique_fingerprints));
+        if let Some(seed) = self.first_failure_seed {
+            lines.push(format!("First failure at seed: {seed}"));
+        }
+        lines.join("\n")
+    }
+}
+
+fn lab_explore(args: LabExploreArgs, output: &mut Output) -> Result<(), CliError> {
+    let scenario = lab_load_scenario(&args.scenario)?;
+    let result = asupersync::lab::scenario_runner::ScenarioRunner::explore_seeds(
+        &scenario,
+        args.start_seed,
+        args.seeds as usize,
+    )
+    .map_err(|err| scenario_runner_error(&err))?;
+
+    let had_failures = result.failed > 0;
+
+    let out = LabExploreOutput {
+        scenario_id: result.scenario_id.clone(),
+        seeds_explored: result.seeds_explored,
+        passed: result.passed,
+        failed: result.failed,
+        unique_fingerprints: result.unique_fingerprints,
+        first_failure_seed: result.first_failure_seed,
+    };
+
+    if args.json {
+        // Full JSON includes per-seed details
+        let json = serde_json::to_string_pretty(&result.to_json()).map_err(output_cli_error)?;
+        let mut stdout = io::stdout();
+        writeln!(stdout, "{json}").map_err(output_cli_error)?;
+    } else {
+        output.write(&out).map_err(|e| {
+            CliError::new("output_error", "Failed to write output").detail(e.to_string())
+        })?;
+    }
+
+    if had_failures {
+        return Err(CliError::new("exploration_failures", "Some seeds failed")
+            .detail(format!(
+                "{} of {} seeds failed",
+                result.failed, result.seeds_explored
+            ))
+            .exit_code(ExitCode::TEST_FAILURE));
+    }
+
+    Ok(())
+}
+
+fn scenario_runner_error(err: &asupersync::lab::scenario_runner::ScenarioRunnerError) -> CliError {
+    use asupersync::lab::scenario_runner::ScenarioRunnerError;
+    match err {
+        ScenarioRunnerError::Validation(errors) => {
+            let detail = errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            CliError::new("validation_failed", "Scenario validation failed")
+                .detail(detail)
+                .exit_code(ExitCode::USER_ERROR)
+        }
+        ScenarioRunnerError::UnknownOracle(name) => {
+            CliError::new("unknown_oracle", "Unknown oracle name")
+                .detail(name.clone())
+                .exit_code(ExitCode::USER_ERROR)
+        }
+        ScenarioRunnerError::ReplayDivergence { seed, first, second } => CliError::new(
+            "replay_divergence",
+            "Replay produced different trace certificates",
+        )
+        .detail(format!(
+            "seed {seed}: first(event_hash={}, schedule_hash={}) != second(event_hash={}, schedule_hash={})",
+            first.event_hash, first.schedule_hash,
+            second.event_hash, second.schedule_hash,
+        ))
+        .exit_code(ExitCode::DETERMINISM_FAILURE),
+    }
+}
+
+// =========================================================================
 
 fn trace_info(path: &Path) -> Result<TraceInfo, CliError> {
     let file_version = read_trace_version(path)?;
