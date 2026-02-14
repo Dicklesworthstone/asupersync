@@ -206,7 +206,7 @@ impl State {
             Self::HalfOpen {
                 probes_active,
                 successes,
-            } => 2 | (u64::from(probes_active) << 8) | (u64::from(successes) << 32),
+            } => 2 | ((u64::from(probes_active) & 0xFF_FFFF) << 8) | (u64::from(successes) << 32),
         }
     }
 
@@ -601,26 +601,41 @@ impl CircuitBreaker {
         if window_triggered {
             let callback_event = {
                 let mut metrics = self.metrics.write().expect("lock poisoned");
-                // Transition to Open due to window
-                let current_bits = self.state_bits.load(Ordering::SeqCst);
-                let state = State::from_bits(current_bits);
+                // Transition to Open due to window (use CAS to avoid clobbering concurrent transitions)
                 let mut event = None;
+                loop {
+                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let state = State::from_bits(current_bits);
 
-                // Only transition if not already Open?
-                if !matches!(state, State::Open { .. }) {
+                    // Only transition if not already Open
+                    if matches!(state, State::Open { .. }) {
+                        break;
+                    }
+
                     let new_state = State::Open {
                         since_millis: now_millis,
                     };
-                    self.state_bits.store(new_state.to_bits(), Ordering::SeqCst);
-                    metrics.times_opened += 1;
-                    metrics.current_state = new_state;
+                    if self
+                        .state_bits
+                        .compare_exchange(
+                            current_bits,
+                            new_state.to_bits(),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        metrics.times_opened += 1;
+                        metrics.current_state = new_state;
 
-                    if let Some(ref w) = self.sliding_window {
-                        w.write().expect("lock poisoned").reset();
-                    }
+                        if let Some(ref w) = self.sliding_window {
+                            w.write().expect("lock poisoned").reset();
+                        }
 
-                    if self.policy.on_state_change.is_some() {
-                        event = Some((state, new_state, metrics.clone()));
+                        if self.policy.on_state_change.is_some() {
+                            event = Some((state, new_state, metrics.clone()));
+                        }
+                        break;
                     }
                 }
                 event
@@ -1593,5 +1608,67 @@ mod tests {
 
         let inner: CircuitBreakerError<&str> = CircuitBreakerError::Inner("test error");
         assert_eq!(inner.to_string(), "test error");
+    }
+
+    // =========================================================================
+    // Regression Tests for Bug Fixes
+    // =========================================================================
+
+    #[test]
+    fn halfopen_bit_packing_large_probes_active() {
+        // Regression: probes_active > 16M (24-bit max) would corrupt successes
+        // field due to bit overlap in to_bits(). Now probes_active is masked to
+        // 24 bits in encoding, matching the decode mask.
+        let state = State::HalfOpen {
+            probes_active: 0x00FF_FFFF, // max 24-bit value
+            successes: 42,
+        };
+        let roundtripped = State::from_bits(state.to_bits());
+        assert_eq!(
+            roundtripped,
+            State::HalfOpen {
+                probes_active: 0x00FF_FFFF,
+                successes: 42,
+            }
+        );
+
+        // Value exceeding 24 bits gets truncated (saturated by mask)
+        let overflow = State::HalfOpen {
+            probes_active: 0x01FF_FFFF, // 25 bits - bit 24 set
+            successes: 7,
+        };
+        let rt = State::from_bits(overflow.to_bits());
+        // The high bit is lost, but successes must remain uncorrupted
+        assert_eq!(
+            rt,
+            State::HalfOpen {
+                probes_active: 0x00FF_FFFF,
+                successes: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn halfopen_bit_packing_successes_isolated() {
+        // Verify successes field is completely independent of probes_active
+        for probes in [0u32, 1, 255, 0x00FF_FFFF] {
+            for succ in [0u32, 1, 100, u32::MAX] {
+                let state = State::HalfOpen {
+                    probes_active: probes,
+                    successes: succ,
+                };
+                let rt = State::from_bits(state.to_bits());
+                match rt {
+                    State::HalfOpen {
+                        probes_active: p,
+                        successes: s,
+                    } => {
+                        assert_eq!(p, probes, "probes_active mismatch for ({probes}, {succ})");
+                        assert_eq!(s, succ, "successes mismatch for ({probes}, {succ})");
+                    }
+                    _ => panic!("Expected HalfOpen"),
+                }
+            }
+        }
     }
 }
