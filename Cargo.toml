@@ -246,6 +246,17 @@ harness = false
 name = "methodology_baselines"
 harness = false
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations

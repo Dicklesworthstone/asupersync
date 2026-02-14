@@ -98,10 +98,18 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
             self.config.encoding.symbol_size as usize,
             self.config.encoding.repair_overhead,
         );
+        // Pool max_size must accommodate all source + repair symbols for this
+        // object. The configured pool_size is a hint for pre-allocation, but
+        // the actual need depends on the data length.
+        let source_count = data
+            .len()
+            .div_ceil(self.config.encoding.symbol_size as usize);
+        let needed_symbols = source_count + repair_count;
+        let pool_max = self.config.resources.symbol_pool_size.max(needed_symbols);
         let pool = SymbolPool::new(PoolConfig {
             symbol_size: self.config.encoding.symbol_size,
             initial_size: self.config.resources.symbol_pool_size,
-            max_size: self.config.resources.symbol_pool_size,
+            max_size: pool_max,
             allow_growth: true,
             growth_increment: 64,
         });
