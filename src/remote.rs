@@ -2213,10 +2213,10 @@ mod tests {
     #[test]
     fn remote_cap_builder() {
         let cap = RemoteCap::new()
-            .with_default_lease(Duration::from_secs(60))
+            .with_default_lease(Duration::from_mins(1))
             .with_remote_budget(Budget::INFINITE)
             .with_local_node(NodeId::new("origin-a"));
-        assert_eq!(cap.default_lease(), Duration::from_secs(60));
+        assert_eq!(cap.default_lease(), Duration::from_mins(1));
         assert!(cap.remote_budget().is_some());
         assert_eq!(cap.local_node().as_str(), "origin-a");
     }
@@ -2482,7 +2482,7 @@ mod tests {
 
     #[test]
     fn remote_cap_custom_lease_propagates() {
-        let cap = RemoteCap::new().with_default_lease(Duration::from_secs(120));
+        let cap = RemoteCap::new().with_default_lease(Duration::from_mins(2));
         let cx: Cx = Cx::for_testing_with_remote(cap);
 
         let handle = spawn_remote(
@@ -2493,7 +2493,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(handle.lease(), Duration::from_secs(120));
+        assert_eq!(handle.lease(), Duration::from_mins(2));
     }
 
     // -----------------------------------------------------------------------
@@ -2526,7 +2526,7 @@ mod tests {
             remote_task_id: RemoteTaskId::next(),
             computation: ComputationName::new("encode_block"),
             input: RemoteInput::new(vec![1, 2, 3]),
-            lease: Duration::from_secs(60),
+            lease: Duration::from_mins(1),
             idempotency_key: IdempotencyKey::generate(&cx),
             budget: None,
             origin_node: NodeId::new("origin-1"),
@@ -2536,7 +2536,7 @@ mod tests {
 
         assert_eq!(req.computation.as_str(), "encode_block");
         assert_eq!(req.input.len(), 3);
-        assert_eq!(req.lease, Duration::from_secs(60));
+        assert_eq!(req.lease, Duration::from_mins(1));
         assert_eq!(req.origin_node.as_str(), "origin-1");
     }
 
@@ -3070,7 +3070,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_new_request() {
-        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let mut store = IdempotencyStore::new(Duration::from_mins(5));
         assert!(store.is_empty());
 
         let key = IdempotencyKey::from_raw(1);
@@ -3089,7 +3089,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_duplicate_detection() {
-        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let mut store = IdempotencyStore::new(Duration::from_mins(5));
         let key = IdempotencyKey::from_raw(42);
         let comp = ComputationName::new("encode");
 
@@ -3107,7 +3107,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_conflict_detection() {
-        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let mut store = IdempotencyStore::new(Duration::from_mins(5));
         let key = IdempotencyKey::from_raw(42);
 
         store.record(
@@ -3124,7 +3124,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_complete_outcome() {
-        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let mut store = IdempotencyStore::new(Duration::from_mins(5));
         let key = IdempotencyKey::from_raw(99);
 
         store.record(
@@ -3149,7 +3149,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_complete_unknown_key() {
-        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let mut store = IdempotencyStore::new(Duration::from_mins(5));
         let key = IdempotencyKey::from_raw(999);
 
         // Complete on unknown key returns false
@@ -3159,7 +3159,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_eviction() {
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        let mut store = IdempotencyStore::new(Duration::from_mins(1));
 
         // Insert at t=10 (expires at t=70)
         store.record(
@@ -3194,7 +3194,7 @@ mod tests {
 
     #[test]
     fn idempotency_store_debug() {
-        let store = IdempotencyStore::new(Duration::from_secs(60));
+        let store = IdempotencyStore::new(Duration::from_mins(1));
         let debug = format!("{store:?}");
         assert!(debug.contains("IdempotencyStore"));
         assert!(debug.contains("entries"));
