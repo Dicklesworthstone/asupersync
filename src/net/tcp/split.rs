@@ -142,6 +142,22 @@ fn combined_waker(read: Option<&Waker>, write: Option<&Waker>) -> Waker {
     }))
 }
 
+#[inline]
+fn registration_interest(read_waiter: bool, write_waiter: bool, fallback: Interest) -> Interest {
+    let mut interest = Interest::empty();
+    if read_waiter {
+        interest |= Interest::READABLE;
+    }
+    if write_waiter {
+        interest |= Interest::WRITABLE;
+    }
+    if interest.is_empty() {
+        fallback
+    } else {
+        interest
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Owned split halves
 // ---------------------------------------------------------------------------
@@ -216,6 +232,11 @@ impl TcpStreamInner {
 
         // Build combined waker before dropping the lock.
         let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+        let register_interest = registration_interest(
+            guard.read_waker.is_some(),
+            guard.write_waker.is_some(),
+            interest,
+        );
         drop(guard);
 
         let Some(current) = Cx::current() else {
@@ -227,7 +248,7 @@ impl TcpStreamInner {
             return Ok(());
         };
 
-        match driver.register(&*self.stream, interest, waker) {
+        match driver.register(&*self.stream, register_interest, waker) {
             Ok(registration) => {
                 self.state.lock().unwrap().registration = Some(registration);
                 Ok(())
@@ -646,5 +667,36 @@ mod tests {
         crate::assert_with_log!(is_shutdown, "write shutdown on drop", true, is_shutdown);
 
         crate::test_complete!("write_half_shutdown_on_drop");
+    }
+
+    #[test]
+    fn registration_interest_prefers_waiter_union() {
+        init_test("registration_interest_prefers_waiter_union");
+
+        let both = registration_interest(true, true, Interest::READABLE);
+        crate::assert_with_log!(
+            both == (Interest::READABLE | Interest::WRITABLE),
+            "both interests preserved",
+            Interest::READABLE | Interest::WRITABLE,
+            both
+        );
+
+        let read_only = registration_interest(true, false, Interest::WRITABLE);
+        crate::assert_with_log!(
+            read_only == Interest::READABLE,
+            "read waiter wins",
+            Interest::READABLE,
+            read_only
+        );
+
+        let fallback = registration_interest(false, false, Interest::WRITABLE);
+        crate::assert_with_log!(
+            fallback == Interest::WRITABLE,
+            "fallback interest",
+            Interest::WRITABLE,
+            fallback
+        );
+
+        crate::test_complete!("registration_interest_prefers_waiter_union");
     }
 }
