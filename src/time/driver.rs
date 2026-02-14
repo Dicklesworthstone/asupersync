@@ -5,7 +5,7 @@
 //! and virtual (lab) time.
 
 use crate::types::Time;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::time::Duration;
@@ -80,6 +80,11 @@ impl TimeSource for WallClock {
 pub struct VirtualClock {
     /// Current time in nanoseconds.
     now: AtomicU64,
+    /// When true, `now()` returns the frozen time and `advance`/`advance_to`
+    /// are no-ops. The frozen time is captured at the moment `pause()` is called.
+    paused: AtomicBool,
+    /// Frozen time snapshot captured when the clock is paused.
+    frozen_at: AtomicU64,
 }
 
 impl VirtualClock {
@@ -88,6 +93,8 @@ impl VirtualClock {
     pub fn new() -> Self {
         Self {
             now: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            frozen_at: AtomicU64::new(0),
         }
     }
 
@@ -96,18 +103,27 @@ impl VirtualClock {
     pub fn starting_at(time: Time) -> Self {
         Self {
             now: AtomicU64::new(time.as_nanos()),
+            paused: AtomicBool::new(false),
+            frozen_at: AtomicU64::new(time.as_nanos()),
         }
     }
 
     /// Advances time by the given number of nanoseconds.
+    ///
+    /// No-op when the clock is paused.
     pub fn advance(&self, nanos: u64) {
-        self.now.fetch_add(nanos, Ordering::Release);
+        if !self.paused.load(Ordering::Acquire) {
+            self.now.fetch_add(nanos, Ordering::Release);
+        }
     }
 
     /// Advances time to the given absolute time.
     ///
-    /// If the target time is in the past, this is a no-op.
+    /// If the target time is in the past, or the clock is paused, this is a no-op.
     pub fn advance_to(&self, time: Time) {
+        if self.paused.load(Ordering::Acquire) {
+            return;
+        }
         let target = time.as_nanos();
         loop {
             let current = self.now.load(Ordering::Acquire);
@@ -128,6 +144,29 @@ impl VirtualClock {
     pub fn set(&self, time: Time) {
         self.now.store(time.as_nanos(), Ordering::Release);
     }
+
+    /// Pauses the clock, freezing `now()` at the current time.
+    ///
+    /// While paused, `advance()` and `advance_to()` are no-ops.
+    /// Call `resume()` to unfreeze.
+    pub fn pause(&self) {
+        let current = self.now.load(Ordering::Acquire);
+        self.frozen_at.store(current, Ordering::Release);
+        self.paused.store(true, Ordering::Release);
+    }
+
+    /// Resumes a paused clock.
+    ///
+    /// The clock continues from the time it was paused at (no jump).
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Release);
+    }
+
+    /// Returns true if the clock is paused.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
 }
 
 impl Default for VirtualClock {
@@ -138,7 +177,11 @@ impl Default for VirtualClock {
 
 impl TimeSource for VirtualClock {
     fn now(&self) -> Time {
-        Time::from_nanos(self.now.load(Ordering::Acquire))
+        if self.paused.load(Ordering::Acquire) {
+            Time::from_nanos(self.frozen_at.load(Ordering::Acquire))
+        } else {
+            Time::from_nanos(self.now.load(Ordering::Acquire))
+        }
     }
 }
 
@@ -567,6 +610,69 @@ mod tests {
             now_back
         );
         crate::test_complete!("virtual_clock_set");
+    }
+
+    #[test]
+    fn virtual_clock_pause_freezes_time() {
+        init_test("virtual_clock_pause_freezes_time");
+        let clock = VirtualClock::new();
+        clock.advance(1_000_000_000); // 1 second
+        clock.pause();
+
+        let paused = clock.is_paused();
+        crate::assert_with_log!(paused, "is_paused", true, paused);
+
+        let frozen = clock.now();
+        crate::assert_with_log!(
+            frozen == Time::from_secs(1),
+            "frozen at 1s",
+            Time::from_secs(1),
+            frozen
+        );
+
+        // Advance is a no-op while paused
+        clock.advance(5_000_000_000);
+        let still_frozen = clock.now();
+        crate::assert_with_log!(
+            still_frozen == Time::from_secs(1),
+            "still frozen at 1s",
+            Time::from_secs(1),
+            still_frozen
+        );
+
+        // advance_to is also a no-op while paused
+        clock.advance_to(Time::from_secs(100));
+        let still_frozen2 = clock.now();
+        crate::assert_with_log!(
+            still_frozen2 == Time::from_secs(1),
+            "still frozen after advance_to",
+            Time::from_secs(1),
+            still_frozen2
+        );
+        crate::test_complete!("virtual_clock_pause_freezes_time");
+    }
+
+    #[test]
+    fn virtual_clock_resume_unfreezes() {
+        init_test("virtual_clock_resume_unfreezes");
+        let clock = VirtualClock::new();
+        clock.advance(1_000_000_000);
+        clock.pause();
+        clock.resume();
+
+        let resumed = !clock.is_paused();
+        crate::assert_with_log!(resumed, "not paused", true, resumed);
+
+        // Advance works again
+        clock.advance(2_000_000_000);
+        let now = clock.now();
+        crate::assert_with_log!(
+            now == Time::from_secs(3),
+            "resumed and advanced",
+            Time::from_secs(3),
+            now
+        );
+        crate::test_complete!("virtual_clock_resume_unfreezes");
     }
 
     // =========================================================================

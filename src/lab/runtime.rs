@@ -49,6 +49,39 @@ pub struct LabTraceCertificateSummary {
     pub schedule_hash: u64,
 }
 
+/// Report from a [`LabRuntime::run_with_auto_advance`] execution.
+///
+/// Captures statistics about automatic time advancement during the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualTimeReport {
+    /// Total scheduler steps executed.
+    pub steps: u64,
+    /// Number of times virtual time was auto-advanced to a timer deadline.
+    pub auto_advances: u64,
+    /// Total timer wakeups triggered by auto-advances.
+    pub total_wakeups: u64,
+    /// Virtual time at the start of the run.
+    pub time_start: Time,
+    /// Virtual time at the end of the run.
+    pub time_end: Time,
+    /// Total virtual nanoseconds elapsed during the run.
+    pub virtual_elapsed_nanos: u64,
+}
+
+impl VirtualTimeReport {
+    /// Returns the virtual elapsed time in milliseconds.
+    #[must_use]
+    pub const fn virtual_elapsed_ms(&self) -> u64 {
+        self.virtual_elapsed_nanos / 1_000_000
+    }
+
+    /// Returns the virtual elapsed time in seconds.
+    #[must_use]
+    pub const fn virtual_elapsed_secs(&self) -> u64 {
+        self.virtual_elapsed_nanos / 1_000_000_000
+    }
+}
+
 /// Structured report for a single lab runtime run.
 ///
 /// This is intended as a low-level building block for Spork app harnesses.
@@ -776,6 +809,190 @@ impl LabRuntime {
             self.replay_recorder
                 .record_time_advanced(from, self.virtual_time);
         }
+    }
+
+    // =========================================================================
+    // Virtual time control (bd-1hu19.3)
+    // =========================================================================
+
+    /// Advances virtual time to the next timer deadline.
+    ///
+    /// If a timer is pending, advances time to its deadline, processes the
+    /// expired timer(s), and returns the number of wakeups triggered.
+    /// Returns 0 if no timers are pending.
+    pub fn advance_to_next_timer(&mut self) -> usize {
+        let next = self
+            .state
+            .timer_driver_handle()
+            .and_then(|h| h.next_deadline());
+
+        let Some(deadline) = next else {
+            return 0;
+        };
+
+        if deadline <= self.virtual_time {
+            // Timer already expired, just process it
+            return self
+                .state
+                .timer_driver_handle()
+                .map_or(0, |h| h.process_timers());
+        }
+
+        let delta_nanos = deadline.as_nanos() - self.virtual_time.as_nanos();
+        self.advance_time(delta_nanos);
+
+        let wakeups = self
+            .state
+            .timer_driver_handle()
+            .map_or(0, |h| h.process_timers());
+
+        crate::tracing_compat::debug!(
+            "virtual clock auto-advance: reason=all_tasks_blocked, \
+             next_wakeup_ms={}, delta_ms={}, wakeup_count={}",
+            deadline.as_nanos() / 1_000_000,
+            delta_nanos / 1_000_000,
+            wakeups
+        );
+
+        wakeups
+    }
+
+    /// Returns the next timer deadline, if any timers are pending.
+    #[must_use]
+    pub fn next_timer_deadline(&self) -> Option<Time> {
+        self.state
+            .timer_driver_handle()
+            .and_then(|h| h.next_deadline())
+    }
+
+    /// Returns the number of pending timers.
+    #[must_use]
+    pub fn pending_timer_count(&self) -> usize {
+        self.state
+            .timer_driver_handle()
+            .map_or(0, |h| h.pending_count())
+    }
+
+    /// Runs until quiescent, automatically advancing virtual time to pending
+    /// timer deadlines whenever all tasks are idle.
+    ///
+    /// This enables "instant timeout testing": a scenario that would take
+    /// 24 hours of wall-clock time completes in <1 second because every
+    /// `sleep`/`timeout` deadline is jumped to instantly.
+    ///
+    /// The loop is:
+    /// 1. Run until idle (no runnable tasks in scheduler).
+    /// 2. If timers are pending, advance time to next deadline → go to 1.
+    /// 3. If no timers and quiescent → done.
+    ///
+    /// Returns a [`VirtualTimeReport`] with execution statistics.
+    pub fn run_with_auto_advance(&mut self) -> VirtualTimeReport {
+        let start_steps = self.steps;
+        let mut auto_advances: u64 = 0;
+        let mut total_wakeups: u64 = 0;
+        let start_time = self.virtual_time;
+
+        loop {
+            // Check step limit
+            if let Some(max) = self.config.max_steps {
+                if self.steps >= max {
+                    break;
+                }
+            }
+
+            // Run until the scheduler is empty
+            let is_empty = self.scheduler.lock().unwrap().is_empty();
+            if !is_empty {
+                self.step();
+                continue;
+            }
+
+            // Scheduler is empty — check if we should auto-advance
+            if let Some(deadline) = self.next_timer_deadline() {
+                if deadline > self.virtual_time {
+                    let wakeups = self.advance_to_next_timer();
+                    auto_advances += 1;
+                    total_wakeups += wakeups as u64;
+                    continue;
+                }
+                // Timer at or before current time — process and continue
+                let wakeups = self
+                    .state
+                    .timer_driver_handle()
+                    .map_or(0, |h| h.process_timers());
+                if wakeups > 0 {
+                    total_wakeups += wakeups as u64;
+                    continue;
+                }
+            }
+
+            // No runnable tasks and no pending timers → quiescent
+            if self.is_quiescent() {
+                break;
+            }
+
+            // Not quiescent but nothing to advance — try one more step
+            // (there may be I/O or finalizers to process)
+            self.step();
+        }
+
+        VirtualTimeReport {
+            steps: self.steps - start_steps,
+            auto_advances,
+            total_wakeups,
+            time_start: start_time,
+            time_end: self.virtual_time,
+            virtual_elapsed_nanos: self.virtual_time.as_nanos() - start_time.as_nanos(),
+        }
+    }
+
+    /// Pauses the virtual clock, freezing time at the current value.
+    ///
+    /// While paused, `advance_time()` and timer processing still work at the
+    /// `LabRuntime` level (they update the runtime's own `virtual_time` field),
+    /// but the underlying `VirtualClock` visible to tasks via `Cx::now()` is
+    /// frozen. This is useful for testing timeout detection: tasks that call
+    /// `Cx::now()` will see time standing still while the runtime can still
+    /// orchestrate scheduling.
+    pub fn pause_clock(&self) {
+        self.virtual_clock.pause();
+        crate::tracing_compat::info!(
+            "virtual clock paused at time_ms={}",
+            self.virtual_time.as_nanos() / 1_000_000
+        );
+    }
+
+    /// Resumes a paused virtual clock.
+    pub fn resume_clock(&self) {
+        self.virtual_clock.resume();
+        crate::tracing_compat::info!(
+            "virtual clock resumed at time_ms={}",
+            self.virtual_time.as_nanos() / 1_000_000
+        );
+    }
+
+    /// Returns true if the virtual clock is currently paused.
+    #[must_use]
+    pub fn is_clock_paused(&self) -> bool {
+        self.virtual_clock.is_paused()
+    }
+
+    /// Injects a clock skew by jumping time forward by `skew_nanos`.
+    ///
+    /// This simulates clock drift or NTP corrections. A warning is logged
+    /// because large jumps may affect lease/timeout correctness.
+    #[allow(clippy::no_effect_underscore_binding)]
+    pub fn inject_clock_skew(&mut self, skew_nanos: u64) {
+        let _old_time = self.virtual_time;
+        self.advance_time(skew_nanos);
+
+        crate::tracing_compat::warn!(
+            "virtual clock jump detected: old_time_ms={}, new_time_ms={}, jump_ms={} \
+             -- may affect lease/timeout correctness",
+            _old_time.as_nanos() / 1_000_000,
+            self.virtual_time.as_nanos() / 1_000_000,
+            skew_nanos / 1_000_000
+        );
     }
 
     /// Runs until quiescent or max steps reached.
@@ -2046,6 +2263,22 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    /// Waker that sets an `AtomicBool` when woken (for virtual time tests).
+    struct FlagWaker(Arc<std::sync::atomic::AtomicBool>);
+    impl Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Waker that increments an `AtomicU64` counter when woken.
+    struct CountWaker(Arc<std::sync::atomic::AtomicU64>);
+    impl Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -3186,5 +3419,225 @@ mod tests {
         assert_eq!(attachments[1]["kind"], "trace");
 
         crate::test_complete!("contract_attachments_sorted_in_json");
+    }
+
+    // =========================================================================
+    // Virtual Time Control Tests (bd-1hu19.3)
+    // =========================================================================
+
+    #[test]
+    fn advance_to_next_timer_empty() {
+        init_test("advance_to_next_timer_empty");
+        let mut runtime = LabRuntime::with_seed(42);
+
+        let wakeups = runtime.advance_to_next_timer();
+        crate::assert_with_log!(wakeups == 0, "no timers → 0 wakeups", 0, wakeups);
+
+        let deadline = runtime.next_timer_deadline();
+        crate::assert_with_log!(
+            deadline.is_none(),
+            "no pending deadline",
+            true,
+            deadline.is_none()
+        );
+        crate::test_complete!("advance_to_next_timer_empty");
+    }
+
+    #[test]
+    fn advance_to_next_timer_fires_timer() {
+        init_test("advance_to_next_timer_fires_timer");
+        let mut runtime = LabRuntime::with_seed(42);
+
+        // Register a timer at t=1s via the timer driver handle
+        let timer_handle = runtime.state.timer_driver_handle().unwrap();
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let waker = Waker::from(Arc::new(FlagWaker(woken.clone())));
+        let _ = timer_handle.register(Time::from_secs(1), waker);
+
+        // Should have 1 pending timer
+        let count = runtime.pending_timer_count();
+        crate::assert_with_log!(count == 1, "1 pending timer", 1, count);
+
+        // Advance to next timer
+        let wakeups = runtime.advance_to_next_timer();
+        crate::assert_with_log!(wakeups == 1, "1 wakeup", 1, wakeups);
+
+        // Time should now be at 1 second
+        let now = runtime.now();
+        crate::assert_with_log!(
+            now == Time::from_secs(1),
+            "time at 1s",
+            Time::from_secs(1),
+            now
+        );
+
+        // Waker should have been called
+        let was_woken = woken.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(was_woken, "waker fired", true, was_woken);
+        crate::test_complete!("advance_to_next_timer_fires_timer");
+    }
+
+    #[test]
+    fn run_with_auto_advance_basic() {
+        init_test("run_with_auto_advance_basic");
+        let config = LabConfig::new(42).with_auto_advance();
+        let mut runtime = LabRuntime::new(config);
+
+        // No tasks, no timers → immediate quiescence
+        let report = runtime.run_with_auto_advance();
+        crate::assert_with_log!(report.steps == 0, "0 steps", 0u64, report.steps);
+        crate::assert_with_log!(
+            report.auto_advances == 0,
+            "0 auto-advances",
+            0u64,
+            report.auto_advances
+        );
+        crate::test_complete!("run_with_auto_advance_basic");
+    }
+
+    #[test]
+    fn run_with_auto_advance_jumps_past_timer_deadlines() {
+        init_test("run_with_auto_advance_jumps_past_timer_deadlines");
+        let config = LabConfig::new(42).with_auto_advance().max_steps(1_000);
+        let mut runtime = LabRuntime::new(config);
+
+        // Register timers at 1s, 5s, and 10s via timer driver
+        let timer_handle = runtime.state.timer_driver_handle().unwrap();
+        let wake_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        for secs in [1, 5, 10] {
+            let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
+            let _ = timer_handle.register(Time::from_secs(secs), waker);
+        }
+
+        let report = runtime.run_with_auto_advance();
+
+        // All 3 timer deadlines should have been auto-advanced to
+        crate::assert_with_log!(
+            report.auto_advances >= 3,
+            "at least 3 auto-advances",
+            true,
+            report.auto_advances >= 3
+        );
+
+        // Virtual time should be at or past 10 seconds
+        let now = runtime.now();
+        crate::assert_with_log!(
+            now >= Time::from_secs(10),
+            "time >= 10s",
+            true,
+            now >= Time::from_secs(10)
+        );
+
+        // All wakers should have been called
+        let count = wake_count.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(count == 3, "3 wakeups", 3u64, count);
+        crate::test_complete!("run_with_auto_advance_jumps_past_timer_deadlines");
+    }
+
+    #[test]
+    fn virtual_time_24_hour_instant_test() {
+        init_test("virtual_time_24_hour_instant_test");
+        // Acceptance criterion: 24 hours of virtual time in <1 second wall time.
+        let config = LabConfig::new(42).with_auto_advance().max_steps(100_000);
+        let mut runtime = LabRuntime::new(config);
+
+        // Register timers spread across 24 hours (every hour)
+        let timer_handle = runtime.state.timer_driver_handle().unwrap();
+        let wake_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        for hour in 1..=24 {
+            let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
+            let _ = timer_handle.register(Time::from_secs(hour * 3600), waker);
+        }
+
+        let wall_start = std::time::Instant::now();
+        let report = runtime.run_with_auto_advance();
+        let wall_elapsed = wall_start.elapsed();
+
+        // Virtual time should span 24 hours = 86400 seconds
+        crate::assert_with_log!(
+            report.virtual_elapsed_secs() >= 86400,
+            "24h virtual",
+            true,
+            report.virtual_elapsed_secs() >= 86400
+        );
+
+        // All 24 timers fired
+        let count = wake_count.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(count == 24, "24 wakeups", 24u64, count);
+
+        // Wall time should be well under 1 second (typically <1ms)
+        let wall_ms = wall_elapsed.as_millis();
+        crate::assert_with_log!(wall_ms < 1000, "wall time < 1s", true, wall_ms < 1000);
+        crate::test_complete!("virtual_time_24_hour_instant_test");
+    }
+
+    #[test]
+    fn clock_pause_resume() {
+        init_test("clock_pause_resume");
+        let runtime = LabRuntime::with_seed(42);
+
+        let not_paused = !runtime.is_clock_paused();
+        crate::assert_with_log!(not_paused, "not paused initially", true, not_paused);
+
+        runtime.pause_clock();
+        let paused = runtime.is_clock_paused();
+        crate::assert_with_log!(paused, "paused", true, paused);
+
+        runtime.resume_clock();
+        let resumed = !runtime.is_clock_paused();
+        crate::assert_with_log!(resumed, "resumed", true, resumed);
+        crate::test_complete!("clock_pause_resume");
+    }
+
+    #[test]
+    fn inject_clock_skew() {
+        init_test("inject_clock_skew");
+        let mut runtime = LabRuntime::with_seed(42);
+
+        runtime.advance_time(1_000_000_000); // 1 second
+        let before = runtime.now();
+
+        // Inject 5 second skew
+        runtime.inject_clock_skew(5_000_000_000);
+        let after = runtime.now();
+
+        let delta = after.as_nanos() - before.as_nanos();
+        crate::assert_with_log!(
+            delta == 5_000_000_000,
+            "5s skew applied",
+            5_000_000_000u64,
+            delta
+        );
+
+        crate::assert_with_log!(
+            after == Time::from_secs(6),
+            "time at 6s",
+            Time::from_secs(6),
+            after
+        );
+        crate::test_complete!("inject_clock_skew");
+    }
+
+    #[test]
+    fn virtual_time_report_conversions() {
+        init_test("virtual_time_report_conversions");
+        let report = VirtualTimeReport {
+            steps: 100,
+            auto_advances: 5,
+            total_wakeups: 10,
+            time_start: Time::ZERO,
+            time_end: Time::from_secs(3600),
+            virtual_elapsed_nanos: 3_600_000_000_000,
+        };
+
+        let ms = report.virtual_elapsed_ms();
+        crate::assert_with_log!(ms == 3_600_000, "3600000 ms", 3_600_000u64, ms);
+
+        let secs = report.virtual_elapsed_secs();
+        crate::assert_with_log!(secs == 3600, "3600 secs", 3600u64, secs);
+        crate::test_complete!("virtual_time_report_conversions");
     }
 }
