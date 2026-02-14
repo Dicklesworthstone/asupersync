@@ -695,7 +695,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
-            checkpoint_timeout: Duration::from_secs(60),
+            checkpoint_timeout: Duration::from_mins(1),
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
@@ -831,7 +831,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_secs(60),
+            checkpoint_timeout: Duration::from_mins(1),
             adaptive: AdaptiveDeadlineConfig {
                 adaptive_enabled: true,
                 warning_percentile: 0.5,
@@ -900,7 +900,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_secs(60),
+            checkpoint_timeout: Duration::from_mins(1),
             adaptive: AdaptiveDeadlineConfig {
                 adaptive_enabled: true,
                 warning_percentile: 0.9,
@@ -1003,7 +1003,7 @@ mod tests {
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
-            checkpoint_timeout: Duration::from_secs(60),
+            checkpoint_timeout: Duration::from_mins(1),
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };

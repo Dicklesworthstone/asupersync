@@ -386,7 +386,7 @@ mod tests {
         let first = signal.begin_drain(Duration::from_secs(30));
         crate::assert_with_log!(first, "first drain", true, first);
 
-        let second = signal.begin_drain(Duration::from_secs(60));
+        let second = signal.begin_drain(Duration::from_mins(1));
         crate::assert_with_log!(!second, "second drain rejected", false, second);
 
         crate::assert_with_log!(

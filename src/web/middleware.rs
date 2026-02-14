@@ -632,7 +632,7 @@ mod tests {
         let policy = RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(60),
+            period: Duration::from_mins(1),
             ..Default::default()
         };
         let mw = RateLimitMiddleware::new(FnHandler::new(ok_handler), policy);
@@ -658,7 +658,7 @@ mod tests {
         let policy = RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(60),
+            period: Duration::from_mins(1),
             ..Default::default()
         };
         let mw = RateLimitMiddleware::new(handler, policy);

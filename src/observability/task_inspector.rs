@@ -617,12 +617,12 @@ mod tests {
     #[test]
     fn test_config_builder() {
         let config = TaskInspectorConfig::default()
-            .with_stuck_threshold(Duration::from_secs(60))
+            .with_stuck_threshold(Duration::from_mins(1))
             .with_show_obligations(false)
             .with_max_event_history(20)
             .with_highlight_stuck_tasks(false);
 
-        assert_eq!(config.stuck_task_threshold, Duration::from_secs(60));
+        assert_eq!(config.stuck_task_threshold, Duration::from_mins(1));
         assert!(!config.show_obligations);
         assert_eq!(config.max_event_history, 20);
         assert!(!config.highlight_stuck_tasks);
