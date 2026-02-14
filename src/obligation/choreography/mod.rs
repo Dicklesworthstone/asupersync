@@ -2741,4 +2741,177 @@ mod tests {
         }
         assert_eq!(refs.len(), 8);
     }
+
+    // ------------------------------------------------------------------
+    // Proptest: randomly generated choreographies (bd-1f8jn.4 item 1)
+    // ------------------------------------------------------------------
+    //
+    // Since there is no parser for the DSL (only a builder API), we test
+    // structural invariants: validation catches errors, valid protocols
+    // project successfully, projections are consistent.
+
+    mod proptest_choreography {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Pool of participant names for random generation.
+        const NAMES: &[&str] = &["alice", "bob", "carol", "dave"];
+        const ACTIONS: &[&str] = &["ping", "pong", "req", "resp", "ack", "data"];
+        const MSG_TYPES: &[&str] = &["Ping", "Pong", "Request", "Response", "Ack", "Data"];
+
+        /// Generate a random Interaction tree of bounded depth.
+        fn arb_interaction(depth: u32) -> BoxedStrategy<Interaction> {
+            if depth == 0 {
+                // Leaf: comm between two distinct participants
+                (
+                    prop::sample::select(NAMES),
+                    prop::sample::select(NAMES),
+                    prop::sample::select(ACTIONS),
+                    prop::sample::select(MSG_TYPES),
+                )
+                    .prop_filter("distinct participants", |(s, r, _, _)| s != r)
+                    .prop_map(|(sender, receiver, action, msg)| {
+                        Interaction::comm(sender, action, msg, receiver)
+                    })
+                    .boxed()
+            } else {
+                let leaf = arb_interaction(0);
+
+                prop_oneof![
+                    // Comm
+                    4 => leaf,
+                    // Seq
+                    2 => (arb_interaction(depth - 1), arb_interaction(depth - 1))
+                        .prop_map(|(a, b)| Interaction::seq(a, b)),
+                    // Choice (decider + two branches)
+                    1 => (
+                        prop::sample::select(NAMES),
+                        arb_interaction(depth - 1),
+                        arb_interaction(depth - 1),
+                    ).prop_map(|(decider, then_b, else_b)| {
+                        Interaction::choice(decider, "cond", then_b, else_b)
+                    }),
+                    // Compensate
+                    1 => (arb_interaction(depth - 1), arb_interaction(depth - 1))
+                        .prop_map(|(fwd, comp)| Interaction::compensate(fwd, comp)),
+                ]
+                .boxed()
+            }
+        }
+
+        /// Build a GlobalProtocol from a random interaction, adding all
+        /// referenced participants.
+        fn build_protocol(name: &str, interaction: Interaction) -> GlobalProtocol {
+            let refs = interaction.referenced_participants();
+            let mut builder = GlobalProtocol::builder(name);
+            for p in &refs {
+                builder = builder.participant(p, "test-role");
+            }
+            builder.interaction(interaction).build()
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            /// Validation never panics on randomly generated protocols.
+            #[test]
+            fn validation_never_panics(interaction in arb_interaction(3)) {
+                let protocol = build_protocol("proptest_protocol", interaction);
+                let _ = protocol.validate(); // must not panic
+            }
+
+            /// Referenced participants are always a subset of declared participants.
+            #[test]
+            fn referenced_subset_of_declared(interaction in arb_interaction(3)) {
+                let protocol = build_protocol("proptest_protocol", interaction);
+                let declared: std::collections::HashSet<&str> =
+                    protocol.participants.keys().map(String::as_str).collect();
+                let referenced = protocol.interaction.referenced_participants();
+                for r in &referenced {
+                    prop_assert!(
+                        declared.contains(r.as_str()),
+                        "referenced participant {} not in declared set",
+                        r
+                    );
+                }
+            }
+
+            /// Valid protocols project to Some for every declared participant that
+            /// is referenced in interactions.
+            #[test]
+            fn valid_protocols_project_all_participants(interaction in arb_interaction(2)) {
+                let protocol = build_protocol("proptest_protocol", interaction);
+                let errors = protocol.validate();
+                if errors.is_empty() {
+                    let referenced = protocol.interaction.referenced_participants();
+                    for name in &referenced {
+                        let local = protocol.project(name);
+                        prop_assert!(
+                            local.is_some(),
+                            "valid protocol should project for referenced participant {}",
+                            name
+                        );
+                    }
+                }
+            }
+
+            /// Projection duality: if A sends to B, then B receives from A.
+            #[test]
+            fn projection_duality_for_comm(
+                sender_idx in 0..NAMES.len(),
+                receiver_idx in 0..NAMES.len(),
+                action_idx in 0..ACTIONS.len(),
+                msg_idx in 0..MSG_TYPES.len(),
+            ) {
+                let sender = NAMES[sender_idx];
+                let receiver = NAMES[receiver_idx];
+                prop_assume!(sender != receiver);
+
+                let action = ACTIONS[action_idx];
+                let msg = MSG_TYPES[msg_idx];
+
+                let protocol = GlobalProtocol::builder("duality_test")
+                    .participant(sender, "role")
+                    .participant(receiver, "role")
+                    .interaction(Interaction::comm(sender, action, msg, receiver))
+                    .build();
+
+                let errors = protocol.validate();
+                prop_assert!(errors.is_empty(), "simple comm should validate");
+
+                let sender_local = protocol.project(sender).expect("sender should project");
+                let receiver_local = protocol.project(receiver).expect("receiver should project");
+
+                // Sender projection should be Send
+                prop_assert!(
+                    matches!(sender_local, LocalType::Send { .. }),
+                    "sender projection should be Send, got {:?}",
+                    sender_local
+                );
+
+                // Receiver projection should be Recv
+                prop_assert!(
+                    matches!(receiver_local, LocalType::Recv { .. }),
+                    "receiver projection should be Recv, got {:?}",
+                    receiver_local
+                );
+            }
+
+            /// Stats participant count matches referenced participants for valid protocols.
+            #[test]
+            fn stats_participant_count_consistent(interaction in arb_interaction(2)) {
+                let protocol = build_protocol("proptest_protocol", interaction);
+                let errors = protocol.validate();
+                if errors.is_empty() {
+                    let stats = protocol.stats();
+                    let referenced = protocol.interaction.referenced_participants();
+                    prop_assert_eq!(
+                        stats.participant_count,
+                        referenced.len(),
+                        "stats participant count should match referenced count"
+                    );
+                }
+            }
+        }
+    }
 }
