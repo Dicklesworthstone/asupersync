@@ -534,7 +534,7 @@ impl<'a, RT: RuntimeInterface> TestRunner<'a, RT> {
 }
 
 /// Run the full conformance suite and collect structured logs.
-pub fn run_conformance_suite<RT: RuntimeInterface>(
+pub fn run_conformance_suite<RT: RuntimeInterface + Sync>(
     runtime: &RT,
     runtime_name: &str,
     config: RunConfig,
