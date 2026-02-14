@@ -377,11 +377,11 @@ mod tests {
     fn config_builder() {
         let config = Http1ListenerConfig::default()
             .max_connections(Some(5000))
-            .drain_timeout(Duration::from_secs(60))
+            .drain_timeout(Duration::from_mins(1))
             .http_config(Http1Config::default().keep_alive(false));
 
         assert_eq!(config.max_connections, Some(5000));
-        assert_eq!(config.drain_timeout, Duration::from_secs(60));
+        assert_eq!(config.drain_timeout, Duration::from_mins(1));
         assert!(!config.http_config.keep_alive);
     }
 
