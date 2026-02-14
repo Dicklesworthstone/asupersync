@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 /// A task entry in a scheduler lane ordered by priority.
 ///
 /// Ordering: higher priority first, then earlier generation (FIFO within same priority).
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct SchedulerEntry {
     task: TaskId,
     priority: u8,
@@ -45,7 +45,7 @@ impl PartialOrd for SchedulerEntry {
 /// A task entry in a scheduler lane ordered by deadline (EDF).
 ///
 /// Ordering: earlier deadline first, then earlier generation (FIFO within same deadline).
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct TimedEntry {
     task: TaskId,
     deadline: Time,
