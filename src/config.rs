@@ -145,7 +145,7 @@ impl ServerConfig {
                     .max_headers_size(32 * 1024)
                     .max_body_size(8 * 1024 * 1024)
                     .max_requests(Some(10_000))
-                    .idle_timeout(Some(Duration::from_secs(120))),
+                    .idle_timeout(Some(Duration::from_mins(2))),
                 listener: Http1ListenerConfig::default()
                     .max_connections(Some(50_000))
                     .drain_timeout(Duration::from_secs(30)),

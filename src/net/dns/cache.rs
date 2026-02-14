@@ -25,8 +25,8 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 10_000,
-            min_ttl: Duration::from_secs(60),
-            max_ttl: Duration::from_secs(86400), // 24 hours
+            min_ttl: Duration::from_mins(1),
+            max_ttl: Duration::from_hours(24), // 24 hours
             negative_ttl: Duration::from_secs(30),
         }
     }
@@ -289,7 +289,7 @@ mod tests {
         // Insert
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         );
         cache.put_ip("example.com", &lookup);
 
@@ -344,7 +344,7 @@ mod tests {
 
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         );
         cache.put_ip("example.com", &lookup);
         let size = cache.stats().size;
@@ -360,8 +360,8 @@ mod tests {
     fn cache_ttl_clamping() {
         init_test("cache_ttl_clamping");
         let config = CacheConfig {
-            min_ttl: Duration::from_secs(60),
-            max_ttl: Duration::from_secs(3600),
+            min_ttl: Duration::from_mins(1),
+            max_ttl: Duration::from_hours(1),
             ..Default::default()
         };
         let cache = DnsCache::with_config(config);
@@ -390,7 +390,7 @@ mod tests {
 
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         );
         cache.put_ip("example.com", &lookup);
 

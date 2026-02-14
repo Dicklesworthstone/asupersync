@@ -51,7 +51,7 @@ pub struct ObligationTrackerConfig {
 impl Default for ObligationTrackerConfig {
     fn default() -> Self {
         Self {
-            leak_age_threshold: Duration::from_secs(60),
+            leak_age_threshold: Duration::from_mins(1),
             periodic_checks: false,
             check_interval: Duration::from_secs(30),
         }

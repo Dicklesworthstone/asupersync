@@ -131,7 +131,7 @@ impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
             min_symbols: 0,
-            recovery_timeout: Duration::from_secs(60),
+            recovery_timeout: Duration::from_mins(1),
             replica_timeout: Duration::from_secs(5),
             max_concurrent_requests: 10,
             collection_consistency: CollectionConsistency::Quorum,

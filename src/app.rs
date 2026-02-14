@@ -1803,7 +1803,7 @@ mod tests {
                 },
             ),
             restart: crate::supervision::SupervisionStrategy::Restart(
-                crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(60)),
+                crate::supervision::RestartConfig::new(3, std::time::Duration::from_mins(1)),
             ),
             shutdown_budget: Budget::INFINITE,
             depends_on: vec![],
@@ -1823,7 +1823,7 @@ mod tests {
                 },
             ),
             restart: crate::supervision::SupervisionStrategy::Restart(
-                crate::supervision::RestartConfig::new(3, std::time::Duration::from_secs(60)),
+                crate::supervision::RestartConfig::new(3, std::time::Duration::from_mins(1)),
             ),
             shutdown_budget: Budget::INFINITE,
             depends_on: vec!["lobby".into()], // depends on lobby

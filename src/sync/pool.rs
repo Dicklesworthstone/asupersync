@@ -579,8 +579,8 @@ impl Default for PoolConfig {
             min_size: 1,
             max_size: 10,
             acquire_timeout: Duration::from_secs(30),
-            idle_timeout: Duration::from_secs(600),
-            max_lifetime: Duration::from_secs(3600),
+            idle_timeout: Duration::from_mins(10),
+            max_lifetime: Duration::from_hours(1),
             // Health check defaults
             health_check_on_acquire: false,
             health_check_interval: None,
@@ -1256,6 +1256,26 @@ where
         state.waiters.retain(|w| w.id != id);
     }
 
+    /// Record elapsed wait time for blocked acquires.
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+    fn record_wait_time(&self, wait_duration: Duration) {
+        if wait_duration.is_zero() {
+            return;
+        }
+
+        let mut state = self.state.lock().expect("pool state lock poisoned");
+        state.total_wait_time = state
+            .total_wait_time
+            .checked_add(wait_duration)
+            .unwrap_or(Duration::MAX);
+        drop(state);
+
+        #[cfg(feature = "metrics")]
+        if let Some(ref metrics) = self.metrics {
+            metrics.record_wait(wait_duration);
+        }
+    }
+
     /// Update metrics gauges from current pool state.
     #[cfg(feature = "metrics")]
     fn update_metrics_gauges(&self) {
@@ -1361,11 +1381,13 @@ where
                 }
 
                 // Wait for a resource to become available
+                let wait_started = Instant::now();
                 WaitForNotification {
                     pool: self,
                     waiter_id: None,
                 }
                 .await;
+                self.record_wait_time(wait_started.elapsed());
             }
         })
     }
@@ -1922,6 +1944,18 @@ mod tests {
             Duration::from_secs(30),
             config.acquire_timeout
         );
+        crate::assert_with_log!(
+            config.idle_timeout == Duration::from_mins(10),
+            "idle_timeout",
+            Duration::from_mins(10),
+            config.idle_timeout
+        );
+        crate::assert_with_log!(
+            config.max_lifetime == Duration::from_hours(1),
+            "max_lifetime",
+            Duration::from_hours(1),
+            config.max_lifetime
+        );
         crate::test_complete!("pool_config_default");
     }
 
@@ -2367,6 +2401,29 @@ mod tests {
         );
 
         crate::test_complete!("load_test_many_acquire_return_cycles");
+    }
+
+    #[test]
+    fn record_wait_time_accumulates_in_pool_stats() {
+        init_test("record_wait_time_accumulates_in_pool_stats");
+
+        let pool = GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1).acquire_timeout(Duration::from_secs(1)),
+        );
+        let before = pool.stats().total_wait_time;
+
+        pool.record_wait_time(Duration::from_millis(15));
+        pool.record_wait_time(Duration::ZERO);
+
+        let stats = pool.stats();
+        assert!(
+            stats.total_wait_time >= before + Duration::from_millis(15),
+            "recorded wait time should be reflected in pool stats, got {:?}",
+            stats.total_wait_time
+        );
+
+        crate::test_complete!("record_wait_time_accumulates_in_pool_stats");
     }
 
     // ========================================================================

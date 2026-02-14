@@ -265,7 +265,7 @@ impl Default for RestartConfig {
     fn default() -> Self {
         Self {
             max_restarts: 3,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             backoff: BackoffStrategy::default(),
             restart_cost: 0,
             min_remaining_for_restart: None,
@@ -455,7 +455,7 @@ impl Default for SupervisionConfig {
         Self {
             restart_policy: RestartPolicy::OneForOne,
             max_restarts: 3,
-            restart_window: Duration::from_secs(60),
+            restart_window: Duration::from_mins(1),
             backoff: BackoffStrategy::default(),
             escalation: EscalationPolicy::Stop,
             storm_threshold: None,

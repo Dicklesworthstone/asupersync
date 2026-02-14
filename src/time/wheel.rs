@@ -73,8 +73,8 @@ pub struct TimerWheelConfig {
 impl Default for TimerWheelConfig {
     fn default() -> Self {
         Self {
-            max_wheel_duration: Duration::from_secs(86_400), // 24 hours
-            max_timer_duration: Duration::from_secs(604_800), // 7 days
+            max_wheel_duration: Duration::from_hours(24), // 24 hours
+            max_timer_duration: Duration::from_hours(168), // 7 days
         }
     }
 }
@@ -765,16 +765,16 @@ impl TimerWheel {
                 .coalesce_window
                 .as_nanos()
                 .min(u128::from(u64::MAX)) as u64;
-            if window_ns > 0 {
+            if window_ns == 0 {
+                None
+            } else {
                 let now_ns = now.as_nanos();
                 // Compute the next coalescing window boundary with saturation.
                 // At very large logical times, `((now/window)+1)*window` can overflow.
-                let window_end_ns = (now_ns / window_ns)
-                    .saturating_add(1)
-                    .saturating_mul(window_ns);
-                Some(Time::from_nanos(window_end_ns))
-            } else {
-                None
+                now_ns.checked_div(window_ns).map(|quotient| {
+                    let window_end_ns = quotient.saturating_add(1).saturating_mul(window_ns);
+                    Time::from_nanos(window_end_ns)
+                })
             }
         } else {
             None
@@ -1034,7 +1034,7 @@ mod tests {
     #[test]
     fn timer_at_exactly_max_duration() {
         init_test("timer_at_exactly_max_duration");
-        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_hours(1)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
         let waker = counter_waker(counter);
@@ -1058,7 +1058,7 @@ mod tests {
     #[test]
     fn timer_beyond_max_duration_rejected() {
         init_test("timer_beyond_max_duration_rejected");
-        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_hours(1)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
         let waker = counter_waker(counter);
@@ -1075,7 +1075,7 @@ mod tests {
 
         let err = result.unwrap_err();
         crate::assert_with_log!(
-            err.max == Duration::from_secs(3600),
+            err.max == Duration::from_hours(1),
             "error contains max",
             3600,
             err.max.as_secs()
@@ -1418,16 +1418,16 @@ mod tests {
 
         // Test TimerWheelConfig builder
         let wheel_config = TimerWheelConfig::new()
-            .max_wheel_duration(Duration::from_secs(86400))
-            .max_timer_duration(Duration::from_secs(604_800));
+            .max_wheel_duration(Duration::from_hours(24))
+            .max_timer_duration(Duration::from_hours(168));
         crate::assert_with_log!(
-            wheel_config.max_wheel_duration == Duration::from_secs(86400),
+            wheel_config.max_wheel_duration == Duration::from_hours(24),
             "wheel duration",
             86400,
             wheel_config.max_wheel_duration.as_secs()
         );
         crate::assert_with_log!(
-            wheel_config.max_timer_duration == Duration::from_secs(604_800),
+            wheel_config.max_timer_duration == Duration::from_hours(168),
             "timer duration",
             604_800,
             wheel_config.max_timer_duration.as_secs()

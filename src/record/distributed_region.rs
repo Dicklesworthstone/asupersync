@@ -254,7 +254,7 @@ impl Default for DistributedRegionConfig {
             min_quorum: 2,
             replication_factor: 3,
             init_timeout: Duration::from_secs(30),
-            recovery_timeout: Duration::from_secs(60),
+            recovery_timeout: Duration::from_mins(1),
             allow_degraded: true,
             read_consistency: ConsistencyLevel::One,
             write_consistency: ConsistencyLevel::Quorum,

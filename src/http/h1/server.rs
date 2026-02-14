@@ -43,7 +43,7 @@ impl Default for Http1Config {
             max_body_size: 16 * 1024 * 1024,
             keep_alive: true,
             max_requests_per_connection: Some(1000),
-            idle_timeout: Some(Duration::from_secs(60)),
+            idle_timeout: Some(Duration::from_mins(1)),
         }
     }
 }
