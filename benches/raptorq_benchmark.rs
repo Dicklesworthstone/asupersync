@@ -16,6 +16,140 @@ use asupersync::raptorq::gf256::{gf256_add_slice, gf256_addmul_slice, gf256_mul_
 use asupersync::raptorq::linalg::{row_scale_add, row_xor, DenseRow, GaussianSolver};
 use asupersync::raptorq::systematic::SystematicEncoder;
 
+const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
+const TRACK_E_REPRO_CMD: &str =
+    "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
+
+#[derive(Clone, Copy)]
+struct Gf256BenchScenario {
+    scenario_id: &'static str,
+    seed: u64,
+    k: usize,
+    symbol_size: usize,
+    loss_pattern: &'static str,
+    len: usize,
+    mul_const: u8,
+}
+
+fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed.wrapping_add(1);
+    let mut out = vec![0u8; len];
+    for byte in &mut out {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        let value = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        *byte = (value & 0xFF) as u8;
+    }
+    out
+}
+
+fn gf256_bench_context(scenario: &Gf256BenchScenario, outcome: &str) -> String {
+    format!(
+        "scenario_id={} seed={} k={} symbol_size={} loss_pattern={} outcome={} artifact_path={} \
+         repro_cmd='{}'",
+        scenario.scenario_id,
+        scenario.seed,
+        scenario.k,
+        scenario.symbol_size,
+        scenario.loss_pattern,
+        outcome,
+        TRACK_E_ARTIFACT_PATH,
+        TRACK_E_REPRO_CMD
+    )
+}
+
+fn reference_mul_slice(dst: &mut [u8], c: Gf256) {
+    for value in dst.iter_mut() {
+        *value = (Gf256::new(*value) * c).raw();
+    }
+}
+
+fn reference_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
+    assert_eq!(dst.len(), src.len());
+    for (dst_value, src_value) in dst.iter_mut().zip(src.iter().copied()) {
+        let product = (Gf256::new(src_value) * c).raw();
+        *dst_value ^= product;
+    }
+}
+
+fn validate_gf256_bit_exactness(scenario: &Gf256BenchScenario, src: &[u8], c_val: Gf256) {
+    let base = deterministic_bytes(scenario.len, scenario.seed ^ 0xA5A5_5A5A_F0F0_0F0F);
+
+    let mut add_actual = base.clone();
+    gf256_add_slice(&mut add_actual, src);
+    let mut add_expected = base.clone();
+    for (dst_value, src_value) in add_expected.iter_mut().zip(src.iter().copied()) {
+        *dst_value ^= src_value;
+    }
+    let add_ctx = gf256_bench_context(scenario, "add_slice_bit_exact");
+    assert_eq!(add_actual, add_expected, "{add_ctx} mismatch");
+
+    let mut mul_actual = src.to_vec();
+    gf256_mul_slice(&mut mul_actual, c_val);
+    let mut mul_expected = src.to_vec();
+    reference_mul_slice(&mut mul_expected, c_val);
+    let mul_ctx = gf256_bench_context(scenario, "mul_slice_bit_exact");
+    assert_eq!(mul_actual, mul_expected, "{mul_ctx} mismatch");
+
+    let mut addmul_actual = base.clone();
+    gf256_addmul_slice(&mut addmul_actual, src, c_val);
+    let mut addmul_expected = base;
+    reference_addmul_slice(&mut addmul_expected, src, c_val);
+    let addmul_ctx = gf256_bench_context(scenario, "addmul_slice_bit_exact");
+    assert_eq!(addmul_actual, addmul_expected, "{addmul_ctx} mismatch");
+}
+
+fn gf256_scenarios() -> [Gf256BenchScenario; 5] {
+    [
+        Gf256BenchScenario {
+            scenario_id: "RQ-E-GF256-001",
+            seed: 0x1001,
+            k: 8,
+            symbol_size: 64,
+            loss_pattern: "none",
+            len: 64,
+            mul_const: 7,
+        },
+        Gf256BenchScenario {
+            scenario_id: "RQ-E-GF256-002",
+            seed: 0x1002,
+            k: 16,
+            symbol_size: 256,
+            loss_pattern: "drop_10pct",
+            len: 256,
+            mul_const: 13,
+        },
+        Gf256BenchScenario {
+            scenario_id: "RQ-E-GF256-003",
+            seed: 0x1003,
+            k: 32,
+            symbol_size: 1024,
+            loss_pattern: "drop_25pct_burst",
+            len: 1024,
+            mul_const: 29,
+        },
+        Gf256BenchScenario {
+            scenario_id: "RQ-E-GF256-004",
+            seed: 0x1004,
+            k: 32,
+            symbol_size: 4096,
+            loss_pattern: "drop_35pct_burst",
+            len: 4096,
+            mul_const: 71,
+        },
+        Gf256BenchScenario {
+            scenario_id: "RQ-E-GF256-005",
+            seed: 0x1005,
+            k: 64,
+            symbol_size: 16384,
+            loss_pattern: "drop_40pct_random",
+            len: 16384,
+            mul_const: 151,
+        },
+    ]
+}
+
 // ============================================================================
 // GF(256) primitive benchmarks
 // ============================================================================
@@ -23,23 +157,28 @@ use asupersync::raptorq::systematic::SystematicEncoder;
 fn bench_gf256_primitives(c: &mut Criterion) {
     let mut group = c.benchmark_group("gf256_primitives");
 
-    // Test various symbol sizes (typical RaptorQ range)
-    for &size in &[64, 256, 1024, 4096, 16384] {
-        group.throughput(Throughput::Bytes(size as u64));
+    // Deterministic scenario matrix for reproducible profiling + parity checks.
+    for scenario in gf256_scenarios() {
+        group.throughput(Throughput::Bytes(scenario.len as u64));
 
-        let src: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        let c_val = Gf256::new(7);
+        let src = deterministic_bytes(scenario.len, scenario.seed);
+        let c_val = Gf256::new(scenario.mul_const);
+        validate_gf256_bit_exactness(&scenario, &src, c_val);
+        let label = format!(
+            "{}_n{}_seed{}_k{}_sym{}",
+            scenario.scenario_id, scenario.len, scenario.seed, scenario.k, scenario.symbol_size
+        );
 
         // Benchmark gf256_add_slice (pure XOR)
-        group.bench_with_input(BenchmarkId::new("add_slice", size), &size, |b, _| {
-            let mut dst = vec![0u8; size];
+        group.bench_with_input(BenchmarkId::new("add_slice", &label), &scenario, |b, _| {
+            let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0xAA55_AA55);
             b.iter(|| {
                 gf256_add_slice(black_box(&mut dst), black_box(&src));
             });
         });
 
         // Benchmark gf256_mul_slice (scalar multiply)
-        group.bench_with_input(BenchmarkId::new("mul_slice", size), &size, |b, _| {
+        group.bench_with_input(BenchmarkId::new("mul_slice", &label), &scenario, |b, _| {
             let mut dst: Vec<u8> = src.clone();
             b.iter(|| {
                 gf256_mul_slice(black_box(&mut dst), black_box(c_val));
@@ -47,12 +186,16 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         });
 
         // Benchmark gf256_addmul_slice (THE critical hot path)
-        group.bench_with_input(BenchmarkId::new("addmul_slice", size), &size, |b, _| {
-            let mut dst = vec![0u8; size];
-            b.iter(|| {
-                gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(c_val));
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slice", &label),
+            &scenario,
+            |b, _| {
+                let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0x55AA_55AA);
+                b.iter(|| {
+                    gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(c_val));
+                });
+            },
+        );
     }
 
     group.finish();
