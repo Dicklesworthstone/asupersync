@@ -1,0 +1,41 @@
+# FrankenLab Example 1: Simple Race Condition
+#
+# Two tasks race to send on a shared channel. Under certain scheduling
+# orders, the receiver sees an unexpected message ordering.
+#
+# This is the simplest possible FrankenLab scenario: 2 tasks, 1 worker,
+# deterministic seed. Try different seeds to observe different orderings:
+#
+#   frankenlab run 01_race_condition.yaml
+#   frankenlab run 01_race_condition.yaml --seed 99
+#   frankenlab explore 01_race_condition.yaml --seeds 100
+#
+schema_version: 1
+id: example-race-condition
+description: >
+  Two tasks race to update shared state via a channel.
+  Demonstrates deterministic scheduling: same seed always
+  produces the same winner.
+
+lab:
+  seed: 42
+  worker_count: 2
+  trace_capacity: 4096
+  max_steps: 10000
+  panic_on_obligation_leak: true
+  panic_on_futurelock: true
+
+chaos:
+  preset: "off"
+
+network:
+  preset: ideal
+
+participants:
+  - name: producer-a
+    role: sender
+  - name: producer-b
+    role: sender
+
+oracles:
+  - all
