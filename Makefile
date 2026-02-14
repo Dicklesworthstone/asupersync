@@ -3,7 +3,7 @@
 # This Makefile wraps common cargo commands and demo workflows.
 # All heavy lifting is done by Cargo; these are shortcuts.
 
-.PHONY: test check clippy fmt demo-record demo-delta-debug clean
+.PHONY: test check clippy fmt demo-record demo-delta-debug demo-benchmark clean
 
 # Default: run full test suite.
 test:
@@ -44,6 +44,17 @@ demo-record:
 #   DEMO_NARRATIVE   - Output path for narrative .md (default: narrative.md)
 demo-delta-debug:
 	cargo run --example demo_delta_debug --features test-internals
+
+# Reproducible benchmark harness for the full time-travel demo pipeline.
+#
+# Runs record -> delta-debug -> checksum validation and compares all
+# outputs against golden checksums in artifacts/demo_golden_checksums.json.
+#
+# Environment variables:
+#   GOLDEN_UPDATE   - Set to "1" to regenerate golden checksums
+#   DEMO_TRACE_DIR  - Output directory for artifacts (default: tempdir)
+demo-benchmark:
+	cargo run --example demo_benchmark --features test-internals
 
 clean:
 	cargo clean

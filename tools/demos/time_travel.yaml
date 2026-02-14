@@ -1,0 +1,41 @@
+# Time-travel bug reproduction demo: scenario configuration.
+#
+# This YAML describes the parameters used by the reproducible benchmark
+# harness (`examples/demo_benchmark.rs`) to validate that the full
+# time-travel demo pipeline produces identical results across machines.
+#
+# Run:
+#   make demo-benchmark
+#
+# Update golden checksums:
+#   GOLDEN_UPDATE=1 make demo-benchmark
+
+schema_version: 1
+name: time_travel_demo
+description: >
+  Reproducible benchmark for the time-travel bug reproduction pipeline.
+  Sweeps seeds to find a cancel/obligation race condition, records the
+  failing trace, minimizes via hierarchical delta debugging, and
+  validates that all artifacts match golden checksums.
+
+# Seed search parameters.
+seed:
+  start: 0
+  count: 50000
+
+# Scenario construction parameters (must match the demo examples).
+scenario:
+  num_tasks: 8
+  obligation_kinds: [SendPermit, Ack, Lease, IoOp]
+  late_probability_denominator: 10000  # 1 in 10,000 per obligation
+  cancel_target_assignment: "i % 3 != 0"
+
+# Expected results (deterministic for the given seed range).
+expected:
+  failing_seed: 509
+  original_element_count: 30
+  minimized_element_count: 3
+  is_1_minimal: true
+
+# Artifact checksums are stored in artifacts/demo_golden_checksums.json.
+# The benchmark harness reads and validates against them automatically.

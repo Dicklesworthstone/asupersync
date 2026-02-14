@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "generated_by": "demo_benchmark (bd-77g6j.3)",
+  "checksums": {
+    "demo/failing_seed": {
+      "output_hash": "6abe2f4b2df1474a569e776779d9b190ae69061287207937e19af225a56d8721"
+    },
+    "demo/minimized_elements": {
+      "output_hash": "0cd76c88cc6cee445f11ec7294ac4b9fef197998169cd43c4d9bf60f040d1dd6"
+    },
+    "demo/narrative": {
+      "output_hash": "161f81fe1466699cef90e3b5aa4abb20ec9b41cac96d798120ea6a3327fd7cbd"
+    },
+    "demo/original_elements": {
+      "output_hash": "2b5765734900cb8ffd1e3945c15a594d8e7d50f36072ab46672456cfeca97a64"
+    },
+    "demo/trace_file": {
+      "output_hash": "464ac86018060683a2efd3c0c277d37ea9adc8289fee91c0af83a327510d31d3"
+    }
+  }
+}
