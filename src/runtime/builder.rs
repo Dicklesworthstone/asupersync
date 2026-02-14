@@ -949,6 +949,9 @@ struct RuntimeInner {
 
 impl RuntimeInner {
     fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> io::Result<Self> {
+        // Runtime currently instantiates the unified RuntimeState path.
+        // ShardedState exists behind migration work, but there is not yet a
+        // RuntimeConfig layout switch wired here (see bd-2f7uj runbook).
         let state = Arc::new(crate::sync::ContendedMutex::new(
             "runtime_state",
             match reactor {

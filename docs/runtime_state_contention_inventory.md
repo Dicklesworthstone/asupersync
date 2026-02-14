@@ -549,3 +549,89 @@ When reviewing sharding PRs, verify:
 - [ ] **Instrumentation lock-free**: Shard D trace/metrics accessed without any shard lock
 - [ ] **Test coverage**: New tests for each affected cross-shard operation
 - [ ] **Benchmark comparison**: Pre/post contention numbers from bd-3urgh baseline
+
+## Migration + Rollback Runbook (bd-2f7uj)
+
+### Current State (as of 2026-02-14)
+
+- Runtime construction in `src/runtime/builder.rs` still creates a unified
+  `RuntimeState` under one `ContendedMutex`.
+- `src/runtime/sharded_state.rs` and `ShardGuard` exist, but there is no
+  runtime layout switch in `RuntimeBuilder`/`RuntimeConfig` yet.
+- Therefore, there is no user-visible behavior change today; this document
+  defines the staged migration needed to land sharding safely.
+
+### Staged Rollout Plan
+
+1. Add an internal layout switch:
+   - `RuntimeStateLayout::{Unified, Sharded}` in runtime config.
+   - Single selection point in `RuntimeBuilder` (no public API forks).
+   - Default remains `Unified` until validation passes.
+2. Enable A/B profiling with identical seeds/config:
+   - Run the same workload against `Unified` and `Sharded`.
+   - Compare lock contention, trace replay, and invariant oracle outputs.
+3. Flip default to `Sharded` only after parity gates pass:
+   - Keep `Unified` selectable for rollback and regression triage.
+4. Remove the fallback only after at least one release cycle with clean
+   contention and determinism evidence.
+
+### Repro Commands (Baseline vs Sharded)
+
+Baseline (current unified layout):
+
+```bash
+ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention/unified \
+  cargo test --test contention_e2e --features lock-metrics -- --nocapture
+```
+
+Replay determinism sweep (artifact-friendly):
+
+```bash
+ASUPERSYNC_REPLAY_ARTIFACTS_DIR=target/replay/unified \
+ASUPERSYNC_REPLAY_PARITY_ITERS=1000 \
+cargo test --test replay_e2e_suite deterministic_replay_parity_seed_sweep_1000 -- --nocapture
+```
+
+After layout toggle lands, run the same commands with the sharded layout
+selection and write to `target/contention/sharded` and `target/replay/sharded`.
+
+### Rollback Procedure
+
+1. Switch layout selection to `Unified`.
+2. Re-run contention + replay commands above using the same seed/workload.
+3. Compare artifacts:
+   - Contention metrics (`target/contention/*`)
+   - Replay parity JSON/CSV + trace hashes (`target/replay/*`)
+4. Keep `Unified` as default until all regressions are resolved.
+
+Rollback triggers:
+
+- Any determinism mismatch in lab replay for identical seed/config.
+- New deadlock or lock-order violations.
+- Cancel/obligation/quiescence invariant regressions.
+- Material contention regression versus baseline.
+
+### User Impact and Configuration
+
+- No public API changes are required for users.
+- Migration should expose at most one runtime layout selector and optional
+  lock-metrics feature usage for profiling.
+- Metrics/artifact directories are opt-in via env vars; defaults remain
+  deterministic and quiet.
+
+### Validation Checklist (Gate Before Default Flip)
+
+```bash
+cargo fmt --check
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --test contention_e2e --features lock-metrics -- --nocapture
+cargo test --test replay_e2e_suite deterministic_replay_parity_seed_sweep_1000 -- --nocapture
+```
+
+Acceptance signal for flipping default:
+
+- No correctness/invariant regressions.
+- Deterministic replay parity remains 100% for fixed seeds.
+- Contention metrics show expected reduction on task-hot paths.
