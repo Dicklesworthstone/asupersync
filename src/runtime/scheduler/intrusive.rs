@@ -148,6 +148,7 @@ impl IntrusiveRing {
     /// # Complexity
     ///
     /// O(1) time, O(0) allocations.
+    #[inline]
     pub fn push_back(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
         let Some(record) = arena.get_mut(task_id.arena_index()) else {
             return;
@@ -195,6 +196,7 @@ impl IntrusiveRing {
     /// # Complexity
     ///
     /// O(1) time, O(0) allocations.
+    #[inline]
     #[must_use]
     pub fn pop_front(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         let head_id = self.head?;
@@ -242,6 +244,7 @@ impl IntrusiveRing {
     /// # Complexity
     ///
     /// O(1) time, O(0) allocations.
+    #[inline]
     pub fn remove(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) -> bool {
         let Some(record) = arena.get_mut(task_id.arena_index()) else {
             return false;
@@ -390,6 +393,7 @@ impl IntrusiveStack {
     /// # Complexity
     ///
     /// O(1) time, O(0) allocations.
+    #[inline]
     pub fn push(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
         let Some(record) = arena.get_mut(task_id.arena_index()) else {
             return;
@@ -427,6 +431,7 @@ impl IntrusiveStack {
     /// # Complexity
     ///
     /// O(1) time, O(0) allocations.
+    #[inline]
     #[must_use]
     pub fn pop(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         let top_id = self.top?;
@@ -508,6 +513,7 @@ impl IntrusiveStack {
     }
 
     /// Steals one task from the bottom of the stack.
+    #[inline]
     #[must_use]
     pub(crate) fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         let bottom_id = self.bottom?;

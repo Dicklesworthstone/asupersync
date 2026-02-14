@@ -26,6 +26,7 @@ enum TaskSource {
 }
 
 impl TaskSource {
+    #[inline]
     fn with_tasks_arena_mut<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&mut Arena<TaskRecord>) -> R,
@@ -146,6 +147,7 @@ impl LocalQueue {
     }
 
     /// Pushes a task to the local queue.
+    #[inline]
     pub fn push(&self, task: TaskId) {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock().expect("local queue lock poisoned");
@@ -154,6 +156,7 @@ impl LocalQueue {
     }
 
     /// Pushes multiple tasks to the local queue under one arena/queue lock.
+    #[inline]
     pub fn push_many(&self, tasks: &[TaskId]) {
         if tasks.is_empty() {
             return;
@@ -167,6 +170,7 @@ impl LocalQueue {
     }
 
     /// Pops a task from the local queue (LIFO).
+    #[inline]
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
@@ -176,6 +180,7 @@ impl LocalQueue {
     }
 
     /// Returns true if the local queue is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         let stack = self.inner.lock().expect("local queue lock poisoned");

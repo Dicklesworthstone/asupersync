@@ -251,6 +251,7 @@ mod inner {
 
     impl<T> ContendedMutex<T> {
         /// Creates a new mutex with the given name and value.
+        #[inline]
         pub fn new(name: &'static str, value: T) -> Self {
             Self {
                 inner: Mutex::new(value),
@@ -259,6 +260,7 @@ mod inner {
         }
 
         /// Acquires the mutex (no instrumentation).
+        #[inline]
         pub fn lock(&self) -> LockResult<ContendedMutexGuard<'_, T>> {
             match self.inner.lock() {
                 Ok(guard) => Ok(ContendedMutexGuard { guard }),
@@ -310,12 +312,14 @@ mod inner {
 
     impl<T> std::ops::Deref for ContendedMutexGuard<'_, T> {
         type Target = T;
+        #[inline]
         fn deref(&self) -> &T {
             &self.guard
         }
     }
 
     impl<T> std::ops::DerefMut for ContendedMutexGuard<'_, T> {
+        #[inline]
         fn deref_mut(&mut self) -> &mut T {
             &mut self.guard
         }

@@ -323,6 +323,7 @@ impl Scheduler {
     ///
     /// Does nothing if the task is already scheduled.
     /// O(log n) insertion via binary heap.
+    #[inline]
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
             let generation = self.next_gen();
@@ -339,6 +340,7 @@ impl Scheduler {
     /// If the task is already scheduled, it is moved to the cancel lane to
     /// ensure cancellation preempts timed/ready work.
     /// O(log n) insertion for new tasks; O(n) for promotions.
+    #[inline]
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
             let generation = self.next_gen();
@@ -371,6 +373,7 @@ impl Scheduler {
     ///
     /// Order: cancel lane > timed lane > ready lane.
     /// O(log n) pop via binary heap.
+    #[inline]
     pub fn pop(&mut self) -> Option<TaskId> {
         if let Some(entry) = self.cancel_lane.pop() {
             self.scheduled.remove(entry.task);

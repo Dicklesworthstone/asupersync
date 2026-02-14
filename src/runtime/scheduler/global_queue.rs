@@ -14,6 +14,7 @@ pub struct GlobalQueue {
 
 impl GlobalQueue {
     /// Creates a new global queue.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -22,21 +23,25 @@ impl GlobalQueue {
     }
 
     /// Pushes a task to the global queue.
+    #[inline]
     pub fn push(&self, task: TaskId) {
         self.inner.push(task);
     }
 
     /// Pops a task from the global queue.
+    #[inline]
     pub fn pop(&self) -> Option<TaskId> {
         self.inner.pop()
     }
 
     /// Returns the number of tasks in the queue.
+    #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
     /// Returns true if the queue is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }

@@ -149,6 +149,7 @@ impl IntrusivePriorityHeap {
     /// # Complexity
     ///
     /// O(log n) time, O(0) allocations (amortised, after Vec warmup).
+    #[inline]
     pub fn push(&mut self, task: TaskId, priority: u8, arena: &mut Arena<TaskRecord>) {
         let Some(record) = arena.get_mut(task.arena_index()) else {
             return;
@@ -177,6 +178,7 @@ impl IntrusivePriorityHeap {
     /// # Complexity
     ///
     /// O(log n) time, O(0) allocations.
+    #[inline]
     #[must_use]
     pub fn pop(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         if self.heap.is_empty() {

@@ -111,6 +111,7 @@ impl GlobalInjector {
     ///
     /// Cancel lane tasks have the highest priority and will be processed
     /// before any timed or ready work.
+    #[inline]
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
         self.cancel_queue.push(PriorityTask { task, priority });
         self.pending_count.fetch_add(1, Ordering::Relaxed);
@@ -134,6 +135,7 @@ impl GlobalInjector {
     /// Ready tasks have the lowest lane priority. The global ready queue
     /// uses FIFO ordering for lock-free throughput; per-task priority
     /// ordering is applied by the local `PriorityScheduler` after stealing.
+    #[inline]
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         self.ready_queue.push(PriorityTask { task, priority });
         self.ready_count.fetch_add(1, Ordering::Relaxed);
@@ -143,6 +145,7 @@ impl GlobalInjector {
     /// Pops a task from the cancel lane.
     ///
     /// Returns `None` if the cancel lane is empty.
+    #[inline]
     #[must_use]
     pub fn pop_cancel(&self) -> Option<PriorityTask> {
         let result = self.cancel_queue.pop();
@@ -199,6 +202,7 @@ impl GlobalInjector {
     /// Pops a task from the ready lane.
     ///
     /// Returns `None` if the ready lane is empty.
+    #[inline]
     #[must_use]
     pub fn pop_ready(&self) -> Option<PriorityTask> {
         let result = self.ready_queue.pop();
