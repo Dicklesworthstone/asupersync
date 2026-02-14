@@ -1072,6 +1072,24 @@ where
             .is_none_or(|check| check(resource))
     }
 
+    /// Handle an unhealthy idle resource that was popped by `try_get_idle`.
+    ///
+    /// `try_get_idle` increments `active` and `total_acquisitions` when it
+    /// pops an idle entry. If health-check rejects that entry we must undo
+    /// those counters, and (when metrics are enabled) record a destroy event.
+    fn reject_unhealthy_idle_resource(&self) {
+        let mut state = self.state.lock().expect("pool state lock poisoned");
+        state.active = state.active.saturating_sub(1);
+        state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
+        drop(state);
+
+        #[cfg(feature = "metrics")]
+        if let Some(ref metrics) = self.metrics {
+            metrics.record_destroyed(DestroyReason::Unhealthy);
+            self.update_metrics_gauges();
+        }
+    }
+
     /// Process returned resources from the return channel.
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
@@ -1286,11 +1304,7 @@ where
                 // Try to get a healthy idle resource.
                 while let Some((resource, created_at)) = self.try_get_idle() {
                     if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
-                        // Unhealthy: undo the active count bump from try_get_idle
-                        let mut state = self.state.lock().expect("pool state lock poisoned");
-                        state.active = state.active.saturating_sub(1);
-                        state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
-                        drop(state);
+                        self.reject_unhealthy_idle_resource();
                         continue;
                     }
 
@@ -1367,11 +1381,7 @@ where
 
         while let Some((resource, created_at)) = self.try_get_idle() {
             if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
-                // Unhealthy: undo the active count bump from try_get_idle.
-                let mut state = self.state.lock().expect("pool state lock poisoned");
-                state.active = state.active.saturating_sub(1);
-                state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
-                drop(state);
+                self.reject_unhealthy_idle_resource();
                 continue;
             }
 
@@ -2484,13 +2494,18 @@ mod tests {
         let picked = pool
             .try_acquire()
             .expect("should acquire healthy idle resource");
-        assert_eq!(*picked, 1, "try_acquire should skip unhealthy idle resource");
+        assert_eq!(
+            *picked, 1,
+            "try_acquire should skip unhealthy idle resource"
+        );
 
         let stats = pool.stats();
         assert_eq!(stats.active, 1, "one resource checked out");
         assert_eq!(stats.idle, 0, "no healthy idle resources left");
 
-        crate::test_complete!("try_acquire_skips_unhealthy_idle_resources_when_health_check_enabled");
+        crate::test_complete!(
+            "try_acquire_skips_unhealthy_idle_resources_when_health_check_enabled"
+        );
     }
 
     // ========================================================================

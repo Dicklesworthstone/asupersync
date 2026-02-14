@@ -188,8 +188,14 @@ impl Notify {
                 .entries
                 .iter_mut()
                 .filter_map(|entry| {
-                    entry.notified = true;
-                    entry.waker.take()
+                    // Only mark active waiters as notified. Marking free slab slots
+                    // (`waker == None`) can pin tail entries and prevent shrinking.
+                    if let Some(waker) = entry.waker.take() {
+                        entry.notified = true;
+                        Some(waker)
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -718,5 +724,43 @@ mod tests {
         );
 
         crate::test_complete!("notify_one_does_not_lose_wakeup_during_registration_race");
+    }
+
+    #[test]
+    fn notify_waiters_preserves_slab_shrinking_with_middle_hole() {
+        init_test("notify_waiters_preserves_slab_shrinking_with_middle_hole");
+
+        let notify = Notify::new();
+
+        // Register three waiters.
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        // Create a free-slot hole before broadcasting.
+        drop(fut2);
+
+        // Wake remaining waiters; they should cleanly drain and allow the slab to shrink.
+        notify.notify_waiters();
+        assert!(poll_once(&mut fut1).is_ready());
+        assert!(poll_once(&mut fut3).is_ready());
+        drop(fut1);
+        drop(fut3);
+
+        let count = notify.waiter_count();
+        crate::assert_with_log!(count == 0, "no waiters remain", 0usize, count);
+
+        let entries_len = notify.waiters.lock().expect("lock poisoned").entries.len();
+        crate::assert_with_log!(
+            entries_len == 0,
+            "slab tail fully shrinks after broadcast",
+            0usize,
+            entries_len
+        );
+
+        crate::test_complete!("notify_waiters_preserves_slab_shrinking_with_middle_hole");
     }
 }

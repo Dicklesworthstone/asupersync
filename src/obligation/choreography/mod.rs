@@ -1955,4 +1955,790 @@ mod tests {
             ValidationError::DuplicateLoopLabel { label } if label == "x"
         )));
     }
+
+    // ==================================================================
+    // bd-1f8jn.4: Comprehensive choreography test suite
+    // ==================================================================
+
+    // ------------------------------------------------------------------
+    // Projection completeness: every message a participant sends/receives
+    // in the global protocol must appear in their projected local type.
+    // ------------------------------------------------------------------
+
+    fn collect_local_actions(local: &LocalType) -> Vec<(String, &'static str)> {
+        let mut actions = Vec::new();
+        collect_local_actions_rec(local, &mut actions);
+        actions
+    }
+
+    fn collect_local_actions_rec(local: &LocalType, out: &mut Vec<(String, &'static str)>) {
+        match local {
+            LocalType::Send { action, then, .. } => {
+                out.push((action.clone(), "send"));
+                collect_local_actions_rec(then, out);
+            }
+            LocalType::Recv { action, then, .. } => {
+                out.push((action.clone(), "recv"));
+                collect_local_actions_rec(then, out);
+            }
+            LocalType::InternalChoice {
+                then_branch,
+                else_branch,
+                ..
+            }
+            | LocalType::ExternalChoice {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_local_actions_rec(then_branch, out);
+                collect_local_actions_rec(else_branch, out);
+            }
+            LocalType::Rec { body, .. } => {
+                collect_local_actions_rec(body, out);
+            }
+            LocalType::Compensate {
+                forward,
+                compensate,
+            } => {
+                collect_local_actions_rec(forward, out);
+                collect_local_actions_rec(compensate, out);
+            }
+            LocalType::RecVar { .. } | LocalType::End => {}
+        }
+    }
+
+    fn collect_global_actions(
+        interaction: &Interaction,
+        participant: &str,
+    ) -> Vec<(String, &'static str)> {
+        let mut actions = Vec::new();
+        collect_global_actions_rec(interaction, participant, &mut actions);
+        actions
+    }
+
+    fn collect_global_actions_rec(
+        interaction: &Interaction,
+        participant: &str,
+        out: &mut Vec<(String, &'static str)>,
+    ) {
+        match interaction {
+            Interaction::Comm {
+                sender,
+                receiver,
+                action,
+                then,
+                ..
+            } => {
+                if sender == participant {
+                    out.push((action.clone(), "send"));
+                } else if receiver == participant {
+                    out.push((action.clone(), "recv"));
+                }
+                collect_global_actions_rec(then, participant, out);
+            }
+            Interaction::Choice {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_global_actions_rec(then_branch, participant, out);
+                collect_global_actions_rec(else_branch, participant, out);
+            }
+            Interaction::Loop { body, .. } => {
+                collect_global_actions_rec(body, participant, out);
+            }
+            Interaction::Compensate {
+                forward,
+                compensate,
+            } => {
+                collect_global_actions_rec(forward, participant, out);
+                collect_global_actions_rec(compensate, participant, out);
+            }
+            Interaction::Seq { first, second } => {
+                collect_global_actions_rec(first, participant, out);
+                collect_global_actions_rec(second, participant, out);
+            }
+            Interaction::Par { left, right } => {
+                collect_global_actions_rec(left, participant, out);
+                collect_global_actions_rec(right, participant, out);
+            }
+            Interaction::Continue { .. } | Interaction::End => {}
+        }
+    }
+
+    #[test]
+    fn projection_completeness_two_phase_commit() {
+        let protocol = example_two_phase_commit();
+        for name in protocol.participants.keys() {
+            let global_actions = collect_global_actions(&protocol.interaction, name);
+            if global_actions.is_empty() {
+                assert!(protocol.project(name).is_none());
+                continue;
+            }
+            let local = protocol.project(name).expect("projection should exist");
+            let local_actions = collect_local_actions(&local);
+            for (action, dir) in &global_actions {
+                assert!(
+                    local_actions.iter().any(|(a, d)| a == action && d == dir),
+                    "Missing {action} ({dir}) in projection for {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projection_completeness_lease_renewal() {
+        let protocol = example_lease_renewal();
+        for name in protocol.participants.keys() {
+            let global_actions = collect_global_actions(&protocol.interaction, name);
+            if global_actions.is_empty() {
+                continue;
+            }
+            let local = protocol.project(name).expect("projection should exist");
+            let local_actions = collect_local_actions(&local);
+            for (action, dir) in &global_actions {
+                assert!(
+                    local_actions.iter().any(|(a, d)| a == action && d == dir),
+                    "Missing {action} ({dir}) in projection for {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projection_completeness_saga_compensation() {
+        let protocol = example_saga_compensation();
+        for name in protocol.participants.keys() {
+            let global_actions = collect_global_actions(&protocol.interaction, name);
+            if global_actions.is_empty() {
+                continue;
+            }
+            let local = protocol.project(name).expect("projection should exist");
+            let local_actions = collect_local_actions(&local);
+            for (action, dir) in &global_actions {
+                assert!(
+                    local_actions.iter().any(|(a, d)| a == action && d == dir),
+                    "Missing {action} ({dir}) in projection for {name}"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Projection duality: for each Comm(sender→receiver), the sender's
+    // projection has a Send and the receiver's has a Recv.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn projection_duality_two_phase_commit() {
+        let protocol = example_two_phase_commit();
+        let coord = protocol
+            .project("coordinator")
+            .expect("coordinator projection");
+        let worker = protocol.project("worker").expect("worker projection");
+
+        let coord_actions = collect_local_actions(&coord);
+        let worker_actions = collect_local_actions(&worker);
+
+        assert!(coord_actions.contains(&("reserve".to_string(), "send")));
+        assert!(worker_actions.contains(&("reserve".to_string(), "recv")));
+        assert!(coord_actions.contains(&("commit".to_string(), "send")));
+        assert!(worker_actions.contains(&("commit".to_string(), "recv")));
+        assert!(coord_actions.contains(&("abort".to_string(), "send")));
+        assert!(worker_actions.contains(&("abort".to_string(), "recv")));
+    }
+
+    #[test]
+    fn projection_duality_lease_renewal() {
+        let protocol = example_lease_renewal();
+        let holder = protocol.project("holder").expect("holder projection");
+        let resource = protocol.project("resource").expect("resource projection");
+
+        let holder_actions = collect_local_actions(&holder);
+        let resource_actions = collect_local_actions(&resource);
+
+        for (action, dir) in &holder_actions {
+            let expected_dir = if *dir == "send" { "recv" } else { "send" };
+            assert!(
+                resource_actions
+                    .iter()
+                    .any(|(a, d)| a == action && *d == expected_dir),
+                "Duality violation: holder {dir}s {action}"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Knowledge-of-choice: comprehensive edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn knowledge_of_choice_nested_choice_both_valid() {
+        let protocol = GlobalProtocol::builder("nested_valid")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "outer",
+                Interaction::comm("a", "m1", "M1", "b").then(Interaction::choice(
+                    "a",
+                    "inner",
+                    Interaction::comm("a", "m2", "M2", "b"),
+                    Interaction::comm("a", "m3", "M3", "b"),
+                )),
+                Interaction::comm("a", "m4", "M4", "b"),
+            ))
+            .build();
+        assert!(protocol.is_deadlock_free());
+    }
+
+    #[test]
+    fn knowledge_of_choice_nested_different_deciders_valid() {
+        let protocol = GlobalProtocol::builder("nested_diff")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "outer",
+                Interaction::comm("a", "notify", "Notify", "b").then(Interaction::choice(
+                    "b",
+                    "inner",
+                    Interaction::comm("b", "reply_yes", "Yes", "a"),
+                    Interaction::comm("b", "reply_no", "No", "a"),
+                )),
+                Interaction::comm("a", "skip", "Skip", "b"),
+            ))
+            .build();
+        assert!(protocol.is_deadlock_free());
+    }
+
+    #[test]
+    fn knowledge_of_choice_violation_in_else_branch() {
+        let protocol = GlobalProtocol::builder("bad_else")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "pred",
+                Interaction::comm("a", "ok", "Ok", "b"),
+                Interaction::comm("b", "nope", "Nope", "a"),
+            ))
+            .build();
+        let errors = protocol.validate();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::KnowledgeOfChoice { branch: "else", .. })));
+        assert!(!protocol.is_deadlock_free());
+    }
+
+    #[test]
+    fn knowledge_of_choice_violation_both_branches() {
+        let protocol = GlobalProtocol::builder("bad_both")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .interaction(Interaction::choice(
+                "c",
+                "pred",
+                Interaction::comm("a", "m1", "M1", "b"),
+                Interaction::comm("b", "m2", "M2", "a"),
+            ))
+            .build();
+        let errors = protocol.validate();
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|e| matches!(e, ValidationError::KnowledgeOfChoice { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn knowledge_of_choice_within_loop() {
+        let protocol = GlobalProtocol::builder("choice_in_loop")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::loop_(
+                "main",
+                Interaction::choice(
+                    "a",
+                    "continue_pred",
+                    Interaction::comm("a", "data", "Data", "b")
+                        .then(Interaction::continue_("main")),
+                    Interaction::comm("a", "done", "Done", "b"),
+                ),
+            ))
+            .build();
+        assert!(protocol.validate().is_empty());
+        assert!(protocol.is_deadlock_free());
+    }
+
+    #[test]
+    fn knowledge_of_choice_within_compensation() {
+        let protocol = GlobalProtocol::builder("choice_in_comp")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::compensate(
+                Interaction::choice(
+                    "a",
+                    "which_path",
+                    Interaction::comm("a", "path1", "P1", "b"),
+                    Interaction::comm("a", "path2", "P2", "b"),
+                ),
+                Interaction::comm("a", "rollback", "Rollback", "b"),
+            ))
+            .build();
+        assert!(protocol.validate().is_empty());
+        assert!(protocol.is_deadlock_free());
+    }
+
+    // ------------------------------------------------------------------
+    // Complex protocol tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn four_participant_saga_validates() {
+        let protocol = GlobalProtocol::builder("four_party_saga")
+            .participant("coord", "coordinator")
+            .participant("auth", "auth-service")
+            .participant("payment", "payment-service")
+            .participant("inventory", "inventory-service")
+            .interaction(Interaction::seq(
+                Interaction::comm("coord", "check_auth", "AuthReq", "auth"),
+                Interaction::seq(
+                    Interaction::comm("auth", "auth_result", "AuthResp", "coord"),
+                    Interaction::choice(
+                        "coord",
+                        "auth_ok",
+                        Interaction::seq(
+                            Interaction::comm("coord", "charge", "PayReq", "payment"),
+                            Interaction::seq(
+                                Interaction::comm("payment", "pay_result", "PayResp", "coord"),
+                                Interaction::seq(
+                                    Interaction::comm(
+                                        "coord",
+                                        "reserve_stock",
+                                        "InvReq",
+                                        "inventory",
+                                    ),
+                                    Interaction::comm(
+                                        "inventory",
+                                        "stock_result",
+                                        "InvResp",
+                                        "coord",
+                                    ),
+                                ),
+                            ),
+                        ),
+                        Interaction::comm("coord", "reject", "RejectMsg", "auth"),
+                    ),
+                ),
+            ))
+            .build();
+
+        assert!(protocol.validate().is_empty());
+        assert!(protocol.is_deadlock_free());
+
+        for name in protocol.participants.keys() {
+            let global = collect_global_actions(&protocol.interaction, name);
+            if global.is_empty() {
+                continue;
+            }
+            let local = protocol.project(name).expect("projection exists");
+            let local_acts = collect_local_actions(&local);
+            for (action, dir) in &global {
+                assert!(
+                    local_acts.iter().any(|(a, d)| a == action && d == dir),
+                    "{name}: missing {action} ({dir})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deeply_nested_protocol_validates() {
+        let protocol = GlobalProtocol::builder("deep")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::loop_(
+                "outer",
+                Interaction::choice(
+                    "a",
+                    "should_continue",
+                    Interaction::seq(
+                        Interaction::compensate(
+                            Interaction::seq(
+                                Interaction::comm("a", "step1", "S1", "b"),
+                                Interaction::comm("a", "step2", "S2", "b"),
+                            ),
+                            Interaction::comm("a", "undo", "Undo", "b"),
+                        ),
+                        Interaction::continue_("outer"),
+                    ),
+                    Interaction::comm("a", "finish", "Finish", "b"),
+                ),
+            ))
+            .build();
+
+        assert!(protocol.validate().is_empty());
+        let stats = protocol.stats();
+        assert!(stats.max_depth >= 3);
+        assert_eq!(stats.loop_count, 1);
+        assert_eq!(stats.choice_count, 1);
+        assert_eq!(stats.compensate_count, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Stats consistency
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn stats_comm_count_matches_tree() {
+        let protocol = example_saga_compensation();
+        let stats = protocol.stats();
+        assert_eq!(stats.comm_count, 8);
+    }
+
+    #[test]
+    fn stats_participant_count_matches_references() {
+        let protocol = example_two_phase_commit();
+        let stats = protocol.stats();
+        let referenced = protocol.interaction.referenced_participants();
+        assert_eq!(stats.participant_count, referenced.len());
+    }
+
+    #[test]
+    fn stats_par_count() {
+        let protocol = example_scatter_gather_disjoint();
+        let stats = protocol.stats();
+        assert_eq!(stats.par_count, 1);
+        assert_eq!(stats.comm_count, 4);
+    }
+
+    // ------------------------------------------------------------------
+    // Display determinism
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn display_deterministic() {
+        let p1 = example_two_phase_commit();
+        let p2 = example_two_phase_commit();
+        assert_eq!(format!("{}", p1.interaction), format!("{}", p2.interaction));
+    }
+
+    #[test]
+    fn local_type_display_deterministic() {
+        let protocol = example_two_phase_commit();
+        let l1 = protocol.project("coordinator").unwrap();
+        let l2 = protocol.project("coordinator").unwrap();
+        assert_eq!(format!("{l1}"), format!("{l2}"));
+    }
+
+    // ------------------------------------------------------------------
+    // Validation error Display coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validation_error_display_coverage() {
+        let errors = vec![
+            ValidationError::UndeclaredParticipant {
+                name: "x".into(),
+                context: "test".into(),
+            },
+            ValidationError::SelfCommunication {
+                participant: "a".into(),
+                action: "ping".into(),
+            },
+            ValidationError::KnowledgeOfChoice {
+                decider: "a".into(),
+                branch: "then",
+                first_sender: Some("b".into()),
+            },
+            ValidationError::KnowledgeOfChoice {
+                decider: "a".into(),
+                branch: "else",
+                first_sender: None,
+            },
+            ValidationError::UndefinedLoopLabel { label: "x".into() },
+            ValidationError::DuplicateLoopLabel { label: "x".into() },
+            ValidationError::EmptyProtocol,
+            ValidationError::ParallelParticipantOverlap {
+                participant: "a".into(),
+            },
+            ValidationError::DuplicateParticipant { name: "a".into() },
+            ValidationError::NoParticipants,
+        ];
+        for e in &errors {
+            let msg = format!("{e}");
+            assert!(!msg.is_empty(), "Empty Display for {e:?}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Projection edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn project_participant_only_in_one_par_branch() {
+        let protocol = example_scatter_gather_disjoint();
+        let local_a = protocol.project("worker_a").expect("should project");
+        let actions = collect_local_actions(&local_a);
+        assert!(actions
+            .iter()
+            .any(|(a, d)| a == "request_a" && *d == "recv"));
+        assert!(actions
+            .iter()
+            .any(|(a, d)| a == "response_a" && *d == "send"));
+        assert!(!actions.iter().any(|(a, _)| a == "request_b"));
+    }
+
+    #[test]
+    fn project_seq_local_threads_continuations() {
+        let protocol = GlobalProtocol::builder("seq_test")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::seq(
+                Interaction::comm("a", "m1", "M1", "b"),
+                Interaction::comm("a", "m2", "M2", "b"),
+            ))
+            .build();
+
+        let local_a = protocol.project("a").expect("projection exists");
+        match &local_a {
+            LocalType::Send {
+                action, then: t1, ..
+            } => {
+                assert_eq!(action, "m1");
+                match t1.as_ref() {
+                    LocalType::Send {
+                        action, then: t2, ..
+                    } => {
+                        assert_eq!(action, "m2");
+                        assert!(matches!(t2.as_ref(), LocalType::End));
+                    }
+                    other => panic!("Expected Send m2, got {other}"),
+                }
+            }
+            other => panic!("Expected Send m1, got {other}"),
+        }
+    }
+
+    #[test]
+    fn project_choice_uninvolved_participant_gets_branch() {
+        let protocol = GlobalProtocol::builder("choice_uninvolved")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .interaction(Interaction::seq(
+                Interaction::choice(
+                    "a",
+                    "pred",
+                    Interaction::comm("a", "yes", "Yes", "b"),
+                    Interaction::comm("a", "no", "No", "b"),
+                ),
+                Interaction::comm("a", "notify", "Notify", "c"),
+            ))
+            .build();
+
+        let local_c = protocol.project("c").expect("c should project");
+        match &local_c {
+            LocalType::Recv { action, .. } => assert_eq!(action, "notify"),
+            other => panic!("Expected Recv notify, got {other}"),
+        }
+    }
+
+    #[test]
+    fn project_compensation_only_forward_for_uninvolved() {
+        let protocol = GlobalProtocol::builder("comp_partial")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .interaction(Interaction::compensate(
+                Interaction::comm("a", "fwd", "Fwd", "b"),
+                Interaction::comm("a", "comp", "Comp", "c"),
+            ))
+            .build();
+
+        let local_b = protocol.project("b").expect("b should project");
+        let b_actions = collect_local_actions(&local_b);
+        assert!(b_actions.iter().any(|(a, _)| a == "fwd"));
+        assert!(!b_actions.iter().any(|(a, _)| a == "comp"));
+
+        let local_c = protocol.project("c").expect("c should project");
+        let c_actions = collect_local_actions(&local_c);
+        assert!(c_actions.iter().any(|(a, _)| a == "comp"));
+        assert!(!c_actions.iter().any(|(a, _)| a == "fwd"));
+    }
+
+    fn has_rec_var(local: &LocalType, label: &str) -> bool {
+        match local {
+            LocalType::RecVar { label: l } => l == label,
+            LocalType::Send { then, .. } | LocalType::Recv { then, .. } => has_rec_var(then, label),
+            LocalType::InternalChoice {
+                then_branch,
+                else_branch,
+                ..
+            }
+            | LocalType::ExternalChoice {
+                then_branch,
+                else_branch,
+                ..
+            } => has_rec_var(then_branch, label) || has_rec_var(else_branch, label),
+            LocalType::Rec { body, .. } => has_rec_var(body, label),
+            LocalType::Compensate {
+                forward,
+                compensate,
+            } => has_rec_var(forward, label) || has_rec_var(compensate, label),
+            LocalType::End => false,
+        }
+    }
+
+    #[test]
+    fn project_loop_with_continue_produces_rec_var() {
+        let protocol = example_lease_renewal();
+        let local = protocol.project("holder").expect("projection exists");
+        assert!(has_rec_var(&local, "renew_loop"));
+    }
+
+    // ------------------------------------------------------------------
+    // Builder API edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn comm_calm_monotone_appears_in_display() {
+        let interaction =
+            Interaction::comm_calm("a", "test", "TestMsg", "b", Monotonicity::Monotone);
+        assert!(format!("{interaction}").contains("[monotone]"));
+    }
+
+    #[test]
+    fn comm_calm_non_monotone_appears_in_display() {
+        let interaction =
+            Interaction::comm_calm("a", "test", "TestMsg", "b", Monotonicity::NonMonotone);
+        assert!(format!("{interaction}").contains("[non-monotone]"));
+    }
+
+    #[test]
+    fn message_type_display_with_type_params() {
+        let mt = MessageType {
+            name: "Payload".into(),
+            type_params: vec!["T".into(), "U".into()],
+        };
+        assert_eq!(format!("{mt}"), "Payload<T, U>");
+    }
+
+    #[test]
+    fn message_type_display_no_type_params() {
+        let mt = MessageType {
+            name: "Simple".into(),
+            type_params: vec![],
+        };
+        assert_eq!(format!("{mt}"), "Simple");
+    }
+
+    #[test]
+    #[should_panic(expected = "then() can only be called on Comm interactions")]
+    fn then_panics_on_non_comm() {
+        let _bad = Interaction::end().then(Interaction::end());
+    }
+
+    #[test]
+    #[should_panic(expected = "interaction must be set")]
+    fn builder_panics_without_interaction() {
+        let _bad = GlobalProtocol::builder("bad")
+            .participant("a", "role")
+            .build();
+    }
+
+    // ------------------------------------------------------------------
+    // first_active_participant coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn first_active_in_seq_is_first_branch() {
+        let inter = Interaction::seq(
+            Interaction::comm("a", "m", "M", "b"),
+            Interaction::comm("c", "n", "N", "b"),
+        );
+        assert_eq!(inter.first_active_participant(), Some("a"));
+    }
+
+    #[test]
+    fn first_active_in_compensate_is_forward() {
+        let inter = Interaction::compensate(
+            Interaction::comm("a", "fwd", "F", "b"),
+            Interaction::comm("c", "comp", "C", "b"),
+        );
+        assert_eq!(inter.first_active_participant(), Some("a"));
+    }
+
+    #[test]
+    fn first_active_in_par_is_left() {
+        let inter = Interaction::par(
+            Interaction::comm("a", "left", "L", "b"),
+            Interaction::comm("c", "right", "R", "d"),
+        );
+        assert_eq!(inter.first_active_participant(), Some("a"));
+    }
+
+    #[test]
+    fn first_active_in_end_is_none() {
+        assert!(Interaction::end().first_active_participant().is_none());
+    }
+
+    #[test]
+    fn first_active_in_continue_is_none() {
+        assert!(Interaction::continue_("x")
+            .first_active_participant()
+            .is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Multiple errors detected simultaneously
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn multiple_errors_detected_at_once() {
+        let protocol = GlobalProtocol::builder("multi_bad")
+            .participant("a", "role")
+            .interaction(
+                Interaction::comm("a", "ping", "Ping", "a")
+                    .then(Interaction::comm("a", "send", "Msg", "ghost")),
+            )
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::SelfCommunication { .. })));
+        assert!(errors.iter().any(
+            |e| matches!(e, ValidationError::UndeclaredParticipant { name, .. } if name == "ghost")
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // referenced_participants correctness
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn referenced_participants_collects_all() {
+        let inter = Interaction::seq(
+            Interaction::comm("a", "m1", "M", "b"),
+            Interaction::par(
+                Interaction::comm("c", "m2", "M", "d"),
+                Interaction::compensate(
+                    Interaction::comm("e", "m3", "M", "f"),
+                    Interaction::comm("g", "m4", "M", "h"),
+                ),
+            ),
+        );
+
+        let refs = inter.referenced_participants();
+        for name in &["a", "b", "c", "d", "e", "f", "g", "h"] {
+            assert!(refs.contains(*name), "Missing participant {name}");
+        }
+        assert_eq!(refs.len(), 8);
+    }
 }

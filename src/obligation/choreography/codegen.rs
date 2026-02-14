@@ -992,4 +992,233 @@ mod tests {
             }
         }
     }
+
+    // ==================================================================
+    // bd-1f8jn.4: Comprehensive codegen test suite
+    // ==================================================================
+
+    // ------------------------------------------------------------------
+    // Codegen determinism
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn codegen_deterministic_two_phase_commit() {
+        let c = compiler();
+        let protocol = example_two_phase_commit();
+        let out1 = c.compile(&protocol, "coordinator").unwrap();
+        let out2 = c.compile(&protocol, "coordinator").unwrap();
+        assert_eq!(out1.render(), out2.render());
+        assert_eq!(out1.session_type, out2.session_type);
+    }
+
+    #[test]
+    fn codegen_deterministic_all_participants() {
+        let c = compiler();
+        let protocol = example_saga_compensation();
+        let all1 = c.compile_all(&protocol).unwrap();
+        let all2 = c.compile_all(&protocol).unwrap();
+        assert_eq!(all1.len(), all2.len());
+        for (name, o1) in &all1 {
+            let o2 = &all2[name];
+            assert_eq!(
+                o1.render(),
+                o2.render(),
+                "Non-deterministic codegen for {name}"
+            );
+            assert_eq!(o1.session_type, o2.session_type);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Message struct collection
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn message_structs_no_duplicates() {
+        let c = compiler();
+        let protocol = example_saga_compensation();
+        let output = c.compile(&protocol, "coordinator").unwrap();
+        let names: Vec<&str> = output
+            .message_structs
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "Duplicate messages: {names:?}");
+    }
+
+    #[test]
+    fn message_structs_match_protocol_comms() {
+        let c = compiler();
+        let protocol = example_two_phase_commit();
+        let coord = c.compile(&protocol, "coordinator").unwrap();
+        let msg_names: BTreeSet<&str> = coord
+            .message_structs
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(msg_names.contains("ReserveMsg"));
+        assert!(msg_names.contains("CommitMsg"));
+        assert!(msg_names.contains("AbortMsg"));
+    }
+
+    #[test]
+    fn message_structs_only_relevant_to_participant() {
+        let c = compiler();
+        let protocol = example_saga_compensation();
+        let sa = c.compile(&protocol, "service_a").unwrap();
+        let msg_names: BTreeSet<&str> =
+            sa.message_structs.iter().map(|m| m.name.as_str()).collect();
+        assert!(msg_names.contains("ReserveMsg"));
+        assert!(msg_names.contains("CommitMsg"));
+        assert!(msg_names.contains("AbortMsg"));
+        assert!(msg_names.contains("CompensateMsg"));
+    }
+
+    // ------------------------------------------------------------------
+    // Session type structure
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn session_type_lease_has_recursion() {
+        let c = compiler();
+        let protocol = example_lease_renewal();
+        let output = c.compile(&protocol, "holder").unwrap();
+        assert!(
+            output.session_type.contains("Rec_renew_loop"),
+            "Expected recursion, got: {}",
+            output.session_type
+        );
+    }
+
+    #[test]
+    fn session_type_end_at_leaves() {
+        let c = compiler();
+        let protocol = example_two_phase_commit();
+        let output = c.compile(&protocol, "coordinator").unwrap();
+        assert!(output.session_type.contains("End"));
+    }
+
+    // ------------------------------------------------------------------
+    // CALM annotation correctness
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn calm_annotations_worker_perspective() {
+        let c = compiler();
+        let protocol = example_two_phase_commit();
+        let output = c.compile(&protocol, "worker").unwrap();
+        assert_eq!(output.calm_annotations.len(), 3);
+        for ann in &output.calm_annotations {
+            assert_eq!(ann.direction, "recv");
+            assert_eq!(ann.peer, "coordinator");
+        }
+    }
+
+    #[test]
+    fn calm_annotations_missing_when_no_calm_tags() {
+        let protocol = GlobalProtocol::builder("no_calm")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::comm("a", "msg", "Msg", "b").then(Interaction::end()))
+            .build();
+        let c = compiler();
+        let output = c.compile(&protocol, "a").unwrap();
+        assert!(output.calm_annotations.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Complexity counting
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn complexity_two_phase_commit_coordinator() {
+        let c = compiler();
+        let protocol = example_two_phase_commit();
+        let output = c.compile(&protocol, "coordinator").unwrap();
+        assert!(output.local_state_count > 0);
+        assert!(output.local_transition_count > 0);
+        assert!(output.local_transition_count <= output.local_state_count * 2);
+    }
+
+    #[test]
+    fn complexity_grows_with_protocol_size() {
+        let c = compiler();
+        let simple = example_two_phase_commit();
+        let complex = example_saga_compensation();
+        let simple_out = c.compile(&simple, "coordinator").unwrap();
+        let complex_out = c.compile(&complex, "coordinator").unwrap();
+        assert!(complex_out.local_state_count >= simple_out.local_state_count);
+    }
+
+    // ------------------------------------------------------------------
+    // Generated code structure
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn generated_code_has_imports() {
+        let c = compiler();
+        let protocol = example_two_phase_commit();
+        let output = c.compile(&protocol, "coordinator").unwrap();
+        let code = output.render();
+        assert!(code.contains("use asupersync::obligation::session_types::"));
+        assert!(code.contains("Chan, End, Send, Recv"));
+    }
+
+    #[test]
+    fn generated_code_tracing_disabled() {
+        let c = ProjectionCompiler {
+            include_tracing: false,
+        };
+        let protocol = example_two_phase_commit();
+        let output = c.compile(&protocol, "coordinator").unwrap();
+        let code = output.render();
+        assert!(!code.contains("Span:"));
+    }
+
+    #[test]
+    fn generated_code_tracing_enabled() {
+        let c = ProjectionCompiler {
+            include_tracing: true,
+        };
+        let protocol = example_two_phase_commit();
+        let output = c.compile(&protocol, "coordinator").unwrap();
+        let code = output.render();
+        assert!(code.contains("Span:"));
+    }
+
+    #[test]
+    fn compilation_error_display() {
+        let err1 = CompilationError::ParticipantNotFound { name: "x".into() };
+        assert!(format!("{err1}").contains("'x'"));
+
+        let err2 = CompilationError::EmptyProjection {
+            participant: "y".into(),
+        };
+        assert!(format!("{err2}").contains("'y'"));
+
+        let err3 =
+            CompilationError::ValidationFailed(vec![super::super::ValidationError::EmptyProtocol]);
+        assert!(format!("{err3}").contains("validation failed"));
+    }
+
+    // ------------------------------------------------------------------
+    // compile_all skips uninvolved participants
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compile_all_skips_uninvolved() {
+        let protocol = GlobalProtocol::builder("partial")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("ghost", "role")
+            .interaction(Interaction::comm("a", "msg", "Msg", "b").then(Interaction::end()))
+            .build();
+
+        let c = compiler();
+        let outputs = c.compile_all(&protocol).unwrap();
+        assert!(outputs.contains_key("a"));
+        assert!(outputs.contains_key("b"));
+        assert!(!outputs.contains_key("ghost"));
+    }
 }

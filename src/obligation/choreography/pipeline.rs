@@ -892,7 +892,8 @@ impl SagaPipeline {
 mod tests {
     use super::*;
     use crate::obligation::choreography::{
-        example_lease_renewal, example_saga_compensation, example_two_phase_commit,
+        example_lease_renewal, example_saga_compensation, example_scatter_gather_disjoint,
+        example_two_phase_commit,
     };
 
     fn pipeline() -> SagaPipeline {
@@ -1011,10 +1012,7 @@ mod tests {
             .iter()
             .filter(|s| s.op == SagaOpKind::Send)
             .count();
-        assert!(
-            send_count >= 3,
-            "holder should send acquire+renew+release"
-        );
+        assert!(send_count >= 3, "holder should send acquire+renew+release");
     }
 
     // ------------------------------------------------------------------
@@ -1337,5 +1335,451 @@ mod tests {
                 "{name}: execution plan steps != saga plan steps"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: scatter-gather disjoint through full pipeline (bd-1f8jn.4 item 5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn generate_scatter_gather_disjoint() {
+        let protocol = example_scatter_gather_disjoint();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        assert_eq!(output.protocol_name, "scatter_gather_disjoint");
+        assert_eq!(output.participants.len(), 4);
+        assert!(output.participants.contains_key("proxy_a"));
+        assert!(output.participants.contains_key("proxy_b"));
+        assert!(output.participants.contains_key("worker_a"));
+        assert!(output.participants.contains_key("worker_b"));
+    }
+
+    #[test]
+    fn scatter_gather_proxy_sends_and_worker_receives() {
+        let protocol = example_scatter_gather_disjoint();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        let proxy_a = &output.participants["proxy_a"];
+        let worker_a = &output.participants["worker_a"];
+
+        // proxy_a sends request_a, receives response_a
+        let proxy_sends: Vec<_> = proxy_a
+            .saga_plan
+            .steps
+            .iter()
+            .filter(|s| s.op == SagaOpKind::Send)
+            .collect();
+        let proxy_recvs: Vec<_> = proxy_a
+            .saga_plan
+            .steps
+            .iter()
+            .filter(|s| s.op == SagaOpKind::Recv)
+            .collect();
+        assert_eq!(proxy_sends.len(), 1, "proxy_a should send once");
+        assert_eq!(proxy_recvs.len(), 1, "proxy_a should recv once");
+
+        // worker_a receives request_a, sends response_a
+        let worker_sends: Vec<_> = worker_a
+            .saga_plan
+            .steps
+            .iter()
+            .filter(|s| s.op == SagaOpKind::Send)
+            .collect();
+        let worker_recvs: Vec<_> = worker_a
+            .saga_plan
+            .steps
+            .iter()
+            .filter(|s| s.op == SagaOpKind::Recv)
+            .collect();
+        assert_eq!(worker_sends.len(), 1, "worker_a should send once");
+        assert_eq!(worker_recvs.len(), 1, "worker_a should recv once");
+    }
+
+    #[test]
+    fn scatter_gather_lab_test_references_all_participants() {
+        let protocol = example_scatter_gather_disjoint();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        assert!(output.lab_test_code.contains("proxy_a_handle"));
+        assert!(output.lab_test_code.contains("proxy_b_handle"));
+        assert!(output.lab_test_code.contains("worker_a_handle"));
+        assert!(output.lab_test_code.contains("worker_b_handle"));
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: codegen determinism (bd-1f8jn.4 item 8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn codegen_deterministic_across_runs() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let protocols = vec![
+            example_two_phase_commit(),
+            example_lease_renewal(),
+            example_saga_compensation(),
+            example_scatter_gather_disjoint(),
+        ];
+
+        let pipe = pipeline();
+
+        for protocol in &protocols {
+            let output1 = pipe
+                .generate_with_locals(protocol)
+                .expect("pipeline failed");
+            let output2 = pipe
+                .generate_with_locals(protocol)
+                .expect("pipeline failed");
+
+            // Same participants
+            assert_eq!(
+                output1.participants.len(),
+                output2.participants.len(),
+                "{}: participant count differs across runs",
+                protocol.name
+            );
+
+            // Same source code for each participant
+            for (name, p1) in &output1.participants {
+                let p2 = &output2.participants[name];
+                assert_eq!(
+                    p1.source_code, p2.source_code,
+                    "{}: source code differs for {name}",
+                    protocol.name
+                );
+
+                // Hash-based golden check
+                let mut h1 = DefaultHasher::new();
+                p1.source_code.hash(&mut h1);
+                let mut h2 = DefaultHasher::new();
+                p2.source_code.hash(&mut h2);
+                assert_eq!(
+                    h1.finish(),
+                    h2.finish(),
+                    "{}: code hash differs for {name}",
+                    protocol.name
+                );
+            }
+
+            // Same lab test code
+            assert_eq!(
+                output1.lab_test_code, output2.lab_test_code,
+                "{}: lab test code differs",
+                protocol.name
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: cross-protocol structural invariants (bd-1f8jn.4 item 5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn all_valid_protocols_through_full_pipeline() {
+        let protocols = vec![
+            example_two_phase_commit(),
+            example_lease_renewal(),
+            example_saga_compensation(),
+            example_scatter_gather_disjoint(),
+        ];
+
+        let pipe = pipeline();
+        for protocol in &protocols {
+            let output = pipe
+                .generate_with_locals(protocol)
+                .unwrap_or_else(|e| panic!("{}: pipeline failed: {e}", protocol.name));
+
+            // Structural invariants every output must satisfy:
+            assert!(
+                !output.participants.is_empty(),
+                "{}: no participants",
+                protocol.name
+            );
+
+            for (name, p) in &output.participants {
+                // Protocol metadata consistency
+                assert_eq!(
+                    p.protocol_name, protocol.name,
+                    "{name}: protocol_name mismatch"
+                );
+                assert_eq!(
+                    p.participant_name, *name,
+                    "{name}: participant_name mismatch"
+                );
+
+                // Saga plan non-empty
+                assert!(
+                    !p.saga_plan.steps.is_empty(),
+                    "{name} in {}: empty saga plan",
+                    protocol.name
+                );
+
+                // Execution plan covers all steps
+                assert_eq!(
+                    p.execution_plan.total_steps(),
+                    p.saga_plan.steps.len(),
+                    "{name} in {}: step count mismatch",
+                    protocol.name
+                );
+
+                // Monotone ratio valid
+                let ratio = p.saga_plan.monotone_ratio();
+                assert!(
+                    (0.0..=1.0).contains(&ratio),
+                    "{name} in {}: invalid monotone ratio {ratio}",
+                    protocol.name
+                );
+
+                // Source code structural requirements
+                assert!(
+                    p.source_code.contains("cx.checkpoint()"),
+                    "{name} in {}: missing cx.checkpoint()",
+                    protocol.name
+                );
+                assert!(
+                    p.source_code.contains("cx.trace("),
+                    "{name} in {}: missing cx.trace()",
+                    protocol.name
+                );
+                assert!(
+                    p.source_code.contains("EvidenceLedgerBuilder"),
+                    "{name} in {}: missing EvidenceLedgerBuilder",
+                    protocol.name
+                );
+                assert!(
+                    p.source_code.contains("DO NOT EDIT"),
+                    "{name} in {}: missing DO NOT EDIT header",
+                    protocol.name
+                );
+                assert!(
+                    p.source_code.contains("use asupersync::cx::Cx;"),
+                    "{name} in {}: missing Cx import",
+                    protocol.name
+                );
+                assert!(
+                    p.source_code.contains("pub async fn"),
+                    "{name} in {}: missing async handler",
+                    protocol.name
+                );
+                assert!(
+                    p.source_code.contains("pub fn")
+                        && p.source_code.contains("_saga_plan() -> SagaPlan"),
+                    "{name} in {}: missing saga_plan constructor",
+                    protocol.name
+                );
+            }
+
+            // Lab test scaffold present
+            assert!(
+                !output.lab_test_code.is_empty(),
+                "{}: empty lab test code",
+                protocol.name
+            );
+            assert!(
+                output.lab_test_code.contains("#[cfg(test)]"),
+                "{}: lab test missing cfg(test)",
+                protocol.name
+            );
+            assert!(
+                output.lab_test_code.contains("tokio::spawn"),
+                "{}: lab test missing tokio::spawn",
+                protocol.name
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: plan_only consistency with generate (bd-1f8jn.4)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn plan_only_matches_generate_saga_plan() {
+        let protocols = vec![
+            example_two_phase_commit(),
+            example_lease_renewal(),
+            example_saga_compensation(),
+            example_scatter_gather_disjoint(),
+        ];
+
+        let pipe = pipeline();
+        for protocol in &protocols {
+            let output = pipe
+                .generate_with_locals(protocol)
+                .unwrap_or_else(|e| panic!("{}: generate failed: {e}", protocol.name));
+
+            for (name, p) in &output.participants {
+                let (plan, exec) = pipe
+                    .plan_only(protocol, name)
+                    .unwrap_or_else(|e| panic!("{}: plan_only failed for {name}: {e}", protocol.name));
+
+                // Same step count
+                assert_eq!(
+                    plan.steps.len(),
+                    p.saga_plan.steps.len(),
+                    "{name} in {}: plan_only step count differs from generate",
+                    protocol.name
+                );
+
+                // Same step labels and ops
+                for (i, (a, b)) in plan.steps.iter().zip(p.saga_plan.steps.iter()).enumerate() {
+                    assert_eq!(
+                        a.op, b.op,
+                        "{name} in {} step {i}: op mismatch ({:?} vs {:?})",
+                        protocol.name, a.op, b.op
+                    );
+                    assert_eq!(
+                        a.label, b.label,
+                        "{name} in {} step {i}: label mismatch",
+                        protocol.name
+                    );
+                }
+
+                // Same execution plan totals
+                assert_eq!(
+                    exec.total_steps(),
+                    p.execution_plan.total_steps(),
+                    "{name} in {}: execution plan total_steps mismatch",
+                    protocol.name
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: compensation boundary markers (bd-1f8jn.4 item 5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn saga_compensation_source_code_has_compensation_scope() {
+        let protocol = example_saga_compensation();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        // At least one participant should have compensation scope in generated code
+        let has_compensation = output.participants.values().any(|p| {
+            p.source_code.contains("compensation")
+                || p.source_code.contains("Compensation")
+                || p.source_code.contains("rollback")
+        });
+        assert!(
+            has_compensation,
+            "saga compensation protocol should generate compensation scope code"
+        );
+    }
+
+    #[test]
+    fn saga_compensation_all_participants_have_steps() {
+        let protocol = example_saga_compensation();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        for (name, p) in &output.participants {
+            assert!(
+                !p.saga_plan.steps.is_empty(),
+                "{name} has empty saga plan in compensation protocol"
+            );
+            assert!(
+                !p.source_code.is_empty(),
+                "{name} has empty source code in compensation protocol"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: CALM batch analysis across protocols (bd-1f8jn.4 item 5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn calm_batching_produces_at_least_one_batch_per_participant() {
+        let protocols = vec![
+            example_two_phase_commit(),
+            example_lease_renewal(),
+            example_saga_compensation(),
+            example_scatter_gather_disjoint(),
+        ];
+
+        let pipe = pipeline();
+        for protocol in &protocols {
+            let output = pipe
+                .generate_with_locals(protocol)
+                .unwrap_or_else(|e| panic!("{}: pipeline failed: {e}", protocol.name));
+
+            for (name, p) in &output.participants {
+                let batch_count = p.execution_plan.coordination_free_batch_count()
+                    + p.execution_plan.coordination_barrier_count();
+                assert!(
+                    batch_count > 0,
+                    "{name} in {}: no CALM batches",
+                    protocol.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_code_calm_header_reflects_batch_counts() {
+        let protocol = example_two_phase_commit();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        for (_, p) in &output.participants {
+            // Header should contain CALM batch info
+            assert!(
+                p.source_code.contains("CALM batches:"),
+                "source code missing CALM batch header"
+            );
+            assert!(
+                p.source_code.contains("Monotone ratio:"),
+                "source code missing monotone ratio header"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // E2E: pipeline error paths (bd-1f8jn.4)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pipeline_rejects_invalid_protocol() {
+        use crate::obligation::choreography::Interaction;
+
+        // Protocol with self-communication (invalid)
+        let protocol = GlobalProtocol::builder("bad_protocol")
+            .participant("alice", "role")
+            .interaction(Interaction::comm("alice", "msg", "Msg", "alice"))
+            .build();
+
+        let result = pipeline().generate_with_locals(&protocol);
+        assert!(result.is_err(), "pipeline should reject invalid protocol");
+
+        match result.unwrap_err() {
+            PipelineError::Compilation(CompilationError::ValidationFailed(errors)) => {
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected ValidationFailed, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn plan_only_rejects_invalid_protocol() {
+        use crate::obligation::choreography::Interaction;
+
+        let protocol = GlobalProtocol::builder("bad_protocol")
+            .participant("alice", "role")
+            .interaction(Interaction::comm("alice", "msg", "Msg", "alice"))
+            .build();
+
+        let result = pipeline().plan_only(&protocol, "alice");
+        assert!(result.is_err(), "plan_only should reject invalid protocol");
     }
 }

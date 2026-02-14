@@ -27,7 +27,9 @@
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
-use asupersync::trace::minimizer::{generate_narrative, ScenarioElement, TraceMinimizer};
+use asupersync::trace::minimizer::{
+    generate_narrative, MinimizationReport, ScenarioElement, TraceMinimizer,
+};
 use asupersync::trace::{write_trace, TraceMetadata};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObligationId};
 use serde::{Deserialize, Serialize};
@@ -413,7 +415,50 @@ struct BenchmarkResult {
     checksums: BTreeMap<String, String>,
 }
 
-#[allow(clippy::cast_precision_loss)]
+fn run_consistency_checks(
+    elements: &[ScenarioElement],
+    report: &MinimizationReport,
+    checksums: &mut BTreeMap<String, String>,
+) -> (bool, bool) {
+    eprintln!("  phase 4: consistency checks");
+
+    let elements_str = elements.iter().fold(String::new(), |mut acc, e| {
+        use std::fmt::Write;
+        writeln!(acc, "{e}").ok();
+        acc
+    });
+    checksums.insert(
+        "demo/original_elements".into(),
+        sha256_hex(elements_str.as_bytes()),
+    );
+
+    let minimized = report.minimized_elements();
+    let mut minimality_ok = true;
+    for skip in 0..minimized.len() {
+        let without: Vec<ScenarioElement> = minimized
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != skip)
+            .map(|(_, e): (usize, &ScenarioElement)| e.clone())
+            .collect();
+        if check_for_leak(&without) {
+            minimality_ok = false;
+            eprintln!("    WARN: removing element {skip} still reproduces failure");
+        }
+    }
+    eprintln!(
+        "    minimality: {}",
+        if minimality_ok { "PASS" } else { "FAIL" }
+    );
+
+    let report2 = TraceMinimizer::minimize(elements, check_for_leak);
+    let stable = report2.minimized_indices == report.minimized_indices;
+    eprintln!("    stability: {}", if stable { "PASS" } else { "FAIL" });
+
+    (minimality_ok, stable)
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
     let mut checksums = BTreeMap::new();
 
@@ -463,14 +508,14 @@ fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
     let minimize_ms = minimize_start.elapsed().as_millis() as u64;
 
     // Hash the minimized elements (canonical string representation).
-    let minimized_str = report.minimized_elements().iter().fold(
-        String::new(),
-        |mut acc, e| {
+    let minimized_str = report
+        .minimized_elements()
+        .iter()
+        .fold(String::new(), |mut acc, e| {
             use std::fmt::Write;
             writeln!(acc, "{e}").ok();
             acc
-        },
-    );
+        });
     let minimized_hash = sha256_hex(minimized_str.as_bytes());
     eprintln!(
         "    minimized: {}/{} elements, hash={}...",
@@ -491,44 +536,7 @@ fn run_pipeline(trace_dir: &str) -> BenchmarkResult {
     let narrative_hash = sha256_hex(narrative_deterministic.as_bytes());
     checksums.insert("demo/narrative".into(), narrative_hash);
 
-    // Phase 4: consistency checks.
-    eprintln!("  phase 4: consistency checks");
-
-    // Elements hash (full scenario for the failing seed).
-    let elements_str = elements.iter().fold(String::new(), |mut acc, e| {
-        use std::fmt::Write;
-        writeln!(acc, "{e}").ok();
-        acc
-    });
-    checksums.insert(
-        "demo/original_elements".into(),
-        sha256_hex(elements_str.as_bytes()),
-    );
-
-    // Verify minimality: removing any single element should make the failure disappear.
-    let minimized = report.minimized_elements();
-    let mut minimality_ok = true;
-    for skip in 0..minimized.len() {
-        let without: Vec<ScenarioElement> = minimized
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != skip)
-            .map(|(_, e)| e.clone())
-            .collect();
-        if check_for_leak(&without) {
-            minimality_ok = false;
-            eprintln!("    WARN: removing element {skip} still reproduces failure");
-        }
-    }
-    eprintln!(
-        "    minimality: {}",
-        if minimality_ok { "PASS" } else { "FAIL" }
-    );
-
-    // Stability: run minimizer again and verify identical output.
-    let report2 = TraceMinimizer::minimize(&elements, check_for_leak);
-    let stable = report2.minimized_indices == report.minimized_indices;
-    eprintln!("    stability: {}", if stable { "PASS" } else { "FAIL" });
+    let (minimality_ok, _stable) = run_consistency_checks(&elements, &report, &mut checksums);
 
     BenchmarkResult {
         failing_seed: seed,

@@ -174,14 +174,22 @@ impl Metadata {
 
     /// Insert a binary value.
     pub fn insert_bin(&mut self, key: impl Into<String>, value: Bytes) {
-        self.entries
-            .push((key.into(), MetadataValue::Binary(value)));
+        let mut key = key.into();
+        if !key.ends_with("-bin") {
+            key.push_str("-bin");
+        }
+        self.entries.push((key, MetadataValue::Binary(value)));
     }
 
     /// Get a value by key.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&MetadataValue> {
-        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        // Return the most recently inserted value for the key.
+        self.entries
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
     }
 
     /// Iterate over entries.
@@ -531,5 +539,35 @@ mod tests {
             _ => panic!("expected binary value"),
         }
         crate::test_complete!("test_metadata_binary");
+    }
+
+    #[test]
+    fn test_metadata_binary_key_suffix_is_normalized() {
+        init_test("test_metadata_binary_key_suffix_is_normalized");
+        let mut metadata = Metadata::new();
+        metadata.insert_bin("raw-key", Bytes::from_static(b"\x01\x02"));
+
+        let has = metadata.get("raw-key-bin").is_some();
+        crate::assert_with_log!(has, "normalized -bin key present", true, has);
+
+        let missing_raw = metadata.get("raw-key").is_none();
+        crate::assert_with_log!(missing_raw, "raw key absent", true, missing_raw);
+        crate::test_complete!("test_metadata_binary_key_suffix_is_normalized");
+    }
+
+    #[test]
+    fn test_metadata_get_prefers_latest_value() {
+        init_test("test_metadata_get_prefers_latest_value");
+        let mut metadata = Metadata::new();
+        metadata.insert("authorization", "old-token");
+        metadata.insert("authorization", "new-token");
+
+        match metadata.get("authorization") {
+            Some(MetadataValue::Ascii(v)) => {
+                crate::assert_with_log!(v == "new-token", "latest value", "new-token", v);
+            }
+            _ => panic!("expected ascii value"),
+        }
+        crate::test_complete!("test_metadata_get_prefers_latest_value");
     }
 }
