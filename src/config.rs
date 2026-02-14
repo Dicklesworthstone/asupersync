@@ -1079,11 +1079,11 @@ default_timeout_ms = 5000
     fn server_config_builder() {
         let config = ServerConfig::default()
             .bind_addr(SocketAddr::from(([127, 0, 0, 1], 9090)))
-            .shutdown_timeout(Duration::from_secs(60))
+            .shutdown_timeout(Duration::from_mins(1))
             .worker_threads(Some(4));
 
         assert_eq!(config.bind_addr.port(), 9090);
-        assert_eq!(config.shutdown_timeout, Duration::from_secs(60));
+        assert_eq!(config.shutdown_timeout, Duration::from_mins(1));
         assert_eq!(config.worker_threads, Some(4));
         assert!(config.validate().is_ok());
     }
