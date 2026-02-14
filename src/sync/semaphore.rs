@@ -231,8 +231,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 let mut state = self
                     .semaphore
                     .state
-                    .lock()
-                    .expect("semaphore lock poisoned");
+                    .lock();
 
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
@@ -258,8 +257,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 let mut state = self
                     .semaphore
                     .state
-                    .lock()
-                    .expect("semaphore lock poisoned");
+                    .lock();
                 let id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 id
@@ -271,8 +269,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         let mut state = self
             .semaphore
             .state
-            .lock()
-            .expect("semaphore lock poisoned");
+            .lock();
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
@@ -449,8 +446,7 @@ impl Future for OwnedAcquireFuture {
                     let mut state = self
                         .semaphore
                         .state
-                        .lock()
-                        .expect("semaphore lock poisoned");
+                        .lock();
                     let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
                     state.waiters.retain(|waiter| waiter.id != waiter_id);
                     if was_front {
@@ -474,8 +470,7 @@ impl Future for OwnedAcquireFuture {
                 let mut state = self
                     .semaphore
                     .state
-                    .lock()
-                    .expect("semaphore lock poisoned");
+                    .lock();
                 let id = state.next_waiter_id;
                 state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 id
@@ -487,8 +482,7 @@ impl Future for OwnedAcquireFuture {
         let mut state = self
             .semaphore
             .state
-            .lock()
-            .expect("semaphore lock poisoned");
+            .lock();
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);

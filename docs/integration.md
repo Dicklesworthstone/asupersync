@@ -493,6 +493,40 @@ proof_impact:
 Reviewers should reject PRs touching critical modules when this block is missing
 or when `class` does not match touched paths.
 
+### Theorem-Assumption Guardrail Checklist (Track-6 T6.2a)
+
+Use this checklist for reliability reviews and incident retrospectives when a
+change touches runtime-critical behavior.
+
+Assumption-class mapping:
+
+| Assumption class | Guardrail checks (deterministic) | Primary evidence anchors |
+|------------------|----------------------------------|---------------------------|
+| Budget constraints | Deadline/poll/cost bounds remain monotone; no path relaxes child budget beyond parent meet | `Budget` semantics, region/scope budget propagation, timeout tests |
+| Cancellation protocol | Request -> drain -> finalize ordering preserved; loser-drain behavior present for race paths; masked sections remain bounded | cancellation state machine, combinator race/join tests, cancel oracles |
+| Region lifecycle | Region-close still implies quiescence; no child/task/finalizer leaks at close | region lifecycle invariants, quiescence oracles, close-regression tests |
+| Obligation resolution | Every permit/ack/lease path resolves commit/abort; no unresolved obligation exits | obligation leak checks, obligation table metrics, leak/futurelock tests |
+
+Deterministic review checklist (mark each as `pass`/`fail`/`n/a`):
+
+1. `budget_monotonicity`: parent/child budget composition still uses tightening semantics.
+2. `cancel_protocol_order`: cancellation order is request -> drain -> finalize in changed paths.
+3. `race_loser_drain`: race/hedge paths still cancel and drain losers.
+4. `region_quiescence`: changed region lifecycle paths preserve close => quiescence.
+5. `obligation_totality`: changed reserve/commit/abort paths remain total (no silent drop).
+6. `determinism_surface`: no ambient randomness/time introduced in changed paths.
+7. `evidence_commands`: commands and artifacts recorded for reproduction.
+
+Reliability workflow tie-in:
+
+1. During review: attach the checklist in the PR under `proof_guardrails`.
+2. During incident triage: map symptom to one assumption class first, then verify corresponding guardrails/evidence.
+3. During postmortem: record failed checklist items and link the exact code/test artifacts.
+
+Guardrail-gap escalation rule:
+- Any `fail` item without an immediate fix must create a blocker bead (prefix: `[GUARDRAIL-GAP]`) before merge/sign-off.
+- Blocker bead must include: impacted assumption class, violated checklist item, reproducible command/artifact, and owner.
+
 ---
 
 ## API Reference Orientation

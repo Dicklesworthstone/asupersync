@@ -3143,8 +3143,13 @@ theorem step_preserves_wellformed {Value Error Panic : Type}
         (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).children = region.children)
         (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).subregions = region.subregions)
         (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).ledger = region.ledger)
+    have hTask1 :
+        getTask
+          (setRegion s r { region with cancel := some (strengthenOpt region.cancel reason) })
+          t = some task := by
+      simpa [getTask, setRegion] using hTask
     exact setTask_same_region_preserves_wellformed hWF1
-      (by simpa [getTask, setRegion] using hTask)
+      hTask1
       rfl
   -- Cancel protocol: task-only transitions
   | cancelMasked _ _ hTask _ _ hUpdate =>
