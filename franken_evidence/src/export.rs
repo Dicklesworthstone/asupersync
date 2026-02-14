@@ -81,7 +81,7 @@ impl JsonlExporter {
 
     /// Open with explicit configuration.
     pub fn open_with_config(path: PathBuf, config: &ExporterConfig) -> io::Result<Self> {
-        let existing_size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let existing_size = fs::metadata(&path).map_or(0, |m| m.len());
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let mut writer = BufWriter::with_capacity(config.buf_capacity, file);
 
