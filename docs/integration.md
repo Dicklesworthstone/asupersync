@@ -476,6 +476,10 @@ proof_impact:
   class: none|local|cross-cutting
   touched_paths:
     - <path>
+  theorem_touchpoints:
+    - <theorem/helper/witness id>
+  refinement_mapping_touchpoints:
+    - <runtime_state_refinement_map row id or constraint id>
   matched_routing_rules:
     - <rule id or sentence>
   owner_groups_required:
@@ -488,10 +492,17 @@ proof_impact:
   evidence_commands:
     - rch exec -- cargo check --all-targets
     - rch exec -- cargo clippy --all-targets -- -D warnings
+  review_artifact_location: <PR body section or attached artifact path>
 ```
 
 Reviewers should reject PRs touching critical modules when this block is missing
 or when `class` does not match touched paths.
+
+Additional hard requirements for `local` and `cross-cutting` changes:
+1. At least one `theorem_touchpoints` entry.
+2. At least one `refinement_mapping_touchpoints` entry.
+3. At least one executable entry under `conformance_touchpoints`.
+4. `review_artifact_location` must point to where the completed declaration lives.
 
 ### Theorem-Assumption Guardrail Checklist (Track-6 T6.2a)
 

@@ -113,6 +113,169 @@ fn ci_profiles_have_required_shape_and_ordering() {
 }
 
 #[test]
+fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
+    let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
+    let artifact_contract = profiles
+        .get("artifact_contract")
+        .and_then(Value::as_object)
+        .expect("artifact_contract must be an object");
+
+    assert_eq!(
+        artifact_contract
+            .get("policy_id")
+            .and_then(Value::as_str)
+            .expect("artifact_contract.policy_id must be string"),
+        "lean.ci.artifact_contract.v1"
+    );
+    assert_eq!(
+        artifact_contract
+            .get("manifest_schema_version")
+            .and_then(Value::as_str)
+            .expect("artifact_contract.manifest_schema_version must be string"),
+        "lean.full.repro.bundle.v1"
+    );
+
+    let required_manifest_fields = artifact_contract
+        .get("manifest_required_fields")
+        .and_then(Value::as_array)
+        .expect("artifact_contract.manifest_required_fields must be array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("artifact_contract.manifest_required_fields entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "schema_version",
+        "generated_at_utc",
+        "profile",
+        "status",
+        "profile_source",
+        "repro_script",
+        "ci_context",
+        "ownership",
+        "comparison_keys",
+        "expected_runtime_seconds",
+        "commands",
+        "artifacts",
+    ] {
+        assert!(
+            required_manifest_fields.contains(required),
+            "artifact_contract.manifest_required_fields must include {required}"
+        );
+    }
+
+    let retention_policy = artifact_contract
+        .get("retention_policy")
+        .and_then(Value::as_object)
+        .expect("artifact_contract.retention_policy must be object");
+    let minimum_days = retention_policy
+        .get("minimum_days")
+        .and_then(Value::as_u64)
+        .expect("artifact_contract.retention_policy.minimum_days must be numeric");
+    let default_days = retention_policy
+        .get("default_days")
+        .and_then(Value::as_u64)
+        .expect("artifact_contract.retention_policy.default_days must be numeric");
+    let maximum_days = retention_policy
+        .get("maximum_days")
+        .and_then(Value::as_u64)
+        .expect("artifact_contract.retention_policy.maximum_days must be numeric");
+    assert!(
+        minimum_days <= default_days && default_days <= maximum_days,
+        "retention policy must satisfy minimum_days <= default_days <= maximum_days"
+    );
+    assert!(
+        minimum_days >= 7,
+        "minimum_days should preserve at least one week of forensic reproducibility"
+    );
+
+    let entries = profiles
+        .get("profiles")
+        .and_then(Value::as_array)
+        .expect("profiles must be an array");
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("profile name must be string");
+
+        let triage = entry
+            .get("triage")
+            .and_then(Value::as_object)
+            .expect("profile triage must be object");
+        let routing_policy = triage
+            .get("routing_policy")
+            .and_then(Value::as_str)
+            .expect("triage.routing_policy must be string");
+        assert!(
+            !routing_policy.trim().is_empty(),
+            "triage.routing_policy must be non-empty for profile {name}"
+        );
+        let ttfr_target_minutes = triage
+            .get("ttfr_target_minutes")
+            .and_then(Value::as_u64)
+            .expect("triage.ttfr_target_minutes must be numeric");
+        assert!(
+            ttfr_target_minutes > 0,
+            "triage.ttfr_target_minutes must be positive for profile {name}"
+        );
+
+        let artifact_bundle = entry
+            .get("artifact_bundle")
+            .and_then(Value::as_object)
+            .expect("profile artifact_bundle must be object");
+        let artifact_name = artifact_bundle
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("artifact_bundle.name must be string");
+        assert!(
+            artifact_name.starts_with("lean-"),
+            "artifact_bundle.name must be prefixed with `lean-` for profile {name}"
+        );
+        let directory = artifact_bundle
+            .get("directory")
+            .and_then(Value::as_str)
+            .expect("artifact_bundle.directory must be string");
+        assert!(
+            directory.starts_with("lean-"),
+            "artifact_bundle.directory must be prefixed with `lean-` for profile {name}"
+        );
+        let retention_days = artifact_bundle
+            .get("retention_days")
+            .and_then(Value::as_u64)
+            .expect("artifact_bundle.retention_days must be numeric");
+        assert!(
+            retention_days >= minimum_days && retention_days <= maximum_days,
+            "artifact_bundle.retention_days for {name} must be within retention policy bounds"
+        );
+        assert!(
+            artifact_bundle
+                .get("failure_payload")
+                .and_then(Value::as_str)
+                .is_some(),
+            "artifact_bundle.failure_payload must exist for profile {name}"
+        );
+    }
+
+    let full = entries
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some("full"))
+        .expect("full profile must exist");
+    let full_bundle = full
+        .get("artifact_bundle")
+        .and_then(Value::as_object)
+        .expect("full profile artifact_bundle must be object");
+    for field in ["repro_bundle_manifest", "repro_script", "failure_payload"] {
+        assert!(
+            full_bundle.get(field).and_then(Value::as_str).is_some(),
+            "full artifact bundle must include {field}"
+        );
+    }
+}
+
+#[test]
 fn ci_profile_runtime_order_and_bead_links_are_valid() {
     let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
     let entries = profiles
@@ -373,7 +536,9 @@ fn ci_profile_waiver_policy_enforces_expiry_and_closure_paths() {
 fn lean_smoke_failure_payload_routes_to_owners_deterministically() {
     for required_snippet in [
         ".beads/issues.jsonl",
-        "routing_policy: \"bead-owner-v1\"",
+        "Resolve Lean smoke artifact contract",
+        ".profiles[] | select(.name == \"smoke\") | .triage.routing_policy",
+        ".profiles[] | select(.name == \"smoke\") | .triage.ttfr_target_minutes",
         "ttfr_target_minutes",
         "owner_candidates",
         "routed_owners",
@@ -393,9 +558,13 @@ fn lean_smoke_gate_is_pr_scoped_and_profile_driven() {
         "Lean Smoke Gate (PR)",
         "if: github.event_name == 'pull_request'",
         "select(.name == \"smoke\")",
+        ".artifact_bundle.name",
+        ".artifact_bundle.directory",
+        ".artifact_bundle.retention_days",
         "Run Lean smoke profile commands",
         "Upload Lean smoke artifacts",
-        "lean-smoke-artifacts",
+        "steps.lean_smoke_contract.outputs.artifact_name",
+        "steps.lean_smoke_contract.outputs.artifact_dir",
     ] {
         assert!(
             CI_WORKFLOW_YML.contains(required_snippet),
@@ -408,12 +577,19 @@ fn lean_smoke_gate_is_pr_scoped_and_profile_driven() {
 fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
     for required_snippet in [
         "Lean Full Gate (Main/Release)",
+        "Resolve Lean full artifact contract",
+        ".artifact_contract.manifest_schema_version",
         "select(.name == \"full\")",
+        ".artifact_bundle.repro_bundle_manifest",
+        ".artifact_bundle.repro_script",
+        ".artifact_bundle.failure_payload",
+        ".triage.routing_policy",
+        ".triage.ttfr_target_minutes",
         "lean-full/repro_bundle_manifest.json",
         "lean-full/repro_commands.sh",
         "lean-full/failure_payload.json",
         "Upload Lean full artifacts",
-        "lean-full-artifacts",
+        "steps.lean_full_contract.outputs.artifact_name",
     ] {
         assert!(
             CI_WORKFLOW_YML.contains(required_snippet),

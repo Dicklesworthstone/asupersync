@@ -165,6 +165,32 @@ Key fields:
 
 See `examples/scenarios/` for more examples.
 
+## Correctness-by-Construction Review Workflow
+
+For changes touching runtime-critical paths (`src/runtime/`, `src/cx/`,
+`src/cancel/`, `src/channel/`, `src/obligation/`, `src/trace/`, `src/lab/`,
+`formal/lean/`), PRs must include a completed **Proof + Conformance Impact
+Declaration** in `.github/PULL_REQUEST_TEMPLATE.md`.
+
+Required review artifact content:
+
+- Change path classification (`none`, `local`, `cross-cutting`)
+- Theorem touchpoints (theorem/helper/witness IDs)
+- Refinement mapping touchpoints (`runtime_state_refinement_map` rows or
+  constraint IDs)
+- Executable conformance touchpoints and artifact links
+- Reviewer routing for critical path owner groups
+
+For deterministic evidence commands, run heavy checks via `rch`:
+
+```bash
+rch exec -- cargo check --all-targets
+rch exec -- cargo clippy --all-targets -- -D warnings
+```
+
+Detailed routing and review rules are documented in
+`docs/integration.md` under **Proof-Impact Classification and Routing**.
+
 ## Next steps
 
 - Explore the [partition_heal](../../examples/scenarios/partition_heal.yaml)

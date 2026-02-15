@@ -1690,7 +1690,10 @@ mod tests {
         // L = K' + S + H, so ratio > 1.0. For small K (e.g., 20), S and H
         // dominate, pushing ratio above 2.0 (e.g., L=41, K=20 → 2.05).
         assert!(ratio > 1.0, "overhead ratio should be > 1; {context}");
-        assert!(ratio < 3.0, "overhead ratio should be reasonable; {context}");
+        assert!(
+            ratio < 3.0,
+            "overhead ratio should be reasonable; {context}"
+        );
     }
 
     #[test]

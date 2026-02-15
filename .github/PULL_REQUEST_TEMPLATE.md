@@ -47,10 +47,21 @@ src/runtime/, src/cx/, src/cancel/, src/channel/, src/obligation/, src/trace/, s
 
 | Touchpoint Type | ID / Test / Profile | Result / Artifact |
 |-----------------|----------------------|-------------------|
+| Theorem touchpoints | theorem IDs / helper lemmas / witness names | |
+| Refinement mapping touchpoints | `runtime_state_refinement_map` row IDs / constraint IDs | |
 | Rust tests | | |
 | Conformance checks | | |
 | Lean coverage artifacts | | |
 | CI verification profile (`smoke` / `frontier` / `full`) | | |
+
+### Critical Module Scope Declaration
+
+- [ ] This PR touches at least one runtime-critical path and the block below is complete
+- [ ] This PR does not touch runtime-critical paths
+
+| Critical Path Touched | Owner Group | Why This Change Is Needed |
+|-----------------------|-------------|---------------------------|
+| | | |
 
 ### Divergence Handling Declaration
 

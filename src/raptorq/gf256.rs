@@ -1666,7 +1666,10 @@ mod tests {
                 let mut scalar_dst = original;
                 mul_with_table_scalar(&mut scalar_dst, table);
 
-                assert_eq!(simd_dst, scalar_dst, "mul mismatch: len={len}, c={c_val}; {context}");
+                assert_eq!(
+                    simd_dst, scalar_dst,
+                    "mul mismatch: len={len}, c={c_val}; {context}"
+                );
             }
         }
     }
