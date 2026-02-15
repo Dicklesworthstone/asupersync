@@ -28,6 +28,7 @@ use parking_lot::Mutex;
 use std::ffi::CString;
 use std::io::{self, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -118,6 +119,11 @@ fn mark_op_complete(state: &Mutex<OpState>, result: i32) {
     }
 }
 
+fn path_to_cstring(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
+}
+
 impl Drop for IoUringFile {
     fn drop(&mut self) {
         // Best-effort safety: if any ops are in flight on this ring, make sure we
@@ -175,10 +181,7 @@ impl IoUringFile {
     /// Opens a file with custom flags and mode.
     pub fn open_with_flags(path: impl AsRef<Path>, flags: i32, mode: u32) -> io::Result<Self> {
         let path = path.as_ref();
-        let c_path = CString::new(path.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes")
-        })?)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))?;
+        let c_path = path_to_cstring(path)?;
 
         // For now, use synchronous open and then io_uring for I/O.
         // True async open requires a running io_uring event loop.
@@ -590,11 +593,48 @@ impl AsyncSeek for IoUringFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     use tempfile::tempdir;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_to_cstring_accepts_non_utf8_unix_paths() {
+        init_test("test_path_to_cstring_accepts_non_utf8_unix_paths");
+        let raw = vec![b'f', b'i', b'l', b'e', b'_', 0xFD];
+        let path = std::path::PathBuf::from(OsString::from_vec(raw.clone()));
+
+        let c = path_to_cstring(&path).expect("non-utf8 unix path should be accepted");
+        crate::assert_with_log!(
+            c.as_bytes() == raw.as_slice(),
+            "raw bytes preserved",
+            raw.as_slice(),
+            c.as_bytes()
+        );
+        crate::test_complete!("test_path_to_cstring_accepts_non_utf8_unix_paths");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_to_cstring_rejects_nul_bytes() {
+        init_test("test_path_to_cstring_rejects_nul_bytes");
+        let path = std::path::PathBuf::from(OsString::from_vec(vec![b'b', b'a', b'd', 0, b'x']));
+
+        let err = path_to_cstring(&path).expect_err("path with nul must be rejected");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "invalid input error",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        crate::test_complete!("test_path_to_cstring_rejects_nul_bytes");
     }
 
     #[test]
