@@ -701,6 +701,11 @@ impl GlobalProtocol {
                     });
                 }
                 self.validate_interaction(body, declared, loop_labels, errors);
+                // Remove the label after validating the body so it doesn't
+                // leak into sibling interactions (e.g. Seq siblings, Choice
+                // branches, Par branches).  Only the body of the Loop should
+                // be able to `continue` to this label.
+                loop_labels.remove(label);
             }
             Interaction::Continue { label } => {
                 if !loop_labels.contains(label) {
@@ -1032,6 +1037,16 @@ fn project_interaction(interaction: &Interaction, participant: &str) -> Option<L
             else_branch,
         } => project_choice(decider, predicate, then_branch, else_branch, participant),
         Interaction::Loop { label, body } => {
+            // Only project the loop if the participant is actually referenced
+            // in the loop body.  Without this check, a bare `Continue` inside
+            // the body would project to `RecVar` for uninvolved participants,
+            // creating a vacuous `Rec { body: RecVar }` that `seq_local`
+            // treats as a fixed point — silently dropping any actions that
+            // follow the loop in a Seq.
+            let refs = body.referenced_participants();
+            if !refs.contains(participant) {
+                return None;
+            }
             let body_local = project_interaction(body, participant)?;
             Some(LocalType::Rec {
                 label: label.clone(),
@@ -2740,6 +2755,127 @@ mod tests {
             assert!(refs.contains(*name), "Missing participant {name}");
         }
         assert_eq!(refs.len(), 8);
+    }
+
+    // ------------------------------------------------------------------
+    // Bug fix: loop label scoping (labels must not leak into siblings)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn continue_to_sibling_loop_detected() {
+        // Loop("x", ...) followed by Continue("x") in a Seq — the Continue
+        // references a non-enclosing loop, which should be an error.
+        let protocol = GlobalProtocol::builder("sibling_continue")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::seq(
+                Interaction::loop_(
+                    "x",
+                    Interaction::comm("a", "m", "M", "b").then(Interaction::continue_("x")),
+                ),
+                Interaction::continue_("x"), // "x" is NOT enclosing here
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedLoopLabel { label } if label == "x"
+            )),
+            "Continue to sibling loop should be detected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn loop_label_does_not_leak_across_choice_branches() {
+        // Loop("x") in then-branch should not be visible in else-branch.
+        let protocol = GlobalProtocol::builder("choice_label_leak")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "pred",
+                Interaction::comm("a", "m1", "M", "b").then(Interaction::loop_(
+                    "inner",
+                    Interaction::comm("a", "ping", "Ping", "b")
+                        .then(Interaction::continue_("inner")),
+                )),
+                Interaction::comm("a", "m2", "M", "b").then(Interaction::continue_("inner")), // NOT enclosing
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedLoopLabel { label } if label == "inner"
+            )),
+            "Loop label should not leak across choice branches: {errors:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Bug fix: Continue projection for uninvolved participants
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn uninvolved_participant_not_trapped_in_loop() {
+        // Participant "c" is not in the loop body but appears after the
+        // loop in a Seq.  Before the fix, projection produced a vacuous
+        // Rec { body: RecVar } that swallowed the subsequent Recv.
+        let protocol = GlobalProtocol::builder("continue_projection")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .interaction(Interaction::seq(
+                Interaction::loop_(
+                    "x",
+                    Interaction::comm("a", "ping", "Ping", "b").then(Interaction::continue_("x")),
+                ),
+                Interaction::comm("a", "notify", "Notify", "c"),
+            ))
+            .build();
+
+        assert!(protocol.validate().is_empty(), "should be valid");
+
+        let local_c = protocol
+            .project("c")
+            .expect("c should project (has actions after loop)");
+        let actions = collect_local_actions(&local_c);
+        assert!(
+            actions.iter().any(|(a, d)| a == "notify" && *d == "recv"),
+            "c must receive 'notify' after uninvolved loop, got: {local_c}"
+        );
+    }
+
+    #[test]
+    fn involved_participant_still_gets_loop() {
+        // Participant "b" IS involved in the loop body — they should still
+        // get a proper Rec/RecVar projection.
+        let protocol = GlobalProtocol::builder("involved_loop")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::loop_(
+                "x",
+                Interaction::choice(
+                    "a",
+                    "go",
+                    Interaction::comm("a", "data", "Data", "b").then(Interaction::continue_("x")),
+                    Interaction::comm("a", "done", "Done", "b"),
+                ),
+            ))
+            .build();
+
+        assert!(protocol.validate().is_empty());
+
+        let local_b = protocol
+            .project("b")
+            .expect("b should project (involved in loop)");
+        assert!(
+            has_rec_var(&local_b, "x"),
+            "b should have RecVar for loop 'x', got: {local_b}"
+        );
     }
 
     // ------------------------------------------------------------------
