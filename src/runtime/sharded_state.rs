@@ -1327,4 +1327,51 @@ mod tests {
         }
         assert_eq!(lock_order::held_count(), 0);
     }
+
+    // ── Audit regression tests ───────────────────────────────────────────
+
+    #[test]
+    fn root_region_encoding_roundtrip_zero() {
+        // (0, 0) is a valid ArenaIndex and must roundtrip correctly.
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let encoded = encode_root_region(region);
+        assert_ne!(encoded, ROOT_REGION_NONE, "encoded must differ from NONE");
+        let decoded = decode_root_region(encoded);
+        assert_eq!(decoded, Some(region));
+    }
+
+    #[test]
+    fn root_region_encoding_roundtrip_large() {
+        // Large but valid (index, generation) must roundtrip.
+        let region = RegionId::from_arena(ArenaIndex::new(u32::MAX, u32::MAX - 1));
+        let encoded = encode_root_region(region);
+        let decoded = decode_root_region(encoded);
+        assert_eq!(decoded, Some(region));
+    }
+
+    #[test]
+    #[should_panic(expected = "region ID too large")]
+    fn root_region_encoding_max_panics() {
+        // (u32::MAX, u32::MAX) encodes to u64::MAX and must be rejected.
+        let region = RegionId::from_arena(ArenaIndex::new(u32::MAX, u32::MAX));
+        let _ = encode_root_region(region);
+    }
+
+    #[test]
+    fn guard_drop_releases_in_reverse_order() {
+        // Verify that after dropping a full guard, we can immediately
+        // acquire any single shard (obligations first, which is the
+        // "last" in lock order and would fail if drop leaked state).
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        {
+            let _g = ShardGuard::all(&state);
+        }
+
+        // If drop didn't properly release, this would deadlock.
+        let g = ShardGuard::obligations_only(&state);
+        assert!(g.obligations.is_some());
+    }
 }
