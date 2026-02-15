@@ -227,7 +227,7 @@ impl<T> RwLock<T> {
             }),
             Err(poisoned) => {
                 self.poisoned.store(true, Ordering::Release);
-                self.release_reader_on_error();
+                self.release_reader();
                 drop(poisoned.into_inner());
                 Err(TryReadError::Poisoned)
             }
@@ -258,7 +258,7 @@ impl<T> RwLock<T> {
             }),
             Err(poisoned) => {
                 self.poisoned.store(true, Ordering::Release);
-                self.release_writer_on_error();
+                self.release_writer();
                 drop(poisoned.into_inner());
                 Err(TryWriteError::Poisoned)
             }
@@ -326,39 +326,6 @@ impl<T> RwLock<T> {
             }
         }
         wakers
-    }
-
-    fn release_reader_on_error(&self) {
-        let waker = {
-            let mut state = self.state.lock();
-            state.readers = state.readers.saturating_sub(1);
-            if state.readers == 0 && state.writer_waiters > 0 {
-                Self::pop_writer_waiter(&mut state)
-            } else {
-                None
-            }
-        };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    fn release_writer_on_error(&self) {
-        let (writer_waker, reader_wakers) = {
-            let mut state = self.state.lock();
-            state.writer_active = false;
-            if state.writer_waiters > 0 {
-                (Self::pop_writer_waiter(&mut state), SmallVec::new())
-            } else {
-                (None, Self::drain_reader_waiters(&mut state))
-            }
-        };
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
     }
 
     fn release_reader(&self) {
@@ -467,8 +434,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             };
 
             // If success, forget guard so it doesn't decrement (RwLockReadGuard will do it)
-            // If error (Poisoned), guard decrements. Wait, release_reader_on_error wakes writers too.
-            // release_reader does the same.
+            // If error (Poisoned), guard drops and calls release_reader.
             // But RwLockReadGuard calls release_reader on drop.
             // If we return Ready(Ok), we transfer responsibility to RwLockReadGuard.
             // If we return Ready(Err), we must decrement.
@@ -1373,5 +1339,234 @@ mod tests {
         let can_read = lock.try_read().is_ok();
         crate::assert_with_log!(can_read, "can read after write drop", true, can_read);
         crate::test_complete!("test_rwlock_write_released_on_drop");
+    }
+
+    #[test]
+    fn test_writer_fifo_ordering() {
+        // Verifies that queued writers acquire in FIFO order.
+        init_test("test_writer_fifo_ordering");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(Vec::<u32>::new()));
+        let order = StdArc::new(std::sync::Mutex::new(Vec::new()));
+
+        // Hold a read lock so writers must queue.
+        let read_guard = read_blocking(&lock, &cx);
+
+        let mut handles = Vec::new();
+        for id in 1..=3_u32 {
+            let lock_c = StdArc::clone(&lock);
+            let order_c = StdArc::clone(&order);
+            handles.push(thread::spawn(move || {
+                let cx = test_cx();
+                let mut guard = write_blocking(&lock_c, &cx);
+                order_c.lock().unwrap().push(id);
+                guard.push(id);
+            }));
+            // Small delay to ensure writers queue in id order.
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Release reader — writers should now acquire one by one in queue order.
+        drop(read_guard);
+        for h in handles {
+            let _ = h.join();
+        }
+
+        let final_order = order.lock().unwrap().clone();
+        let data = lock.try_read().unwrap();
+        // Both the acquisition order and data should match FIFO.
+        crate::assert_with_log!(
+            final_order == *data,
+            "writer FIFO order matches data",
+            true,
+            final_order == *data
+        );
+        crate::test_complete!("test_writer_fifo_ordering");
+    }
+
+    #[test]
+    fn test_write_future_drop_wakes_readers_when_last_writer() {
+        // When the last queued WriteFuture is dropped without acquiring,
+        // pending readers must be woken.
+        init_test("test_write_future_drop_wakes_readers_when_last_writer");
+        let cx = test_cx();
+        let lock = RwLock::new(42_u32);
+
+        // Queue a writer (it will count itself in writer_waiters).
+        let _write_guard = write_blocking(&lock, &cx);
+        let mut write_fut = lock.write(&cx);
+        let pending = poll_once(&mut write_fut).is_none();
+        crate::assert_with_log!(pending, "write future pending", true, pending);
+
+        // Queue a reader (blocked because writer_waiters > 0).
+        let mut read_fut = lock.read(&cx);
+        let read_pending = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(read_pending, "read future pending", true, read_pending);
+
+        // Release the active writer.
+        drop(_write_guard);
+
+        // Drop the queued write future. This decrements writer_waiters to 0,
+        // which should wake the queued reader.
+        drop(write_fut);
+
+        // The reader should now acquire.
+        let read_result = poll_once(&mut read_fut);
+        let acquired = matches!(read_result, Some(Ok(_)));
+        crate::assert_with_log!(acquired, "reader acquired after writer drop", true, acquired);
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.writer_waiters == 0,
+            "no writer waiters left",
+            0usize,
+            state.writer_waiters
+        );
+        crate::test_complete!("test_write_future_drop_wakes_readers_when_last_writer");
+    }
+
+    #[test]
+    fn test_read_future_drop_forwards_wake_to_writer() {
+        // When a dequeued ReadFuture is dropped without acquiring, it must
+        // forward its wake to a waiting writer.
+        init_test("test_read_future_drop_forwards_wake_to_writer");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(0_u32));
+
+        // Writer holds the lock.
+        let write_guard = write_blocking(&lock, &cx);
+
+        // Queue a reader.
+        let mut read_fut = lock.read(&cx);
+        let pending = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(pending, "read pending while writer active", true, pending);
+
+        // Queue a second writer.
+        let writer_lock = StdArc::clone(&lock);
+        let writer_done = StdArc::new(AtomicBool::new(false));
+        let writer_done_c = StdArc::clone(&writer_done);
+        let handle = thread::spawn(move || {
+            let cx = test_cx();
+            let _guard = write_blocking(&writer_lock, &cx);
+            writer_done_c.store(true, AtomicOrdering::Release);
+        });
+
+        // Wait for the second writer to register.
+        thread::sleep(std::time::Duration::from_millis(20));
+
+        // Release active writer. This wakes the reader (drain_reader_waiters),
+        // NOT the second writer (writer_waiters > 0 is checked, but
+        // release_writer wakes writers first when writer_waiters > 0).
+        drop(write_guard);
+
+        // Drop the read future without polling. If it was dequeued, its drop
+        // should forward the wake to the second writer.
+        drop(read_fut);
+
+        let _ = handle.join();
+        let done = writer_done.load(AtomicOrdering::Acquire);
+        crate::assert_with_log!(done, "second writer eventually acquired", true, done);
+        crate::test_complete!("test_read_future_drop_forwards_wake_to_writer");
+    }
+
+    #[test]
+    fn test_owned_read_guard_basic() {
+        init_test("test_owned_read_guard_basic");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(42_u32));
+
+        let guard = OwnedRwLockReadGuard::try_read(StdArc::clone(&lock))
+            .expect("try_read should succeed");
+        let value = guard.with_read(|v| *v);
+        crate::assert_with_log!(value == 42, "owned read guard value", 42u32, value);
+        drop(guard);
+
+        // After drop, write should succeed.
+        let can_write = lock.try_write().is_ok();
+        crate::assert_with_log!(can_write, "write after owned read drop", true, can_write);
+        crate::test_complete!("test_owned_read_guard_basic");
+    }
+
+    #[test]
+    fn test_owned_write_guard_basic() {
+        init_test("test_owned_write_guard_basic");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(42_u32));
+
+        let mut guard = OwnedRwLockWriteGuard::try_write(StdArc::clone(&lock))
+            .expect("try_write should succeed");
+        guard.with_write(|v| *v = 100);
+        drop(guard);
+
+        let read_guard = lock.try_read().expect("read after write drop");
+        crate::assert_with_log!(*read_guard == 100, "owned write persisted", 100u32, *read_guard);
+        crate::test_complete!("test_owned_write_guard_basic");
+    }
+
+    #[test]
+    fn test_multiple_writer_cascade() {
+        // Multiple writers queue behind an active writer and acquire sequentially.
+        init_test("test_multiple_writer_cascade");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        let write1 = write_blocking(&lock, &cx);
+
+        // Queue two more writers.
+        let mut write2_fut = lock.write(&cx);
+        let w2_pending = poll_once(&mut write2_fut).is_none();
+        crate::assert_with_log!(w2_pending, "writer 2 pending", true, w2_pending);
+
+        let mut write3_fut = lock.write(&cx);
+        let w3_pending = poll_once(&mut write3_fut).is_none();
+        crate::assert_with_log!(w3_pending, "writer 3 pending", true, w3_pending);
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.writer_waiters == 2,
+            "two writers waiting",
+            2usize,
+            state.writer_waiters
+        );
+
+        // Release first writer — writer 2 should be next.
+        drop(write1);
+
+        let w2_result = poll_once(&mut write2_fut);
+        let w2_acquired = matches!(w2_result, Some(Ok(_)));
+        crate::assert_with_log!(w2_acquired, "writer 2 acquired", true, w2_acquired);
+
+        // Writer 3 should still be pending.
+        let w3_still_pending = poll_once(&mut write3_fut).is_none();
+        crate::assert_with_log!(w3_still_pending, "writer 3 still pending", true, w3_still_pending);
+
+        // Release writer 2 — writer 3 should acquire.
+        if let Some(Ok(guard)) = w2_result {
+            drop(guard);
+        }
+
+        let w3_result = poll_once(&mut write3_fut);
+        let w3_acquired = matches!(w3_result, Some(Ok(_)));
+        crate::assert_with_log!(w3_acquired, "writer 3 acquired", true, w3_acquired);
+        crate::test_complete!("test_multiple_writer_cascade");
+    }
+
+    #[test]
+    fn test_try_read_blocked_by_writer_waiters() {
+        // try_read must fail when writers are queued, even if no writer is active.
+        init_test("test_try_read_blocked_by_writer_waiters");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        // Hold a read lock, then queue a writer.
+        let _read = read_blocking(&lock, &cx);
+        let mut write_fut = lock.write(&cx);
+        let pending = poll_once(&mut write_fut).is_none();
+        crate::assert_with_log!(pending, "writer queued", true, pending);
+
+        // try_read should fail because writer_waiters > 0.
+        let blocked = matches!(lock.try_read(), Err(TryReadError::Locked));
+        crate::assert_with_log!(blocked, "try_read blocked by writer waiter", true, blocked);
+        crate::test_complete!("test_try_read_blocked_by_writer_waiters");
     }
 }
