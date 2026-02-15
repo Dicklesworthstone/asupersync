@@ -1768,4 +1768,221 @@ mod tests {
         );
         crate::test_complete!("test_aggregator_stats");
     }
+
+    // ========================================================================
+    // Audit regression tests
+    // ========================================================================
+
+    #[test]
+    fn flush_respects_interval_gating() {
+        init_test("flush_respects_interval_gating");
+        let config = AggregatorConfig {
+            flush_interval: Time::from_millis(100),
+            ..Default::default()
+        };
+        let aggregator = MultipathAggregator::new(config);
+        let path = aggregator.paths().create_path(
+            "test",
+            "localhost:8080",
+            PathCharacteristics::default(),
+        );
+
+        // Process a symbol with out-of-order ESI to put something in the reorderer buffer
+        let s2 = Symbol::new_for_test(1, 0, 2, &[2]);
+        aggregator.process(s2, path, Time::ZERO);
+
+        // Flush too soon — should return empty
+        let early = aggregator.flush(Time::from_millis(50));
+        crate::assert_with_log!(
+            early.is_empty(),
+            "flush before interval returns empty",
+            true,
+            early.is_empty()
+        );
+
+        // Flush after interval — should succeed
+        let later = aggregator.flush(Time::from_millis(200));
+        // Symbol 2 was buffered waiting for 0,1 — if max_wait_time passed, it should flush
+        // (default max_wait_time is 100ms, and symbol was received at t=0, flush at t=200)
+        crate::assert_with_log!(
+            later.len() == 1,
+            "flush after interval returns buffered symbol",
+            1,
+            later.len()
+        );
+
+        crate::test_complete!("flush_respects_interval_gating");
+    }
+
+    #[test]
+    fn dedup_prune_removes_expired_objects() {
+        init_test("dedup_prune_removes_expired_objects");
+        let config = DeduplicatorConfig {
+            entry_ttl: Time::from_secs(10),
+            ..Default::default()
+        };
+        let dedup = SymbolDeduplicator::new(config);
+        let path = PathId(1);
+
+        // Record a symbol at t=0
+        let s = Symbol::new_for_test(1, 0, 0, &[1]);
+        dedup.check_and_record(&s, path, Time::ZERO);
+
+        let before = dedup.stats();
+        crate::assert_with_log!(
+            before.objects_tracked == 1,
+            "1 object tracked before prune",
+            1,
+            before.objects_tracked
+        );
+
+        // Prune at t=5 (within TTL) — should keep
+        let pruned_early = dedup.prune(Time::from_secs(5));
+        crate::assert_with_log!(pruned_early == 0, "nothing pruned early", 0, pruned_early);
+
+        // Prune at t=15 (past TTL) — should remove
+        let pruned_late = dedup.prune(Time::from_secs(15));
+        crate::assert_with_log!(pruned_late == 1, "1 object pruned", 1, pruned_late);
+
+        let after = dedup.stats();
+        crate::assert_with_log!(
+            after.objects_tracked == 0,
+            "0 objects after prune",
+            0,
+            after.objects_tracked
+        );
+
+        crate::test_complete!("dedup_prune_removes_expired_objects");
+    }
+
+    #[test]
+    fn reorderer_late_duplicate_ignored() {
+        init_test("reorderer_late_duplicate_ignored");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+        let path = PathId(1);
+        let now = Time::ZERO;
+
+        // Deliver 0, 1, 2 in order
+        reorderer.process(Symbol::new_for_test(1, 0, 0, &[0]), path, now);
+        reorderer.process(Symbol::new_for_test(1, 0, 1, &[1]), path, now);
+        reorderer.process(Symbol::new_for_test(1, 0, 2, &[2]), path, now);
+
+        // Late duplicate: seq 0 again
+        let late = reorderer.process(Symbol::new_for_test(1, 0, 0, &[0]), path, now);
+        crate::assert_with_log!(
+            late.is_empty(),
+            "late duplicate produces no output",
+            true,
+            late.is_empty()
+        );
+
+        let stats = reorderer.stats();
+        crate::assert_with_log!(
+            stats.in_order_deliveries == 3,
+            "still 3 in-order deliveries",
+            3,
+            stats.in_order_deliveries
+        );
+
+        crate::test_complete!("reorderer_late_duplicate_ignored");
+    }
+
+    #[test]
+    fn path_set_round_robin_cycles() {
+        init_test("path_set_round_robin_cycles");
+        let set = PathSet::new(PathSelectionPolicy::RoundRobin);
+
+        set.register(test_path(1));
+        set.register(test_path(2));
+
+        // RoundRobin should select one path per call, cycling through
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            let selected = set.select_paths();
+            crate::assert_with_log!(
+                selected.len() == 1,
+                "round robin selects 1",
+                1,
+                selected.len()
+            );
+            ids.push(selected[0].id);
+        }
+
+        // Should see both paths represented (2 paths, 4 calls)
+        let unique_ids: HashSet<PathId> = ids.iter().copied().collect();
+        crate::assert_with_log!(
+            unique_ids.len() == 2,
+            "round robin covers both paths",
+            2,
+            unique_ids.len()
+        );
+
+        crate::test_complete!("path_set_round_robin_cycles");
+    }
+
+    #[test]
+    fn path_set_remove_path() {
+        init_test("path_set_remove_path");
+        let set = PathSet::new(PathSelectionPolicy::UseAll);
+
+        let id = set.register(test_path(1));
+        set.register(test_path(2));
+
+        crate::assert_with_log!(set.count() == 2, "2 paths", 2, set.count());
+
+        let removed = set.remove(id);
+        crate::assert_with_log!(removed.is_some(), "removed path", true, removed.is_some());
+        crate::assert_with_log!(set.count() == 1, "1 path after remove", 1, set.count());
+
+        // Remove again — should return None
+        let removed_again = set.remove(id);
+        crate::assert_with_log!(
+            removed_again.is_none(),
+            "double remove returns None",
+            true,
+            removed_again.is_none()
+        );
+
+        crate::test_complete!("path_set_remove_path");
+    }
+
+    #[test]
+    fn aggregation_error_display_variants() {
+        init_test("aggregation_error_display_variants");
+
+        let e1 = AggregationError::PathNotFound { path: PathId(42) };
+        crate::assert_with_log!(
+            e1.to_string().contains("42"),
+            "path not found contains id",
+            true,
+            e1.to_string().contains("42")
+        );
+
+        let e2 = AggregationError::PathUnavailable { path: PathId(7) };
+        crate::assert_with_log!(
+            e2.to_string().contains("unavailable"),
+            "path unavailable display",
+            true,
+            e2.to_string().contains("unavailable")
+        );
+
+        let e3 = AggregationError::InvalidSequence {
+            object_id: ObjectId::new(1),
+            expected: 5,
+            received: 10,
+        };
+        let msg = e3.to_string();
+        crate::assert_with_log!(
+            msg.contains("expected 5") && msg.contains("got 10"),
+            "invalid sequence display",
+            true,
+            msg.contains("expected 5") && msg.contains("got 10")
+        );
+
+        crate::test_complete!("aggregation_error_display_variants");
+    }
 }
