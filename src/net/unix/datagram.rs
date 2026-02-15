@@ -95,8 +95,8 @@ impl UnixDatagram {
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref();
 
-        // Remove existing socket file if present (might be stale from previous run)
-        let _ = std::fs::remove_file(path);
+        // Remove only stale socket files. Refuse to delete non-socket paths.
+        super::listener::remove_stale_socket_file(path)?;
 
         let inner = net::UnixDatagram::bind(path)?;
         inner.set_nonblocking(true)?;
@@ -1204,5 +1204,27 @@ mod tests {
         }
 
         crate::test_complete!("test_datagram_peer_cred");
+    }
+
+    #[test]
+    fn test_bind_refuses_non_socket_path() {
+        init_test("test_datagram_bind_refuses_non_socket_path");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("not_a_socket");
+        std::fs::write(&path, b"important data").expect("write file");
+
+        let err = UnixDatagram::bind(&path).expect_err("bind should reject non-socket path");
+        crate::assert_with_log!(
+            err.kind() == std::io::ErrorKind::AlreadyExists,
+            "error kind",
+            std::io::ErrorKind::AlreadyExists,
+            err.kind()
+        );
+
+        // Verify the file was NOT deleted
+        let contents = std::fs::read(&path).expect("read file");
+        let unchanged = contents == b"important data";
+        crate::assert_with_log!(unchanged, "file unchanged", true, unchanged);
+        crate::test_complete!("test_datagram_bind_refuses_non_socket_path");
     }
 }
