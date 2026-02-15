@@ -246,7 +246,7 @@ impl UnixStreamInner {
             return Ok(());
         };
 
-        match driver.register(&*self.stream, register_interest, waker) {
+        let result = match driver.register(&*self.stream, register_interest, waker) {
             Ok(registration) => {
                 guard.registration = Some(registration);
                 Ok(())
@@ -256,7 +256,9 @@ impl UnixStreamInner {
                 Ok(())
             }
             Err(err) => Err(err),
-        }
+        };
+        drop(guard);
+        result
     }
 }
 
