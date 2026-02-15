@@ -149,6 +149,7 @@ pub struct Cx<Caps = cap::All> {
 // Manual Clone impl to avoid requiring `Caps: Clone` (Caps is just a phantom marker type).
 // Only 3 Arc increments instead of ~15.
 impl<Caps> Clone for Cx<Caps> {
+    #[inline]
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -250,6 +251,7 @@ impl FullCx {
     /// Returns the current task context, if one is set.
     ///
     /// This is set by the runtime while polling a task.
+    #[inline]
     #[must_use]
     pub fn current() -> Option<Self> {
         CURRENT_CX.with(|slot| slot.borrow().clone())
@@ -442,6 +444,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Internal re-typing helper (no subset enforcement).
+    #[inline]
     #[must_use]
     pub(crate) fn retype<NewCaps>(&self) -> Cx<NewCaps> {
         Cx {
