@@ -355,9 +355,25 @@ impl<T> Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        self.inner.mark_sender_dropped();
-        // Wake all waiting receivers so they see Closed
-        self.inner.wake_all_waiters();
+        // Use defensive locking to avoid double-panic abort if a
+        // mutex is already poisoned during stack unwinding.
+        if let Ok(mut dropped) = self.inner.sender_dropped.lock() {
+            *dropped = true;
+        } else {
+            return; // Poisoned — bail out.
+        }
+        // Wake all waiting receivers so they see Closed.
+        // Collect wakers under lock, wake outside.
+        let waiters: SmallVec<[WatchWaiter; 4]> = {
+            let Ok(mut w) = self.inner.waiters.lock() else {
+                return;
+            };
+            std::mem::take(&mut *w)
+        };
+        for w in waiters {
+            w.queued.store(false, Ordering::Release);
+            w.waker.wake();
+        }
     }
 }
 
@@ -565,22 +581,20 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        {
-            let mut count = self
-                .inner
-                .receiver_count
-                .lock()
-                .expect("watch lock poisoned");
+        // Use defensive locking to avoid double-panic abort if a
+        // mutex is already poisoned during stack unwinding.
+        if let Ok(mut count) = self.inner.receiver_count.lock() {
             *count = count.saturating_sub(1);
         }
 
         // Eagerly remove this receiver's waiter entry so dropped receivers do not
         // leave stale wakers behind until a later send/re-registration.
         if let Some(waiter) = self.waiter.take() {
-            let mut waiters = self.inner.waiters.lock().expect("watch lock poisoned");
-            waiters.retain(|entry| {
-                !Arc::ptr_eq(&entry.queued, &waiter) && Arc::strong_count(&entry.queued) > 1
-            });
+            if let Ok(mut waiters) = self.inner.waiters.lock() {
+                waiters.retain(|entry| {
+                    !Arc::ptr_eq(&entry.queued, &waiter) && Arc::strong_count(&entry.queued) > 1
+                });
+            }
         }
     }
 }
@@ -1320,5 +1334,38 @@ mod tests {
         let value = *shutdown_rx.borrow();
         crate::assert_with_log!(value, "shutdown true", true, value);
         crate::test_complete!("shutdown_signal_pattern");
+    }
+
+    #[test]
+    fn sender_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("sender_drop_on_poisoned_mutex_does_not_panic");
+        let (tx, _rx) = channel::<i32>(0);
+
+        // Poison the sender_dropped mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.inner.sender_dropped.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping tx should NOT panic (it should bail gracefully).
+        drop(tx);
+        crate::test_complete!("sender_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn receiver_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
+        let (tx, rx) = channel::<i32>(0);
+
+        // Poison the receiver_count mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.inner.receiver_count.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping rx should NOT panic.
+        drop(rx);
+        drop(tx);
+        crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
     }
 }
