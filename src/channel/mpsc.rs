@@ -147,16 +147,22 @@ impl<T> ChannelInner<T> {
         self.sender_count == 0
     }
 
-    /// Wakes the next waiting sender, if any.
+    /// Returns the waker for the next waiting sender, if any, marking it
+    /// as no longer queued. The caller must invoke `waker.wake()` **after**
+    /// releasing the channel lock to avoid wake-under-lock deadlocks.
     ///
     /// This does NOT remove the waiter from the queue. The waiter is responsible
     /// for removing itself upon successfully acquiring a permit.
-    fn wake_next_sender(&self) {
-        if let Some(waiter) = self.send_wakers.front() {
+    fn take_next_sender_waker(&self) -> Option<Waker> {
+        self.send_wakers.front().map(|waiter| {
             waiter.shared.queued.store(false, Ordering::Release);
-            let waker = waiter.shared.waker.lock().expect("waiter lock poisoned");
-            waker.wake_by_ref();
-        }
+            waiter
+                .shared
+                .waker
+                .lock()
+                .expect("waiter lock poisoned")
+                .clone()
+        })
     }
 }
 
@@ -286,7 +292,9 @@ impl<T> Sender<T> {
     ///
     /// Returns `Ok(None)` if the value was sent without eviction,
     /// `Ok(Some(evicted))` if the oldest message was evicted to make room,
-    /// or `Err(SendError::Disconnected(value))` if the receiver has dropped.
+    /// `Err(SendError::Full(value))` if all capacity is consumed by reserved
+    /// slots and there is nothing to evict, or
+    /// `Err(SendError::Disconnected(value))` if the receiver has dropped.
     ///
     /// This is used by the `DropOldest` backpressure policy. The evicted
     /// message is returned so callers can trace or log the drop.
@@ -299,9 +307,12 @@ impl<T> Sender<T> {
 
         let evicted = if inner.has_capacity() {
             None
-        } else {
+        } else if let Some(oldest) = inner.queue.pop_front() {
             // Evict the oldest committed message (not a reserved slot).
-            inner.queue.pop_front()
+            Some(oldest)
+        } else {
+            // All capacity consumed by reserved slots — nothing to evict.
+            return Err(SendError::Full(value));
         };
 
         inner.queue.push_back(value);
@@ -372,9 +383,18 @@ impl<'a, T> Future for Reserve<'a, T> {
                 }
 
                 // CASCADE: If there is still capacity, wake the *next* waiter.
-                if inner.has_capacity() {
-                    inner.wake_next_sender();
+                // Extract waker now; wake after releasing the lock.
+                let cascade_waker = if inner.has_capacity() {
+                    inner.take_next_sender_waker()
+                } else {
+                    None
+                };
+                drop(inner);
+                if let Some(w) = cascade_waker {
+                    w.wake();
                 }
+            } else {
+                drop(inner);
             }
 
             return Poll::Ready(Ok(SendPermit {
@@ -413,30 +433,38 @@ impl<T> Drop for Reserve<'_, T> {
     fn drop(&mut self) {
         // If we have a waiter, we need to remove it from the sender's queue.
         if let Some(waiter) = self.waiter.as_ref() {
-            let mut inner = self
-                .sender
-                .shared
-                .inner
-                .lock()
-                .expect("channel lock poisoned");
+            let next_waker = {
+                let mut inner = self
+                    .sender
+                    .shared
+                    .inner
+                    .lock()
+                    .expect("channel lock poisoned");
 
-            // We need to remove ourselves.
-            let is_head = inner
-                .send_wakers
-                .front()
-                .is_some_and(|w| Arc::ptr_eq(&w.shared, waiter));
-
-            if is_head {
-                inner.send_wakers.pop_front();
-            } else {
-                inner
+                // We need to remove ourselves.
+                let is_head = inner
                     .send_wakers
-                    .retain(|w| !Arc::ptr_eq(&w.shared, waiter));
-            }
+                    .front()
+                    .is_some_and(|w| Arc::ptr_eq(&w.shared, waiter));
 
-            // Propagate wake if we were blocking capacity
-            if inner.has_capacity() {
-                inner.wake_next_sender();
+                if is_head {
+                    inner.send_wakers.pop_front();
+                } else {
+                    inner
+                        .send_wakers
+                        .retain(|w| !Arc::ptr_eq(&w.shared, waiter));
+                }
+
+                // Propagate wake if we were blocking capacity
+                if inner.has_capacity() {
+                    inner.take_next_sender_waker()
+                } else {
+                    None
+                }
+            };
+            // Wake outside the lock.
+            if let Some(w) = next_waker {
+                w.wake();
             }
         }
     }
@@ -456,14 +484,18 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
-        inner.sender_count -= 1;
-        let all_senders_gone = inner.sender_count == 0;
-
-        if all_senders_gone {
-            if let Some(waker) = inner.recv_waker.take() {
-                waker.wake();
+        let recv_waker = {
+            let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+            inner.sender_count -= 1;
+            if inner.sender_count == 0 {
+                inner.recv_waker.take()
+            } else {
+                None
             }
+        };
+        // Wake receiver outside the lock to avoid wake-under-lock deadlocks.
+        if let Some(waker) = recv_waker {
+            waker.wake();
         }
     }
 }
@@ -533,17 +565,28 @@ impl<T> SendPermit<'_, T> {
 
         if inner.receiver_dropped {
             // Receiver is gone; drop the value and release capacity.
-            for waiter in inner.send_wakers.drain(..) {
-                waiter.shared.queued.store(false, Ordering::Release);
-                let waker = waiter.shared.waker.lock().expect("waiter lock poisoned");
-                waker.wake_by_ref();
+            // Collect wakers before dropping the lock to avoid wake-under-lock.
+            let wakers: Vec<_> = inner
+                .send_wakers
+                .drain(..)
+                .map(|waiter| {
+                    waiter.shared.queued.store(false, Ordering::Release);
+                    waiter.shared.waker.lock().expect("waiter lock poisoned").clone()
+                })
+                .collect();
+            drop(inner);
+            for waker in wakers {
+                waker.wake();
             }
             return;
         }
 
         inner.queue.push_back(value);
 
-        if let Some(waker) = inner.recv_waker.take() {
+        // Extract waker before dropping the lock to avoid wake-under-lock.
+        let recv_waker = inner.recv_waker.take();
+        drop(inner);
+        if let Some(waker) = recv_waker {
             waker.wake();
         }
     }
@@ -551,25 +594,7 @@ impl<T> SendPermit<'_, T> {
     /// Aborts the reserved slot without sending.
     pub fn abort(mut self) {
         self.sent = true;
-        let mut inner = self
-            .sender
-            .shared
-            .inner
-            .lock()
-            .expect("channel lock poisoned");
-        if inner.reserved == 0 {
-            debug_assert!(false, "abort permit without reservation");
-        } else {
-            inner.reserved -= 1;
-        }
-
-        inner.wake_next_sender();
-    }
-}
-
-impl<T> Drop for SendPermit<'_, T> {
-    fn drop(&mut self) {
-        if !self.sent {
+        let next_waker = {
             let mut inner = self
                 .sender
                 .shared
@@ -577,12 +602,40 @@ impl<T> Drop for SendPermit<'_, T> {
                 .lock()
                 .expect("channel lock poisoned");
             if inner.reserved == 0 {
-                debug_assert!(false, "dropped permit without reservation");
+                debug_assert!(false, "abort permit without reservation");
             } else {
                 inner.reserved -= 1;
             }
+            inner.take_next_sender_waker()
+        };
+        // Wake outside the lock.
+        if let Some(w) = next_waker {
+            w.wake();
+        }
+    }
+}
 
-            inner.wake_next_sender();
+impl<T> Drop for SendPermit<'_, T> {
+    fn drop(&mut self) {
+        if !self.sent {
+            let next_waker = {
+                let mut inner = self
+                    .sender
+                    .shared
+                    .inner
+                    .lock()
+                    .expect("channel lock poisoned");
+                if inner.reserved == 0 {
+                    debug_assert!(false, "dropped permit without reservation");
+                } else {
+                    inner.reserved -= 1;
+                }
+                inner.take_next_sender_waker()
+            };
+            // Wake outside the lock.
+            if let Some(w) = next_waker {
+                w.wake();
+            }
         }
     }
 }
@@ -611,19 +664,23 @@ impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
 
-        inner.queue.pop_front().map_or_else(
-            || {
+        match inner.queue.pop_front() {
+            Some(value) => {
+                let next_waker = inner.take_next_sender_waker();
+                drop(inner);
+                if let Some(w) = next_waker {
+                    w.wake();
+                }
+                Ok(value)
+            }
+            None => {
                 if inner.is_closed() {
                     Err(RecvError::Disconnected)
                 } else {
                     Err(RecvError::Empty)
                 }
-            },
-            |value| {
-                inner.wake_next_sender();
-                Ok(value)
-            },
-        )
+            }
+        }
     }
 
     /// Returns true if all senders have been dropped.
@@ -704,7 +761,11 @@ impl<T> Future for Recv<'_, T> {
             .expect("channel lock poisoned");
 
         if let Some(value) = inner.queue.pop_front() {
-            inner.wake_next_sender();
+            let next_waker = inner.take_next_sender_waker();
+            drop(inner);
+            if let Some(w) = next_waker {
+                w.wake();
+            }
             return Poll::Ready(Ok(value));
         }
 
@@ -723,15 +784,24 @@ impl<T> Future for Recv<'_, T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
-        inner.receiver_dropped = true;
-        // Drain queued items to prevent memory leaks when senders are
-        // long-lived (they hold Arc refs that keep the queue alive).
-        inner.queue.clear();
-        for waiter in inner.send_wakers.drain(..) {
-            waiter.shared.queued.store(false, Ordering::Release);
-            let waker = waiter.shared.waker.lock().expect("waiter lock poisoned");
-            waker.wake_by_ref();
+        let wakers: Vec<Waker> = {
+            let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+            inner.receiver_dropped = true;
+            // Drain queued items to prevent memory leaks when senders are
+            // long-lived (they hold Arc refs that keep the queue alive).
+            inner.queue.clear();
+            inner
+                .send_wakers
+                .drain(..)
+                .map(|waiter| {
+                    waiter.shared.queued.store(false, Ordering::Release);
+                    waiter.shared.waker.lock().expect("waiter lock poisoned").clone()
+                })
+                .collect()
+        };
+        // Wake senders outside the lock to avoid wake-under-lock deadlocks.
+        for waker in wakers {
+            waker.wake();
         }
     }
 }
@@ -1192,5 +1262,99 @@ mod tests {
         let upgraded = weak.upgrade();
         crate::assert_with_log!(upgraded.is_none(), "upgrade none", true, upgraded.is_none());
         crate::test_complete!("weak_sender_upgrade_fails_after_drop");
+    }
+
+    #[test]
+    fn send_evict_oldest_returns_full_when_all_capacity_reserved() {
+        // Regression: send_evict_oldest must not exceed capacity when all
+        // slots are consumed by outstanding permits (reserved slots).
+        init_test("send_evict_oldest_returns_full_when_all_capacity_reserved");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>(2);
+
+        // Reserve both slots.
+        let p1 = block_on(tx.reserve(&cx)).expect("reserve 1");
+        let p2 = block_on(tx.reserve(&cx)).expect("reserve 2");
+
+        // send_evict_oldest cannot evict reserved slots — must return Full.
+        let result = tx.send_evict_oldest(99);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Full(99))),
+            "send_evict_oldest full when reserved",
+            "Err(Full(99))",
+            format!("{:?}", result)
+        );
+
+        // Verify capacity invariant: used_slots <= capacity.
+        {
+            let inner = tx.shared.inner.lock().expect("lock");
+            let used = inner.used_slots();
+            let cap = inner.capacity;
+            drop(inner);
+            crate::assert_with_log!(used <= cap, "capacity invariant", true, used <= cap);
+        }
+
+        p1.abort();
+        p2.abort();
+        crate::test_complete!("send_evict_oldest_returns_full_when_all_capacity_reserved");
+    }
+
+    #[test]
+    fn send_evict_oldest_evicts_committed_not_reserved() {
+        // When queue has committed messages AND reserved slots consume the
+        // rest, eviction should pop a committed message.
+        init_test("send_evict_oldest_evicts_committed_not_reserved");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>(2);
+
+        // Commit one message, reserve one slot.
+        block_on(tx.send(&cx, 10)).expect("send");
+        let permit = block_on(tx.reserve(&cx)).expect("reserve");
+
+        // Channel: queue=[10], reserved=1, used=2, capacity=2.
+        // send_evict_oldest should evict 10 and enqueue the new value.
+        let result = tx.send_evict_oldest(20);
+        crate::assert_with_log!(
+            matches!(result, Ok(Some(10))),
+            "evicted oldest",
+            "Ok(Some(10))",
+            format!("{:?}", result)
+        );
+
+        // Verify: queue=[20], reserved=1, used=2, capacity=2.
+        {
+            let inner = tx.shared.inner.lock().expect("lock");
+            let used = inner.used_slots();
+            let cap = inner.capacity;
+            let qlen = inner.queue.len();
+            drop(inner);
+            crate::assert_with_log!(used <= cap, "capacity after eviction", true, used <= cap);
+            crate::assert_with_log!(qlen == 1, "queue len after eviction", 1, qlen);
+        }
+
+        permit.abort();
+        crate::test_complete!("send_evict_oldest_evicts_committed_not_reserved");
+    }
+
+    #[test]
+    fn send_evict_oldest_no_eviction_with_capacity() {
+        init_test("send_evict_oldest_no_eviction_with_capacity");
+        let (tx, _rx) = channel::<i32>(3);
+
+        // Channel has capacity — should enqueue without eviction.
+        let result = tx.send_evict_oldest(1);
+        crate::assert_with_log!(
+            matches!(result, Ok(None)),
+            "no eviction with capacity",
+            "Ok(None)",
+            format!("{:?}", result)
+        );
+
+        let qlen = {
+            let inner = tx.shared.inner.lock().expect("lock");
+            inner.queue.len()
+        };
+        crate::assert_with_log!(qlen == 1, "queue len", 1, qlen);
+        crate::test_complete!("send_evict_oldest_no_eviction_with_capacity");
     }
 }
