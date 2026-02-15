@@ -602,6 +602,26 @@ impl MacaroonToken {
                         });
                     }
 
+                    // Check discharge's first-party caveats against context.
+                    // Per the Macaroon spec (Birgisson et al. 2014), all caveats
+                    // from both authorizing and discharge macaroons must pass.
+                    for (di, dc) in discharge.caveats.iter().enumerate() {
+                        if let Caveat::FirstParty { predicate } = dc {
+                            if let Err(reason) = check_caveat(predicate, context) {
+                                return Err(VerificationError::CaveatFailed {
+                                    index: i,
+                                    predicate: format!(
+                                        "discharge[{}].caveat[{}]: {}",
+                                        tp_id,
+                                        di,
+                                        predicate.display_string()
+                                    ),
+                                    reason,
+                                });
+                            }
+                        }
+                    }
+
                     sig = hmac_compute(&sig, vid);
                 }
             }
@@ -1623,6 +1643,65 @@ mod tests {
         assert!(token
             .verify_with_discharges(&root_key, &ctx, &[bound])
             .is_ok());
+    }
+
+    /// Regression: discharge caveats must be checked against context.
+    #[test]
+    fn discharge_caveat_predicates_are_checked() {
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(650);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+            "tp",
+            "auth_check",
+            &caveat_key,
+        );
+
+        let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
+            .add_caveat(CaveatPredicate::TimeBefore(1000));
+        let bound = token.bind_for_request(&discharge);
+
+        // At time=500 — passes (discharge caveat satisfied).
+        let ctx_ok = VerificationContext::new().with_time(500);
+        assert!(token
+            .verify_with_discharges(&root_key, &ctx_ok, &[bound.clone()])
+            .is_ok());
+
+        // At time=5000 — fails (discharge caveat expired).
+        let ctx_expired = VerificationContext::new().with_time(5000);
+        let err = token
+            .verify_with_discharges(&root_key, &ctx_expired, &[bound])
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::CaveatFailed { .. }),
+            "discharge caveat should be checked: {err:?}"
+        );
+    }
+
+    #[test]
+    fn discharge_max_uses_caveat_enforced() {
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(651);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "loc").add_third_party_caveat(
+            "tp",
+            "auth_check",
+            &caveat_key,
+        );
+
+        let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
+            .add_caveat(CaveatPredicate::MaxUses(5));
+        let bound = token.bind_for_request(&discharge);
+
+        let ctx_ok = VerificationContext::new().with_use_count(3);
+        assert!(token
+            .verify_with_discharges(&root_key, &ctx_ok, &[bound.clone()])
+            .is_ok());
+
+        let ctx_over = VerificationContext::new().with_use_count(6);
+        assert!(token
+            .verify_with_discharges(&root_key, &ctx_over, &[bound])
+            .is_err());
     }
 
     #[test]
