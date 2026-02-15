@@ -610,6 +610,14 @@ pub fn pipeline_with_final<T, E>(
     final_outcome: Outcome<T, E>,
     total_stages: usize,
 ) -> PipelineResult<T, E> {
+    assert!(total_stages > 0, "total_stages must be positive");
+    assert!(
+        intermediate_outcomes.len() + 1 == total_stages,
+        "intermediate_outcomes.len() ({}) + 1 must equal total_stages ({})",
+        intermediate_outcomes.len(),
+        total_stages
+    );
+
     // Check intermediate stages
     for (index, outcome) in intermediate_outcomes.into_iter().enumerate() {
         if let Some(result) = stage_outcome_to_result(outcome, index, total_stages) {
@@ -676,9 +684,10 @@ pub fn pipeline_to_result<T, E>(result: PipelineResult<T, E>) -> Result<T, Pipel
     }
 }
 
-/// Macro for creating a sequential pipeline (placeholder).
+/// Macro for creating a sequential pipeline (not yet implemented).
 ///
 /// In the full implementation, this chains stages with cancellation checks.
+/// Use [`pipeline_n_outcomes`] or [`pipeline_with_final`] for now.
 ///
 /// # Example (API shape)
 /// ```ignore
@@ -690,12 +699,11 @@ pub fn pipeline_to_result<T, E>(result: PipelineResult<T, E>) -> Result<T, Pipel
 /// ```
 #[macro_export]
 macro_rules! pipeline {
-    ($cx:expr, $input:expr, $($stage:expr),+ $(,)?) => {{
-        // Placeholder: in real implementation, this chains stages
-        let _ = $cx;
-        let _ = $input;
-        $(let _ = $stage;)+
-    }};
+    ($cx:expr, $input:expr, $($stage:expr),+ $(,)?) => {
+        compile_error!(
+            "pipeline! macro not yet implemented; use pipeline_n_outcomes or pipeline_with_final instead"
+        )
+    };
 }
 
 #[cfg(test)]
@@ -1166,20 +1174,239 @@ mod tests {
     }
 
     // =========================================================================
+    // pipeline_n_outcomes Tests
+    // =========================================================================
+
+    #[test]
+    fn pipeline_n_all_ok() {
+        let outcomes: Vec<Outcome<i32, &str>> =
+            vec![Outcome::Ok(1), Outcome::Ok(2), Outcome::Ok(3)];
+        let result = pipeline_n_outcomes(outcomes, 3);
+
+        assert!(result.is_completed());
+        if let PipelineResult::Completed {
+            value,
+            stages_completed,
+        } = result
+        {
+            assert_eq!(value, 3);
+            assert_eq!(stages_completed, 3);
+        } else {
+            panic!("Expected Completed");
+        }
+    }
+
+    #[test]
+    fn pipeline_n_first_error() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Err("fail"), Outcome::Ok(2)];
+        let result = pipeline_n_outcomes(outcomes, 3);
+
+        assert!(result.is_failed());
+        if let PipelineResult::Failed { error, failed_at } = result {
+            assert_eq!(error, "fail");
+            assert_eq!(failed_at.index, 0);
+            assert_eq!(failed_at.total_stages, 3);
+        } else {
+            panic!("Expected Failed");
+        }
+    }
+
+    #[test]
+    fn pipeline_n_middle_cancel() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(1),
+            Outcome::Cancelled(CancelReason::shutdown()),
+        ];
+        let result = pipeline_n_outcomes(outcomes, 4);
+
+        assert!(result.is_cancelled());
+        if let PipelineResult::Cancelled {
+            cancelled_at, ..
+        } = result
+        {
+            assert_eq!(cancelled_at.index, 1);
+            assert_eq!(cancelled_at.total_stages, 4);
+        } else {
+            panic!("Expected Cancelled");
+        }
+    }
+
+    #[test]
+    fn pipeline_n_partial_completion() {
+        // Provide fewer outcomes than total_stages, all Ok
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(10), Outcome::Ok(20)];
+        let result = pipeline_n_outcomes(outcomes, 5);
+
+        // Should return Completed with stages_completed = num_provided
+        assert!(result.is_completed());
+        if let PipelineResult::Completed {
+            value,
+            stages_completed,
+        } = result
+        {
+            assert_eq!(value, 20);
+            assert_eq!(stages_completed, 2); // Only 2 of 5 stages provided
+        } else {
+            panic!("Expected Completed");
+        }
+    }
+
+    #[test]
+    fn pipeline_n_single_ok() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(42)];
+        let result = pipeline_n_outcomes(outcomes, 1);
+
+        assert!(result.is_completed());
+        if let PipelineResult::Completed {
+            value,
+            stages_completed,
+        } = result
+        {
+            assert_eq!(value, 42);
+            assert_eq!(stages_completed, 1);
+        } else {
+            panic!("Expected Completed");
+        }
+    }
+
+    #[test]
+    fn pipeline_n_single_error() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Err("only stage fails")];
+        let result = pipeline_n_outcomes(outcomes, 1);
+
+        assert!(result.is_failed());
+        if let PipelineResult::Failed { failed_at, .. } = result {
+            assert_eq!(failed_at.index, 0);
+            assert!(failed_at.is_first());
+            assert!(failed_at.is_last());
+        } else {
+            panic!("Expected Failed");
+        }
+    }
+
+    #[test]
+    fn pipeline_n_panic_mid_pipeline() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(1),
+            Outcome::Ok(2),
+            Outcome::Panicked(PanicPayload::new("stage 3 panicked")),
+        ];
+        let result = pipeline_n_outcomes(outcomes, 4);
+
+        assert!(result.is_panicked());
+        if let PipelineResult::Panicked {
+            panicked_at, ..
+        } = result
+        {
+            assert_eq!(panicked_at.index, 2);
+            assert_eq!(panicked_at.total_stages, 4);
+        } else {
+            panic!("Expected Panicked");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "outcomes must not be empty")]
+    fn pipeline_n_empty_outcomes_panics() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![];
+        pipeline_n_outcomes(outcomes, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "more outcomes than stages")]
+    fn pipeline_n_too_many_outcomes_panics() {
+        let outcomes: Vec<Outcome<i32, &str>> =
+            vec![Outcome::Ok(1), Outcome::Ok(2), Outcome::Ok(3)];
+        pipeline_n_outcomes(outcomes, 2);
+    }
+
+    // =========================================================================
+    // pipeline_with_final Validation Tests
+    // =========================================================================
+
+    #[test]
+    #[should_panic(expected = "total_stages must be positive")]
+    fn pipeline_with_final_zero_stages_panics() {
+        let intermediates: Vec<Outcome<i32, &str>> = vec![];
+        pipeline_with_final(intermediates, Outcome::Ok(42), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "must equal total_stages")]
+    fn pipeline_with_final_mismatched_stages_panics() {
+        let intermediates: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1)];
+        // 1 intermediate + 1 final = 2, but total_stages = 5
+        pipeline_with_final(intermediates, Outcome::Ok(42), 5);
+    }
+
+    #[test]
+    fn pipeline_with_final_cancelled_final() {
+        let intermediates: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1), Outcome::Ok(2)];
+        let result =
+            pipeline_with_final(intermediates, Outcome::Cancelled(CancelReason::shutdown()), 3);
+
+        assert!(result.is_cancelled());
+        if let PipelineResult::Cancelled {
+            cancelled_at, ..
+        } = result
+        {
+            assert_eq!(cancelled_at.index, 2);
+            assert!(cancelled_at.is_last());
+        } else {
+            panic!("Expected Cancelled");
+        }
+    }
+
+    #[test]
+    fn pipeline_with_final_panicked_final() {
+        let intermediates: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1)];
+        let result = pipeline_with_final(
+            intermediates,
+            Outcome::Panicked(PanicPayload::new("final boom")),
+            2,
+        );
+
+        assert!(result.is_panicked());
+        if let PipelineResult::Panicked {
+            panicked_at, ..
+        } = result
+        {
+            assert_eq!(panicked_at.index, 1);
+            assert!(panicked_at.is_last());
+        } else {
+            panic!("Expected Panicked");
+        }
+    }
+
+    #[test]
+    fn pipeline_with_final_single_stage() {
+        // 0 intermediates + 1 final = 1 total stage
+        let intermediates: Vec<Outcome<i32, &str>> = vec![];
+        let result = pipeline_with_final(intermediates, Outcome::Ok(99), 1);
+
+        assert!(result.is_completed());
+        if let PipelineResult::Completed { value, .. } = result {
+            assert_eq!(value, 99);
+        } else {
+            panic!("Expected Completed");
+        }
+    }
+
+    // =========================================================================
     // Invariant Tests
     // =========================================================================
 
     #[test]
     fn error_short_circuits_at_first_failure() {
-        // Simulate a 5-stage pipeline where stage 2 fails
+        // Simulate a 5-stage pipeline where stage 2 (index 2) fails.
+        // pipeline_with_final requires intermediates.len() + 1 == total_stages,
+        // so provide all 4 intermediates even though short-circuit stops at stage 2.
         let intermediates: Vec<Outcome<i32, &str>> = vec![
             Outcome::Ok(1),
             Outcome::Ok(2),
             Outcome::Err("stage 3 failed"),
-            // Stages 4 and 5 should never be reached
+            Outcome::Ok(4), // Never reached due to short-circuit
         ];
-        // Using pipeline_with_final with a dummy final outcome
-        // since we expect to short-circuit at stage 2
         let result = pipeline_with_final(intermediates, Outcome::Ok(999), 5);
 
         assert!(result.is_failed());
