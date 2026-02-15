@@ -29,7 +29,7 @@ Deterministic E2E scenario IDs from `tests/raptorq_conformance.rs:1310`:
 
 | Module Family | Happy Path Coverage | Boundary Coverage | Adversarial/Error Coverage | Determinism Evidence | E2E Linkage | Structured Replay/Log Field Coverage | Status |
 |---|---|---|---|---|---|---|---|
-| Sender/Receiver builders + pipeline API | `src/raptorq/tests.rs:91`, `src/raptorq/tests.rs:217`, `src/raptorq/tests.rs:307` | empty payload + custom/default config: `src/raptorq/tests.rs:283`, `src/raptorq/tests.rs:293`, `src/raptorq/tests.rs:307` | oversized + cancellation + insufficient symbols: `src/raptorq/tests.rs:157`, `src/raptorq/tests.rs:178`, `src/raptorq/tests.rs:264` | deterministic emit/signing behavior covered via send-symbol paths | `RQ-E2E-SYSTEMATIC-ONLY`, `RQ-E2E-INSUFFICIENT-SYMBOLS` | edge-case unit replay refs are now cataloged in D9 artifact; broader builder-path schema coverage still in progress | partial |
+| Sender/Receiver builders + pipeline API | `src/raptorq/tests.rs:101`, `src/raptorq/tests.rs:268`, `src/raptorq/tests.rs:379` | empty payload + custom/default config: `src/raptorq/tests.rs:344`, `src/raptorq/tests.rs:320`, `src/raptorq/tests.rs:331` | oversized + cancellation + insufficient symbols: `src/raptorq/tests.rs:194`, `src/raptorq/tests.rs:226`, `src/raptorq/tests.rs:315` | deterministic emit/signing behavior covered via send-symbol paths | `RQ-E2E-SYSTEMATIC-ONLY`, `RQ-E2E-INSUFFICIENT-SYMBOLS` | builder-path unit failures now emit schema-aligned context (`scenario_id`, `seed`, `parameter_set`, `replay_ref`) and are replay-catalog linked; remaining partial status is due non-builder families | partial |
 | Systematic parameter lookup + tuple/degree semantics | `src/raptorq/systematic.rs:1148`, `src/raptorq/systematic.rs:1159`, `tests/raptorq_conformance.rs:597` | k-small/large + overhead bounds: `src/raptorq/systematic.rs:1122`, `src/raptorq/systematic.rs:1135`, `tests/raptorq_conformance.rs:617` | distribution/edge handling: `src/raptorq/systematic.rs:1171`, `src/raptorq/systematic.rs:1250`, `tests/raptorq_conformance.rs:541` | same-seed deterministic checks: `src/raptorq/systematic.rs:1204`, `tests/raptorq_conformance.rs:573` | `RQ-E2E-SYSTEMATIC-ONLY`, `RQ-E2E-TYPICAL-RANDOM-LOSS` | RFC-equation/degree/seed-overhead unit tests now emit structured replay context and are catalog-linked | partial |
 | Decoder equation reconstruction + decode semantics | roundtrip no-loss/repair-only: `tests/raptorq_conformance.rs:101`, `tests/raptorq_conformance.rs:155`, `src/raptorq/tests.rs:604` | tiny/large symbol, k=1/2: `tests/raptorq_conformance.rs:276`, `tests/raptorq_conformance.rs:293`, `src/raptorq/tests.rs:1080`, `src/raptorq/tests.rs:1337` | insufficient + size mismatch + random loss: `tests/raptorq_conformance.rs:374`, `tests/raptorq_conformance.rs:397`, `tests/raptorq_conformance.rs:469`, `src/raptorq/tests.rs:1276`, `src/raptorq/tests.rs:1301` | deterministic decode equality: `tests/raptorq_conformance.rs:217`, `tests/raptorq_conformance.rs:243` | all four E2E scenarios | structured report fields available in E2E suite (`tests/raptorq_conformance.rs:1181`) | strong |
 | Solver/Linalg (pivot/rank/gaussian behavior) | gaussian solve sanity: `src/raptorq/linalg.rs:1056`, `src/raptorq/linalg.rs:1072` | empty rhs + 3x3/64-scale paths: `src/raptorq/linalg.rs:1109`, `src/raptorq/linalg.rs:1176`, perf invariants dense paths `tests/raptorq_perf_invariants.rs:732` | singular matrix + stats/pivot constraints: `src/raptorq/linalg.rs:1094`, `tests/raptorq_perf_invariants.rs:392`, `tests/raptorq_perf_invariants.rs:825` | deterministic stats/proof checks: `tests/raptorq_perf_invariants.rs:425`, `tests/raptorq_perf_invariants.rs:506` | `RQ-E2E-TYPICAL-RANDOM-LOSS`, `RQ-E2E-BURST-LOSS-LATE`, `RQ-E2E-INSUFFICIENT-SYMBOLS` | structured logging sentinel present (`tests/raptorq_perf_invariants.rs:667`) | strong |
@@ -82,7 +82,7 @@ Required unit failure fields (for matrix governance):
 Status:
 
 - structured fields are fully present in deterministic E2E report flow
-- unit-level structured context is present for edge-case paths plus systematic/GF256 deterministic regression sentinels; full suite-wide replay-id propagation remains **partial** pending D7 coverage completion
+- unit-level structured context is present for edge-case paths, builder-path send/receive tests, and systematic/GF256 deterministic regression sentinels; full suite-wide replay-id propagation remains **partial** pending D7 coverage completion
 
 ## Replay Catalog (D9)
 
@@ -107,8 +107,8 @@ Profile tags represented in catalog entries:
 Open gaps identified during matrix pass:
 
 1. Unit suites do not yet consistently emit explicit `replay_ref` IDs on every failure path.
-2. Some builder and GF256/property-style tests still rely on plain assertion text without schema-aligned key/value context.
-3. Matrix row status is still `partial` for builder/systematic/GF256 families until schema-aligned failure context is universal.
+2. Some non-builder GF256/property-style tests still rely on plain assertion text without schema-aligned key/value context.
+3. Matrix row status is still `partial` for systematic/GF256 families until schema-aligned failure context is universal.
 
 Mapped follow-up beads:
 
@@ -134,7 +134,7 @@ The D5 bead can close only when all of the following are true:
 
 | Bead | Scope | Current Status | Note for D5 Closure |
 |---|---|---|---|
-| `bd-61s90` | D5 comprehensive unit matrix | `open` | this matrix remains authoritative, but closure requires replay-id/schema completion on all required paths |
+| `bd-61s90` | D5 comprehensive unit matrix | `in_progress` | this matrix remains authoritative, but closure requires replay-id/schema completion on all required paths |
 | `bd-26pqk` | D9 replay catalog | `open` | catalog artifact exists; keep replay references aligned with latest entries |
 | `bd-oeql8` | D7 structured logging schema | `open` | schema contract enforcement still needed across all required suites |
 | `bd-3bvdj` | D6 deterministic E2E suite | `open` | unit-to-E2E linkage must remain synchronized as scenarios evolve |

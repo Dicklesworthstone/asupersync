@@ -83,6 +83,17 @@ impl SymbolStream for VecStream {
 
 impl Unpin for VecStream {}
 
+fn builder_failure_context(
+    scenario_id: &str,
+    seed: u64,
+    parameter_set: &str,
+    replay_ref: &str,
+) -> String {
+    format!(
+        "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
+    )
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -113,55 +124,92 @@ fn default_config_passes_validation() {
 
 #[test]
 fn sender_encodes_and_transmits() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
+    let config = RaptorQConfig::default();
+    let symbol_size = config.encoding.symbol_size;
+    let replay_ref = "replay:rq-u-builder-send-transmit-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-SEND-TRANSMIT",
+        seed,
+        &format!("symbol_size={symbol_size},data_len=1024"),
+        replay_ref,
+    );
     let mut sender = RaptorQSenderBuilder::new()
-        .config(RaptorQConfig::default())
+        .config(config)
         .transport(sink)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     let data = vec![42u8; 1024];
     let object_id = ObjectId::new_for_test(1);
-    let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+    let outcome = sender
+        .send_object(&cx, object_id, &data)
+        .unwrap_or_else(|err| panic!("{context} send_object should succeed; got {err:?}"));
 
     assert_eq!(outcome.object_id, object_id);
-    assert!(outcome.source_symbols > 0);
-    assert!(outcome.symbols_sent > 0);
+    assert!(outcome.source_symbols > 0, "{context} expected source symbols > 0");
+    assert!(outcome.symbols_sent > 0, "{context} expected symbols sent > 0");
     assert_eq!(
         outcome.symbols_sent,
-        outcome.source_symbols + outcome.repair_symbols
+        outcome.source_symbols + outcome.repair_symbols,
+        "{context} expected symbols_sent == source_symbols + repair_symbols"
     );
 }
 
 #[test]
 fn sender_with_security_signs_symbols() {
+    let seed = 42u64;
     let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
     let security = SecurityContext::for_testing(42);
+    let config = RaptorQConfig::default();
+    let symbol_size = config.encoding.symbol_size;
+    let replay_ref = "replay:rq-u-builder-security-send-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-SECURITY-SEND",
+        seed,
+        &format!("symbol_size={symbol_size},data_len=512"),
+        replay_ref,
+    );
 
     let mut sender = RaptorQSenderBuilder::new()
-        .config(RaptorQConfig::default())
+        .config(config)
         .transport(sink)
         .security(security)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     let data = vec![0xABu8; 512];
     let object_id = ObjectId::new_for_test(2);
-    let outcome = sender.send_object(&cx, object_id, &data).unwrap();
-    assert!(outcome.symbols_sent > 0);
+    let outcome = sender
+        .send_object(&cx, object_id, &data)
+        .unwrap_or_else(|err| panic!("{context} send_object should succeed; got {err:?}"));
+    assert!(
+        outcome.symbols_sent > 0,
+        "{context} expected signed send to emit symbols"
+    );
 }
 
 #[test]
 fn sender_rejects_oversized_data() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
+    let config = RaptorQConfig::default();
+    let replay_ref = "replay:rq-u-builder-oversized-error-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-ERROR-OVERSIZED",
+        seed,
+        &format!("symbol_size={}", config.encoding.symbol_size),
+        replay_ref,
+    );
     let mut sender = RaptorQSenderBuilder::new()
-        .config(RaptorQConfig::default())
+        .config(config)
         .transport(sink)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     // Create data larger than max_block_size * symbol_size.
     let max = u64::try_from(sender.config().encoding.max_block_size)
@@ -170,25 +218,40 @@ fn sender_rejects_oversized_data() {
     let data = vec![0u8; (max + 1) as usize];
     let result = sender.send_object(&cx, ObjectId::new_for_test(99), &data);
 
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataTooLarge);
+    let err = result
+        .err()
+        .unwrap_or_else(|| panic!("{context} expected DataTooLarge error"));
+    assert_eq!(
+        err.kind(),
+        ErrorKind::DataTooLarge,
+        "{context} expected DataTooLarge error kind"
+    );
 }
 
 #[test]
 fn sender_respects_cancellation() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
     cx.set_cancel_requested(true);
 
     let sink = VecSink::new();
+    let config = RaptorQConfig::default();
+    let replay_ref = "replay:rq-u-builder-cancelled-send-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-CANCELLED-SEND",
+        seed,
+        &format!("symbol_size={},data_len=512", config.encoding.symbol_size),
+        replay_ref,
+    );
     let mut sender = RaptorQSenderBuilder::new()
-        .config(RaptorQConfig::default())
+        .config(config)
         .transport(sink)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     let data = vec![0u8; 512];
     let result = sender.send_object(&cx, ObjectId::new_for_test(1), &data);
-    assert!(result.is_err());
+    assert!(result.is_err(), "{context} expected cancellation to return error");
 }
 
 #[test]
@@ -215,19 +278,31 @@ fn sender_with_metrics_increments_counters() {
 /// Full roundtrip test through the RaptorQ sender/receiver pipeline.
 #[test]
 fn send_receive_roundtrip() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
 
     // Sender side.
     let sink = VecSink::new();
+    let config = RaptorQConfig::default();
+    let symbol_size = config.encoding.symbol_size;
+    let replay_ref = "replay:rq-u-builder-roundtrip-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-ROUNDTRIP",
+        seed,
+        &format!("symbol_size={symbol_size},data_len=6"),
+        replay_ref,
+    );
     let mut sender = RaptorQSenderBuilder::new()
-        .config(RaptorQConfig::default())
+        .config(config)
         .transport(sink)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     let original_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
     let object_id = ObjectId::new_for_test(77);
-    let outcome = sender.send_object(&cx, object_id, &original_data).unwrap();
+    let outcome = sender
+        .send_object(&cx, object_id, &original_data)
+        .unwrap_or_else(|err| panic!("{context} send_object should succeed; got {err:?}"));
 
     // Extract symbols from the sink for the receiver.
     let symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
@@ -252,17 +327,34 @@ fn send_receive_roundtrip() {
         .config(RaptorQConfig::default())
         .source(stream)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} receiver build should succeed; got {err:?}"));
 
-    let recv_outcome = receiver.receive_object(&cx, &params).unwrap();
+    let recv_outcome = receiver
+        .receive_object(&cx, &params)
+        .unwrap_or_else(|err| panic!("{context} receive_object should succeed; got {err:?}"));
     // The decoded data should match the original (after trimming padding).
-    assert!(recv_outcome.data.len() >= original_data.len());
-    assert_eq!(&recv_outcome.data[..original_data.len()], &original_data);
+    assert!(
+        recv_outcome.data.len() >= original_data.len(),
+        "{context} expected decoded data len >= original data len"
+    );
+    assert_eq!(
+        &recv_outcome.data[..original_data.len()],
+        &original_data,
+        "{context} expected decoded prefix to match original payload"
+    );
 }
 
 #[test]
 fn receiver_reports_insufficient_symbols() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
+    let replay_ref = "replay:rq-u-builder-receiver-insufficient-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-RECEIVER-INSUFFICIENT",
+        seed,
+        "symbol_size=256,data_len=1024,source_symbols=4",
+        replay_ref,
+    );
 
     // Empty stream — no symbols available.
     let stream = VecStream::new(vec![]);
@@ -270,13 +362,13 @@ fn receiver_reports_insufficient_symbols() {
         .config(RaptorQConfig::default())
         .source(stream)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} receiver build should succeed; got {err:?}"));
 
     let params =
         crate::types::symbol::ObjectParams::new(ObjectId::new_for_test(1), 1024, 256, 1, 4);
 
     let result = receiver.receive_object(&cx, &params);
-    assert!(result.is_err());
+    assert!(result.is_err(), "{context} expected insufficient-symbols error");
 }
 
 #[test]
@@ -305,30 +397,51 @@ fn builder_accepts_custom_config() {
 
 #[test]
 fn send_empty_data_succeeds() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
+    let config = RaptorQConfig::default();
+    let symbol_size = config.encoding.symbol_size;
+    let replay_ref = "replay:rq-u-builder-send-empty-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-SEND-EMPTY",
+        seed,
+        &format!("symbol_size={symbol_size},data_len=0"),
+        replay_ref,
+    );
     let mut sender = RaptorQSenderBuilder::new()
-        .config(RaptorQConfig::default())
+        .config(config)
         .transport(sink)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     let outcome = sender
         .send_object(&cx, ObjectId::new_for_test(1), &[])
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} empty send should succeed; got {err:?}"));
     // Empty data may produce zero symbols (no source blocks to encode).
-    assert_eq!(outcome.source_symbols, 0);
+    assert_eq!(
+        outcome.source_symbols, 0,
+        "{context} expected empty send to emit zero source symbols"
+    );
 }
 
 #[test]
 fn send_symbols_directly() {
+    let seed = 0u64;
     let cx: Cx = Cx::for_testing();
     let sink = VecSink::new();
+    let replay_ref = "replay:rq-u-builder-send-symbols-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-SEND-SYMBOLS",
+        seed,
+        "symbol_count=5,symbol_size=256",
+        replay_ref,
+    );
     let mut sender = RaptorQSenderBuilder::new()
         .config(RaptorQConfig::default())
         .transport(sink)
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
     // Create a few authenticated symbols.
     let symbols: Vec<AuthenticatedSymbol> = (0..5)
@@ -338,9 +451,15 @@ fn send_symbols_directly() {
         })
         .collect();
 
-    let count = sender.send_symbols(&cx, symbols).unwrap();
-    assert_eq!(count, 5);
-    assert_eq!(sender.transport_mut().symbols.len(), 5);
+    let count = sender
+        .send_symbols(&cx, symbols)
+        .unwrap_or_else(|err| panic!("{context} send_symbols should succeed; got {err:?}"));
+    assert_eq!(count, 5, "{context} expected five symbols to be transmitted");
+    assert_eq!(
+        sender.transport_mut().symbols.len(),
+        5,
+        "{context} expected sink to store five symbols"
+    );
 }
 
 // =========================================================================

@@ -2,7 +2,7 @@
   "schema_version": "raptorq-replay-catalog-v1",
   "owner_bead": "bd-26pqk",
   "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
-  "generated_at_utc": "2026-02-14T22:24:00Z",
+  "generated_at_utc": "2026-02-15T16:49:00Z",
   "catalog_notes": [
     "Stable replay identifiers must never be rotated or reused without migration notes.",
     "Each replay entry links at least one unit test and one deterministic E2E script.",
@@ -398,6 +398,153 @@
       ],
       "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
       "repro_cmd": "rch exec -- cargo test --lib nibble_tables_exhaustive -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-send-transmit-v1",
+      "scenario_id": "RQ-U-BUILDER-SEND-TRANSMIT",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_send_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::sender_encodes_and_transmits"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib sender_encodes_and_transmits -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-security-send-v1",
+      "scenario_id": "RQ-U-BUILDER-SECURITY-SEND",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_security_send_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::sender_with_security_signs_symbols"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib sender_with_security_signs_symbols -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-oversized-error-v1",
+      "scenario_id": "RQ-U-BUILDER-ERROR-OVERSIZED",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_send_error_data_too_large",
+      "profile_tags": [
+        "fast",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::sender_rejects_oversized_data"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib sender_rejects_oversized_data -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-cancelled-send-v1",
+      "scenario_id": "RQ-U-BUILDER-CANCELLED-SEND",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_send_error_cancelled",
+      "profile_tags": [
+        "fast",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::sender_respects_cancellation"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib sender_respects_cancellation -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-roundtrip-v1",
+      "scenario_id": "RQ-U-BUILDER-ROUNDTRIP",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "send_receive_roundtrip_success",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::send_receive_roundtrip"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib send_receive_roundtrip -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-receiver-insufficient-v1",
+      "scenario_id": "RQ-U-BUILDER-RECEIVER-INSUFFICIENT",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_receive_error_insufficient_symbols",
+      "profile_tags": [
+        "fast",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::receiver_reports_insufficient_symbols"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib receiver_reports_insufficient_symbols -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-send-empty-v1",
+      "scenario_id": "RQ-U-BUILDER-SEND-EMPTY",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_empty_send_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::send_empty_data_succeeds"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib send_empty_data_succeeds -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-builder-send-symbols-v1",
+      "scenario_id": "RQ-U-BUILDER-SEND-SYMBOLS",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "builder_send_symbols_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::send_symbols_directly"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib send_symbols_directly -- --nocapture"
     }
   ]
 }

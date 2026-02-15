@@ -1624,7 +1624,7 @@ mod tests {
             for x in 0u16..=255 {
                 let context = failure_context(
                     "RQ-U-GF256-ALGEBRA",
-                    c as u64,
+                    u64::from(c),
                     &format!("nibble_table,c={c},x={x}"),
                     replay_ref,
                 );
