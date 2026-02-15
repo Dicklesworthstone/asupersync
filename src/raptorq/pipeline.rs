@@ -687,7 +687,8 @@ mod tests {
             outcome.source_symbols,
         );
 
-        let mut symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        let mut symbols: Vec<AuthenticatedSymbol> =
+            sender.transport_mut().symbols.drain(..).collect();
         symbols.truncate(outcome.source_symbols);
         let duplicate = symbols[0].clone();
         let mut stream_symbols = vec![duplicate.clone(), duplicate];
@@ -699,8 +700,7 @@ mod tests {
 
         assert_eq!(&recv.data[..data.len()], &data);
         assert_eq!(
-            recv.symbols_received,
-            outcome.source_symbols,
+            recv.symbols_received, outcome.source_symbols,
             "duplicate symbols must not count as used-for-decoding"
         );
     }

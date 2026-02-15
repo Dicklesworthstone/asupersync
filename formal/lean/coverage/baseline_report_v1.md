@@ -9,7 +9,7 @@ Machine-readable source: `formal/lean/coverage/baseline_report_v1.json`.
 - Step constructor coverage: `22` total, `22` covered, `0` partial, `0` missing
 - Invariant status: `1` fully proven, `3` partially proven, `2` unproven
 - Invariant witness linkage: `6` invariants mapped, `5` with theorem witnesses, `6` with executable checks
-- Frontier buckets: `32` errors grouped into `7` deterministic buckets (largest: `proof-shape.type-mismatch`)
+- Frontier buckets: `0` errors grouped into `0` deterministic buckets (largest: `none`)
   - Unproven invariants:
     - `inv.race.losers_drained`
     - `inv.authority.no_ambient`
@@ -39,21 +39,15 @@ Recommended track execution order:
 Dashboard ID: `lean.track2.frontier_burndown.v1`
 
 Latest recorded run:
-- run_id: `track2.frontier.baseline.2026-02-15`
-- source_log: `target/lean-e2e/bd-cspxm_lake_build.log`
+- run_id: `track2.frontier.stability.2026-02-15.run2`
+- source_log: `formal/lean/coverage/bd-200ok_lake_build.log`
 - toolchain_key: `lean4+rust-nightly-2026-02-05`
 - frontier artifact: `formal/lean/coverage/lean_frontier_buckets_v1.json`
-- totals: diagnostics `86`, errors `32`, warnings `54`, bucket_count `7`
-- delta vs previous: all `0` (baseline run)
+- totals: diagnostics `54`, errors `0`, warnings `54`, bucket_count `0`
+- delta vs previous: all `0` (stability run)
 
 Current bucket trend table (lexicographic by `(failure_mode,error_code)`):
-- `proof-shape.application-type-mismatch`: count `1`, delta `0`, trend `baseline`
-- `proof-shape.omega-goal-not-proved`: count `1`, delta `0`, trend `baseline`
-- `proof-shape.other`: count `1`, delta `0`, trend `baseline`
-- `proof-shape.rewrite-failed`: count `3`, delta `0`, trend `baseline`
-- `proof-shape.subst-failed`: count `9`, delta `0`, trend `baseline`
-- `proof-shape.type-mismatch`: count `14`, delta `0`, trend `baseline`
-- `proof-shape.unsolved-goals`: count `3`, delta `0`, trend `baseline`
+- no active error buckets (empty deterministic frontier)
 
 Repro command:
 - `cargo test --test lean_baseline_report baseline_report_track2_burndown_and_closure_gate_are_well_formed -- --nocapture`
@@ -63,7 +57,7 @@ Repro command:
 Policy ID: `lean.track2.closure_gate.v1`
 
 Current status:
-- `not-satisfied`
+- `satisfied`
 
 Blocking classes that must remain at zero:
 - `declaration-order.unknown-identifier`

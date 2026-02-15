@@ -540,4 +540,84 @@ mod tests {
 
         crate::test_complete!("tracked_into_inner_escapes");
     }
+
+    // 10. Dropped MPSC receiver yields disconnected error with original value.
+    #[test]
+    fn tracked_mpsc_send_returns_disconnected_when_receiver_dropped() {
+        init_test("tracked_mpsc_send_returns_disconnected_when_receiver_dropped");
+        let cx = test_cx();
+        let (tx, rx) = tracked_channel::<i32>(1);
+        drop(rx);
+
+        let err =
+            block_on(tx.send(&cx, 77)).expect_err("send should fail when receiver is dropped");
+        match err {
+            mpsc::SendError::Disconnected(value) => {
+                crate::assert_with_log!(
+                    value == 77,
+                    "disconnected error must return original value",
+                    77,
+                    value
+                );
+            }
+            other => panic!("expected Disconnected(77), got {other:?}"),
+        }
+
+        crate::test_complete!("tracked_mpsc_send_returns_disconnected_when_receiver_dropped");
+    }
+
+    // 11. Dropped oneshot receiver: reserved permit send aborts obligation and returns value.
+    #[test]
+    fn tracked_oneshot_reserved_send_returns_disconnected_without_obligation_leak() {
+        init_test("tracked_oneshot_reserved_send_returns_disconnected_without_obligation_leak");
+        let cx = test_cx();
+        let (tx, rx) = tracked_oneshot::<i32>();
+        let permit = tx.reserve(&cx);
+        drop(rx);
+
+        let err = permit
+            .send(101)
+            .expect_err("reserved oneshot send should fail when receiver is dropped");
+        match err {
+            oneshot::SendError::Disconnected(value) => {
+                crate::assert_with_log!(
+                    value == 101,
+                    "oneshot disconnected must return original value",
+                    101,
+                    value
+                );
+            }
+        }
+
+        crate::test_complete!(
+            "tracked_oneshot_reserved_send_returns_disconnected_without_obligation_leak"
+        );
+    }
+
+    // 12. Dropped oneshot receiver: convenience send returns disconnected and original value.
+    #[test]
+    fn tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped() {
+        init_test("tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped");
+        let cx = test_cx();
+        let (tx, rx) = tracked_oneshot::<i32>();
+        drop(rx);
+
+        let err = tx
+            .send(&cx, 202)
+            .expect_err("convenience oneshot send should fail when receiver is dropped");
+        match err {
+            oneshot::SendError::Disconnected(value) => {
+                crate::assert_with_log!(
+                    value == 202,
+                    "oneshot disconnected must return original value",
+                    202,
+                    value
+                );
+            }
+        }
+
+        crate::test_complete!(
+            "tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped"
+        );
+    }
 }

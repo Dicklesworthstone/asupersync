@@ -55,7 +55,17 @@ fn frontier_report_has_valid_schema_and_sorted_buckets() {
         .get("buckets")
         .and_then(Value::as_array)
         .expect("buckets must be an array");
-    assert!(!buckets.is_empty(), "buckets must not be empty");
+    if errors_total == 0 {
+        assert!(
+            buckets.is_empty(),
+            "buckets must be empty when errors_total is zero"
+        );
+    } else {
+        assert!(
+            !buckets.is_empty(),
+            "buckets must not be empty when errors_total is non-zero"
+        );
+    }
 
     let bucket_ids = buckets
         .iter()

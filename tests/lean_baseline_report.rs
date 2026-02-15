@@ -258,6 +258,10 @@ fn baseline_report_track2_burndown_and_closure_gate_are_well_formed() {
         .and_then(Value::as_array)
         .expect("dashboard runs must be array");
     assert!(!runs.is_empty(), "dashboard runs must not be empty");
+    assert!(
+        runs.len() >= 2,
+        "dashboard runs must include at least two entries for stability checks"
+    );
 
     let mut previous_run_index = 0_u64;
     for run in runs {
@@ -323,6 +327,12 @@ fn baseline_report_track2_burndown_and_closure_gate_are_well_formed() {
         .get("buckets")
         .and_then(Value::as_array)
         .expect("frontier buckets must be array");
+    if latest_errors == 0 {
+        assert!(
+            frontier_buckets.is_empty(),
+            "frontier buckets must be empty when latest_errors is zero"
+        );
+    }
     let frontier_map = frontier_buckets
         .iter()
         .map(|bucket| {
@@ -403,6 +413,12 @@ fn baseline_report_track2_burndown_and_closure_gate_are_well_formed() {
         matches!(status, "not-satisfied" | "satisfied"),
         "closure gate status must be not-satisfied|satisfied"
     );
+    if latest_errors == 0 {
+        assert_eq!(
+            status, "satisfied",
+            "closure gate should be satisfied when frontier errors are zero"
+        );
+    }
 
     let blocking_classes = closure_gate
         .get("blocking_classes_must_be_zero")
