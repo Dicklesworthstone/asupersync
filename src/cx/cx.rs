@@ -100,59 +100,6 @@ fn noop_waker() -> Waker {
     Waker::from(Arc::new(NoopWaker))
 }
 
-/// The capability context for a task.
-///
-/// `Cx` provides access to runtime capabilities within Asupersync. All effectful
-/// operations flow through `Cx`, ensuring explicit capability security with no
-/// ambient authority.
-///
-/// # Overview
-///
-/// A `Cx` instance is provided to each task by the runtime. It grants access to:
-///
-/// - **Identity**: Query the current region and task IDs
-/// - **Budget**: Check remaining time/poll quotas
-/// - **Cancellation**: Observe and respond to cancellation requests
-/// - **Tracing**: Emit trace events for observability
-///
-/// # Usage for External Crates
-///
-/// External crates like fastapi_rust can depend on Asupersync and use `Cx`:
-///
-/// ```ignore
-/// use asupersync::Cx;
-///
-/// async fn handle_request(cx: &Cx) -> Result<Response, Error> {
-///     // Check if the request should be cancelled
-///     if cx.is_cancel_requested() {
-///         return Err(Error::Cancelled);
-///     }
-///
-///     // Check remaining budget (timeout)
-///     let budget = cx.budget();
-///     if budget.is_expired() {
-///         return Err(Error::Timeout);
-///     }
-///
-///     // Trace request handling
-///     cx.trace("Processing request");
-///
-///     // Do work...
-///     Ok(Response::new())
-/// }
-/// ```
-///
-/// # Cloning
-///
-/// `Cx` is cheaply clonable (it wraps an `Arc`). Clones share the same
-/// underlying state, so cancellation signals and budget updates are visible
-/// to all clones.
-///
-/// # Lifetime Considerations
-///
-/// While `Cx` can be cloned and moved, it semantically belongs to a specific
-/// task within a specific region. The runtime ensures proper cleanup when
-/// tasks complete.
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone
 /// refcount operations from ~13 to 1 for this bundle.
 #[derive(Debug, Clone)]
@@ -170,6 +117,26 @@ struct CxHandles {
     macaroon: Option<Arc<MacaroonToken>>,
 }
 
+/// The capability context for a task.
+///
+/// `Cx` provides access to runtime capabilities within Asupersync. All effectful
+/// operations flow through `Cx`, ensuring explicit capability security with no
+/// ambient authority.
+///
+/// # Overview
+///
+/// A `Cx` instance is provided to each task by the runtime. It grants access to:
+///
+/// - **Identity**: Query the current region and task IDs
+/// - **Budget**: Check remaining time/poll quotas
+/// - **Cancellation**: Observe and respond to cancellation requests
+/// - **Tracing**: Emit trace events for observability
+///
+/// # Cloning
+///
+/// `Cx` is cheaply clonable (it wraps an `Arc`). Clones share the same
+/// underlying state, so cancellation signals and budget updates are visible
+/// to all clones.
 #[derive(Debug)]
 pub struct Cx<Caps = cap::All> {
     pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
