@@ -36,16 +36,19 @@ rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/p
 
 ## Canonical Workload Taxonomy (G1)
 
-| Workload ID | Family | Intent | Primary Metric |
-|---|---|---|---|
-| `RQ-G1-ENC-SMALL` | Encode (`k=32`, `sym=1024`) | Hot-path encode latency for common small block | `median_ns`, `p95_ns` |
-| `RQ-G1-DEC-SOURCE` | Decode source-only (`k=32`, `sym=1024`) | Best-case decode latency floor | `median_ns`, `p95_ns` |
-| `RQ-G1-DEC-REPAIR` | Decode repair-only (`k=32`, `sym=1024`) | Repair-heavy decode robustness | `median_ns`, `p95_ns` |
-| `RQ-G1-GF256-ADDMUL` | GF256 kernel (`addmul_slice/4096`) | Arithmetic hotspot sensitivity | `median_ns`, `p95_ns` |
-| `RQ-G1-SOLVER-MARKOWITZ` | Dense solve (`solve_markowitz/64`) | Worst-case decode solver pressure | `median_ns`, `p95_ns` |
-| `RQ-G1-PIPE-64K` | Pipeline throughput (`send_receive/65536`) | Small object end-to-end throughput | `throughput_mib_s` |
-| `RQ-G1-PIPE-256K` | Pipeline throughput (`send_receive/262144`) | Mid-size object throughput | `throughput_mib_s` |
-| `RQ-G1-PIPE-1M` | Pipeline throughput (`send_receive/1048576`) | Large object throughput stability | `throughput_kib_s` |
+| Workload ID | Family | Traffic Shape | Intent | Primary Metric |
+|---|---|---|---|---|
+| `RQ-G1-ENC-SMALL` | Encode (`k=32`, `sym=1024`) | small block, no repair, no loss | Hot-path encode latency for common small block | `median_ns`, `p95_ns` |
+| `RQ-G1-DEC-SOURCE` | Decode source-only (`k=32`, `sym=1024`) | small block, zero repair density | Best-case decode latency floor | `median_ns`, `p95_ns` |
+| `RQ-G1-DEC-REPAIR` | Decode repair-only (`k=32`, `sym=1024`) | small block, high repair density | Repair-heavy decode robustness | `median_ns`, `p95_ns` |
+| `RQ-G1-GF256-ADDMUL` | GF256 kernel (`addmul_slice/4096`) | arithmetic hotspot | Arithmetic hotspot sensitivity | `median_ns`, `p95_ns` |
+| `RQ-G1-SOLVER-MARKOWITZ` | Dense solve (`solve_markowitz/64`) | solver stress shape | Worst-case decode solver pressure | `median_ns`, `p95_ns` |
+| `RQ-G1-PIPE-64K` | Pipeline throughput (`send_receive/65536`) | small object | Small object end-to-end throughput | `throughput_mib_s` |
+| `RQ-G1-PIPE-256K` | Pipeline throughput (`send_receive/262144`) | medium object | Mid-size object throughput | `throughput_mib_s` |
+| `RQ-G1-PIPE-1M` | Pipeline throughput (`send_receive/1048576`) | large object | Large object throughput stability | `throughput_kib_s` |
+| `RQ-G1-E2E-RANDOM-LOWLOSS` | Deterministic E2E conformance | low repair density, random loss | Low-loss real-world decode behavior | `decode_success`, `median_ns` |
+| `RQ-G1-E2E-RANDOM-HIGHLOSS` | Deterministic E2E conformance | high repair density, random loss | High-loss decode resilience | `decode_success`, `median_ns` |
+| `RQ-G1-E2E-BURST-LATE` | Deterministic E2E conformance | burst loss (late window) | Burst-loss recovery behavior | `decode_success`, `median_ns` |
 
 ## Draft Budget Sheet (G1)
 
@@ -62,6 +65,9 @@ Budget source: `baseline_current.json` and phase0 throughput logs listed above. 
 | `RQ-G1-PIPE-64K` (`throughput_mib_s`) | 11.5620 | 10.5000 | 9.5000 |
 | `RQ-G1-PIPE-256K` (`throughput_mib_s`) | 2.6734 | 2.3500 | 2.1500 |
 | `RQ-G1-PIPE-1M` (`throughput_kib_s`) | 354.6400 | 325.0000 | 300.0000 |
+| `RQ-G1-E2E-RANDOM-LOWLOSS` (`decode_success`) | 1.0000 | 1.0000 | 1.0000 |
+| `RQ-G1-E2E-RANDOM-HIGHLOSS` (`decode_success`) | 1.0000 | 1.0000 | 1.0000 |
+| `RQ-G1-E2E-BURST-LATE` (`decode_success`) | 1.0000 | 1.0000 | 1.0000 |
 
 ## Confidence + Threshold Policy (G1)
 
@@ -74,11 +80,11 @@ Budget source: `baseline_current.json` and phase0 throughput logs listed above. 
 
 ## Profile-to-Gate Mapping (G1)
 
-| Profile | Command Surface | Required Workloads | Gate Intent |
-|---|---|---|---|
-| `fast` | direct benchmark invocation (quickstart fast) | `RQ-G1-ENC-SMALL` | PR/smoke directional signal |
-| `full` | `scripts/run_perf_e2e.sh --bench ... --seed 424242` | all workload IDs in taxonomy table | merge/release evidence |
-| `forensics` | callgrind + artifact capture (quickstart forensics) | `RQ-G1-ENC-SMALL`, `RQ-G1-GF256-ADDMUL`, `RQ-G1-SOLVER-MARKOWITZ` | deep regression root-cause packet |
+| Profile | Command Surface | Required Workloads | Deterministic Runtime Envelope | Gate Intent |
+|---|---|---|---|---|
+| `fast` | direct benchmark invocation (quickstart fast) | `RQ-G1-ENC-SMALL`, `RQ-G1-E2E-RANDOM-LOWLOSS` | <= 3 minutes wall time on standard CI runner | PR/smoke directional signal |
+| `full` | `scripts/run_perf_e2e.sh --bench ... --seed 424242` | all workload IDs in taxonomy table | <= 30 minutes wall time on standard CI runner | merge/release evidence |
+| `forensics` | callgrind + artifact capture (quickstart forensics) | `RQ-G1-ENC-SMALL`, `RQ-G1-GF256-ADDMUL`, `RQ-G1-SOLVER-MARKOWITZ`, `RQ-G1-E2E-BURST-LATE` | <= 90 minutes wall time on standard CI runner | deep regression root-cause packet |
 
 ## Correctness Prerequisites for Performance Claims
 
@@ -111,6 +117,39 @@ Every budget-check event should include:
 - `decision` (`pass`|`warn`|`fail`)
 - `artifact_path`
 - `replay_ref`
+
+Artifact path conventions by profile:
+
+| Profile | Artifact Path Pattern | Required Artifact |
+|---|---|---|
+| `fast` | `target/perf-results/fast/<timestamp>/summary.json` | metric summary with budget verdict |
+| `full` | `target/perf-results/full/<timestamp>/report.json` | full benchmark report + baseline snapshot |
+| `forensics` | `target/perf-results/forensics/<timestamp>/` | callgrind output + annotated hotspot report |
+
+## Calibration Checklist for Closure
+
+Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead comments:
+
+1. Confirm D1 (`bd-1rxlv`), D5 (`bd-61s90`), and D6 (`bd-3bvdj`) are green in CI.
+2. Re-run full baseline corpus with fixed seed `424242` and record artifact paths.
+3. Recompute warning/fail budgets from the refreshed corpus and update this document.
+4. Verify `fast`/`full`/`forensics` runtime envelopes on the standard CI shape.
+5. Attach one deterministic repro command for each budget violation class.
+
+## Prerequisite Status Snapshot (2026-02-15)
+
+| Bead | Purpose | Current Status | Calibration Impact |
+|---|---|---|---|
+| `bd-1rxlv` | D1 golden-vector conformance | `closed` | prerequisite satisfied |
+| `bd-61s90` | D5 comprehensive unit matrix | `open` | unit-coverage evidence still partial for closure |
+| `bd-3bvdj` | D6 deterministic E2E suite | `open` | E2E profile coverage not fully closed |
+| `bd-oeql8` | D7 structured logging/artifact schema | `open` | forensics schema contract still pending closure |
+| `bd-26pqk` | D9 replay catalog linkage | `open` | replay catalog delivered but bead not closed yet |
+
+Closure gate interpretation for `bd-3v1cs`:
+
+- This bead may publish and iterate draft budgets early.
+- Final closure requires a post-D5/D6/D7/D9 calibration pass with refreshed corpus artifacts and updated budget numbers committed in this document.
 
 ## Phase Note
 
