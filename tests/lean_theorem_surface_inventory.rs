@@ -120,3 +120,55 @@ fn mapped_theorems_exist_in_inventory() {
         }
     }
 }
+
+#[test]
+fn progress_and_canonical_families_cover_required_ladders() {
+    let inventory: Value =
+        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
+    let theorem_names = inventory
+        .get("theorems")
+        .and_then(Value::as_array)
+        .expect("theorems must be an array")
+        .iter()
+        .filter_map(|entry| entry.get("theorem").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+
+    let required_cancel_ladder = BTreeSet::from([
+        "cancel_masked_step",
+        "cancel_ack_step",
+        "cancel_finalize_step",
+        "cancel_complete_step",
+        "cancel_protocol_terminates",
+        "cancel_propagation_bounded",
+    ]);
+    let required_close_ladder = BTreeSet::from([
+        "close_begin_step",
+        "close_cancel_children_step",
+        "close_children_done_step",
+        "close_run_finalizer_step",
+        "close_complete_step",
+        "close_implies_quiescent",
+        "close_quiescence_decomposition",
+    ]);
+    let required_obligation_lifecycle = BTreeSet::from([
+        "reserve_creates_reserved",
+        "commit_resolves",
+        "abort_resolves",
+        "leak_marks_leaked",
+        "committed_obligation_stable",
+        "aborted_obligation_stable",
+        "leaked_obligation_stable",
+        "resolved_obligation_stable",
+    ]);
+
+    for theorem in required_cancel_ladder
+        .iter()
+        .chain(required_close_ladder.iter())
+        .chain(required_obligation_lifecycle.iter())
+    {
+        assert!(
+            theorem_names.contains(theorem),
+            "required theorem missing from inventory: {theorem}"
+        );
+    }
+}
