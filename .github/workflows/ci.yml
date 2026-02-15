@@ -53,6 +53,111 @@ jobs:
       - name: Check compilation
         run: cargo check --all-targets --all-features
 
+  lean-smoke:
+    name: Lean Smoke Gate (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lean-smoke-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Lean smoke profile commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lean-smoke
+
+          profile_file="formal/lean/coverage/ci_verification_profiles.json"
+          if [[ ! -f "$profile_file" ]]; then
+            echo "::error::Missing $profile_file"
+            exit 1
+          fi
+
+          mapfile -t smoke_commands < <(jq -r '.profiles[] | select(.name == "smoke") | .commands[]' "$profile_file")
+          if [[ "${#smoke_commands[@]}" -eq 0 ]]; then
+            echo "::error::Smoke profile has no commands"
+            exit 1
+          fi
+
+          printf '%s\n' "${smoke_commands[@]}" > lean-smoke/commands.txt
+
+          for cmd in "${smoke_commands[@]}"; do
+            echo ">>> $cmd"
+            if ! bash -lc "$cmd"; then
+              printf '%s\n' "$cmd" > lean-smoke/failed_command.txt
+              exit 1
+            fi
+          done
+
+      - name: Emit frontier failure payload
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lean-smoke
+
+          failed_cmd="$(cat lean-smoke/failed_command.txt 2>/dev/null || echo "unknown")"
+          frontier_file="formal/lean/coverage/lean_frontier_buckets_v1.json"
+
+          if [[ -f "$frontier_file" ]]; then
+            jq --arg failed_command "$failed_cmd" '{
+              profile: "smoke",
+              failed_command: $failed_command,
+              source_frontier: .source_log,
+              diagnostics_total: .diagnostics_total,
+              errors_total: .errors_total,
+              warnings_total: .warnings_total,
+              buckets: [
+                .buckets[] | {
+                  bucket_id,
+                  failure_mode,
+                  error_code,
+                  count,
+                  linked_gap_ids,
+                  linked_bead_ids
+                }
+              ]
+            }' "$frontier_file" > lean-smoke/failure_payload.json
+          else
+            jq -n --arg failed_command "$failed_cmd" '{
+              profile: "smoke",
+              failed_command: $failed_command,
+              error: "missing formal/lean/coverage/lean_frontier_buckets_v1.json"
+            }' > lean-smoke/failure_payload.json
+          fi
+
+          {
+            echo "## Lean Smoke Failure Payload"
+            echo
+            echo "- Failed command: \`$failed_cmd\`"
+            echo "- Payload artifact: \`lean-smoke/failure_payload.json\`"
+            if [[ -f "$frontier_file" ]]; then
+              echo
+              echo "| Bucket | Count | Gap IDs | Bead IDs |"
+              echo "|---|---:|---|---|"
+              jq -r '.buckets[] | "| `\(.bucket_id)` | \(.count) | \((.linked_gap_ids // []) | join(", ")) | \((.linked_bead_ids // []) | join(", ")) |"' "$frontier_file"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Lean smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-smoke-artifacts
+          path: lean-smoke/
+          retention-days: 30
+
   test:
     name: Test Suite
     runs-on: ${{ matrix.os }}
