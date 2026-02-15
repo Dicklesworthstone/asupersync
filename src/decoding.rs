@@ -657,6 +657,7 @@ fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
     threshold
 }
 
+#[allow(clippy::too_many_lines)]
 fn decode_block(
     plan: &BlockPlan,
     symbols: &[Symbol],
@@ -677,7 +678,9 @@ fn decode_block(
     let base_rows = params.s + params.h;
 
     let decoder = InactivationDecoder::new(k, symbol_size, block_seed);
-    let mut received: Vec<ReceivedSymbol> = Vec::with_capacity(base_rows + symbols.len());
+    let padding_rows = params.k_prime.saturating_sub(k);
+    let mut received: Vec<ReceivedSymbol> =
+        Vec::with_capacity(base_rows + symbols.len() + padding_rows);
 
     for row in 0..base_rows {
         let (columns, coefficients) = constraint_row_equation(&constraints, row);
@@ -721,6 +724,20 @@ fn decode_block(
                 });
             }
         }
+    }
+
+    // Add zero-padded rows for K..K'. The encoder pads source blocks to K'
+    // symbols with zeros; these rows constrain the solver identically.
+    for esi in k..params.k_prime {
+        let row = base_rows + esi;
+        let (columns, coefficients) = constraint_row_equation(&constraints, row);
+        received.push(ReceivedSymbol {
+            esi: esi as u32,
+            is_source: false,
+            columns,
+            coefficients,
+            data: vec![0u8; symbol_size],
+        });
     }
 
     let intermediate = match decoder.decode(&received) {
