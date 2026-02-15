@@ -180,6 +180,9 @@ mod command {
     pub const COM_STMT_RESET: u8 = 0x1A;
 }
 
+/// Maximum payload size for a single MySQL packet (16 MiB - 1 byte).
+const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
+
 /// MySQL column types for result set parsing.
 #[allow(dead_code, missing_docs)]
 pub mod column_type {
@@ -1695,7 +1698,6 @@ impl MySqlConnection {
         let seq = header[3];
 
         // Guard against oversized packets (max MySQL packet is 16 MB minus 1 byte)
-        const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
         if len > MAX_PACKET_SIZE {
             return Err(MySqlError::Protocol(format!(
                 "packet length {len} exceeds maximum allowed {MAX_PACKET_SIZE}"
@@ -1923,7 +1925,7 @@ mod tests {
         // 3-byte encoding (0xFD prefix)
         let data = [0xFD, 0x01, 0x02, 0x03]; // 0x030201 = 197121
         let mut reader = PacketReader::new(&data);
-        assert_eq!(reader.read_lenenc_int().unwrap(), 197121);
+        assert_eq!(reader.read_lenenc_int().unwrap(), 197_121);
     }
 
     #[test]
@@ -1982,8 +1984,8 @@ mod tests {
         assert_eq!(MySqlValue::Tiny(42).as_i32(), Some(42));
         // Test LongLong to i64
         assert_eq!(
-            MySqlValue::LongLong(123456789012345).as_i64(),
-            Some(123456789012345)
+            MySqlValue::LongLong(123_456_789_012_345).as_i64(),
+            Some(123_456_789_012_345)
         );
         // Test Float to f64
         assert!(MySqlValue::Float(3.14).as_f64().is_some());
