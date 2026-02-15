@@ -103,8 +103,10 @@ impl LogCollector {
 
     /// Start collecting (resets the timer).
     pub fn start(&self) {
-        let mut start = self.start_time.lock().unwrap();
-        *start = Some(Instant::now());
+        {
+            let mut start = self.start_time.lock().unwrap();
+            *start = Some(Instant::now());
+        }
         self.entries.lock().unwrap().clear();
     }
 
