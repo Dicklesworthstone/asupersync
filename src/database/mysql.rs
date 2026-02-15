@@ -921,7 +921,6 @@ impl MySqlConnection {
         };
 
         conn.inner.connection_id = handshake.connection_id;
-        conn.inner.capabilities = handshake.capabilities;
         conn.inner.charset = handshake.charset;
         conn.inner.status_flags = handshake.status_flags;
         conn.inner.server_version = handshake.server_version.clone();
@@ -1032,6 +1031,11 @@ impl MySqlConnection {
             client_caps |= capability::CLIENT_CONNECT_WITH_DB;
         }
 
+        // Runtime packet parsing decisions must use negotiated capabilities,
+        // not the server-advertised superset.
+        self.inner.capabilities =
+            Self::negotiated_capabilities(handshake.capabilities, client_caps);
+
         buf.write_u32_le(client_caps);
         buf.write_u32_le(16_777_215); // Max packet size
         buf.write_byte(handshake.charset); // Character set
@@ -1066,6 +1070,11 @@ impl MySqlConnection {
         self.inner.sequence = self.inner.sequence.wrapping_add(1);
 
         Ok(())
+    }
+
+    #[inline]
+    const fn negotiated_capabilities(server_caps: u32, client_caps: u32) -> u32 {
+        server_caps & client_caps
     }
 
     /// Handle authentication response from server.
@@ -1273,6 +1282,7 @@ impl MySqlConnection {
     async fn read_result_set(&mut self, first_packet: &[u8]) -> Result<Vec<MySqlRow>, MySqlError> {
         let mut reader = PacketReader::new(first_packet);
         let column_count = reader.read_lenenc_int()? as usize;
+        let deprecate_eof = self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0;
 
         if column_count == 0 {
             return Ok(Vec::new());
@@ -1319,15 +1329,19 @@ impl MySqlConnection {
             });
         }
 
-        // Read EOF marker (if not using DEPRECATE_EOF)
-        if self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF == 0 {
-            let (data, seq) = self.read_packet().await?;
-            self.inner.sequence = seq.wrapping_add(1);
-            if data.first() != Some(&0xFE) {
+        // Read column-terminator packet.
+        let (data, seq) = self.read_packet().await?;
+        self.inner.sequence = seq.wrapping_add(1);
+        if deprecate_eof {
+            if !Self::is_result_set_ok_packet(&data) {
                 return Err(MySqlError::Protocol(
-                    "expected EOF after columns".to_string(),
+                    "expected OK after columns".to_string(),
                 ));
             }
+        } else if !Self::is_eof_packet(&data) {
+            return Err(MySqlError::Protocol(
+                "expected EOF after columns".to_string(),
+            ));
         }
 
         let columns = Arc::new(columns);
@@ -1353,7 +1367,7 @@ impl MySqlConnection {
                     // ERR packet
                     return Err(Self::parse_error(&data));
                 }
-                0x00 if self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0 => {
+                0x00 if deprecate_eof && Self::is_result_set_ok_packet(&data) => {
                     // OK packet (end of result set with DEPRECATE_EOF)
                     break;
                 }
@@ -1390,7 +1404,32 @@ impl MySqlConnection {
             values.push(value);
         }
 
+        if reader.remaining() != 0 {
+            return Err(MySqlError::Protocol(format!(
+                "row packet has {} trailing bytes",
+                reader.remaining()
+            )));
+        }
+
         Ok(values)
+    }
+
+    #[inline]
+    fn is_eof_packet(data: &[u8]) -> bool {
+        data.first() == Some(&0xFE) && data.len() < 9
+    }
+
+    #[inline]
+    fn is_result_set_ok_packet(data: &[u8]) -> bool {
+        if data.first() != Some(&0x00) {
+            return false;
+        }
+
+        let mut reader = PacketReader::new(&data[1..]);
+        reader.read_lenenc_int().is_ok()
+            && reader.read_lenenc_int().is_ok()
+            && reader.read_u16_le().is_ok()
+            && reader.read_u16_le().is_ok()
     }
 
     /// Parse a text format value.
@@ -2004,5 +2043,38 @@ mod tests {
     #[test]
     fn test_ssl_mode_default() {
         assert_eq!(SslMode::default(), SslMode::Disabled);
+    }
+
+    #[test]
+    fn test_negotiated_capabilities_require_client_and_server_support() {
+        let server_caps = capability::CLIENT_PROTOCOL_41 | capability::CLIENT_DEPRECATE_EOF;
+        let client_caps = capability::CLIENT_PROTOCOL_41;
+        let negotiated = MySqlConnection::negotiated_capabilities(server_caps, client_caps);
+
+        assert_eq!(
+            negotiated & capability::CLIENT_PROTOCOL_41,
+            capability::CLIENT_PROTOCOL_41
+        );
+        assert_eq!(negotiated & capability::CLIENT_DEPRECATE_EOF, 0);
+    }
+
+    #[test]
+    fn test_parse_text_row_rejects_trailing_bytes() {
+        let columns = vec![MySqlColumn {
+            catalog: "def".to_string(),
+            schema: "test_db".to_string(),
+            table: "users".to_string(),
+            org_table: "users".to_string(),
+            name: "name".to_string(),
+            org_name: "name".to_string(),
+            charset: 33,
+            length: 255,
+            column_type: column_type::MYSQL_TYPE_VAR_STRING,
+            flags: 0,
+            decimals: 0,
+        }];
+
+        let err = MySqlConnection::parse_text_row(&[0x00, 0x00], &columns).unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
     }
 }
