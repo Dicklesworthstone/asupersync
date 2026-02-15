@@ -149,8 +149,14 @@ fn sender_encodes_and_transmits() {
         .unwrap_or_else(|err| panic!("{context} send_object should succeed; got {err:?}"));
 
     assert_eq!(outcome.object_id, object_id);
-    assert!(outcome.source_symbols > 0, "{context} expected source symbols > 0");
-    assert!(outcome.symbols_sent > 0, "{context} expected symbols sent > 0");
+    assert!(
+        outcome.source_symbols > 0,
+        "{context} expected source symbols > 0"
+    );
+    assert!(
+        outcome.symbols_sent > 0,
+        "{context} expected symbols sent > 0"
+    );
     assert_eq!(
         outcome.symbols_sent,
         outcome.source_symbols + outcome.repair_symbols,
@@ -251,7 +257,10 @@ fn sender_respects_cancellation() {
 
     let data = vec![0u8; 512];
     let result = sender.send_object(&cx, ObjectId::new_for_test(1), &data);
-    assert!(result.is_err(), "{context} expected cancellation to return error");
+    assert!(
+        result.is_err(),
+        "{context} expected cancellation to return error"
+    );
 }
 
 #[test]
@@ -368,7 +377,10 @@ fn receiver_reports_insufficient_symbols() {
         crate::types::symbol::ObjectParams::new(ObjectId::new_for_test(1), 1024, 256, 1, 4);
 
     let result = receiver.receive_object(&cx, &params);
-    assert!(result.is_err(), "{context} expected insufficient-symbols error");
+    assert!(
+        result.is_err(),
+        "{context} expected insufficient-symbols error"
+    );
 }
 
 #[test]
@@ -454,7 +466,10 @@ fn send_symbols_directly() {
     let count = sender
         .send_symbols(&cx, symbols)
         .unwrap_or_else(|err| panic!("{context} send_symbols should succeed; got {err:?}"));
-    assert_eq!(count, 5, "{context} expected five symbols to be transmitted");
+    assert_eq!(
+        count, 5,
+        "{context} expected five symbols to be transmitted"
+    );
     assert_eq!(
         sender.transport_mut().symbols.len(),
         5,
