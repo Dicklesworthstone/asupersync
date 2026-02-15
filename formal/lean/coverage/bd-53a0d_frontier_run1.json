@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0.0",
+  "report_id": "lean.frontier.buckets.v1",
+  "generated_by": "bd-1dorb",
+  "source_log": "formal/lean/coverage/bd-53a0d_existing_run1.log",
+  "bucket_ordering": "lexicographic(failure_mode,error_code)",
+  "diagnostics_total": 63,
+  "errors_total": 9,
+  "warnings_total": 54,
+  "buckets": [
+    {
+      "bucket_id": "proof-shape.application-type-mismatch",
+      "failure_mode": "proof-shape",
+      "error_code": "application-type-mismatch",
+      "count": 9,
+      "signatures": [
+        "Asupersync.lean:application-type-mismatch:application type mismatch the argument"
+      ],
+      "sample_locations": [
+        "Asupersync.lean:2521:34",
+        "Asupersync.lean:2534:34",
+        "Asupersync.lean:2547:34",
+        "Asupersync.lean:2915:34",
+        "Asupersync.lean:2928:34",
+        "Asupersync.lean:2941:34",
+        "Asupersync.lean:3015:34",
+        "Asupersync.lean:3029:34",
+        "Asupersync.lean:3043:34"
+      ],
+      "linked_gap_ids": [
+        "gap.proof_shape.preservation_branches"
+      ],
+      "linked_bead_ids": [
+        "bd-112rm",
+        "bd-366fd",
+        "bd-3tal8"
+      ]
+    }
+  ]
+}
