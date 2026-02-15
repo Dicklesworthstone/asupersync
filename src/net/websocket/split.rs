@@ -43,7 +43,7 @@ use parking_lot::Mutex;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Poll, Waker};
 
 /// Shared state between read and write halves.
 struct WebSocketShared<IO> {
@@ -65,8 +65,53 @@ struct WebSocketShared<IO> {
     protocol: Option<String>,
     /// Pending pong payloads to send.
     pending_pongs: Vec<Bytes>,
+    /// True while one half is performing a frame write sequence.
+    writer_active: bool,
+    /// Waker for a waiter blocked on `writer_active`.
+    writer_waiter: Option<Waker>,
     /// Unique ID for reunite verification.
     id: u64,
+}
+
+struct SplitWritePermit<IO> {
+    shared: Arc<Mutex<WebSocketShared<IO>>>,
+}
+
+impl<IO> Drop for SplitWritePermit<IO> {
+    fn drop(&mut self) {
+        let wake = {
+            let mut shared = self.shared.lock();
+            shared.writer_active = false;
+            shared.writer_waiter.take()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+}
+
+async fn acquire_write_permit<IO>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+) -> SplitWritePermit<IO> {
+    use std::future::poll_fn;
+
+    poll_fn(|cx| {
+        let mut state = shared.lock();
+        if state.writer_active {
+            state.writer_waiter = Some(cx.waker().clone());
+            drop(state);
+            Poll::Pending
+        } else {
+            state.writer_active = true;
+            drop(state);
+            Poll::Ready(())
+        }
+    })
+    .await;
+
+    SplitWritePermit {
+        shared: Arc::clone(shared),
+    }
 }
 
 /// The read half of a split WebSocket.
@@ -139,6 +184,8 @@ where
             assembler: self.assembler,
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
+            writer_active: false,
+            writer_waiter: None,
             id,
         }));
 
@@ -351,6 +398,7 @@ where
     async fn write_all(&self, buf: &[u8]) -> Result<(), WsError> {
         use std::future::poll_fn;
 
+        let _permit = acquire_write_permit(&self.shared).await;
         let mut written = 0;
         while written < buf.len() {
             let n = poll_fn(|poll_cx| {
@@ -495,6 +543,7 @@ where
             shared.write_buf.to_vec()
         };
 
+        let _permit = acquire_write_permit(&self.shared).await;
         let mut written = 0;
         while written < data.len() {
             let n = poll_fn(|poll_cx| {
@@ -519,6 +568,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future;
 
     // In-memory I/O for testing
     struct TestIo {
@@ -537,6 +587,20 @@ mod tests {
         }
     }
 
+    struct InterleavingIo {
+        written: Vec<u8>,
+        pending_next: bool,
+    }
+
+    impl InterleavingIo {
+        fn new() -> Self {
+            Self {
+                written: Vec::new(),
+                pending_next: false,
+            }
+        }
+    }
+
     impl AsyncRead for TestIo {
         fn poll_read(
             mut self: Pin<&mut Self>,
@@ -547,6 +611,16 @@ mod tests {
             let to_read = remaining.len().min(buf.remaining());
             buf.put_slice(&remaining[..to_read]);
             self.read_pos += to_read;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for InterleavingIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
     }
@@ -574,6 +648,90 @@ mod tests {
         ) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    impl AsyncWrite for InterleavingIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if buf.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            if self.pending_next {
+                self.pending_next = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.pending_next = true;
+            self.written.push(buf[0]);
+            Poll::Ready(Ok(1))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn encode_server_frame(frame: Frame) -> Vec<u8> {
+        let mut codec = FrameCodec::server();
+        let mut out = BytesMut::new();
+        codec
+            .encode(frame, &mut out)
+            .expect("frame encoding should succeed");
+        out.to_vec()
+    }
+
+    #[test]
+    fn split_writes_do_not_interleave_frame_bytes() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(InterleavingIo::new(), WebSocketConfig::default());
+            let (read, write) = ws.split();
+
+            let read_frame = Frame::binary(Bytes::from_static(b"read-half"));
+            let write_frame = Frame::binary(Bytes::from_static(b"write-half"));
+
+            let expected_read = encode_server_frame(read_frame.clone());
+            let expected_write = encode_server_frame(write_frame.clone());
+
+            {
+                let mut shared = read.shared.lock();
+                shared.codec = FrameCodec::server();
+            }
+
+            let (read_result, write_result) = future::zip(
+                read.send_frame_internal(read_frame),
+                write.send_frame(write_frame),
+            )
+            .await;
+            assert!(read_result.is_ok(), "read half frame send must succeed");
+            assert!(write_result.is_ok(), "write half frame send must succeed");
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            let written = ws.io.written;
+
+            let mut read_then_write = expected_read.clone();
+            read_then_write.extend_from_slice(&expected_write);
+
+            let mut write_then_read = expected_write;
+            write_then_read.extend_from_slice(&expected_read);
+
+            assert!(
+                written == read_then_write || written == write_then_read,
+                "concurrent writes must preserve full-frame atomicity"
+            );
+        });
     }
 
     #[test]
