@@ -487,20 +487,7 @@ impl<R> PooledResource<R> {
 
 impl<R> Drop for PooledResource<R> {
     fn drop(&mut self) {
-        if self.return_obligation.is_discharged() {
-            return;
-        }
-
-        let hold_duration = self.held_duration();
-        if let Some(resource) = self.resource.take() {
-            let _ = self.return_tx.send(PoolReturn::Return {
-                resource,
-                hold_duration,
-                created_at: self.created_at,
-            });
-        }
-
-        self.return_obligation.discharge();
+        self.return_inner();
     }
 }
 
@@ -520,10 +507,9 @@ impl<R> std::ops::DerefMut for PooledResource<R> {
     }
 }
 
-// PooledResource is Send if the resource is Send.
-// The callback is already required to be Send + Sync.
-#[allow(unsafe_code)]
-unsafe impl<R: Send> Send for PooledResource<R> {}
+// PooledResource is auto-derived as Send when R: Send because all fields
+// (Option<R>, ReturnObligation, mpsc::Sender<PoolReturn<R>>, Instant) are Send.
+// No manual unsafe impl needed.
 
 // ============================================================================
 // PoolConfig and GenericPool
@@ -1285,7 +1271,7 @@ where
                 PoolStats {
                     active: state.active,
                     idle: state.idle.len(),
-                    total: state.active + state.idle.len(),
+                    total: state.active + state.idle.len() + state.creating,
                     max_size: self.config.max_size,
                     waiters: state.waiters.len(),
                     total_acquisitions: state.total_acquisitions,
@@ -1436,7 +1422,7 @@ where
             PoolStats {
                 active: state.active,
                 idle: state.idle.len(),
-                total: state.active + state.idle.len(),
+                total: state.active + state.idle.len() + state.creating,
                 max_size: self.config.max_size,
                 waiters: state.waiters.len(),
                 total_acquisitions: state.total_acquisitions,

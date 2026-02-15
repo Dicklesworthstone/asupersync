@@ -194,9 +194,15 @@ impl<T> OnceCell<T> {
                 Ok(_) => {
                     // We are the initializer.
                     let f = init_fn.take().expect("init closure available");
+                    let mut guard = InitGuard {
+                        cell: self,
+                        completed: false,
+                    };
                     let value = f();
                     let _ = self.value.set(value);
                     self.state.store(INITIALIZED, Ordering::Release);
+                    guard.completed = true;
+                    drop(guard);
                     self.cvar.notify_all();
                     self.wake_all();
                     return self.value.get().expect("just initialized");
@@ -1057,6 +1063,38 @@ mod tests {
         );
         assert!(cell.is_initialized());
         crate::test_complete!("get_or_init_blocking_retries_after_cancelled_async_init");
+    }
+
+    #[test]
+    fn get_or_init_blocking_panic_resets_state() {
+        init_test("get_or_init_blocking_panic_resets_state");
+        let cell = Arc::new(OnceCell::<u32>::new());
+
+        let cell_for_panic = Arc::clone(&cell);
+        let handle = thread::spawn(move || {
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = cell_for_panic.get_or_init_blocking(|| -> u32 { panic!("boom") });
+            }));
+            crate::assert_with_log!(
+                panic_result.is_err(),
+                "initializer panic captured",
+                true,
+                panic_result.is_err()
+            );
+        });
+
+        handle.join().expect("panic thread panicked");
+
+        crate::assert_with_log!(
+            !cell.is_initialized(),
+            "cell remains uninitialized after panic",
+            false,
+            cell.is_initialized()
+        );
+
+        let value = cell.get_or_init_blocking(|| 55);
+        crate::assert_with_log!(*value == 55, "recovery init", 55u32, *value);
+        crate::test_complete!("get_or_init_blocking_panic_resets_state");
     }
 
     #[test]
