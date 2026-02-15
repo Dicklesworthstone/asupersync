@@ -1357,27 +1357,20 @@ impl MySqlConnection {
             }
 
             match data[0] {
-                0xFE if data.len() < 9 => {
-                    // EOF packet
-                    break;
-                }
                 0xFF => {
                     // ERR packet
                     return Err(Self::parse_error(&data));
                 }
-                0x00 if deprecate_eof && Self::is_result_set_ok_packet(&data) => {
-                    // OK packet (end of result set with DEPRECATE_EOF)
-                    break;
-                }
-                _ => {
-                    // Data row
-                    let values = Self::parse_text_row(&data, &columns)?;
-                    rows.push(MySqlRow {
-                        columns: Arc::clone(&columns),
-                        column_indices: Arc::clone(&indices),
-                        values,
-                    });
-                }
+                _ => match Self::parse_data_row_or_terminator(&data, &columns, deprecate_eof)? {
+                    Some(values) => {
+                        rows.push(MySqlRow {
+                            columns: Arc::clone(&columns),
+                            column_indices: Arc::clone(&indices),
+                            values,
+                        });
+                    }
+                    None => break,
+                },
             }
         }
 
@@ -1433,6 +1426,37 @@ impl MySqlConnection {
             && reader.read_lenenc_int().is_ok()
             && reader.read_u16_le().is_ok()
             && reader.read_u16_le().is_ok()
+    }
+
+    /// Parse an incoming row packet or classify it as a result-set terminator.
+    ///
+    /// In `CLIENT_DEPRECATE_EOF` mode, packets starting with `0x00` are
+    /// ambiguous: they may be a valid data row (first column is empty string)
+    /// or an OK terminator. We parse as a row first and only classify as
+    /// terminator if row parsing fails and the packet has OK structure.
+    fn parse_data_row_or_terminator(
+        data: &[u8],
+        columns: &[MySqlColumn],
+        deprecate_eof: bool,
+    ) -> Result<Option<Vec<MySqlValue>>, MySqlError> {
+        if Self::is_eof_packet(data) {
+            return Ok(None);
+        }
+
+        if deprecate_eof && data.first() == Some(&0x00) {
+            return match Self::parse_text_row(data, columns) {
+                Ok(values) => Ok(Some(values)),
+                Err(row_err) => {
+                    if Self::is_result_set_ok_packet(data) {
+                        Ok(None)
+                    } else {
+                        Err(row_err)
+                    }
+                }
+            };
+        }
+
+        Self::parse_text_row(data, columns).map(Some)
     }
 
     /// Parse a text format value.
@@ -1793,6 +1817,22 @@ impl Drop for MySqlTransaction<'_> {
 mod tests {
     use super::*;
 
+    fn test_var_string_column(name: &str) -> MySqlColumn {
+        MySqlColumn {
+            catalog: "def".to_string(),
+            schema: "test_db".to_string(),
+            table: "users".to_string(),
+            org_table: "users".to_string(),
+            name: name.to_string(),
+            org_name: name.to_string(),
+            charset: 33,
+            length: 255,
+            column_type: column_type::MYSQL_TYPE_VAR_STRING,
+            flags: 0,
+            decimals: 0,
+        }
+    }
+
     #[test]
     fn test_connect_options_parse() {
         let opts = MySqlConnectOptions::parse("mysql://user:pass@localhost:3306/mydb").unwrap();
@@ -2063,21 +2103,50 @@ mod tests {
 
     #[test]
     fn test_parse_text_row_rejects_trailing_bytes() {
-        let columns = vec![MySqlColumn {
-            catalog: "def".to_string(),
-            schema: "test_db".to_string(),
-            table: "users".to_string(),
-            org_table: "users".to_string(),
-            name: "name".to_string(),
-            org_name: "name".to_string(),
-            charset: 33,
-            length: 255,
-            column_type: column_type::MYSQL_TYPE_VAR_STRING,
-            flags: 0,
-            decimals: 0,
-        }];
+        let columns = vec![test_var_string_column("name")];
 
         let err = MySqlConnection::parse_text_row(&[0x00, 0x00], &columns).unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_parse_data_row_or_terminator_prefers_valid_row_for_0x00_packets() {
+        let columns: Vec<_> = (0..7)
+            .map(|i| test_var_string_column(&format!("c{i}")))
+            .collect();
+        let data = vec![0x00; 7];
+
+        assert!(MySqlConnection::is_result_set_ok_packet(&data));
+
+        let values = MySqlConnection::parse_data_row_or_terminator(&data, &columns, true)
+            .expect("parse should succeed")
+            .expect("ambiguous packet should be treated as row when row parse succeeds");
+
+        assert_eq!(values.len(), 7);
+        for value in values {
+            assert_eq!(value, MySqlValue::Text(String::new()));
+        }
+    }
+
+    #[test]
+    fn test_parse_data_row_or_terminator_accepts_ok_when_row_parse_fails() {
+        let columns = vec![test_var_string_column("name")];
+        let ok_packet = [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+
+        assert!(MySqlConnection::is_result_set_ok_packet(&ok_packet));
+
+        let outcome = MySqlConnection::parse_data_row_or_terminator(&ok_packet, &columns, true)
+            .expect("classification should succeed");
+        assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn test_parse_data_row_or_terminator_non_deprecate_reports_row_error() {
+        let columns = vec![test_var_string_column("name")];
+        let ok_packet = [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+
+        let err =
+            MySqlConnection::parse_data_row_or_terminator(&ok_packet, &columns, false).unwrap_err();
         assert!(matches!(err, MySqlError::Protocol(_)));
     }
 
