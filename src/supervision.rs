@@ -5634,7 +5634,7 @@ mod tests {
             ("Stop", SupervisionStrategy::Stop),
             (
                 "Restart",
-                SupervisionStrategy::Restart(RestartConfig::new(10, Duration::from_secs(60))),
+                SupervisionStrategy::Restart(RestartConfig::new(10, Duration::from_mins(1))),
             ),
             ("Escalate", SupervisionStrategy::Escalate),
         ];
@@ -5928,7 +5928,7 @@ mod tests {
     fn conformance_budget_exhaustion_idempotent_stop() {
         init_test("conformance_budget_exhaustion_idempotent_stop");
 
-        let config = RestartConfig::new(1, Duration::from_secs(60));
+        let config = RestartConfig::new(1, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // First failure: restarts
@@ -5980,7 +5980,7 @@ mod tests {
     fn conformance_budget_refusal_checks_window_first() {
         init_test("conformance_budget_refusal_checks_window_first");
 
-        let config = RestartConfig::new(1, Duration::from_secs(60))
+        let config = RestartConfig::new(1, Duration::from_mins(1))
             .with_restart_cost(100)
             .with_min_polls(500);
 
@@ -6068,7 +6068,7 @@ mod tests {
 
         // Restart strategy — verify attempt counter increments
         {
-            let config = RestartConfig::new(5, Duration::from_secs(60));
+            let config = RestartConfig::new(5, Duration::from_mins(1));
             let mut sup = Supervisor::new(SupervisionStrategy::Restart(config));
 
             for expected_attempt in 1..=3u32 {
@@ -6125,7 +6125,7 @@ mod tests {
     fn conformance_restart_delay_matches_backoff() {
         init_test("conformance_restart_delay_matches_backoff");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60)).with_backoff(
+        let config = RestartConfig::new(5, Duration::from_mins(1)).with_backoff(
             BackoffStrategy::Exponential {
                 initial: Duration::from_millis(100),
                 max: Duration::from_secs(10),
@@ -6681,7 +6681,7 @@ mod tests {
     fn evidence_records_restart_allowed() {
         init_test("evidence_records_restart_allowed");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let config = RestartConfig::new(3, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         let _d1 = supervisor.on_failure(
@@ -6777,7 +6777,7 @@ mod tests {
         init_test("evidence_records_monotone_severity_panicked");
 
         // Even with Restart strategy, panics produce MonotoneSeverity evidence
-        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let config = RestartConfig::new(5, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         supervisor.on_failure(
@@ -6805,7 +6805,7 @@ mod tests {
     fn evidence_records_monotone_severity_cancelled() {
         init_test("evidence_records_monotone_severity_cancelled");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let config = RestartConfig::new(5, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         supervisor.on_failure(
@@ -6831,7 +6831,7 @@ mod tests {
     fn evidence_records_monotone_severity_ok() {
         init_test("evidence_records_monotone_severity_ok");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let config = RestartConfig::new(5, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         supervisor.on_failure(
@@ -6880,7 +6880,7 @@ mod tests {
     fn evidence_records_budget_insufficient_cost() {
         init_test("evidence_records_budget_insufficient_cost");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60)).with_restart_cost(100);
+        let config = RestartConfig::new(5, Duration::from_mins(1)).with_restart_cost(100);
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         let budget = Budget {
@@ -6912,7 +6912,7 @@ mod tests {
     fn evidence_records_budget_insufficient_polls() {
         init_test("evidence_records_budget_insufficient_polls");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60)).with_min_polls(10);
+        let config = RestartConfig::new(5, Duration::from_mins(1)).with_min_polls(10);
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         let budget = Budget {
@@ -6944,7 +6944,7 @@ mod tests {
     fn evidence_records_budget_deadline_too_close() {
         init_test("evidence_records_budget_deadline_too_close");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60))
+        let config = RestartConfig::new(5, Duration::from_mins(1))
             .with_min_remaining(Duration::from_secs(10));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
@@ -6977,7 +6977,7 @@ mod tests {
     fn evidence_full_lifecycle_restart_to_exhaustion() {
         init_test("evidence_full_lifecycle_restart_to_exhaustion");
 
-        let window = Duration::from_secs(60);
+        let window = Duration::from_mins(1);
         let config = RestartConfig::new(3, window);
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
@@ -7023,7 +7023,7 @@ mod tests {
     fn evidence_for_task_filter() {
         init_test("evidence_for_task_filter");
 
-        let config = RestartConfig::new(5, Duration::from_secs(60));
+        let config = RestartConfig::new(5, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
         let task_a = TaskId::from_arena(ArenaIndex::new(0, 1));
         let task_b = TaskId::from_arena(ArenaIndex::new(0, 2));
@@ -7046,7 +7046,7 @@ mod tests {
     fn evidence_with_constraint_filter() {
         init_test("evidence_with_constraint_filter");
 
-        let config = RestartConfig::new(2, Duration::from_secs(60));
+        let config = RestartConfig::new(2, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts then a panicked outcome
@@ -7127,7 +7127,7 @@ mod tests {
 
         for strategy in [
             SupervisionStrategy::Stop,
-            SupervisionStrategy::Restart(RestartConfig::new(5, Duration::from_secs(60))),
+            SupervisionStrategy::Restart(RestartConfig::new(5, Duration::from_mins(1))),
             SupervisionStrategy::Escalate,
         ] {
             let mut sup_a = Supervisor::new(strategy.clone());
@@ -7173,7 +7173,7 @@ mod tests {
             (
                 BindingConstraint::WindowExhausted {
                     max_restarts: 5,
-                    window: Duration::from_secs(60),
+                    window: Duration::from_mins(1),
                 },
                 "window exhausted: 5 restarts in 60s",
             ),
@@ -7204,7 +7204,7 @@ mod tests {
     fn evidence_window_exhaustion_with_budget_vs_without() {
         init_test("evidence_window_exhaustion_with_budget_vs_without");
 
-        let window = Duration::from_secs(60);
+        let window = Duration::from_mins(1);
         let config = RestartConfig::new(1, window);
 
         // Without budget: exhaust via can_restart(now)
@@ -7276,7 +7276,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 3,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             ..Default::default()
         }));
 
@@ -7354,7 +7354,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 3,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             ..Default::default()
         }));
 
@@ -7389,7 +7389,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 1,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             ..Default::default()
         }));
 
@@ -7427,7 +7427,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 5,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             restart_cost: 100,
             ..Default::default()
         }));
@@ -7472,7 +7472,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 5,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             ..Default::default()
         }));
 
@@ -7530,12 +7530,12 @@ mod tests {
 
         let mut sup_a = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 2,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             ..Default::default()
         }));
         let mut sup_b = Supervisor::new(SupervisionStrategy::Restart(RestartConfig {
             max_restarts: 2,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             ..Default::default()
         }));
 
@@ -7781,7 +7781,7 @@ mod tests {
     fn obs_evidence_ledger_determinism_mixed_outcomes() {
         init_test("obs_evidence_ledger_determinism_mixed_outcomes");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let config = RestartConfig::new(3, Duration::from_mins(1));
         let task = test_task_id();
         let region = test_region_id();
 
@@ -7978,7 +7978,7 @@ mod tests {
         let region = test_region_id();
 
         // Strategy: Restart with tight budget to hit multiple constraint types.
-        let config = RestartConfig::new(2, Duration::from_secs(60)).with_restart_cost(100);
+        let config = RestartConfig::new(2, Duration::from_mins(1)).with_restart_cost(100);
         let mut sup = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Err → RestartAllowed
@@ -8078,7 +8078,7 @@ mod tests {
             .child(ChildSpec::new("alpha", noop_start))
             .child(ChildSpec::new("bravo", noop_start))
             .child(ChildSpec::new("charlie", noop_start).with_restart(
-                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
+                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
             ))
             .compile()
             .unwrap();
@@ -8130,7 +8130,7 @@ mod tests {
             SupervisorBuilder::new("ops_gate")
                 .with_restart_policy(RestartPolicy::OneForOne)
                 .child(ChildSpec::new("svc", noop_start).with_restart(
-                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
+                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
                 ))
                 .compile()
                 .unwrap();
