@@ -308,7 +308,14 @@ where
 /// A simpler bracket that doesn't require Clone on the resource.
 ///
 /// The release function receives an `Option<Res>` which is `Some` if the
-/// use function consumed the resource, `None` otherwise.
+/// use function returned it, `None` if the use function consumed it or panicked.
+///
+/// # Cancel Safety — WEAKER than `Bracket`
+///
+/// Unlike [`Bracket`], this function is a plain `async fn` with no `Drop`
+/// handler. If the returned future is dropped during `release().await`,
+/// the release work is abandoned. Use [`bracket`] (which requires `Res: Clone`)
+/// for full cancel-safe resource cleanup.
 pub async fn bracket_move<Res, T, E, A, U, R, RF>(acquire: A, use_fn: U, release: R) -> Result<T, E>
 where
     A: Future<Output = Result<Res, E>>,
