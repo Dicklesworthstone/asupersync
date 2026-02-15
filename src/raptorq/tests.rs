@@ -83,15 +83,19 @@ impl SymbolStream for VecStream {
 
 impl Unpin for VecStream {}
 
+use crate::raptorq::test_log_schema::UnitLogEntry;
+
 fn builder_failure_context(
     scenario_id: &str,
     seed: u64,
     parameter_set: &str,
     replay_ref: &str,
 ) -> String {
-    format!(
-        "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
-    )
+    UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
+        .with_repro_command(&format!(
+            "rch exec -- cargo test --lib raptorq::tests -- --nocapture"
+        ))
+        .to_context_string()
 }
 
 // =========================================================================
@@ -488,6 +492,7 @@ mod conformance {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::gf256::gf256_addmul_slice;
     use crate::raptorq::systematic::SystematicEncoder;
+    use crate::raptorq::test_log_schema::UnitLogEntry;
     use crate::types::symbol::ObjectId;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -507,9 +512,11 @@ mod conformance {
         parameter_set: &str,
         replay_ref: &str,
     ) -> String {
-        format!(
-            "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
-        )
+        UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
+            .with_repro_command(
+                "rch exec -- cargo test --lib raptorq::tests::conformance -- --nocapture",
+            )
+            .to_context_string()
     }
 
     /// Known vector: small block (K=4, symbol_size=16, seed=42)
@@ -777,6 +784,7 @@ mod conformance {
 mod property_tests {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::systematic::SystematicEncoder;
+    use crate::raptorq::test_log_schema::UnitLogEntry;
     use crate::util::DetRng;
 
     /// Generate deterministic source data for testing.
@@ -793,9 +801,11 @@ mod property_tests {
         parameter_set: &str,
         replay_ref: &str,
     ) -> String {
-        format!(
-            "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
-        )
+        UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
+            .with_repro_command(
+                "rch exec -- cargo test --lib raptorq::tests::property_tests -- --nocapture",
+            )
+            .to_context_string()
     }
 
     /// Property: roundtrip with all symbols succeeds for known-good parameters.
@@ -1105,6 +1115,7 @@ mod property_tests {
 mod fuzz {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::systematic::SystematicEncoder;
+    use crate::raptorq::test_log_schema::UnitLogEntry;
     use crate::util::DetRng;
 
     /// Configuration for a single fuzz iteration.
@@ -1117,10 +1128,18 @@ mod fuzz {
     }
 
     fn failure_context(config: &FuzzConfig, scenario_id: &str, replay_ref: &str) -> String {
-        format!(
-            "scenario_id={scenario_id} seed={} parameter_set=k={},symbol_size={},overhead_percent={},drop_percent={} replay_ref={replay_ref}",
-            config.seed, config.k, config.symbol_size, config.overhead_percent, config.drop_percent
+        UnitLogEntry::new(
+            scenario_id,
+            config.seed,
+            &format!(
+                "k={},symbol_size={},overhead_percent={},drop_percent={}",
+                config.k, config.symbol_size, config.overhead_percent, config.drop_percent
+            ),
+            replay_ref,
+            "pending",
         )
+        .with_repro_command("rch exec -- cargo test --lib raptorq::tests::fuzz -- --nocapture")
+        .to_context_string()
     }
 
     /// Run a single fuzz iteration.
@@ -1396,6 +1415,7 @@ mod edge_cases {
     use crate::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::gf256::Gf256;
     use crate::raptorq::systematic::SystematicEncoder;
+    use crate::raptorq::test_log_schema::UnitLogEntry;
 
     fn failure_context(
         scenario_id: &str,
@@ -1404,9 +1424,17 @@ mod edge_cases {
         symbol_size: usize,
         replay_ref: &str,
     ) -> String {
-        format!(
-            "scenario_id={scenario_id} seed={seed} k={k} symbol_size={symbol_size} replay_ref={replay_ref}"
+        UnitLogEntry::new(
+            scenario_id,
+            seed,
+            &format!("k={k},symbol_size={symbol_size}"),
+            replay_ref,
+            "pending",
         )
+        .with_repro_command(
+            "rch exec -- cargo test --lib raptorq::tests::edge_cases -- --nocapture",
+        )
+        .to_context_string()
     }
 
     fn encoder_with_seed_fallback(

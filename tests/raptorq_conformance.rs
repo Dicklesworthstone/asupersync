@@ -1407,6 +1407,16 @@ mod pipeline_e2e {
             assert_eq!(proof_hash_first, proof_hash_second, "proof hash mismatch");
             assert_report_contract(&report_first, scenario);
             assert_report_contract(&report_second, scenario);
+
+            // D7 schema contract: validate via shared schema validator.
+            let violations =
+                asupersync::raptorq::test_log_schema::validate_e2e_log_json(&report_first);
+            assert!(
+                violations.is_empty(),
+                "D7 E2E schema contract violation for {}: {violations:?}",
+                scenario.id
+            );
+
             assert_eq!(report_first, report_second, "report JSON mismatch");
             assert_eq!(success_first, success_second, "success mismatch");
         }

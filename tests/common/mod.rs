@@ -23,6 +23,13 @@ pub use asupersync::test_logging::{
     ARTIFACT_SCHEMA_VERSION,
 };
 
+pub use asupersync::raptorq::test_log_schema::{
+    self as raptorq_log, validate_e2e_log_json, validate_unit_log_json, E2eLogEntry,
+    LogConfigReport, LogLossReport, LogOutcomeReport, LogProofReport, LogSymbolCounts,
+    LogSymbolReport, UnitDecodeStats, UnitLogEntry, E2E_LOG_SCHEMA_VERSION,
+    UNIT_LOG_SCHEMA_VERSION,
+};
+
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::RuntimeBuilder;

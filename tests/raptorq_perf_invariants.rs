@@ -86,12 +86,23 @@ fn build_received_symbols(
     received
 }
 
+use asupersync::raptorq::test_log_schema::{
+    UnitDecodeStats, UnitLogEntry, UNIT_LOG_SCHEMA_VERSION,
+};
+
 fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &str) -> String {
-    format!(
-        "replay_ref={replay_ref} scenario_id={scenario_id} seed={seed} outcome={outcome} \
-         fixture_ref={REPLAY_FIXTURE_REF} artifact_path={REPLAY_CATALOG_ARTIFACT_PATH} \
-         repro_cmd='rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture'"
+    UnitLogEntry::new(
+        scenario_id,
+        seed,
+        &format!("fixture_ref={REPLAY_FIXTURE_REF}"),
+        replay_ref,
+        outcome,
     )
+    .with_repro_command(
+        "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+    )
+    .with_artifact_path(REPLAY_CATALOG_ARTIFACT_PATH)
+    .to_context_string()
 }
 
 // ============================================================================
@@ -701,20 +712,26 @@ fn seed_sweep_structured_logging() {
         match decoder.decode(&received) {
             Ok(result) => {
                 successes += 1;
-                let context = replay_log_context(
-                    REPLAY_SEED_SWEEP_ID,
+                let log_entry = UnitLogEntry::new(
                     REPLAY_SEED_SWEEP_SCENARIO,
                     seed,
+                    &format!("k={k},symbol_size={symbol_size},loss_pct={loss_pct}"),
+                    REPLAY_SEED_SWEEP_ID,
                     "ok",
-                );
-                eprintln!(
-                    "{context} k={k} loss={loss_pct}% dropped={} peeled={} inact={} gauss={} pivots={} OK",
-                    drop.len(),
-                    result.stats.peeled,
-                    result.stats.inactivated,
-                    result.stats.gauss_ops,
-                    result.stats.pivots_selected,
-                );
+                )
+                .with_repro_command(
+                    "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+                )
+                .with_decode_stats(UnitDecodeStats {
+                    k,
+                    loss_pct,
+                    dropped: drop.len(),
+                    peeled: result.stats.peeled,
+                    inactivated: result.stats.inactivated,
+                    gauss_ops: result.stats.gauss_ops,
+                    pivots: result.stats.pivots_selected,
+                });
+                eprintln!("{}", log_entry.to_json().unwrap_or_else(|_| log_entry.to_context_string()));
 
                 for (i, original) in source.iter().enumerate() {
                     assert_eq!(
@@ -732,16 +749,26 @@ fn seed_sweep_structured_logging() {
             }
             Err(e) => {
                 failures += 1;
-                let context = replay_log_context(
-                    REPLAY_SEED_SWEEP_ID,
+                let log_entry = UnitLogEntry::new(
                     REPLAY_SEED_SWEEP_SCENARIO,
                     seed,
+                    &format!("k={k},symbol_size={symbol_size},loss_pct={loss_pct}"),
+                    REPLAY_SEED_SWEEP_ID,
                     "decode_failure",
-                );
-                eprintln!(
-                    "{context} k={k} loss={loss_pct}% dropped={} FAIL: {e:?}",
-                    drop.len()
-                );
+                )
+                .with_repro_command(
+                    "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+                )
+                .with_decode_stats(UnitDecodeStats {
+                    k,
+                    loss_pct,
+                    dropped: drop.len(),
+                    peeled: 0,
+                    inactivated: 0,
+                    gauss_ops: 0,
+                    pivots: 0,
+                });
+                eprintln!("{} FAIL: {e:?}", log_entry.to_json().unwrap_or_else(|_| log_entry.to_context_string()));
             }
         }
     }
@@ -1032,4 +1059,82 @@ fn cross_parameter_roundtrip_sweep() {
             result.stats.gauss_ops,
         );
     }
+}
+
+// ============================================================================
+// D7 schema contract tests
+// ============================================================================
+
+/// Validate that unit log entries produced by the seed sweep conform to the
+/// canonical schema contract (asupersync-vca9g / D7).
+#[test]
+fn unit_log_schema_contract() {
+    use asupersync::raptorq::test_log_schema::validate_unit_log_json;
+
+    // Build a representative log entry matching seed_sweep output.
+    let entry = UnitLogEntry::new(
+        REPLAY_SEED_SWEEP_SCENARIO,
+        5042,
+        "k=16,symbol_size=32,loss_pct=25",
+        REPLAY_SEED_SWEEP_ID,
+        "ok",
+    )
+    .with_repro_command(
+        "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+    )
+    .with_decode_stats(UnitDecodeStats {
+        k: 16,
+        loss_pct: 25,
+        dropped: 4,
+        peeled: 10,
+        inactivated: 2,
+        gauss_ops: 8,
+        pivots: 2,
+    });
+
+    let json = entry.to_json().expect("serialize unit log entry");
+    let violations = validate_unit_log_json(&json);
+    assert!(
+        violations.is_empty(),
+        "D7 schema contract violation in seed sweep entry: {violations:?}"
+    );
+
+    // Verify schema version matches constant.
+    assert_eq!(
+        entry.schema_version, UNIT_LOG_SCHEMA_VERSION,
+        "schema version mismatch"
+    );
+
+    // Verify the JSON round-trips cleanly.
+    let parsed: UnitLogEntry = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.scenario_id, REPLAY_SEED_SWEEP_SCENARIO);
+    assert_eq!(parsed.seed, 5042);
+    assert_eq!(parsed.outcome, "ok");
+    let stats = parsed.decode_stats.expect("decode_stats should be present");
+    assert_eq!(stats.k, 16);
+    assert_eq!(stats.dropped, 4);
+}
+
+/// Validate that failure entries also conform to the schema contract.
+#[test]
+fn unit_log_schema_contract_failure_entry() {
+    use asupersync::raptorq::test_log_schema::validate_unit_log_json;
+
+    let entry = UnitLogEntry::new(
+        REPLAY_SEED_SWEEP_SCENARIO,
+        5099,
+        "k=16,symbol_size=32,loss_pct=38",
+        REPLAY_SEED_SWEEP_ID,
+        "decode_failure",
+    )
+    .with_repro_command(
+        "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+    );
+
+    let json = entry.to_json().expect("serialize");
+    let violations = validate_unit_log_json(&json);
+    assert!(
+        violations.is_empty(),
+        "D7 schema contract violation in failure entry: {violations:?}"
+    );
 }
