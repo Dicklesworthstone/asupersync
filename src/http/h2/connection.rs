@@ -499,7 +499,7 @@ impl Connection {
                 }
                 Ok(None)
             }
-            Frame::RstStream(f) => Ok(Some(self.process_rst_stream(f))),
+            Frame::RstStream(f) => self.process_rst_stream(f).map(Some),
             Frame::Settings(f) => self.process_settings(&f),
             Frame::PushPromise(f) => self.process_push_promise(&f),
             Frame::Ping(f) => Ok(self.process_ping(f)),
@@ -518,14 +518,18 @@ impl Connection {
 
     /// Process DATA frame.
     fn process_data(&mut self, frame: DataFrame) -> Result<Option<ReceivedFrame>, H2Error> {
-        self.track_stream_id(frame.stream_id);
-        let stream = self.streams.get_or_create(frame.stream_id)?;
-
         // RFC 7540 §5.1: receiving DATA on an idle stream MUST be treated as a
-        // connection error of type PROTOCOL_ERROR.
-        if stream.state() == StreamState::Idle {
-            return Err(H2Error::protocol("DATA received on idle stream"));
+        // connection error of type PROTOCOL_ERROR. Check this before
+        // get_or_create to avoid polluting last_stream_id on rejection.
+        {
+            let stream = self.streams.get_or_create(frame.stream_id)?;
+            if stream.state() == StreamState::Idle {
+                return Err(H2Error::protocol("DATA received on idle stream"));
+            }
         }
+
+        // Track stream ID only after the idle check passes.
+        self.track_stream_id(frame.stream_id);
 
         let payload_len =
             u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
@@ -536,6 +540,21 @@ impl Connection {
                 "data exceeds connection flow control window",
             ));
         }
+
+        // Decrement the connection-level receive window BEFORE the stream-level
+        // check. The peer counted these bytes against their send window when
+        // they transmitted the DATA frame, so we must count them here even if
+        // the stream rejects the data (e.g. StreamClosed). Failing to do so
+        // desynchronizes the connection flow-control windows.
+        self.recv_window -= window_delta;
+
+        // Re-borrow the stream for the stream-level operations.
+        let stream = self.streams.get_mut(frame.stream_id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "stream disappeared after get_or_create",
+            )
+        })?;
         stream.recv_data(payload_len, frame.end_stream)?;
 
         // Auto stream-level WINDOW_UPDATE when recv window drops below 50%.
@@ -551,9 +570,6 @@ impl Connection {
                 increment,
             });
         }
-
-        // Update connection-level window
-        self.recv_window -= window_delta;
 
         let low_watermark = DEFAULT_CONNECTION_WINDOW_SIZE / 2;
         if self.recv_window < low_watermark {
@@ -721,15 +737,29 @@ impl Connection {
     }
 
     /// Process RST_STREAM frame.
-    fn process_rst_stream(&mut self, frame: RstStreamFrame) -> ReceivedFrame {
+    ///
+    /// RFC 7540 §5.1: RST_STREAM received on a stream in the idle state MUST
+    /// be treated as a connection error of type PROTOCOL_ERROR.
+    fn process_rst_stream(&mut self, frame: RstStreamFrame) -> Result<ReceivedFrame, H2Error> {
+        // RFC 7540 §6.4: RST_STREAM frames MUST NOT be sent for stream 0.
+        if frame.stream_id == 0 {
+            return Err(H2Error::protocol("RST_STREAM with stream ID 0"));
+        }
+
+        // RFC 7540 §5.1: receiving RST_STREAM on an idle stream MUST be
+        // treated as a connection error of type PROTOCOL_ERROR.
+        if self.streams.is_idle_stream_id(frame.stream_id) {
+            return Err(H2Error::protocol("RST_STREAM received on idle stream"));
+        }
+
         if let Some(stream) = self.streams.get_mut(frame.stream_id) {
             stream.reset(frame.error_code);
         }
 
-        ReceivedFrame::Reset {
+        Ok(ReceivedFrame::Reset {
             stream_id: frame.stream_id,
             error_code: frame.error_code,
-        }
+        })
     }
 
     /// Process SETTINGS frame.
@@ -788,21 +818,28 @@ impl Connection {
             return Err(H2Error::protocol("PUSH_PROMISE on server-initiated stream"));
         }
 
+        // RFC 7540 §5.1: "An endpoint receiving a PUSH_PROMISE on a stream
+        // that is neither 'open' nor 'half-closed (local)' MUST treat this
+        // as a connection error of type PROTOCOL_ERROR."
         let assoc_state = match self.streams.get(frame.stream_id) {
             Some(stream) => stream.state(),
             None => {
-                return Err(H2Error::stream(
-                    frame.stream_id,
-                    ErrorCode::ProtocolError,
-                    "PUSH_PROMISE on unknown stream",
-                ));
+                return Err(H2Error::protocol("PUSH_PROMISE on unknown stream"));
             }
         };
-        if assoc_state.is_closed() {
+        if !matches!(
+            assoc_state,
+            StreamState::Open | StreamState::HalfClosedLocal
+        ) {
+            let code = if assoc_state.is_closed() {
+                ErrorCode::StreamClosed
+            } else {
+                ErrorCode::ProtocolError
+            };
             return Err(H2Error::stream(
                 frame.stream_id,
-                ErrorCode::StreamClosed,
-                "PUSH_PROMISE on closed stream",
+                code,
+                "PUSH_PROMISE on stream not in open or half-closed (local) state",
             ));
         }
 
@@ -1203,6 +1240,40 @@ mod tests {
         assert!(result.is_err());
         let err = result.expect_err("flow control error");
         assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    /// Regression: when stream.recv_data() fails with a stream-level error
+    /// (e.g., data on a closed stream), the connection recv_window must still
+    /// be decremented. The peer counted these bytes against their send window
+    /// when transmitting; failing to account for them desynchronizes flow control.
+    #[test]
+    fn data_on_closed_stream_still_decrements_connection_window() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open stream 1 via HEADERS.
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Reset stream 1 so it becomes closed.
+        let rst = Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel));
+        conn.process_frame(rst).unwrap();
+        assert_eq!(conn.stream(1).unwrap().state(), StreamState::Closed);
+
+        let window_before = conn.recv_window();
+        let payload = Bytes::from(vec![0_u8; 100]);
+
+        // DATA on closed stream should fail with a stream error…
+        let frame = Frame::Data(DataFrame::new(1, payload, false));
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(err.code, ErrorCode::StreamClosed);
+
+        // …but the connection window MUST still be decremented by 100 bytes.
+        assert_eq!(
+            conn.recv_window(),
+            window_before - 100,
+            "connection recv_window must be decremented even on stream-level errors"
+        );
     }
 
     #[test]
@@ -1792,7 +1863,9 @@ mod tests {
 
         let err = conn.process_frame(frame).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
-        assert_eq!(err.stream_id, Some(1));
+        // RFC 7540 §5.1: PUSH_PROMISE referencing an unknown stream is a
+        // connection error, so no stream_id is attached.
+        assert_eq!(err.stream_id, None);
     }
 
     #[test]
@@ -1996,6 +2069,52 @@ mod tests {
 
         let err = conn.process_frame(frame).unwrap_err();
         assert_eq!(err.code, ErrorCode::StreamClosed);
+    }
+
+    /// RFC 7540 §5.1: PUSH_PROMISE must only be received on streams in
+    /// "open" or "half-closed (local)" state. A stream in HalfClosedRemote
+    /// (where the server already sent END_STREAM) must be rejected.
+    #[test]
+    fn push_promise_rejected_on_half_closed_remote_stream() {
+        let mut settings = Settings::client();
+        settings.enable_push = true;
+        let mut conn = Connection::client(settings);
+        conn.state = ConnectionState::Open;
+
+        // Open a stream without END_STREAM so it enters Open state.
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+        let _ = conn.next_frame(); // drain HEADERS
+
+        // Receive response headers with END_STREAM from server.
+        // This puts the stream into HalfClosedRemote from client's perspective.
+        let response = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), true, true));
+        conn.process_frame(response).unwrap();
+
+        assert_eq!(
+            conn.stream(stream_id).unwrap().state(),
+            StreamState::HalfClosedRemote
+        );
+
+        // PUSH_PROMISE on HalfClosedRemote stream should be rejected.
+        let frame = Frame::PushPromise(PushPromiseFrame {
+            stream_id,
+            promised_stream_id: 2,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
+
+        let err = conn.process_frame(frame).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "PUSH_PROMISE on half-closed (remote) stream must be PROTOCOL_ERROR"
+        );
     }
 
     #[test]
@@ -2500,13 +2619,36 @@ mod tests {
     // Cancellation Race Tests (bd-1oo7)
     // =========================================================================
 
+    /// RFC 7540 §5.1: RST_STREAM received on a stream in the idle state
+    /// MUST be treated as a connection error of type PROTOCOL_ERROR.
     #[test]
-    fn test_rst_stream_on_idle_stream() {
+    fn test_rst_stream_on_idle_stream_is_connection_error() {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
 
-        // RST_STREAM on stream that doesn't exist should be handled gracefully
+        // Stream 999 has never been opened — it is idle.
         let rst = Frame::RstStream(RstStreamFrame::new(999, ErrorCode::Cancel));
+        let err = conn.process_frame(rst).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            err.stream_id.is_none(),
+            "idle-stream RST_STREAM must be a connection error, not a stream error"
+        );
+    }
+
+    /// RST_STREAM on a known (non-idle) stream should still work normally.
+    #[test]
+    fn test_rst_stream_on_open_stream() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open stream 1 via HEADERS.
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // RST_STREAM on an open stream should succeed.
+        let rst = Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel));
         let result = conn.process_frame(rst).unwrap().unwrap();
 
         match result {
@@ -2514,11 +2656,24 @@ mod tests {
                 stream_id,
                 error_code,
             } => {
-                assert_eq!(stream_id, 999);
+                assert_eq!(stream_id, 1);
                 assert_eq!(error_code, ErrorCode::Cancel);
             }
             _ => panic!("expected Reset"),
         }
+    }
+
+    /// RST_STREAM with stream ID 0 is always a connection error (RFC 7540 §6.4).
+    #[test]
+    fn test_rst_stream_on_stream_zero_is_connection_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        let rst = Frame::RstStream(RstStreamFrame::new(0, ErrorCode::Cancel));
+        let err = conn.process_frame(rst).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.stream_id.is_none());
     }
 
     #[test]

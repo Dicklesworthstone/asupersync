@@ -613,6 +613,11 @@ impl SettingsFrame {
                 | ((u32::from(payload[cursor + 4])) << 8)
                 | u32::from(payload[cursor + 5]);
 
+            // RFC 7540 Section 6.5.2: SETTINGS_ENABLE_PUSH MUST be 0 or 1.
+            if id == 0x2 && value > 1 {
+                return Err(H2Error::protocol("SETTINGS_ENABLE_PUSH must be 0 or 1"));
+            }
+
             if let Some(setting) = Setting::from_id_value(id, value) {
                 settings.push(setting);
             }
@@ -1819,6 +1824,20 @@ mod tests {
         // Unknown settings are ignored per RFC 7540
         assert_eq!(Setting::from_id_value(0x7, 123), None);
         assert_eq!(Setting::from_id_value(0xFF, 456), None);
+    }
+
+    #[test]
+    fn test_settings_frame_rejects_invalid_enable_push_value() {
+        let header = FrameHeader {
+            length: 6,
+            frame_type: FrameType::Settings as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        let payload = Bytes::from_static(&[0x00, 0x02, 0x00, 0x00, 0x00, 0x02]);
+
+        let err = SettingsFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
     }
 
     #[test]

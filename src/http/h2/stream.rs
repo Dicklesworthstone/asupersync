@@ -443,7 +443,10 @@ impl Stream {
 
     /// Transition state on sending data.
     pub fn send_data(&mut self, end_stream: bool) -> Result<(), H2Error> {
-        if !self.state.can_send() {
+        // RFC 7540 §5.1: reserved(local) only permits HEADERS, RST_STREAM,
+        // and PRIORITY — DATA frames are not allowed before the stream is
+        // activated via send_headers.
+        if !self.state.can_send() || self.state == StreamState::ReservedLocal {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::StreamClosed,
@@ -464,7 +467,10 @@ impl Stream {
 
     /// Transition state on receiving data.
     pub fn recv_data(&mut self, len: u32, end_stream: bool) -> Result<(), H2Error> {
-        if !self.state.can_recv() {
+        // RFC 7540 §5.1: reserved(remote) only permits HEADERS, RST_STREAM,
+        // and PRIORITY — DATA frames must not arrive before the server sends
+        // HEADERS to activate the promised stream.
+        if !self.state.can_recv() || self.state == StreamState::ReservedRemote {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::StreamClosed,
@@ -506,6 +512,9 @@ impl Stream {
     pub fn reset(&mut self, error_code: ErrorCode) {
         self.state = StreamState::Closed;
         self.error_code = Some(error_code);
+        // Release buffered data to avoid holding memory until prune.
+        self.header_fragments.clear();
+        self.pending_data.clear();
     }
 
     /// Queue data for sending (when flow control blocks).
@@ -578,9 +587,13 @@ impl StreamStore {
 
     /// Set the initial window size for new streams.
     pub fn set_initial_window_size(&mut self, size: u32) -> Result<(), H2Error> {
-        // Update existing streams
+        // Update existing streams.  Closed streams are excluded: their
+        // windows are irrelevant and applying a large delta could trigger
+        // a spurious overflow error that blocks the entire SETTINGS update.
         for stream in self.streams.values_mut() {
-            stream.update_initial_window_size(size)?;
+            if !stream.state.is_closed() {
+                stream.update_initial_window_size(size)?;
+            }
         }
         self.initial_window_size = size;
         Ok(())
@@ -1745,21 +1758,99 @@ mod tests {
         assert_eq!(stream.state(), StreamState::Closed);
     }
 
-    /// Test: Reserved stream cannot send data directly
+    /// Test: Reserved(local) stream rejects DATA frames.
+    /// RFC 7540 §5.1: only HEADERS, RST_STREAM, and PRIORITY are allowed
+    /// in the reserved(local) state.
     #[test]
-    fn reserved_stream_cannot_send_data() {
+    fn reserved_local_rejects_send_data() {
         let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.state = StreamState::ReservedLocal;
 
-        // Reserved streams cannot send data until headers are sent
-        // (can_send returns true for ReservedLocal, but send_data should
-        // only allow it after headers are sent)
-        let _result = stream.send_data(false);
-        // This should fail because we're in ReservedLocal, not a data-sending state
-        // Actually, can_send() returns true for ReservedLocal, so this will succeed
-        // The RFC says data is allowed on reserved(local) after HEADERS is sent
-        // Let's verify the actual behavior
-        assert!(stream.state().can_send());
+        // DATA must be rejected even though can_send() returns true
+        // (can_send covers HEADERS too; send_data is more restrictive).
+        let result = stream.send_data(false);
+        assert!(result.is_err(), "DATA on reserved(local) must be rejected");
+    }
+
+    /// Test: Reserved(remote) stream rejects DATA frames.
+    /// RFC 7540 §5.1: only HEADERS, RST_STREAM, and PRIORITY may be
+    /// received in the reserved(remote) state.
+    #[test]
+    fn reserved_remote_rejects_recv_data() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote;
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err(), "DATA on reserved(remote) must be rejected");
+    }
+
+    /// Test: reset() clears accumulated header fragments and pending data
+    /// so the memory is released immediately rather than lingering until
+    /// the stream is pruned.
+    #[test]
+    fn reset_clears_header_fragments_and_pending_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Accumulate header fragments (simulate partial CONTINUATION)
+        stream.recv_headers(false, false).unwrap();
+        stream
+            .add_header_fragment(Bytes::from(vec![0xAA; 64]))
+            .unwrap();
+        assert!(!stream.take_header_fragments().is_empty() || stream.is_receiving_headers());
+
+        // Re-add fragments after take
+        stream
+            .add_header_fragment(Bytes::from(vec![0xBB; 64]))
+            .unwrap();
+
+        // Queue pending data
+        stream.queue_data(Bytes::from_static(b"buffered"), false);
+        assert!(stream.has_pending_data());
+
+        // Reset the stream
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // Both buffers must be empty
+        assert!(
+            stream.take_header_fragments().is_empty(),
+            "header_fragments should be cleared on reset"
+        );
+        assert!(
+            !stream.has_pending_data(),
+            "pending_data should be cleared on reset"
+        );
+    }
+
+    /// Test: set_initial_window_size skips closed streams.
+    /// A closed stream with a very negative send window could cause a
+    /// spurious overflow error if the delta is large; closed streams
+    /// are excluded from the update.
+    #[test]
+    fn set_initial_window_size_skips_closed_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id = store.allocate_stream_id().unwrap();
+        // Drive send window deeply negative
+        store.get_mut(id).unwrap().consume_send_window(65535);
+        store
+            .get_mut(id)
+            .unwrap()
+            .update_initial_window_size(1)
+            .unwrap();
+        // send_window is now  0 - 65535 + (1 - 65535) = negative
+        assert!(store.get(id).unwrap().send_window() < 0);
+
+        // Close the stream
+        store.get_mut(id).unwrap().reset(ErrorCode::NoError);
+
+        // Setting initial window to MAX should succeed because the
+        // closed stream is skipped.
+        let result = store.set_initial_window_size(0x7fff_ffff);
+        assert!(
+            result.is_ok(),
+            "closed streams must not block SETTINGS update: {result:?}"
+        );
     }
 
     /// Test: Stream store handles rapid allocation/deallocation
