@@ -675,4 +675,56 @@ mod tests {
         // Expired after timeout
         assert!(meta.is_expired(make_time(250), timeout));
     }
+
+    #[test]
+    fn remove_nonexistent_is_noop() {
+        let mut pool = Pool::new();
+        let key = PoolKey::https("example.com", None);
+        // Removing from empty pool should not panic
+        pool.remove(&key, 999);
+        assert_eq!(pool.stats().connections_closed, 0);
+    }
+
+    #[test]
+    fn release_nonexistent_is_noop() {
+        let mut pool = Pool::new();
+        let key = PoolKey::https("example.com", None);
+        // Releasing a nonexistent connection should not panic
+        pool.release(&key, 999, make_time(0));
+    }
+
+    #[test]
+    fn mark_connected_nonexistent_is_noop() {
+        let mut pool = Pool::new();
+        let key = PoolKey::https("example.com", None);
+        pool.mark_connected(&key, 999, make_time(0));
+    }
+
+    #[test]
+    fn pool_default_config() {
+        let config = PoolConfig::default();
+        assert_eq!(config.max_connections_per_host, 6);
+        assert_eq!(config.max_total_connections, 100);
+        assert_eq!(config.idle_timeout, Duration::from_secs(90));
+        assert_eq!(config.cleanup_interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn acquire_prefers_idle_over_expired() {
+        let config = PoolConfig::builder()
+            .idle_timeout(Duration::from_millis(100))
+            .build();
+        let mut pool = Pool::with_config(config);
+        let key = PoolKey::https("example.com", None);
+
+        // Create two connections at time 0
+        let id1 = pool.register_connecting(key.clone(), make_time(0), 2);
+        pool.mark_connected(&key, id1, make_time(0));
+        let id2 = pool.register_connecting(key.clone(), make_time(50), 2);
+        pool.mark_connected(&key, id2, make_time(50));
+
+        // At time 120: id1 is expired (idle 120ms), id2 is not (idle 70ms)
+        let acquired = pool.try_acquire(&key, make_time(120));
+        assert_eq!(acquired, Some(id2));
+    }
 }

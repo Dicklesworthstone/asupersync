@@ -511,8 +511,11 @@ impl<R> PooledResource<R> {
     /// discover the newly available resource/slot.
     fn notify_return_wakers(&self) {
         if let Some(ref wakers) = self.return_wakers {
-            let mut wakers = wakers.lock().expect("return_wakers lock");
-            for waker in wakers.drain(..) {
+            let drained = {
+                let mut wakers = wakers.lock().expect("return_wakers lock");
+                wakers.drain(..).collect::<Vec<_>>()
+            };
+            for waker in drained {
                 waker.wake();
             }
         }
@@ -840,11 +843,7 @@ where
         // directly.  Without this, a return that arrives while no other
         // code calls process_returns would leave us stuck until timeout.
         {
-            let mut wakers = self
-                .pool
-                .return_wakers
-                .lock()
-                .expect("return_wakers lock");
+            let mut wakers = self.pool.return_wakers.lock().expect("return_wakers lock");
             wakers.push(cx.waker().clone());
         }
 
@@ -1150,6 +1149,7 @@ where
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
         let rx = self.return_rx.lock().expect("return_rx lock poisoned");
+        let mut waiters_to_wake = Vec::new();
         while let Ok(ret) = rx.try_recv() {
             match ret {
                 PoolReturn::Return {
@@ -1163,20 +1163,23 @@ where
                         metrics.record_released(hold_duration);
                     }
 
-                    let mut state = self.state.lock().expect("pool state lock poisoned");
-                    state.active = state.active.saturating_sub(1);
+                    let waiter = {
+                        let mut state = self.state.lock().expect("pool state lock poisoned");
+                        state.active = state.active.saturating_sub(1);
 
-                    if !state.closed {
-                        state.idle.push_back(IdleResource {
-                            resource,
-                            idle_since: Instant::now(),
-                            created_at,
-                        });
-
-                        // Wake up one waiter if any
-                        if let Some(waiter) = state.waiters.pop_front() {
-                            waiter.waker.wake();
+                        if !state.closed {
+                            state.idle.push_back(IdleResource {
+                                resource,
+                                idle_since: Instant::now(),
+                                created_at,
+                            });
+                            state.waiters.pop_front()
+                        } else {
+                            None
                         }
+                    };
+                    if let Some(waiter) = waiter {
+                        waiters_to_wake.push(waiter.waker);
                     }
                     // If closed, just drop the resource
                 }
@@ -1188,15 +1191,20 @@ where
                         metrics.record_destroyed(DestroyReason::Unhealthy);
                     }
 
-                    let mut state = self.state.lock().expect("pool state lock poisoned");
-                    state.active = state.active.saturating_sub(1);
-
-                    // Wake up one waiter to potentially create a new resource
-                    if let Some(waiter) = state.waiters.pop_front() {
-                        waiter.waker.wake();
+                    let waiter = {
+                        let mut state = self.state.lock().expect("pool state lock poisoned");
+                        state.active = state.active.saturating_sub(1);
+                        state.waiters.pop_front()
+                    };
+                    if let Some(waiter) = waiter {
+                        waiters_to_wake.push(waiter.waker);
                     }
                 }
             }
+        }
+        drop(rx);
+        for waker in waiters_to_wake {
+            waker.wake();
         }
     }
 
@@ -1487,12 +1495,8 @@ where
             }
 
             return Some(
-                PooledResource::new_with_created_at(
-                    resource,
-                    self.return_tx.clone(),
-                    created_at,
-                )
-                .with_return_notify(Arc::clone(&self.return_wakers)),
+                PooledResource::new_with_created_at(resource, self.return_tx.clone(), created_at)
+                    .with_return_notify(Arc::clone(&self.return_wakers)),
             );
         }
 
@@ -1529,14 +1533,13 @@ where
             #[cfg(feature = "metrics")]
             let idle_count: usize;
 
-            {
+            let waiters = {
                 let mut state = self.state.lock().expect("pool state lock poisoned");
                 state.closed = true;
 
-                // Wake all waiters so they can see the pool is closed
-                for waiter in state.waiters.drain(..) {
-                    waiter.waker.wake();
-                }
+                // Drain waiters, then wake after releasing the state lock.
+                let waiters: Vec<Waker> =
+                    state.waiters.drain(..).map(|waiter| waiter.waker).collect();
 
                 // Record how many idle resources we're clearing (only needed for metrics)
                 #[cfg(feature = "metrics")]
@@ -1546,6 +1549,11 @@ where
 
                 // Clear idle resources
                 state.idle.clear();
+                waiters
+            };
+
+            for waker in waiters {
+                waker.wake();
             }
 
             // Record destroyed metrics for all cleared idle resources
@@ -1924,10 +1932,28 @@ pub use pool_metrics::{PoolMetrics, PoolMetricsHandle, PoolMetricsState};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct ReentrantReturnWaker {
+        return_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
+        tx: mpsc::Sender<bool>,
+    }
+
+    impl Wake for ReentrantReturnWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let lock_was_free = self.return_wakers.try_lock().is_ok();
+            let _ = self.tx.send(lock_was_free);
+        }
     }
 
     #[test]
@@ -1970,6 +1996,38 @@ mod tests {
             PoolReturn::Discard { .. } => unreachable!("unexpected discard"),
         }
         crate::test_complete!("pooled_resource_return_to_pool_sends_return");
+    }
+
+    #[test]
+    fn pooled_resource_notifies_wakers_outside_return_waker_lock() {
+        init_test("pooled_resource_notifies_wakers_outside_return_waker_lock");
+        let (return_tx, _return_rx) = mpsc::channel();
+        let return_wakers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (probe_tx, probe_rx) = mpsc::channel();
+
+        {
+            let probe = Arc::new(ReentrantReturnWaker {
+                return_wakers: Arc::clone(&return_wakers),
+                tx: probe_tx,
+            });
+            let mut wakers = return_wakers.lock().expect("return_wakers lock");
+            wakers.push(Waker::from(probe));
+        }
+
+        let pooled =
+            PooledResource::new(7u8, return_tx).with_return_notify(Arc::clone(&return_wakers));
+        pooled.return_to_pool();
+
+        let lock_was_free = probe_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("probe wake result");
+        crate::assert_with_log!(
+            lock_was_free,
+            "waker should run after return_wakers lock is released",
+            true,
+            lock_was_free
+        );
+        crate::test_complete!("pooled_resource_notifies_wakers_outside_return_waker_lock");
     }
 
     #[test]
