@@ -166,20 +166,33 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let futures = self.futures.as_mut().expect("polled after completion");
         let mut first_ready: Option<(F::Output, usize)> = None;
+        let mut also_ready: Vec<usize> = Vec::new();
 
         // Poll ALL futures to ensure initialization (same as SelectAll).
         for (i, f) in futures.iter_mut().enumerate() {
             if let Poll::Ready(v) = Pin::new(f).poll(cx) {
                 if first_ready.is_none() {
                     first_ready = Some((v, i));
+                } else {
+                    // Non-winner Ready value is dropped per select semantics.
+                    // Track the index so this future is excluded from losers;
+                    // re-polling a completed future would panic.
+                    drop(v);
+                    also_ready.push(i);
                 }
             }
         }
 
         if let Some((value, winner_index)) = first_ready {
             let mut all = self.futures.take().expect("polled after completion");
-            // Remove the winner; remaining are losers.
-            all.swap_remove(winner_index);
+            // Remove the winner and any simultaneously-completed non-winners.
+            // Process in descending index order so swap_remove doesn't
+            // invalidate subsequent indices.
+            also_ready.push(winner_index);
+            also_ready.sort_unstable_by(|a, b| b.cmp(a));
+            for idx in also_ready {
+                all.swap_remove(idx);
+            }
             return Poll::Ready(SelectAllDrainResult {
                 value,
                 winner_index,
@@ -526,8 +539,9 @@ mod tests {
             Poll::Ready(r) => {
                 assert_eq!(r.value, 10);
                 assert_eq!(r.winner_index, 0);
-                // 2 losers remain (indices 1 and 2 originally)
-                assert_eq!(r.losers.len(), 2);
+                // All 3 were simultaneously ready, so non-winners are excluded
+                // from losers (re-polling a completed future would panic).
+                assert_eq!(r.losers.len(), 0);
             }
             Poll::Pending => unreachable!("expected Ready"),
         }
@@ -581,6 +595,68 @@ mod tests {
 
         let result = poll_once(&mut sel);
         assert!(result.is_pending());
+    }
+
+    #[test]
+    fn test_select_all_drain_simultaneous_ready_excludes_completed_from_losers() {
+        // Regression: when multiple futures are simultaneously Ready,
+        // non-winner completed futures must NOT appear in losers.
+        // Re-polling a completed future (e.g., std::future::Ready) panics.
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct TrackableFuture {
+            poll_count: Arc<AtomicU32>,
+            ready: bool,
+        }
+        impl Future for TrackableFuture {
+            type Output = &'static str;
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<&'static str> {
+                self.poll_count.fetch_add(1, Ordering::SeqCst);
+                if self.ready {
+                    Poll::Ready("done")
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        let pending_count = Arc::new(AtomicU32::new(0));
+        let ready1_count = Arc::new(AtomicU32::new(0));
+        let ready2_count = Arc::new(AtomicU32::new(0));
+
+        let futures = vec![
+            TrackableFuture {
+                poll_count: Arc::clone(&pending_count),
+                ready: false,
+            },
+            TrackableFuture {
+                poll_count: Arc::clone(&ready1_count),
+                ready: true,
+            }, // winner (first ready)
+            TrackableFuture {
+                poll_count: Arc::clone(&ready2_count),
+                ready: true,
+            }, // also ready but non-winner
+        ];
+        let mut sel = SelectAllDrain::new(futures);
+
+        let result = poll_once(&mut sel);
+        match result {
+            Poll::Ready(r) => {
+                assert_eq!(r.value, "done");
+                assert_eq!(r.winner_index, 1);
+                // Only the pending future should be in losers.
+                // The simultaneously-ready non-winner (index 2) must be excluded.
+                assert_eq!(r.losers.len(), 1, "only pending futures should be losers");
+
+                // Verify the loser is the pending future by checking poll counts.
+                // All 3 were polled once during SelectAllDrain::poll.
+                assert_eq!(pending_count.load(Ordering::SeqCst), 1);
+                assert_eq!(ready1_count.load(Ordering::SeqCst), 1);
+                assert_eq!(ready2_count.load(Ordering::SeqCst), 1);
+            }
+            Poll::Pending => unreachable!("expected Ready"),
+        }
     }
 
     // ========== Loser-drain invariant tests ==========

@@ -302,6 +302,12 @@ pub fn join2_outcomes<T1, T2, E: Clone>(
         // Cancelled takes precedence over Err
         (Outcome::Cancelled(r), Outcome::Ok(v2)) => (Outcome::Cancelled(r), None, Some(v2)),
         (Outcome::Ok(v1), Outcome::Cancelled(r)) => (Outcome::Cancelled(r), Some(v1), None),
+        (Outcome::Cancelled(mut r1), Outcome::Cancelled(r2)) => {
+            // Both cancelled: strengthen to keep the worst reason,
+            // consistent with join_all_outcomes' severity lattice.
+            r1.strengthen(&r2);
+            (Outcome::Cancelled(r1), None, None)
+        }
         (Outcome::Cancelled(r), _) | (_, Outcome::Cancelled(r)) => {
             (Outcome::Cancelled(r), None, None)
         }
@@ -530,7 +536,11 @@ pub fn join2_to_result<T1, T2, E>(
         (Outcome::Ok(v1), Outcome::Ok(v2)) => Ok((v1, v2)),
         // Check for panics first (highest severity)
         (Outcome::Panicked(p), _) | (_, Outcome::Panicked(p)) => Err(JoinError::Panicked(p)),
-        // Then cancellations
+        // Then cancellations — strengthen when both cancelled
+        (Outcome::Cancelled(mut r1), Outcome::Cancelled(r2)) => {
+            r1.strengthen(&r2);
+            Err(JoinError::Cancelled(r1))
+        }
         (Outcome::Cancelled(r), _) | (_, Outcome::Cancelled(r)) => Err(JoinError::Cancelled(r)),
         // Then errors (first one encountered)
         (Outcome::Err(e), _) => Err(JoinError::First(e)),
@@ -1014,6 +1024,59 @@ mod tests {
         assert_eq!(result.successes[0], (0, 10));
         assert_eq!(result.successes[1], (2, 30));
         assert_eq!(result.successes[2], (4, 50));
+    }
+
+    #[test]
+    fn join2_both_cancelled_strengthens_to_worst_reason() {
+        // Regression: join2_outcomes must use strengthen() when both branches
+        // are cancelled, matching join_all_outcomes' severity lattice behavior.
+        // User(severity 0) + Shutdown(severity 5) → Shutdown wins.
+        let o1: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("soft"));
+        let o2: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+        let (result, v1, v2) = join2_outcomes(o1, o2);
+
+        assert!(result.is_cancelled());
+        assert!(v1.is_none());
+        assert!(v2.is_none());
+        if let Outcome::Cancelled(r) = &result {
+            assert_eq!(
+                r.kind(),
+                crate::types::cancel::CancelKind::Shutdown,
+                "join2_outcomes should strengthen to Shutdown (severity 5), not User (severity 0)"
+            );
+        }
+
+        // Also test the reverse order: Shutdown + User → still Shutdown
+        let o1: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+        let o2: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("soft"));
+        let (result, _, _) = join2_outcomes(o1, o2);
+
+        if let Outcome::Cancelled(r) = &result {
+            assert_eq!(
+                r.kind(),
+                crate::types::cancel::CancelKind::Shutdown,
+                "join2_outcomes should be commutative in cancel severity"
+            );
+        }
+    }
+
+    #[test]
+    fn join2_to_result_both_cancelled_strengthens() {
+        // Same regression test for join2_to_result
+        let o1: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("soft"));
+        let o2: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+        let result = join2_to_result(o1, o2);
+
+        match result {
+            Err(JoinError::Cancelled(r)) => {
+                assert_eq!(
+                    r.kind(),
+                    crate::types::cancel::CancelKind::Shutdown,
+                    "join2_to_result should strengthen to Shutdown"
+                );
+            }
+            other => panic!("Expected Cancelled, got {other:?}"),
+        }
     }
 
     #[test]
