@@ -307,6 +307,7 @@ impl UnitLogEntry {
     ///
     /// Compatible with the legacy `builder_failure_context()` format but
     /// richer: includes repro command and schema version.
+    #[must_use]
     pub fn to_context_string(&self) -> String {
         format!(
             "schema={} scenario_id={} seed={} parameter_set={} replay_ref={} outcome={} repro='{}'",
@@ -328,6 +329,7 @@ impl UnitLogEntry {
 /// Validate a JSON string against the E2E log entry schema contract.
 ///
 /// Returns a list of violations. An empty list means the entry is valid.
+#[must_use]
 pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
@@ -360,7 +362,7 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
         "repro_command",
     ] {
         match value.get(*field).and_then(|v| v.as_str()) {
-            Some(s) if s.is_empty() => {
+            Some("") => {
                 violations.push(format!("required field '{field}' is empty"));
             }
             Some(_) => {}
@@ -380,9 +382,8 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
     // Repro command must include rch exec
     if let Some(cmd) = value.get("repro_command").and_then(|v| v.as_str()) {
         if !cmd.contains("rch exec --") {
-            violations.push(
-                "repro_command must include 'rch exec --' for remote execution".to_string(),
-            );
+            violations
+                .push("repro_command must include 'rch exec --' for remote execution".to_string());
         }
     }
 
@@ -402,7 +403,7 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 
     // Required sub-objects
     for section in &["config", "loss", "symbols", "outcome", "proof"] {
-        if !value.get(*section).is_some_and(|v| v.is_object()) {
+        if !value.get(*section).is_some_and(serde_json::Value::is_object) {
             violations.push(format!("missing or non-object required section: {section}"));
         }
     }
@@ -445,6 +446,7 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 /// Validate a JSON string against the unit test log entry schema contract.
 ///
 /// Returns a list of violations. An empty list means the entry is valid.
+#[must_use]
 pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
@@ -468,7 +470,7 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     // Required string fields
     for field in &["scenario_id", "parameter_set", "replay_ref", "outcome"] {
         match value.get(*field).and_then(|v| v.as_str()) {
-            Some(s) if s.is_empty() => {
+            Some("") => {
                 violations.push(format!("required field '{field}' is empty"));
             }
             Some(_) => {}
@@ -508,9 +510,7 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
 
 /// Helper: check if a field is missing or null in a JSON value.
 fn value_missing_or_null(parent: &serde_json::Value, field: &str) -> bool {
-    parent
-        .get(field)
-        .is_none_or(serde_json::Value::is_null)
+    parent.get(field).is_none_or(serde_json::Value::is_null)
 }
 
 // ============================================================================
@@ -625,7 +625,9 @@ mod tests {
         let json = entry.to_json().expect("serialize");
         let violations = validate_unit_log_json(&json);
         assert!(
-            violations.iter().any(|v| v.contains("unrecognized outcome")),
+            violations
+                .iter()
+                .any(|v| v.contains("unrecognized outcome")),
             "should flag unrecognized outcome"
         );
     }
