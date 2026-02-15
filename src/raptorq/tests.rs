@@ -501,12 +501,30 @@ mod conformance {
         hasher.finish()
     }
 
+    fn failure_context(
+        scenario_id: &str,
+        seed: u64,
+        parameter_set: &str,
+        replay_ref: &str,
+    ) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
+        )
+    }
+
     /// Known vector: small block (K=4, symbol_size=16, seed=42)
     #[test]
     fn known_vector_small_block() {
         let k = 4;
         let symbol_size = 16;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-known-vector-small-v1";
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-KNOWN-VECTOR-SMALL",
+            seed,
+            &format!("k={k},symbol_size={symbol_size}"),
+            replay_ref,
+        );
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -516,7 +534,8 @@ mod conformance {
             })
             .collect();
 
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
 
         // Generate repair symbols with fixed ESIs
         let repair_0 = encoder.repair_symbol(k as u32);
@@ -527,7 +546,8 @@ mod conformance {
         let repair_hash = content_hash(&[repair_0, repair_1, repair_2]);
 
         // Re-create encoder and verify same output
-        let encoder2 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder2 = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
         let repair_0_2 = encoder2.repair_symbol(k as u32);
         let repair_1_2 = encoder2.repair_symbol(k as u32 + 1);
         let repair_2_2 = encoder2.repair_symbol(k as u32 + 2);
@@ -535,7 +555,7 @@ mod conformance {
         let repair_hash_2 = content_hash(&[repair_0_2, repair_1_2, repair_2_2]);
         assert_eq!(
             repair_hash, repair_hash_2,
-            "repair symbols must be deterministic"
+            "{context} repair symbols must be deterministic"
         );
     }
 
@@ -544,6 +564,13 @@ mod conformance {
         let k = 10;
         let symbol_size = 24;
         let seed = 123u64;
+        let replay_ref = "replay:rq-u-systematic-rfc-projection-v1";
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-RFC-PROJECTION",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},esi_range=[{k},{}]", k + 7),
+            replay_ref,
+        );
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
                 (0..symbol_size)
@@ -552,7 +579,8 @@ mod conformance {
             })
             .collect();
 
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
         for esi in (k as u32)..(k as u32 + 8) {
             let repair = encoder.repair_symbol(esi);
             let (columns, coefficients) = encoder.params().rfc_repair_equation(esi);
@@ -568,7 +596,7 @@ mod conformance {
 
             assert_eq!(
                 repair, expected,
-                "repair symbol must equal projection of RFC equation for esi={esi}"
+                "{context} repair symbol must equal projection of RFC equation for esi={esi}"
             );
         }
     }
@@ -582,6 +610,13 @@ mod conformance {
         let k = 32;
         let symbol_size = 64;
         let seed = 12345u64;
+        let replay_ref = "replay:rq-u-systematic-known-vector-medium-v1";
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-KNOWN-VECTOR-MEDIUM",
+            seed,
+            &format!("k={k},symbol_size={symbol_size}"),
+            replay_ref,
+        );
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -591,7 +626,8 @@ mod conformance {
             })
             .collect();
 
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
@@ -609,12 +645,17 @@ mod conformance {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder.decode(&received).expect("decode should succeed");
+        let result = decoder
+            .decode(&received)
+            .unwrap_or_else(|err| panic!("{context} decode should succeed; got {err:?}"));
 
         // Verify roundtrip
         let source_hash = content_hash(&source);
         let decoded_hash = content_hash(&result.source);
-        assert_eq!(source_hash, decoded_hash, "decoded data must match source");
+        assert_eq!(
+            source_hash, decoded_hash,
+            "{context} decoded data must match source"
+        );
     }
 
     /// Known vector: verify proof artifact determinism.
@@ -623,6 +664,13 @@ mod conformance {
         let k = 8;
         let symbol_size = 32;
         let seed = 99u64;
+        let replay_ref = "replay:rq-u-determinism-proof-vector-v1";
+        let context = failure_context(
+            "RQ-U-DETERMINISM-PROOF-VECTOR",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},object_id=777"),
+            replay_ref,
+        );
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -632,7 +680,8 @@ mod conformance {
             })
             .collect();
 
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
@@ -655,16 +704,20 @@ mod conformance {
         // Decode twice with proof
         let result1 = decoder
             .decode_with_proof(&received, object_id, 0)
-            .expect("decode should succeed");
+            .unwrap_or_else(|err| {
+                panic!("{context} decode_with_proof should succeed; got {err:?}")
+            });
         let result2 = decoder
             .decode_with_proof(&received, object_id, 0)
-            .expect("decode should succeed");
+            .unwrap_or_else(|err| {
+                panic!("{context} decode_with_proof should succeed; got {err:?}")
+            });
 
         // Proof content hashes must match
         assert_eq!(
             result1.proof.content_hash(),
             result2.proof.content_hash(),
-            "proof artifacts must be deterministic"
+            "{context} proof artifacts must be deterministic"
         );
     }
 
@@ -674,6 +727,13 @@ mod conformance {
         let k = 16;
         let symbol_size = 32;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-encoder-determinism-v1";
+        let context = failure_context(
+            "RQ-U-DETERMINISM-SEED",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},esi_range=[0,49]"),
+            replay_ref,
+        );
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -683,15 +743,17 @@ mod conformance {
             })
             .collect();
 
-        let encoder1 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
-        let encoder2 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder1 = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
+        let encoder2 = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
 
         // Verify intermediate symbols match
         for i in 0..encoder1.params().l {
             assert_eq!(
                 encoder1.intermediate_symbol(i),
                 encoder2.intermediate_symbol(i),
-                "intermediate symbol {i} must be deterministic"
+                "{context} intermediate symbol {i} must be deterministic"
             );
         }
 
@@ -700,7 +762,7 @@ mod conformance {
             assert_eq!(
                 encoder1.repair_symbol(esi),
                 encoder2.repair_symbol(esi),
-                "repair symbol {esi} must be deterministic"
+                "{context} repair symbol {esi} must be deterministic"
             );
         }
     }
@@ -725,6 +787,17 @@ mod property_tests {
             .collect()
     }
 
+    fn failure_context(
+        scenario_id: &str,
+        seed: u64,
+        parameter_set: &str,
+        replay_ref: &str,
+    ) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
+        )
+    }
+
     /// Property: roundtrip with all symbols succeeds for known-good parameters.
     /// Uses the same parameters as the decoder module's passing tests.
     #[test]
@@ -733,6 +806,13 @@ mod property_tests {
         let k = 8;
         let symbol_size = 32;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-property-roundtrip-v1";
+        let context = failure_context(
+            "RQ-U-HAPPY-SYSTEMATIC",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},repair_to_l=true"),
+            replay_ref,
+        );
 
         let source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
@@ -742,7 +822,8 @@ mod property_tests {
             })
             .collect();
 
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
@@ -761,9 +842,14 @@ mod property_tests {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder.decode(&received).expect("roundtrip should succeed");
+        let result = decoder
+            .decode(&received)
+            .unwrap_or_else(|err| panic!("{context} roundtrip should succeed; got {err:?}"));
 
-        assert_eq!(result.source, source, "decoded source must match original");
+        assert_eq!(
+            result.source, source,
+            "{context} decoded source must match original"
+        );
     }
 
     /// Property: roundtrip with overhead symbols handles LT rank issues.
@@ -775,9 +861,17 @@ mod property_tests {
         let k = 8;
         let symbol_size = 32;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-property-overhead-v1";
+        let context = failure_context(
+            "RQ-U-HAPPY-REPAIR",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},overhead_multiplier=2"),
+            replay_ref,
+        );
 
         let source = make_source_data(k, symbol_size, seed);
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
 
@@ -797,18 +891,29 @@ mod property_tests {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder
-            .decode(&received)
-            .expect("decode with overhead should succeed");
-        assert_eq!(result.source, source);
+        let result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} decode with overhead should succeed; got {err:?}")
+        });
+        assert_eq!(
+            result.source, source,
+            "{context} decoded source must match original"
+        );
     }
 
     /// Property: encoder produces correctly-sized symbols.
     #[test]
     fn property_encoder_symbol_sizes() {
+        let replay_ref = "replay:rq-u-systematic-property-symbol-sizes-v1";
         for (k, symbol_size, seed) in [(4, 16, 1u64), (8, 32, 2), (16, 64, 3), (32, 128, 4)] {
+            let context = failure_context(
+                "RQ-U-SYSTEMATIC-PROPERTY-SIZES",
+                seed,
+                &format!("k={k},symbol_size={symbol_size},esi_range=[0,19]"),
+                replay_ref,
+            );
             let source = make_source_data(k, symbol_size, seed);
-            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+                .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
             let params = encoder.params();
 
             // Check intermediate symbols
@@ -816,7 +921,7 @@ mod property_tests {
                 assert_eq!(
                     encoder.intermediate_symbol(i).len(),
                     symbol_size,
-                    "intermediate symbol {i} should be {symbol_size} bytes for k={k}"
+                    "{context} intermediate symbol {i} should be {symbol_size} bytes for k={k}"
                 );
             }
 
@@ -825,7 +930,7 @@ mod property_tests {
                 assert_eq!(
                     encoder.repair_symbol(esi).len(),
                     symbol_size,
-                    "repair symbol {esi} should be {symbol_size} bytes for k={k}"
+                    "{context} repair symbol {esi} should be {symbol_size} bytes for k={k}"
                 );
             }
         }
@@ -917,9 +1022,20 @@ mod property_tests {
         let k = 8;
         let symbol_size = 32;
         let source = make_source_data(k, symbol_size, 0);
+        let replay_ref = "replay:rq-u-systematic-property-seed-independent-v1";
+        let context = failure_context(
+            "RQ-U-DETERMINISM-SEED",
+            0,
+            &format!("k={k},symbol_size={symbol_size},compare_seeds=[111,222]"),
+            replay_ref,
+        );
 
-        let enc1 = SystematicEncoder::new(&source, symbol_size, 111).unwrap();
-        let enc2 = SystematicEncoder::new(&source, symbol_size, 222).unwrap();
+        let enc1 = SystematicEncoder::new(&source, symbol_size, 111).unwrap_or_else(|| {
+            panic!("{context} expected encoder construction to succeed for seed=111")
+        });
+        let enc2 = SystematicEncoder::new(&source, symbol_size, 222).unwrap_or_else(|| {
+            panic!("{context} expected encoder construction to succeed for seed=222")
+        });
 
         let repair1: Vec<Vec<u8>> = (0..10u32).map(|esi| enc1.repair_symbol(esi)).collect();
         let repair2: Vec<Vec<u8>> = (0..10u32).map(|esi| enc2.repair_symbol(esi)).collect();
@@ -928,7 +1044,7 @@ mod property_tests {
         // by the RFC 6330 systematic index table, not by the seed.
         assert_eq!(
             repair1, repair2,
-            "same source data should produce identical repair output"
+            "{context} same source data should produce identical repair output"
         );
     }
 
@@ -938,22 +1054,36 @@ mod property_tests {
         let k = 12;
         let symbol_size = 24;
         let seed = 77777u64;
+        let replay_ref = "replay:rq-u-systematic-property-determinism-runs-v1";
 
-        for _ in 0..5 {
+        for run_idx in 0..5 {
+            let context = failure_context(
+                "RQ-U-DETERMINISM-SEED",
+                seed,
+                &format!("k={k},symbol_size={symbol_size},run={run_idx},esi_range=[0,19]"),
+                replay_ref,
+            );
             let source = make_source_data(k, symbol_size, seed);
-            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+                .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
 
             let repairs: Vec<Vec<u8>> = (0..20u32).map(|esi| encoder.repair_symbol(esi)).collect();
 
             // All runs should produce identical repairs
             let expected: Vec<Vec<u8>> = (0..20u32)
                 .map(|esi| {
-                    let enc = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+                    let enc =
+                        SystematicEncoder::new(&source, symbol_size, seed).unwrap_or_else(|| {
+                            panic!("{context} expected encoder construction to succeed")
+                        });
                     enc.repair_symbol(esi)
                 })
                 .collect();
 
-            assert_eq!(repairs, expected, "same seed must produce identical output");
+            assert_eq!(
+                repairs, expected,
+                "{context} same seed must produce identical output"
+            );
         }
     }
 }
