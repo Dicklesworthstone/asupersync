@@ -264,6 +264,48 @@ impl TcpStreamInner {
         drop(guard);
         result
     }
+
+    fn clear_waiter_on_drop(&self, interest: Interest) {
+        let mut guard = self.state.lock().unwrap();
+        let SplitIoState {
+            registration,
+            read_waker,
+            write_waker,
+        } = &mut *guard;
+
+        if interest.is_readable() {
+            *read_waker = None;
+        }
+        if interest.is_writable() {
+            *write_waker = None;
+        }
+
+        let desired_interest = registration_interest(
+            read_waker.is_some(),
+            write_waker.is_some(),
+            Interest::empty(),
+        );
+
+        // No pending waiters remain. Drop registration so its driver-side
+        // waker slot/token are released immediately instead of lingering until
+        // the last half drops.
+        if desired_interest.is_empty() {
+            *registration = None;
+            return;
+        }
+
+        if let Some(reg) = registration.as_mut() {
+            if reg.interest() != desired_interest && reg.set_interest(desired_interest).is_err() {
+                *registration = None;
+                return;
+            }
+
+            let combined = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+            if !reg.update_waker(combined) {
+                *registration = None;
+            }
+        }
+    }
 }
 
 /// Owned read half of a split TCP stream.
@@ -454,9 +496,16 @@ impl AsyncWrite for OwnedWriteHalf {
 
 impl Drop for OwnedWriteHalf {
     fn drop(&mut self) {
+        self.inner.clear_waiter_on_drop(Interest::WRITABLE);
         if self.shutdown_on_drop {
             let _ = self.inner.stream.shutdown(Shutdown::Write);
         }
+    }
+}
+
+impl Drop for OwnedReadHalf {
+    fn drop(&mut self) {
+        self.inner.clear_waiter_on_drop(Interest::READABLE);
     }
 }
 
@@ -905,5 +954,106 @@ mod tests {
         );
 
         crate::test_complete!("registration_interest_prefers_waiter_union");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_read_half_clears_waiter_and_registration_when_idle() {
+        init_test("dropping_read_half_clears_waiter_and_registration_when_idle");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let task_cx = Context::from_waker(&waker);
+        read_half
+            .inner
+            .register_interest(&task_cx, Interest::READABLE)
+            .expect("register readable");
+
+        drop(read_half);
+
+        let state = write_half.inner.state.lock().expect("lock poisoned");
+        assert!(
+            state.read_waker.is_none(),
+            "read waiter must be cleared after read half drop"
+        );
+        assert!(
+            state.registration.is_none(),
+            "registration should be released when no waiters remain"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_write_half_clears_waiter_and_keeps_read_interest() {
+        init_test("dropping_write_half_clears_waiter_and_keeps_read_interest");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let task_cx = Context::from_waker(&waker);
+        read_half
+            .inner
+            .register_interest(&task_cx, Interest::READABLE)
+            .expect("register readable");
+        write_half
+            .inner
+            .register_interest(&task_cx, Interest::WRITABLE)
+            .expect("register writable");
+
+        drop(write_half);
+
+        let state = read_half.inner.state.lock().expect("lock poisoned");
+        assert!(
+            state.write_waker.is_none(),
+            "write waiter must be cleared after write half drop"
+        );
+        assert!(
+            state.registration.is_some(),
+            "registration should remain for the live read waiter"
+        );
+        assert_eq!(
+            state
+                .registration
+                .as_ref()
+                .expect("registration")
+                .interest(),
+            Interest::READABLE,
+            "interest should drop writable bit when write half is dropped"
+        );
     }
 }
