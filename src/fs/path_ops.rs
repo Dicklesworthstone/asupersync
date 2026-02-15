@@ -166,11 +166,10 @@ fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn path_to_cstring(path: &Path) -> io::Result<std::ffi::CString> {
-    std::ffi::CString::new(
-        path.to_str()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?,
-    )
-    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -216,7 +215,11 @@ fn uring_symlinkat(target: &Path, linkpath: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use futures_lite::future;
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    use std::ffi::OsString;
     use std::fs;
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    use std::os::unix::ffi::OsStringExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,6 +253,39 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    #[test]
+    fn path_to_cstring_accepts_non_utf8_unix_paths() {
+        init_test("path_to_cstring_accepts_non_utf8_unix_paths");
+        let raw = vec![b'f', b's', b'_', 0xFE];
+        let path = PathBuf::from(OsString::from_vec(raw.clone()));
+
+        let c = path_to_cstring(&path).expect("non-utf8 unix path should be accepted");
+        crate::assert_with_log!(
+            c.as_bytes() == raw.as_slice(),
+            "raw bytes preserved",
+            raw.as_slice(),
+            c.as_bytes()
+        );
+        crate::test_complete!("path_to_cstring_accepts_non_utf8_unix_paths");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    #[test]
+    fn path_to_cstring_rejects_nul_bytes() {
+        init_test("path_to_cstring_rejects_nul_bytes");
+        let path = PathBuf::from(OsString::from_vec(vec![b'b', b'a', b'd', 0, b'x']));
+
+        let err = path_to_cstring(&path).expect_err("path with nul must be rejected");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "invalid input error",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        crate::test_complete!("path_to_cstring_rejects_nul_bytes");
     }
 
     #[test]

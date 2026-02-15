@@ -96,11 +96,10 @@ fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn path_to_cstring(path: &std::path::Path) -> io::Result<std::ffi::CString> {
-    std::ffi::CString::new(
-        path.to_str()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?,
-    )
-    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
 }
 
 /// Uses io_uring's UNLINKAT opcode with AT_REMOVEDIR flag for directory removal.
@@ -128,6 +127,10 @@ fn uring_mkdirat(path: &std::path::Path, mode: libc::mode_t) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    use std::ffi::OsString;
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    use std::os::unix::ffi::OsStringExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -142,6 +145,39 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    #[test]
+    fn test_path_to_cstring_accepts_non_utf8_unix_paths() {
+        init_test("test_path_to_cstring_accepts_non_utf8_unix_paths");
+        let raw = vec![b'd', b'i', b'r', b'_', 0xFF];
+        let path = std::path::PathBuf::from(OsString::from_vec(raw.clone()));
+
+        let c = path_to_cstring(&path).expect("non-utf8 unix path should be accepted");
+        crate::assert_with_log!(
+            c.as_bytes() == raw.as_slice(),
+            "raw bytes preserved",
+            raw.as_slice(),
+            c.as_bytes()
+        );
+        crate::test_complete!("test_path_to_cstring_accepts_non_utf8_unix_paths");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
+    #[test]
+    fn test_path_to_cstring_rejects_nul_bytes() {
+        init_test("test_path_to_cstring_rejects_nul_bytes");
+        let path = std::path::PathBuf::from(OsString::from_vec(vec![b'b', b'a', b'd', 0, b'x']));
+
+        let err = path_to_cstring(&path).expect_err("path with nul must be rejected");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "invalid input error",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        crate::test_complete!("test_path_to_cstring_rejects_nul_bytes");
     }
 
     #[test]
