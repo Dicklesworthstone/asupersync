@@ -1192,7 +1192,9 @@ mod pipeline_e2e {
                 );
                 match err {
                     DecodeError::InsufficientSymbols { .. } => {}
-                    DecodeError::SingularMatrix { .. } | DecodeError::SymbolSizeMismatch { .. } => {
+                    DecodeError::SingularMatrix { .. }
+                    | DecodeError::SymbolSizeMismatch { .. }
+                    | DecodeError::SymbolEquationArityMismatch { .. } => {
                         panic!("unexpected decode error {err:?}");
                     }
                 }

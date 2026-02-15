@@ -919,7 +919,10 @@ fn runtime_state_refinement_map_reporting_and_signoff_contract_is_complete() {
         .get("report_cadence")
         .and_then(Value::as_array)
         .expect("report_cadence must be array");
-    assert!(cadence.len() >= 2, "report_cadence must define review rhythms");
+    assert!(
+        cadence.len() >= 2,
+        "report_cadence must define review rhythms"
+    );
 
     let mut cadence_ids = BTreeSet::new();
     for entry in cadence {
@@ -932,7 +935,8 @@ fn runtime_state_refinement_map_reporting_and_signoff_contract_is_complete() {
             "duplicate cadence_id: {cadence_id}"
         );
         assert!(
-            entry.get("governance_record_thread")
+            entry
+                .get("governance_record_thread")
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.trim().is_empty()),
             "governance_record_thread must be non-empty for cadence {cadence_id}"
@@ -1089,7 +1093,11 @@ fn runtime_state_refinement_map_reporting_and_signoff_contract_is_complete() {
     let coverage_percent = latest_report
         .get("coverage_percent")
         .expect("latest_report.coverage_percent must exist");
-    for key in ["mapped_operations", "conformance_harnesses", "invariant_test_links"] {
+    for key in [
+        "mapped_operations",
+        "conformance_harnesses",
+        "invariant_test_links",
+    ] {
         let value = coverage_percent
             .get(key)
             .and_then(Value::as_f64)
