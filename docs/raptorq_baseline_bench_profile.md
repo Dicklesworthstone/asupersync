@@ -92,7 +92,7 @@ Performance budget outcomes are advisory-only until these are present and green:
 
 - D1 (`bd-1rxlv`): RFC/canonical golden vector suite
 - D5 (`bd-61s90`): comprehensive unit matrix
-- D6 (`bd-3bvdj`): deterministic E2E scenario suite
+- D6 (`bd-3bvdj` / `asupersync-wdk6c`): deterministic E2E scenario suite (`scripts/run_raptorq_e2e.sh`)
 - D7 (`bd-oeql8`) and D9 (`bd-26pqk`): structured forensic logging + replay catalog
 
 No optimization decision record (`bd-7toum`) or CI gate closure (`bd-322jd`) should treat G1 budgets as authoritative without these prerequisites.
@@ -130,7 +130,7 @@ Artifact path conventions by profile:
 
 Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead comments:
 
-1. Confirm D1 (`bd-1rxlv`), D5 (`bd-61s90`), and D6 (`bd-3bvdj`) are green in CI.
+1. Confirm D1 (`bd-1rxlv`), D5 (`bd-61s90`), and D6 (`bd-3bvdj` / `asupersync-wdk6c`) are green in CI.
 2. Re-run full baseline corpus with fixed seed `424242` and record artifact paths.
 3. Recompute warning/fail budgets from the refreshed corpus and update this document.
 4. Verify `fast`/`full`/`forensics` runtime envelopes on the standard CI shape.
@@ -142,7 +142,7 @@ Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead 
 |---|---|---|---|
 | `bd-1rxlv` | D1 golden-vector conformance | `closed` | prerequisite satisfied |
 | `bd-61s90` | D5 comprehensive unit matrix | `open` | unit-coverage evidence still partial for closure |
-| `bd-3bvdj` | D6 deterministic E2E suite | `open` | E2E profile coverage not fully closed |
+| `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `in_progress` | profile-aware deterministic runner is in place; keep scenario/replay mapping synchronized |
 | `bd-oeql8` | D7 structured logging/artifact schema | `open` | forensics schema contract still pending closure |
 | `bd-26pqk` | D9 replay catalog linkage | `open` | replay catalog delivered but bead not closed yet |
 
@@ -206,11 +206,16 @@ This document satisfies the G1 draft-definition phase (workload taxonomy + budge
 - `tests/raptorq_perf_invariants.rs`
 
 ### Deterministic E2E
+- `rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast`
+- `rch exec -- ./scripts/run_raptorq_e2e.sh --profile full`
+- `rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT`
 - `rch exec -- ./scripts/run_phase6_e2e.sh`
 - `rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture`
 
 Artifacts:
 - `target/phase6-e2e/report_<timestamp>.txt`
+- `target/e2e-results/raptorq/<profile>_<timestamp>/summary.json`
+- `target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson`
 - `target/perf-results/perf_20260214_143734/report.json`
 - `target/perf-results/perf_20260214_143734/artifacts/baseline_current.json`
 

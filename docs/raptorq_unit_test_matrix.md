@@ -102,6 +102,28 @@ Profile tags represented in catalog entries:
 - `full`
 - `forensics`
 
+## Deterministic E2E Script Suite (D6)
+
+Deterministic scenario runner for D6:
+
+- Script: `scripts/run_raptorq_e2e.sh`
+- Machine-parseable artifacts:
+  - `target/e2e-results/raptorq/<profile>_<timestamp>/summary.json`
+  - `target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson`
+- Scenario records include:
+  - `scenario_id`
+  - `profile`
+  - `category` (`happy`|`boundary`|`failure`|`composite`)
+  - `replay_ref`
+  - `unit_sentinel`
+  - `repro_cmd`
+
+Profile coverage in the script suite:
+
+- `fast`: happy smoke + tiny boundary + insufficient-symbol failure + deterministic report contract
+- `full`: complete happy/boundary/failure matrix + deterministic report contract
+- `forensics`: heavy-loss/hard-failure surfaces + deterministic report contract
+
 ## Gaps and Follow-ups
 
 Open gaps identified during matrix pass:
@@ -113,7 +135,7 @@ Mapped follow-up beads:
 
 - `bd-26pqk` (seed/fixture replay catalog)
 - `bd-oeql8` (structured test logging schema)
-- `bd-3bvdj` (deterministic E2E scenario suite alignment)
+- `bd-3bvdj` / `asupersync-wdk6c` (deterministic E2E scenario suite alignment)
 
 ## D5 Closure Gate
 
@@ -136,7 +158,7 @@ The D5 bead can close only when all of the following are true:
 | `bd-61s90` | D5 comprehensive unit matrix | `in_progress` | this matrix remains authoritative, but closure requires replay-id/schema completion on all required paths |
 | `bd-26pqk` | D9 replay catalog | `open` | catalog artifact exists; keep replay references aligned with latest entries |
 | `bd-oeql8` | D7 structured logging schema | `open` | schema contract enforcement still needed across all required suites |
-| `bd-3bvdj` | D6 deterministic E2E suite | `open` | unit-to-E2E linkage must remain synchronized as scenarios evolve |
+| `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `in_progress` | deterministic profile/scenario runner now exists; keep unit-to-E2E linkage synchronized as scenarios evolve |
 
 ## Repro Commands
 
@@ -146,6 +168,12 @@ rch exec -- cargo test --lib raptorq -- --nocapture
 
 # Deterministic conformance scenario suite
 rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture
+
+# Deterministic D6 profile suite (happy + boundary + failure)
+rch exec -- ./scripts/run_raptorq_e2e.sh --profile full
+
+# Focused failure reproduction with stable replay linkage
+rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
 
 # Structured logging sentinel in perf invariants
 rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture
