@@ -233,11 +233,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-lean-full-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run Lean full profile commands
+      - name: Resolve Lean full artifact contract
+        id: lean_full_contract
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p lean-full
 
           profile_file="formal/lean/coverage/ci_verification_profiles.json"
           if [[ ! -f "$profile_file" ]]; then
@@ -245,27 +245,85 @@ jobs:
             exit 1
           fi
 
+          profile_json="$(jq -c '.profiles[] | select(.name == "full")' "$profile_file")"
+          if [[ -z "$profile_json" || "$profile_json" == "null" ]]; then
+            echo "::error::Missing full profile in $profile_file"
+            exit 1
+          fi
+
+          manifest_schema_version="$(jq -r '.artifact_contract.manifest_schema_version // empty' "$profile_file")"
+          artifact_name="$(jq -r '.artifact_bundle.name // empty' <<<"$profile_json")"
+          artifact_dir="$(jq -r '.artifact_bundle.directory // empty' <<<"$profile_json")"
+          retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
+          routing_policy="$(jq -r '.triage.routing_policy // empty' <<<"$profile_json")"
+          ttfr_target_minutes="$(jq -r '.triage.ttfr_target_minutes // empty' <<<"$profile_json")"
+          repro_bundle_manifest="$(jq -r '.artifact_bundle.repro_bundle_manifest // empty' <<<"$profile_json")"
+          repro_script="$(jq -r '.artifact_bundle.repro_script // empty' <<<"$profile_json")"
+          failure_payload_path="$(jq -r '.artifact_bundle.failure_payload // empty' <<<"$profile_json")"
+
+          if [[ -z "$manifest_schema_version" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
+            echo "::error::Full artifact contract is missing manifest schema/name/directory"
+            exit 1
+          fi
+          if [[ -z "$repro_bundle_manifest" || -z "$repro_script" || -z "$failure_payload_path" ]]; then
+            echo "::error::Full artifact contract is missing repro/failure payload paths"
+            exit 1
+          fi
+          if [[ ! "$retention_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::Full retention_days must be numeric, got: $retention_days"
+            exit 1
+          fi
+          if [[ ! "$ttfr_target_minutes" =~ ^[0-9]+$ ]]; then
+            echo "::error::Full ttfr_target_minutes must be numeric, got: $ttfr_target_minutes"
+            exit 1
+          fi
+          if [[ -z "$routing_policy" ]]; then
+            echo "::error::Full triage.routing_policy must be non-empty"
+            exit 1
+          fi
+
+          {
+            printf 'profile_file=%s\n' "$profile_file"
+            printf 'manifest_schema_version=%s\n' "$manifest_schema_version"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_dir=%s\n' "$artifact_dir"
+            printf 'retention_days=%s\n' "$retention_days"
+            printf 'routing_policy=%s\n' "$routing_policy"
+            printf 'ttfr_target_minutes=%s\n' "$ttfr_target_minutes"
+            printf 'repro_bundle_manifest=%s\n' "$repro_bundle_manifest"
+            printf 'repro_script=%s\n' "$repro_script"
+            printf 'failure_payload=%s\n' "$failure_payload_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Lean full profile commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
+          mkdir -p "$artifact_dir"
+
           mapfile -t full_commands < <(jq -r '.profiles[] | select(.name == "full") | .commands[]' "$profile_file")
           if [[ "${#full_commands[@]}" -eq 0 ]]; then
             echo "::error::Full profile has no commands"
             exit 1
           fi
 
-          printf '%s\n' "${full_commands[@]}" > lean-full/commands.txt
+          printf '%s\n' "${full_commands[@]}" > "$artifact_dir/commands.txt"
 
           run_status="success"
-          : > lean-full/run.log
+          : > "$artifact_dir/run.log"
 
           for cmd in "${full_commands[@]}"; do
-            echo ">>> $cmd" | tee -a lean-full/run.log
-            if ! bash -lc "$cmd" >> lean-full/run.log 2>&1; then
-              printf '%s\n' "$cmd" > lean-full/failed_command.txt
+            echo ">>> $cmd" | tee -a "$artifact_dir/run.log"
+            if ! bash -lc "$cmd" >> "$artifact_dir/run.log" 2>&1; then
+              printf '%s\n' "$cmd" > "$artifact_dir/failed_command.txt"
               run_status="failure"
               break
             fi
           done
 
-          printf '%s\n' "$run_status" > lean-full/status.txt
+          printf '%s\n' "$run_status" > "$artifact_dir/status.txt"
           if [[ "$run_status" != "success" ]]; then
             exit 1
           fi
@@ -275,14 +333,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p lean-full
+          artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
+          manifest_schema_version="${{ steps.lean_full_contract.outputs.manifest_schema_version }}"
+          repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
+          repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
+          mkdir -p "$artifact_dir"
 
-          profile_file="formal/lean/coverage/ci_verification_profiles.json"
-          failed_cmd="$(cat lean-full/failed_command.txt 2>/dev/null || echo "unknown")"
-          run_status="$(cat lean-full/status.txt 2>/dev/null || echo "unknown")"
+          failed_cmd="$(cat "$artifact_dir/failed_command.txt" 2>/dev/null || echo "unknown")"
+          run_status="$(cat "$artifact_dir/status.txt" 2>/dev/null || echo "unknown")"
+          rustc_version="$(rustc -V)"
+          cargo_version="$(cargo -V)"
+          rustup_toolchain="${RUSTUP_TOOLCHAIN:-unknown}"
+          cargo_lock_sha256="$(sha256sum Cargo.lock | awk '{print $1}')"
 
           mapfile -t full_artifacts < <(jq -r '.profiles[] | select(.name == "full") | .output_artifacts[]' "$profile_file")
-          : > lean-full/artifacts.jsonl
+          : > "$artifact_dir/artifacts.jsonl"
           for artifact in "${full_artifacts[@]}"; do
             if [[ -f "$artifact" ]]; then
               sha256="$(sha256sum "$artifact" | awk '{print $1}')"
@@ -292,16 +358,16 @@ jobs:
                 --arg sha256 "$sha256" \
                 --argjson size_bytes "$size_bytes" \
                 '{path: $path, exists: true, sha256: $sha256, size_bytes: $size_bytes}' \
-                >> lean-full/artifacts.jsonl
+                >> "$artifact_dir/artifacts.jsonl"
             else
               jq -cn \
                 --arg path "$artifact" \
                 '{path: $path, exists: false, sha256: null, size_bytes: null}' \
-                >> lean-full/artifacts.jsonl
+                >> "$artifact_dir/artifacts.jsonl"
             fi
           done
 
-          jq -s '.' lean-full/artifacts.jsonl > lean-full/artifacts.json
+          jq -s '.' "$artifact_dir/artifacts.jsonl" > "$artifact_dir/artifacts.json"
 
           {
             echo "#!/usr/bin/env bash"
@@ -309,29 +375,35 @@ jobs:
             while IFS= read -r cmd; do
               [[ -n \"$cmd\" ]] || continue
               printf '%s\n' \"$cmd\"
-            done < lean-full/commands.txt
-          } > lean-full/repro_commands.sh
-          chmod +x lean-full/repro_commands.sh
+            done < "$artifact_dir/commands.txt"
+          } > "$repro_script"
+          chmod +x "$repro_script"
 
           jq -n \
-            --arg schema_version "lean.full.repro.bundle.v1" \
+            --arg schema_version "$manifest_schema_version" \
             --arg generated_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg profile "full" \
             --arg status "$run_status" \
             --arg failed_command "$failed_cmd" \
             --arg profile_source "$profile_file" \
-            --arg repro_script "lean-full/repro_commands.sh" \
+            --arg repro_script "$repro_script" \
+            --arg commands_file "$artifact_dir/commands.txt" \
             --arg workflow_name "${GITHUB_WORKFLOW}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg event_name "${GITHUB_EVENT_NAME}" \
             --arg git_ref "${GITHUB_REF}" \
             --arg git_commit "${GITHUB_SHA}" \
+            --arg rustc_version "$rustc_version" \
+            --arg cargo_version "$cargo_version" \
+            --arg rustup_toolchain "$rustup_toolchain" \
+            --arg cargo_lock_sha256 "$cargo_lock_sha256" \
             --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
             --arg comparison_keys_json "$(jq -c '.profiles[] | select(.name == "full") | .comparison_keys' "$profile_file")" \
             --argjson expected_runtime_seconds "$(jq '.profiles[] | select(.name == "full") | .expected_runtime_seconds' "$profile_file")" \
-            --argjson commands "$(jq -Rsc 'split(\"\\n\")[:-1]' lean-full/commands.txt)" \
-            --argjson artifacts "$(cat lean-full/artifacts.json)" \
+            --argjson commands "$(jq -Rsc 'split(\"\\n\")[:-1]' "$artifact_dir/commands.txt")" \
+            --argjson artifacts "$(cat "$artifact_dir/artifacts.json")" \
+            --argjson manifest_required_fields "$(jq '.artifact_contract.manifest_required_fields' "$profile_file")" \
             '{
               schema_version: $schema_version,
               generated_at_utc: $generated_at_utc,
@@ -351,28 +423,45 @@ jobs:
               ownership: ($ownership_json | fromjson),
               comparison_keys: ($comparison_keys_json | fromjson),
               expected_runtime_seconds: $expected_runtime_seconds,
+              toolchain: {
+                rustc: $rustc_version,
+                cargo: $cargo_version,
+                rustup_toolchain: $rustup_toolchain
+              },
+              inputs: {
+                profile_file: $profile_source,
+                commands_file: $commands_file,
+                cargo_lock_sha256: $cargo_lock_sha256
+              },
+              manifest_required_fields: $manifest_required_fields,
               commands: $commands,
               artifacts: $artifacts
-            }' > lean-full/repro_bundle_manifest.json
+            }' > "$repro_bundle_manifest"
 
       - name: Emit full failure payload
         if: failure()
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p lean-full
+          artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
+          routing_policy="${{ steps.lean_full_contract.outputs.routing_policy }}"
+          ttfr_target_minutes="${{ steps.lean_full_contract.outputs.ttfr_target_minutes }}"
+          repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
+          repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
+          failure_payload_path="${{ steps.lean_full_contract.outputs.failure_payload }}"
+          mkdir -p "$artifact_dir"
 
-          profile_file="formal/lean/coverage/ci_verification_profiles.json"
-          failed_cmd="$(cat lean-full/failed_command.txt 2>/dev/null || echo "unknown")"
+          failed_cmd="$(cat "$artifact_dir/failed_command.txt" 2>/dev/null || echo "unknown")"
 
           jq -n \
             --arg profile "full" \
             --arg failed_command "$failed_cmd" \
-            --arg repro_bundle_manifest "lean-full/repro_bundle_manifest.json" \
-            --arg repro_script "lean-full/repro_commands.sh" \
-            --arg routing_policy "bead-owner-v1" \
+            --arg repro_bundle_manifest "$repro_bundle_manifest" \
+            --arg repro_script "$repro_script" \
+            --arg routing_policy "$routing_policy" \
             --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
-            --argjson ttfr_target_minutes 60 \
+            --argjson ttfr_target_minutes "$ttfr_target_minutes" \
             '{
               profile: $profile,
               routing_policy: $routing_policy,
@@ -387,24 +476,24 @@ jobs:
                 "Route to ownership.primary_bead and failure_triage_bead with manifest + failed command",
                 "Escalate to ownership.escalation_bead if TTFR exceeds ttfr_target_minutes"
               ]
-            }' > lean-full/failure_payload.json
+            }' > "$failure_payload_path"
 
           {
             echo "## Lean Full Failure Payload"
             echo
             echo "- Failed command: \`$failed_cmd\`"
-            echo "- Repro bundle: \`lean-full/repro_bundle_manifest.json\`"
-            echo "- Repro script: \`lean-full/repro_commands.sh\`"
-            echo "- Failure payload: \`lean-full/failure_payload.json\`"
+            echo "- Repro bundle: \`$repro_bundle_manifest\`"
+            echo "- Repro script: \`$repro_script\`"
+            echo "- Failure payload: \`$failure_payload_path\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Lean full artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lean-full-artifacts
-          path: lean-full/
-          retention-days: 30
+          name: ${{ steps.lean_full_contract.outputs.artifact_name }}
+          path: ${{ steps.lean_full_contract.outputs.artifact_dir }}/
+          retention-days: ${{ fromJSON(steps.lean_full_contract.outputs.retention_days) }}
 
   test:
     name: Test Suite
