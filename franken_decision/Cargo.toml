@@ -8,8 +8,8 @@ repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["decision", "contract", "bayesian", "loss-matrix"]
 
 [dependencies]
-franken-kernel = { path = "../franken_kernel" }
-franken-evidence = { path = "../franken_evidence" }
+franken-kernel = { version = "0.2.0", path = "../franken_kernel" }
+franken-evidence = { version = "0.2.0", path = "../franken_evidence" }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
