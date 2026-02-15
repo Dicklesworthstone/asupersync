@@ -187,6 +187,18 @@ Validation for this artifact is enforced in `tests/lean_invariant_theorem_test_l
 Validation for profile structure, runtime ordering, and bead-link integrity is enforced in
 `tests/lean_ci_verification_profiles.rs`.
 
+## Governance Cadence and Decision Records (Track-5)
+
+`ci_verification_profiles.json` includes `governance_policy` as the canonical governance contract:
+- deterministic review cadence definitions for `weekly-proof-health` and `phase-exit-signoff`
+- required participants and required artifact sets per review
+- explicit rules for bead status updates and dependency-edge updates from each review
+- decision-record template with required fields, temporary-decision expiry semantics, and
+  dependency change type constraints
+
+CI failure payload generation consumes this policy so triage artifacts include governance context
+and explicit `br` update/dependency command templates for operational follow-through.
+
 ## Proof-Safe Hot-Path Refactor Checklist (Track-6 T6.1b)
 
 Canonical checklist location:

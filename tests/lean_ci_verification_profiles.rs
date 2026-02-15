@@ -192,6 +192,47 @@ fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
         "minimum_days should preserve at least one week of forensic reproducibility"
     );
 
+    let misroute_tracking = artifact_contract
+        .get("misroute_tracking")
+        .and_then(Value::as_object)
+        .expect("artifact_contract.misroute_tracking must be object");
+    let misroute_policy_id = misroute_tracking
+        .get("policy_id")
+        .and_then(Value::as_str)
+        .expect("artifact_contract.misroute_tracking.policy_id must be string");
+    assert!(
+        !misroute_policy_id.trim().is_empty(),
+        "misroute policy_id must be non-empty"
+    );
+    let feedback_log_path = misroute_tracking
+        .get("feedback_log_path")
+        .and_then(Value::as_str)
+        .expect("artifact_contract.misroute_tracking.feedback_log_path must be string");
+    assert!(
+        std::path::Path::new(feedback_log_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")),
+        "misroute feedback log path must be jsonl for append-only auditability"
+    );
+    let review_window_days = misroute_tracking
+        .get("review_window_days")
+        .and_then(Value::as_u64)
+        .expect("artifact_contract.misroute_tracking.review_window_days must be numeric");
+    assert!(
+        review_window_days >= 7,
+        "misroute review window must be at least one week"
+    );
+    let max_allowed_misroutes_per_20_failures = misroute_tracking
+        .get("max_allowed_misroutes_per_20_failures")
+        .and_then(Value::as_u64)
+        .expect(
+            "artifact_contract.misroute_tracking.max_allowed_misroutes_per_20_failures must be numeric"
+        );
+    assert!(
+        max_allowed_misroutes_per_20_failures <= 3,
+        "misroute threshold should remain strict (<= 3 per 20 failures)"
+    );
+
     let entries = profiles
         .get("profiles")
         .and_then(Value::as_array)
@@ -534,6 +575,216 @@ fn ci_profile_waiver_policy_enforces_expiry_and_closure_paths() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn ci_governance_policy_defines_cadence_and_decision_record_contract() {
+    let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
+    let governance_policy = profiles
+        .get("governance_policy")
+        .and_then(Value::as_object)
+        .expect("governance_policy must be an object");
+
+    assert_eq!(
+        governance_policy
+            .get("policy_id")
+            .and_then(Value::as_str)
+            .expect("governance_policy.policy_id must be a string"),
+        "lean.ci.governance.cadence.v1"
+    );
+    let decision_log_path = governance_policy
+        .get("decision_log_path")
+        .and_then(Value::as_str)
+        .expect("governance_policy.decision_log_path must be a string");
+    assert!(
+        std::path::Path::new(decision_log_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")),
+        "governance decision log path must be jsonl for append-only governance history"
+    );
+
+    let reviews = governance_policy
+        .get("reviews")
+        .and_then(Value::as_array)
+        .expect("governance_policy.reviews must be an array");
+    assert!(
+        reviews.len() >= 2,
+        "governance_policy.reviews must include weekly and phase-exit reviews"
+    );
+
+    let mut review_ids = BTreeSet::new();
+    for review in reviews {
+        let review_id = review
+            .get("review_id")
+            .and_then(Value::as_str)
+            .expect("governance review_id must be a string");
+        assert!(
+            review_ids.insert(review_id.to_string()),
+            "duplicate governance review_id: {review_id}"
+        );
+
+        let cadence = review
+            .get("cadence")
+            .and_then(Value::as_str)
+            .expect("governance cadence must be a string");
+        assert!(
+            matches!(cadence, "weekly" | "phase-exit"),
+            "governance cadence must be weekly or phase-exit"
+        );
+
+        let participants = review
+            .get("required_participants")
+            .and_then(Value::as_array)
+            .expect("required_participants must be an array");
+        assert!(
+            !participants.is_empty(),
+            "required_participants must be non-empty"
+        );
+        for participant in participants {
+            let role = participant
+                .as_str()
+                .expect("required_participants entries must be strings");
+            assert!(
+                !role.trim().is_empty(),
+                "participant role must be non-empty"
+            );
+        }
+
+        let artifacts = review
+            .get("required_artifacts")
+            .and_then(Value::as_array)
+            .expect("required_artifacts must be an array");
+        assert!(
+            !artifacts.is_empty(),
+            "required_artifacts must be non-empty"
+        );
+        for artifact in artifacts {
+            let path = artifact
+                .as_str()
+                .expect("required_artifacts entries must be strings");
+            assert!(
+                path.starts_with("formal/lean/coverage/"),
+                "governance required_artifacts must reference canonical coverage artifacts"
+            );
+        }
+
+        for rule_field in ["bead_status_update_rule", "dependency_update_rule"] {
+            let rule = review
+                .get(rule_field)
+                .and_then(Value::as_str)
+                .expect("governance review rule fields must be strings");
+            assert!(!rule.trim().is_empty(), "{rule_field} must be non-empty");
+        }
+    }
+    for required_review in ["weekly-proof-health", "phase-exit-signoff"] {
+        assert!(
+            review_ids.contains(required_review),
+            "governance reviews must include {required_review}"
+        );
+    }
+
+    let template = governance_policy
+        .get("decision_record_template")
+        .and_then(Value::as_object)
+        .expect("decision_record_template must be an object");
+    let required_fields = template
+        .get("required_fields")
+        .and_then(Value::as_array)
+        .expect("decision_record_template.required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("required_fields entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "decision_id",
+        "review_id",
+        "taken_at_utc",
+        "participants",
+        "summary",
+        "rationale",
+        "linked_bead_ids",
+        "linked_artifact_paths",
+        "temporary",
+        "expires_at_utc",
+        "bead_status_changes",
+        "dependency_changes",
+    ] {
+        assert!(
+            required_fields.contains(required),
+            "decision_record_template.required_fields must include {required}"
+        );
+    }
+
+    let temporary_requires_expiry = template
+        .get("temporary_decisions_require_expiry")
+        .and_then(Value::as_bool)
+        .expect("temporary_decisions_require_expiry must be boolean");
+    assert!(
+        temporary_requires_expiry,
+        "temporary decision records must require an expiry field"
+    );
+
+    let bead_status_change_required_fields = template
+        .get("bead_status_change_required_fields")
+        .and_then(Value::as_array)
+        .expect("bead_status_change_required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("bead_status_change_required_fields entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for required in ["bead_id", "from_status", "to_status", "reason"] {
+        assert!(
+            bead_status_change_required_fields.contains(required),
+            "bead_status_change_required_fields must include {required}"
+        );
+    }
+
+    let dependency_change_required_fields = template
+        .get("dependency_change_required_fields")
+        .and_then(Value::as_array)
+        .expect("dependency_change_required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("dependency_change_required_fields entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "blocked_bead_id",
+        "blocking_bead_id",
+        "change_type",
+        "reason",
+    ] {
+        assert!(
+            dependency_change_required_fields.contains(required),
+            "dependency_change_required_fields must include {required}"
+        );
+    }
+
+    let allowed_dependency_change_types = template
+        .get("allowed_dependency_change_types")
+        .and_then(Value::as_array)
+        .expect("allowed_dependency_change_types must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("allowed_dependency_change_types entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        allowed_dependency_change_types.contains("add")
+            && allowed_dependency_change_types.contains("remove"),
+        "allowed_dependency_change_types must include add/remove"
+    );
+}
+
+#[test]
 fn lean_smoke_failure_payload_routes_to_owners_deterministically() {
     for required_snippet in [
         ".beads/issues.jsonl",
@@ -542,11 +793,19 @@ fn lean_smoke_failure_payload_routes_to_owners_deterministically() {
         ".triage.routing_policy",
         ".triage.ttfr_target_minutes",
         ".artifact_bundle.failure_payload",
+        ".governance_policy.policy_id // empty",
+        ".governance_policy.decision_log_path // empty",
+        ".governance_policy.reviews[] | select(.review_id == \"weekly-proof-health\")",
         "ttfr_target_minutes",
+        "misroute_tracking",
+        "governance_weekly_review_json",
+        "governance_decision_required_fields_json",
+        "decision_record_required_fields",
         "owner_candidates",
         "routed_owners",
         "primary_owner",
         "first_action_checklist",
+        "Append governance decision record",
     ] {
         assert!(
             CI_WORKFLOW_YML.contains(required_snippet),
@@ -582,15 +841,24 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "Lean Full Gate (Main/Release)",
         "Resolve Lean full artifact contract",
         ".artifact_contract.manifest_schema_version // empty",
+        ".artifact_contract.misroute_tracking.policy_id // empty",
+        ".governance_policy.policy_id // empty",
+        ".governance_policy.decision_log_path // empty",
+        ".governance_policy.reviews[] | select(.review_id == \"phase-exit-signoff\")",
         "select(.name == \"full\")",
         ".artifact_bundle.repro_bundle_manifest // empty",
         ".artifact_bundle.repro_script // empty",
         ".artifact_bundle.failure_payload // empty",
         ".triage.routing_policy",
         ".triage.ttfr_target_minutes",
+        "misroute_tracking",
+        "governance_phase_exit_review_json",
+        "governance_decision_required_fields_json",
+        "decision_record_required_fields",
         "steps.lean_full_contract.outputs.repro_bundle_manifest",
         "steps.lean_full_contract.outputs.repro_script",
         "steps.lean_full_contract.outputs.failure_payload",
+        "Append governance decision record",
         "Upload Lean full artifacts",
         "steps.lean_full_contract.outputs.artifact_name",
     ] {

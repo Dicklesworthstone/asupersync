@@ -37,6 +37,13 @@
       "maximum_days": 90,
       "expiry_reference": "ci_run_created_at_utc",
       "rationale": "Keep Lean CI artifacts long enough for deterministic repro while capping long-term storage growth."
+    },
+    "misroute_tracking": {
+      "policy_id": "lean.ci.routing_feedback.v1",
+      "feedback_log_path": "formal/lean/coverage/ci_routing_feedback_log.jsonl",
+      "review_window_days": 14,
+      "max_allowed_misroutes_per_20_failures": 1,
+      "adjustment_rule": "If misroute rate exceeds threshold, update routing rules in ci_verification_profiles.json and record the policy change in Track-5 governance notes."
     }
   },
   "profiles": [
@@ -273,6 +280,77 @@
         "closed_at_utc": "2026-02-04T18:00:00Z"
       }
     ]
+  },
+  "governance_policy": {
+    "policy_id": "lean.ci.governance.cadence.v1",
+    "decision_log_path": "formal/lean/coverage/ci_governance_decisions.jsonl",
+    "reviews": [
+      {
+        "review_id": "weekly-proof-health",
+        "cadence": "weekly",
+        "required_participants": [
+          "track5-owner",
+          "triage-owner",
+          "refinement-owner"
+        ],
+        "required_artifacts": [
+          "formal/lean/coverage/ci_verification_profiles.json",
+          "formal/lean/coverage/gap_risk_sequencing_plan.json",
+          "formal/lean/coverage/lean_frontier_buckets_v1.json"
+        ],
+        "bead_status_update_rule": "Every review must update status/notes for impacted bead IDs within 24h.",
+        "dependency_update_rule": "Any newly identified blocker relationship must be reflected in bead dependency edges in the same review cycle."
+      },
+      {
+        "review_id": "phase-exit-signoff",
+        "cadence": "phase-exit",
+        "required_participants": [
+          "track5-owner",
+          "runtime-owner",
+          "formal-owner"
+        ],
+        "required_artifacts": [
+          "formal/lean/coverage/baseline_report_v1.json",
+          "formal/lean/coverage/runtime_state_refinement_map.json",
+          "formal/lean/coverage/invariant_theorem_test_link_map.json"
+        ],
+        "bead_status_update_rule": "Phase-exit signoff must close completed beads and reopen stale blockers with owners.",
+        "dependency_update_rule": "Signoff must remove resolved dependency edges and add newly discovered blockers."
+      }
+    ],
+    "decision_record_template": {
+      "required_fields": [
+        "decision_id",
+        "review_id",
+        "taken_at_utc",
+        "participants",
+        "summary",
+        "rationale",
+        "linked_bead_ids",
+        "linked_artifact_paths",
+        "temporary",
+        "expires_at_utc",
+        "bead_status_changes",
+        "dependency_changes"
+      ],
+      "temporary_decisions_require_expiry": true,
+      "bead_status_change_required_fields": [
+        "bead_id",
+        "from_status",
+        "to_status",
+        "reason"
+      ],
+      "dependency_change_required_fields": [
+        "blocked_bead_id",
+        "blocking_bead_id",
+        "change_type",
+        "reason"
+      ],
+      "allowed_dependency_change_types": [
+        "add",
+        "remove"
+      ]
+    }
   },
   "promotion_policy": {
     "smoke_to_frontier": "Frontier is required when smoke detects coverage drift or when gap sequencing artifacts change.",

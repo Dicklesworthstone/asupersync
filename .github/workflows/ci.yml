@@ -98,6 +98,13 @@ jobs:
           retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
           routing_policy="$(jq -r '.profiles[] | select(.name == "smoke") | .triage.routing_policy // empty' "$profile_file")"
           ttfr_target_minutes="$(jq -r '.profiles[] | select(.name == "smoke") | .triage.ttfr_target_minutes // empty' "$profile_file")"
+          misroute_policy_id="$(jq -r '.artifact_contract.misroute_tracking.policy_id // empty' "$profile_file")"
+          misroute_feedback_log_path="$(jq -r '.artifact_contract.misroute_tracking.feedback_log_path // empty' "$profile_file")"
+          misroute_review_window_days="$(jq -r '.artifact_contract.misroute_tracking.review_window_days // empty' "$profile_file")"
+          governance_policy_id="$(jq -r '.governance_policy.policy_id // empty' "$profile_file")"
+          governance_decision_log_path="$(jq -r '.governance_policy.decision_log_path // empty' "$profile_file")"
+          governance_weekly_review_json="$(jq -c '.governance_policy.reviews[] | select(.review_id == "weekly-proof-health")' "$profile_file")"
+          governance_decision_required_fields_json="$(jq -c '.governance_policy.decision_record_template.required_fields // []' "$profile_file")"
           failure_payload_default="lean-smoke/failure_payload.json"
           failure_payload_path="$(jq -r '.artifact_bundle.failure_payload // empty' <<<"$profile_json")"
           if [[ -z "$failure_payload_path" ]]; then
@@ -116,8 +123,29 @@ jobs:
             echo "::error::Smoke ttfr_target_minutes must be numeric, got: $ttfr_target_minutes"
             exit 1
           fi
+          if [[ ! "$misroute_review_window_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::misroute review_window_days must be numeric, got: $misroute_review_window_days"
+            exit 1
+          fi
           if [[ -z "$routing_policy" ]]; then
             echo "::error::Smoke triage.routing_policy must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$misroute_policy_id" || -z "$misroute_feedback_log_path" ]]; then
+            echo "::error::artifact_contract.misroute_tracking policy_id/feedback_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_policy_id" || -z "$governance_decision_log_path" ]]; then
+            echo "::error::governance_policy policy_id/decision_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_weekly_review_json" || "$governance_weekly_review_json" == "null" ]]; then
+            echo "::error::Missing governance weekly-proof-health review contract"
+            exit 1
+          fi
+          governance_required_field_count="$(jq -r 'length' <<<"$governance_decision_required_fields_json")"
+          if [[ ! "$governance_required_field_count" =~ ^[0-9]+$ || "$governance_required_field_count" -eq 0 ]]; then
+            echo "::error::governance decision_record_template.required_fields must be a non-empty array"
             exit 1
           fi
 
@@ -128,6 +156,13 @@ jobs:
             printf 'retention_days=%s\n' "$retention_days"
             printf 'routing_policy=%s\n' "$routing_policy"
             printf 'ttfr_target_minutes=%s\n' "$ttfr_target_minutes"
+            printf 'misroute_policy_id=%s\n' "$misroute_policy_id"
+            printf 'misroute_feedback_log_path=%s\n' "$misroute_feedback_log_path"
+            printf 'misroute_review_window_days=%s\n' "$misroute_review_window_days"
+            printf 'governance_policy_id=%s\n' "$governance_policy_id"
+            printf 'governance_decision_log_path=%s\n' "$governance_decision_log_path"
+            printf 'governance_weekly_review_json=%s\n' "$governance_weekly_review_json"
+            printf 'governance_decision_required_fields_json=%s\n' "$governance_decision_required_fields_json"
             printf 'failure_payload=%s\n' "$failure_payload_path"
           } >> "$GITHUB_OUTPUT"
 
@@ -163,6 +198,13 @@ jobs:
           artifact_dir="${{ steps.lean_smoke_contract.outputs.artifact_dir }}"
           routing_policy="${{ steps.lean_smoke_contract.outputs.routing_policy }}"
           ttfr_target_minutes="${{ steps.lean_smoke_contract.outputs.ttfr_target_minutes }}"
+          misroute_policy_id="${{ steps.lean_smoke_contract.outputs.misroute_policy_id }}"
+          misroute_feedback_log_path="${{ steps.lean_smoke_contract.outputs.misroute_feedback_log_path }}"
+          misroute_review_window_days="${{ steps.lean_smoke_contract.outputs.misroute_review_window_days }}"
+          governance_policy_id="${{ steps.lean_smoke_contract.outputs.governance_policy_id }}"
+          governance_decision_log_path="${{ steps.lean_smoke_contract.outputs.governance_decision_log_path }}"
+          governance_weekly_review_json="${{ steps.lean_smoke_contract.outputs.governance_weekly_review_json }}"
+          governance_decision_required_fields_json="${{ steps.lean_smoke_contract.outputs.governance_decision_required_fields_json }}"
           failure_payload_path="${{ steps.lean_smoke_contract.outputs.failure_payload }}"
           mkdir -p "$artifact_dir"
 
@@ -175,6 +217,13 @@ jobs:
               --arg failed_command "$failed_cmd" \
               --arg routing_policy "$routing_policy" \
               --arg failure_payload_path "$failure_payload_path" \
+              --arg misroute_policy_id "$misroute_policy_id" \
+              --arg misroute_feedback_log_path "$misroute_feedback_log_path" \
+              --argjson misroute_review_window_days "$misroute_review_window_days" \
+              --arg governance_policy_id "$governance_policy_id" \
+              --arg governance_decision_log_path "$governance_decision_log_path" \
+              --arg governance_weekly_review_json "$governance_weekly_review_json" \
+              --arg governance_decision_required_fields_json "$governance_decision_required_fields_json" \
               --argjson ttfr_target_minutes "$ttfr_target_minutes" \
               --slurpfile issues "$issues_file" '
               def owners_for_bead($id):
@@ -199,12 +248,33 @@ jobs:
               profile: "smoke",
               routing_policy: $routing_policy,
               ttfr_target_minutes: $ttfr_target_minutes,
+              misroute_tracking: {
+                policy_id: $misroute_policy_id,
+                feedback_log_path: $misroute_feedback_log_path,
+                review_window_days: $misroute_review_window_days
+              },
+              governance: {
+                policy_id: $governance_policy_id,
+                decision_log_path: $governance_decision_log_path,
+                review: ($governance_weekly_review_json | fromjson),
+                decision_record_required_fields: ($governance_decision_required_fields_json | fromjson),
+                bead_update_commands: [
+                  "br update <bead-id> --status in_progress --notes \"governance review outcome\"",
+                  "br update <bead-id> --status blocked --notes \"new blocker identified in governance review\""
+                ],
+                dependency_update_commands: [
+                  "br dep add <blocked-bead-id> <blocking-bead-id>",
+                  "br dep remove <blocked-bead-id> <resolved-bead-id>"
+                ]
+              },
               failed_command: $failed_command,
               first_action_checklist: [
                 ("Open " + $failure_payload_path + " and identify bucket_id + primary_owner"),
                 "Run the failed command locally in the same commit to confirm repro",
                 "Route to primary_owner and linked_bead_ids with artifact path + repro command",
-                "If owner is unassigned, claim the top linked bead and post triage note"
+                "If owner is unassigned, claim the top linked bead and post triage note",
+                ("Record misroutes in " + $misroute_feedback_log_path + " for policy review"),
+                ("Append governance decision record to " + $governance_decision_log_path + " and apply bead/dependency updates")
               ],
               source_frontier: .source_log,
               diagnostics_total: .diagnostics_total,
@@ -236,16 +306,36 @@ jobs:
             jq -n \
               --arg failed_command "$failed_cmd" \
               --arg routing_policy "$routing_policy" \
+              --arg misroute_policy_id "$misroute_policy_id" \
+              --arg misroute_feedback_log_path "$misroute_feedback_log_path" \
+              --argjson misroute_review_window_days "$misroute_review_window_days" \
+              --arg governance_policy_id "$governance_policy_id" \
+              --arg governance_decision_log_path "$governance_decision_log_path" \
+              --arg governance_weekly_review_json "$governance_weekly_review_json" \
+              --arg governance_decision_required_fields_json "$governance_decision_required_fields_json" \
               --argjson ttfr_target_minutes "$ttfr_target_minutes" \
               '{
               profile: "smoke",
               routing_policy: $routing_policy,
               ttfr_target_minutes: $ttfr_target_minutes,
+              misroute_tracking: {
+                policy_id: $misroute_policy_id,
+                feedback_log_path: $misroute_feedback_log_path,
+                review_window_days: $misroute_review_window_days
+              },
+              governance: {
+                policy_id: $governance_policy_id,
+                decision_log_path: $governance_decision_log_path,
+                review: ($governance_weekly_review_json | fromjson),
+                decision_record_required_fields: ($governance_decision_required_fields_json | fromjson)
+              },
               failed_command: $failed_command,
               first_action_checklist: [
                 "Run failed command locally to verify repro",
                 "Generate formal/lean/coverage/lean_frontier_buckets_v1.json",
-                "Route manually to owning bead(s) based on failure mode"
+                "Route manually to owning bead(s) based on failure mode",
+                ("Record misroutes in " + $misroute_feedback_log_path + " for policy review"),
+                ("Append governance decision record to " + $governance_decision_log_path + " and apply bead/dependency updates")
               ],
               error: "missing formal/lean/coverage/lean_frontier_buckets_v1.json"
             }' > "$failure_payload_path"
@@ -315,6 +405,13 @@ jobs:
           retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
           routing_policy="$(jq -r '.triage.routing_policy // empty' <<<"$profile_json")"
           ttfr_target_minutes="$(jq -r '.triage.ttfr_target_minutes // empty' <<<"$profile_json")"
+          misroute_policy_id="$(jq -r '.artifact_contract.misroute_tracking.policy_id // empty' "$profile_file")"
+          misroute_feedback_log_path="$(jq -r '.artifact_contract.misroute_tracking.feedback_log_path // empty' "$profile_file")"
+          misroute_review_window_days="$(jq -r '.artifact_contract.misroute_tracking.review_window_days // empty' "$profile_file")"
+          governance_policy_id="$(jq -r '.governance_policy.policy_id // empty' "$profile_file")"
+          governance_decision_log_path="$(jq -r '.governance_policy.decision_log_path // empty' "$profile_file")"
+          governance_phase_exit_review_json="$(jq -c '.governance_policy.reviews[] | select(.review_id == "phase-exit-signoff")' "$profile_file")"
+          governance_decision_required_fields_json="$(jq -c '.governance_policy.decision_record_template.required_fields // []' "$profile_file")"
           repro_bundle_manifest="$(jq -r '.artifact_bundle.repro_bundle_manifest // empty' <<<"$profile_json")"
           repro_script="$(jq -r '.artifact_bundle.repro_script // empty' <<<"$profile_json")"
           failure_payload_default="lean-full/failure_payload.json"
@@ -339,8 +436,29 @@ jobs:
             echo "::error::Full ttfr_target_minutes must be numeric, got: $ttfr_target_minutes"
             exit 1
           fi
+          if [[ ! "$misroute_review_window_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::misroute review_window_days must be numeric, got: $misroute_review_window_days"
+            exit 1
+          fi
           if [[ -z "$routing_policy" ]]; then
             echo "::error::Full triage.routing_policy must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$misroute_policy_id" || -z "$misroute_feedback_log_path" ]]; then
+            echo "::error::artifact_contract.misroute_tracking policy_id/feedback_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_policy_id" || -z "$governance_decision_log_path" ]]; then
+            echo "::error::governance_policy policy_id/decision_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_phase_exit_review_json" || "$governance_phase_exit_review_json" == "null" ]]; then
+            echo "::error::Missing governance phase-exit-signoff review contract"
+            exit 1
+          fi
+          governance_required_field_count="$(jq -r 'length' <<<"$governance_decision_required_fields_json")"
+          if [[ ! "$governance_required_field_count" =~ ^[0-9]+$ || "$governance_required_field_count" -eq 0 ]]; then
+            echo "::error::governance decision_record_template.required_fields must be a non-empty array"
             exit 1
           fi
 
@@ -352,6 +470,13 @@ jobs:
             printf 'retention_days=%s\n' "$retention_days"
             printf 'routing_policy=%s\n' "$routing_policy"
             printf 'ttfr_target_minutes=%s\n' "$ttfr_target_minutes"
+            printf 'misroute_policy_id=%s\n' "$misroute_policy_id"
+            printf 'misroute_feedback_log_path=%s\n' "$misroute_feedback_log_path"
+            printf 'misroute_review_window_days=%s\n' "$misroute_review_window_days"
+            printf 'governance_policy_id=%s\n' "$governance_policy_id"
+            printf 'governance_decision_log_path=%s\n' "$governance_decision_log_path"
+            printf 'governance_phase_exit_review_json=%s\n' "$governance_phase_exit_review_json"
+            printf 'governance_decision_required_fields_json=%s\n' "$governance_decision_required_fields_json"
             printf 'repro_bundle_manifest=%s\n' "$repro_bundle_manifest"
             printf 'repro_script=%s\n' "$repro_script"
             printf 'failure_payload=%s\n' "$failure_payload_path"
@@ -509,6 +634,13 @@ jobs:
           profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
           routing_policy="${{ steps.lean_full_contract.outputs.routing_policy }}"
           ttfr_target_minutes="${{ steps.lean_full_contract.outputs.ttfr_target_minutes }}"
+          misroute_policy_id="${{ steps.lean_full_contract.outputs.misroute_policy_id }}"
+          misroute_feedback_log_path="${{ steps.lean_full_contract.outputs.misroute_feedback_log_path }}"
+          misroute_review_window_days="${{ steps.lean_full_contract.outputs.misroute_review_window_days }}"
+          governance_policy_id="${{ steps.lean_full_contract.outputs.governance_policy_id }}"
+          governance_decision_log_path="${{ steps.lean_full_contract.outputs.governance_decision_log_path }}"
+          governance_phase_exit_review_json="${{ steps.lean_full_contract.outputs.governance_phase_exit_review_json }}"
+          governance_decision_required_fields_json="${{ steps.lean_full_contract.outputs.governance_decision_required_fields_json }}"
           repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
           repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
           failure_payload_path="${{ steps.lean_full_contract.outputs.failure_payload }}"
@@ -522,12 +654,39 @@ jobs:
             --arg repro_bundle_manifest "$repro_bundle_manifest" \
             --arg repro_script "$repro_script" \
             --arg routing_policy "$routing_policy" \
+            --arg misroute_policy_id "$misroute_policy_id" \
+            --arg misroute_feedback_log_path "$misroute_feedback_log_path" \
+            --argjson misroute_review_window_days "$misroute_review_window_days" \
+            --arg governance_policy_id "$governance_policy_id" \
+            --arg governance_decision_log_path "$governance_decision_log_path" \
+            --arg governance_phase_exit_review_json "$governance_phase_exit_review_json" \
+            --arg governance_decision_required_fields_json "$governance_decision_required_fields_json" \
             --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
             --argjson ttfr_target_minutes "$ttfr_target_minutes" \
             '{
               profile: $profile,
               routing_policy: $routing_policy,
               ttfr_target_minutes: $ttfr_target_minutes,
+              misroute_tracking: {
+                policy_id: $misroute_policy_id,
+                feedback_log_path: $misroute_feedback_log_path,
+                review_window_days: $misroute_review_window_days
+              },
+              governance: {
+                policy_id: $governance_policy_id,
+                decision_log_path: $governance_decision_log_path,
+                review: ($governance_phase_exit_review_json | fromjson),
+                decision_record_required_fields: ($governance_decision_required_fields_json | fromjson),
+                bead_update_commands: [
+                  "br update <bead-id> --status in_progress --notes \"governance review outcome\"",
+                  "br update <bead-id> --status blocked --notes \"new blocker identified in governance review\"",
+                  "br close <bead-id> --reason \"phase-exit completed\""
+                ],
+                dependency_update_commands: [
+                  "br dep add <blocked-bead-id> <blocking-bead-id>",
+                  "br dep remove <blocked-bead-id> <resolved-bead-id>"
+                ]
+              },
               failed_command: $failed_command,
               repro_bundle_manifest: $repro_bundle_manifest,
               repro_script: $repro_script,
@@ -536,7 +695,9 @@ jobs:
                 "Download lean-full-artifacts and open lean-full/repro_bundle_manifest.json",
                 "Run lean-full/repro_commands.sh on the same commit to reproduce deterministically",
                 "Route to ownership.primary_bead and failure_triage_bead with manifest + failed command",
-                "Escalate to ownership.escalation_bead if TTFR exceeds ttfr_target_minutes"
+                "Escalate to ownership.escalation_bead if TTFR exceeds ttfr_target_minutes",
+                ("Record misroutes in " + $misroute_feedback_log_path + " for policy review"),
+                ("Append governance decision record to " + $governance_decision_log_path + " and apply bead/dependency updates")
               ]
             }' > "$failure_payload_path"
 
