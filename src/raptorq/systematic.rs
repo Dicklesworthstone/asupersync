@@ -379,29 +379,47 @@ impl ConstraintMatrix {
         let mut pivot_col = vec![usize::MAX; self.rows];
         let mut used_col = vec![false; cols];
 
-        // Forward elimination with partial pivoting
+        // Forward elimination with full pivoting (row + column).
+        //
+        // RFC 6330 Section 5.4 uses inactivation decoding which relies on
+        // careful row/column permutations. This implementation uses full
+        // pivoting: when the current row has no nonzero entry in an unused
+        // column, we search remaining rows and swap to find one.
         for row in 0..self.rows.min(n) {
-            // Find pivot column
-            let mut best_col = None;
+            // Find an unused column with a nonzero entry in this row.
+            let mut pivot = None;
             for col in 0..cols {
-                if used_col[col] {
-                    continue;
-                }
-                if !a[row * cols + col].is_zero() {
-                    best_col = Some(col);
+                if !used_col[col] && !a[row * cols + col].is_zero() {
+                    pivot = Some((row, col));
                     break;
                 }
             }
 
-            let col = match best_col {
-                Some(c) => c,
-                None => {
-                    // Try to find any nonzero in this row among unused columns
-                    match (0..cols).find(|&c| !used_col[c] && !a[row * cols + c].is_zero()) {
-                        Some(c) => c,
-                        None => continue, // zero row, skip
+            // If the current row is all zeros in unused columns, search
+            // remaining rows for any nonzero entry and swap.
+            if pivot.is_none() {
+                'outer: for swap_row in (row + 1)..self.rows {
+                    for col in 0..cols {
+                        if !used_col[col] && !a[swap_row * cols + col].is_zero() {
+                            // Swap rows in the matrix
+                            for c in 0..cols {
+                                let idx_a = row * cols + c;
+                                let idx_b = swap_row * cols + c;
+                                a.swap(idx_a, idx_b);
+                            }
+                            // Swap RHS
+                            b.swap(row, swap_row);
+                            // Swap any already-assigned pivot info
+                            pivot_col.swap(row, swap_row);
+                            pivot = Some((row, col));
+                            break 'outer;
+                        }
                     }
                 }
+            }
+
+            let Some((_, col)) = pivot else {
+                continue; // genuinely zero row, skip
             };
 
             used_col[col] = true;

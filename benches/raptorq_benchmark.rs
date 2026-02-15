@@ -103,45 +103,45 @@ fn validate_gf256_bit_exactness(scenario: &Gf256BenchScenario, src: &[u8], c_val
     assert_eq!(addmul_actual, addmul_expected, "{addmul_ctx} mismatch");
 
     // Validate fused dual multiply path against sequential baseline.
-    let mut mul_a_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7001);
-    let mut mul_b_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7002);
-    let mut mul_a_expected = mul_a_actual.clone();
-    let mut mul_b_expected = mul_b_actual.clone();
-    gf256_mul_slices2(&mut mul_a_actual, &mut mul_b_actual, c_val);
-    gf256_mul_slice(&mut mul_a_expected, c_val);
-    gf256_mul_slice(&mut mul_b_expected, c_val);
+    let mut mul_left_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7001);
+    let mut mul_right_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7002);
+    let mut mul_left_expected = mul_left_actual.clone();
+    let mut mul_right_expected = mul_right_actual.clone();
+    gf256_mul_slices2(&mut mul_left_actual, &mut mul_right_actual, c_val);
+    gf256_mul_slice(&mut mul_left_expected, c_val);
+    gf256_mul_slice(&mut mul_right_expected, c_val);
     let mul2_ctx = gf256_bench_context(scenario, "mul_slices2_bit_exact");
     assert_eq!(
-        mul_a_actual, mul_a_expected,
+        mul_left_actual, mul_left_expected,
         "{mul2_ctx} mismatch on lane_a"
     );
     assert_eq!(
-        mul_b_actual, mul_b_expected,
+        mul_right_actual, mul_right_expected,
         "{mul2_ctx} mismatch on lane_b"
     );
 
     // Validate fused dual addmul path against sequential baseline.
     let src2 = deterministic_bytes(scenario.len, scenario.seed ^ 0xABCD_0123);
-    let mut addmul_a_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_1001);
-    let mut addmul_b_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_1002);
-    let mut addmul_a_expected = addmul_a_actual.clone();
-    let mut addmul_b_expected = addmul_b_actual.clone();
+    let mut addmul_left_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_1001);
+    let mut addmul_right_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_1002);
+    let mut addmul_left_expected = addmul_left_actual.clone();
+    let mut addmul_right_expected = addmul_right_actual.clone();
     gf256_addmul_slices2(
-        &mut addmul_a_actual,
+        &mut addmul_left_actual,
         src,
-        &mut addmul_b_actual,
+        &mut addmul_right_actual,
         &src2,
         c_val,
     );
-    gf256_addmul_slice(&mut addmul_a_expected, src, c_val);
-    gf256_addmul_slice(&mut addmul_b_expected, &src2, c_val);
+    gf256_addmul_slice(&mut addmul_left_expected, src, c_val);
+    gf256_addmul_slice(&mut addmul_right_expected, &src2, c_val);
     let addmul2_ctx = gf256_bench_context(scenario, "addmul_slices2_bit_exact");
     assert_eq!(
-        addmul_a_actual, addmul_a_expected,
+        addmul_left_actual, addmul_left_expected,
         "{addmul2_ctx} mismatch on lane_a"
     );
     assert_eq!(
-        addmul_b_actual, addmul_b_expected,
+        addmul_right_actual, addmul_right_expected,
         "{addmul2_ctx} mismatch on lane_b"
     );
 }
@@ -200,6 +200,7 @@ fn gf256_scenarios() -> [Gf256BenchScenario; 5] {
 // GF(256) primitive benchmarks
 // ============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn bench_gf256_primitives(c: &mut Criterion) {
     let mut group = c.benchmark_group("gf256_primitives");
 
@@ -287,7 +288,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
             BenchmarkId::new("addmul_slices2_fused", &label),
             &scenario,
             |b, _| {
-                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFEBABE);
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFE_BABE);
                 let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0101);
                 let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0202);
                 b.iter(|| {
@@ -305,7 +306,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
             BenchmarkId::new("addmul_slices2_sequential", &label),
             &scenario,
             |b, _| {
-                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFEBABE);
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFE_BABE);
                 let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0101);
                 let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0202);
                 b.iter(|| {

@@ -723,7 +723,7 @@ mod pipeline_e2e {
     #[derive(Clone, Copy)]
     struct Scenario {
         name: &'static str,
-        scenario_id: &'static str,
+        id: &'static str,
         replay_id: &'static str,
         profile: &'static str,
         unit_sentinel: &'static str,
@@ -1166,7 +1166,7 @@ mod pipeline_e2e {
                 assert!(
                     scenario.expect_success,
                     "scenario_id={} replay_id={} unexpected proof success",
-                    scenario.scenario_id, scenario.replay_id
+                    scenario.id, scenario.replay_id
                 );
                 result.proof
             }
@@ -1174,7 +1174,7 @@ mod pipeline_e2e {
                 assert!(
                     !scenario.expect_success,
                     "scenario_id={} replay_id={} unexpected proof failure {err:?}",
-                    scenario.scenario_id, scenario.replay_id
+                    scenario.id, scenario.replay_id
                 );
                 match err {
                     DecodeError::InsufficientSymbols { .. } => {}
@@ -1207,7 +1207,7 @@ mod pipeline_e2e {
         let report = Report {
             schema_version: "raptorq-e2e-log-v1",
             scenario: scenario.name,
-            scenario_id: scenario.scenario_id,
+            scenario_id: scenario.id,
             replay_id: scenario.replay_id,
             profile: scenario.profile,
             unit_sentinel: scenario.unit_sentinel,
@@ -1215,7 +1215,7 @@ mod pipeline_e2e {
             run_id,
             repro_command: format!(
                 "rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture # scenario_id={} replay_id={}",
-                scenario.scenario_id, scenario.replay_id
+                scenario.id, scenario.replay_id
             ),
             phase_markers: ["encode", "loss", "decode", "proof", "report"],
             config: ConfigReport {
@@ -1254,7 +1254,7 @@ mod pipeline_e2e {
         );
         assert_eq!(
             report["scenario_id"].as_str(),
-            Some(scenario.scenario_id),
+            Some(scenario.id),
             "scenario id mismatch"
         );
         assert_eq!(
@@ -1319,7 +1319,7 @@ mod pipeline_e2e {
         let scenarios = [
             Scenario {
                 name: "systematic_only",
-                scenario_id: "RQ-E2E-SYSTEMATIC-ONLY",
+                id: "RQ-E2E-SYSTEMATIC-ONLY",
                 replay_id: "replay:rq-e2e-systematic-only-v1",
                 profile: "fast",
                 unit_sentinel: "raptorq::tests::edge_cases::repair_zero_only_source",
@@ -1329,7 +1329,7 @@ mod pipeline_e2e {
             },
             Scenario {
                 name: "typical_random_loss",
-                scenario_id: "RQ-E2E-TYPICAL-RANDOM-LOSS",
+                id: "RQ-E2E-TYPICAL-RANDOM-LOSS",
                 replay_id: "replay:rq-e2e-typical-random-loss-v1",
                 profile: "full",
                 unit_sentinel: "roundtrip_with_source_loss",
@@ -1342,7 +1342,7 @@ mod pipeline_e2e {
             },
             Scenario {
                 name: "burst_loss_late",
-                scenario_id: "RQ-E2E-BURST-LOSS-LATE",
+                id: "RQ-E2E-BURST-LOSS-LATE",
                 replay_id: "replay:rq-e2e-burst-loss-late-v1",
                 profile: "forensics",
                 unit_sentinel: "roundtrip_repair_only",
@@ -1355,7 +1355,7 @@ mod pipeline_e2e {
             },
             Scenario {
                 name: "insufficient_symbols",
-                scenario_id: "RQ-E2E-INSUFFICIENT-SYMBOLS",
+                id: "RQ-E2E-INSUFFICIENT-SYMBOLS",
                 replay_id: "replay:rq-e2e-insufficient-symbols-v1",
                 profile: "fast",
                 unit_sentinel: "raptorq::tests::edge_cases::insufficient_symbols_error",
@@ -1423,7 +1423,7 @@ mod metamorphic_property {
             indices.swap(i, j);
         }
         indices.truncate(count);
-        indices.sort();
+        indices.sort_unstable();
         indices
     }
 
@@ -1734,10 +1734,10 @@ mod metamorphic_property {
             let params = decoder.params();
             let extra_needed = params.l; // All intermediates needed, no source contributing
 
-            let decoded = roundtrip(k, symbol_size, seed, &drop_all, extra_needed)
+            let decoded_source = roundtrip(k, symbol_size, seed, &drop_all, extra_needed)
                 .unwrap_or_else(|e| panic!("K={k} pure-repair: decode failed: {e}"));
 
-            for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
+            for (i, (orig, dec)) in source.iter().zip(decoded_source.iter()).enumerate() {
                 assert_eq!(orig, dec, "K={k} pure-repair: symbol {i} mismatch");
             }
         }
@@ -1774,8 +1774,8 @@ mod metamorphic_property {
         );
 
         match decoder.decode(&received) {
-            Err(DecodeError::InsufficientSymbols { .. }) => {} // expected
-            Err(DecodeError::SingularMatrix { .. }) => {}      // also acceptable for rank-deficient
+            // Expected errors for insufficient / rank-deficient systems.
+            Err(DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. }) => {}
             Err(e) => panic!("unexpected error variant: {e:?}"),
             Ok(result) => {
                 // If decode somehow succeeds, it MUST be correct
@@ -1890,9 +1890,8 @@ mod metamorphic_property {
             let source = make_source_data(k, symbol_size, seed);
             let drop_set = random_drop_set(k, num_erasures, seed + 5000);
 
-            let decoded = match roundtrip(k, symbol_size, seed, &drop_set, extra_repair) {
-                Ok(d) => d,
-                Err(_) => continue, // skip seeds where encoder matrix is singular
+            let Ok(decoded) = roundtrip(k, symbol_size, seed, &drop_set, extra_repair) else {
+                continue; // skip seeds where encoder matrix is singular
             };
 
             successes += 1;
@@ -2571,8 +2570,7 @@ mod golden_vectors {
             // Pin repair symbol hash (first 5 repair symbols after K)
             let mut repair_hasher = DefaultHasher::new();
             for esi in (v.k as u32)..((v.k + 5) as u32) {
-                let repair = encoder.repair_symbol(esi);
-                repair.hash(&mut repair_hasher);
+                encoder.repair_symbol(esi).hash(&mut repair_hasher);
             }
             assert_eq!(
                 repair_hasher.finish(),
