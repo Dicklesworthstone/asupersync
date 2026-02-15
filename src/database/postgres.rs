@@ -1621,7 +1621,13 @@ impl PgConnection {
         data: &[u8],
     ) -> Result<(Vec<PgColumn>, HashMap<String, usize>), PgError> {
         let mut reader = MessageReader::new(data);
-        let num_fields = reader.read_i16()? as usize;
+        let num_fields_i16 = reader.read_i16()?;
+        if num_fields_i16 < 0 {
+            return Err(PgError::Protocol(format!(
+                "negative field count in RowDescription: {num_fields_i16}"
+            )));
+        }
+        let num_fields = num_fields_i16 as usize;
 
         let mut columns = Vec::with_capacity(num_fields);
         let mut indices = HashMap::with_capacity(num_fields);
@@ -1653,7 +1659,13 @@ impl PgConnection {
     /// Parse DataRow message.
     fn parse_data_row(&self, data: &[u8], columns: &[PgColumn]) -> Result<Vec<PgValue>, PgError> {
         let mut reader = MessageReader::new(data);
-        let num_values = reader.read_i16()? as usize;
+        let num_values_i16 = reader.read_i16()?;
+        if num_values_i16 < 0 {
+            return Err(PgError::Protocol(format!(
+                "negative value count in DataRow: {num_values_i16}"
+            )));
+        }
+        let num_values = num_values_i16 as usize;
 
         let mut values = Vec::with_capacity(num_values);
 
@@ -1662,6 +1674,10 @@ impl PgConnection {
             if len == -1 {
                 // NULL value
                 values.push(PgValue::Null);
+            } else if len < -1 {
+                return Err(PgError::Protocol(format!(
+                    "negative column length in DataRow: {len}"
+                )));
             } else {
                 let data = reader.read_bytes(len as usize)?;
                 let col = columns.get(i);
@@ -1926,5 +1942,81 @@ mod tests {
 
         let msg = buf.build_startup_message();
         assert!(msg.len() > 4); // At least length prefix
+    }
+
+    /// Create a PgConnection backed by a dummy socket pair for unit-testing
+    /// parse methods that only inspect a byte slice.
+    fn make_test_connection() -> PgConnection {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+        let _accepted = listener.accept().expect("accept");
+        let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+        PgConnection {
+            inner: PgConnectionInner {
+                stream,
+                read_buf: Vec::new(),
+                process_id: 0,
+                secret_key: 0,
+                parameters: HashMap::new(),
+                transaction_status: b'I',
+                closed: false,
+            },
+        }
+    }
+
+    #[test]
+    fn negative_field_count_in_row_description() {
+        let conn = make_test_connection();
+        // i16 = -1  (0xFF 0xFF)
+        let data: Vec<u8> = vec![0xFF, 0xFF];
+        let result = conn.parse_row_description(&data);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PgError::Protocol(msg) => {
+                assert!(msg.contains("negative field count"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn negative_value_count_in_data_row() {
+        let conn = make_test_connection();
+        // i16 = -1  (0xFF 0xFF)
+        let data: Vec<u8> = vec![0xFF, 0xFF];
+        let columns = vec![];
+        let result = conn.parse_data_row(&data, &columns);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PgError::Protocol(msg) => {
+                assert!(msg.contains("negative value count"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn negative_column_length_in_data_row() {
+        let conn = make_test_connection();
+        // num_values = 1 (0x00 0x01), then column len = -2 (0xFF 0xFF 0xFF 0xFE)
+        let data: Vec<u8> = vec![0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFE];
+        let columns = vec![PgColumn {
+            name: "col".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::TEXT,
+            type_size: -1,
+            type_modifier: -1,
+            format_code: 0,
+        }];
+        let result = conn.parse_data_row(&data, &columns);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PgError::Protocol(msg) => {
+                assert!(msg.contains("negative column length"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got: {other}"),
+        }
     }
 }
