@@ -265,6 +265,7 @@ impl Reactor for EpollReactor {
             count += 1;
         }
 
+        drop(poll_events);
         Ok(count)
     }
 
