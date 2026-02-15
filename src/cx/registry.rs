@@ -1105,7 +1105,10 @@ impl NameRegistry {
         }
         self.waiters.retain(|_, q| !q.is_empty());
         // Grant freed names to eligible waiters from other regions.
-        for (name, _, _) in &active_removed {
+        // Use to_remove (not active_removed) so pending-only names also
+        // trigger waiter grants — waiters can be queued against pending
+        // permits via register_with_policy(Wait).
+        for name in &to_remove {
             self.try_grant_to_first_waiter(name, now);
         }
         to_remove
@@ -1174,7 +1177,10 @@ impl NameRegistry {
         }
         self.waiters.retain(|_, q| !q.is_empty());
         // Grant freed names to eligible waiters from other tasks.
-        for (name, _, _) in &active_removed {
+        // Use to_remove (not active_removed) so pending-only names also
+        // trigger waiter grants — waiters can be queued against pending
+        // permits via register_with_policy(Wait).
+        for name in &to_remove {
             self.try_grant_to_first_waiter(name, now);
         }
         to_remove
@@ -3314,5 +3320,95 @@ mod tests {
         granted_lease.release().unwrap();
 
         crate::test_complete!("cleanup_task_grants_to_other_task_waiter");
+    }
+
+    /// Regression: cleanup of a region holding a pending permit must grant
+    /// the name to a waiter from another region. Before the fix,
+    /// try_grant_to_first_waiter was only called for active lease names,
+    /// not pending-only names, so the waiter was stranded.
+    #[test]
+    fn cleanup_region_grants_waiter_for_pending_permit() {
+        init_test("cleanup_region_grants_waiter_for_pending_permit");
+
+        let mut reg = NameRegistry::new();
+        // Task 1 in region 0 reserves (pending) "svc".
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+
+        // Task 2 in region 1 tries to register with Wait policy.
+        // The pending permit blocks registration, so task 2 becomes a waiter.
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(1),
+                Time::from_secs(1),
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(60),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Cleanup region 0 removes the pending permit.
+        reg.cleanup_region_at(rid(0), Time::from_secs(2));
+        permit.abort().unwrap();
+
+        // The waiter from region 1 should have been granted the name.
+        assert_eq!(reg.waiter_count(), 0);
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        let granted = reg.take_granted();
+        assert_eq!(granted.len(), 1);
+        assert_eq!(granted[0].name, "svc");
+        let mut granted_lease = granted.into_iter().next().unwrap().lease;
+        granted_lease.release().unwrap();
+
+        crate::test_complete!("cleanup_region_grants_waiter_for_pending_permit");
+    }
+
+    /// Regression: cleanup of a task holding a pending permit must grant
+    /// the name to a waiter from another task.
+    #[test]
+    fn cleanup_task_grants_waiter_for_pending_permit() {
+        init_test("cleanup_task_grants_waiter_for_pending_permit");
+
+        let mut reg = NameRegistry::new();
+        // Task 1 reserves (pending) "svc".
+        let mut permit = reg
+            .reserve("svc", tid(1), rid(0), Time::ZERO)
+            .expect("reserve ok");
+
+        // Task 2 tries to register with Wait policy.
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(60),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Cleanup task 1 removes the pending permit.
+        reg.cleanup_task_at(tid(1), Time::from_secs(2));
+        permit.abort().unwrap();
+
+        // The waiter should have been granted the name.
+        assert_eq!(reg.waiter_count(), 0);
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+
+        let granted = reg.take_granted();
+        assert_eq!(granted.len(), 1);
+        let mut granted_lease = granted.into_iter().next().unwrap().lease;
+        granted_lease.release().unwrap();
+
+        crate::test_complete!("cleanup_task_grants_waiter_for_pending_permit");
     }
 }
