@@ -168,7 +168,10 @@ impl<T: Clone> Sender<T> {
     ///
     /// # Errors
     ///
-    /// Returns `SendError::Closed(msg)` if there are no active receivers.
+    /// Returns `SendError::Closed(msg)` if there are no active receivers when
+    /// reservation is attempted.
+    ///
+    /// Returns `Ok(0)` if all receivers drop between reservation and commit.
     pub fn send(&self, cx: &Cx, msg: T) -> Result<usize, SendError<T>> {
         let permit = match self.reserve(cx) {
             Ok(p) => p,
@@ -237,6 +240,9 @@ impl<T: Clone> SendPermit<'_, T> {
     /// Sends the message.
     ///
     /// Returns the number of receivers that will see this message.
+    ///
+    /// If all receivers drop after reservation but before commit, this returns
+    /// `0` and does not mutate channel state.
     pub fn send(self, msg: T) -> usize {
         let mut inner = self
             .sender
@@ -244,6 +250,12 @@ impl<T: Clone> SendPermit<'_, T> {
             .inner
             .lock()
             .expect("broadcast lock poisoned");
+
+        // A reservation can outlive the last receiver dropping.
+        // In that case, do not enqueue an unobservable message.
+        if inner.receiver_count == 0 {
+            return 0;
+        }
 
         if inner.buffer.len() == inner.capacity {
             inner.buffer.pop_front();
@@ -307,9 +319,13 @@ pub struct Recv<'a, T> {
 impl<T> Recv<'_, T> {
     fn clear_waiter_registration(&mut self) {
         if let Some(token) = self.waiter.take() {
-            if let Ok(mut inner) = self.receiver.channel.inner.lock() {
-                inner.wakers.remove(token);
-            }
+            let mut inner = self
+                .receiver
+                .channel
+                .inner
+                .lock()
+                .expect("broadcast lock poisoned");
+            inner.wakers.remove(token);
         }
     }
 }
@@ -964,5 +980,43 @@ mod tests {
         drop(fut);
 
         crate::test_complete!("recv_closed_clears_waiter_registration");
+    }
+
+    #[test]
+    fn permit_send_after_last_receiver_drop_is_noop() {
+        init_test("permit_send_after_last_receiver_drop_is_noop");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>(4);
+
+        let permit = tx.reserve(&cx).expect("reserve should succeed");
+        drop(rx);
+
+        let delivered = permit.send(42);
+        crate::assert_with_log!(delivered == 0, "delivered count", 0usize, delivered);
+
+        let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+        crate::assert_with_log!(
+            inner.total_sent == 0,
+            "total_sent unchanged",
+            0u64,
+            inner.total_sent
+        );
+        crate::assert_with_log!(
+            inner.buffer.is_empty(),
+            "buffer remains empty",
+            true,
+            inner.buffer.is_empty()
+        );
+        drop(inner);
+
+        let closed = tx.send(&cx, 7);
+        crate::assert_with_log!(
+            matches!(closed, Err(SendError::Closed(7))),
+            "send sees closed after receiver drop",
+            "Err(Closed(7))",
+            format!("{closed:?}")
+        );
+
+        crate::test_complete!("permit_send_after_last_receiver_drop_is_noop");
     }
 }

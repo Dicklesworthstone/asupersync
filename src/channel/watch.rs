@@ -565,12 +565,23 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut count = self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
-        *count = count.saturating_sub(1);
+        {
+            let mut count = self
+                .inner
+                .receiver_count
+                .lock()
+                .expect("watch lock poisoned");
+            *count = count.saturating_sub(1);
+        }
+
+        // Eagerly remove this receiver's waiter entry so dropped receivers do not
+        // leave stale wakers behind until a later send/re-registration.
+        if let Some(waiter) = self.waiter.take() {
+            let mut waiters = self.inner.waiters.lock().expect("watch lock poisoned");
+            waiters.retain(|entry| {
+                !Arc::ptr_eq(&entry.queued, &waiter) && Arc::strong_count(&entry.queued) > 1
+            });
+        }
     }
 }
 
@@ -1185,6 +1196,42 @@ mod tests {
             waiter_count
         );
         crate::test_complete!("dropped_receiver_waiter_is_pruned_on_next_registration");
+    }
+
+    #[test]
+    fn dropped_receiver_eagerly_removes_pending_waiter() {
+        init_test("dropped_receiver_eagerly_removes_pending_waiter");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+
+        {
+            let mut future = rx.changed(&cx);
+            let result = Pin::new(&mut future).poll(&mut task_cx);
+            assert!(result.is_pending());
+        }
+
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(waiter_count == 1, "waiter registered", 1, waiter_count);
+
+        drop(rx);
+
+        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "waiter removed on receiver drop",
+            0,
+            waiter_count
+        );
+        let receiver_count = tx.receiver_count();
+        crate::assert_with_log!(
+            receiver_count == 0,
+            "receiver count after drop",
+            0,
+            receiver_count
+        );
+        crate::test_complete!("dropped_receiver_eagerly_removes_pending_waiter");
     }
 
     struct CountWake {

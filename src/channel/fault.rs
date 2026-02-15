@@ -200,6 +200,12 @@ impl<T: Clone> FaultSender<T> {
     /// - Duplicated (sent twice)
     /// - Sent normally
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
+        // Preserve base sender semantics: if the receiver side is already gone,
+        // fail immediately instead of buffering and reporting a false success.
+        if self.inner.is_closed() {
+            return Err(SendError::Disconnected(value));
+        }
+
         let should_reorder;
         let should_duplicate;
         {
@@ -695,6 +701,20 @@ mod tests {
         drop(rx);
         let result = block_on(fault_tx.send(&cx, 1));
         assert!(matches!(result, Err(SendError::Disconnected(_))));
+    }
+
+    #[test]
+    fn send_after_receiver_drop_with_reorder_returns_error() {
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 4);
+        let (tx, rx) = mpsc::channel::<u32>(1);
+        let fault_tx = FaultSender::new(tx, config, sink);
+        let cx = test_cx();
+
+        drop(rx);
+        let result = block_on(fault_tx.send(&cx, 1));
+        assert!(matches!(result, Err(SendError::Disconnected(1))));
+        assert_eq!(fault_tx.buffered_count(), 0);
     }
 
     #[test]

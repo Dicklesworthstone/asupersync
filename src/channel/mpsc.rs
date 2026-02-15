@@ -21,7 +21,6 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -77,7 +76,6 @@ impl std::error::Error for RecvError {}
 #[derive(Debug)]
 struct SharedWaiter {
     waker: Mutex<Waker>,
-    queued: AtomicBool,
 }
 
 /// A queued waiter for channel capacity.
@@ -147,15 +145,14 @@ impl<T> ChannelInner<T> {
         self.sender_count == 0
     }
 
-    /// Returns the waker for the next waiting sender, if any, marking it
-    /// as no longer queued. The caller must invoke `waker.wake()` **after**
-    /// releasing the channel lock to avoid wake-under-lock deadlocks.
+    /// Returns the waker for the next waiting sender, if any.
+    /// The caller must invoke `waker.wake()` **after** releasing the channel
+    /// lock to avoid wake-under-lock deadlocks.
     ///
     /// This does NOT remove the waiter from the queue. The waiter is responsible
     /// for removing itself upon successfully acquiring a permit.
     fn take_next_sender_waker(&self) -> Option<Waker> {
         self.send_wakers.front().map(|waiter| {
-            waiter.shared.queued.store(false, Ordering::Release);
             waiter
                 .shared
                 .waker
@@ -406,17 +403,14 @@ impl<'a, T> Future for Reserve<'a, T> {
         // Register/update waiter
         if let Some(waiter) = self.waiter.as_ref() {
             // Already queued. Update waker.
-            if let Ok(mut waker_guard) = waiter.waker.lock() {
-                if !waker_guard.will_wake(ctx.waker()) {
-                    waker_guard.clone_from(ctx.waker());
-                }
+            let mut waker_guard = waiter.waker.lock().expect("waiter lock poisoned");
+            if !waker_guard.will_wake(ctx.waker()) {
+                waker_guard.clone_from(ctx.waker());
             }
-            waiter.queued.store(true, Ordering::Release);
         } else {
             // New waiter
             let waiter = Arc::new(SharedWaiter {
                 waker: Mutex::new(ctx.waker().clone()),
-                queued: AtomicBool::new(true),
             });
             inner.send_wakers.push_back(SendWaiter {
                 shared: Arc::clone(&waiter),
@@ -570,7 +564,6 @@ impl<T> SendPermit<'_, T> {
                 .send_wakers
                 .drain(..)
                 .map(|waiter| {
-                    waiter.shared.queued.store(false, Ordering::Release);
                     waiter
                         .shared
                         .waker
@@ -799,7 +792,6 @@ impl<T> Drop for Receiver<T> {
                 .send_wakers
                 .drain(..)
                 .map(|waiter| {
-                    waiter.shared.queued.store(false, Ordering::Release);
                     waiter
                         .shared
                         .waker
@@ -822,6 +814,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
