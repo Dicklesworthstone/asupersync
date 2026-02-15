@@ -1329,19 +1329,17 @@ impl MySqlConnection {
             });
         }
 
-        // Read column-terminator packet.
-        let (data, seq) = self.read_packet().await?;
-        self.inner.sequence = seq.wrapping_add(1);
-        if deprecate_eof {
-            if !Self::is_result_set_ok_packet(&data) {
+        // In CLIENT_DEPRECATE_EOF mode, there is no metadata terminator after
+        // column definitions; rows start immediately and the final terminator
+        // is an OK packet. Without DEPRECATE_EOF we still expect EOF here.
+        if Self::expects_metadata_eof(self.inner.capabilities) {
+            let (data, seq) = self.read_packet().await?;
+            self.inner.sequence = seq.wrapping_add(1);
+            if !Self::is_eof_packet(&data) {
                 return Err(MySqlError::Protocol(
-                    "expected OK after columns".to_string(),
+                    "expected EOF after columns".to_string(),
                 ));
             }
-        } else if !Self::is_eof_packet(&data) {
-            return Err(MySqlError::Protocol(
-                "expected EOF after columns".to_string(),
-            ));
         }
 
         let columns = Arc::new(columns);
@@ -1417,6 +1415,11 @@ impl MySqlConnection {
     #[inline]
     fn is_eof_packet(data: &[u8]) -> bool {
         data.first() == Some(&0xFE) && data.len() < 9
+    }
+
+    #[inline]
+    const fn expects_metadata_eof(capabilities: u32) -> bool {
+        capabilities & capability::CLIENT_DEPRECATE_EOF == 0
     }
 
     #[inline]
@@ -2076,5 +2079,19 @@ mod tests {
 
         let err = MySqlConnection::parse_text_row(&[0x00, 0x00], &columns).unwrap_err();
         assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_expects_metadata_eof_without_deprecate_eof() {
+        assert!(MySqlConnection::expects_metadata_eof(
+            capability::CLIENT_PROTOCOL_41
+        ));
+    }
+
+    #[test]
+    fn test_expects_metadata_eof_disabled_with_deprecate_eof() {
+        assert!(!MySqlConnection::expects_metadata_eof(
+            capability::CLIENT_PROTOCOL_41 | capability::CLIENT_DEPRECATE_EOF
+        ));
     }
 }
