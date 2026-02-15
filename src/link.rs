@@ -644,7 +644,6 @@ impl LinkSet {
             };
             batch.push(exit_vt, crashed_task, peer, *lref, action);
         }
-        batch.sort_in_place();
         batch
     }
 
