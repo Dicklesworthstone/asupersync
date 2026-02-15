@@ -636,13 +636,15 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
             callback();
         }
 
-        blocking_worker_loop(&inner_clone);
+        let retired_with_claim = blocking_worker_loop(&inner_clone);
 
         if let Some(ref callback) = inner_clone.on_thread_stop {
             callback();
         }
 
-        inner_clone.active_threads.fetch_sub(1, Ordering::Relaxed);
+        if !retired_with_claim {
+            inner_clone.active_threads.fetch_sub(1, Ordering::Relaxed);
+        }
     }) {
         Ok(handle) => {
             inner.thread_handles.lock().unwrap().push(handle);
@@ -670,9 +672,30 @@ fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     }
 }
 
+/// Atomically claims one idle-retirement slot without dropping below min_threads.
+///
+/// Returns true only for the single worker allowed to retire at the current floor.
+fn try_claim_idle_retirement(inner: &BlockingPoolInner) -> bool {
+    let mut current = inner.active_threads.load(Ordering::Relaxed);
+    loop {
+        if current <= inner.min_threads {
+            return false;
+        }
+        match inner.active_threads.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(next) => current = next,
+        }
+    }
+}
+
 /// The worker loop for blocking pool threads.
 #[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
-fn blocking_worker_loop(inner: &BlockingPoolInner) {
+fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
     loop {
         // Try to get work from the queue
         if let Some(task) = inner.queue.pop() {
@@ -726,12 +749,9 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) {
             };
 
             // If we timed out and there's still no work, consider retiring
-            if timed_out
-                && inner.queue.is_empty()
-                && inner.active_threads.load(Ordering::Relaxed) > inner.min_threads
-            {
-                // Retire this thread
-                break;
+            if timed_out && inner.queue.is_empty() && try_claim_idle_retirement(inner) {
+                // Retire this thread; active_threads was already decremented atomically.
+                return true;
             }
         } else {
             {
@@ -748,13 +768,14 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) {
             }
         }
     }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicI32, AtomicU64};
+    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize};
 
     #[test]
     fn basic_spawn_and_wait() {
@@ -1250,5 +1271,59 @@ mod tests {
 
         // Restore the original panic hook.
         std::panic::set_hook(prev_hook);
+    }
+
+    #[test]
+    fn idle_retirement_claim_allows_only_one_thread_at_floor() {
+        let inner = Arc::new(BlockingPoolInner {
+            min_threads: 1,
+            max_threads: 2,
+            active_threads: AtomicUsize::new(2),
+            busy_threads: AtomicUsize::new(0),
+            pending_count: AtomicUsize::new(0),
+            next_task_id: AtomicU64::new(1),
+            queue: SegQueue::new(),
+            shutdown: AtomicBool::new(false),
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+            idle_timeout: Duration::from_millis(1),
+            thread_name_prefix: "retire-test".to_string(),
+            on_thread_start: None,
+            on_thread_stop: None,
+            thread_handles: Mutex::new(Vec::new()),
+        });
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let claims = Arc::new(AtomicUsize::new(0));
+        let mut joiners = Vec::new();
+
+        for _ in 0..2 {
+            let inner_clone = Arc::clone(&inner);
+            let barrier_clone = Arc::clone(&barrier);
+            let claims_clone = Arc::clone(&claims);
+            joiners.push(thread::spawn(move || {
+                barrier_clone.wait();
+                if try_claim_idle_retirement(&inner_clone) {
+                    claims_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        barrier.wait();
+
+        for joiner in joiners {
+            joiner.join().expect("retirement claimant panicked");
+        }
+
+        assert_eq!(
+            claims.load(Ordering::Relaxed),
+            1,
+            "exactly one worker should claim the retirement slot at the floor"
+        );
+        assert_eq!(
+            inner.active_threads.load(Ordering::Relaxed),
+            inner.min_threads,
+            "retirement claims must not drop below min_threads"
+        );
     }
 }
