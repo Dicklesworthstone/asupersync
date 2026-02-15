@@ -29,6 +29,7 @@ impl DetRng {
     }
 
     /// Generates the next pseudo-random u64 value.
+    #[inline]
     #[allow(clippy::missing_const_for_fn)] // Cannot be const: mutates self
     pub fn next_u64(&mut self) -> u64 {
         // xorshift64 algorithm
@@ -52,6 +53,7 @@ impl DetRng {
     /// # Panics
     ///
     /// Panics if `bound` is zero.
+    #[inline]
     #[allow(clippy::cast_possible_truncation)]
     pub fn next_usize(&mut self, bound: usize) -> usize {
         assert!(bound > 0, "bound must be non-zero");
