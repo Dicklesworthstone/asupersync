@@ -2458,7 +2458,12 @@ mod tests {
             3usize,
             popped.len()
         );
-        crate::assert_with_log!(sched.is_empty(), "empty after all pops", true, sched.is_empty());
+        crate::assert_with_log!(
+            sched.is_empty(),
+            "empty after all pops",
+            true,
+            sched.is_empty()
+        );
         crate::test_complete!("pop_timed_only_with_hint_groups_by_deadline_not_now");
     }
 }
