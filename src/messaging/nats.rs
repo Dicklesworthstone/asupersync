@@ -254,10 +254,8 @@ fn nats_json_escape(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
-                for byte in c.encode_utf8(&mut [0; 4]).bytes() {
-                    use std::fmt::Write;
-                    write!(&mut out, "\\u{byte:04x}").expect("write to String");
-                }
+                use std::fmt::Write;
+                write!(&mut out, "\\u{:04x}", c as u32).expect("write to String");
             }
             c => out.push(c),
         }
@@ -1294,5 +1292,29 @@ mod tests {
 
         buf.extend(b"\n");
         assert_eq!(buf.find_crlf(), Some(5));
+    }
+
+    #[test]
+    fn test_nats_json_escape_c1_control() {
+        // C1 control U+0080 is 2 bytes in UTF-8 (0xC2, 0x80).
+        // Must emit a single \u0080 escape, not per-byte \u00c2\u0080.
+        let input = "\u{0080}";
+        let escaped = nats_json_escape(input);
+        assert_eq!(escaped, "\\u0080");
+    }
+
+    #[test]
+    fn test_nats_json_escape_c0_control() {
+        // C0 control U+0001 (SOH) is 1 byte in UTF-8.
+        let escaped = nats_json_escape("\u{0001}");
+        assert_eq!(escaped, "\\u0001");
+    }
+
+    #[test]
+    fn test_nats_json_escape_common_chars() {
+        assert_eq!(nats_json_escape(r#"hello"world"#), r#"hello\"world"#);
+        assert_eq!(nats_json_escape("back\\slash"), "back\\\\slash");
+        assert_eq!(nats_json_escape("new\nline"), "new\\nline");
+        assert_eq!(nats_json_escape("plain"), "plain");
     }
 }
