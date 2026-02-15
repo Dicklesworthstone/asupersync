@@ -75,11 +75,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-lean-smoke-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run Lean smoke profile commands
+      - name: Resolve Lean smoke artifact contract
+        id: lean_smoke_contract
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p lean-smoke
 
           profile_file="formal/lean/coverage/ci_verification_profiles.json"
           if [[ ! -f "$profile_file" ]]; then
@@ -87,18 +87,70 @@ jobs:
             exit 1
           fi
 
+          profile_json="$(jq -c '.profiles[] | select(.name == "smoke")' "$profile_file")"
+          if [[ -z "$profile_json" || "$profile_json" == "null" ]]; then
+            echo "::error::Missing smoke profile in $profile_file"
+            exit 1
+          fi
+
+          artifact_name="$(jq -r '.artifact_bundle.name // empty' <<<"$profile_json")"
+          artifact_dir="$(jq -r '.artifact_bundle.directory // empty' <<<"$profile_json")"
+          retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
+          routing_policy="$(jq -r '.profiles[] | select(.name == "smoke") | .triage.routing_policy // empty' "$profile_file")"
+          ttfr_target_minutes="$(jq -r '.profiles[] | select(.name == "smoke") | .triage.ttfr_target_minutes // empty' "$profile_file")"
+          failure_payload_default="lean-smoke/failure_payload.json"
+          failure_payload_path="$(jq -r '.artifact_bundle.failure_payload // empty' <<<"$profile_json")"
+          if [[ -z "$failure_payload_path" ]]; then
+            failure_payload_path="$failure_payload_default"
+          fi
+
+          if [[ -z "$artifact_name" || -z "$artifact_dir" || -z "$failure_payload_path" ]]; then
+            echo "::error::Smoke artifact contract is missing name/directory/failure_payload"
+            exit 1
+          fi
+          if [[ ! "$retention_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::Smoke retention_days must be numeric, got: $retention_days"
+            exit 1
+          fi
+          if [[ ! "$ttfr_target_minutes" =~ ^[0-9]+$ ]]; then
+            echo "::error::Smoke ttfr_target_minutes must be numeric, got: $ttfr_target_minutes"
+            exit 1
+          fi
+          if [[ -z "$routing_policy" ]]; then
+            echo "::error::Smoke triage.routing_policy must be non-empty"
+            exit 1
+          fi
+
+          {
+            printf 'profile_file=%s\n' "$profile_file"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_dir=%s\n' "$artifact_dir"
+            printf 'retention_days=%s\n' "$retention_days"
+            printf 'routing_policy=%s\n' "$routing_policy"
+            printf 'ttfr_target_minutes=%s\n' "$ttfr_target_minutes"
+            printf 'failure_payload=%s\n' "$failure_payload_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Lean smoke profile commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_smoke_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_smoke_contract.outputs.profile_file }}"
+          mkdir -p "$artifact_dir"
+
           mapfile -t smoke_commands < <(jq -r '.profiles[] | select(.name == "smoke") | .commands[]' "$profile_file")
           if [[ "${#smoke_commands[@]}" -eq 0 ]]; then
             echo "::error::Smoke profile has no commands"
             exit 1
           fi
 
-          printf '%s\n' "${smoke_commands[@]}" > lean-smoke/commands.txt
+          printf '%s\n' "${smoke_commands[@]}" > "$artifact_dir/commands.txt"
 
           for cmd in "${smoke_commands[@]}"; do
             echo ">>> $cmd"
             if ! bash -lc "$cmd"; then
-              printf '%s\n' "$cmd" > lean-smoke/failed_command.txt
+              printf '%s\n' "$cmd" > "$artifact_dir/failed_command.txt"
               exit 1
             fi
           done
@@ -108,16 +160,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p lean-smoke
+          artifact_dir="${{ steps.lean_smoke_contract.outputs.artifact_dir }}"
+          routing_policy="${{ steps.lean_smoke_contract.outputs.routing_policy }}"
+          ttfr_target_minutes="${{ steps.lean_smoke_contract.outputs.ttfr_target_minutes }}"
+          failure_payload_path="${{ steps.lean_smoke_contract.outputs.failure_payload }}"
+          mkdir -p "$artifact_dir"
 
-          failed_cmd="$(cat lean-smoke/failed_command.txt 2>/dev/null || echo "unknown")"
+          failed_cmd="$(cat "$artifact_dir/failed_command.txt" 2>/dev/null || echo "unknown")"
           frontier_file="formal/lean/coverage/lean_frontier_buckets_v1.json"
           issues_file=".beads/issues.jsonl"
-          ttfr_target_minutes=30
 
           if [[ -f "$frontier_file" ]]; then
             jq \
               --arg failed_command "$failed_cmd" \
+              --arg routing_policy "$routing_policy" \
+              --arg failure_payload_path "$failure_payload_path" \
               --argjson ttfr_target_minutes "$ttfr_target_minutes" \
               --slurpfile issues "$issues_file" '
               def owners_for_bead($id):
@@ -140,11 +197,11 @@ jobs:
                   });
               {
               profile: "smoke",
-              routing_policy: "bead-owner-v1",
+              routing_policy: $routing_policy,
               ttfr_target_minutes: $ttfr_target_minutes,
               failed_command: $failed_command,
               first_action_checklist: [
-                "Open lean-smoke/failure_payload.json and identify bucket_id + primary_owner",
+                ("Open " + $failure_payload_path + " and identify bucket_id + primary_owner"),
                 "Run the failed command locally in the same commit to confirm repro",
                 "Route to primary_owner and linked_bead_ids with artifact path + repro command",
                 "If owner is unassigned, claim the top linked bead and post triage note"
@@ -174,14 +231,15 @@ jobs:
                   ]
                 }
               ]
-            }' "$frontier_file" > lean-smoke/failure_payload.json
+            }' "$frontier_file" > "$failure_payload_path"
           else
             jq -n \
               --arg failed_command "$failed_cmd" \
+              --arg routing_policy "$routing_policy" \
               --argjson ttfr_target_minutes "$ttfr_target_minutes" \
               '{
               profile: "smoke",
-              routing_policy: "bead-owner-v1",
+              routing_policy: $routing_policy,
               ttfr_target_minutes: $ttfr_target_minutes,
               failed_command: $failed_command,
               first_action_checklist: [
@@ -190,14 +248,14 @@ jobs:
                 "Route manually to owning bead(s) based on failure mode"
               ],
               error: "missing formal/lean/coverage/lean_frontier_buckets_v1.json"
-            }' > lean-smoke/failure_payload.json
+            }' > "$failure_payload_path"
           fi
 
           {
             echo "## Lean Smoke Failure Payload"
             echo
             echo "- Failed command: \`$failed_cmd\`"
-            echo "- Payload artifact: \`lean-smoke/failure_payload.json\`"
+            echo "- Payload artifact: \`$failure_payload_path\`"
             if [[ -f "$frontier_file" ]]; then
               echo
               echo "| Bucket | Count | Gap IDs | Bead IDs |"
@@ -210,9 +268,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lean-smoke-artifacts
-          path: lean-smoke/
-          retention-days: 30
+          name: ${{ steps.lean_smoke_contract.outputs.artifact_name }}
+          path: ${{ steps.lean_smoke_contract.outputs.artifact_dir }}/
+          retention-days: ${{ fromJSON(steps.lean_smoke_contract.outputs.retention_days) }}
 
   lean-full:
     name: Lean Full Gate (Main/Release)
@@ -259,7 +317,11 @@ jobs:
           ttfr_target_minutes="$(jq -r '.triage.ttfr_target_minutes // empty' <<<"$profile_json")"
           repro_bundle_manifest="$(jq -r '.artifact_bundle.repro_bundle_manifest // empty' <<<"$profile_json")"
           repro_script="$(jq -r '.artifact_bundle.repro_script // empty' <<<"$profile_json")"
+          failure_payload_default="lean-full/failure_payload.json"
           failure_payload_path="$(jq -r '.artifact_bundle.failure_payload // empty' <<<"$profile_json")"
+          if [[ -z "$failure_payload_path" ]]; then
+            failure_payload_path="$failure_payload_default"
+          fi
 
           if [[ -z "$manifest_schema_version" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
             echo "::error::Full artifact contract is missing manifest schema/name/directory"

@@ -113,6 +113,7 @@ fn ci_profiles_have_required_shape_and_ordering() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
     let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
     let artifact_contract = profiles
@@ -537,8 +538,10 @@ fn lean_smoke_failure_payload_routes_to_owners_deterministically() {
     for required_snippet in [
         ".beads/issues.jsonl",
         "Resolve Lean smoke artifact contract",
-        ".profiles[] | select(.name == \"smoke\") | .triage.routing_policy",
-        ".profiles[] | select(.name == \"smoke\") | .triage.ttfr_target_minutes",
+        ".profiles[] | select(.name == \"smoke\")",
+        ".triage.routing_policy",
+        ".triage.ttfr_target_minutes",
+        ".artifact_bundle.failure_payload",
         "ttfr_target_minutes",
         "owner_candidates",
         "routed_owners",
@@ -558,9 +561,9 @@ fn lean_smoke_gate_is_pr_scoped_and_profile_driven() {
         "Lean Smoke Gate (PR)",
         "if: github.event_name == 'pull_request'",
         "select(.name == \"smoke\")",
-        ".artifact_bundle.name",
-        ".artifact_bundle.directory",
-        ".artifact_bundle.retention_days",
+        ".artifact_bundle.name // empty",
+        ".artifact_bundle.directory // empty",
+        ".artifact_bundle.retention_days // empty",
         "Run Lean smoke profile commands",
         "Upload Lean smoke artifacts",
         "steps.lean_smoke_contract.outputs.artifact_name",
@@ -578,16 +581,16 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
     for required_snippet in [
         "Lean Full Gate (Main/Release)",
         "Resolve Lean full artifact contract",
-        ".artifact_contract.manifest_schema_version",
+        ".artifact_contract.manifest_schema_version // empty",
         "select(.name == \"full\")",
-        ".artifact_bundle.repro_bundle_manifest",
-        ".artifact_bundle.repro_script",
-        ".artifact_bundle.failure_payload",
+        ".artifact_bundle.repro_bundle_manifest // empty",
+        ".artifact_bundle.repro_script // empty",
+        ".artifact_bundle.failure_payload // empty",
         ".triage.routing_policy",
         ".triage.ttfr_target_minutes",
-        "lean-full/repro_bundle_manifest.json",
-        "lean-full/repro_commands.sh",
-        "lean-full/failure_payload.json",
+        "steps.lean_full_contract.outputs.repro_bundle_manifest",
+        "steps.lean_full_contract.outputs.repro_script",
+        "steps.lean_full_contract.outputs.failure_payload",
         "Upload Lean full artifacts",
         "steps.lean_full_contract.outputs.artifact_name",
     ] {
