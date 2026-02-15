@@ -1167,15 +1167,15 @@ where
                         let mut state = self.state.lock().expect("pool state lock poisoned");
                         state.active = state.active.saturating_sub(1);
 
-                        if !state.closed {
+                        if state.closed {
+                            None
+                        } else {
                             state.idle.push_back(IdleResource {
                                 resource,
                                 idle_since: Instant::now(),
                                 created_at,
                             });
                             state.waiters.pop_front()
-                        } else {
-                            None
                         }
                     };
                     if let Some(waiter) = waiter {
@@ -2949,6 +2949,241 @@ mod tests {
         assert_eq!(created, 5, "all 5 warmup resources created");
 
         crate::test_complete!("warmup_require_minimum_passes_above_min");
+    }
+
+    // ========================================================================
+    // Audit regression tests (asupersync-10x0x.44)
+    // ========================================================================
+
+    #[test]
+    fn return_to_closed_pool_drops_resource() {
+        init_test("return_to_closed_pool_drops_resource");
+
+        // Verify that returning a resource to a closed pool silently drops
+        // the resource instead of adding it to the idle queue.
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Acquire a resource
+        let resource =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
+
+        // Close the pool while the resource is held
+        futures_lite::future::block_on(pool.close());
+
+        // Return the resource — it should be silently dropped, not added to idle
+        resource.return_to_pool();
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.idle == 0,
+            "no idle after return to closed pool",
+            0usize,
+            stats.idle
+        );
+        crate::assert_with_log!(
+            stats.active == 0,
+            "active decremented despite closed pool",
+            0usize,
+            stats.active
+        );
+
+        crate::test_complete!("return_to_closed_pool_drops_resource");
+    }
+
+    #[test]
+    fn discard_to_closed_pool_decrements_active() {
+        init_test("discard_to_closed_pool_decrements_active");
+
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(5));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        let resource =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
+
+        futures_lite::future::block_on(pool.close());
+
+        // Discard the resource after pool is closed
+        resource.discard();
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.active == 0,
+            "active decremented after discard to closed pool",
+            0usize,
+            stats.active
+        );
+
+        crate::test_complete!("discard_to_closed_pool_decrements_active");
+    }
+
+    #[test]
+    fn create_slot_reservation_cancel_safety() {
+        init_test("create_slot_reservation_cancel_safety");
+
+        // Verify that dropping a CreateSlotReservation without committing
+        // correctly releases the slot and wakes a waiter.
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+
+        // Reserve a slot (simulates start of resource creation)
+        let slot = CreateSlotReservation::try_reserve(&pool);
+        assert!(slot.is_some(), "should reserve slot");
+
+        // Verify pool is at capacity
+        let slot2 = CreateSlotReservation::try_reserve(&pool);
+        assert!(slot2.is_none(), "pool at capacity with one creating slot");
+
+        // Drop without committing (simulates cancel during create)
+        drop(slot);
+
+        // Creating count should be back to 0
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.total == 0,
+            "total back to 0 after cancelled reservation",
+            0usize,
+            stats.total
+        );
+
+        // Should be able to reserve again
+        let slot3 = CreateSlotReservation::try_reserve(&pool);
+        assert!(slot3.is_some(), "slot available after cancel");
+        if let Some(s) = slot3 {
+            s.commit();
+        }
+
+        crate::test_complete!("create_slot_reservation_cancel_safety");
+    }
+
+    #[test]
+    fn idle_eviction_respects_idle_timeout() {
+        init_test("idle_eviction_respects_idle_timeout");
+
+        // Use a very short idle timeout so we can test eviction
+        let config = PoolConfig::with_max_size(5).idle_timeout(Duration::from_millis(10));
+        let pool = GenericPool::new(simple_factory, config);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Acquire and return a resource
+        let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire");
+        r.return_to_pool();
+
+        // Verify it's idle
+        let stats = pool.stats();
+        assert_eq!(stats.idle, 1, "resource should be idle");
+
+        // Wait for the idle timeout to expire
+        std::thread::sleep(Duration::from_millis(20));
+
+        // try_acquire should evict the expired resource and return None
+        // (no more idle resources, and try_acquire doesn't create new ones)
+        let result = pool.try_acquire();
+        assert!(
+            result.is_none(),
+            "expired idle resource should be evicted, try_acquire returns None"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.idle, 0,
+            "expired idle resource should have been evicted"
+        );
+
+        crate::test_complete!("idle_eviction_respects_idle_timeout");
+    }
+
+    #[test]
+    fn idle_eviction_respects_max_lifetime() {
+        init_test("idle_eviction_respects_max_lifetime");
+
+        // Use a very short max lifetime
+        let config = PoolConfig::with_max_size(5).max_lifetime(Duration::from_millis(10));
+        let pool = GenericPool::new(simple_factory, config);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire");
+        r.return_to_pool();
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        let result = pool.try_acquire();
+        assert!(
+            result.is_none(),
+            "resource past max_lifetime should be evicted"
+        );
+
+        crate::test_complete!("idle_eviction_respects_max_lifetime");
+    }
+
+    #[test]
+    fn multiple_acquire_return_cycles_keep_accounting_consistent() {
+        init_test("multiple_acquire_return_cycles_keep_accounting_consistent");
+
+        // Verify that mixed return_to_pool, discard, and implicit drop
+        // all keep the accounting correct over many cycles.
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        for i in 0..50 {
+            let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire");
+            match i % 3 {
+                0 => r.return_to_pool(),
+                1 => r.discard(),
+                _ => drop(r), // implicit return via Drop
+            }
+        }
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.active == 0,
+            "no active after all returned/discarded",
+            0usize,
+            stats.active
+        );
+        crate::assert_with_log!(
+            stats.total_acquisitions == 50,
+            "50 total acquisitions",
+            50u64,
+            stats.total_acquisitions
+        );
+
+        crate::test_complete!("multiple_acquire_return_cycles_keep_accounting_consistent");
+    }
+
+    #[test]
+    fn warmup_resources_reused_by_acquire() {
+        init_test("warmup_resources_reused_by_acquire");
+
+        // Verify that warmup resources are available for acquire.
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let config = PoolConfig::with_max_size(10).warmup_connections(2);
+        let pool = GenericPool::new(factory, config);
+
+        let created = futures_lite::future::block_on(pool.warmup()).expect("warmup should succeed");
+        assert_eq!(created, 2);
+
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Acquire should reuse warmup resources (ids 0 and 1), not create new ones
+        let r1 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 1");
+        let r2 = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire 2");
+
+        // Both should be from warmup (ids 0 or 1)
+        assert!(
+            *r1 <= 1u32 && *r2 <= 1u32,
+            "warmup resources should be reused: got {} and {}",
+            *r1,
+            *r2
+        );
+        assert_ne!(*r1, *r2, "should be different resources");
+
+        crate::test_complete!("warmup_resources_reused_by_acquire");
     }
 
     // ========================================================================
