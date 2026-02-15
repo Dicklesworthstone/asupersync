@@ -574,6 +574,13 @@ impl SymbolDeduplicator {
 
         let mut objects = self.objects.write().expect("lock poisoned");
 
+        // Enforce max_objects: if at capacity and this is a new object,
+        // treat the symbol as unique but skip recording to bound memory.
+        if !objects.contains_key(&object_id) && objects.len() >= self.config.max_objects {
+            drop(objects);
+            return true;
+        }
+
         // Get or create object state
         let state = objects
             .entry(object_id)
@@ -584,6 +591,12 @@ impl SymbolDeduplicator {
             drop(objects);
             self.duplicates_detected.fetch_add(1, Ordering::Relaxed);
             return false;
+        }
+
+        // Enforce max_symbols_per_object: stop recording beyond the limit.
+        if state.seen.len() >= self.config.max_symbols_per_object {
+            drop(objects);
+            return true;
         }
 
         // Record new symbol
@@ -810,7 +823,11 @@ impl SymbolReorderer {
                 );
             } else if gap > self.config.max_sequence_gap {
                 // Gap too large: give up waiting on missing sequence and advance.
-                state.buffer.clear();
+                // Deliver all buffered symbols (in sequence order) before resetting.
+                for (_, buffered) in std::mem::take(&mut state.buffer) {
+                    ready.push(buffered.symbol);
+                    self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
+                }
                 state.next_expected = seq + 1;
                 state.last_delivery = now;
                 self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
@@ -1984,5 +2001,176 @@ mod tests {
         );
 
         crate::test_complete!("aggregation_error_display_variants");
+    }
+
+    // ========================================================================
+    // Bug-fix regression tests
+    // ========================================================================
+
+    /// Regression: large gap reset must drain buffered symbols, not drop them.
+    #[test]
+    fn reorderer_large_gap_delivers_buffered_before_reset() {
+        init_test("reorderer_large_gap_delivers_buffered_before_reset");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            max_sequence_gap: 3,
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+        let path = PathId(1);
+        let now = Time::ZERO;
+
+        // Deliver seq 0 in-order.
+        let s0 = Symbol::new_for_test(1, 0, 0, &[0]);
+        let out0 = reorderer.process(s0, path, now);
+        crate::assert_with_log!(out0.len() == 1, "s0 delivered", 1, out0.len());
+
+        // Buffer seq 2 and 3 (out-of-order, waiting for seq 1).
+        let s2 = Symbol::new_for_test(1, 0, 2, &[2]);
+        let s3 = Symbol::new_for_test(1, 0, 3, &[3]);
+        let out2 = reorderer.process(s2, path, now);
+        let out3 = reorderer.process(s3, path, now);
+        crate::assert_with_log!(out2.is_empty(), "s2 buffered", 0, out2.len());
+        crate::assert_with_log!(out3.is_empty(), "s3 buffered", 0, out3.len());
+
+        // Now deliver seq 100 — gap is 99 > max_sequence_gap(3).
+        // Buffered symbols 2 and 3 must be delivered, not dropped.
+        let s100 = Symbol::new_for_test(1, 0, 100, &[100]);
+        let out100 = reorderer.process(s100, path, now);
+        crate::assert_with_log!(
+            out100.len() == 3,
+            "large gap delivers buffered + new",
+            3,
+            out100.len()
+        );
+
+        crate::test_complete!("reorderer_large_gap_delivers_buffered_before_reset");
+    }
+
+    /// Regression: dedup must enforce max_objects limit.
+    #[test]
+    fn dedup_enforces_max_objects() {
+        init_test("dedup_enforces_max_objects");
+        let config = DeduplicatorConfig {
+            max_objects: 2,
+            ..Default::default()
+        };
+        let dedup = SymbolDeduplicator::new(config);
+        let path = PathId(1);
+
+        // Record symbols for 2 different objects — both should be tracked.
+        let s1 = Symbol::new_for_test(1, 0, 0, &[1]);
+        let s2 = Symbol::new_for_test(2, 0, 0, &[2]);
+        crate::assert_with_log!(
+            dedup.check_and_record(&s1, path, Time::ZERO),
+            "obj1 unique",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            dedup.check_and_record(&s2, path, Time::ZERO),
+            "obj2 unique",
+            true,
+            true
+        );
+
+        // Third object exceeds max_objects — should still return true (unique)
+        // but NOT be tracked (so a duplicate won't be detected).
+        let s3 = Symbol::new_for_test(3, 0, 0, &[3]);
+        let result = dedup.check_and_record(&s3, path, Time::ZERO);
+        crate::assert_with_log!(result, "obj3 treated as unique", true, result);
+
+        let stats = dedup.stats();
+        crate::assert_with_log!(
+            stats.objects_tracked == 2,
+            "only 2 objects tracked",
+            2,
+            stats.objects_tracked
+        );
+
+        crate::test_complete!("dedup_enforces_max_objects");
+    }
+
+    /// Regression: dedup must enforce max_symbols_per_object limit.
+    #[test]
+    fn dedup_enforces_max_symbols_per_object() {
+        init_test("dedup_enforces_max_symbols_per_object");
+        let config = DeduplicatorConfig {
+            max_symbols_per_object: 3,
+            ..Default::default()
+        };
+        let dedup = SymbolDeduplicator::new(config);
+        let path = PathId(1);
+
+        // Record 3 symbols for object 1 — all should be tracked.
+        for i in 0..3 {
+            let s = Symbol::new_for_test(1, 0, i, &[i as u8]);
+            let unique = dedup.check_and_record(&s, path, Time::ZERO);
+            crate::assert_with_log!(unique, "symbol unique", true, unique);
+        }
+
+        // 4th symbol for same object exceeds limit — treated as unique
+        // but not recorded.
+        let s4 = Symbol::new_for_test(1, 0, 3, &[3]);
+        let result = dedup.check_and_record(&s4, path, Time::ZERO);
+        crate::assert_with_log!(result, "over-limit symbol treated as unique", true, result);
+
+        let stats = dedup.stats();
+        crate::assert_with_log!(
+            stats.symbols_tracked == 3,
+            "only 3 symbols tracked",
+            3,
+            stats.symbols_tracked
+        );
+
+        crate::test_complete!("dedup_enforces_max_symbols_per_object");
+    }
+
+    /// Flush timeout advances next_expected and drains consecutive.
+    #[test]
+    fn flush_timeout_drains_consecutive_after_advance() {
+        init_test("flush_timeout_drains_consecutive_after_advance");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            max_wait_time: Time::from_millis(50),
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+        let path = PathId(1);
+
+        // Deliver seq 0.
+        reorderer.process(Symbol::new_for_test(1, 0, 0, &[0]), path, Time::ZERO);
+
+        // Buffer seq 2 at t=0 (will time out at t=50).
+        reorderer.process(Symbol::new_for_test(1, 0, 2, &[2]), path, Time::ZERO);
+
+        // Buffer seq 3 at t=40 (will time out at t=90).
+        reorderer.process(
+            Symbol::new_for_test(1, 0, 3, &[3]),
+            path,
+            Time::from_millis(40),
+        );
+
+        // Flush at t=60: seq 2 timed out (waited 60ms > 50ms).
+        // Seq 3 has NOT timed out (waited 20ms < 50ms).
+        // After flushing seq 2, next_expected advances to 3,
+        // and the consecutive drain pops seq 3 from the buffer.
+        let flushed = reorderer.flush_timeouts(Time::from_millis(60));
+        crate::assert_with_log!(
+            flushed.len() == 2,
+            "seq 2 flushed + seq 3 drained",
+            2,
+            flushed.len()
+        );
+
+        let stats = reorderer.stats();
+        crate::assert_with_log!(
+            stats.symbols_buffered == 0,
+            "buffer empty after drain",
+            0,
+            stats.symbols_buffered
+        );
+
+        crate::test_complete!("flush_timeout_drains_consecutive_after_advance");
     }
 }
