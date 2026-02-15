@@ -92,6 +92,23 @@ struct Waiter {
     waker: Waker,
 }
 
+fn front_waiter_waker(state: &SemaphoreState) -> Option<Waker> {
+    state.waiters.front().map(|waiter| waiter.waker.clone())
+}
+
+fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64) -> Option<Waker> {
+    let was_front = state
+        .waiters
+        .front()
+        .is_some_and(|waiter| waiter.id == waiter_id);
+    state.waiters.retain(|waiter| waiter.id != waiter_id);
+    if was_front {
+        front_waiter_waker(state)
+    } else {
+        None
+    }
+}
+
 impl Semaphore {
     /// Creates a new semaphore with the given number of permits.
     #[must_use]
@@ -127,10 +144,17 @@ impl Semaphore {
 
     /// Closes the semaphore.
     pub fn close(&self) {
-        let mut state = self.state.lock();
-        state.closed = true;
-        for waiter in state.waiters.drain(..) {
-            waiter.waker.wake();
+        let waiters = {
+            let mut state = self.state.lock();
+            state.closed = true;
+            state
+                .waiters
+                .drain(..)
+                .map(|waiter| waiter.waker)
+                .collect::<Vec<_>>()
+        };
+        for waiter in waiters {
+            waiter.wake();
         }
     }
 
@@ -180,13 +204,16 @@ impl Semaphore {
     ///
     /// Saturates at `usize::MAX` if adding would overflow.
     pub fn add_permits(&self, count: usize) {
-        let mut state = self.state.lock();
-        state.permits = state.permits.saturating_add(count);
-        // Only wake the first waiter since FIFO ordering means only it can acquire.
-        // Waking all waiters wastes CPU when only the front can make progress.
-        // If the first waiter acquires and releases, it will wake the next.
-        if let Some(first) = state.waiters.front() {
-            first.waker.wake_by_ref();
+        let waiter_to_wake = {
+            let mut state = self.state.lock();
+            state.permits = state.permits.saturating_add(count);
+            // Only wake the first waiter since FIFO ordering means only it can acquire.
+            // Waking all waiters wastes CPU when only the front can make progress.
+            // If the first waiter acquires and releases, it will wake the next.
+            front_waiter_waker(&state)
+        };
+        if let Some(waiter) = waiter_to_wake {
+            waiter.wake();
         }
     }
 }
@@ -202,18 +229,14 @@ pub struct AcquireFuture<'a, 'b> {
 impl Drop for AcquireFuture<'_, '_> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let mut state = self.semaphore.state.lock();
-
-            // If we are at the front, we need to wake the next waiter when we leave,
-            // otherwise the signal (permits available) might be lost.
-            let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
-
-            state.waiters.retain(|waiter| waiter.id != waiter_id);
-
-            if was_front {
-                if let Some(next) = state.waiters.front() {
-                    next.waker.wake_by_ref();
-                }
+            let next_waker = {
+                let mut state = self.semaphore.state.lock();
+                // If we are at the front, we need to wake the next waiter when we leave,
+                // otherwise the signal (permits available) might be lost.
+                remove_waiter_and_take_next_waker(&mut state, waiter_id)
+            };
+            if let Some(next) = next_waker {
+                next.wake();
             }
         }
     }
@@ -225,21 +248,17 @@ impl<'a> Future for AcquireFuture<'a, '_> {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
-                let mut state = self.semaphore.state.lock();
-
-                // If we are at the front, we need to wake the next waiter when we leave,
-                // otherwise the signal (permits available) might be lost.
-                let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
-
-                state.waiters.retain(|waiter| waiter.id != waiter_id);
-
-                if was_front {
-                    if let Some(next) = state.waiters.front() {
-                        next.waker.wake_by_ref();
-                    }
-                }
+                let next_waker = {
+                    let mut state = self.semaphore.state.lock();
+                    // If we are at the front, we need to wake the next waiter when we leave,
+                    // otherwise the signal (permits available) might be lost.
+                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                };
                 // Clear waiter_id so Drop doesn't try to remove it again
                 self.waiter_id = None;
+                if let Some(next) = next_waker {
+                    next.wake();
+                }
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
@@ -284,14 +303,17 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             // Wake next waiter if there are still permits available.
             // Without this, add_permits(N) where N satisfies multiple waiters
             // would only wake the first, leaving others sleeping indefinitely.
-            if state.permits > 0 {
-                if let Some(next) = state.waiters.front() {
-                    next.waker.wake_by_ref();
-                }
-            }
+            let next_waker = if state.permits > 0 {
+                front_waiter_waker(&state)
+            } else {
+                None
+            };
             drop(state);
             // Clear waiter_id after releasing state guard to avoid borrow conflicts.
             self.waiter_id = None;
+            if let Some(next) = next_waker {
+                next.wake();
+            }
             return Poll::Ready(Ok(SemaphorePermit {
                 semaphore: self.semaphore,
                 count: self.count,
@@ -404,18 +426,14 @@ struct OwnedAcquireFuture {
 impl Drop for OwnedAcquireFuture {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let mut state = self.semaphore.state.lock();
-
-            // If we are at the front, we need to wake the next waiter when we leave,
-            // otherwise the signal (permits available) might be lost.
-            let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
-
-            state.waiters.retain(|waiter| waiter.id != waiter_id);
-
-            if was_front {
-                if let Some(next) = state.waiters.front() {
-                    next.waker.wake_by_ref();
-                }
+            let next_waker = {
+                let mut state = self.semaphore.state.lock();
+                // If we are at the front, we need to wake the next waiter when we leave,
+                // otherwise the signal (permits available) might be lost.
+                remove_waiter_and_take_next_waker(&mut state, waiter_id)
+            };
+            if let Some(next) = next_waker {
+                next.wake();
             }
         }
     }
@@ -427,19 +445,13 @@ impl Future for OwnedAcquireFuture {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
-                {
+                let next_waker = {
                     let mut state = self.semaphore.state.lock();
-                    let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
-                    state.waiters.retain(|waiter| waiter.id != waiter_id);
-                    if was_front {
-                        if let Some(next) = state.waiters.front() {
-                            next.waker.wake_by_ref();
-                        }
-                    }
+                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                };
+                if let Some(next) = next_waker {
+                    next.wake();
                 }
-                // Clear waiter_id so Drop doesn't try to remove it again.
-                // Must happen after `state` is dropped (end of block above)
-                // to satisfy the borrow checker.
                 self.waiter_id = None;
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
@@ -481,14 +493,17 @@ impl Future for OwnedAcquireFuture {
             // Wake next waiter if there are still permits available.
             // Without this, add_permits(N) where N satisfies multiple waiters
             // would only wake the first, leaving others sleeping indefinitely.
-            if state.permits > 0 {
-                if let Some(next) = state.waiters.front() {
-                    next.waker.wake_by_ref();
-                }
-            }
+            let next_waker = if state.permits > 0 {
+                front_waiter_waker(&state)
+            } else {
+                None
+            };
             drop(state);
             // Prevent redundant Drop cleanup after releasing state guard.
             self.waiter_id = None;
+            if let Some(next) = next_waker {
+                next.wake();
+            }
             return Poll::Ready(Ok(OwnedSemaphorePermit {
                 semaphore: self.semaphore.clone(),
                 count: self.count,
@@ -607,6 +622,22 @@ mod tests {
         }
     }
 
+    struct ReentrantSemaphoreWaker {
+        semaphore: Arc<Semaphore>,
+        wake_tx: std::sync::mpsc::Sender<()>,
+    }
+
+    impl std::task::Wake for ReentrantSemaphoreWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let _ = self.semaphore.available_permits();
+            let _ = self.wake_tx.send(());
+        }
+    }
+
     fn acquire_blocking<'a>(
         semaphore: &'a Semaphore,
         cx: &Cx,
@@ -694,6 +725,42 @@ mod tests {
         let waiter_len = sem.state.lock().waiters.len();
         crate::assert_with_log!(waiter_len == 0, "waiter removed", 0usize, waiter_len);
         crate::test_complete!("drop_removes_waiter");
+    }
+
+    #[test]
+    fn add_permits_wakes_without_holding_lock() {
+        init_test("add_permits_wakes_without_holding_lock");
+        let cx = test_cx();
+        let sem = Arc::new(Semaphore::new(1));
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut = sem.acquire(&cx, 1);
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let waker = Waker::from(Arc::new(ReentrantSemaphoreWaker {
+            semaphore: Arc::clone(&sem),
+            wake_tx,
+        }));
+
+        let pending = poll_once_with_waker(&mut fut, &waker).is_none();
+        crate::assert_with_log!(pending, "waiter pending", true, pending);
+
+        let sem_for_thread = Arc::clone(&sem);
+        let join = std::thread::spawn(move || {
+            sem_for_thread.add_permits(1);
+        });
+
+        let woke = wake_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+        crate::assert_with_log!(woke, "wake signal received", true, woke);
+        join.join().expect("add_permits thread join");
+
+        let permit = poll_once_with_waker(&mut fut, &waker)
+            .expect("acquire ready")
+            .expect("acquire ok");
+        drop(permit);
+        drop(held);
+        crate::test_complete!("add_permits_wakes_without_holding_lock");
     }
 
     #[test]
