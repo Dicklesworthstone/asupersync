@@ -41,7 +41,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
-fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path),
         Ok(_) => Err(io::Error::new(
