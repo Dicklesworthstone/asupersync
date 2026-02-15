@@ -197,6 +197,9 @@ impl ScheduledSet {
                 let removed = self.overflow.remove(&task);
                 if removed {
                     self.len -= 1;
+                    // Only keep collision-mode bookkeeping while multiple generations for this
+                    // arena index are live. Collapse back to dense tracking when possible.
+                    self.collapse_collision_slot(idx);
                 }
                 removed
             }
@@ -224,6 +227,46 @@ impl ScheduledSet {
         new_len = new_len.clamp(Self::MIN_DENSE_LEN, Self::MAX_DENSE_LEN);
         if new_len > self.dense.len() {
             self.dense.resize(new_len, 0);
+        }
+    }
+
+    /// Rebuild a collision-marked dense slot when generations drain.
+    ///
+    /// Collision slots are required only while two or more generations for the
+    /// same arena index are live in the set. When that count drops to one (or
+    /// zero), we restore the dense fast path.
+    fn collapse_collision_slot(&mut self, idx: usize) {
+        debug_assert!(idx < self.dense.len());
+        if self.dense[idx] != Self::DENSE_COLLISION {
+            return;
+        }
+
+        let mut remaining: Option<TaskId> = None;
+        let mut multiple = false;
+        for candidate in &self.overflow {
+            if candidate.0.index() as usize != idx {
+                continue;
+            }
+            if remaining.is_some() {
+                multiple = true;
+                break;
+            }
+            remaining = Some(*candidate);
+        }
+
+        if multiple {
+            return;
+        }
+
+        match remaining {
+            None => {
+                self.dense[idx] = 0;
+            }
+            Some(task) => {
+                let removed = self.overflow.remove(&task);
+                debug_assert!(removed, "task discovered in overflow should remove");
+                self.dense[idx] = u64::from(task.0.generation()) + 1;
+            }
         }
     }
 }
@@ -2197,5 +2240,59 @@ mod tests {
             sched.len()
         );
         crate::test_complete!("repeated_cancel_requests_are_idempotent");
+    }
+
+    #[test]
+    fn scheduled_set_collision_slot_clears_when_generations_drain() {
+        init_test("scheduled_set_collision_slot_clears_when_generations_drain");
+        let mut sched = Scheduler::new();
+        let idx = 777_u32;
+        let g0 = TaskId::from_arena(ArenaIndex::new(idx, 0));
+        let g1 = TaskId::from_arena(ArenaIndex::new(idx, 1));
+        let g2 = TaskId::from_arena(ArenaIndex::new(idx, 2));
+
+        // Trigger dense collision tracking for this index.
+        sched.schedule(g0, 10);
+        sched.schedule(g1, 20);
+        assert_eq!(
+            sched.scheduled.dense[idx as usize],
+            ScheduledSet::DENSE_COLLISION
+        );
+
+        // Remove both colliding generations. The slot should collapse back to empty dense state.
+        sched.remove(g0);
+        sched.remove(g1);
+        assert_eq!(sched.scheduled.dense[idx as usize], 0);
+        assert!(sched.scheduled.overflow.iter().all(|t| t.0.index() != idx));
+
+        // New generation should use dense storage directly (not overflow fallback).
+        sched.schedule(g2, 30);
+        assert_ne!(
+            sched.scheduled.dense[idx as usize],
+            ScheduledSet::DENSE_COLLISION
+        );
+        assert!(!sched.scheduled.overflow.contains(&g2));
+    }
+
+    #[test]
+    fn scheduled_set_collision_slot_collapses_to_single_remaining_generation() {
+        init_test("scheduled_set_collision_slot_collapses_to_single_remaining_generation");
+        let mut sched = Scheduler::new();
+        let idx = 314_u32;
+        let g0 = TaskId::from_arena(ArenaIndex::new(idx, 0));
+        let g1 = TaskId::from_arena(ArenaIndex::new(idx, 1));
+
+        sched.schedule(g0, 10);
+        sched.schedule(g1, 20);
+        assert_eq!(
+            sched.scheduled.dense[idx as usize],
+            ScheduledSet::DENSE_COLLISION
+        );
+
+        // Remove one generation; the remaining one should be restored to dense tracking.
+        sched.remove(g1);
+        let expected_tag = u64::from(g0.0.generation()) + 1;
+        assert_eq!(sched.scheduled.dense[idx as usize], expected_tag);
+        assert!(!sched.scheduled.overflow.contains(&g0));
     }
 }
