@@ -157,7 +157,8 @@ pub struct DeadlineMonitor {
     monitored: HashMap<TaskId, MonitoredTask>,
     history: HashMap<String, DurationHistory>,
     metrics_provider: Option<Arc<dyn MetricsProvider>>,
-    last_scan: Option<Instant>,
+    last_scan_time: Option<Time>,
+    last_scan_instant: Option<Instant>,
 }
 
 impl fmt::Debug for DeadlineMonitor {
@@ -165,7 +166,8 @@ impl fmt::Debug for DeadlineMonitor {
         f.debug_struct("DeadlineMonitor")
             .field("config", &self.config)
             .field("monitored", &self.monitored)
-            .field("last_scan", &self.last_scan)
+            .field("last_scan_time", &self.last_scan_time)
+            .field("last_scan_instant", &self.last_scan_instant)
             .finish_non_exhaustive()
     }
 }
@@ -180,7 +182,8 @@ impl DeadlineMonitor {
             monitored: HashMap::new(),
             history: HashMap::new(),
             metrics_provider: None,
-            last_scan: None,
+            last_scan_time: None,
+            last_scan_instant: None,
         }
     }
 
@@ -297,12 +300,22 @@ impl DeadlineMonitor {
         }
 
         let now_instant = Instant::now();
-        if let Some(last_scan) = self.last_scan {
-            if now_instant.duration_since(last_scan) < self.config.check_interval {
+        let interval_nanos = duration_to_nanos(self.config.check_interval);
+        if interval_nanos > 0 && self.last_scan_time.is_some() {
+            let logical_elapsed = self
+                .last_scan_time
+                .map(|last| now.duration_since(last))
+                .unwrap_or_default();
+            let wall_elapsed = self
+                .last_scan_instant
+                .map(|last| duration_to_nanos(now_instant.duration_since(last)))
+                .unwrap_or_default();
+            if logical_elapsed < interval_nanos && wall_elapsed < interval_nanos {
                 return;
             }
         }
-        self.last_scan = Some(now_instant);
+        self.last_scan_time = Some(now);
+        self.last_scan_instant = Some(now_instant);
 
         let mut seen: HashSet<TaskId> = HashSet::new();
 
@@ -470,6 +483,10 @@ fn fraction_nanos(total_nanos: u64, fraction: f64) -> u64 {
     }
     let scaled = (total_nanos as f64) * fraction;
     scaled.max(0.0).min(u64::MAX as f64) as u64
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 fn normalize_task_type(task_type: &str) -> &str {
@@ -642,6 +659,103 @@ mod tests {
         let count = warnings.lock().unwrap().len();
         crate::assert_with_log!(count == 1, "warned once", 1usize, count);
         crate::test_complete!("warns_only_once_per_task");
+    }
+
+    #[test]
+    fn check_interval_uses_logical_time_not_wall_clock() {
+        init_test("check_interval_uses_logical_time_not_wall_clock");
+        let config = MonitorConfig {
+            check_interval: Duration::from_secs(1),
+            warning_threshold_fraction: 0.2,
+            checkpoint_timeout: Duration::from_hours(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(31, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(100),
+            None,
+            None,
+            None,
+        );
+
+        // First scan at t=0 should not warn.
+        monitor.check(Time::from_secs(0), std::iter::once(&task));
+        let first_count = warnings.lock().unwrap().len();
+        crate::assert_with_log!(first_count == 0, "no warning at t=0", 0usize, first_count);
+
+        // Immediate second call advances logical time beyond check_interval and near deadline.
+        // This must produce a warning even when little wall-clock time has elapsed.
+        monitor.check(Time::from_secs(90), std::iter::once(&task));
+        let recorded = warnings.lock().unwrap().clone();
+        crate::assert_with_log!(
+            recorded.as_slice() == [WarningReason::ApproachingDeadline],
+            "warning emitted after logical-time advance",
+            vec![WarningReason::ApproachingDeadline],
+            recorded
+        );
+        crate::test_complete!("check_interval_uses_logical_time_not_wall_clock");
+    }
+
+    #[test]
+    fn check_interval_falls_back_to_wall_clock_when_logical_time_is_stable() {
+        init_test("check_interval_falls_back_to_wall_clock_when_logical_time_is_stable");
+        let config = MonitorConfig {
+            check_interval: Duration::from_millis(5),
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_millis(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(32, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1_000),
+            None,
+            None,
+            None,
+        );
+
+        monitor.check(Time::from_secs(0), std::iter::once(&task));
+        let first_count = warnings.lock().unwrap().len();
+        crate::assert_with_log!(
+            first_count == 0,
+            "no warning on first scan",
+            0usize,
+            first_count
+        );
+
+        std::thread::sleep(Duration::from_millis(10));
+        monitor.check(Time::from_secs(0), std::iter::once(&task));
+        let recorded = warnings.lock().unwrap().clone();
+        crate::assert_with_log!(
+            recorded.as_slice() == [WarningReason::NoProgress],
+            "wall-clock fallback allows progress checks with stable logical time",
+            vec![WarningReason::NoProgress],
+            recorded
+        );
+        crate::test_complete!(
+            "check_interval_falls_back_to_wall_clock_when_logical_time_is_stable"
+        );
     }
 
     #[test]

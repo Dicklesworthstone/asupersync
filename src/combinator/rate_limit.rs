@@ -210,6 +210,11 @@ struct QueueEntry {
 /// Fixed-point scale for token storage (allows fractional tokens).
 const FIXED_POINT_SCALE: u64 = 1000;
 
+#[inline]
+fn duration_to_millis_saturating(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 /// Internal state of the token bucket.
 struct BucketState {
     /// Token bucket state (stored as fixed-point).
@@ -450,7 +455,10 @@ impl RateLimiter {
         // Calculate deadline
         let now_millis = now.as_millis();
         let deadline_millis = match &self.policy.wait_strategy {
-            WaitStrategy::BlockWithTimeout(timeout) => now_millis + timeout.as_millis() as u64,
+            WaitStrategy::BlockWithTimeout(timeout) => {
+                let timeout_millis = duration_to_millis_saturating(*timeout);
+                now_millis.saturating_add(timeout_millis)
+            }
             _ => u64::MAX,
         };
 
@@ -530,7 +538,7 @@ impl RateLimiter {
                     metrics.max_wait_time = wait_duration;
                 }
 
-                let total_ms = metrics.total_wait_time.as_millis() as u64;
+                let total_ms = duration_to_millis_saturating(metrics.total_wait_time);
                 if let Some(avg_ms) = total_ms.checked_div(metrics.total_waited) {
                     metrics.avg_wait_time = Duration::from_millis(avg_ms);
                 }
@@ -672,7 +680,7 @@ impl SlidingWindowRateLimiter {
     #[allow(clippy::cast_possible_truncation)]
     fn current_usage(&self, now: Time) -> u32 {
         let now_millis = now.as_millis();
-        let period_millis = self.policy.period.as_millis() as u64;
+        let period_millis = duration_to_millis_saturating(self.policy.period);
 
         let window = self.window.read().expect("lock poisoned");
         window
@@ -687,7 +695,7 @@ impl SlidingWindowRateLimiter {
     #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
     fn cleanup_old(&self, now: Time) {
         let now_millis = now.as_millis();
-        let period_millis = self.policy.period.as_millis() as u64;
+        let period_millis = duration_to_millis_saturating(self.policy.period);
         let mut window = self.window.write().expect("lock poisoned");
 
         while let Some((t, _)) = window.front() {
@@ -707,7 +715,7 @@ impl SlidingWindowRateLimiter {
         self.cleanup_old(now);
 
         let now_millis = now.as_millis();
-        let period_millis = self.policy.period.as_millis() as u64;
+        let period_millis = duration_to_millis_saturating(self.policy.period);
 
         // Hold write lock during both usage check and entry addition to prevent TOCTOU
         let mut window = self.window.write().expect("lock poisoned");
@@ -751,7 +759,7 @@ impl SlidingWindowRateLimiter {
         // Find when enough capacity frees up
         let needed = (usage + cost) - self.policy.rate;
         let window = self.window.read().expect("lock poisoned");
-        let period_millis = self.policy.period.as_millis() as u64;
+        let period_millis = duration_to_millis_saturating(self.policy.period);
         let now_millis = now.as_millis();
 
         let mut freed = 0u32;
@@ -1364,7 +1372,7 @@ mod tests {
     fn check_entry_timeout() {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
-            period: Duration::from_secs(60), // Very slow refill
+            period: Duration::from_mins(1), // Very slow refill
             burst: 1,
             wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(100)),
             ..Default::default()
@@ -1385,7 +1393,7 @@ mod tests {
     fn cancel_entry_triggers_cancelled_error() {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
-            period: Duration::from_secs(60),
+            period: Duration::from_mins(1),
             burst: 1,
             wait_strategy: WaitStrategy::Block,
             ..Default::default()
@@ -1469,6 +1477,22 @@ mod tests {
             wait >= Duration::from_millis(900) && wait <= Duration::from_millis(1100),
             "Expected ~1000ms, got {wait:?}"
         );
+    }
+
+    #[test]
+    fn sliding_window_period_overflow_does_not_wrap() {
+        let overflowing_millis = Duration::new(18_446_744_073_709_551, 616_000_000);
+        let rl = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: overflowing_millis,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now));
+        // With saturating conversion this second acquire must be rejected:
+        // the first entry remains inside the (effectively max) window.
+        assert!(!rl.try_acquire(1, Time::from_millis(1)));
     }
 
     // =========================================================================
@@ -1651,7 +1675,7 @@ mod tests {
     fn reset_cancels_queued_entries() {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
-            period: Duration::from_secs(60),
+            period: Duration::from_mins(1),
             burst: 1,
             wait_strategy: WaitStrategy::Block,
             ..Default::default()
@@ -1668,5 +1692,33 @@ mod tests {
         // Entry should be cancelled
         let result = rl.check_entry(entry_id, now);
         assert!(matches!(result, Err(RateLimitError::Cancelled)));
+    }
+
+    #[test]
+    fn enqueue_deadline_saturates_for_huge_timeouts() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_mins(1),
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::MAX),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now));
+
+        let entry_id = rl.enqueue(1, now).expect("enqueue should succeed");
+        let queue = rl.wait_queue.read().expect("lock poisoned");
+        let entry = queue
+            .iter()
+            .find(|entry| entry.id == entry_id)
+            .expect("queued entry should exist");
+
+        assert_eq!(entry.deadline_millis, u64::MAX);
+    }
+
+    #[test]
+    fn duration_to_millis_saturates_for_large_durations() {
+        assert_eq!(duration_to_millis_saturating(Duration::MAX), u64::MAX);
     }
 }

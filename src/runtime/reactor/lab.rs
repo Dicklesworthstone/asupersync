@@ -41,6 +41,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 /// A timed event in the lab reactor.
 ///
 /// Events are ordered by delivery time, with sequence numbers breaking ties
@@ -314,7 +318,9 @@ impl LabReactor {
     /// This method is also known as `schedule_event()` in the spec.
     pub fn inject_event(&self, token: Token, mut event: Event, delay: Duration) {
         let mut inner = self.inner.lock().unwrap();
-        let time = inner.time.saturating_add_nanos(delay.as_nanos() as u64);
+        let time = inner
+            .time
+            .saturating_add_nanos(duration_to_nanos_saturating(delay));
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
         event.token = token;
@@ -367,7 +373,9 @@ impl LabReactor {
     /// This is useful for testing timeout behavior without going through poll().
     pub fn advance_time(&self, duration: Duration) {
         let mut inner = self.inner.lock().unwrap();
-        inner.time = inner.time.saturating_add_nanos(duration.as_nanos() as u64);
+        inner.time = inner
+            .time
+            .saturating_add_nanos(duration_to_nanos_saturating(duration));
     }
 
     /// Advances virtual time to a specific target time.
@@ -745,7 +753,9 @@ impl Reactor for LabReactor {
 
             // Advance time if timeout provided (simulated)
             if let Some(d) = timeout {
-                inner.time = inner.time.saturating_add_nanos(d.as_nanos() as u64);
+                inner.time = inner
+                    .time
+                    .saturating_add_nanos(duration_to_nanos_saturating(d));
             }
 
             let mut ready_events = Vec::new();
@@ -845,7 +855,7 @@ impl Reactor for LabReactor {
                                 let sequence = *next_sequence;
                                 *next_sequence += 1;
                                 let delayed_time =
-                                    time.saturating_add_nanos(delay.as_nanos() as u64);
+                                    time.saturating_add_nanos(duration_to_nanos_saturating(delay));
                                 pending.push(TimedEvent {
                                     time: delayed_time,
                                     sequence,
@@ -857,7 +867,7 @@ impl Reactor for LabReactor {
                                     target: "chaos",
                                     token = token.0,
                                     injection = "io_delay",
-                                    delay_ns = delay.as_nanos() as u64
+                                    delay_ns = duration_to_nanos_saturating(delay)
                                 );
                                 continue;
                             }
@@ -1177,6 +1187,44 @@ mod tests {
             reactor.now().as_nanos()
         );
         crate::test_complete!("virtual_time_advances");
+    }
+
+    #[test]
+    fn duration_to_nanos_saturates_max_duration() {
+        init_test("duration_to_nanos_saturates_max_duration");
+        let nanos = duration_to_nanos_saturating(Duration::MAX);
+        crate::assert_with_log!(nanos == u64::MAX, "nanos", u64::MAX, nanos);
+        crate::test_complete!("duration_to_nanos_saturates_max_duration");
+    }
+
+    #[test]
+    fn inject_event_with_max_duration_saturates_to_time_max() {
+        init_test("inject_event_with_max_duration_saturates_to_time_max");
+        let reactor = LabReactor::new();
+        let token = Token::new(1);
+        reactor.inject_event(token, Event::readable(token), Duration::MAX);
+        let next = reactor.next_event_time();
+        crate::assert_with_log!(
+            next == Some(Time::MAX),
+            "next event time",
+            Some(Time::MAX),
+            next
+        );
+        crate::test_complete!("inject_event_with_max_duration_saturates_to_time_max");
+    }
+
+    #[test]
+    fn poll_timeout_with_max_duration_saturates_time() {
+        init_test("poll_timeout_with_max_duration_saturates_time");
+        let reactor = LabReactor::new();
+        let mut events = crate::runtime::reactor::Events::with_capacity(1);
+        let count = reactor
+            .poll(&mut events, Some(Duration::MAX))
+            .expect("poll should succeed");
+        crate::assert_with_log!(count == 0, "count", 0usize, count);
+        let now = reactor.now();
+        crate::assert_with_log!(now == Time::MAX, "now", Time::MAX, now);
+        crate::test_complete!("poll_timeout_with_max_duration_saturates_time");
     }
 
     #[test]

@@ -37,6 +37,7 @@ use super::nats::{Message, NatsClient, NatsError};
 use crate::cx::Cx;
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
+use crate::types::Time;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -913,13 +914,8 @@ impl Consumer {
         let now = cx
             .timer_driver()
             .map_or_else(wall_now, |driver| driver.now());
-        let client_timeout = if pull_timeout.is_zero() {
-            None
-        } else {
-            Some(pull_timeout.saturating_add(Self::CLIENT_TIMEOUT_SLACK))
-        };
-        let client_deadline = client_timeout
-            .map(|timeout_dur| now.saturating_add_nanos(timeout_dur.as_nanos() as u64));
+        let client_deadline =
+            compute_client_deadline(now, pull_timeout, Self::CLIENT_TIMEOUT_SLACK);
         let mut result: Result<(), JsError> = Ok(());
 
         // Collect messages until we get batch or timeout
@@ -1112,6 +1108,19 @@ fn random_id(cx: &Cx) -> String {
     format!("{:016x}", cx.random_u64())
 }
 
+fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn compute_client_deadline(now: Time, pull_timeout: Duration, slack: Duration) -> Option<Time> {
+    if pull_timeout.is_zero() {
+        None
+    } else {
+        let timeout_dur = pull_timeout.saturating_add(slack);
+        Some(now.saturating_add_nanos(duration_to_nanos_saturating(timeout_dur)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1219,5 +1228,17 @@ mod tests {
             format!("{}", JsError::NotAcked),
             "JetStream message not acknowledged"
         );
+    }
+
+    #[test]
+    fn test_duration_to_nanos_saturating_max_duration() {
+        assert_eq!(duration_to_nanos_saturating(Duration::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn test_compute_client_deadline_saturates_for_large_timeout() {
+        let now = Time::from_nanos(1);
+        let deadline = compute_client_deadline(now, Duration::MAX, Consumer::CLIENT_TIMEOUT_SLACK);
+        assert_eq!(deadline, Some(Time::MAX));
     }
 }
