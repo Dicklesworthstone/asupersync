@@ -34,11 +34,27 @@ use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
 use std::future::poll_fn;
 use std::io;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
+
+fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to remove non-socket path before bind: {}",
+                path.display()
+            ),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
 
 /// A Unix domain socket listener.
 ///
@@ -91,8 +107,8 @@ impl UnixListener {
     pub async fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref();
 
-        // Remove existing socket file if present (might be stale from previous run)
-        let _ = std::fs::remove_file(path);
+        // Remove only stale socket files. Refuse to delete non-socket paths.
+        remove_stale_socket_file(path)?;
 
         let inner = net::UnixListener::bind(path)?;
         inner.set_nonblocking(true)?;
@@ -397,6 +413,57 @@ mod tests {
             crate::assert_with_log!(pathname == path, "pathname", path, pathname);
         });
         crate::test_complete!("test_bind_and_local_addr");
+    }
+
+    #[test]
+    fn test_bind_refuses_non_socket_path() {
+        init_test("test_bind_refuses_non_socket_path");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let path = dir.path().join("non_socket_target");
+            std::fs::write(&path, b"not a socket").expect("write file");
+
+            let err = UnixListener::bind(&path)
+                .await
+                .expect_err("bind should reject non-socket path");
+            crate::assert_with_log!(
+                err.kind() == std::io::ErrorKind::AlreadyExists,
+                "error kind",
+                std::io::ErrorKind::AlreadyExists,
+                err.kind()
+            );
+
+            let contents = std::fs::read(&path).expect("read file");
+            let unchanged = contents == b"not a socket";
+            crate::assert_with_log!(unchanged, "file unchanged", true, unchanged);
+        });
+        crate::test_complete!("test_bind_refuses_non_socket_path");
+    }
+
+    #[test]
+    fn test_bind_replaces_stale_socket_file() {
+        init_test("test_bind_replaces_stale_socket_file");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let path = dir.path().join("stale_socket.sock");
+
+            let stale = net::UnixListener::bind(&path).expect("create stale socket");
+            drop(stale);
+
+            let exists = path.exists();
+            crate::assert_with_log!(exists, "stale socket exists", true, exists);
+
+            let listener = UnixListener::bind(&path)
+                .await
+                .expect("bind should replace stale socket");
+            let exists = path.exists();
+            crate::assert_with_log!(exists, "socket exists after rebind", true, exists);
+            drop(listener);
+
+            let exists = path.exists();
+            crate::assert_with_log!(!exists, "socket cleaned after drop", false, exists);
+        });
+        crate::test_complete!("test_bind_replaces_stale_socket_file");
     }
 
     #[test]
