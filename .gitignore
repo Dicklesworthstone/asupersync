@@ -76,6 +76,14 @@ storage.sqlite3-*
 # bv graph output
 --graph-format.svg
 
+# Beads ephemeral files (locks, migration hints, backups)
+**/.beads/.bv.lock
+**/.beads/.migration-hint-ts
+**/.beads/*.bak_*
+
+# bd obligation patches
+.bd-*.patch
+
 # Ephemeral files (agent-generated, build artifacts, test detritus)
 ci-artifacts/
 proptest-regressions/
