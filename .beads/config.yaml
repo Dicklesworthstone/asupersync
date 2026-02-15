@@ -1,4 +1,4 @@
 sync-branch: main
-issue_prefix: bd
+issue_prefix: asupersync
 id:
-  prefix: bd
+  prefix: asupersync

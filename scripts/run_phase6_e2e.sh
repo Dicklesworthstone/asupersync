@@ -12,6 +12,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/target/phase6-e2e"
+RCH_BIN="${RCH_BIN:-rch}"
+PHASE6_TIMEOUT="${PHASE6_TIMEOUT:-1800}"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -19,6 +21,11 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 REPORT_FILE="${OUTPUT_DIR}/report_${TIMESTAMP}.txt"
 
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "Required executable not found: $RCH_BIN" >&2
+    exit 1
+fi
 
 # Suite definitions: name, test target, required (1) or advisory (0)
 declare -a SUITE_NAMES=(geo homo lyap raptorq plan)
@@ -71,12 +78,22 @@ for name in "${SUITE_NAMES[@]}"; do
     TOTAL=$((TOTAL + 1))
 
     set +e
-    cargo test --test "$target" --all-features -- --nocapture > "$log_file" 2>&1
+    if [[ "$name" == "raptorq" ]]; then
+        timeout "$PHASE6_TIMEOUT" bash "${ROOT_DIR}/scripts/run_raptorq_e2e.sh" --profile full > "$log_file" 2>&1
+    else
+        timeout "$PHASE6_TIMEOUT" "$RCH_BIN" exec -- cargo test --test "$target" --all-features -- --nocapture > "$log_file" 2>&1
+    fi
     rc=$?
     set -e
 
-    passed=$(grep -c "^test .* ok$" "$log_file" 2>/dev/null || echo "0")
-    failed=$(grep -c "^test .* FAILED$" "$log_file" 2>/dev/null || echo "0")
+    passed="$(grep -c "^test .* ok$" "$log_file" 2>/dev/null || true)"
+    failed="$(grep -c "^test .* FAILED$" "$log_file" 2>/dev/null || true)"
+    if [[ -z "$passed" ]]; then
+        passed="0"
+    fi
+    if [[ -z "$failed" ]]; then
+        failed="0"
+    fi
 
     if [ "$rc" -eq 0 ]; then
         echo "PASS  ($passed tests)"
