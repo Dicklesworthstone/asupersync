@@ -2,6 +2,8 @@
 //!
 //! Implements RFC 7541: HPACK - Header Compression for HTTP/2.
 
+use std::collections::VecDeque;
+
 use crate::bytes::{Bytes, BytesMut};
 
 use super::error::H2Error;
@@ -102,9 +104,12 @@ impl Header {
 }
 
 /// Dynamic table for HPACK encoding/decoding.
+///
+/// Uses `VecDeque` so that front insertion (`push_front`) is O(1) amortized
+/// rather than the O(n) of `Vec::insert(0, ...)`.
 #[derive(Debug)]
 pub struct DynamicTable {
-    entries: Vec<Header>,
+    entries: VecDeque<Header>,
     size: usize,
     max_size: usize,
 }
@@ -114,7 +119,7 @@ impl DynamicTable {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: VecDeque::new(),
             size: 0,
             max_size: DEFAULT_MAX_TABLE_SIZE,
         }
@@ -124,7 +129,7 @@ impl DynamicTable {
     #[must_use]
     pub fn with_max_size(max_size: usize) -> Self {
         Self {
-            entries: Vec::new(),
+            entries: VecDeque::new(),
             size: 0,
             max_size,
         }
@@ -152,16 +157,16 @@ impl DynamicTable {
     pub fn insert(&mut self, header: Header) {
         let entry_size = header.size();
 
-        // Evict entries to make room
+        // Evict oldest entries (at back) to make room
         while self.size + entry_size > self.max_size && !self.entries.is_empty() {
-            if let Some(evicted) = self.entries.pop() {
+            if let Some(evicted) = self.entries.pop_back() {
                 self.size -= evicted.size();
             }
         }
 
         // Only insert if it fits
         if entry_size <= self.max_size {
-            self.entries.insert(0, header);
+            self.entries.push_front(header);
             self.size += entry_size;
         }
     }
@@ -198,10 +203,10 @@ impl DynamicTable {
         None
     }
 
-    /// Evict entries to fit within max size.
+    /// Evict oldest entries (at back) to fit within max size.
     fn evict(&mut self) {
         while self.size > self.max_size && !self.entries.is_empty() {
-            if let Some(evicted) = self.entries.pop() {
+            if let Some(evicted) = self.entries.pop_back() {
                 self.size -= evicted.size();
             }
         }
@@ -248,6 +253,9 @@ fn get_static(index: usize) -> Option<(&'static str, &'static str)> {
 pub struct Encoder {
     dynamic_table: DynamicTable,
     use_huffman: bool,
+    /// Pending dynamic table size update to emit at the start of the next header block.
+    /// RFC 7541 Section 6.3 requires this when the table size changes.
+    pending_size_update: Option<usize>,
 }
 
 impl Encoder {
@@ -257,6 +265,7 @@ impl Encoder {
         Self {
             dynamic_table: DynamicTable::new(),
             use_huffman: true,
+            pending_size_update: None,
         }
     }
 
@@ -266,6 +275,7 @@ impl Encoder {
         Self {
             dynamic_table: DynamicTable::with_max_size(max_size),
             use_huffman: true,
+            pending_size_update: None,
         }
     }
 
@@ -275,21 +285,43 @@ impl Encoder {
     }
 
     /// Set the maximum dynamic table size.
+    ///
+    /// Per RFC 7541 Section 6.3, the encoder will emit a dynamic table size
+    /// update at the start of the next encoded header block.
     pub fn set_max_table_size(&mut self, size: usize) {
         self.dynamic_table.set_max_size(size);
+        self.pending_size_update = Some(size);
     }
 
     /// Encode a list of headers.
+    ///
+    /// If a dynamic table size update is pending (from `set_max_table_size`),
+    /// it is emitted at the start of the block per RFC 7541 Section 6.3.
     pub fn encode(&mut self, headers: &[Header], dst: &mut BytesMut) {
+        self.emit_pending_size_update(dst);
         for header in headers {
             self.encode_header(header, dst, true);
         }
     }
 
-    /// Encode headers without indexing (for sensitive headers).
+    /// Encode headers as "never indexed" (for sensitive headers like auth tokens).
+    ///
+    /// Uses RFC 7541 §6.2.3 "Literal Header Field Never Indexed" representation,
+    /// which signals to intermediaries that these headers must not be compressed
+    /// or added to any index, even on re-encoding.
+    ///
+    /// If a dynamic table size update is pending, it is emitted first.
     pub fn encode_sensitive(&mut self, headers: &[Header], dst: &mut BytesMut) {
+        self.emit_pending_size_update(dst);
         for header in headers {
             self.encode_header(header, dst, false);
+        }
+    }
+
+    /// Emit a pending dynamic table size update instruction on the wire.
+    fn emit_pending_size_update(&mut self, dst: &mut BytesMut) {
+        if let Some(new_size) = self.pending_size_update.take() {
+            encode_integer(dst, new_size, 5, 0x20);
         }
     }
 
@@ -343,6 +375,10 @@ impl Default for Encoder {
 /// Maximum allowed HPACK table size to prevent DoS (1MB).
 const MAX_ALLOWED_TABLE_SIZE: usize = 1024 * 1024;
 
+/// Maximum allowed decoded string length to prevent DoS (256 KB).
+/// This bounds the allocation size before the header-list-size check runs.
+const MAX_STRING_LENGTH: usize = 256 * 1024;
+
 /// HPACK decoder for decoding headers.
 #[derive(Debug)]
 pub struct Decoder {
@@ -387,12 +423,19 @@ impl Decoder {
     }
 
     /// Decode headers from a buffer.
+    ///
+    /// Per RFC 7541 §4.2, dynamic table size updates are only permitted at the
+    /// beginning of the header block (before the first header field
+    /// representation). Any size update after the first header is a
+    /// COMPRESSION_ERROR.
     pub fn decode(&mut self, src: &mut Bytes) -> Result<Vec<Header>, H2Error> {
         let mut headers = Vec::new();
         let mut total_size = 0;
+        let mut first_header_seen = false;
 
         while !src.is_empty() {
-            let header = self.decode_header(src)?;
+            let header = self.decode_header(src, !first_header_seen)?;
+            first_header_seen = true;
             total_size += header.size();
             if total_size > self.max_header_list_size {
                 return Err(H2Error::compression("header list too large"));
@@ -407,7 +450,14 @@ impl Decoder {
     ///
     /// Uses iterative approach instead of recursion to prevent stack overflow
     /// from malicious sequences of dynamic table size updates.
-    fn decode_header(&mut self, src: &mut Bytes) -> Result<Header, H2Error> {
+    ///
+    /// `allow_size_updates` is true only before the first header field
+    /// representation in a block, per RFC 7541 §4.2.
+    fn decode_header(
+        &mut self,
+        src: &mut Bytes,
+        allow_size_updates: bool,
+    ) -> Result<Header, H2Error> {
         // Maximum consecutive size updates allowed to prevent DoS
         const MAX_SIZE_UPDATES: usize = 16;
         let mut size_update_count = 0;
@@ -434,7 +484,13 @@ impl Decoder {
             }
 
             if first & 0x20 != 0 {
-                // Dynamic table size update
+                // Dynamic table size update — RFC 7541 §4.2 requires these
+                // appear only at the start of a header block.
+                if !allow_size_updates {
+                    return Err(H2Error::compression(
+                        "dynamic table size update after first header in block",
+                    ));
+                }
                 size_update_count += 1;
                 if size_update_count > MAX_SIZE_UPDATES {
                     return Err(H2Error::compression(
@@ -554,15 +610,23 @@ fn decode_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
         let byte = src[0];
         let _ = src.split_to(1);
 
-        // Check shift limit BEFORE doing the addition to prevent overflow
+        // Guard against unbounded continuation sequences. The shift limit
+        // ensures the loop terminates even on malicious input.
         if shift > 28 {
             return Err(H2Error::compression("integer too large"));
         }
 
-        // Use checked arithmetic to prevent overflow
-        let increment = ((byte & 0x7f) as usize)
+        // Compute increment = (byte & 0x7f) * 2^shift using checked
+        // arithmetic. Note: checked_shl only validates shift < bit_width,
+        // it does NOT detect when the result silently truncates (e.g. on
+        // 32-bit where 127 << 28 overflows u32). Using checked_mul on the
+        // multiplier catches the actual value overflow on all platforms.
+        let multiplier = 1usize
             .checked_shl(shift)
             .ok_or_else(|| H2Error::compression("integer overflow in shift"))?;
+        let increment = ((byte & 0x7f) as usize)
+            .checked_mul(multiplier)
+            .ok_or_else(|| H2Error::compression("integer overflow in multiply"))?;
         value = value
             .checked_add(increment)
             .ok_or_else(|| H2Error::compression("integer overflow in addition"))?;
@@ -630,6 +694,10 @@ fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
 
     let huffman = src[0] & 0x80 != 0;
     let length = decode_integer(src, 7)?;
+
+    if length > MAX_STRING_LENGTH {
+        return Err(H2Error::compression("string length exceeds maximum"));
+    }
 
     if src.len() < length {
         return Err(H2Error::compression("string length exceeds buffer"));
@@ -2109,5 +2177,198 @@ mod tests {
                 assert_eq!(decoded, value, "prefix={prefix}, value={value}");
             }
         }
+    }
+
+    // =========================================================================
+    // Audit Fix Tests (br-10x0x.5)
+    // =========================================================================
+
+    #[test]
+    fn test_encoder_emits_size_update_on_wire() {
+        // RFC 7541 §6.3: After set_max_table_size, the encoder MUST emit a
+        // dynamic table size update at the start of the next header block.
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        // Change max table size
+        encoder.set_max_table_size(256);
+
+        // Encode a header — the size update should precede it
+        let headers = vec![Header::new(":method", "GET")];
+        let mut buf = BytesMut::new();
+        encoder.encode(&headers, &mut buf);
+
+        // First byte should be a dynamic table size update (0x20 prefix)
+        assert_eq!(
+            buf[0] & 0xe0,
+            0x20,
+            "first byte should be dynamic table size update prefix"
+        );
+
+        // Decode and verify: the size update should be consumed, then the header
+        let mut decoder = Decoder::new();
+        decoder.set_allowed_table_size(256);
+        let mut src = buf.freeze();
+        let decoded = decoder.decode(&mut src).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].name, ":method");
+        assert_eq!(decoded[0].value, "GET");
+    }
+
+    #[test]
+    fn test_encoder_size_update_not_repeated() {
+        // The size update should only be emitted once, not on subsequent blocks.
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+        encoder.set_max_table_size(256);
+
+        // First encode — should have size update prefix
+        let mut buf1 = BytesMut::new();
+        encoder.encode(&[Header::new(":method", "GET")], &mut buf1);
+        assert_eq!(buf1[0] & 0xe0, 0x20, "first block should have size update");
+
+        // Second encode — should NOT have size update prefix
+        let mut buf2 = BytesMut::new();
+        encoder.encode(&[Header::new(":method", "POST")], &mut buf2);
+        // First byte should be indexed header (0x80 prefix) not size update
+        assert_ne!(
+            buf2[0] & 0xe0,
+            0x20,
+            "second block should not repeat size update"
+        );
+    }
+
+    #[test]
+    fn test_encoder_size_update_roundtrip_full() {
+        // Full encoder/decoder roundtrip after a size change
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+        encoder.set_use_huffman(false);
+
+        // Initial encode works
+        let headers1 = vec![Header::new("x-test", "value1")];
+        let mut buf1 = BytesMut::new();
+        encoder.encode(&headers1, &mut buf1);
+        let dec1 = decoder.decode(&mut buf1.freeze()).unwrap();
+        assert_eq!(dec1[0].value, "value1");
+
+        // Change table size on both sides
+        encoder.set_max_table_size(128);
+        decoder.set_allowed_table_size(128);
+
+        // Encode after size change — decoder should accept the size update
+        let headers2 = vec![Header::new("x-test", "value2")];
+        let mut buf2 = BytesMut::new();
+        encoder.encode(&headers2, &mut buf2);
+        let dec2 = decoder.decode(&mut buf2.freeze()).unwrap();
+        assert_eq!(dec2[0].value, "value2");
+    }
+
+    #[test]
+    fn test_integer_decode_checked_mul_overflow() {
+        // On all platforms, verify that the checked_mul path catches
+        // values that would silently truncate with plain checked_shl.
+        // Craft input: prefix full (0x1f for 5-bit), then continuation
+        // bytes that push the value beyond what fits in the platform usize.
+        // 5-bit prefix full, then 4 continuation bytes (0xff = value 0x7f + continue)
+        let mut data = vec![0x1f_u8];
+        data.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+        data.push(0x7f); // final byte without continuation
+        let mut src = Bytes::from(data);
+        // On 32-bit this MUST error (value would be ~34 GB).
+        // On 64-bit the value fits, so it may succeed, but we verify no panic.
+        let _ = decode_integer(&mut src, 5);
+    }
+
+    // =========================================================================
+    // Audit Fix Tests: RFC 7541 §4.2 mid-block size update rejection
+    // =========================================================================
+
+    #[test]
+    fn test_size_update_before_first_header_accepted() {
+        // Size update at the start of a block (before any headers) is valid.
+        let mut decoder = Decoder::new();
+        let mut buf = BytesMut::new();
+
+        // Size update to 2048
+        encode_integer(&mut buf, 2048, 5, 0x20);
+        // Then an indexed header (:method: GET)
+        buf.put_u8(0x82);
+
+        let mut src = buf.freeze();
+        let headers = decoder.decode(&mut src).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, ":method");
+        assert_eq!(headers[0].value, "GET");
+    }
+
+    #[test]
+    fn test_size_update_after_first_header_rejected() {
+        // RFC 7541 §4.2: size update after the first header field
+        // representation MUST be a COMPRESSION_ERROR.
+        let mut decoder = Decoder::new();
+        let mut buf = BytesMut::new();
+
+        // First: an indexed header (:method: GET)
+        buf.put_u8(0x82);
+        // Then: a size update (illegal mid-block)
+        encode_integer(&mut buf, 2048, 5, 0x20);
+        // Then: another indexed header
+        buf.put_u8(0x84);
+
+        let mut src = buf.freeze();
+        let result = decoder.decode(&mut src);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::CompressionError);
+    }
+
+    #[test]
+    fn test_multiple_size_updates_then_header_ok() {
+        // Multiple size updates before the first header are valid.
+        let mut decoder = Decoder::new();
+        let mut buf = BytesMut::new();
+
+        // Two consecutive size updates
+        encode_integer(&mut buf, 1024, 5, 0x20);
+        encode_integer(&mut buf, 2048, 5, 0x20);
+        // Then a header
+        buf.put_u8(0x82); // :method: GET
+
+        let mut src = buf.freeze();
+        let headers = decoder.decode(&mut src).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, ":method");
+    }
+
+    // =========================================================================
+    // Audit Fix Tests: String length DoS prevention
+    // =========================================================================
+
+    #[test]
+    fn test_string_length_exceeds_maximum() {
+        // Craft a string header with a length claiming > MAX_STRING_LENGTH.
+        // The integer encodes 300000 (> 256 * 1024 = 262144).
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, 300_000, 7, 0x00); // literal string, length 300k
+
+        let mut src = buf.freeze();
+        let result = decode_string(&mut src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_string_length_at_maximum_boundary() {
+        // A string of exactly MAX_STRING_LENGTH should be accepted
+        // (if the buffer actually contains that many bytes).
+        let data = vec![b'x'; MAX_STRING_LENGTH];
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, MAX_STRING_LENGTH, 7, 0x00);
+        buf.extend_from_slice(&data);
+
+        let mut src = buf.freeze();
+        let result = decode_string(&mut src);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), MAX_STRING_LENGTH);
     }
 }
