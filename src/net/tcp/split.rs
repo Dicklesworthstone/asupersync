@@ -267,44 +267,38 @@ impl TcpStreamInner {
 
     fn clear_waiter_on_drop(&self, interest: Interest) {
         let mut guard = self.state.lock().unwrap();
-        let SplitIoState {
-            registration,
-            read_waker,
-            write_waker,
-        } = &mut *guard;
 
         if interest.is_readable() {
-            *read_waker = None;
+            guard.read_waker = None;
         }
         if interest.is_writable() {
-            *write_waker = None;
+            guard.write_waker = None;
         }
 
         let desired_interest = registration_interest(
-            read_waker.is_some(),
-            write_waker.is_some(),
+            guard.read_waker.is_some(),
+            guard.write_waker.is_some(),
             Interest::empty(),
         );
 
-        // No pending waiters remain. Drop registration so its driver-side
-        // waker slot/token are released immediately instead of lingering until
-        // the last half drops.
-        if desired_interest.is_empty() {
-            *registration = None;
-            return;
-        }
-
-        if let Some(reg) = registration.as_mut() {
-            if reg.interest() != desired_interest && reg.set_interest(desired_interest).is_err() {
-                *registration = None;
-                return;
-            }
-
-            let combined = combined_waker(read_waker.as_ref(), write_waker.as_ref());
-            if !reg.update_waker(combined) {
-                *registration = None;
+        let mut clear_registration = desired_interest.is_empty();
+        if !clear_registration {
+            let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+            if let Some(reg) = guard.registration.as_mut() {
+                if reg.interest() != desired_interest && reg.set_interest(desired_interest).is_err() {
+                    clear_registration = true;
+                } else if !reg.update_waker(combined) {
+                    clear_registration = true;
+                }
             }
         }
+
+        // No pending waiters remain, or re-arm/waker refresh failed.
+        // Drop registration so its driver-side waker slot/token are released.
+        if clear_registration {
+            guard.registration = None;
+        }
+        drop(guard);
     }
 }
 
