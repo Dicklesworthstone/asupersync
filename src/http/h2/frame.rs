@@ -457,7 +457,12 @@ impl PriorityFrame {
             return Err(H2Error::protocol("PRIORITY frame with stream ID 0"));
         }
         if payload.len() != 5 {
-            return Err(H2Error::frame_size("PRIORITY frame must be 5 bytes"));
+            // RFC 7540 §6.3: PRIORITY size error is a stream error, not connection.
+            return Err(H2Error::stream(
+                header.stream_id,
+                ErrorCode::FrameSizeError,
+                "PRIORITY frame must be 5 bytes",
+            ));
         }
 
         let exclusive = payload[0] & 0x80 != 0;
@@ -952,7 +957,17 @@ impl WindowUpdateFrame {
             | u32::from(payload[3]);
 
         if increment == 0 {
-            return Err(H2Error::protocol("WINDOW_UPDATE with zero increment"));
+            // RFC 7540 §6.9: zero increment on a stream is a stream error;
+            // on the connection (stream 0) it is a connection error.
+            return if header.stream_id == 0 {
+                Err(H2Error::protocol("WINDOW_UPDATE with zero increment"))
+            } else {
+                Err(H2Error::stream(
+                    header.stream_id,
+                    ErrorCode::ProtocolError,
+                    "WINDOW_UPDATE with zero increment",
+                ))
+            };
         }
 
         Ok(Self {
@@ -1448,6 +1463,8 @@ mod tests {
 
         let err = PriorityFrame::parse(&header, &payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::FrameSizeError);
+        // RFC 7540 §6.3: PRIORITY size error is a stream error, not connection.
+        assert_eq!(err.stream_id, Some(1));
     }
 
     #[test]
@@ -1666,6 +1683,7 @@ mod tests {
 
     #[test]
     fn test_window_update_zero_increment_rejected() {
+        // Connection-level (stream 0): connection error per RFC 7540 §6.9
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::WindowUpdate as u8,
@@ -1676,6 +1694,23 @@ mod tests {
 
         let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, None); // connection error
+    }
+
+    #[test]
+    fn test_window_update_zero_increment_stream_level_is_stream_error() {
+        // Stream-level (stream != 0): stream error per RFC 7540 §6.9
+        let header = FrameHeader {
+            length: 4,
+            frame_type: FrameType::WindowUpdate as u8,
+            flags: 0,
+            stream_id: 3,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0]);
+
+        let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.stream_id, Some(3)); // stream error, not connection
     }
 
     #[test]
