@@ -182,10 +182,11 @@ impl AsyncWrite for VirtualTcpStream {
         }
 
         half.buf.extend(buf);
-        if let Some(waker) = half.waker.take() {
+        let wake = half.waker.take();
+        drop(half);
+        if let Some(waker) = wake {
             waker.wake();
         }
-        drop(half);
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -200,10 +201,11 @@ impl AsyncWrite for VirtualTcpStream {
         // Signal EOF to the reader
         let mut half = this.write_half.lock().expect("channel lock poisoned");
         half.closed = true;
-        if let Some(waker) = half.waker.take() {
+        let wake = half.waker.take();
+        drop(half);
+        if let Some(waker) = wake {
             waker.wake();
         }
-        drop(half);
         Poll::Ready(Ok(()))
     }
 }
@@ -214,19 +216,27 @@ impl Drop for VirtualTcpStream {
     fn drop(&mut self) {
         self.write_shutdown = true;
 
-        if let Ok(mut half) = self.read_half.lock() {
-            half.read_shutdown = true;
-            half.buf.clear();
-            if let Some(waker) = half.waker.take() {
-                waker.wake();
-            }
+        let read_wake = self.read_half.lock().map_or_else(
+            |_| None,
+            |mut half| {
+                half.read_shutdown = true;
+                half.buf.clear();
+                half.waker.take()
+            },
+        );
+        if let Some(waker) = read_wake {
+            waker.wake();
         }
 
-        if let Ok(mut half) = self.write_half.lock() {
-            half.closed = true;
-            if let Some(waker) = half.waker.take() {
-                waker.wake();
-            }
+        let write_wake = self.write_half.lock().map_or_else(
+            |_| None,
+            |mut half| {
+                half.closed = true;
+                half.waker.take()
+            },
+        );
+        if let Some(waker) = write_wake {
+            waker.wake();
         }
     }
 }
@@ -258,7 +268,9 @@ impl TcpStreamApi for VirtualTcpStream {
                 let mut half = self.read_half.lock().expect("lock poisoned");
                 half.read_shutdown = true;
                 half.buf.clear();
-                if let Some(waker) = half.waker.take() {
+                let wake = half.waker.take();
+                drop(half);
+                if let Some(waker) = wake {
                     waker.wake();
                 }
             }
@@ -268,7 +280,9 @@ impl TcpStreamApi for VirtualTcpStream {
             Shutdown::Write | Shutdown::Both => {
                 let mut half = self.write_half.lock().expect("lock poisoned");
                 half.closed = true;
-                if let Some(waker) = half.waker.take() {
+                let wake = half.waker.take();
+                drop(half);
+                if let Some(waker) = wake {
                     waker.wake();
                 }
             }

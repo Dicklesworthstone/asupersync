@@ -217,7 +217,12 @@ impl TcpStreamInner {
                 if let Err(err) = reg.set_interest(combined_interest) {
                     if err.kind() == io::ErrorKind::NotConnected {
                         *registration = None;
-                        cx.waker().wake_by_ref();
+                        if let Some(w) = read_waker.as_ref() {
+                            w.wake_by_ref();
+                        }
+                        if let Some(w) = write_waker.as_ref() {
+                            w.wake_by_ref();
+                        }
                         return Ok(());
                     }
                     return Err(err);
@@ -586,6 +591,7 @@ mod tests {
         register_calls: AtomicUsize,
         modify_calls: AtomicUsize,
         fail_modify_on_call: AtomicUsize,
+        fail_modify_not_connected: AtomicBool,
         slow_first_register: AtomicBool,
     }
 
@@ -597,6 +603,7 @@ mod tests {
                 register_calls: AtomicUsize::new(0),
                 modify_calls: AtomicUsize::new(0),
                 fail_modify_on_call: AtomicUsize::new(0),
+                fail_modify_not_connected: AtomicBool::new(false),
                 slow_first_register: AtomicBool::new(true),
             }
         }
@@ -611,6 +618,11 @@ mod tests {
 
         fn fail_modify_on_call(&self, call_index: usize) {
             self.fail_modify_on_call.store(call_index, Ordering::SeqCst);
+        }
+
+        fn fail_modify_with_not_connected(&self, enabled: bool) {
+            self.fail_modify_not_connected
+                .store(enabled, Ordering::SeqCst);
         }
     }
 
@@ -661,6 +673,12 @@ mod tests {
             let call = self.modify_calls.fetch_add(1, Ordering::SeqCst) + 1;
             let fail_on = self.fail_modify_on_call.load(Ordering::SeqCst);
             if fail_on != 0 && call == fail_on {
+                if self.fail_modify_not_connected.load(Ordering::SeqCst) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "injected not-connected modify failure",
+                    ));
+                }
                 return Err(io::Error::other("injected modify failure"));
             }
             Ok(())
@@ -1150,6 +1168,84 @@ mod tests {
         assert!(
             read_hits.load(Ordering::SeqCst) >= 1,
             "surviving waiter must be woken to retry registration after drop-time failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn not_connected_modify_wakes_both_split_waiters() {
+        struct CountingWaker {
+            hits: Arc<AtomicUsize>,
+        }
+
+        impl Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.hits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        init_test("not_connected_modify_wakes_both_split_waiters");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        reactor.fail_modify_on_call(1);
+        reactor.fail_modify_with_not_connected(true);
+
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let read_hits = Arc::new(AtomicUsize::new(0));
+        let read_waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&read_hits),
+        }));
+        let read_task_cx = Context::from_waker(&read_waker);
+        read_half
+            .inner
+            .register_interest(&read_task_cx, Interest::READABLE)
+            .expect("register readable");
+
+        let write_hits = Arc::new(AtomicUsize::new(0));
+        let write_waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&write_hits),
+        }));
+        let write_task_cx = Context::from_waker(&write_waker);
+        write_half
+            .inner
+            .register_interest(&write_task_cx, Interest::WRITABLE)
+            .expect("register writable with injected not-connected");
+
+        let state = read_half.inner.state.lock().expect("lock poisoned");
+        assert!(
+            state.registration.is_none(),
+            "registration should be dropped after not-connected modify"
+        );
+        drop(state);
+
+        assert!(
+            read_hits.load(Ordering::SeqCst) >= 1,
+            "read waiter must be woken when shared registration drops on not-connected"
+        );
+        assert!(
+            write_hits.load(Ordering::SeqCst) >= 1,
+            "write waiter must be woken when shared registration drops on not-connected"
         );
     }
 }
