@@ -520,6 +520,13 @@ impl Connection {
     fn process_data(&mut self, frame: DataFrame) -> Result<Option<ReceivedFrame>, H2Error> {
         self.track_stream_id(frame.stream_id);
         let stream = self.streams.get_or_create(frame.stream_id)?;
+
+        // RFC 7540 §5.1: receiving DATA on an idle stream MUST be treated as a
+        // connection error of type PROTOCOL_ERROR.
+        if stream.state() == StreamState::Idle {
+            return Err(H2Error::protocol("DATA received on idle stream"));
+        }
+
         let payload_len =
             u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
         let window_delta = i32::try_from(payload_len)
@@ -888,6 +895,11 @@ impl Connection {
             self.send_window = new_window as i32;
         } else {
             // Stream-level window update
+            // RFC 7540 §5.1: receiving WINDOW_UPDATE on an idle stream
+            // MUST be treated as a connection error of type PROTOCOL_ERROR.
+            if self.streams.is_idle_stream_id(frame.stream_id) {
+                return Err(H2Error::protocol("WINDOW_UPDATE received on idle stream"));
+            }
             if let Some(stream) = self.streams.get_mut(frame.stream_id) {
                 stream.update_send_window(increment)?;
             }
@@ -2748,5 +2760,51 @@ mod tests {
                 None => panic!("ran out of frames before end_headers"),
             }
         }
+    }
+
+    // =========================================================================
+    // RFC 7540 §5.1 Idle Stream Enforcement Tests (bd-3n7hy)
+    // =========================================================================
+
+    /// Regression: DATA received on a stream in the idle state MUST be treated
+    /// as a connection error of type PROTOCOL_ERROR (RFC 7540 §5.1).
+    #[test]
+    fn data_on_idle_stream_is_connection_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Stream 1 has never been opened (no prior HEADERS). get_or_create
+        // will create it in Idle state, then the idle-check must fire.
+        let data = Frame::Data(DataFrame::new(1, Bytes::from("hello"), false));
+        let err = conn.process_frame(data).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            err.stream_id.is_none(),
+            "idle-stream DATA must be a connection error, not a stream error"
+        );
+    }
+
+    /// Regression: WINDOW_UPDATE received on a stream in the idle state MUST be
+    /// treated as a connection error of type PROTOCOL_ERROR (RFC 7540 §5.1).
+    #[test]
+    fn window_update_on_idle_stream_is_connection_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open stream 1 via HEADERS to advance next_client_stream_id, then
+        // send WINDOW_UPDATE on stream 3 which is idle (never opened).
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Stream 3 is idle — WINDOW_UPDATE must be a connection error.
+        let wu = Frame::WindowUpdate(WindowUpdateFrame::new(3, 1024));
+        let err = conn.process_frame(wu).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            err.stream_id.is_none(),
+            "idle-stream WINDOW_UPDATE must be a connection error, not a stream error"
+        );
     }
 }
