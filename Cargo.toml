@@ -12,7 +12,7 @@ exclude = ["fuzz"]
 
 [package]
 name = "asupersync"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."
