@@ -161,10 +161,6 @@ impl Semaphore {
     /// Acquires the given number of permits asynchronously.
     pub fn acquire<'a, 'b>(&'a self, cx: &'b Cx, count: usize) -> AcquireFuture<'a, 'b> {
         assert!(count > 0, "cannot acquire 0 permits");
-        assert!(
-            count <= self.max_permits,
-            "cannot acquire more permits than semaphore capacity"
-        );
         AcquireFuture {
             semaphore: self,
             cx,
@@ -176,10 +172,6 @@ impl Semaphore {
     /// Tries to acquire the given number of permits without waiting.
     pub fn try_acquire(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
         assert!(count > 0, "cannot acquire 0 permits");
-        assert!(
-            count <= self.max_permits,
-            "cannot acquire more permits than semaphore capacity"
-        );
 
         let mut state = self.state.lock();
         let result = if state.closed {
@@ -378,6 +370,7 @@ impl OwnedSemaphorePermit {
         cx: &Cx,
         count: usize,
     ) -> Result<Self, AcquireError> {
+        assert!(count > 0, "cannot acquire 0 permits");
         OwnedAcquireFuture {
             semaphore,
             cx: cx.clone(),
@@ -1108,6 +1101,42 @@ mod tests {
     }
 
     #[test]
+    fn try_acquire_can_exceed_initial_permit_count_after_add_permits() {
+        init_test("try_acquire_can_exceed_initial_permit_count_after_add_permits");
+        let sem = Semaphore::new(1);
+        sem.add_permits(4);
+
+        let permit = sem.try_acquire(5).expect("acquire after add_permits");
+        let count = permit.count();
+        crate::assert_with_log!(count == 5, "permit count", 5usize, count);
+
+        let avail_after = sem.available_permits();
+        crate::assert_with_log!(
+            avail_after == 0,
+            "available after acquire",
+            0usize,
+            avail_after
+        );
+        drop(permit);
+        crate::test_complete!("try_acquire_can_exceed_initial_permit_count_after_add_permits");
+    }
+
+    #[test]
+    fn semaphore_with_zero_initial_permits_works_after_add_permits() {
+        init_test("semaphore_with_zero_initial_permits_works_after_add_permits");
+        let sem = Semaphore::new(0);
+        sem.add_permits(2);
+
+        let permit = sem
+            .try_acquire(2)
+            .expect("acquire after add on zero-initial");
+        let count = permit.count();
+        crate::assert_with_log!(count == 2, "permit count", 2usize, count);
+        drop(permit);
+        crate::test_complete!("semaphore_with_zero_initial_permits_works_after_add_permits");
+    }
+
+    #[test]
     fn close_during_owned_acquire_returns_error() {
         init_test("close_during_owned_acquire_returns_error");
         let cx1 = test_cx();
@@ -1169,6 +1198,16 @@ mod tests {
         let avail_after = sem.available_permits();
         crate::assert_with_log!(avail_after == 3, "after owned drop", 3usize, avail_after);
         crate::test_complete!("owned_permit_try_acquire_and_drop");
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot acquire 0 permits")]
+    fn owned_acquire_panics_on_zero_count() {
+        init_test("owned_acquire_panics_on_zero_count");
+        let sem = Arc::new(Semaphore::new(1));
+        let cx = test_cx();
+        let mut fut = Box::pin(OwnedSemaphorePermit::acquire(sem, &cx, 0));
+        let _ = poll_once(&mut fut);
     }
 
     #[test]
