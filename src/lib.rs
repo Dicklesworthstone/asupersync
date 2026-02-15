@@ -62,7 +62,7 @@
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
 // Test harness builds a large test table in one frame.
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
-#![feature(portable_simd)]
+#![cfg_attr(feature = "simd-intrinsics", feature(portable_simd))]
 
 pub mod actor;
 pub mod app;
