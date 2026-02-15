@@ -579,6 +579,26 @@ proof_safe_hot_path_review:
     - tests/lean_invariant_theorem_test_link_map.rs
 ```
 
+### Optimization Constraint Sheet (Track-6 T6.1a / bd-3fooi)
+
+Use these constraint IDs in optimization-task design notes and reviews.
+Each constraint is proof-linked and has an explicit detection path.
+
+| Constraint ID | Derived from (proof/invariant anchor) | Actionable engineering rule | Detection path |
+|---------------|----------------------------------------|-----------------------------|----------------|
+| `OPT-LOCK-001` | `inv.structured_concurrency.single_owner`, lock-order assumptions in `formal/lean/coverage/runtime_state_refinement_map.json` | Do not introduce new lock acquisition orderings; all multi-lock paths must preserve `E -> D -> B -> A -> C`. | Debug lock-order assertions + scheduler/runtime contention tests |
+| `OPT-CANCEL-001` | `inv.cancel.protocol`, cancel-phase witnesses in `src/types/cancel.rs` | Optimizations may not collapse or reorder `request -> drain -> finalize`; cancellation-phase transitions must stay monotone. | `tests/refinement_conformance.rs` cancellation cases |
+| `OPT-CANCEL-002` | `inv.race.losers_drained` | Any race/hedge fast path must still cancel and fully drain losers before completion is reported. | race/refinement conformance checks + trace replay assertions |
+| `OPT-OBL-001` | `inv.obligation.no_leaks`, obligation theorem map in `formal/lean/coverage/invariant_theorem_test_link_map.json` | Never optimize by bypassing reserve/commit/abort boundaries; obligation resolution must remain total. | obligation leak/futurelock tests + invariant link-map tests |
+| `OPT-DET-001` | deterministic replay assumptions in `formal/lean/coverage/runtime_state_refinement_map.json` | No ambient wall-clock or entropy on hot paths; use capability-provided time/randomness only. | replay/refinement tests + deterministic trace fingerprint checks |
+| `OPT-HOT-001` | refinement obligations for scheduler/task hot paths | Micro-optimizations (allocation removal, queue reshaping, lock sharding) are allowed only when they preserve all above constraints. | checklist completion + required evidence command bundle |
+
+Constraint usage rule for performance work:
+
+1. Every performance bead touching the listed hot paths must include cited constraint IDs (`OPT-*`) in its notes/review payload.
+2. A missing constraint citation is treated as an incomplete proof-impact review.
+3. Any violated constraint requires a blocker bead before merge/sign-off.
+
 ---
 
 ## API Reference Orientation

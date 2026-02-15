@@ -174,6 +174,7 @@ Validation for profile structure, runtime ordering, and bead-link integrity is e
 
 Canonical checklist location:
 - `docs/integration.md` under **Proof-Safe Hot-Path Refactor Checklist (Track-6 T6.1b)**.
+- `docs/integration.md` under **Optimization Constraint Sheet (Track-6 T6.1a / bd-3fooi)**.
 
 When performance refactors touch scheduler/cancellation/obligation hot paths, review artifacts
 must include:
@@ -185,6 +186,12 @@ must include:
 - deterministic executable evidence from:
   - `tests/refinement_conformance.rs`
   - `tests/lean_invariant_theorem_test_link_map.rs`.
+
+Constraint-ID policy for optimization tracks:
+- Performance/refactor work in scheduler/cancellation/obligation hot paths must cite `OPT-*`
+  constraint IDs from `docs/integration.md`.
+- Missing constraint IDs indicate missing proof-impact linkage.
+- Constraint violations must be converted to blocker beads before merge/sign-off.
 
 ## Waiver Lifecycle Policy (Track-5.3a)
 
