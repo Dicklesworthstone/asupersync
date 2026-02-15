@@ -223,9 +223,9 @@ fn frontier_errors_have_single_primary_taxonomy_code() {
 #[test]
 fn declaration_order_helpers_precede_master_preservation_theorem() {
     let helper_markers = [
-        "theorem scheduler_change_preserves_wellformed",
-        "theorem setTask_same_region_preserves_wellformed",
-        "theorem setRegion_structural_preserves_wellformed",
+        "theorem scheduler_change_preserves_wellformed {Value Error Panic : Type}",
+        "theorem setTask_same_region_preserves_wellformed {Value Error Panic : Type}",
+        "theorem setRegion_structural_preserves_wellformed {Value Error Panic : Type}",
     ];
     let rationale_markers = [
         "Ordering rationale: keep this helper before `step_preserves_wellformed`",
@@ -233,7 +233,8 @@ fn declaration_order_helpers_precede_master_preservation_theorem() {
         "Ordering rationale: this structural lemma is referenced by the master",
     ];
     let master_marker = "theorem step_preserves_wellformed";
-    let prelude_start_marker = "-- Preservation helper prelude (high-reuse helpers for preservation dispatch)";
+    let prelude_start_marker =
+        "-- Preservation helper prelude (high-reuse helpers for preservation dispatch)";
     let prelude_end_marker = "-- End preservation helper prelude";
 
     let master_pos = ASUPERSYNC_LEAN
@@ -249,15 +250,21 @@ fn declaration_order_helpers_precede_master_preservation_theorem() {
         prelude_start_pos < prelude_end_pos,
         "helper prelude start marker must appear before end marker"
     );
+    let first_helper_pos = ASUPERSYNC_LEAN
+        .find("theorem scheduler_change_preserves_wellformed {Value Error Panic : Type}")
+        .expect("scheduler helper theorem marker must exist");
+    let last_helper_pos = ASUPERSYNC_LEAN
+        .find("theorem setRegion_structural_preserves_wellformed {Value Error Panic : Type}")
+        .expect("region helper theorem marker must exist");
+    assert!(
+        prelude_start_pos < first_helper_pos && last_helper_pos < prelude_end_pos,
+        "helper prelude markers must wrap the canonical preservation helper block"
+    );
 
     for marker in helper_markers {
         let helper_pos = ASUPERSYNC_LEAN
             .find(marker)
             .unwrap_or_else(|| panic!("helper theorem marker must exist: {marker}"));
-        assert!(
-            helper_pos > prelude_start_pos && helper_pos < prelude_end_pos,
-            "helper theorem '{marker}' must stay inside the helper prelude block"
-        );
         assert!(
             helper_pos < master_pos,
             "helper theorem '{marker}' must be declared before step_preserves_wellformed"

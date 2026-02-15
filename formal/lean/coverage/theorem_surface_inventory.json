@@ -322,7 +322,7 @@
       "theorem": "cancel_label_preserves_region_structure"
     },
     {
-      "line": 2449,
+      "line": 2488,
       "theorem": "committed_obligation_stable"
     },
     {
@@ -378,15 +378,15 @@
       "theorem": "setRegion_structural_preserves_wellformed"
     },
     {
-      "line": 2867,
+      "line": 2898,
       "theorem": "aborted_obligation_stable"
     },
     {
-      "line": 2953,
+      "line": 2996,
       "theorem": "leaked_obligation_stable"
     },
     {
-      "line": 3040,
+      "line": 3099,
       "theorem": "resolved_obligation_stable"
     },
     {

@@ -159,3 +159,90 @@ fn constructor_specific_preservation_lemmas_are_traceable() {
         );
     }
 }
+
+#[test]
+fn obligation_stability_family_is_constructor_total() {
+    let coverage: Value =
+        serde_json::from_str(STEP_COVERAGE_JSON).expect("step coverage json must parse");
+    let theorem_inventory: Value =
+        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
+    let ledger: Value =
+        serde_json::from_str(TRACEABILITY_LEDGER_JSON).expect("traceability ledger must parse");
+
+    let theorem_names = theorem_inventory
+        .get("theorems")
+        .and_then(Value::as_array)
+        .expect("theorems must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .get("theorem")
+                .and_then(Value::as_str)
+                .expect("theorem name must be a string")
+        })
+        .collect::<BTreeSet<_>>();
+
+    let constructor_map = coverage
+        .get("constructors")
+        .and_then(Value::as_array)
+        .expect("constructors must be an array")
+        .iter()
+        .map(|entry| {
+            let constructor = entry
+                .get("constructor")
+                .and_then(Value::as_str)
+                .expect("constructor name must be string")
+                .to_string();
+            let theorems = entry
+                .get("mapped_theorems")
+                .and_then(Value::as_array)
+                .expect("mapped_theorems must be an array")
+                .iter()
+                .map(|t| t.as_str().expect("theorem names must be strings"))
+                .collect::<BTreeSet<_>>();
+            (constructor, theorems)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let traceability_rules = ledger
+        .get("rows")
+        .and_then(Value::as_array)
+        .expect("ledger rows must be an array")
+        .iter()
+        .map(|row| {
+            let theorem = row
+                .get("theorem")
+                .and_then(Value::as_str)
+                .expect("ledger theorem must be string");
+            let rule_id = row
+                .get("rule_id")
+                .and_then(Value::as_str)
+                .expect("ledger rule_id must be string");
+            (theorem, rule_id)
+        })
+        .collect::<BTreeSet<_>>();
+
+    let expected = [
+        ("commit", "committed_obligation_stable", "step.commit"),
+        ("abort", "aborted_obligation_stable", "step.abort"),
+        ("leak", "leaked_obligation_stable", "step.leak"),
+    ];
+
+    for (constructor, theorem, rule_id) in expected {
+        assert!(
+            theorem_names.contains(theorem),
+            "obligation stability theorem {theorem} missing from theorem inventory"
+        );
+        let mapped_theorems = constructor_map
+            .get(constructor)
+            .expect("expected constructor must exist in coverage map");
+        assert!(
+            mapped_theorems.contains(theorem),
+            "constructor {constructor} missing obligation stability theorem {theorem}"
+        );
+        assert!(
+            traceability_rules.contains(&(theorem, rule_id)),
+            "traceability ledger missing pair ({theorem}, {rule_id})"
+        );
+    }
+}

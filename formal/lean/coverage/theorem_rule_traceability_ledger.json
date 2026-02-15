@@ -89,7 +89,7 @@
     },
     {
       "theorem": "aborted_obligation_stable",
-      "theorem_line": 2867,
+      "theorem_line": 2898,
       "rule_id": "step.abort",
       "semantic_intent": "Supports formal obligations for step.abort",
       "assumptions": [
@@ -101,7 +101,7 @@
         "Used for stale-link detection in CI/test automation"
       ],
       "artifacts": [
-        "formal/lean/Asupersync.lean:2867",
+        "formal/lean/Asupersync.lean:2898",
         "formal/lean/coverage/step_constructor_coverage.json"
       ],
       "rule_status": "covered"
@@ -887,7 +887,7 @@
     },
     {
       "theorem": "committed_obligation_stable",
-      "theorem_line": 2449,
+      "theorem_line": 2488,
       "rule_id": "step.commit",
       "semantic_intent": "Supports formal obligations for step.commit",
       "assumptions": [
@@ -899,7 +899,7 @@
         "Used for stale-link detection in CI/test automation"
       ],
       "artifacts": [
-        "formal/lean/Asupersync.lean:2449",
+        "formal/lean/Asupersync.lean:2488",
         "formal/lean/coverage/step_constructor_coverage.json"
       ],
       "rule_status": "covered"
@@ -1077,7 +1077,7 @@
     },
     {
       "theorem": "leaked_obligation_stable",
-      "theorem_line": 2953,
+      "theorem_line": 2996,
       "rule_id": "step.leak",
       "semantic_intent": "Supports formal obligations for step.leak",
       "assumptions": [
@@ -1089,7 +1089,7 @@
         "Used for stale-link detection in CI/test automation"
       ],
       "artifacts": [
-        "formal/lean/Asupersync.lean:2953",
+        "formal/lean/Asupersync.lean:2996",
         "formal/lean/coverage/step_constructor_coverage.json"
       ],
       "rule_status": "covered"

@@ -190,6 +190,27 @@
           ]
         },
         {
+          "theorem": "committed_obligation_stable",
+          "theorem_line": 2488,
+          "rule_ids": [
+            "step.commit"
+          ]
+        },
+        {
+          "theorem": "aborted_obligation_stable",
+          "theorem_line": 2898,
+          "rule_ids": [
+            "step.abort"
+          ]
+        },
+        {
+          "theorem": "leaked_obligation_stable",
+          "theorem_line": 2996,
+          "rule_ids": [
+            "step.leak"
+          ]
+        },
+        {
           "theorem": "obligation_in_ledger_blocks_close",
           "theorem_line": 939,
           "rule_ids": []
