@@ -1062,4 +1062,132 @@ mod tests {
         drop(tx);
         crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
     }
+
+    // --- Audit tests (SapphireHill, 2026-02-15) ---
+
+    #[test]
+    fn total_sent_advances_even_when_buffer_evicts() {
+        // Verify total_sent is a monotonic sequence number independent of buffer size.
+        init_test("total_sent_advances_even_when_buffer_evicts");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>(2);
+
+        for i in 0..10 {
+            tx.send(&cx, i).unwrap();
+        }
+
+        let inner = tx.channel.inner.lock().expect("lock");
+        crate::assert_with_log!(
+            inner.total_sent == 10,
+            "total_sent",
+            10u64,
+            inner.total_sent
+        );
+        crate::assert_with_log!(
+            inner.buffer.len() == 2,
+            "buffer len",
+            2usize,
+            inner.buffer.len()
+        );
+        // Buffer should hold the last 2 messages (indices 8, 9).
+        let first_idx = inner.buffer.front().unwrap().index;
+        crate::assert_with_log!(first_idx == 8, "first buffer index", 8u64, first_idx);
+        crate::test_complete!("total_sent_advances_even_when_buffer_evicts");
+    }
+
+    #[test]
+    fn subscribe_from_lagged_position_gets_only_future() {
+        // New subscribers should only see messages sent after subscription.
+        init_test("subscribe_from_lagged_position_gets_only_future");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>(4);
+
+        // Send some messages before subscribing.
+        for i in 0..5 {
+            tx.send(&cx, i).unwrap();
+        }
+
+        let mut rx2 = tx.subscribe();
+
+        // rx2 shouldn't see any existing messages (it starts at total_sent=5).
+        tx.send(&cx, 99).unwrap();
+        let got = block_on(rx2.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 99, "subscriber sees only future", 99, got);
+        crate::test_complete!("subscribe_from_lagged_position_gets_only_future");
+    }
+
+    #[test]
+    fn multiple_receivers_independent_lag() {
+        // Each receiver tracks its own lag independently.
+        init_test("multiple_receivers_independent_lag");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel::<i32>(2);
+        let mut rx2 = tx.subscribe();
+
+        tx.send(&cx, 1).unwrap();
+        tx.send(&cx, 2).unwrap();
+
+        // Advance rx1 but not rx2.
+        let v = block_on(rx1.recv(&cx)).unwrap();
+        crate::assert_with_log!(v == 1, "rx1 reads 1", 1, v);
+
+        // Overwrite buffer.
+        tx.send(&cx, 3).unwrap(); // evicts 1
+
+        // rx1 should get 2 (still in buffer).
+        let v = block_on(rx1.recv(&cx)).unwrap();
+        crate::assert_with_log!(v == 2, "rx1 reads 2", 2, v);
+
+        // rx2 has next_index=0, but earliest is now 1 → lagged by 1.
+        let result = block_on(rx2.recv(&cx));
+        let lagged_ok = matches!(result, Err(RecvError::Lagged(1)));
+        crate::assert_with_log!(lagged_ok, "rx2 lagged by 1", true, lagged_ok);
+        crate::test_complete!("multiple_receivers_independent_lag");
+    }
+
+    #[test]
+    fn permit_send_returns_zero_after_all_receivers_drop() {
+        // Verify that SendPermit::send does not mutate state when no receivers.
+        init_test("permit_send_returns_zero_after_all_receivers_drop");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>(4);
+        let permit = tx.reserve(&cx).expect("reserve");
+
+        drop(rx);
+        let count = permit.send(42);
+        crate::assert_with_log!(count == 0, "no receivers", 0usize, count);
+
+        // total_sent and buffer should be untouched.
+        let inner = tx.channel.inner.lock().expect("lock");
+        crate::assert_with_log!(inner.total_sent == 0, "total_sent", 0u64, inner.total_sent);
+        crate::assert_with_log!(
+            inner.buffer.is_empty(),
+            "buffer empty",
+            true,
+            inner.buffer.is_empty()
+        );
+        crate::test_complete!("permit_send_returns_zero_after_all_receivers_drop");
+    }
+
+    #[test]
+    fn capacity_one_overwrites_correctly() {
+        // Edge case: capacity=1 means every send overwrites the previous.
+        init_test("capacity_one_overwrites_correctly");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(1);
+
+        tx.send(&cx, 1).unwrap();
+        tx.send(&cx, 2).unwrap(); // evicts 1
+        tx.send(&cx, 3).unwrap(); // evicts 2
+
+        // rx should detect lag (missed 1 and 2).
+        let result = block_on(rx.recv(&cx));
+        let lagged_ok = matches!(result, Err(RecvError::Lagged(2)));
+        crate::assert_with_log!(lagged_ok, "lagged by 2", true, lagged_ok);
+
+        // Then receive 3.
+        let got = block_on(rx.recv(&cx)).unwrap();
+        crate::assert_with_log!(got == 3, "last message", 3, got);
+        crate::test_complete!("capacity_one_overwrites_correctly");
+    }
 }
