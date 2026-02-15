@@ -378,34 +378,16 @@ impl Scheduler {
     /// O(log n) pop via binary heap.
     #[inline]
     pub fn pop(&mut self) -> Option<TaskId> {
-        if self.cancel_lane.len() == 1 {
-            let task = self.cancel_lane.peek().expect("len checked").task;
-            self.cancel_lane.clear();
-            self.scheduled.remove(task);
-            return Some(task);
-        }
         if let Some(entry) = self.cancel_lane.pop() {
             self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
-        if self.timed_lane.len() == 1 {
-            let task = self.timed_lane.peek().expect("len checked").task;
-            self.timed_lane.clear();
-            self.scheduled.remove(task);
-            return Some(task);
-        }
         if let Some(entry) = self.timed_lane.pop() {
             self.scheduled.remove(entry.task);
             return Some(entry.task);
         }
 
-        if self.ready_lane.len() == 1 {
-            let task = self.ready_lane.peek().expect("len checked").task;
-            self.ready_lane.clear();
-            self.scheduled.remove(task);
-            return Some(task);
-        }
         if let Some(entry) = self.ready_lane.pop() {
             self.scheduled.remove(entry.task);
             return Some(entry.task);
