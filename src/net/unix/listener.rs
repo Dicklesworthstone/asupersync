@@ -197,7 +197,10 @@ impl UnixListener {
 
     /// Registers interest with the I/O driver for READABLE events.
     fn register_interest(&self, cx: &Context<'_>) -> io::Result<()> {
-        let mut registration = self.registration.lock().expect("lock poisoned");
+        let mut registration = self
+            .registration
+            .lock()
+            .map_err(|_| io::Error::other("unix listener registration lock poisoned"))?;
 
         if let Some(existing) = registration.as_mut() {
             // Always call set_interest to re-arm the reactor registration.
@@ -536,6 +539,62 @@ mod tests {
             "incoming should register interest"
         );
         crate::test_complete!("incoming_registers_on_wouldblock");
+    }
+
+    #[test]
+    fn incoming_handles_poisoned_registration_lock() {
+        init_test("incoming_handles_poisoned_registration_lock");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("incoming_poisoned_lock.sock");
+
+        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+        std_listener
+            .set_nonblocking(true)
+            .expect("nonblocking failed");
+
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx_cap = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx_cap));
+
+        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = listener.registration.lock().expect("lock acquired");
+            panic!("poison registration lock");
+        }));
+
+        let mut incoming = listener.incoming();
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Pin::new(&mut incoming).poll_next(&mut poll_cx)
+        }));
+        assert!(
+            poll_result.is_ok(),
+            "poll_next should not panic on poisoned registration lock"
+        );
+
+        match poll_result.expect("poll result available") {
+            Poll::Ready(Some(Err(err))) => {
+                crate::assert_with_log!(
+                    err.kind() == io::ErrorKind::Other,
+                    "error kind",
+                    io::ErrorKind::Other,
+                    err.kind()
+                );
+            }
+            other => panic!("expected Poll::Ready(Some(Err(_))), got {other:?}"),
+        }
+
+        crate::test_complete!("incoming_handles_poisoned_registration_lock");
     }
 
     #[test]
