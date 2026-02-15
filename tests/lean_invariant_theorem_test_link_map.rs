@@ -39,11 +39,17 @@ fn bead_ids() -> BTreeSet<String> {
     BEADS_JSONL
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
+        .flat_map(|entry| {
+            let mut ids = Vec::new();
+            if let Some(id) = entry.get("id").and_then(Value::as_str) {
+                ids.push(id.to_string());
+            }
+            if let Some(external_ref) = entry.get("external_ref").and_then(Value::as_str) {
+                if !external_ref.trim().is_empty() {
+                    ids.push(external_ref.to_string());
+                }
+            }
+            ids
         })
         .collect::<BTreeSet<_>>()
 }
@@ -536,4 +542,227 @@ fn link_map_summary_counts_match_rows() {
         .get("summary")
         .expect("summary object must be present");
     assert_summary_matches(summary, counts);
+}
+
+fn invariant_row<'a>(rows: &'a [Value], invariant_id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row.get("invariant_id").and_then(Value::as_str) == Some(invariant_id))
+        .unwrap_or_else(|| panic!("missing {invariant_id} row"))
+}
+
+fn theorem_witness_names(row: &Value) -> BTreeSet<String> {
+    row.get("theorem_witnesses")
+        .and_then(Value::as_array)
+        .expect("theorem_witnesses must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .get("theorem")
+                .and_then(Value::as_str)
+                .expect("theorem witness name must be string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>()
+}
+
+fn assert_liveness_contract(
+    row: &Value,
+    invariant_id: &str,
+    expected_status: &str,
+    expected_consumers: &[&str],
+) {
+    let assumption_envelope = row
+        .get("assumption_envelope")
+        .expect("liveness rows must define assumption_envelope");
+    assert!(
+        assumption_envelope
+            .get("assumption_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty()),
+        "{invariant_id} assumption_envelope.assumption_id must be non-empty"
+    );
+    let assumptions = assumption_envelope
+        .get("assumptions")
+        .and_then(Value::as_array)
+        .expect("assumption_envelope.assumptions must be an array");
+    assert!(
+        !assumptions.is_empty(),
+        "{invariant_id} must provide at least one liveness assumption"
+    );
+    let runtime_guardrails = assumption_envelope
+        .get("runtime_guardrails")
+        .and_then(Value::as_array)
+        .expect("assumption_envelope.runtime_guardrails must be an array");
+    assert!(
+        !runtime_guardrails.is_empty(),
+        "{invariant_id} must provide runtime guardrails"
+    );
+
+    let composition_contract = row
+        .get("composition_contract")
+        .expect("liveness rows must define composition_contract");
+    assert_eq!(
+        composition_contract
+            .get("status")
+            .and_then(Value::as_str)
+            .expect("composition_contract.status must be a string"),
+        expected_status,
+        "{invariant_id} composition_contract.status mismatch"
+    );
+
+    let consumed_by = composition_contract
+        .get("consumed_by")
+        .and_then(Value::as_array)
+        .expect("composition_contract.consumed_by must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("consumed_by entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for consumer in expected_consumers {
+        assert!(
+            consumed_by.contains(*consumer),
+            "{invariant_id} composition_contract missing consumer {consumer}"
+        );
+        assert!(
+            Path::new(consumer).exists(),
+            "{invariant_id} composition consumer path missing: {consumer}"
+        );
+    }
+}
+
+fn assert_cancel_liveness_row(cancel_row: &Value) {
+    let cancel_theorems = theorem_witness_names(cancel_row);
+    for theorem in [
+        "cancel_protocol_terminates",
+        "cancel_steps_testable_bound",
+        "cancel_propagation_bounded",
+    ] {
+        assert!(
+            cancel_theorems.contains(theorem),
+            "cancel liveness witness missing theorem {theorem}"
+        );
+    }
+    assert_liveness_contract(
+        cancel_row,
+        "inv.cancel.protocol",
+        "ready",
+        &[
+            "tests/refinement_conformance.rs",
+            "tests/cancellation_conformance.rs",
+        ],
+    );
+    let cancel_gaps = cancel_row
+        .get("explicit_gaps")
+        .and_then(Value::as_array)
+        .expect("cancel explicit_gaps must be an array");
+    let cancel_idempotence_gap = cancel_gaps
+        .iter()
+        .find(|gap| {
+            gap.get("gap_id").and_then(Value::as_str)
+                == Some("inv.cancel.protocol.gap.idempotence-theorem-missing")
+        })
+        .expect("cancel idempotence gap must be tracked explicitly");
+    let cancel_owner = cancel_idempotence_gap
+        .get("owner")
+        .and_then(Value::as_str)
+        .expect("cancel idempotence gap owner must be present");
+    assert!(
+        cancel_owner != "unassigned",
+        "cancel idempotence gap owner must be explicitly assigned"
+    );
+}
+
+fn assert_quiescence_liveness_row(quiescence_row: &Value) {
+    let quiescence_theorems = theorem_witness_names(quiescence_row);
+    for theorem in ["close_implies_quiescent", "close_quiescence_decomposition"] {
+        assert!(
+            quiescence_theorems.contains(theorem),
+            "region-close liveness witness missing theorem {theorem}"
+        );
+    }
+    let quiescence_gaps = quiescence_row
+        .get("explicit_gaps")
+        .and_then(Value::as_array)
+        .expect("quiescence explicit_gaps must be an array");
+    assert!(
+        quiescence_gaps.is_empty(),
+        "inv.region_close.quiescence should have no explicit gaps"
+    );
+    assert_liveness_contract(
+        quiescence_row,
+        "inv.region_close.quiescence",
+        "ready",
+        &[
+            "tests/refinement_conformance.rs",
+            "tests/region_lifecycle_conformance.rs",
+        ],
+    );
+}
+
+fn assert_loser_drain_liveness_row(losers_row: &Value) {
+    let loser_checks = losers_row
+        .get("executable_checks")
+        .and_then(Value::as_array)
+        .expect("loser-drain executable_checks must be an array");
+    assert!(
+        !loser_checks.is_empty(),
+        "inv.race.losers_drained must keep executable checks"
+    );
+    assert_liveness_contract(
+        losers_row,
+        "inv.race.losers_drained",
+        "partial",
+        &[
+            "tests/runtime_e2e.rs",
+            "tests/refinement_conformance.rs",
+            "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
+        ],
+    );
+    let loser_gaps = losers_row
+        .get("explicit_gaps")
+        .and_then(Value::as_array)
+        .expect("loser-drain explicit_gaps must be an array");
+    let direct_gap = loser_gaps
+        .iter()
+        .find(|gap| {
+            gap.get("gap_id").and_then(Value::as_str)
+                == Some("inv.race.losers_drained.gap.direct-lean-theorem-missing")
+        })
+        .expect("loser-drain direct Lean theorem gap must be tracked explicitly");
+    let dependency_blockers = direct_gap
+        .get("dependency_blockers")
+        .and_then(Value::as_array)
+        .expect("loser-drain gap dependency_blockers must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("dependency_blockers entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        dependency_blockers.contains("bd-19efq"),
+        "loser-drain gap must be blocked by bd-19efq until direct theorem lands"
+    );
+    let owner = direct_gap
+        .get("owner")
+        .and_then(Value::as_str)
+        .expect("loser-drain gap owner must be present");
+    assert!(
+        owner != "unassigned",
+        "loser-drain gap owner must be explicitly assigned"
+    );
+}
+
+#[test]
+fn liveness_invariants_have_termination_quiescence_and_gap_contracts() {
+    let link_map = parse_json(LINK_MAP_JSON, "link map");
+    let rows = link_rows(&link_map);
+    assert_cancel_liveness_row(invariant_row(rows, "inv.cancel.protocol"));
+    assert_quiescence_liveness_row(invariant_row(rows, "inv.region_close.quiescence"));
+    assert_loser_drain_liveness_row(invariant_row(rows, "inv.race.losers_drained"));
 }

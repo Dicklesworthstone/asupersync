@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "report_id": "lean.frontier.buckets.v1",
+  "generated_by": "bd-1dorb",
+  "source_log": "formal/lean/coverage/bd-366fd_lake_build.log",
+  "bucket_ordering": "lexicographic(failure_mode,error_code)",
+  "diagnostics_total": 54,
+  "errors_total": 0,
+  "warnings_total": 54,
+  "buckets": []
+}

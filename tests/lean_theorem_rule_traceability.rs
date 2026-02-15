@@ -154,3 +154,106 @@ fn progress_and_canonical_ladder_rules_are_trace_linked() {
         );
     }
 }
+
+#[test]
+fn liveness_bundle_rules_are_trace_linked() {
+    let ledger: Value =
+        serde_json::from_str(TRACEABILITY_LEDGER_JSON).expect("traceability ledger must parse");
+    let rows = ledger
+        .get("rows")
+        .and_then(Value::as_array)
+        .expect("rows must be an array");
+
+    let mut rule_to_theorems = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
+    for row in rows {
+        let rule_id = row
+            .get("rule_id")
+            .and_then(Value::as_str)
+            .expect("row rule_id must be a string")
+            .to_string();
+        let theorem = row
+            .get("theorem")
+            .and_then(Value::as_str)
+            .expect("row theorem must be a string")
+            .to_string();
+        rule_to_theorems.entry(rule_id).or_default().insert(theorem);
+    }
+
+    let required_rule_theorem_pairs = [
+        ("step.cancelComplete", "cancel_protocol_terminates"),
+        ("step.cancelComplete", "cancel_terminates_from_cancelling"),
+        ("step.cancelComplete", "cancel_terminates_from_finalizing"),
+        ("step.cancelComplete", "cancel_steps_testable_bound"),
+        ("step.cancelChild", "cancel_propagation_bounded"),
+        ("step.cancelPropagate", "cancel_propagation_bounded"),
+        ("step.close", "close_implies_quiescent"),
+        ("step.close", "close_quiescence_decomposition"),
+        ("step.close", "close_complete_step"),
+    ];
+
+    for (rule, theorem) in required_rule_theorem_pairs {
+        let mapped = rule_to_theorems
+            .get(rule)
+            .unwrap_or_else(|| panic!("missing rule in traceability ledger: {rule}"));
+        assert!(
+            mapped.contains(theorem),
+            "traceability ledger missing required liveness theorem {theorem} for rule {rule}"
+        );
+    }
+}
+
+#[test]
+fn every_step_constructor_has_traceability_with_at_least_one_covered_row() {
+    let step_coverage: Value =
+        serde_json::from_str(STEP_COVERAGE_JSON).expect("step coverage must parse");
+    let expected_rule_ids = step_coverage
+        .get("constructors")
+        .and_then(Value::as_array)
+        .expect("constructors must be an array")
+        .iter()
+        .map(|entry| {
+            let constructor = entry
+                .get("constructor")
+                .and_then(Value::as_str)
+                .expect("constructor must be a string");
+            format!("step.{constructor}")
+        })
+        .collect::<BTreeSet<_>>();
+
+    let ledger: Value =
+        serde_json::from_str(TRACEABILITY_LEDGER_JSON).expect("traceability ledger must parse");
+    let rows = ledger
+        .get("rows")
+        .and_then(Value::as_array)
+        .expect("rows must be an array");
+
+    let mut seen_rule_ids = BTreeSet::new();
+    let mut rules_with_covered_rows = BTreeSet::new();
+    for row in rows {
+        let rule_id = row
+            .get("rule_id")
+            .and_then(Value::as_str)
+            .expect("row rule_id must be string");
+        let status = row
+            .get("rule_status")
+            .and_then(Value::as_str)
+            .expect("row rule_status must be string");
+        assert!(
+            matches!(status, "covered" | "partial"),
+            "unexpected rule_status for {rule_id}: {status}"
+        );
+        seen_rule_ids.insert(rule_id.to_string());
+        if status == "covered" {
+            rules_with_covered_rows.insert(rule_id.to_string());
+        }
+    }
+
+    assert_eq!(
+        seen_rule_ids, expected_rule_ids,
+        "traceability ledger rule IDs must match step constructor rule IDs exactly"
+    );
+    assert_eq!(
+        rules_with_covered_rows, expected_rule_ids,
+        "each constructor rule must have at least one covered traceability row"
+    );
+}

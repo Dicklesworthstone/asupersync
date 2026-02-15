@@ -35,6 +35,33 @@ fn theorem_inventory_is_well_formed() {
 }
 
 #[test]
+fn theorem_inventory_lines_are_positive_and_unique() {
+    let inventory: Value =
+        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
+    let theorems = inventory
+        .get("theorems")
+        .and_then(Value::as_array)
+        .expect("theorems must be an array");
+
+    let mut seen_lines = BTreeSet::new();
+    for entry in theorems {
+        let theorem = entry
+            .get("theorem")
+            .and_then(Value::as_str)
+            .expect("theorem name must be present");
+        let line = entry
+            .get("line")
+            .and_then(Value::as_u64)
+            .expect("theorem line must be numeric");
+        assert!(line > 0, "theorem {theorem} must have positive line");
+        assert!(
+            seen_lines.insert(line),
+            "theorem inventory has duplicate line {line}; expected stable 1:1 theorem-to-line mapping (latest theorem: {theorem})"
+        );
+    }
+}
+
+#[test]
 fn step_constructor_coverage_is_consistent() {
     let coverage: Value =
         serde_json::from_str(STEP_COVERAGE_JSON).expect("step coverage must parse");
@@ -169,6 +196,37 @@ fn progress_and_canonical_families_cover_required_ladders() {
         assert!(
             theorem_names.contains(theorem),
             "required theorem missing from inventory: {theorem}"
+        );
+    }
+}
+
+#[test]
+fn liveness_bundle_theorems_cover_termination_and_quiescence_contract() {
+    let inventory: Value =
+        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
+    let theorem_names = inventory
+        .get("theorems")
+        .and_then(Value::as_array)
+        .expect("theorems must be an array")
+        .iter()
+        .filter_map(|entry| entry.get("theorem").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+
+    let required_liveness_theorems = BTreeSet::from([
+        "cancel_protocol_terminates",
+        "cancel_terminates_from_cancelling",
+        "cancel_terminates_from_finalizing",
+        "cancel_steps_testable_bound",
+        "cancel_propagation_bounded",
+        "close_implies_quiescent",
+        "close_quiescence_decomposition",
+        "close_complete_step",
+    ]);
+
+    for theorem in required_liveness_theorems {
+        assert!(
+            theorem_names.contains(theorem),
+            "required liveness theorem missing from inventory: {theorem}"
         );
     }
 }

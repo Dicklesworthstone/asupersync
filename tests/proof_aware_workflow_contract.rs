@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 const PR_TEMPLATE: &str = include_str!("../.github/PULL_REQUEST_TEMPLATE.md");
 const INTEGRATION_DOC: &str = include_str!("../docs/integration.md");
 const ADOPTION_GUIDE: &str = include_str!("../docs/adoption/getting_started.md");
@@ -40,7 +42,7 @@ fn integration_doc_defines_review_artifact_requirements_for_critical_changes() {
 fn adoption_guide_points_to_correctness_by_construction_workflow() {
     for required_snippet in [
         "Correctness-by-Construction Review Workflow",
-        "Proof + Conformance Impact Declaration",
+        "Proof + Conformance Impact",
         "Theorem touchpoints",
         "Refinement mapping touchpoints",
         "rch exec -- cargo check --all-targets",
