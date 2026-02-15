@@ -660,7 +660,7 @@ impl ThreeLaneScheduler {
 
         if should_schedule {
             if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
-                crate::warn!(
+                crate::tracing_compat::warn!(
                     ?task,
                     priority,
                     limit = self.global_queue_limit,
