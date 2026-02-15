@@ -797,9 +797,7 @@ impl<T> Drop for Receiver<T> {
             inner
                 .send_wakers
                 .drain(..)
-                .filter_map(|waiter| {
-                    waiter.shared.waker.lock().ok().map(|g| g.clone())
-                })
+                .filter_map(|waiter| waiter.shared.waker.lock().ok().map(|g| g.clone()))
                 .collect()
         };
         // Wake senders outside the lock to avoid wake-under-lock deadlocks.
