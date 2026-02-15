@@ -155,6 +155,7 @@ const fn build_mul_tables() -> [[u8; 256]; 256] {
 
 static MUL_TABLES: [[u8; 256]; 256] = build_mul_tables();
 
+#[cfg(feature = "simd-intrinsics")]
 use std::simd::prelude::*;
 
 /// Precomputed nibble-decomposed multiplication tables for SIMD (Halevi-Shacham).
@@ -163,11 +164,13 @@ use std::simd::prelude::*;
 /// `hi[i] = c * (i << 4)` for `i in 0..16`. This enables 16-byte-at-a-time
 /// multiplication via `c * x = lo[x & 0x0F] ^ hi[x >> 4]`, where each lookup
 /// is a single SIMD shuffle (`swizzle_dyn` → PSHUFB on x86).
+#[cfg(feature = "simd-intrinsics")]
 struct NibbleTables {
     lo: Simd<u8, 16>,
     hi: Simd<u8, 16>,
 }
 
+#[cfg(feature = "simd-intrinsics")]
 impl NibbleTables {
     #[inline]
     fn for_scalar(c: Gf256) -> Self {
@@ -191,6 +194,17 @@ impl NibbleTables {
         let lo_nibbles = x & mask_lo;
         let hi_nibbles = (x >> 4) & mask_lo;
         self.lo.swizzle_dyn(lo_nibbles) ^ self.hi.swizzle_dyn(hi_nibbles)
+    }
+}
+
+#[cfg(not(feature = "simd-intrinsics"))]
+struct NibbleTables;
+
+#[cfg(not(feature = "simd-intrinsics"))]
+impl NibbleTables {
+    #[inline]
+    fn for_scalar(_c: Gf256) -> Self {
+        Self
     }
 }
 
@@ -820,6 +834,7 @@ fn gf256_mul_slice_aarch64_neon(dst: &mut [u8], c: Gf256) {
 /// via Halevi-Shacham nibble decomposition (`swizzle_dyn` → PSHUFB on x86).
 ///
 /// Falls back to scalar table lookups for the remainder (< 16 bytes).
+#[cfg(feature = "simd-intrinsics")]
 fn mul_with_table_wide(dst: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
     let mut chunks = dst.chunks_exact_mut(16);
     for chunk in chunks.by_ref() {
@@ -828,6 +843,13 @@ fn mul_with_table_wide(dst: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
         chunk.copy_from_slice(result.as_array());
     }
     for d in chunks.into_remainder() {
+        *d = table[*d as usize];
+    }
+}
+
+#[cfg(not(feature = "simd-intrinsics"))]
+fn mul_with_table_wide(dst: &mut [u8], _nib: &NibbleTables, table: &[u8; 256]) {
+    for d in dst.iter_mut() {
         *d = table[*d as usize];
     }
 }
@@ -858,6 +880,7 @@ fn mul_with_table_scalar(dst: &mut [u8], table: &[u8; 256]) {
 /// via Halevi-Shacham nibble decomposition, XORing the products into `dst`.
 ///
 /// Falls back to scalar table lookups for the remainder (< 16 bytes).
+#[cfg(feature = "simd-intrinsics")]
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], nib: &NibbleTables, table: &[u8; 256]) {
     let mut d_chunks = dst.chunks_exact_mut(16);
     let mut s_chunks = src.chunks_exact(16);
@@ -873,6 +896,13 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], nib: &NibbleTables, table:
         .zip(s_chunks.remainder())
     {
         *d ^= table[*s as usize];
+    }
+}
+
+#[cfg(not(feature = "simd-intrinsics"))]
+fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], _nib: &NibbleTables, table: &[u8; 256]) {
+    for (d, s) in dst.iter_mut().zip(src.iter().copied()) {
+        *d ^= table[s as usize];
     }
 }
 
@@ -1753,6 +1783,7 @@ mod tests {
 
     // -- SIMD nibble decomposition verification --
 
+    #[cfg(feature = "simd-intrinsics")]
     #[test]
     fn nibble_tables_exhaustive() {
         // Verify nibble decomposition for all 256×256 (c, x) pairs.

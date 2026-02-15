@@ -31,7 +31,7 @@ include = [
 ]
 
 [features]
-default = ["test-internals", "simd-intrinsics"]
+default = ["test-internals"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
