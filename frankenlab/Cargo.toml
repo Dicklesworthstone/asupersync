@@ -5,7 +5,6 @@ edition = "2021"
 license = "MIT"
 description = "Deterministic testing harness for async Rust: record, replay, and minimize concurrency bugs."
 repository = "https://github.com/Dicklesworthstone/asupersync"
-readme = "README.md"
 keywords = ["testing", "deterministic", "async", "concurrency", "replay"]
 categories = ["development-tools::testing", "asynchronous"]
 
