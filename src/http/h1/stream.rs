@@ -724,15 +724,17 @@ impl OutgoingBodySender {
         }
 
         let len = data.len() as u64;
+        if matches!(self.kind, BodyKind::ContentLength(_)) && len > self.remaining {
+            return Err(HttpError::BadContentLength);
+        }
+        self.send_frame(cx, Frame::Data(BytesCursor::new(data)))
+            .await?;
+
         if matches!(self.kind, BodyKind::ContentLength(_)) {
-            if len > self.remaining {
-                return Err(HttpError::BadContentLength);
-            }
             self.remaining -= len;
         }
         self.total_bytes = self.total_bytes.saturating_add(len);
-        self.send_frame(cx, Frame::Data(BytesCursor::new(data)))
-            .await
+        Ok(())
     }
 
     /// Sends a slice (copies into Bytes).
@@ -751,8 +753,8 @@ impl OutgoingBodySender {
         if self.finished {
             return Err(HttpError::BodyChannelClosed);
         }
-        self.finished = true;
         self.send_frame(cx, Frame::Trailers(trailers)).await?;
+        self.finished = true;
         self.close_sender();
         Ok(())
     }
@@ -1164,13 +1166,46 @@ mod tests {
 
     #[test]
     fn outgoing_body_send_cancelled() {
-        let cx: Cx = Cx::for_testing();
-        let (mut sender, _body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
-        cx.cancel_fast(CancelKind::User);
+        let cx_base: Cx = Cx::for_testing();
+        let (mut sender, _body) = OutgoingBody::channel(&cx_base, BodyKind::Chunked);
+        let cx_cancel: Cx = Cx::for_testing();
+        cx_cancel.cancel_fast(CancelKind::User);
 
-        let err = block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello")))
+        let err = block_on(sender.send_bytes(&cx_cancel, Bytes::from_static(b"hello")))
             .expect_err("send should be cancelled");
         assert!(matches!(err, HttpError::BodyCancelled));
+    }
+
+    #[test]
+    fn outgoing_body_send_cancelled_does_not_consume_state() {
+        let cx_base: Cx = Cx::for_testing();
+        let (mut sender, _body) = OutgoingBody::channel(&cx_base, BodyKind::ContentLength(5));
+        let cx_cancel: Cx = Cx::for_testing();
+        cx_cancel.cancel_fast(CancelKind::User);
+
+        let err = block_on(sender.send_bytes(&cx_cancel, Bytes::from_static(b"hi")))
+            .expect_err("send should be cancelled");
+        assert!(matches!(err, HttpError::BodyCancelled));
+        assert_eq!(sender.remaining, 5);
+        assert_eq!(sender.total_bytes, 0);
+        assert!(!sender.finished);
+    }
+
+    #[test]
+    fn outgoing_body_send_trailers_cancelled_does_not_finish_sender() {
+        let cx_base: Cx = Cx::for_testing();
+        let (mut sender, _body) = OutgoingBody::channel(&cx_base, BodyKind::Chunked);
+        let cx_cancel: Cx = Cx::for_testing();
+        cx_cancel.cancel_fast(CancelKind::User);
+
+        let err = block_on(sender.send_trailers(&cx_cancel, HeaderMap::new()))
+            .expect_err("trailers send should be cancelled");
+        assert!(matches!(err, HttpError::BodyCancelled));
+        assert!(!sender.finished);
+        assert!(sender.sender.is_some());
+
+        block_on(sender.send_bytes(&cx_base, Bytes::from_static(b"ok")))
+            .expect("sender should remain usable");
     }
 
     #[test]
