@@ -403,7 +403,10 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 
     // Required sub-objects
     for section in &["config", "loss", "symbols", "outcome", "proof"] {
-        if !value.get(*section).is_some_and(serde_json::Value::is_object) {
+        if !value
+            .get(*section)
+            .is_some_and(serde_json::Value::is_object)
+        {
             violations.push(format!("missing or non-object required section: {section}"));
         }
     }

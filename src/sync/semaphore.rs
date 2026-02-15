@@ -1167,12 +1167,7 @@ mod tests {
 
         drop(permit);
         let avail_after = sem.available_permits();
-        crate::assert_with_log!(
-            avail_after == 3,
-            "after owned drop",
-            3usize,
-            avail_after
-        );
+        crate::assert_with_log!(avail_after == 3, "after owned drop", 3usize, avail_after);
         crate::test_complete!("owned_permit_try_acquire_and_drop");
     }
 
@@ -1261,12 +1256,7 @@ mod tests {
         drop(_held);
         // The semaphore wakes the front waiter's stored waker.
         let w2_woken = w2.count() > 0;
-        crate::assert_with_log!(
-            w2_woken,
-            "updated waker woken",
-            true,
-            w2_woken
-        );
+        crate::assert_with_log!(w2_woken, "updated waker woken", true, w2_woken);
         crate::test_complete!("waker_update_on_repoll");
     }
 }

@@ -1272,8 +1272,7 @@ mod tests {
     #[test]
     fn test_decode_8byte_length_msb_set_rejected() {
         // RFC 6455 §5.2: most significant bit of 64-bit length MUST be 0.
-        let mut codec = FrameCodec::client()
-            .max_payload_size(usize::MAX); // disable size limit for this test
+        let mut codec = FrameCodec::client().max_payload_size(usize::MAX); // disable size limit for this test
         let mut buf = BytesMut::new();
         // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=127 → 0x7F
         buf.put_u8(0x82);
