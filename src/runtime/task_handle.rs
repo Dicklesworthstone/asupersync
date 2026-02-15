@@ -241,6 +241,11 @@ impl<T> Drop for JoinFuture<'_, T> {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
         if !self.completed {
+            // If a result is already ready, don't stamp a spurious cancel
+            // reason when dropping an unpolled join future.
+            if self.handle.is_finished() {
+                return;
+            }
             if let Some(reason) = self.drop_reason.take() {
                 self.handle.abort_with_reason(reason);
             } else {
@@ -454,5 +459,33 @@ mod tests {
             panicked_text
         );
         crate::test_complete!("join_error_display");
+    }
+
+    #[test]
+    fn drop_join_does_not_abort_if_result_already_ready() {
+        init_test("drop_join_does_not_abort_if_result_already_ready");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(9, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        tx.send(&cx, Ok::<i32, JoinError>(7))
+            .expect("send should succeed");
+
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        drop(handle.join(&cx));
+
+        let guard = cx.inner.read().expect("lock poisoned");
+        crate::assert_with_log!(
+            !guard.cancel_requested,
+            "dropping a ready join must not request cancellation",
+            false,
+            guard.cancel_requested
+        );
+        crate::assert_with_log!(
+            guard.cancel_reason.is_none(),
+            "dropping a ready join must not overwrite cancel reason",
+            true,
+            guard.cancel_reason.is_none()
+        );
+        crate::test_complete!("drop_join_does_not_abort_if_result_already_ready");
     }
 }
