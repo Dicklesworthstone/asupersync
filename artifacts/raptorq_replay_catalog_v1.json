@@ -122,6 +122,282 @@
       ],
       "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
       "repro_cmd": "rch exec -- cargo test --test raptorq_perf_invariants proof_replay_passes_for_failure -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-boundary-tiny-k1-v1",
+      "scenario_id": "RQ-U-BOUNDARY-TINY",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::tiny_block_k1"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib tiny_block_k1 -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-boundary-tiny-k2-v1",
+      "scenario_id": "RQ-U-BOUNDARY-TINY",
+      "seed": 99,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::tiny_block_k2"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib tiny_block_k2 -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-boundary-tiny-symbol-v1",
+      "scenario_id": "RQ-U-BOUNDARY-TINY",
+      "seed": 77,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::tiny_symbol_size"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib tiny_symbol_size -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-boundary-large-v1",
+      "scenario_id": "RQ-U-BOUNDARY-LARGE",
+      "seed": "profile+seed-fallback:[12345,42,99,7777,2024]",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::large_block_bounded"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib large_block_bounded -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-boundary-large-symbol-v1",
+      "scenario_id": "RQ-U-BOUNDARY-LARGE",
+      "seed": 88,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::large_symbol_size"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib large_symbol_size -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-happy-source-heavy-v1",
+      "scenario_id": "RQ-U-HAPPY-SYSTEMATIC",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "fast",
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::repair_zero_only_source"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib repair_zero_only_source -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-happy-repair-only-v1",
+      "scenario_id": "RQ-U-HAPPY-REPAIR",
+      "seed": 333,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success",
+      "profile_tags": [
+        "full",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::all_repair_no_source"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib all_repair_no_source -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-error-insufficient-v1",
+      "scenario_id": "RQ-U-ERROR-INSUFFICIENT",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_failure_insufficient_symbols",
+      "profile_tags": [
+        "fast",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::insufficient_symbols_error"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib insufficient_symbols_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-error-size-mismatch-v1",
+      "scenario_id": "RQ-U-ERROR-SIZE-MISMATCH",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_failure_symbol_size_mismatch",
+      "profile_tags": [
+        "fast",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::symbol_size_mismatch_error"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib symbol_size_mismatch_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-rfc-equation-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-RFC-EQUATION",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "repair_equation_matches_rfc_tuple_expansion",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/systematic.rs::repair_symbol_matches_rfc_equation_terms"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib repair_symbol_matches_rfc_equation -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-degree-metadata-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-DEGREE-METADATA",
+      "seed": 7,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "emitted_degree_matches_rfc_equation_width",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/systematic.rs::emitted_repair_degree_matches_rfc_equation_width"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib emitted_repair_degree_matches_rfc_equation_width -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-seed-determinism-v1",
+      "scenario_id": "RQ-U-DETERMINISM-SEED",
+      "seed": "range:[1,2]",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "same_source_same_repair_across_seeds",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/systematic.rs::same_source_same_repair_across_seeds"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib same_source_same_repair_across_seeds -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-overhead-ratio-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-OVERHEAD-RATIO",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "overhead_ratio_within_expected_bounds",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/systematic.rs::stats_overhead_ratio"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib stats_overhead_ratio -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-gf256-simd-scalar-equivalence-v1",
+      "scenario_id": "RQ-U-GF256-ALGEBRA",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "simd_scalar_paths_bit_exact",
+      "profile_tags": [
+        "full",
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/gf256.rs::simd_vs_scalar_mul_equivalence",
+        "src/raptorq/gf256.rs::simd_vs_scalar_addmul_equivalence"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib simd_vs_scalar_mul_equivalence -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-gf256-nibble-table-v1",
+      "scenario_id": "RQ-U-GF256-ALGEBRA",
+      "seed": "range:c=0..255,x=0..255",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "nibble_table_mul_matches_scalar",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/gf256.rs::nibble_tables_exhaustive"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib nibble_tables_exhaustive -- --nocapture"
     }
   ]
 }
