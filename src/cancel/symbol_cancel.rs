@@ -147,12 +147,14 @@ impl SymbolCancelToken {
     }
 
     /// Returns the object ID this token relates to.
+    #[inline]
     #[must_use]
     pub fn object_id(&self) -> ObjectId {
         self.state.object_id
     }
 
     /// Returns true if cancellation has been requested.
+    #[inline]
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
@@ -165,6 +167,7 @@ impl SymbolCancelToken {
     }
 
     /// Returns when cancellation was requested, if cancelled.
+    #[inline]
     #[must_use]
     pub fn cancelled_at(&self) -> Option<Time> {
         let nanos = self.state.cancelled_at.load(Ordering::Acquire);
