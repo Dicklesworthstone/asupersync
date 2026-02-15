@@ -65,3 +65,13 @@ criterion/
 /tmp/
 .tmp/
 **/a.out
+
+# Compiler crash reports
+rustc-ice-*.txt
+
+# Local scratch DBs
+storage.sqlite3
+storage.sqlite3-*
+
+# bv graph output
+--graph-format.svg
