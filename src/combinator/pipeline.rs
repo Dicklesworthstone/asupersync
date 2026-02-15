@@ -1213,17 +1213,12 @@ mod tests {
 
     #[test]
     fn pipeline_n_middle_cancel() {
-        let outcomes: Vec<Outcome<i32, &str>> = vec![
-            Outcome::Ok(1),
-            Outcome::Cancelled(CancelReason::shutdown()),
-        ];
+        let outcomes: Vec<Outcome<i32, &str>> =
+            vec![Outcome::Ok(1), Outcome::Cancelled(CancelReason::shutdown())];
         let result = pipeline_n_outcomes(outcomes, 4);
 
         assert!(result.is_cancelled());
-        if let PipelineResult::Cancelled {
-            cancelled_at, ..
-        } = result
-        {
+        if let PipelineResult::Cancelled { cancelled_at, .. } = result {
             assert_eq!(cancelled_at.index, 1);
             assert_eq!(cancelled_at.total_stages, 4);
         } else {
@@ -1294,10 +1289,7 @@ mod tests {
         let result = pipeline_n_outcomes(outcomes, 4);
 
         assert!(result.is_panicked());
-        if let PipelineResult::Panicked {
-            panicked_at, ..
-        } = result
-        {
+        if let PipelineResult::Panicked { panicked_at, .. } = result {
             assert_eq!(panicked_at.index, 2);
             assert_eq!(panicked_at.total_stages, 4);
         } else {
@@ -1342,14 +1334,14 @@ mod tests {
     #[test]
     fn pipeline_with_final_cancelled_final() {
         let intermediates: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1), Outcome::Ok(2)];
-        let result =
-            pipeline_with_final(intermediates, Outcome::Cancelled(CancelReason::shutdown()), 3);
+        let result = pipeline_with_final(
+            intermediates,
+            Outcome::Cancelled(CancelReason::shutdown()),
+            3,
+        );
 
         assert!(result.is_cancelled());
-        if let PipelineResult::Cancelled {
-            cancelled_at, ..
-        } = result
-        {
+        if let PipelineResult::Cancelled { cancelled_at, .. } = result {
             assert_eq!(cancelled_at.index, 2);
             assert!(cancelled_at.is_last());
         } else {
@@ -1367,10 +1359,7 @@ mod tests {
         );
 
         assert!(result.is_panicked());
-        if let PipelineResult::Panicked {
-            panicked_at, ..
-        } = result
-        {
+        if let PipelineResult::Panicked { panicked_at, .. } = result {
             assert_eq!(panicked_at.index, 1);
             assert!(panicked_at.is_last());
         } else {
