@@ -256,17 +256,17 @@ impl Reactor for EpollReactor {
 
         self.poller.wait(&mut poll_events, timeout)?;
 
-        // Convert polling events to our Event type
-        let mut count = 0;
+        // Convert polling events to our Event type.
+        // `Events` may drop entries when capacity is reached, so the return
+        // value must reflect events actually stored, not raw epoll events seen.
         for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
             let interest = Self::poll_event_to_interest(&poll_event);
             events.push(Event::new(token, interest));
-            count += 1;
         }
 
         drop(poll_events);
-        Ok(count)
+        Ok(events.len())
     }
 
     fn wake(&self) -> io::Result<()> {
@@ -583,6 +583,31 @@ mod tests {
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("poll_readable");
+    }
+
+    #[test]
+    fn poll_zero_capacity_reports_zero_events_stored() {
+        init_test("poll_zero_capacity_reports_zero_events_stored");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (sock1, mut sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(11);
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        sock2.write_all(b"x").expect("write failed");
+
+        let mut events = Events::with_capacity(0);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+
+        crate::assert_with_log!(events.is_empty(), "events empty", true, events.is_empty());
+        crate::assert_with_log!(count == 0, "count is stored events", 0usize, count);
+
+        reactor.deregister(token).expect("deregister failed");
+        crate::test_complete!("poll_zero_capacity_reports_zero_events_stored");
     }
 
     #[test]
