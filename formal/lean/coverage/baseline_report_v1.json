@@ -246,8 +246,8 @@
     {
       "area": "Track-2 declaration-order stabilization",
       "bead_id": "bd-53a0d",
-      "status": "open",
-      "assignee": null
+      "status": "closed",
+      "assignee": "DustyBay"
     },
     {
       "area": "Track-2 tactic stability",
