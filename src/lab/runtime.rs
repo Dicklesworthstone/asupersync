@@ -1405,9 +1405,9 @@ impl LabRuntime {
                 self.state.remove_stored_future(task_id);
                 self.scheduler.lock().unwrap().forget_task(task_id);
 
-                // Record task completion
+                // Record task completion with actual severity from the outcome
                 self.replay_recorder
-                    .record_task_completed(task_id, Severity::Ok); // Severity is approx here
+                    .record_task_completed(task_id, outcome.severity());
 
                 // Update state to Completed if not already terminal
                 if let Some(record) = self.state.task_mut(task_id) {
@@ -3662,5 +3662,65 @@ mod tests {
         let secs = report.virtual_elapsed_secs();
         crate::assert_with_log!(secs == 3600, "3600 secs", 3600u64, secs);
         crate::test_complete!("virtual_time_report_conversions");
+    }
+
+    // =========================================================================
+    // Replay severity correctness (bd-beuyd)
+    // =========================================================================
+
+    /// Regression test: replay recorder must capture the actual completion
+    /// severity, not always `Severity::Ok`.
+    #[test]
+    fn replay_records_correct_severity_for_cancelled_task() {
+        init_test("replay_records_correct_severity_for_cancelled_task");
+        use crate::trace::replay::ReplayEvent;
+        use crate::types::{Budget, CancelReason};
+
+        let config = LabConfig::new(42)
+            .panic_on_leak(false)
+            .with_default_replay_recording();
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        // Create a task that returns Cancelled
+        let (task_id, _) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                crate::types::Outcome::<(), ()>::Cancelled(CancelReason::default())
+            })
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        // Check the replay trace for the TaskCompleted event
+        let replay = runtime
+            .replay_recorder()
+            .snapshot()
+            .expect("replay recording enabled");
+        let completed_events: Vec<_> = replay
+            .events
+            .iter()
+            .filter(|e| matches!(e, ReplayEvent::TaskCompleted { .. }))
+            .collect();
+
+        assert!(
+            !completed_events.is_empty(),
+            "should have at least one TaskCompleted event"
+        );
+
+        // The severity should be Cancelled (2), not Ok (0)
+        for event in &completed_events {
+            if let ReplayEvent::TaskCompleted { outcome, .. } = event {
+                let expected = crate::types::Severity::Cancelled.as_u8();
+                crate::assert_with_log!(
+                    *outcome == expected,
+                    "severity should be Cancelled (2)",
+                    expected,
+                    *outcome
+                );
+            }
+        }
+
+        crate::test_complete!("replay_records_correct_severity_for_cancelled_task");
     }
 }
