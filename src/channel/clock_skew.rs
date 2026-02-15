@@ -282,15 +282,29 @@ impl SkewClock {
         self.stats.snapshot()
     }
 
+    /// Compute drift using integer arithmetic to avoid precision loss at large timestamps.
+    fn compute_drift_ns(base_nanos: u64, drift_rate_ns_per_sec: SkewNanos) -> SkewNanos {
+        let product = i128::from(drift_rate_ns_per_sec).saturating_mul(i128::from(base_nanos));
+        let drift = product / 1_000_000_000_i128;
+        if drift > i128::from(i64::MAX) {
+            i64::MAX
+        } else if drift < i128::from(i64::MIN) {
+            i64::MIN
+        } else {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                drift as SkewNanos
+            }
+        }
+    }
+
     /// Compute the skew offset for a given base time.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn compute_skew(&self, base_nanos: u64) -> SkewNanos {
         let mut total_skew: SkewNanos = self.config.static_offset_ns;
 
         // Drift: proportional to elapsed base time.
         if self.config.drift_rate_ns_per_sec != 0 {
-            let elapsed_secs = base_nanos as f64 / 1_000_000_000.0;
-            let drift = (self.config.drift_rate_ns_per_sec as f64 * elapsed_secs) as SkewNanos;
+            let drift = Self::compute_drift_ns(base_nanos, self.config.drift_rate_ns_per_sec);
             total_skew = total_skew.saturating_add(drift);
         }
 
@@ -680,5 +694,22 @@ mod tests {
         let skewed = SkewClock::new(base as Arc<dyn TimeSource>, config, sink);
         let t = skewed.now();
         assert_eq!(t, Time::from_millis(100));
+    }
+
+    #[test]
+    fn drift_precision_is_stable_at_large_timestamps() {
+        let base = make_base_clock();
+        let (_, sink) = make_sink();
+        // 1 second drift per second of base time.
+        let config = ClockSkewConfig::new(42).with_drift_rate(1_000_000_000);
+        let skewed = SkewClock::new(base.clone() as Arc<dyn TimeSource>, config, sink);
+
+        // 2^53 + 1: not exactly representable in f64, so float-based math loses 1ns.
+        let base_nanos = 9_007_199_254_740_993_u64;
+        base.set(Time::from_nanos(base_nanos));
+
+        let actual = skewed.now();
+        let expected = Time::from_nanos(base_nanos.saturating_mul(2));
+        assert_eq!(actual, expected);
     }
 }
