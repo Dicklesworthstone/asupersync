@@ -137,10 +137,24 @@ mod imp {
                     "token already registered",
                 ));
             }
+            if regs.values().any(|info| info.raw_fd == raw_fd) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "fd already registered",
+                ));
+            }
+            if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
             regs.insert(token, RegistrationInfo { raw_fd, interest });
             drop(regs);
 
-            self.submit_poll_add(token, raw_fd, interest)
+            if let Err(err) = self.submit_poll_add(token, raw_fd, interest) {
+                let mut regs = self.registrations.lock();
+                regs.remove(&token);
+                return Err(err);
+            }
+            Ok(())
         }
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
@@ -343,6 +357,16 @@ mod imp {
     mod tests {
         use super::*;
         use std::os::unix::net::UnixStream;
+        use std::os::{fd::RawFd, unix::io::AsRawFd};
+
+        #[derive(Debug)]
+        struct RawFdSource(RawFd);
+
+        impl AsRawFd for RawFdSource {
+            fn as_raw_fd(&self) -> RawFd {
+                self.0
+            }
+        }
 
         fn new_or_skip() -> Option<IoUringReactor> {
             match IoUringReactor::new() {
@@ -426,6 +450,20 @@ mod imp {
             assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
             reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_register_invalid_fd_fails_and_does_not_track_registration() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let invalid = RawFdSource(-1);
+            let err = reactor
+                .register(&invalid, Token::new(404), Interest::READABLE)
+                .expect_err("invalid fd registration should fail");
+            assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+            assert_eq!(reactor.registration_count(), 0);
         }
 
         #[test]

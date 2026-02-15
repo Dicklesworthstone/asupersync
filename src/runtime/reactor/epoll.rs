@@ -174,6 +174,12 @@ impl Reactor for EpollReactor {
                 "token already registered",
             ));
         }
+        if regs.values().any(|info| info.raw_fd == raw_fd) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "fd already registered",
+            ));
+        }
 
         // Ensure the file descriptor is still valid before registering.
         // This catches cases where the fd was closed but the value reused.
@@ -236,10 +242,15 @@ impl Reactor for EpollReactor {
         // The caller is responsible for ensuring the fd remains valid until deregistered.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
 
-        // Remove from epoll
-        self.poller.delete(borrowed_fd)?;
-
-        Ok(())
+        // Remove from epoll. If the fd was already closed or removed by the kernel,
+        // treat it as already deregistered from reactor bookkeeping perspective.
+        match self.poller.delete(borrowed_fd) {
+            Ok(()) => Ok(()),
+            Err(err) => match err.raw_os_error() {
+                Some(libc::EBADF | libc::ENOENT) => Ok(()),
+                _ => Err(err),
+            },
+        }
     }
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
@@ -728,8 +739,8 @@ mod tests {
     }
 
     #[test]
-    fn deregister_closed_fd_returns_error() {
-        init_test("deregister_closed_fd_returns_error");
+    fn deregister_closed_fd_is_best_effort() {
+        init_test("deregister_closed_fd_is_best_effort");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
 
@@ -740,8 +751,97 @@ mod tests {
 
         drop(sock1);
         let result = reactor.deregister(token);
-        crate::assert_with_log!(result.is_err(), "closed fd error", true, result.is_err());
-        crate::test_complete!("deregister_closed_fd_returns_error");
+        crate::assert_with_log!(
+            result.is_ok(),
+            "closed fd cleanup succeeds",
+            true,
+            result.is_ok()
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            "registration removed from bookkeeping",
+            0usize,
+            reactor.registration_count()
+        );
+        crate::test_complete!("deregister_closed_fd_is_best_effort");
+    }
+
+    #[test]
+    fn reused_fd_cannot_register_under_new_token_until_stale_token_removed() {
+        init_test("reused_fd_cannot_register_under_new_token_until_stale_token_removed");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (old_sock, _old_peer) = UnixStream::pair().expect("failed to create unix stream pair");
+        let stale_fd = old_sock.as_raw_fd();
+        let stale_token = Token::new(87);
+        reactor
+            .register(&old_sock, stale_token, Interest::READABLE)
+            .expect("stale registration failed");
+        drop(old_sock);
+
+        let (new_sock, mut write_peer) =
+            UnixStream::pair().expect("failed to create second unix stream pair");
+        let new_sock_fd = new_sock.as_raw_fd();
+        // Force fd-number reuse so stale bookkeeping and new source collide on raw fd.
+        let dup_result = unsafe { libc::dup2(new_sock_fd, stale_fd) };
+        crate::assert_with_log!(
+            dup_result == stale_fd,
+            "dup2 reused stale fd slot",
+            stale_fd,
+            dup_result
+        );
+
+        let reused_source = RawFdSource(stale_fd);
+        let new_token = Token::new(88);
+
+        let duplicate_result = reactor.register(&reused_source, new_token, Interest::READABLE);
+        crate::assert_with_log!(
+            duplicate_result.is_err(),
+            "duplicate fd registration rejected while stale token exists",
+            true,
+            duplicate_result.is_err()
+        );
+        let duplicate_kind = duplicate_result.unwrap_err().kind();
+        crate::assert_with_log!(
+            duplicate_kind == io::ErrorKind::AlreadyExists,
+            "duplicate fd reports already exists",
+            io::ErrorKind::AlreadyExists,
+            duplicate_kind
+        );
+
+        reactor
+            .deregister(stale_token)
+            .expect("stale token deregister should succeed");
+        reactor
+            .register(&reused_source, new_token, Interest::READABLE)
+            .expect("register reused fd after stale cleanup failed");
+
+        write_peer.write_all(b"x").expect("write failed");
+        let mut events = Events::with_capacity(8);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "has events", true, count >= 1);
+        let mut found = false;
+        for event in &events {
+            if event.token == new_token && event.is_readable() {
+                found = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found, "readable event for reused fd token", true, found);
+
+        reactor
+            .deregister(new_token)
+            .expect("deregister reused fd token failed");
+        // SAFETY: If dup2 created a distinct extra descriptor at `stale_fd`,
+        // close it to avoid leaks. When source==target, `new_sock` already owns it.
+        if stale_fd != new_sock_fd {
+            let close_result = unsafe { libc::close(stale_fd) };
+            crate::assert_with_log!(close_result == 0, "close duplicated fd", 0, close_result);
+        }
+        crate::test_complete!(
+            "reused_fd_cannot_register_under_new_token_until_stale_token_removed"
+        );
     }
 
     #[test]
