@@ -60,6 +60,7 @@ pub(crate) struct SharedChannel {
 
 impl SharedChannel {
     pub(crate) fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "transport::channel capacity must be > 0");
         Self {
             queue: Mutex::new(VecDeque::new()),
             capacity,
@@ -93,6 +94,11 @@ impl SharedChannel {
 }
 
 /// Create a connected in-memory channel pair.
+///
+/// # Panics
+///
+/// Panics if `capacity == 0`. Zero-capacity rendezvous semantics are not
+/// currently supported by this transport channel.
 #[must_use]
 pub fn channel(capacity: usize) -> (sink::ChannelSink, stream::ChannelStream) {
     let shared = Arc::new(SharedChannel::new(capacity));
@@ -222,5 +228,11 @@ mod inline_tests {
         );
 
         crate::test_complete!("test_shared_channel_close_wakes_waiters");
+    }
+
+    #[test]
+    #[should_panic(expected = "transport::channel capacity must be > 0")]
+    fn test_channel_zero_capacity_panics() {
+        let _ = channel(0);
     }
 }
