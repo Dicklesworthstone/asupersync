@@ -1694,15 +1694,7 @@ impl MySqlConnection {
         let mut header = [0u8; 4];
         self.read_exact(&mut header).await?;
 
-        let len = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
-        let seq = header[3];
-
-        // Guard against oversized packets (max MySQL packet is 16 MB minus 1 byte)
-        if len > MAX_PACKET_SIZE {
-            return Err(MySqlError::Protocol(format!(
-                "packet length {len} exceeds maximum allowed {MAX_PACKET_SIZE}"
-            )));
-        }
+        let (len, seq) = Self::decode_packet_header(header, self.inner.sequence)?;
 
         // Read payload
         let mut data = vec![0u8; len as usize];
@@ -1711,6 +1703,27 @@ impl MySqlConnection {
         }
 
         Ok((data, seq))
+    }
+
+    #[inline]
+    fn decode_packet_header(header: [u8; 4], expected_seq: u8) -> Result<(u32, u8), MySqlError> {
+        let len = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
+        let seq = header[3];
+
+        if seq != expected_seq {
+            return Err(MySqlError::Protocol(format!(
+                "packet sequence mismatch: expected {expected_seq}, got {seq}"
+            )));
+        }
+
+        // Guard against oversized packets (max MySQL packet is 16 MB minus 1 byte)
+        if len > MAX_PACKET_SIZE {
+            return Err(MySqlError::Protocol(format!(
+                "packet length {len} exceeds maximum allowed {MAX_PACKET_SIZE}"
+            )));
+        }
+
+        Ok((len, seq))
     }
 
     /// Parse an error packet and return the error.
@@ -2063,6 +2076,36 @@ mod tests {
         assert_eq!(packet[0], 0x00); // low byte
         assert_eq!(packet[1], 0x01); // mid byte (256)
         assert_eq!(packet[2], 0x00); // high byte
+    }
+
+    #[test]
+    fn test_decode_packet_header_accepts_expected_sequence() {
+        let header = [0x02, 0x00, 0x00, 0x07];
+        let (len, seq) = MySqlConnection::decode_packet_header(header, 0x07).expect("valid header");
+        assert_eq!(len, 2);
+        assert_eq!(seq, 0x07);
+    }
+
+    #[test]
+    fn test_decode_packet_header_rejects_sequence_mismatch() {
+        let header = [0x01, 0x00, 0x00, 0x02];
+        let err = MySqlConnection::decode_packet_header(header, 0x01).unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
+        assert!(format!("{err}").contains("sequence mismatch"));
+    }
+
+    #[test]
+    fn test_decode_packet_header_rejects_oversized_packet() {
+        let oversized = MAX_PACKET_SIZE + 1;
+        let header = [
+            u8::try_from(oversized & 0xFF).expect("low byte fits"),
+            u8::try_from((oversized >> 8) & 0xFF).expect("mid byte fits"),
+            u8::try_from((oversized >> 16) & 0xFF).expect("high byte fits"),
+            0x00,
+        ];
+        let err = MySqlConnection::decode_packet_header(header, 0x00).unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
+        assert!(format!("{err}").contains("exceeds maximum"));
     }
 
     #[test]
