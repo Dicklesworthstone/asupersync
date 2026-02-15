@@ -833,4 +833,77 @@ mod tests {
 
         crate::test_complete!("mutex_is_locked_is_poisoned");
     }
+
+    #[test]
+    fn drop_woken_future_passes_baton() {
+        init_test("drop_woken_future_passes_baton");
+        let cx = test_cx();
+        let mutex = Mutex::new(42);
+
+        // Hold the lock.
+        let mut fut_hold = mutex.lock(&cx);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        // Queue waiter A.
+        let mut fut_a = mutex.lock(&cx);
+        let _ = poll_once(&mut fut_a);
+
+        // Queue waiter B.
+        let mut fut_b = mutex.lock(&cx);
+        let _ = poll_once(&mut fut_b);
+
+        let waiters = mutex.waiters();
+        crate::assert_with_log!(waiters == 2, "2 waiters queued", 2usize, waiters);
+
+        // Release the lock. unlock() pops waiter A and marks it dequeued.
+        drop(guard);
+
+        // Drop waiter A WITHOUT polling it. LockFuture::drop must detect
+        // that the lock is free and pass the baton to the next waiter (B).
+        drop(fut_a);
+
+        // Waiter B should now be able to acquire the lock.
+        let guard_b = poll_once(&mut fut_b)
+            .expect("should complete after baton pass")
+            .expect("no error");
+        crate::assert_with_log!(*guard_b == 42, "waiter B acquired", 42, *guard_b);
+
+        crate::test_complete!("drop_woken_future_passes_baton");
+    }
+
+    #[test]
+    fn try_lock_steal_does_not_lose_waiter() {
+        init_test("try_lock_steal_does_not_lose_waiter");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        // Hold the lock.
+        let mut fut_hold = mutex.lock(&cx);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        // Queue a waiter.
+        let mut fut_w = mutex.lock(&cx);
+        let _ = poll_once(&mut fut_w);
+
+        // Release — unlock wakes the waiter (noop waker, no actual schedule).
+        drop(guard);
+
+        // Steal the lock before the waiter can poll.
+        let steal_guard = mutex.try_lock().expect("steal should succeed");
+
+        // Waiter polls: lock is busy (stolen). It re-registers at the front.
+        let pending = poll_once(&mut fut_w).is_none();
+        crate::assert_with_log!(pending, "waiter blocked by steal", true, pending);
+
+        // Release stolen lock.
+        drop(steal_guard);
+
+        // Waiter should now acquire.
+        let guard_w = poll_once(&mut fut_w)
+            .expect("should complete")
+            .expect("no error");
+        crate::assert_with_log!(*guard_w == 0, "waiter acquired after steal", 0u32, *guard_w);
+
+        crate::test_complete!("try_lock_steal_does_not_lose_waiter");
+    }
 }
