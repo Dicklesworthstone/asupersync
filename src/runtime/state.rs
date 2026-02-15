@@ -331,6 +331,12 @@ pub struct RuntimeState {
     leak_escalation: Option<LeakEscalation>,
     /// Cumulative count of obligation leaks (for escalation threshold).
     leak_count: u64,
+    /// Reentrance guard for `handle_obligation_leaks`.
+    ///
+    /// Prevents reentrant calls from inflating `leak_count` when
+    /// `mark_obligation_leaked → advance_region_state → collect_obligation_leaks`
+    /// discovers obligations already being processed by the outer caller.
+    handling_leaks: bool,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -353,6 +359,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("obligation_leak_response", &self.obligation_leak_response)
             .field("leak_escalation", &self.leak_escalation)
             .field("leak_count", &self.leak_count)
+            .field("handling_leaks", &self.handling_leaks)
             .finish()
     }
 }
@@ -388,6 +395,7 @@ impl RuntimeState {
             obligation_leak_response: ObligationLeakResponse::Log,
             leak_escalation: None,
             leak_count: 0,
+            handling_leaks: false,
         }
     }
 
@@ -1038,9 +1046,11 @@ impl RuntimeState {
 
     #[allow(clippy::needless_pass_by_value)]
     fn handle_obligation_leaks(&mut self, error: ObligationLeakError) {
-        if error.leaks.is_empty() {
+        if error.leaks.is_empty() || self.handling_leaks {
             return;
         }
+
+        self.handling_leaks = true;
 
         // Track cumulative leaks for escalation.
         self.leak_count = self.leak_count.saturating_add(error.leaks.len() as u64);
@@ -1118,6 +1128,8 @@ impl RuntimeState {
                 );
             }
         }
+
+        self.handling_leaks = false;
     }
 
     /// Creates and registers an obligation for the given task and region.
@@ -2197,6 +2209,14 @@ impl RuntimeState {
                         };
 
                         if closed {
+                            // Emit region_closed metric with lifetime.
+                            if let Some(region) = self.regions.get(region_id.arena_index()) {
+                                let lifetime = Duration::from_nanos(
+                                    self.now.duration_since(region.created_at()),
+                                );
+                                self.metrics.region_closed(region_id, lifetime);
+                            }
+
                             if let Some(parent_id) = parent {
                                 // Remove from parent
                                 if let Some(parent_record) =
@@ -6794,5 +6814,105 @@ mod tests {
             state.pending_obligation_count()
         );
         crate::test_complete!("mixed_obligation_resolution_during_cancel_cascade");
+    }
+
+    // ── asupersync-sipro: Regression tests for audit findings ────────────
+
+    /// Test metrics that tracks region_closed calls.
+    #[derive(Default)]
+    struct RegionCloseMetrics {
+        closed: Mutex<Vec<(RegionId, Duration)>>,
+    }
+
+    impl MetricsProvider for RegionCloseMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+        fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, id: RegionId, lifetime: Duration) {
+            self.closed.lock().expect("lock").push((id, lifetime));
+        }
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+        fn deadline_remaining(&self, _: &str, _: Duration) {}
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+        fn task_stuck_detected(&self, _: &str) {}
+        fn obligation_created(&self, _: RegionId) {}
+        fn obligation_discharged(&self, _: RegionId) {}
+        fn obligation_leaked(&self, _: RegionId) {}
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn region_closed_metric_fires_on_close() {
+        // Regression: advance_region_state did not call metrics.region_closed()
+        // after complete_close(), causing active region gauge to grow monotonically.
+        init_test("region_closed_metric_fires_on_close");
+        let metrics = Arc::new(RegionCloseMetrics::default());
+        let mut state = RuntimeState::new_with_metrics(metrics.clone());
+        let root = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, root);
+
+        // Close region: begin_close, complete task, advance
+        {
+            let region = state.regions.get(root.arena_index()).expect("root");
+            region.begin_close(None);
+        }
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task);
+
+        {
+            let closed = metrics.closed.lock().expect("lock");
+            crate::assert_with_log!(
+                closed.len() == 1,
+                "region_closed metric fired exactly once",
+                1usize,
+                closed.len()
+            );
+            crate::assert_with_log!(
+                closed[0].0 == root,
+                "correct region ID in metric",
+                root,
+                closed[0].0
+            );
+        }
+        crate::test_complete!("region_closed_metric_fires_on_close");
+    }
+
+    #[test]
+    fn leak_count_exact_for_multiple_obligations() {
+        // Regression: handle_obligation_leaks was reentrant via
+        // mark_obligation_leaked → advance_region_state → collect_obligation_leaks,
+        // causing leak_count to inflate to N*(N+1)/2 instead of N.
+        init_test("leak_count_exact_for_multiple_obligations");
+        let mut state = RuntimeState::new();
+        state.set_obligation_leak_response(ObligationLeakResponse::Silent);
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create 5 obligations on the same task — all will leak on completion
+        for _ in 0..5 {
+            state
+                .create_obligation(ObligationKind::SendPermit, task, region, None)
+                .expect("create obligation");
+        }
+
+        complete_task_ok(&mut state, task);
+
+        // Without the reentrance guard, leak_count would be 5+4+3+2+1 = 15
+        crate::assert_with_log!(
+            state.leak_count() == 5,
+            "leak_count is exactly N, not inflated by reentrance",
+            5u64,
+            state.leak_count()
+        );
+        crate::test_complete!("leak_count_exact_for_multiple_obligations");
     }
 }
