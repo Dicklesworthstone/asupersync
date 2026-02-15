@@ -568,22 +568,31 @@ impl Scheduler {
         }
 
         // Task is scheduled. Check where it is.
-        // Check if already in cancel lane
-        let in_cancel = self.cancel_lane.iter().any(|e| e.task == task);
-        if in_cancel {
-            // Rebuild cancel lane, updating priority if higher
+        // Check if already in cancel lane.
+        if let Some(existing_priority) = self
+            .cancel_lane
+            .iter()
+            .find(|entry| entry.task == task)
+            .map(|entry| entry.priority)
+        {
+            // Fast path: same-or-lower priority re-promotion is a no-op.
+            // Keep generation consumption above for deterministic sequencing.
+            if priority <= existing_priority {
+                return;
+            }
+            // Rebuild cancel lane only when we actually need to increase priority.
             self.cancel_lane = self
                 .cancel_lane
                 .drain()
-                .map(|e| {
-                    if e.task == task && priority > e.priority {
+                .map(|entry| {
+                    if entry.task == task {
                         SchedulerEntry {
                             task,
                             priority,
                             generation,
                         }
                     } else {
-                        e
+                        entry
                     }
                 })
                 .collect();
