@@ -155,7 +155,7 @@ impl SymbolCancelToken {
     /// Returns true if cancellation has been requested.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.state.cancelled.load(Ordering::SeqCst)
+        self.state.cancelled.load(Ordering::Acquire)
     }
 
     /// Returns the cancellation reason, if cancelled.
@@ -167,7 +167,7 @@ impl SymbolCancelToken {
     /// Returns when cancellation was requested, if cancelled.
     #[must_use]
     pub fn cancelled_at(&self) -> Option<Time> {
-        let nanos = self.state.cancelled_at.load(Ordering::SeqCst);
+        let nanos = self.state.cancelled_at.load(Ordering::Acquire);
         if nanos == 0 {
             if self.is_cancelled() {
                 Some(Time::ZERO)
@@ -193,12 +193,12 @@ impl SymbolCancelToken {
         if self
             .state
             .cancelled
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             self.state
                 .cancelled_at
-                .store(now.as_nanos(), Ordering::SeqCst);
+                .store(now.as_nanos(), Ordering::Release);
             *self.state.reason.write().expect("lock poisoned") = Some(reason.clone());
 
             let listeners = {
@@ -247,9 +247,9 @@ impl SymbolCancelToken {
         let child = Self::new(self.state.object_id, rng);
 
         // Hold the children lock across the cancelled check to avoid a TOCTOU
-        // race: cancel() sets the `cancelled` flag (SeqCst) *before* reading
-        // children, so if we observe !cancelled under the write lock the
-        // subsequent cancel() will see our child when it reads the list.
+        // race: cancel() sets the `cancelled` flag (Release) *before* reading
+        // children, so if we observe !cancelled (Acquire) under the write lock
+        // the subsequent cancel() will see our child when it reads the list.
         let mut children = self.state.children.write().expect("lock poisoned");
         if self.is_cancelled() {
             drop(children);
@@ -267,9 +267,9 @@ impl SymbolCancelToken {
     /// Adds a listener to be notified on cancellation.
     pub fn add_listener(&self, listener: impl CancelListener + 'static) {
         // Hold the listeners lock across the cancelled check to avoid a TOCTOU
-        // race: cancel() sets the `cancelled` flag (SeqCst) *before* draining
-        // listeners, so if we observe !cancelled under the write lock the
-        // subsequent cancel() will find our listener when it drains.
+        // race: cancel() sets the `cancelled` flag (Release) *before* draining
+        // listeners, so if we observe !cancelled (Acquire) under the write lock
+        // the subsequent cancel() will find our listener when it drains.
         let mut listeners = self.state.listeners.write().expect("lock poisoned");
         if self.is_cancelled() {
             drop(listeners);
@@ -698,7 +698,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             token.cancel(reason, now);
         }
 
-        let sequence = self.next_sequence.fetch_add(1, Ordering::SeqCst);
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let token_id = self
             .active_tokens
             .read()

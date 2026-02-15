@@ -153,10 +153,10 @@ fn noop_waker() -> Waker {
 /// While `Cx` can be cloned and moved, it semantically belongs to a specific
 /// task within a specific region. The runtime ensures proper cleanup when
 /// tasks complete.
-#[derive(Debug)]
-pub struct Cx<Caps = cap::All> {
-    pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
-    observability: Arc<std::sync::RwLock<ObservabilityState>>,
+/// Grouped handle fields shared behind a single `Arc` to reduce per-clone
+/// refcount operations from ~13 to 1 for this bundle.
+#[derive(Debug, Clone)]
+struct CxHandles {
     io_driver: Option<IoDriverHandle>,
     io_cap: Option<Arc<dyn crate::io::IoCap>>,
     timer_driver: Option<TimerDriverHandle>,
@@ -165,35 +165,28 @@ pub struct Cx<Caps = cap::All> {
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
     registry: Option<RegistryHandle>,
-    /// Optional system pressure handle for compute budget propagation.
-    ///
-    /// When attached, subsystems can query current system headroom and
-    /// degrade gracefully under load. Shared via `Arc` so all clones
-    /// observe the same pressure state.
     pressure: Option<Arc<SystemPressure>>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
     macaroon: Option<Arc<MacaroonToken>>,
+}
+
+#[derive(Debug)]
+pub struct Cx<Caps = cap::All> {
+    pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
+    observability: Arc<std::sync::RwLock<ObservabilityState>>,
+    handles: Arc<CxHandles>,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
 }
 
-// Manual Clone impl to avoid requiring `Caps: Clone` (Caps is just a phantom marker type)
+// Manual Clone impl to avoid requiring `Caps: Clone` (Caps is just a phantom marker type).
+// Only 3 Arc increments instead of ~15.
 impl<Caps> Clone for Cx<Caps> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
             observability: Arc::clone(&self.observability),
-            io_driver: self.io_driver.clone(),
-            io_cap: self.io_cap.clone(),
-            timer_driver: self.timer_driver.clone(),
-            blocking_pool: self.blocking_pool.clone(),
-            entropy: Arc::clone(&self.entropy),
-            logical_clock: self.logical_clock.clone(),
-            remote_cap: self.remote_cap.clone(),
-            registry: self.registry.clone(),
-            pressure: self.pressure.clone(),
-            evidence_sink: self.evidence_sink.clone(),
-            macaroon: self.macaroon.clone(),
+            handles: Arc::clone(&self.handles),
             _caps: PhantomData,
         }
     }
@@ -329,17 +322,19 @@ impl<Caps> Cx<Caps> {
             observability: Arc::new(std::sync::RwLock::new(ObservabilityState::new(
                 region, task,
             ))),
-            io_driver: None,
-            io_cap: None,
-            timer_driver: None,
-            blocking_pool: None,
-            entropy: Arc::new(OsEntropy),
-            logical_clock: LogicalClockHandle::default(),
-            remote_cap: None,
-            registry: None,
-            pressure: None,
-            evidence_sink: None,
-            macaroon: None,
+            handles: Arc::new(CxHandles {
+                io_driver: None,
+                io_cap: None,
+                timer_driver: None,
+                blocking_pool: None,
+                entropy: Arc::new(OsEntropy),
+                logical_clock: LogicalClockHandle::default(),
+                remote_cap: None,
+                registry: None,
+                pressure: None,
+                evidence_sink: None,
+                macaroon: None,
+            }),
             _caps: PhantomData,
         }
     }
@@ -424,17 +419,19 @@ impl<Caps> Cx<Caps> {
         Self {
             inner,
             observability,
-            io_driver,
-            io_cap,
-            timer_driver,
-            blocking_pool: None,
-            entropy,
-            logical_clock: LogicalClockHandle::default(),
-            remote_cap: None,
-            registry: None,
-            pressure: None,
-            evidence_sink: None,
-            macaroon: None,
+            handles: Arc::new(CxHandles {
+                io_driver,
+                io_cap,
+                timer_driver,
+                blocking_pool: None,
+                entropy,
+                logical_clock: LogicalClockHandle::default(),
+                remote_cap: None,
+                registry: None,
+                pressure: None,
+                evidence_sink: None,
+                macaroon: None,
+            }),
             _caps: PhantomData,
         }
     }
@@ -442,26 +439,26 @@ impl<Caps> Cx<Caps> {
     /// Returns a cloned handle to the I/O driver, if present.
     #[must_use]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
-        self.io_driver.clone()
+        self.handles.io_driver.clone()
     }
 
     /// Returns a cloned handle to the blocking pool, if present.
     #[must_use]
     pub(crate) fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
-        self.blocking_pool.clone()
+        self.handles.blocking_pool.clone()
     }
 
     /// Attaches a blocking pool handle to this context.
     #[must_use]
     pub(crate) fn with_blocking_pool_handle(mut self, handle: Option<BlockingPoolHandle>) -> Self {
-        self.blocking_pool = handle;
+        Arc::make_mut(&mut self.handles).blocking_pool = handle;
         self
     }
 
     /// Attaches a logical clock handle to this context.
     #[must_use]
     pub(crate) fn with_logical_clock(mut self, clock: LogicalClockHandle) -> Self {
-        self.logical_clock = clock;
+        Arc::make_mut(&mut self.handles).logical_clock = clock;
         self
     }
 
@@ -483,17 +480,7 @@ impl<Caps> Cx<Caps> {
         Cx {
             inner: self.inner.clone(),
             observability: self.observability.clone(),
-            io_driver: self.io_driver.clone(),
-            io_cap: self.io_cap.clone(),
-            timer_driver: self.timer_driver.clone(),
-            blocking_pool: self.blocking_pool.clone(),
-            entropy: self.entropy.clone(),
-            logical_clock: self.logical_clock.clone(),
-            remote_cap: self.remote_cap.clone(),
-            registry: self.registry.clone(),
-            pressure: self.pressure.clone(),
-            evidence_sink: self.evidence_sink.clone(),
-            macaroon: self.macaroon.clone(),
+            handles: self.handles.clone(),
             _caps: PhantomData,
         }
     }
@@ -504,7 +491,7 @@ impl<Caps> Cx<Caps> {
     /// tasks only see a registry if their `Cx` carries one.
     #[must_use]
     pub(crate) fn with_registry_handle(mut self, registry: Option<RegistryHandle>) -> Self {
-        self.registry = registry;
+        Arc::make_mut(&mut self.handles).registry = registry;
         self
     }
 
@@ -513,7 +500,7 @@ impl<Caps> Cx<Caps> {
     /// This allows the context to perform remote operations like `spawn_remote`.
     #[must_use]
     pub fn with_remote_cap(mut self, cap: RemoteCap) -> Self {
-        self.remote_cap = Some(Arc::new(cap));
+        Arc::make_mut(&mut self.handles).remote_cap = Some(Arc::new(cap));
         self
     }
 
@@ -524,7 +511,7 @@ impl<Caps> Cx<Caps> {
     /// update the value, and any code with `&Cx` can read it lock-free.
     #[must_use]
     pub fn with_pressure(mut self, pressure: Arc<SystemPressure>) -> Self {
-        self.pressure = Some(pressure);
+        Arc::make_mut(&mut self.handles).pressure = Some(pressure);
         self
     }
 
@@ -533,7 +520,7 @@ impl<Caps> Cx<Caps> {
     /// Returns `None` if no pressure handle was attached to this context.
     #[must_use]
     pub fn pressure(&self) -> Option<&SystemPressure> {
-        self.pressure.as_deref()
+        self.handles.pressure.as_deref()
     }
 
     /// Returns a cloned handle to the configured remote capability, if any.
@@ -542,7 +529,7 @@ impl<Caps> Cx<Caps> {
     /// inherit remote capability without requiring `Caps: HasRemote` bounds.
     #[must_use]
     pub(crate) fn remote_cap_handle(&self) -> Option<Arc<RemoteCap>> {
-        self.remote_cap.clone()
+        self.handles.remote_cap.clone()
     }
 
     /// Attaches an already-shared remote capability handle to this context.
@@ -551,33 +538,33 @@ impl<Caps> Cx<Caps> {
     /// capability propagation to child contexts.
     #[must_use]
     pub(crate) fn with_remote_cap_handle(mut self, cap: Option<Arc<RemoteCap>>) -> Self {
-        self.remote_cap = cap;
+        Arc::make_mut(&mut self.handles).remote_cap = cap;
         self
     }
 
     /// Returns the registry capability handle, if attached.
     #[must_use]
     pub fn registry_handle(&self) -> Option<RegistryHandle> {
-        self.registry.clone()
+        self.handles.registry.clone()
     }
 
     /// Returns true if a registry handle is attached.
     #[must_use]
     pub fn has_registry(&self) -> bool {
-        self.registry.is_some()
+        self.handles.registry.is_some()
     }
 
     /// Attaches an evidence sink for runtime decision tracing.
     #[must_use]
     pub fn with_evidence_sink(mut self, sink: Option<Arc<dyn EvidenceSink>>) -> Self {
-        self.evidence_sink = sink;
+        Arc::make_mut(&mut self.handles).evidence_sink = sink;
         self
     }
 
     /// Returns a cloned handle to the evidence sink, if attached.
     #[must_use]
     pub(crate) fn evidence_sink_handle(&self) -> Option<Arc<dyn EvidenceSink>> {
-        self.evidence_sink.clone()
+        self.handles.evidence_sink.clone()
     }
 
     /// Emit an evidence entry to the attached sink, if any.
@@ -585,7 +572,7 @@ impl<Caps> Cx<Caps> {
     /// This is a no-op if no evidence sink is configured. Errors during
     /// emission are handled internally by the sink (logged and dropped).
     pub fn emit_evidence(&self, entry: &franken_evidence::EvidenceLedger) {
-        if let Some(ref sink) = self.evidence_sink {
+        if let Some(ref sink) = self.handles.evidence_sink {
             sink.emit(entry);
         }
     }
@@ -601,27 +588,27 @@ impl<Caps> Cx<Caps> {
     /// inherit the macaroon.
     #[must_use]
     pub fn with_macaroon(mut self, token: MacaroonToken) -> Self {
-        self.macaroon = Some(Arc::new(token));
+        Arc::make_mut(&mut self.handles).macaroon = Some(Arc::new(token));
         self
     }
 
     /// Attaches a pre-shared Macaroon handle to this context (internal use).
     #[must_use]
     pub(crate) fn with_macaroon_handle(mut self, handle: Option<Arc<MacaroonToken>>) -> Self {
-        self.macaroon = handle;
+        Arc::make_mut(&mut self.handles).macaroon = handle;
         self
     }
 
     /// Returns a reference to the attached Macaroon token, if any.
     #[must_use]
     pub fn macaroon(&self) -> Option<&MacaroonToken> {
-        self.macaroon.as_deref()
+        self.handles.macaroon.as_deref()
     }
 
     /// Returns a cloned `Arc` handle to the macaroon, if any.
     #[must_use]
     pub(crate) fn macaroon_handle(&self) -> Option<Arc<MacaroonToken>> {
-        self.macaroon.clone()
+        self.handles.macaroon.clone()
     }
 
     /// Attenuate the capability token by adding a caveat.
@@ -633,7 +620,7 @@ impl<Caps> Cx<Caps> {
     /// Returns `None` if no macaroon is attached.
     #[must_use]
     pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
-        let token = self.macaroon.as_ref()?;
+        let token = self.handles.macaroon.as_ref()?;
         let attenuated = MacaroonToken::clone(token).add_caveat(predicate);
 
         info!(
@@ -643,7 +630,7 @@ impl<Caps> Cx<Caps> {
         );
 
         let mut cx = self.clone();
-        cx.macaroon = Some(Arc::new(attenuated));
+        Arc::make_mut(&mut cx.handles).macaroon = Some(Arc::new(attenuated));
         Some(cx)
     }
 
@@ -718,7 +705,7 @@ impl<Caps> Cx<Caps> {
         root_key: &crate::security::key::AuthKey,
         context: &VerificationContext,
     ) -> Result<(), VerificationError> {
-        let Some(token) = self.macaroon.as_ref() else {
+        let Some(token) = self.handles.macaroon.as_ref() else {
             return Err(VerificationError::InvalidSignature);
         };
 
@@ -784,7 +771,7 @@ impl<Caps> Cx<Caps> {
         token: &MacaroonToken,
         result: &Result<(), VerificationError>,
     ) {
-        let Some(ref sink) = self.evidence_sink else {
+        let Some(ref sink) = self.handles.evidence_sink else {
             return;
         };
 
@@ -822,19 +809,19 @@ impl<Caps> Cx<Caps> {
     /// Returns the current logical time without ticking.
     #[must_use]
     pub fn logical_now(&self) -> LogicalTime {
-        self.logical_clock.now()
+        self.handles.logical_clock.now()
     }
 
     /// Records a local logical event and returns the updated time.
     #[must_use]
     pub fn logical_tick(&self) -> LogicalTime {
-        self.logical_clock.tick()
+        self.handles.logical_clock.tick()
     }
 
     /// Merges a received logical time and returns the updated time.
     #[must_use]
     pub fn logical_receive(&self, sender_time: &LogicalTime) -> LogicalTime {
-        self.logical_clock.receive(sender_time)
+        self.handles.logical_clock.receive(sender_time)
     }
 
     /// Returns a cloned handle to the timer driver, if present.
@@ -856,7 +843,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasTime,
     {
-        self.timer_driver.clone()
+        self.handles.timer_driver.clone()
     }
 
     /// Returns true if a timer driver is available.
@@ -868,7 +855,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasTime,
     {
-        self.timer_driver.is_some()
+        self.handles.timer_driver.is_some()
     }
 
     /// Returns the I/O capability, if one is configured.
@@ -900,7 +887,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasIo,
     {
-        self.io_cap.as_ref().map(AsRef::as_ref)
+        self.handles.io_cap.as_ref().map(AsRef::as_ref)
     }
 
     /// Returns true if I/O capability is available.
@@ -911,7 +898,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasIo,
     {
-        self.io_cap.is_some()
+        self.handles.io_cap.is_some()
     }
 
     /// Returns the remote capability, if one is configured.
@@ -931,7 +918,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRemote,
     {
-        self.remote_cap.as_ref().map(AsRef::as_ref)
+        self.handles.remote_cap.as_ref().map(AsRef::as_ref)
     }
 
     /// Returns true if the remote capability is available.
@@ -942,7 +929,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRemote,
     {
-        self.remote_cap.is_some()
+        self.handles.remote_cap.is_some()
     }
 
     /// Registers an I/O source with the reactor for the given interest.
@@ -1149,7 +1136,7 @@ impl<Caps> Cx<Caps> {
 
         // Emit evidence for cancellation decisions observed at checkpoint.
         if cancel_requested && mask_depth == 0 {
-            if let Some(ref sink) = self.evidence_sink {
+            if let Some(ref sink) = self.handles.evidence_sink {
                 let kind_str = cancel_reason
                     .as_ref()
                     .map_or_else(|| "unknown".to_string(), |r| format!("{}", r.kind));
@@ -1470,6 +1457,7 @@ impl<Caps> Cx<Caps> {
             return;
         };
         let now = self
+            .handles
             .timer_driver
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
@@ -1502,6 +1490,7 @@ impl<Caps> Cx<Caps> {
             return;
         };
         let now = self
+            .handles
             .timer_driver
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
@@ -1565,6 +1554,7 @@ impl<Caps> Cx<Caps> {
         let mut entry = entry.with_context(&context);
         if include_timestamps && entry.timestamp() == Time::ZERO {
             let now = self
+                .handles
                 .timer_driver
                 .as_ref()
                 .map_or_else(wall_clock_now, TimerDriverHandle::now);
@@ -1633,12 +1623,12 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRandom,
     {
-        self.entropy.as_ref()
+        self.handles.entropy.as_ref()
     }
 
     /// Derives an entropy source for a child task.
     pub(crate) fn child_entropy(&self, task: TaskId) -> Arc<dyn EntropySource> {
-        self.entropy.fork(task)
+        self.handles.entropy.fork(task)
     }
 
     /// Generates a random `u64` using the context entropy source.
@@ -1647,9 +1637,9 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRandom,
     {
-        let value = self.entropy.next_u64();
+        let value = self.handles.entropy.next_u64();
         trace!(
-            source = self.entropy.source_id(),
+            source = self.handles.entropy.source_id(),
             task_id = ?self.task_id(),
             value,
             "entropy_u64"
@@ -1662,9 +1652,9 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRandom,
     {
-        self.entropy.fill_bytes(dest);
+        self.handles.entropy.fill_bytes(dest);
         trace!(
-            source = self.entropy.source_id(),
+            source = self.handles.entropy.source_id(),
             task_id = ?self.task_id(),
             len = dest.len(),
             "entropy_bytes"
@@ -2112,6 +2102,7 @@ impl<Caps> Cx<Caps> {
     {
         let race_fut = Box::pin(self.race(futures));
         let now = self
+            .handles
             .timer_driver
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
@@ -2348,7 +2339,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing_with_remote(cap: RemoteCap) -> Self {
         let mut cx = Self::for_testing();
-        cx.remote_cap = Some(Arc::new(cap));
+        Arc::make_mut(&mut cx.handles).remote_cap = Some(Arc::new(cap));
         cx
     }
 }

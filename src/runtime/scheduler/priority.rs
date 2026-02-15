@@ -534,14 +534,10 @@ impl Scheduler {
     /// compared to schedule/pop operations.
     pub fn remove(&mut self, task: TaskId) {
         if self.scheduled.remove(task) {
-            // Rebuild heaps without the removed task
-            self.cancel_lane = self
-                .cancel_lane
-                .drain()
-                .filter(|e| e.task != task)
-                .collect();
-            self.timed_lane = self.timed_lane.drain().filter(|e| e.task != task).collect();
-            self.ready_lane = self.ready_lane.drain().filter(|e| e.task != task).collect();
+            // Remove in-place without heap allocation
+            self.cancel_lane.retain(|e| e.task != task);
+            self.timed_lane.retain(|e| e.task != task);
+            self.ready_lane.retain(|e| e.task != task);
         }
     }
 
@@ -580,29 +576,20 @@ impl Scheduler {
             if priority <= existing_priority {
                 return;
             }
-            // Rebuild cancel lane only when we actually need to increase priority.
-            self.cancel_lane = self
-                .cancel_lane
-                .drain()
-                .map(|entry| {
-                    if entry.task == task {
-                        SchedulerEntry {
-                            task,
-                            priority,
-                            generation,
-                        }
-                    } else {
-                        entry
-                    }
-                })
-                .collect();
+            // Remove old entry and re-insert with new priority, avoiding allocation.
+            self.cancel_lane.retain(|e| e.task != task);
+            self.cancel_lane.push(SchedulerEntry {
+                task,
+                priority,
+                generation,
+            });
             return;
         }
 
         // Check timed lane
         let in_timed = self.timed_lane.iter().any(|e| e.task == task);
         if in_timed {
-            self.timed_lane = self.timed_lane.drain().filter(|e| e.task != task).collect();
+            self.timed_lane.retain(|e| e.task != task);
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,
@@ -614,7 +601,7 @@ impl Scheduler {
         // Check ready lane
         let in_ready = self.ready_lane.iter().any(|e| e.task == task);
         if in_ready {
-            self.ready_lane = self.ready_lane.drain().filter(|e| e.task != task).collect();
+            self.ready_lane.retain(|e| e.task != task);
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,

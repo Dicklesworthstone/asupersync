@@ -164,7 +164,7 @@ impl Notify {
         // Important: keep the waiter lock held while incrementing `stored_notifications` so a
         // waiter can't observe `stored_notifications == 0`, then register, and miss the stored
         // notification (lost wakeup).
-        self.stored_notifications.fetch_add(1, Ordering::SeqCst);
+        self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 
     /// Notifies all waiting tasks.
@@ -173,7 +173,7 @@ impl Notify {
     /// start waiting after this call will not be affected.
     pub fn notify_waiters(&self) {
         // Increment generation to signal all waiters.
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::Release);
 
         // Collect all wakers (SmallVec avoids heap allocation for ≤8 waiters).
         let wakers: SmallVec<[Waker; 8]> = {
@@ -245,7 +245,7 @@ impl Future for Notified<'_> {
             NotifiedState::Init => {
                 // Check for stored notification.
                 loop {
-                    let stored = self.notify.stored_notifications.load(Ordering::SeqCst);
+                    let stored = self.notify.stored_notifications.load(Ordering::Acquire);
                     if stored > 0 {
                         if self
                             .notify
@@ -253,8 +253,8 @@ impl Future for Notified<'_> {
                             .compare_exchange(
                                 stored,
                                 stored - 1,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
                             )
                             .is_ok()
                         {
@@ -281,7 +281,7 @@ impl Future for Notified<'_> {
                 // This closes races where a notifier runs between the lock-free checks above and
                 // the waiter registration below.
                 loop {
-                    let stored = self.notify.stored_notifications.load(Ordering::SeqCst);
+                    let stored = self.notify.stored_notifications.load(Ordering::Acquire);
                     if stored == 0 {
                         break;
                     }
@@ -289,7 +289,7 @@ impl Future for Notified<'_> {
                     if self
                         .notify
                         .stored_notifications
-                        .compare_exchange(stored, stored - 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .compare_exchange(stored, stored - 1, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                     {
                         drop(waiters);
