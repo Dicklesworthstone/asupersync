@@ -747,8 +747,9 @@ impl Reactor for LabReactor {
     fn poll(&self, events: &mut super::Events, timeout: Option<Duration>) -> io::Result<usize> {
         // Clear wake flag at poll entry
         self.woken.store(false, Ordering::SeqCst);
+        events.clear();
 
-        let (delivered_events, count) = {
+        let delivered_events = {
             let mut inner = self.inner.lock().unwrap();
 
             // Advance time if timeout provided (simulated)
@@ -917,15 +918,14 @@ impl Reactor for LabReactor {
                 }
             }
 
-            let count = delivered_events.len();
-            (delivered_events, count)
+            delivered_events
         };
 
         for event in delivered_events {
             events.push(event);
         }
 
-        Ok(count)
+        Ok(events.len())
     }
 
     fn wake(&self) -> io::Result<()> {
@@ -1289,6 +1289,68 @@ mod tests {
         let count = events.iter().count();
         crate::assert_with_log!(count == 1, "event delivered", 1usize, count);
         crate::test_complete!("set_ready_delivers_immediately");
+    }
+
+    #[test]
+    fn poll_clears_existing_events_before_next_poll() {
+        init_test("poll_clears_existing_events_before_next_poll");
+        let reactor = LabReactor::new();
+        let token = Token::new(1);
+        let source = TestFdSource;
+
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+        reactor.set_ready(token, Event::readable(token));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+        let first_count = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        crate::assert_with_log!(first_count == 1, "first count", 1usize, first_count);
+        crate::assert_with_log!(
+            events.iter().count() == 1,
+            "first len",
+            1usize,
+            events.len()
+        );
+
+        let second_count = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        crate::assert_with_log!(second_count == 0, "second count", 0usize, second_count);
+        crate::assert_with_log!(
+            events.is_empty(),
+            "events cleared on second poll",
+            true,
+            events.is_empty()
+        );
+        crate::test_complete!("poll_clears_existing_events_before_next_poll");
+    }
+
+    #[test]
+    fn poll_returns_stored_count_when_capacity_saturates() {
+        init_test("poll_returns_stored_count_when_capacity_saturates");
+        let reactor = LabReactor::new();
+        let source = TestFdSource;
+        let token1 = Token::new(1);
+        let token2 = Token::new(2);
+
+        reactor
+            .register(&source, token1, Interest::READABLE)
+            .unwrap();
+        reactor
+            .register(&source, token2, Interest::READABLE)
+            .unwrap();
+        reactor.set_ready(token1, Event::readable(token1));
+        reactor.set_ready(token2, Event::readable(token2));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(1);
+        let count = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        crate::assert_with_log!(count == 1, "stored count", 1usize, count);
+        crate::assert_with_log!(
+            events.iter().count() == 1,
+            "stored len",
+            1usize,
+            events.len()
+        );
+        crate::test_complete!("poll_returns_stored_count_when_capacity_saturates");
     }
 
     #[test]
