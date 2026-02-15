@@ -26,7 +26,7 @@
 //! // Restart up to 3 times in 60 seconds
 //! let restart = SupervisionStrategy::Restart(RestartConfig {
 //!     max_restarts: 3,
-//!     window: Duration::from_secs(60),
+//!     window: Duration::from_mins(1),
 //!     backoff: BackoffStrategy::Exponential {
 //!         initial: Duration::from_millis(100),
 //!         max: Duration::from_secs(10),
@@ -3568,7 +3568,7 @@ mod tests {
     fn restart_strategy_allows_restarts() {
         init_test("restart_strategy_allows_restarts");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let config = RestartConfig::new(3, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // First error should trigger restart
@@ -3601,7 +3601,7 @@ mod tests {
     fn restart_strategy_does_not_restart_cancelled() {
         init_test("restart_strategy_does_not_restart_cancelled");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let config = RestartConfig::new(3, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         let decision = supervisor.on_failure(
@@ -3627,7 +3627,7 @@ mod tests {
     fn restart_budget_exhaustion() {
         init_test("restart_budget_exhaustion");
 
-        let config = RestartConfig::new(2, Duration::from_secs(60));
+        let config = RestartConfig::new(2, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts allowed
@@ -3751,7 +3751,7 @@ mod tests {
         init_test("panics_always_stop");
 
         // Even with Restart strategy, panics should stop
-        let config = RestartConfig::new(10, Duration::from_secs(60));
+        let config = RestartConfig::new(10, Duration::from_mins(1));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         let decision = supervisor.on_failure(
@@ -3886,7 +3886,7 @@ mod tests {
 
         assert_eq!(config.restart_policy, RestartPolicy::OneForOne);
         assert_eq!(config.max_restarts, 3);
-        assert_eq!(config.restart_window, Duration::from_secs(60));
+        assert_eq!(config.restart_window, Duration::from_mins(1));
         assert_eq!(config.escalation, EscalationPolicy::Stop);
 
         crate::test_complete!("supervision_config_defaults");
@@ -4294,7 +4294,7 @@ mod tests {
         ChildSpec {
             name: name.into(),
             start: Box::new(noop_start),
-            restart: SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
+            restart: SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_mins(1))),
             shutdown_budget: budget,
             depends_on: vec![],
             registration: NameRegistrationPolicy::None,
@@ -4751,7 +4751,7 @@ mod tests {
     fn budget_aware_restart_allowed_with_sufficient_budget() {
         init_test("budget_aware_restart_sufficient");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60))
+        let config = RestartConfig::new(3, Duration::from_mins(1))
             .with_restart_cost(10)
             .with_min_remaining(Duration::from_secs(5))
             .with_min_polls(100);
@@ -4774,7 +4774,7 @@ mod tests {
     fn budget_aware_restart_refused_insufficient_cost() {
         init_test("budget_aware_restart_insufficient_cost");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60)).with_restart_cost(100);
+        let config = RestartConfig::new(3, Duration::from_mins(1)).with_restart_cost(100);
 
         let history = RestartHistory::new(config);
 
@@ -4797,7 +4797,7 @@ mod tests {
     fn budget_aware_restart_refused_deadline_too_close() {
         init_test("budget_aware_restart_deadline_close");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60))
+        let config = RestartConfig::new(3, Duration::from_mins(1))
             .with_min_remaining(Duration::from_secs(10));
 
         let history = RestartHistory::new(config);
@@ -4820,7 +4820,7 @@ mod tests {
     fn budget_aware_restart_refused_insufficient_polls() {
         init_test("budget_aware_restart_insufficient_polls");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60)).with_min_polls(500);
+        let config = RestartConfig::new(3, Duration::from_mins(1)).with_min_polls(500);
 
         let history = RestartHistory::new(config);
 
@@ -4843,7 +4843,7 @@ mod tests {
     fn budget_aware_restart_allowed_no_cost_quota_set() {
         init_test("budget_aware_restart_no_cost_quota");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60)).with_restart_cost(100);
+        let config = RestartConfig::new(3, Duration::from_mins(1)).with_restart_cost(100);
 
         let history = RestartHistory::new(config);
 
@@ -4860,7 +4860,7 @@ mod tests {
     fn budget_aware_restart_allowed_no_deadline() {
         init_test("budget_aware_restart_no_deadline");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60))
+        let config = RestartConfig::new(3, Duration::from_mins(1))
             .with_min_remaining(Duration::from_secs(10));
 
         let history = RestartHistory::new(config);
@@ -4878,7 +4878,7 @@ mod tests {
     fn supervisor_on_failure_with_budget_refuses_restart() {
         init_test("supervisor_on_failure_with_budget_refuses");
 
-        let config = RestartConfig::new(10, Duration::from_secs(60)).with_restart_cost(100);
+        let config = RestartConfig::new(10, Duration::from_mins(1)).with_restart_cost(100);
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
@@ -4909,7 +4909,7 @@ mod tests {
     fn supervisor_on_failure_with_budget_allows_restart() {
         init_test("supervisor_on_failure_with_budget_allows");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60)).with_restart_cost(10);
+        let config = RestartConfig::new(3, Duration::from_mins(1)).with_restart_cost(10);
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
@@ -4937,7 +4937,7 @@ mod tests {
     fn supervisor_on_failure_without_budget_uses_window_only() {
         init_test("supervisor_on_failure_without_budget");
 
-        let config = RestartConfig::new(2, Duration::from_secs(60)).with_restart_cost(10);
+        let config = RestartConfig::new(2, Duration::from_mins(1)).with_restart_cost(10);
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
@@ -5081,7 +5081,7 @@ mod tests {
         let refusals = vec![
             BudgetRefusal::WindowExhausted {
                 max_restarts: 3,
-                window: Duration::from_secs(60),
+                window: Duration::from_mins(1),
             },
             BudgetRefusal::InsufficientCost {
                 required: 100,
@@ -5109,7 +5109,7 @@ mod tests {
     fn deadline_already_passed_refuses_restart() {
         init_test("deadline_already_passed_refuses_restart");
 
-        let config = RestartConfig::new(3, Duration::from_secs(60))
+        let config = RestartConfig::new(3, Duration::from_mins(1))
             .with_min_remaining(Duration::from_secs(1));
 
         let history = RestartHistory::new(config);
@@ -5135,7 +5135,7 @@ mod tests {
         init_test("budget_aware_checks_combined");
 
         // Config requiring all budget constraints
-        let config = RestartConfig::new(5, Duration::from_secs(60))
+        let config = RestartConfig::new(5, Duration::from_mins(1))
             .with_restart_cost(50)
             .with_min_remaining(Duration::from_secs(10))
             .with_min_polls(200);
