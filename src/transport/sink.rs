@@ -390,6 +390,18 @@ impl SymbolSink for ChannelSink {
             if let Some(waiter) = new_waiter {
                 this.waiter = Some(waiter);
             }
+
+            // Re-check the queue after waiter registration to close a
+            // lost-wakeup race: a receiver may pop between our capacity check
+            // and waiter registration, finding no send_waker to wake.
+            {
+                let queue = this.shared.queue.lock().unwrap();
+                if queue.len() < this.shared.capacity || this.shared.closed.load(Ordering::SeqCst) {
+                    drop(queue);
+                    cx.waker().wake_by_ref();
+                }
+            }
+
             Poll::Pending
         }
     }
