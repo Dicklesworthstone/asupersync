@@ -8,9 +8,7 @@
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::systematic::{
-    ConstraintMatrix, RobustSoliton, SystematicEncoder, SystematicParams,
-};
+use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::util::DetRng;
 
 // ============================================================================
@@ -534,59 +532,72 @@ fn stress_many_small_decodes() {
 }
 
 // ============================================================================
-// Soliton distribution tests
+// RFC tuple equation tests
 // ============================================================================
 
 #[test]
-fn soliton_distribution_coverage() {
+fn rfc_tuple_equation_degree_coverage() {
     let k_values = [10, 50, 100, 500];
 
     for k in k_values {
-        let sol = RobustSoliton::new(k, 0.2, 0.05);
-        let mut rng = DetRng::new(k as u64);
+        let params = SystematicParams::for_source_block(k, 64);
+        let mut degree_counts = std::collections::BTreeMap::<usize, usize>::new();
+        let sample_count = 1_024u32;
+        let start_esi = k as u32;
 
-        let mut degrees = vec![0u32; k + 1];
-        let samples = 10_000;
-
-        for _ in 0..samples {
-            let d = sol.sample(rng.next_u64() as u32);
-            assert!(d >= 1 && d <= k, "k={k}: degree {d} out of range");
-            degrees[d] += 1;
+        for esi in start_esi..start_esi + sample_count {
+            let (columns, coefficients) = params.rfc_repair_equation(esi);
+            assert_eq!(
+                columns.len(),
+                coefficients.len(),
+                "k={k}, esi={esi}: columns/coefficients mismatch"
+            );
+            let unique_columns: std::collections::BTreeSet<usize> =
+                columns.iter().copied().collect();
+            assert!(
+                !unique_columns.is_empty(),
+                "k={k}, esi={esi}: empty effective repair equation"
+            );
+            assert!(
+                unique_columns.len() <= params.l,
+                "k={k}, esi={esi}: effective degree {} exceeds L={}",
+                unique_columns.len(),
+                params.l
+            );
+            assert!(
+                columns.iter().all(|&col| col < params.l),
+                "k={k}, esi={esi}: out-of-range repair index"
+            );
+            *degree_counts.entry(unique_columns.len()).or_insert(0) += 1;
         }
 
-        // Degree 2 should have significant mass (robust soliton concentrates
-        // probability at degree 2 via the 1/(d*(d-1)) ideal soliton term).
-        assert!(degrees[2] > 0, "k={k}: degree 2 should have nonzero mass");
-
-        // The top degree (threshold region) should have significant mass
-        // from the tau perturbation. Check that degrees aren't all
-        // concentrated at a single value.
-        let nonzero_degrees = degrees[1..].iter().filter(|&&c| c > 0).count();
         assert!(
-            nonzero_degrees >= 3,
-            "k={k}: should have at least 3 distinct degrees sampled"
+            degree_counts.len() >= 3,
+            "k={k}: expected at least 3 distinct RFC tuple equation degrees, got {}",
+            degree_counts.len()
         );
     }
 }
 
 #[test]
-fn soliton_deterministic_across_runs() {
-    let k = 50;
-    let sol = RobustSoliton::new(k, 0.2, 0.05);
+fn rfc_tuple_equation_deterministic_across_runs() {
+    let params = SystematicParams::for_source_block(50, 64);
 
-    let generate = |seed: u64| -> Vec<usize> {
-        let mut rng = DetRng::new(seed);
-        (0..1000)
-            .map(|_| sol.sample(rng.next_u64() as u32))
+    let generate = |start_esi: u32| -> Vec<Vec<usize>> {
+        (start_esi..start_esi + 512)
+            .map(|esi| params.rfc_repair_equation(esi).0)
             .collect()
     };
 
-    let run1 = generate(42);
-    let run2 = generate(42);
-    let run3 = generate(99);
+    let run1 = generate(50);
+    let run2 = generate(50);
+    let run3 = generate(51);
 
-    assert_eq!(run1, run2, "same seed should produce same sequence");
-    assert_ne!(run1, run3, "different seeds should differ");
+    assert_eq!(run1, run2, "same ESI range should produce same equations");
+    assert_ne!(
+        run1, run3,
+        "different ESI ranges should produce different equations"
+    );
 }
 
 // ============================================================================
