@@ -3711,21 +3711,20 @@ mod tests {
     #[test]
     fn replay_records_correct_severity_for_cancelled_task() {
         init_test("replay_records_correct_severity_for_cancelled_task");
-        use crate::record::task::TaskState;
-        use crate::trace::replay::ReplayEvent;
-        use crate::types::{Budget, CancelReason};
 
         let config = LabConfig::new(42)
             .panic_on_leak(false)
             .with_default_replay_recording();
         let mut runtime = LabRuntime::new(config);
-        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let root = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
 
         // Create a task that yields once then completes with Ok.
         // The yield allows us to cancel the task before it finishes.
         let (task_id, _) = runtime
             .state
-            .create_task(root, Budget::INFINITE, async {
+            .create_task(root, crate::types::Budget::INFINITE, async {
                 crate::runtime::yield_now::yield_now().await;
             })
             .expect("create task");
@@ -3736,11 +3735,14 @@ mod tests {
 
         // Put the task through cancel protocol: CancelRequested → Cancelling
         if let Some(record) = runtime.state.task_mut(task_id) {
-            record.request_cancel(CancelReason::user("test-cancel"));
+            record.request_cancel(crate::types::CancelReason::user("test-cancel"));
             let _ = record.acknowledge_cancel();
             // Task is now in Cancelling state
             assert!(
-                matches!(record.state, TaskState::Cancelling { .. }),
+                matches!(
+                    record.state,
+                    crate::record::task::TaskState::Cancelling { .. }
+                ),
                 "task should be in Cancelling state"
             );
         }
@@ -3755,7 +3757,7 @@ mod tests {
             assert!(
                 matches!(
                     record.state,
-                    TaskState::Completed(crate::types::Outcome::Cancelled(_))
+                    crate::record::task::TaskState::Completed(crate::types::Outcome::Cancelled(_))
                 ),
                 "task should be Completed(Cancelled), got {:?}",
                 record.state
@@ -3770,7 +3772,7 @@ mod tests {
         let completed_events: Vec<_> = replay
             .events
             .iter()
-            .filter(|e| matches!(e, ReplayEvent::TaskCompleted { .. }))
+            .filter(|e| matches!(e, crate::trace::replay::ReplayEvent::TaskCompleted { .. }))
             .collect();
 
         assert!(
@@ -3780,7 +3782,7 @@ mod tests {
 
         // The severity should be Cancelled (2), not Ok (0)
         for event in &completed_events {
-            if let ReplayEvent::TaskCompleted { outcome, .. } = event {
+            if let crate::trace::replay::ReplayEvent::TaskCompleted { outcome, .. } = event {
                 let expected = crate::types::Severity::Cancelled.as_u8();
                 crate::assert_with_log!(
                     *outcome == expected,

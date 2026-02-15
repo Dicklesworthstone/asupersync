@@ -1664,7 +1664,7 @@ mod tests {
         // At time=500 — passes (discharge caveat satisfied).
         let ctx_ok = VerificationContext::new().with_time(500);
         assert!(token
-            .verify_with_discharges(&root_key, &ctx_ok, &[bound.clone()])
+            .verify_with_discharges(&root_key, &ctx_ok, std::slice::from_ref(&bound))
             .is_ok());
 
         // At time=5000 — fails (discharge caveat expired).
@@ -1695,7 +1695,7 @@ mod tests {
 
         let ctx_ok = VerificationContext::new().with_use_count(3);
         assert!(token
-            .verify_with_discharges(&root_key, &ctx_ok, &[bound.clone()])
+            .verify_with_discharges(&root_key, &ctx_ok, std::slice::from_ref(&bound))
             .is_ok());
 
         let ctx_over = VerificationContext::new().with_use_count(6);

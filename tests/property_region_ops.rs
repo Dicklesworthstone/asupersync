@@ -1970,24 +1970,20 @@ fn e2e_property_regression_inventory() {
     init_test_logging();
     test_phase!("e2e_property_regression_inventory");
 
-    let regressions = std::fs::read_dir("tests")
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .ends_with(".proptest-regressions")
-                })
-                .count()
-        })
-        .unwrap_or(0);
+    let regressions = std::fs::read_dir("tests").map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".proptest-regressions")
+            })
+            .count()
+    });
 
     let region_ops_dir = Path::new("tests/regressions/region_ops");
-    let region_ops_cases = load_regression_cases(region_ops_dir)
-        .map(|cases| cases.len())
-        .unwrap_or(0);
+    let region_ops_cases = load_regression_cases(region_ops_dir).map_or(0, |cases| cases.len());
 
     tracing::info!(
         proptest_files = regressions,

@@ -473,18 +473,21 @@ mod tests {
         let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
         drop(handle.join(&cx));
 
-        let guard = cx.inner.read().expect("lock poisoned");
+        let (cancel_requested, cancel_reason_is_none) = {
+            let guard = cx.inner.read().expect("lock poisoned");
+            (guard.cancel_requested, guard.cancel_reason.is_none())
+        };
         crate::assert_with_log!(
-            !guard.cancel_requested,
+            !cancel_requested,
             "dropping a ready join must not request cancellation",
             false,
-            guard.cancel_requested
+            cancel_requested
         );
         crate::assert_with_log!(
-            guard.cancel_reason.is_none(),
+            cancel_reason_is_none,
             "dropping a ready join must not overwrite cancel reason",
             true,
-            guard.cancel_reason.is_none()
+            cancel_reason_is_none
         );
         crate::test_complete!("drop_join_does_not_abort_if_result_already_ready");
     }

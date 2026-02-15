@@ -943,7 +943,7 @@ fn hpack_encoder_table_size_zero_flushes() {
 fn hpack_static_table_boundary_index_61() {
     // Index 61 is the last static table entry: ("www-authenticate", "").
     let mut dec = HpackDecoder::new();
-    let mut src = Bytes::from_static(&[0x80 | 61]); // Indexed, index 61
+    let mut src = Bytes::from_static(&[0x80 | 0x3D]); // Indexed, index 61
     let headers = dec.decode(&mut src).unwrap();
     assert_eq!(headers.len(), 1);
     assert_eq!(headers[0].name, "www-authenticate");
@@ -955,7 +955,7 @@ fn hpack_static_table_index_beyond_61_is_dynamic() {
     // Index 62 would be the first dynamic table entry.
     // With an empty dynamic table, this should fail.
     let mut dec = HpackDecoder::new();
-    let mut src = Bytes::from_static(&[0x80 | 62]); // Indexed, index 62
+    let mut src = Bytes::from_static(&[0x80 | 0x3E]); // Indexed, index 62
     let result = dec.decode(&mut src);
     assert!(
         result.is_err(),

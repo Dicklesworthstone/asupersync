@@ -3917,11 +3917,11 @@ mod tests {
     fn supervision_config_one_for_all_helper() {
         init_test("supervision_config_one_for_all_helper");
 
-        let config = SupervisionConfig::one_for_all(5, Duration::from_secs(120));
+        let config = SupervisionConfig::one_for_all(5, Duration::from_mins(2));
 
         assert_eq!(config.restart_policy, RestartPolicy::OneForAll);
         assert_eq!(config.max_restarts, 5);
-        assert_eq!(config.restart_window, Duration::from_secs(120));
+        assert_eq!(config.restart_window, Duration::from_mins(2));
 
         crate::test_complete!("supervision_config_one_for_all_helper");
     }
@@ -3930,11 +3930,11 @@ mod tests {
     fn supervision_config_rest_for_one_helper() {
         init_test("supervision_config_rest_for_one_helper");
 
-        let config = SupervisionConfig::rest_for_one(10, Duration::from_secs(300));
+        let config = SupervisionConfig::rest_for_one(10, Duration::from_mins(5));
 
         assert_eq!(config.restart_policy, RestartPolicy::RestForOne);
         assert_eq!(config.max_restarts, 10);
-        assert_eq!(config.restart_window, Duration::from_secs(300));
+        assert_eq!(config.restart_window, Duration::from_mins(5));
 
         crate::test_complete!("supervision_config_rest_for_one_helper");
     }

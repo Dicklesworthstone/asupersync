@@ -273,7 +273,7 @@ fn record_failing_trace(seed: u64, trace_dir: &str) {
         let metadata = TraceMetadata::new(seed);
         match write_trace(&trace_file, &metadata, &trace.events) {
             Ok(()) => {
-                let size = std::fs::metadata(&trace_file).map(|m| m.len()).unwrap_or(0);
+                let size = std::fs::metadata(&trace_file).map_or(0, |m| m.len());
                 eprintln!(
                     "  trace recorded: file={trace_file}, size_bytes={size}, events={}",
                     trace.events.len()

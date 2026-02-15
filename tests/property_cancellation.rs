@@ -439,10 +439,10 @@ proptest! {
         cx.cancel_fast(kind);
 
         // Masked: checkpoint should succeed
-        let result = cx.masked(|| cx.checkpoint());
+        let masked_checkpoint_ok = cx.masked(|| cx.checkpoint().is_ok());
         prop_assert!(
-            result.is_ok(),
-            "checkpoint should return Ok when masked, got {result:?}"
+            masked_checkpoint_ok,
+            "checkpoint should return Ok when masked"
         );
 
         // After unmask: checkpoint should fail again

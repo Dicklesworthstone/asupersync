@@ -687,7 +687,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::Path;
     use std::pin::Pin;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    use std::task::{Context, Poll};
 
     #[test]
     fn run_config_default() {
@@ -1117,7 +1117,7 @@ mod tests {
             F: Future + Send + 'static,
             F::Output: Send + 'static,
         {
-            Box::pin(async move { future.await })
+            Box::pin(future)
         }
 
         fn block_on<F: Future>(&self, future: F) -> F::Output {

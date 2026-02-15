@@ -1049,7 +1049,7 @@ mod tests {
         );
         std::fs::write(&file, contents).unwrap();
 
-        let scan = scan_conformance_attributes(&[file.clone()]).unwrap();
+        let scan = scan_conformance_attributes(std::slice::from_ref(&file)).unwrap();
         assert!(scan.warnings.is_empty());
         assert_eq!(scan.entries.len(), 1);
         let entry = &scan.entries[0];
@@ -1071,7 +1071,7 @@ mod tests {
         );
         std::fs::write(&file, contents).unwrap();
 
-        let scan = scan_conformance_attributes(&[file.clone()]).unwrap();
+        let scan = scan_conformance_attributes(std::slice::from_ref(&file)).unwrap();
         assert!(scan.warnings.is_empty());
         assert_eq!(scan.entries.len(), 2);
         assert!(scan

@@ -474,8 +474,8 @@ fn bench_raptorq_encode_decode(c: &mut Criterion) {
                         .expect("build sender")
                 },
                 |mut sender| {
-                    let result = sender.send_object(&cx, object_id, &data);
-                    black_box(result)
+                    let ok = sender.send_object(&cx, object_id, &data).is_ok();
+                    black_box(ok)
                 },
                 BatchSize::SmallInput,
             )
@@ -503,8 +503,8 @@ fn bench_raptorq_encode_decode(c: &mut Criterion) {
                     (receiver, params)
                 },
                 |(mut receiver, params)| {
-                    let result = receiver.receive_object(&cx, &params);
-                    black_box(result)
+                    let ok = receiver.receive_object(&cx, &params).is_ok();
+                    black_box(ok)
                 },
                 BatchSize::SmallInput,
             )

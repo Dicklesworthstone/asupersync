@@ -295,10 +295,10 @@ fn create_ws_frame(payload_len: usize, masked: bool) -> Vec<u8> {
     if payload_len < 126 {
         frame.push(mask_bit | (payload_len as u8));
     } else if payload_len < 65536 {
-        frame.push(mask_bit | 126);
+        frame.push(mask_bit | 0x7E);
         frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
     } else {
-        frame.push(mask_bit | 127);
+        frame.push(mask_bit | 0x7F);
         frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
     }
 

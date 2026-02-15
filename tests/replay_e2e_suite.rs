@@ -612,11 +612,11 @@ fn log_rich_divergence_at_multiple_points() {
 
         // Extract minimal prefix.
         let prefix = minimal_divergent_prefix(&trace, report.divergence_index);
-        let reduction_pct = if event_count > 0 {
-            (event_count - prefix.len()) * 100 / event_count
-        } else {
-            0
-        };
+        let reduction_pct = event_count
+            .saturating_sub(prefix.len())
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(event_count))
+            .unwrap_or(0);
         tracing::info!(
             diverge_at,
             prefix_len = prefix.len(),

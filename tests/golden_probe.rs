@@ -152,8 +152,7 @@ fn probe_e2e_fingerprint() {
         // Hash first 5 repair symbols
         let mut repair_hasher = DefaultHasher::new();
         for esi in (k as u32)..((k + 5) as u32) {
-            let repair = encoder.repair_symbol(esi);
-            repair.hash(&mut repair_hasher);
+            encoder.repair_symbol(esi).hash(&mut repair_hasher);
         }
         let repair_hash = repair_hasher.finish();
 
@@ -162,7 +161,7 @@ fn probe_e2e_fingerprint() {
         let l = decoder.params().l;
 
         let base_rows = params.s + params.h;
-        let constraints = ConstraintMatrix::build(&params, seed);
+        let constraints = ConstraintMatrix::build(params, seed);
         let mut received = decoder.constraint_symbols();
         for (i, data) in source.iter().enumerate() {
             let row = base_rows + i;

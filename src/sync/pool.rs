@@ -1965,8 +1965,8 @@ mod tests {
         let config = PoolConfig::with_max_size(20)
             .min_size(5)
             .acquire_timeout(Duration::from_mins(1))
-            .idle_timeout(Duration::from_secs(300))
-            .max_lifetime(Duration::from_secs(1800));
+            .idle_timeout(Duration::from_mins(5))
+            .max_lifetime(Duration::from_mins(30));
 
         crate::assert_with_log!(config.min_size == 5, "min_size", 5usize, config.min_size);
         crate::assert_with_log!(config.max_size == 20, "max_size", 20usize, config.max_size);
@@ -1977,15 +1977,15 @@ mod tests {
             config.acquire_timeout
         );
         crate::assert_with_log!(
-            config.idle_timeout == Duration::from_secs(300),
+            config.idle_timeout == Duration::from_mins(5),
             "idle_timeout",
-            Duration::from_secs(300),
+            Duration::from_mins(5),
             config.idle_timeout
         );
         crate::assert_with_log!(
-            config.max_lifetime == Duration::from_secs(1800),
+            config.max_lifetime == Duration::from_mins(30),
             "max_lifetime",
-            Duration::from_secs(1800),
+            Duration::from_mins(30),
             config.max_lifetime
         );
         crate::test_complete!("pool_config_builder");

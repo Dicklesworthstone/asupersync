@@ -690,8 +690,7 @@ fn e2e_multi_stress_all_protocols() {
         // gRPC health
         if health
             .check(&HealthCheckRequest::server())
-            .map(|r| r.status == ServingStatus::Serving)
-            .unwrap_or(false)
+            .is_ok_and(|r| r.status == ServingStatus::Serving)
         {
             grpc_ok += 1;
         }

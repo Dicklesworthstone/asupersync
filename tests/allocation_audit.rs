@@ -329,7 +329,10 @@ fn global_queue_push_pop_allocation_ceiling() {
     // SegQueue allocates blocks; after warmup most should be reused.
     // Allow a generous ceiling — the key invariant is amortized O(1).
     let ops = 100u64 * 200;
-    let allocs_per_op = if ops > 0 { allocs * 1000 / ops } else { 0 };
+    let allocs_per_op = allocs
+        .checked_mul(1000)
+        .and_then(|v| v.checked_div(ops))
+        .unwrap_or(0);
     tracing::info!(
         allocs_per_1000_ops = allocs_per_op,
         "Amortized allocation rate"

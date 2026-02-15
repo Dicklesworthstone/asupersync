@@ -105,6 +105,7 @@ fn runtime_state_refinement_map_covers_required_operations() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn runtime_state_refinement_map_links_valid_rules_and_theorems() {
     let map: Value =
         serde_json::from_str(MAP_JSON).expect("runtime state refinement map must parse");
@@ -278,6 +279,7 @@ fn runtime_state_refinement_map_links_valid_rules_and_theorems() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn runtime_state_refinement_map_has_deterministic_divergence_routing_policy() {
     let map: Value =
         serde_json::from_str(MAP_JSON).expect("runtime state refinement map must parse");
