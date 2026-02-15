@@ -171,6 +171,28 @@ impl Equation {
     }
 }
 
+#[inline]
+fn original_col_for_dense(unsolved: &[usize], dense_col: usize) -> usize {
+    unsolved.get(dense_col).copied().unwrap_or(dense_col)
+}
+
+#[inline]
+fn singular_matrix_error(unsolved: &[usize], dense_col: usize) -> DecodeError {
+    DecodeError::SingularMatrix {
+        row: original_col_for_dense(unsolved, dense_col),
+    }
+}
+
+fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) -> FailureReason {
+    match err {
+        DecodeError::SingularMatrix { row } => FailureReason::SingularMatrix {
+            row: *row,
+            attempted_cols: elimination.pivot_events.iter().map(|ev| ev.col).collect(),
+        },
+        _ => FailureReason::from(err),
+    }
+}
+
 // ============================================================================
 // Inactivation decoder
 // ============================================================================
@@ -318,7 +340,8 @@ impl InactivationDecoder {
         if let Err(err) =
             self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut())
         {
-            proof_builder.set_failure(FailureReason::from(&err));
+            let reason = failure_reason_with_trace(&err, proof_builder.elimination_mut());
+            proof_builder.set_failure(reason);
             return Err((err, proof_builder.build()));
         }
 
@@ -614,20 +637,20 @@ impl InactivationDecoder {
         // Gaussian elimination with partial pivoting.
         // Pre-allocate a single pivot buffer to avoid per-column clones.
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut row_used = vec![false; n_rows];
         let mut pivot_buf = vec![Gf256::ZERO; n_cols];
         let mut pivot_rhs = vec![0u8; symbol_size];
 
         for col in 0..n_cols {
             // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows).find(|&row| {
-                pivot_row.iter().all(|&pr| pr != row) && !a[row * n_cols + col].is_zero()
-            });
+            let pivot = (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
 
             let Some(prow) = pivot else {
-                return Err(DecodeError::SingularMatrix { row: col });
+                return Err(singular_matrix_error(&unsolved, col));
             };
 
             pivot_row[col] = prow;
+            row_used[prow] = true;
             state.stats.pivots_selected += 1;
 
             // Scale pivot row so a[prow][col] = 1
@@ -748,20 +771,20 @@ impl InactivationDecoder {
 
         // Gaussian elimination with partial pivoting.
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut row_used = vec![false; n_rows];
         let mut pivot_buf = vec![Gf256::ZERO; n_cols];
         let mut pivot_rhs = vec![0u8; symbol_size];
 
         for col in 0..n_cols {
             // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows).find(|&row| {
-                pivot_row.iter().all(|&pr| pr != row) && !a[row * n_cols + col].is_zero()
-            });
+            let pivot = (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
 
             let Some(prow) = pivot else {
-                return Err(DecodeError::SingularMatrix { row: col });
+                return Err(singular_matrix_error(&unsolved, col));
             };
 
             pivot_row[col] = prow;
+            row_used[prow] = true;
             state.stats.pivots_selected += 1;
             // Record pivot in proof trace (use original column index)
             trace.record_pivot(unsolved[col], prow);
@@ -1327,5 +1350,77 @@ mod tests {
                 "{context} source symbol mismatch at index {i}"
             );
         }
+    }
+
+    fn make_rank_deficient_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> DecoderState {
+        let equation = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
+        let active_cols = [left_col, right_col].into_iter().collect();
+        DecoderState {
+            params: params.clone(),
+            equations: vec![equation.clone(), equation],
+            rhs: vec![vec![0x11; symbol_size], vec![0x22; symbol_size]],
+            solved: vec![None; params.l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
+    #[test]
+    fn singular_matrix_reports_original_column_id() {
+        let decoder = InactivationDecoder::new(8, 16, 123);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SingularMatrix { row: 7 },
+            "rank-deficient failure should report original unsolved column id"
+        );
+    }
+
+    #[test]
+    fn singular_matrix_with_proof_keeps_deterministic_attempt_history() {
+        let decoder = InactivationDecoder::new(8, 16, 321);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 16, 3, 7);
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            trace
+                .pivot_events
+                .iter()
+                .map(|ev| ev.col)
+                .collect::<Vec<_>>(),
+            vec![3],
+            "pivot history should be deterministic across rank-deficient failure"
+        );
+    }
+
+    #[test]
+    fn failure_reason_captures_attempted_pivot_columns() {
+        let mut elimination = EliminationTrace::default();
+        elimination.record_pivot(3, 0);
+        elimination.record_pivot(9, 1);
+
+        let reason =
+            failure_reason_with_trace(&DecodeError::SingularMatrix { row: 11 }, &elimination);
+        assert_eq!(
+            reason,
+            FailureReason::SingularMatrix {
+                row: 11,
+                attempted_cols: vec![3, 9],
+            }
+        );
     }
 }
