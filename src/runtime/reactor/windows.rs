@@ -123,18 +123,20 @@ mod iocp_impl {
         }
 
         fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+            events.clear();
+
             let mut poll_events = Vec::with_capacity(events.capacity());
             self.poller.wait(&mut poll_events, timeout)?;
 
-            let mut count = 0;
+            // `Events` may drop entries when capacity is reached; report only
+            // the number of events actually stored in `events`.
             for poll_event in &poll_events {
                 let token = Token(poll_event.key);
                 let interest = Self::poll_event_to_interest(poll_event);
                 events.push(Event::new(token, interest));
-                count += 1;
             }
 
-            Ok(count)
+            Ok(events.len())
         }
 
         fn wake(&self) -> io::Result<()> {

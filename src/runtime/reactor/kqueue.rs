@@ -241,16 +241,16 @@ impl Reactor for KqueueReactor {
 
         self.poller.wait(&mut poll_events, timeout)?;
 
-        // Convert polling events to our Event type
-        let mut count = 0;
+        // Convert polling events to our Event type.
+        // `Events` may drop entries when capacity is reached; report only
+        // the number of events actually stored in `events`.
         for poll_event in &poll_events {
             let token = Token(poll_event.key);
             let interest = Self::poll_event_to_interest(poll_event);
             events.push(Event::new(token, interest));
-            count += 1;
         }
 
-        Ok(count)
+        Ok(events.len())
     }
 
     fn wake(&self) -> io::Result<()> {

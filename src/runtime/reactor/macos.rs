@@ -522,8 +522,9 @@ mod kqueue_impl {
                 kevents.set_len(ret as usize);
             }
 
-            // Convert kevent results to our Event type
-            let mut count = 0;
+            // Convert kevent results to our Event type.
+            // `Events` may drop entries when capacity is reached; report only
+            // the number of events actually stored in `events`.
             for kev in &kevents {
                 let token_val = kev.udata as usize;
 
@@ -536,10 +537,9 @@ mod kqueue_impl {
                 let token = Token(token_val);
                 let interest = Self::kevent_to_interest(kev.filter, kev.flags);
                 events.push(Event::new(token, interest));
-                count += 1;
             }
 
-            Ok(count)
+            Ok(events.len())
         }
 
         fn wake(&self) -> io::Result<()> {
