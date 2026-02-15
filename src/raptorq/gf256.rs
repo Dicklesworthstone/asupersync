@@ -1310,10 +1310,7 @@ mod tests {
         );
         let mut visited = [false; 256];
         for (i, &v) in EXP.iter().enumerate().take(255) {
-            assert!(
-                !visited[v as usize],
-                "duplicate EXP[{i}] = {v}; {context}"
-            );
+            assert!(!visited[v as usize], "duplicate EXP[{i}] = {v}; {context}");
             visited[v as usize] = true;
         }
         // Zero should not appear in EXP[0..255]
