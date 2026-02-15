@@ -58,7 +58,9 @@ impl TaskTable {
 
     /// Removes a task record by arena index.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
-        self.tasks.remove(index)
+        let record = self.tasks.remove(index)?;
+        self.stored_futures.remove(&record.id);
+        Some(record)
     }
 
     /// Returns an iterator over task records.
@@ -112,7 +114,9 @@ impl TaskTable {
     ///
     /// Returns the removed record if it existed.
     pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
-        self.tasks.remove(task_id.arena_index())
+        let record = self.tasks.remove(task_id.arena_index())?;
+        self.stored_futures.remove(&task_id);
+        Some(record)
     }
 
     /// Stores a spawned task's future for later polling.
@@ -241,6 +245,26 @@ mod tests {
         assert!(table.get_stored_future(task_id).is_some());
 
         let removed = table.remove_stored_future(task_id);
+        assert!(removed.is_some());
+        assert_eq!(table.stored_future_count(), 0);
+        assert!(table.get_stored_future(task_id).is_none());
+    }
+
+    #[test]
+    fn remove_task_cleans_stored_future() {
+        use crate::runtime::stored_task::StoredTask;
+        use crate::types::Outcome;
+
+        let mut table = TaskTable::new();
+        let idx = table.insert_task(make_task_record(RegionId::from_arena(ArenaIndex::new(
+            1, 0,
+        ))));
+        let task_id = TaskId::from_arena(idx);
+
+        table.store_spawned_task(task_id, StoredTask::new(async { Outcome::Ok(()) }));
+        assert_eq!(table.stored_future_count(), 1);
+
+        let removed = table.remove_task(task_id);
         assert!(removed.is_some());
         assert_eq!(table.stored_future_count(), 0);
         assert!(table.get_stored_future(task_id).is_none());

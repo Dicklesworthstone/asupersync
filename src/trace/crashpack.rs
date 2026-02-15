@@ -131,6 +131,7 @@ impl PartialEq for FailureInfo {
     fn eq(&self, other: &Self) -> bool {
         self.task == other.task
             && self.region == other.region
+            && self.outcome == other.outcome
             && self.virtual_time == other.virtual_time
     }
 }
@@ -478,9 +479,14 @@ impl PartialEq for CrashPack {
             && self.manifest.config == other.manifest.config
             && self.manifest.fingerprint == other.manifest.fingerprint
             && self.manifest.event_count == other.manifest.event_count
+            && self.manifest.attachments == other.manifest.attachments
             && self.failure == other.failure
             && self.canonical_prefix == other.canonical_prefix
+            && self.divergent_prefix == other.divergent_prefix
+            && self.evidence == other.evidence
+            && self.supervision_log == other.supervision_log
             && self.oracle_violations == other.oracle_violations
+            && self.replay == other.replay
     }
 }
 
@@ -1305,6 +1311,27 @@ mod tests {
     }
 
     #[test]
+    fn crash_pack_inequality_on_different_divergent_prefix() {
+        init_test("crash_pack_inequality_on_different_divergent_prefix");
+
+        let pack1 = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .fingerprint(0xABCD)
+            .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 1 }])
+            .build();
+
+        let pack2 = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .fingerprint(0xABCD)
+            .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 2 }])
+            .build();
+
+        assert_ne!(pack1, pack2);
+
+        crate::test_complete!("crash_pack_inequality_on_different_divergent_prefix");
+    }
+
+    #[test]
     fn empty_pack_defaults() {
         init_test("empty_pack_defaults");
 
@@ -1341,8 +1368,8 @@ mod tests {
             outcome: FailureOutcome::Err, // different outcome
             virtual_time: Time::from_secs(5),
         };
-        // Equality on (task, region, virtual_time)
-        assert_eq!(f1, f2);
+        // outcome participates in equality
+        assert_ne!(f1, f2);
 
         let f3 = FailureInfo {
             task: tid(2), // different task
