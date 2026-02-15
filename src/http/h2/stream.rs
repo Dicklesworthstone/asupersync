@@ -604,6 +604,27 @@ impl StreamStore {
         self.streams.get_mut(&id)
     }
 
+    /// Returns true when `id` is currently in the idle state.
+    ///
+    /// This covers stream IDs that are not present in the store yet but are
+    /// still in the not-yet-opened range for their initiator parity.
+    #[must_use]
+    pub fn is_idle_stream_id(&self, id: u32) -> bool {
+        if id == 0 || id > MAX_STREAM_ID {
+            return false;
+        }
+
+        if let Some(stream) = self.streams.get(&id) {
+            return stream.state() == StreamState::Idle;
+        }
+
+        if id % 2 == 1 {
+            id >= self.next_client_stream_id
+        } else {
+            id >= self.next_server_stream_id
+        }
+    }
+
     /// Get or create a stream.
     pub fn get_or_create(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
         if !self.streams.contains_key(&id) {
