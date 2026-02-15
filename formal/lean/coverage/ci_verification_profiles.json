@@ -7,6 +7,38 @@
     "frontier",
     "full"
   ],
+  "artifact_contract": {
+    "policy_id": "lean.ci.artifact_contract.v1",
+    "manifest_schema_version": "lean.full.repro.bundle.v1",
+    "manifest_required_fields": [
+      "schema_version",
+      "generated_at_utc",
+      "profile",
+      "status",
+      "profile_source",
+      "repro_script",
+      "ci_context",
+      "ownership",
+      "comparison_keys",
+      "expected_runtime_seconds",
+      "commands",
+      "artifacts"
+    ],
+    "comparability_keys": [
+      "profile",
+      "ci_context.git_commit",
+      "commands",
+      "artifacts[].path",
+      "artifacts[].sha256"
+    ],
+    "retention_policy": {
+      "minimum_days": 30,
+      "default_days": 30,
+      "maximum_days": 90,
+      "expiry_reference": "ci_run_created_at_utc",
+      "rationale": "Keep Lean CI artifacts long enough for deterministic repro while capping long-term storage growth."
+    }
+  },
   "profiles": [
     {
       "name": "smoke",
@@ -47,6 +79,16 @@
         "primary_bead": "bd-rook4",
         "failure_triage_bead": "bd-2vmjj",
         "escalation_bead": "bd-2ruh1"
+      },
+      "triage": {
+        "routing_policy": "bead-owner-v1",
+        "ttfr_target_minutes": 30
+      },
+      "artifact_bundle": {
+        "name": "lean-smoke-artifacts",
+        "directory": "lean-smoke",
+        "retention_days": 30,
+        "failure_payload": "lean-smoke/failure_payload.json"
       }
     },
     {
@@ -92,6 +134,16 @@
         "primary_bead": "bd-rook4",
         "failure_triage_bead": "bd-2vmjj",
         "escalation_bead": "bd-8vpa5"
+      },
+      "triage": {
+        "routing_policy": "bead-owner-v1",
+        "ttfr_target_minutes": 45
+      },
+      "artifact_bundle": {
+        "name": "lean-frontier-artifacts",
+        "directory": "lean-frontier",
+        "retention_days": 30,
+        "failure_payload": "lean-frontier/failure_payload.json"
       }
     },
     {
@@ -142,6 +194,18 @@
         "primary_bead": "bd-rook4",
         "failure_triage_bead": "bd-2vmjj",
         "escalation_bead": "bd-2ruh1"
+      },
+      "triage": {
+        "routing_policy": "bead-owner-v1",
+        "ttfr_target_minutes": 60
+      },
+      "artifact_bundle": {
+        "name": "lean-full-artifacts",
+        "directory": "lean-full",
+        "retention_days": 30,
+        "repro_bundle_manifest": "lean-full/repro_bundle_manifest.json",
+        "repro_script": "lean-full/repro_commands.sh",
+        "failure_payload": "lean-full/failure_payload.json"
       }
     }
   ],
