@@ -926,8 +926,7 @@ mod tests {
 
         // After drop, another lock should succeed and see the mutation.
         drop(guard);
-        let guard2 =
-            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after drop");
+        let guard2 = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after drop");
         crate::assert_with_log!(*guard2 == 100, "mutation persisted", 100u32, *guard2);
         crate::test_complete!("test_owned_mutex_guard_try_lock");
     }
@@ -945,8 +944,7 @@ mod tests {
         drop(guard);
 
         // Verify the mutation persisted.
-        let guard2 =
-            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after async");
+        let guard2 = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after async");
         crate::assert_with_log!(*guard2 == 99, "async mutation persisted", 99u32, *guard2);
         crate::test_complete!("test_owned_mutex_guard_async_lock");
     }

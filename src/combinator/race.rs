@@ -1158,14 +1158,8 @@ mod tests {
         let r1: Race<i32, &str> = Race::new();
         let r2 = r1; // Copy
         let r3 = r1; // still valid after Copy
-        assert_eq!(
-            std::mem::size_of_val(&r1),
-            std::mem::size_of_val(&r2)
-        );
-        assert_eq!(
-            std::mem::size_of_val(&r1),
-            std::mem::size_of_val(&r3)
-        );
+        assert_eq!(std::mem::size_of_val(&r1), std::mem::size_of_val(&r2));
+        assert_eq!(std::mem::size_of_val(&r1), std::mem::size_of_val(&r3));
     }
 
     #[test]

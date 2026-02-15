@@ -158,11 +158,10 @@ impl AsyncMaskGuard {
         let inner = Arc::clone(&cx.inner);
         {
             let mut guard = inner.write().expect("lock poisoned");
-            crate::assert_with_log!(
+            debug_assert!(
                 guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
-                "mask_depth",
-                guard.mask_depth,
-                guard.mask_depth
+                "mask depth exceeded MAX_MASK_DEPTH ({}) in AsyncMaskGuard::enter",
+                crate::types::task_context::MAX_MASK_DEPTH
             );
             guard.mask_depth += 1;
         }
