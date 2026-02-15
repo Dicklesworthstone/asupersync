@@ -571,7 +571,12 @@ impl<T> SendPermit<'_, T> {
                 .drain(..)
                 .map(|waiter| {
                     waiter.shared.queued.store(false, Ordering::Release);
-                    waiter.shared.waker.lock().expect("waiter lock poisoned").clone()
+                    waiter
+                        .shared
+                        .waker
+                        .lock()
+                        .expect("waiter lock poisoned")
+                        .clone()
                 })
                 .collect();
             drop(inner);
@@ -795,7 +800,12 @@ impl<T> Drop for Receiver<T> {
                 .drain(..)
                 .map(|waiter| {
                     waiter.shared.queued.store(false, Ordering::Release);
-                    waiter.shared.waker.lock().expect("waiter lock poisoned").clone()
+                    waiter
+                        .shared
+                        .waker
+                        .lock()
+                        .expect("waiter lock poisoned")
+                        .clone()
                 })
                 .collect()
         };
@@ -1352,7 +1362,9 @@ mod tests {
 
         let qlen = {
             let inner = tx.shared.inner.lock().expect("lock");
-            inner.queue.len()
+            let qlen = inner.queue.len();
+            drop(inner);
+            qlen
         };
         crate::assert_with_log!(qlen == 1, "queue len", 1, qlen);
         crate::test_complete!("send_evict_oldest_no_eviction_with_capacity");
