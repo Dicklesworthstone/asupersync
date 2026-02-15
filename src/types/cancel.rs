@@ -653,6 +653,7 @@ impl CancelReason {
     fn truncate_chain(reason: Self, max_depth: usize) -> Self {
         if max_depth == 0 {
             return Self {
+                cause: None,
                 truncated: true,
                 truncated_at_depth: Some(0),
                 ..reason
@@ -837,6 +838,8 @@ impl CancelReason {
             self.timestamp = other.timestamp;
             self.message = other.message;
             self.cause.clone_from(&other.cause);
+            self.truncated = other.truncated;
+            self.truncated_at_depth = other.truncated_at_depth;
             return true;
         }
 
@@ -853,6 +856,8 @@ impl CancelReason {
             self.timestamp = other.timestamp;
             self.message = other.message;
             self.cause.clone_from(&other.cause);
+            self.truncated = other.truncated;
+            self.truncated_at_depth = other.truncated_at_depth;
             return true;
         }
 
@@ -1132,6 +1137,46 @@ mod tests {
             reason.kind
         );
         crate::test_complete!("strengthen_takes_more_severe");
+    }
+
+    #[test]
+    fn strengthen_adopts_truncation_metadata_from_winner() {
+        init_test("strengthen_adopts_truncation_metadata_from_winner");
+        // Build a truncated reason (self) and a non-truncated stronger reason (other).
+        let config = CancelAttributionConfig::new(2, usize::MAX);
+        let deep_cause = CancelReason::timeout().with_cause(CancelReason::user("root"));
+        let mut truncated_reason =
+            CancelReason::user("weak").with_cause_limited(deep_cause, &config);
+        crate::assert_with_log!(
+            truncated_reason.truncated || truncated_reason.any_truncated(),
+            "pre-strengthen reason should be truncated",
+            true,
+            truncated_reason.truncated || truncated_reason.any_truncated()
+        );
+
+        let non_truncated = CancelReason::shutdown();
+        crate::assert_with_log!(
+            !non_truncated.truncated,
+            "stronger reason should not be truncated",
+            false,
+            non_truncated.truncated
+        );
+
+        let changed = truncated_reason.strengthen(&non_truncated);
+        crate::assert_with_log!(changed, "should strengthen to Shutdown", true, changed);
+        crate::assert_with_log!(
+            !truncated_reason.truncated,
+            "truncated flag should adopt winner's value (false)",
+            false,
+            truncated_reason.truncated
+        );
+        crate::assert_with_log!(
+            truncated_reason.truncated_at_depth.is_none(),
+            "truncated_at_depth should adopt winner's value (None)",
+            true,
+            truncated_reason.truncated_at_depth.is_none()
+        );
+        crate::test_complete!("strengthen_adopts_truncation_metadata_from_winner");
     }
 
     #[test]
