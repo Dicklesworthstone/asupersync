@@ -1326,4 +1326,114 @@ mod tests {
             "retirement claims must not drop below min_threads"
         );
     }
+
+    #[test]
+    fn cancelled_task_signals_completion() {
+        let pool = BlockingPool::new(1, 2);
+        let executed = Arc::new(AtomicBool::new(false));
+        let exec = Arc::clone(&executed);
+
+        let handle = pool.spawn(move || {
+            // Simulate slow work so cancellation can be observed
+            thread::sleep(Duration::from_millis(200));
+            exec.store(true, Ordering::Release);
+        });
+
+        // Cancel before execution starts (race, but we try)
+        handle.cancel();
+
+        // Completion must be signaled regardless of cancel outcome
+        assert!(
+            handle.wait_timeout(Duration::from_secs(5)),
+            "cancelled task must signal completion"
+        );
+        assert!(handle.is_done());
+    }
+
+    #[test]
+    fn busy_threads_balanced_through_panic() {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let pool = BlockingPool::new(2, 4);
+
+        // Submit a panicking task
+        let h1 = pool.spawn(|| panic!("audit panic"));
+        h1.wait();
+
+        // busy_threads must return to 0 after the panic
+        // (catch_unwind ensures the decrement happens)
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            pool.busy_threads(),
+            0,
+            "busy_threads must be decremented even after panic"
+        );
+
+        std::panic::set_hook(prev_hook);
+    }
+
+    #[test]
+    fn spawn_thread_on_inner_respects_max_threads() {
+        let inner = Arc::new(BlockingPoolInner {
+            min_threads: 0,
+            max_threads: 2,
+            active_threads: AtomicUsize::new(2),
+            busy_threads: AtomicUsize::new(0),
+            pending_count: AtomicUsize::new(0),
+            next_task_id: AtomicU64::new(1),
+            queue: SegQueue::new(),
+            shutdown: AtomicBool::new(false),
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+            idle_timeout: Duration::from_millis(10),
+            thread_name_prefix: "max-test".to_string(),
+            on_thread_start: None,
+            on_thread_stop: None,
+            thread_handles: Mutex::new(Vec::new()),
+        });
+
+        // Already at max_threads (2), spawn should be a no-op
+        spawn_thread_on_inner(&inner);
+
+        assert_eq!(
+            inner.active_threads.load(Ordering::Relaxed),
+            2,
+            "spawn must not exceed max_threads"
+        );
+    }
+
+    #[test]
+    fn shutdown_drains_pending_tasks() {
+        let pool = BlockingPool::new(1, 1);
+
+        // Block the single thread so tasks queue up
+        let blocker = Arc::new(std::sync::Barrier::new(2));
+        let b = Arc::clone(&blocker);
+        pool.spawn(move || {
+            b.wait();
+        });
+
+        // Queue some tasks while the thread is blocked
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let c = Arc::clone(&counter);
+            handles.push(pool.spawn(move || {
+                c.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+
+        // Release the blocker
+        blocker.wait();
+
+        // Shutdown and wait should drain all pending tasks
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            5,
+            "all queued tasks must execute before shutdown completes"
+        );
+    }
 }
