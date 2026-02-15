@@ -599,6 +599,59 @@ Constraint usage rule for performance work:
 2. A missing constraint citation is treated as an incomplete proof-impact review.
 3. Any violated constraint requires a blocker bead before merge/sign-off.
 
+### Proof-Guided Performance Opportunity Map (Track-6 support / bd-3cp69)
+
+Use this map to choose optimization work that stays inside theorem-backed safety
+envelopes.
+
+Prioritization rubric:
+
+| Priority band | Expected impact | Proof coverage confidence | Risk class |
+|---------------|-----------------|---------------------------|------------|
+| `P0` | High (hot path, multi-workload benefit) | High | Medium |
+| `P1` | Medium/high | High or medium | Medium |
+| `P2` | Medium | Medium | Medium/high |
+| `P3` | Low/uncertain | Low | High |
+
+Opportunity map:
+
+| Opportunity ID | Target surface | Expected impact | Allowed transformations | Prohibited transformations | Required conformance checks | Theorem / invariant anchors | Risk class |
+|----------------|----------------|-----------------|-------------------------|----------------------------|-----------------------------|-----------------------------|------------|
+| `PG-OPT-001` | `src/runtime/scheduler/**` dispatch fast path | Lower scheduler overhead and better tail latency under mixed ready/cancel load | queue layout tuning, branch elimination, cache-local metadata packing, lock-contention reduction that preserves lock order | changing cancel > timed > ready lane semantics, reordering multi-lock acquisition (`E -> D -> B -> A -> C`) | `tests/refinement_conformance.rs` scheduler/cancel cases; deterministic replay checks | `OPT-LOCK-001`, `OPT-CANCEL-001`, `OPT-DET-001`; `formal/lean/coverage/runtime_state_refinement_map.json` | Medium |
+| `PG-OPT-002` | `src/cancel/**` + race/hedge combinator hot paths | Reduced cancellation-path latency and loser-drain overhead | reduce allocations on cancel/drain path, streamline witness construction, deduplicate wake/drain bookkeeping | collapsing request -> drain -> finalize phases, reporting completion before loser drain | race/hedge conformance cases; cancel protocol assertions in refinement suite | `OPT-CANCEL-001`, `OPT-CANCEL-002`; `formal/lean/coverage/invariant_theorem_test_link_map.json` | Medium |
+| `PG-OPT-003` | `src/obligation/**`, `src/runtime/obligation_table.rs` | Lower obligation bookkeeping overhead in high-concurrency workflows | data-structure reshaping, indexed lookup improvements, lock-scoping reductions that preserve lifecycle semantics | bypassing reserve/commit/abort boundaries, deferred or best-effort obligation resolution | obligation leak/futurelock tests; invariant link-map checks | `OPT-OBL-001`, `OPT-DET-001`; `formal/lean/coverage/invariant_theorem_test_link_map.json` | Medium/high |
+| `PG-OPT-004` | `src/runtime/task_table.rs`, `src/runtime/sharded_state.rs` | Better throughput via cache-local table operations and reduced contention | table compaction/locality improvements, sharding refinements with unchanged ownership semantics | introducing cross-shard ownership ambiguity, non-deterministic iteration order in state transitions | task/region lifecycle conformance checks; deterministic trace fingerprint checks | `OPT-HOT-001`, `OPT-LOCK-001`, `OPT-DET-001`; `formal/lean/coverage/runtime_state_refinement_map.json` | Medium |
+
+Optimization-envelope template (required in performance beads):
+
+```yaml
+proof_guided_optimization:
+  opportunity_id: PG-OPT-###
+  expected_impact: high|medium|low
+  risk_class: low|medium|high
+  allowed_transformations:
+    - <change type>
+  prohibited_transformations:
+    - <must not change>
+  theorem_links:
+    - <OPT-* constraint id>
+    - <coverage artifact path>
+  required_checks:
+    - rch exec -- cargo check --all-targets
+    - rch exec -- cargo clippy --all-targets -- -D warnings
+    - rch exec -- cargo test --test refinement_conformance -- --nocapture
+  evidence:
+    metrics_before: <artifact/link>
+    metrics_after: <artifact/link>
+    determinism_proof: <artifact/link>
+```
+
+Use this map as the default intake filter for Track-6 performance candidates:
+- If a candidate cannot be mapped to one `PG-OPT-*` envelope with explicit
+  theorem linkage, do not start implementation.
+- If a candidate violates any prohibited transformation, create a blocker bead
+  first and route through proof-impact review.
+
 ---
 
 ## API Reference Orientation
