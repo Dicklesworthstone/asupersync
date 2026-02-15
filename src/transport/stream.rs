@@ -449,6 +449,18 @@ impl SymbolStream for ChannelStream {
         if let Some(waiter) = new_waiter {
             this.waiter = Some(waiter);
         }
+
+        // Re-check the queue after waiter registration to close a lost-wakeup
+        // race: a sender may push between our queue check and waiter
+        // registration, finding no recv_waker to wake.
+        {
+            let queue = this.shared.queue.lock().unwrap();
+            if !queue.is_empty() || this.shared.closed.load(Ordering::SeqCst) {
+                drop(queue);
+                cx.waker().wake_by_ref();
+            }
+        }
+
         Poll::Pending
     }
 }
@@ -1119,5 +1131,176 @@ mod tests {
         );
 
         crate::test_complete!("test_timeout_stream_duration_max_saturates_deadline");
+    }
+
+    /// Regression test for lost-wakeup race in ChannelStream::poll_next.
+    ///
+    /// A sender may push between the queue check and waiter registration,
+    /// finding no recv_waker to wake. The re-check after registration
+    /// closes this race by self-waking when items are found.
+    #[test]
+    fn test_channel_stream_no_lost_wakeup_concurrent() {
+        init_test("test_channel_stream_no_lost_wakeup_concurrent");
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Run many iterations to maximise the chance of hitting the race window.
+        for iteration in 0..200 {
+            let (mut sink, mut stream) = channel(1);
+
+            let send_handle = thread::spawn(move || {
+                let waker = noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                let _ = Pin::new(&mut sink).poll_send(&mut cx, create_symbol(iteration));
+            });
+
+            let recv_handle = thread::spawn(move || {
+                let flag = Arc::new(AtomicBool::new(false));
+                let waker = flagged_waker(Arc::clone(&flag));
+                let mut cx = Context::from_waker(&waker);
+                let start = Instant::now();
+
+                loop {
+                    match Pin::new(&mut stream).poll_next(&mut cx) {
+                        Poll::Ready(Some(Ok(_))) => return true,
+                        Poll::Ready(Some(Err(_))) | Poll::Ready(None) => return false,
+                        Poll::Pending => {
+                            if start.elapsed() > Duration::from_millis(500) {
+                                return false; // Timeout — lost wakeup
+                            }
+                            // If the waker was invoked, repoll immediately.
+                            if flag.swap(false, Ordering::AcqRel) {
+                                continue;
+                            }
+                            thread::yield_now();
+                        }
+                    }
+                }
+            });
+
+            send_handle.join().unwrap();
+            let received = recv_handle.join().unwrap();
+            crate::assert_with_log!(received, "no lost wakeup", true, received);
+        }
+
+        crate::test_complete!("test_channel_stream_no_lost_wakeup_concurrent");
+    }
+
+    // ── Audit regression tests (asupersync-10x0x.82) ─────────────────────
+
+    #[test]
+    fn merged_stream_removal_adjusts_current_when_removing_before() {
+        init_test("merged_stream_removal_adjusts_current_when_removing_before");
+        // Streams: [done, A, B]. current = 2 (starts at B).
+        // Removing done at idx 0 should adjust current from 2 to 1,
+        // so B (now at idx 1) is still reached next round.
+        let done_stream = VecStream::new(vec![]); // exhausted immediately
+        let s_a = VecStream::new(vec![create_symbol(10)]);
+        let s_b = VecStream::new(vec![create_symbol(20)]);
+        let mut merged = MergedStream::new(vec![done_stream, s_a, s_b]);
+        merged.current = 2; // start at B
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: starts at idx 2 (B) → Ready(Ok(20)).
+        // Round-robin advances to next.
+        let first = Pin::new(&mut merged).poll_next(&mut cx);
+        let esi = match &first {
+            Poll::Ready(Some(Ok(sym))) => sym.symbol().id().esi(),
+            _ => panic!("expected Ready(Some(Ok))"),
+        };
+        crate::assert_with_log!(esi == 20, "B dispatched first", 20u32, esi);
+
+        // Second poll: should visit the done stream (removed) and then A.
+        let second = Pin::new(&mut merged).poll_next(&mut cx);
+        let esi2 = match &second {
+            Poll::Ready(Some(Ok(sym))) => sym.symbol().id().esi(),
+            _ => panic!("expected Ready(Some(Ok))"),
+        };
+        crate::assert_with_log!(esi2 == 10, "A dispatched after removal", 10u32, esi2);
+
+        // Third: all exhausted.
+        let third = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(third, Poll::Ready(None)),
+            "all exhausted",
+            true,
+            matches!(third, Poll::Ready(None))
+        );
+        crate::test_complete!("merged_stream_removal_adjusts_current_when_removing_before");
+    }
+
+    #[test]
+    fn channel_stream_closed_after_waiter_registration() {
+        init_test("channel_stream_closed_after_waiter_registration");
+        let shared = Arc::new(SharedChannel::new(1));
+        let mut stream = ChannelStream::new(Arc::clone(&shared));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll registers waiter.
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "pending on empty",
+            true,
+            matches!(first, Poll::Pending)
+        );
+
+        // Close channel — should wake and detect closed on next poll.
+        shared.close();
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(None)),
+            "returns None after close",
+            true,
+            matches!(second, Poll::Ready(None))
+        );
+        crate::test_complete!("channel_stream_closed_after_waiter_registration");
+    }
+
+    #[test]
+    fn collect_to_set_propagates_error_stops_early() {
+        init_test("collect_to_set_propagates_error_stops_early");
+        // Stream that produces 1 good item then an error.
+        struct GoodThenError(bool);
+        impl SymbolStream for GoodThenError {
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+                if self.0 {
+                    Poll::Ready(None)
+                } else {
+                    self.0 = true;
+                    Poll::Ready(Some(Err(StreamError::Reset)))
+                }
+            }
+        }
+
+        let mut stream = GoodThenError(false);
+        let mut set = SymbolSet::new();
+        let result = future::block_on(async { stream.collect_to_set(&mut set).await });
+        crate::assert_with_log!(result.is_err(), "error propagated", true, result.is_err());
+        crate::assert_with_log!(set.is_empty(), "set empty on error", true, set.is_empty());
+        crate::test_complete!("collect_to_set_propagates_error_stops_early");
+    }
+
+    #[test]
+    fn vec_stream_size_hint_tracks_remaining() {
+        init_test("vec_stream_size_hint_tracks_remaining");
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(2), create_symbol(3)]);
+
+        let hint = stream.size_hint();
+        crate::assert_with_log!(hint == (3, Some(3)), "initial hint", (3, Some(3)), hint);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = Pin::new(&mut stream).poll_next(&mut cx); // consume one
+
+        let hint2 = stream.size_hint();
+        crate::assert_with_log!(hint2 == (2, Some(2)), "after one", (2, Some(2)), hint2);
+        crate::test_complete!("vec_stream_size_hint_tracks_remaining");
     }
 }
