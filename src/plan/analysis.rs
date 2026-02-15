@@ -737,7 +737,10 @@ impl PlanAnalyzer {
 
                 // Join budget: sum of polls (all children must complete),
                 // max parallelism is sum of children's parallelism.
-                let min_polls = child_analyses.iter().map(|a| a.budget.min_polls).sum();
+                let min_polls = child_analyses
+                    .iter()
+                    .map(|a| a.budget.min_polls)
+                    .fold(0u32, u32::saturating_add);
                 let max_polls = child_analyses.iter().try_fold(0u32, |acc, a| {
                     a.budget.max_polls.map(|m| acc.saturating_add(m))
                 });
@@ -745,7 +748,7 @@ impl PlanAnalyzer {
                 let parallelism = child_analyses
                     .iter()
                     .map(|a| a.budget.parallelism)
-                    .sum::<u32>()
+                    .fold(0u32, u32::saturating_add)
                     .max(1);
 
                 // Join deadline: tightest min_deadline (all must meet it),
@@ -2299,6 +2302,40 @@ mod tests {
         assert!(display.contains("deadline="));
         assert!(display.contains("100ms"));
         assert!(display.contains("500ms"));
+    }
+
+    #[test]
+    fn budget_effect_sequential_saturates_min_polls() {
+        let big = BudgetEffect {
+            min_polls: u32::MAX - 1,
+            max_polls: Some(u32::MAX - 1),
+            has_deadline: false,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
+        };
+        let combined = big.sequential(big);
+        assert_eq!(combined.min_polls, u32::MAX);
+        assert_eq!(combined.max_polls, Some(u32::MAX));
+    }
+
+    #[test]
+    fn budget_effect_parallel_saturates_parallelism() {
+        // Regression: Join inline composition used .sum::<u32>() for parallelism
+        // which wraps on overflow.
+        let big = BudgetEffect {
+            min_polls: 1,
+            max_polls: Some(1),
+            has_deadline: false,
+            parallelism: u32::MAX - 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
+        };
+        // fold(0, saturating_add) with two near-MAX values must saturate.
+        let sum = [big.parallelism, big.parallelism]
+            .into_iter()
+            .fold(0u32, u32::saturating_add);
+        assert_eq!(sum, u32::MAX);
     }
 
     // ---- Independence / trace equivalence tests ----
