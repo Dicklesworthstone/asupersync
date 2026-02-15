@@ -63,6 +63,15 @@ pub enum DecodeError {
         /// Actual size found.
         actual: usize,
     },
+    /// Received symbol has mismatched equation vectors.
+    SymbolEquationArityMismatch {
+        /// ESI of the malformed symbol.
+        esi: u32,
+        /// Number of column indices provided.
+        columns: usize,
+        /// Number of coefficients provided.
+        coefficients: usize,
+    },
 }
 
 /// Decode statistics for observability.
@@ -220,16 +229,10 @@ impl InactivationDecoder {
         &self.params
     }
 
-    /// Decode from received symbols.
-    ///
-    /// `symbols` should contain at least `L` symbols (K source + S LDPC + H HDPC overhead).
-    /// Returns the decoded source symbols on success.
-    pub fn decode(&self, symbols: &[ReceivedSymbol]) -> Result<DecodeResult, DecodeError> {
+    fn validate_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
         let l = self.params.l;
-        let k = self.params.k;
         let symbol_size = self.params.symbol_size;
 
-        // Validate input
         if symbols.len() < l {
             return Err(DecodeError::InsufficientSymbols {
                 received: symbols.len(),
@@ -244,7 +247,28 @@ impl InactivationDecoder {
                     actual: sym.data.len(),
                 });
             }
+
+            if sym.columns.len() != sym.coefficients.len() {
+                return Err(DecodeError::SymbolEquationArityMismatch {
+                    esi: sym.esi,
+                    columns: sym.columns.len(),
+                    coefficients: sym.coefficients.len(),
+                });
+            }
         }
+
+        Ok(())
+    }
+
+    /// Decode from received symbols.
+    ///
+    /// `symbols` should contain at least `L` symbols (K source + S LDPC + H HDPC overhead).
+    /// Returns the decoded source symbols on success.
+    pub fn decode(&self, symbols: &[ReceivedSymbol]) -> Result<DecodeResult, DecodeError> {
+        let k = self.params.k;
+        let symbol_size = self.params.symbol_size;
+
+        self.validate_input(symbols)?;
 
         // Build decoder state
         let mut state = self.build_state(symbols);
@@ -288,7 +312,6 @@ impl InactivationDecoder {
         object_id: ObjectId,
         sbn: u8,
     ) -> Result<DecodeResultWithProof, (DecodeError, DecodeProof)> {
-        let l = self.params.l;
         let k = self.params.k;
         let symbol_size = self.params.symbol_size;
 
@@ -299,7 +322,7 @@ impl InactivationDecoder {
             k,
             s: self.params.s,
             h: self.params.h,
-            l,
+            l: self.params.l,
             symbol_size,
             seed: self.seed,
         };
@@ -310,24 +333,9 @@ impl InactivationDecoder {
         proof_builder.set_received(received);
 
         // Validate input
-        if symbols.len() < l {
-            let err = DecodeError::InsufficientSymbols {
-                received: symbols.len(),
-                required: l,
-            };
+        if let Err(err) = self.validate_input(symbols) {
             proof_builder.set_failure(FailureReason::from(&err));
             return Err((err, proof_builder.build()));
-        }
-
-        for sym in symbols {
-            if sym.data.len() != symbol_size {
-                let err = DecodeError::SymbolSizeMismatch {
-                    expected: symbol_size,
-                    actual: sym.data.len(),
-                };
-                proof_builder.set_failure(FailureReason::from(&err));
-                return Err((err, proof_builder.build()));
-            }
         }
 
         // Build decoder state
@@ -1118,6 +1126,88 @@ mod tests {
 
         let err = decoder.decode(&received).unwrap_err();
         assert!(matches!(err, DecodeError::InsufficientSymbols { .. }));
+    }
+
+    #[test]
+    fn decode_symbol_equation_arity_mismatch_fails() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        received[0].columns.push(0);
+        let esi = received[0].esi;
+        let columns = received[0].columns.len();
+        let coefficients = received[0].coefficients.len();
+
+        let err = decoder.decode(&received).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SymbolEquationArityMismatch {
+                esi,
+                columns,
+                coefficients
+            }
+        );
+    }
+
+    #[test]
+    fn decode_with_proof_symbol_equation_arity_mismatch_reports_failure_reason() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 43u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        received[0].columns.push(0);
+        let esi = received[0].esi;
+        let columns = received[0].columns.len();
+        let coefficients = received[0].coefficients.len();
+
+        let (err, proof) = decoder
+            .decode_with_proof(&received, ObjectId::new_for_test(4242), 0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SymbolEquationArityMismatch {
+                esi,
+                columns,
+                coefficients
+            }
+        );
+        assert!(matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Failure {
+                reason: FailureReason::SymbolEquationArityMismatch {
+                    esi: e,
+                    columns: c,
+                    coefficients: coef_count
+                }
+            } if e == esi && c == columns && coef_count == coefficients
+        ));
     }
 
     #[test]

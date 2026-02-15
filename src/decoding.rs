@@ -759,6 +759,16 @@ fn decode_block(
                         actual,
                     }
                 }
+                RaptorDecodeError::SymbolEquationArityMismatch {
+                    esi,
+                    columns,
+                    coefficients,
+                } => DecodingError::InconsistentMetadata {
+                    sbn: plan.sbn,
+                    details: format!(
+                        "symbol {esi} has mismatched equation vectors: columns={columns}, coefficients={coefficients}"
+                    ),
+                },
             };
             return Err(mapped);
         }

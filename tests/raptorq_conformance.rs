@@ -1055,6 +1055,9 @@ mod pipeline_e2e {
             FailureReason::InsufficientSymbols { .. } => RejectReason::InsufficientRank,
             FailureReason::SingularMatrix { .. } => RejectReason::InconsistentEquations,
             FailureReason::SymbolSizeMismatch { .. } => RejectReason::SymbolSizeMismatch,
+            FailureReason::SymbolEquationArityMismatch { .. } => {
+                RejectReason::InconsistentEquations
+            }
         }
     }
 

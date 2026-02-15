@@ -499,6 +499,15 @@ pub enum FailureReason {
         /// Actual size.
         actual: usize,
     },
+    /// Received symbol has mismatched equation vectors.
+    SymbolEquationArityMismatch {
+        /// ESI of malformed symbol.
+        esi: u32,
+        /// Number of column indices.
+        columns: usize,
+        /// Number of coefficients.
+        coefficients: usize,
+    },
 }
 
 impl From<&DecodeError> for FailureReason {
@@ -515,6 +524,15 @@ impl From<&DecodeError> for FailureReason {
             DecodeError::SymbolSizeMismatch { expected, actual } => Self::SymbolSizeMismatch {
                 expected: *expected,
                 actual: *actual,
+            },
+            DecodeError::SymbolEquationArityMismatch {
+                esi,
+                columns,
+                coefficients,
+            } => Self::SymbolEquationArityMismatch {
+                esi: *esi,
+                columns: *columns,
+                coefficients: *coefficients,
             },
         }
     }
