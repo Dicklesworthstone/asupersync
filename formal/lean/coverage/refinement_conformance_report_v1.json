@@ -1,0 +1,135 @@
+{
+  "schema_version": "1.0.0",
+  "report_id": "lean.refinement_conformance_report.v1",
+  "generated_by": "bd-1psg4",
+  "generated_at": "2026-02-15T17:35:00Z",
+  "source_contract": "formal/lean/coverage/runtime_state_refinement_map.json#reporting_and_signoff_contract",
+  "coverage_percent": {
+    "mapped_operations": 100.0,
+    "conformance_harnesses": 100.0,
+    "invariant_test_links": 100.0
+  },
+  "mismatch_trend": {
+    "window": "rolling-7d",
+    "new_mismatches": 0,
+    "resolved_mismatches": 1,
+    "trend": "improving"
+  },
+  "unresolved_blockers": [
+    {
+      "bead_id": "asupersync-ktf3v",
+      "title": "[LEAN-COVERAGE][T3] Build invariant witness bundle for all non-negotiable invariants",
+      "status": "open",
+      "owner_role": "Track-3 invariant owner",
+      "next_action": "Finalize invariant witness rows and dependent Track-6 assumption links."
+    }
+  ],
+  "confidence_statement": {
+    "level": "medium",
+    "rationale": "Track-4 executable conformance and reporting contracts are fully wired; confidence remains bounded by outstanding Track-3 invariant witness closure."
+  },
+  "required_artifacts": [
+    "formal/lean/coverage/runtime_state_refinement_map.json",
+    "formal/lean/coverage/invariant_theorem_test_link_map.json",
+    "formal/lean/coverage/ci_verification_profiles.json",
+    "formal/lean/coverage/baseline_report_v1.json"
+  ],
+  "required_tests": [
+    "tests/refinement_conformance.rs",
+    "tests/runtime_state_refinement_map.rs"
+  ],
+  "signoff_checklist": [
+    {
+      "check_id": "check.coverage_report_complete",
+      "description": "Report contains coverage %, mismatch trend, unresolved blockers, and confidence statement.",
+      "required_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "required_tests": [
+        "tests/runtime_state_refinement_map.rs"
+      ],
+      "pass_criteria": "All required_report_fields are present and machine-validated."
+    },
+    {
+      "check_id": "check.regression_conformance_green",
+      "description": "Deterministic conformance suites pass with mapped diagnostics.",
+      "required_artifacts": [
+        "target/refinement-conformance/cancellation_obligation/mismatch_payload.json",
+        "target/refinement-conformance/race_loser_drain/mismatch_payload.json"
+      ],
+      "required_tests": [
+        "tests/refinement_conformance.rs",
+        "tests/runtime_state_refinement_map.rs"
+      ],
+      "pass_criteria": "No untriaged mismatches; diagnostics include route candidates and recommended route."
+    },
+    {
+      "check_id": "check.governance_record_linked",
+      "description": "Sign-off decision is linked to governance review cadence and bead updates.",
+      "required_artifacts": [
+        "formal/lean/coverage/ci_verification_profiles.json"
+      ],
+      "required_tests": [
+        "tests/runtime_state_refinement_map.rs"
+      ],
+      "pass_criteria": "Governance thread references and ownership roles are present and non-empty."
+    }
+  ],
+  "cadence_and_ownership": {
+    "report_cadence": [
+      {
+        "cadence_id": "weekly",
+        "max_interval_days": 7,
+        "required_participants": [
+          "Conformance owner",
+          "Formal owner",
+          "Runtime owner"
+        ],
+        "governance_record_thread": "bd-3gnw9"
+      },
+      {
+        "cadence_id": "phase-exit",
+        "phase": "track-4-refinement-signoff",
+        "required_participants": [
+          "Conformance owner",
+          "Formal owner",
+          "Runtime owner",
+          "CI/governance owner"
+        ],
+        "governance_record_thread": "bd-3gnw9"
+      }
+    ],
+    "ownership_roles": {
+      "report_owner_role": "Conformance owner",
+      "signoff_approver_roles": [
+        "Formal owner",
+        "Runtime owner",
+        "CI/governance owner"
+      ],
+      "escalation_owner_role": "Track-5 governance owner"
+    },
+    "governance_links": [
+      "asupersync-38g6z",
+      "bd-3gnw9",
+      "formal/lean/coverage/ci_verification_profiles.json"
+    ]
+  },
+  "next_actions": [
+    "Close Track-3 invariant witness blocker asupersync-ktf3v.",
+    "Run phase-exit sign-off after blocker closure and attach governance thread note."
+  ],
+  "track6_input": {
+    "consumer_beads": [
+      "asupersync-2izu4",
+      "asupersync-3gf4i"
+    ],
+    "export_fields": [
+      "coverage_percent",
+      "mismatch_trend",
+      "unresolved_blockers",
+      "confidence_statement",
+      "next_actions"
+    ],
+    "handoff_rule": "Track-6 planning must consume latest report and unresolved blockers before closing reliability/performance impact beads."
+  }
+}
