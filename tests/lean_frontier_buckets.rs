@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 const FRONTIER_JSON: &str = include_str!("../formal/lean/coverage/lean_frontier_buckets_v1.json");
 const GAP_PLAN_JSON: &str = include_str!("../formal/lean/coverage/gap_risk_sequencing_plan.json");
 const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
+const ASUPERSYNC_LEAN: &str = include_str!("../formal/lean/Asupersync.lean");
 
 #[test]
 fn frontier_report_has_valid_schema_and_sorted_buckets() {
@@ -217,4 +218,56 @@ fn frontier_errors_have_single_primary_taxonomy_code() {
         total_bucketed_errors, errors_total,
         "sum(bucket.count) must match errors_total so every error has exactly one primary taxonomy code"
     );
+}
+
+#[test]
+fn declaration_order_helpers_precede_master_preservation_theorem() {
+    let helper_markers = [
+        "theorem scheduler_change_preserves_wellformed",
+        "theorem setTask_same_region_preserves_wellformed",
+        "theorem setRegion_structural_preserves_wellformed",
+    ];
+    let rationale_markers = [
+        "Ordering rationale: keep this helper before `step_preserves_wellformed`",
+        "Ordering rationale: define this before master preservation dispatch",
+        "Ordering rationale: this structural lemma is referenced by the master",
+    ];
+    let master_marker = "theorem step_preserves_wellformed";
+    let prelude_start_marker = "-- Preservation helper prelude (high-reuse helpers for preservation dispatch)";
+    let prelude_end_marker = "-- End preservation helper prelude";
+
+    let master_pos = ASUPERSYNC_LEAN
+        .find(master_marker)
+        .expect("master preservation theorem must exist");
+    let prelude_start_pos = ASUPERSYNC_LEAN
+        .find(prelude_start_marker)
+        .expect("preservation helper prelude start marker must exist");
+    let prelude_end_pos = ASUPERSYNC_LEAN
+        .find(prelude_end_marker)
+        .expect("preservation helper prelude end marker must exist");
+    assert!(
+        prelude_start_pos < prelude_end_pos,
+        "helper prelude start marker must appear before end marker"
+    );
+
+    for marker in helper_markers {
+        let helper_pos = ASUPERSYNC_LEAN
+            .find(marker)
+            .unwrap_or_else(|| panic!("helper theorem marker must exist: {marker}"));
+        assert!(
+            helper_pos > prelude_start_pos && helper_pos < prelude_end_pos,
+            "helper theorem '{marker}' must stay inside the helper prelude block"
+        );
+        assert!(
+            helper_pos < master_pos,
+            "helper theorem '{marker}' must be declared before step_preserves_wellformed"
+        );
+    }
+
+    for marker in rationale_markers {
+        assert!(
+            ASUPERSYNC_LEAN.contains(marker),
+            "ordering rationale marker missing: {marker}"
+        );
+    }
 }

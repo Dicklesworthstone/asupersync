@@ -87,7 +87,7 @@ References:
 - `bd-5w2lq` Track-1 baseline report/cadence: `MagentaBridge` (`closed`)
 - `bd-2iwok` Track-1 invariant theorem/test linkage: `MagentaBridge` (`closed`)
 - `bd-1dorb` Track-2 frontier extractor: `MagentaBridge` (`closed`)
-- `bd-53a0d` Track-2 declaration-order stabilization: unassigned (`open`)
+- `bd-53a0d` Track-2 declaration-order stabilization: `DustyBay` (`closed`)
 - `bd-kf0mv` Track-2 tactic stability: `MagentaBridge` (`closed`)
 - `bd-112rm` Track-3 constructor-total preservation: `MagentaBridge` (`in_progress`)
 - `bd-244p5` Track-3 invariant witness bundle: unassigned (`open`)

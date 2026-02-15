@@ -2756,8 +2756,16 @@ theorem spawned_task_in_region {Value Error Panic : Type}
     · simp [List.mem_append]
 
 -- ==========================================================================
+-- Preservation helper prelude (high-reuse helpers for preservation dispatch)
+-- Convention: helpers reused by `step_preserves_wellformed` belong in this
+-- prelude block and should appear before any theorem that dispatches to them.
+-- ==========================================================================
+
+-- ==========================================================================
 -- General preservation helper: changing only the scheduler preserves WF
 -- Covers: enqueue, scheduleStep
+-- Ordering rationale: keep this helper before `step_preserves_wellformed`
+-- so downstream proofs never depend on forward declarations.
 -- ==========================================================================
 
 /-- Changing only the scheduler preserves well-formedness. -/
@@ -2788,6 +2796,8 @@ theorem scheduler_change_preserves_wellformed {Value Error Panic : Type}
 -- General preservation helper: replacing a task (same region) preserves WF
 -- Covers: schedule, complete, cancelMasked, cancelAcknowledge,
 --         cancelFinalize, cancelComplete, cancelChild
+-- Ordering rationale: define this before master preservation dispatch to
+-- avoid declaration-order/helper-availability regressions.
 -- ==========================================================================
 
 /-- Replacing a task while preserving its region field preserves well-formedness.
@@ -2804,6 +2814,8 @@ theorem setTask_same_region_preserves_wellformed {Value Error Panic : Type}
 -- ==========================================================================
 -- General preservation helper: replacing a region (same structural fields)
 -- Covers: cancelPropagate, close, cancelRequest (region part)
+-- Ordering rationale: this structural lemma is referenced by the master
+-- preservation theorem and must be available before that dispatch point.
 -- ==========================================================================
 
 /-- Replacing a region while preserving children, subregions, and ledger
@@ -2872,6 +2884,10 @@ theorem setRegion_structural_preserves_wellformed {Value Error Panic : Type}
         · exact ⟨newRegion, by simp [getRegion, setRegion, hSubEq]⟩
         · exact ⟨sub, by simp [getRegion, setRegion, hSubEq]; exact hSub⟩
   }
+
+-- ==========================================================================
+-- End preservation helper prelude
+-- ==========================================================================
 
 -- ==========================================================================
 -- Safety: Aborted obligations stay aborted through any step
