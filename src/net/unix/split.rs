@@ -226,14 +226,16 @@ impl UnixStreamInner {
             }
         }
 
-        // Build combined waker before dropping the lock.
+        // Build combined waker while still holding the lock. We keep the lock
+        // held across `driver.register()` to prevent a race where both halves
+        // concurrently attempt to create a fresh registration for the same fd,
+        // causing one to fail with EEXIST from epoll_ctl(ADD).
         let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
         let register_interest = registration_interest(
             guard.read_waker.is_some(),
             guard.write_waker.is_some(),
             interest,
         );
-        drop(guard);
 
         let Some(current) = Cx::current() else {
             cx.waker().wake_by_ref();
@@ -246,7 +248,7 @@ impl UnixStreamInner {
 
         match driver.register(&*self.stream, register_interest, waker) {
             Ok(registration) => {
-                self.state.lock().expect("lock poisoned").registration = Some(registration);
+                guard.registration = Some(registration);
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
