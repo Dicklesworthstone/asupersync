@@ -509,8 +509,16 @@ impl Connection {
         }
     }
 
+    /// Update last_stream_id to track the highest processed stream.
+    fn track_stream_id(&mut self, stream_id: u32) {
+        if stream_id > self.last_stream_id {
+            self.last_stream_id = stream_id;
+        }
+    }
+
     /// Process DATA frame.
     fn process_data(&mut self, frame: DataFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+        self.track_stream_id(frame.stream_id);
         let stream = self.streams.get_or_create(frame.stream_id)?;
         let payload_len =
             u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
@@ -557,6 +565,7 @@ impl Connection {
 
     /// Process HEADERS frame.
     fn process_headers(&mut self, frame: HeadersFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+        self.track_stream_id(frame.stream_id);
         let stream = self.streams.get_or_create(frame.stream_id)?;
         stream.recv_headers(frame.end_stream, frame.end_headers)?;
 
@@ -924,19 +933,25 @@ impl Connection {
                     let remaining = encoded.slice(max_frame_size..);
 
                     // Queue CONTINUATION frames for remaining data.
-                    // Use push_back to preserve chunk ordering (push_front
-                    // would reverse them, corrupting HPACK state).
+                    // Push to front in reverse order so they are emitted
+                    // immediately after this HEADERS frame, before any other
+                    // pending ops (RFC 9113 §6.10 requires CONTINUATION to
+                    // follow HEADERS without interleaving other frame types).
+                    let mut chunks = Vec::new();
                     let mut offset = 0;
                     while offset < remaining.len() {
                         let chunk_end = (offset + max_frame_size).min(remaining.len());
                         let chunk = remaining.slice(offset..chunk_end);
                         let is_last = chunk_end == remaining.len();
-                        self.pending_ops.push_back(PendingOp::Continuation {
+                        chunks.push(PendingOp::Continuation {
                             stream_id,
                             header_block: chunk,
                             end_headers: is_last,
                         });
                         offset = chunk_end;
+                    }
+                    for chunk in chunks.into_iter().rev() {
+                        self.pending_ops.push_front(chunk);
                     }
 
                     return Some(Frame::Headers(HeadersFrame::new(
@@ -2557,5 +2572,136 @@ mod tests {
         let ping = Frame::Ping(PingFrame::new([0; 8]));
         let err = conn.process_frame(ping).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    // =========================================================================
+    // last_stream_id Tracking Tests (bd-34krf)
+    // =========================================================================
+
+    #[test]
+    fn goaway_reflects_last_processed_stream() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Process HEADERS on stream 1
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Process HEADERS on stream 3
+        let headers = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Send GOAWAY — should reflect last_stream_id=3
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        let frame = conn.next_frame().unwrap();
+        match frame {
+            Frame::GoAway(g) => {
+                assert_eq!(
+                    g.last_stream_id, 3,
+                    "GOAWAY should report highest processed stream ID"
+                );
+            }
+            _ => panic!("expected GoAway"),
+        }
+    }
+
+    #[test]
+    fn goaway_reflects_last_processed_data_stream() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open stream via HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Process DATA on stream 1
+        let data = Frame::Data(DataFrame::new(1, Bytes::from("hello"), false));
+        conn.process_frame(data).unwrap();
+
+        // Open stream 3 via HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(3, Bytes::new(), true, true));
+        conn.process_frame(headers).unwrap();
+
+        // GOAWAY should reflect stream 3 (highest seen)
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        // Drain pending ops (SettingsAck, WindowUpdates, etc.)
+        let mut goaway_frame = None;
+        while let Some(f) = conn.next_frame() {
+            if matches!(&f, Frame::GoAway(_)) {
+                goaway_frame = Some(f);
+                break;
+            }
+        }
+        match goaway_frame.unwrap() {
+            Frame::GoAway(g) => assert_eq!(g.last_stream_id, 3),
+            _ => panic!("expected GoAway"),
+        }
+    }
+
+    // =========================================================================
+    // CONTINUATION Ordering Tests (bd-34krf)
+    // =========================================================================
+
+    #[test]
+    fn continuation_frames_not_interleaved_with_pending_ops() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+        // Small max_frame_size to force CONTINUATION
+        conn.remote_settings.max_frame_size = 50;
+
+        // Queue a PING ACK first (simulating a received ping being processed)
+        conn.pending_ops
+            .push_back(PendingOp::PingAck([9, 8, 7, 6, 5, 4, 3, 2]));
+
+        // Open a stream with large headers that require CONTINUATION
+        let mut headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/some/very/long/path/that/exceeds/frame/size"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        for i in 0..10 {
+            headers.push(Header::new(
+                format!("x-custom-header-{i}"),
+                format!("value-{i}"),
+            ));
+        }
+        let _ = conn.open_stream(headers, true).unwrap();
+
+        // First frame: should be PingAck (it was queued first)
+        let frame1 = conn.next_frame().unwrap();
+        assert!(
+            matches!(frame1, Frame::Ping(_)),
+            "first frame should be the pre-existing PingAck"
+        );
+
+        // Second frame: should be HEADERS (not end_headers)
+        let frame2 = conn.next_frame().unwrap();
+        match &frame2 {
+            Frame::Headers(h) => {
+                assert!(
+                    !h.end_headers,
+                    "headers too large, should have CONTINUATION"
+                );
+            }
+            other => panic!("expected HEADERS, got {other:?}"),
+        }
+
+        // All subsequent frames until end_headers must be CONTINUATION
+        // (no interleaved PingAck, WindowUpdate, etc.)
+        loop {
+            let frame = conn.next_frame();
+            match frame {
+                Some(Frame::Continuation(c)) => {
+                    if c.end_headers {
+                        break;
+                    }
+                }
+                Some(other) => {
+                    panic!("expected CONTINUATION but got {other:?} — interleaving detected!")
+                }
+                None => panic!("ran out of frames before end_headers"),
+            }
+        }
     }
 }
