@@ -1113,8 +1113,8 @@ unsafe fn gf256_mul_slice_x86_avx2_impl_tables(
     table: &[u8; 256],
 ) {
     // SAFETY: caller guarantees AVX2 support.
-    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr() as *const __m128i) };
-    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr() as *const __m128i) };
+    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr().cast::<__m128i>()) };
+    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr().cast::<__m128i>()) };
     let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
     let high_tbl_256 = _mm256_broadcastsi128_si256(high_tbl_128);
     let nibble_mask = _mm256_set1_epi8(0x0f_i8);
@@ -1123,13 +1123,13 @@ unsafe fn gf256_mul_slice_x86_avx2_impl_tables(
     while i + 32 <= dst.len() {
         let ptr = unsafe { dst.as_mut_ptr().add(i) };
         // SAFETY: pointer range is in-bounds and unaligned loads/stores are used.
-        let input = unsafe { _mm256_loadu_si256(ptr as *const __m256i) };
+        let input = unsafe { _mm256_loadu_si256(ptr.cast::<__m256i>()) };
         let low_nibbles = _mm256_and_si256(input, nibble_mask);
         let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(input, 4), nibble_mask);
         let low_mul = _mm256_shuffle_epi8(low_tbl_256, low_nibbles);
         let high_mul = _mm256_shuffle_epi8(high_tbl_256, high_nibbles);
         let result = _mm256_xor_si256(low_mul, high_mul);
-        unsafe { _mm256_storeu_si256(ptr as *mut __m256i, result) };
+        unsafe { _mm256_storeu_si256(ptr.cast::<__m256i>(), result) };
         i += 32;
     }
 
@@ -1167,8 +1167,8 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl_tables(
     table: &[u8; 256],
 ) {
     // SAFETY: caller guarantees AVX2 support and matching lengths.
-    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr() as *const __m128i) };
-    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr() as *const __m128i) };
+    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr().cast::<__m128i>()) };
+    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr().cast::<__m128i>()) };
     let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
     let high_tbl_256 = _mm256_broadcastsi128_si256(high_tbl_128);
     let nibble_mask = _mm256_set1_epi8(0x0f_i8);
@@ -1178,15 +1178,15 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl_tables(
         let src_ptr = unsafe { src.as_ptr().add(i) };
         let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
         // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
-        let src_v = unsafe { _mm256_loadu_si256(src_ptr as *const __m256i) };
-        let dst_v = unsafe { _mm256_loadu_si256(dst_ptr as *const __m256i) };
+        let src_v = unsafe { _mm256_loadu_si256(src_ptr.cast::<__m256i>()) };
+        let dst_v = unsafe { _mm256_loadu_si256(dst_ptr.cast::<__m256i>()) };
         let low_nibbles = _mm256_and_si256(src_v, nibble_mask);
         let high_nibbles = _mm256_and_si256(_mm256_srli_epi16(src_v, 4), nibble_mask);
         let low_mul = _mm256_shuffle_epi8(low_tbl_256, low_nibbles);
         let high_mul = _mm256_shuffle_epi8(high_tbl_256, high_nibbles);
         let product = _mm256_xor_si256(low_mul, high_mul);
         let result = _mm256_xor_si256(dst_v, product);
-        unsafe { _mm256_storeu_si256(dst_ptr as *mut __m256i, result) };
+        unsafe { _mm256_storeu_si256(dst_ptr.cast::<__m256i>(), result) };
         i += 32;
     }
 
