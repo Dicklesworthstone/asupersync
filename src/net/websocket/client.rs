@@ -851,13 +851,13 @@ mod tests {
         let config = WebSocketConfig::new()
             .max_frame_size(1024)
             .max_message_size(4096)
-            .ping_interval(Some(Duration::from_secs(60)))
+            .ping_interval(Some(Duration::from_mins(1)))
             .protocol("chat")
             .nodelay(false);
 
         assert_eq!(config.max_frame_size, 1024);
         assert_eq!(config.max_message_size, 4096);
-        assert_eq!(config.ping_interval, Some(Duration::from_secs(60)));
+        assert_eq!(config.ping_interval, Some(Duration::from_mins(1)));
         assert_eq!(config.protocols, vec!["chat".to_string()]);
         assert!(!config.nodelay);
     }

@@ -1964,16 +1964,16 @@ mod tests {
         init_test("pool_config_builder");
         let config = PoolConfig::with_max_size(20)
             .min_size(5)
-            .acquire_timeout(Duration::from_secs(60))
+            .acquire_timeout(Duration::from_mins(1))
             .idle_timeout(Duration::from_secs(300))
             .max_lifetime(Duration::from_secs(1800));
 
         crate::assert_with_log!(config.min_size == 5, "min_size", 5usize, config.min_size);
         crate::assert_with_log!(config.max_size == 20, "max_size", 20usize, config.max_size);
         crate::assert_with_log!(
-            config.acquire_timeout == Duration::from_secs(60),
+            config.acquire_timeout == Duration::from_mins(1),
             "acquire_timeout",
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             config.acquire_timeout
         );
         crate::assert_with_log!(
@@ -2747,11 +2747,11 @@ mod tests {
 
         let config = PoolConfig::with_max_size(5)
             .health_check_on_acquire(true)
-            .health_check_interval(Some(Duration::from_secs(60)))
+            .health_check_interval(Some(Duration::from_mins(1)))
             .evict_unhealthy(false);
 
         assert!(config.health_check_on_acquire);
-        assert_eq!(config.health_check_interval, Some(Duration::from_secs(60)));
+        assert_eq!(config.health_check_interval, Some(Duration::from_mins(1)));
         assert!(!config.evict_unhealthy);
 
         crate::test_complete!("pool_config_health_check_builder");
