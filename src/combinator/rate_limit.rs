@@ -1708,13 +1708,16 @@ mod tests {
         assert!(rl.try_acquire(1, now));
 
         let entry_id = rl.enqueue(1, now).expect("enqueue should succeed");
-        let queue = rl.wait_queue.read().expect("lock poisoned");
-        let entry = queue
+        let deadline_millis = rl
+            .wait_queue
+            .read()
+            .expect("lock poisoned")
             .iter()
             .find(|entry| entry.id == entry_id)
+            .map(|entry| entry.deadline_millis)
             .expect("queued entry should exist");
 
-        assert_eq!(entry.deadline_millis, u64::MAX);
+        assert_eq!(deadline_millis, u64::MAX);
     }
 
     #[test]
