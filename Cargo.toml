@@ -12,7 +12,7 @@ exclude = ["fuzz"]
 
 [package]
 name = "asupersync"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."
@@ -120,13 +120,13 @@ opentelemetry_sdk = { version = "0.31", default-features = false, features = ["m
 # Optional Tower trait integration
 tower = { version = "0.5.3", optional = true }
 # Optional proc macros for structured concurrency
-asupersync-macros = { version = "0.1.1", path = "asupersync-macros", optional = true }
+asupersync-macros = { version = "0.2.0", path = "asupersync-macros", optional = true }
 # FrankenSuite evidence ledger, kernel types, and decision contracts (bd-1e2if.3, bd-1e2if.6)
 franken-decision = { version = "0.1.0", path = "franken_decision" }
 franken-evidence = { version = "0.1.0", path = "franken_evidence" }
 franken-kernel = { version = "0.1.0", path = "franken_kernel" }
 # Optional conformance tooling (CLI + reports)
-conformance = { package = "asupersync-conformance", version = "0.1.1", path = "conformance", optional = true }
+conformance = { package = "asupersync-conformance", version = "0.2.0", path = "conformance", optional = true }
 # Optional LZ4 compression for trace files
 lz4_flex = { version = "0.12", optional = true }
 # Optional visibility macro for test-internals feature
@@ -182,7 +182,7 @@ ring = { version = "0.17", optional = true }
 proptest = "1.6"
 criterion = { version = "0.8", features = ["html_reports"] }
 futures-lite = "2.6"
-conformance = { package = "asupersync-conformance", version = "0.1.1", path = "conformance" }
+conformance = { package = "asupersync-conformance", version = "0.2.0", path = "conformance" }
 tempfile = "3.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
