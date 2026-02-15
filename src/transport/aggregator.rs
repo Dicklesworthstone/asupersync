@@ -1971,7 +1971,7 @@ mod tests {
         );
 
         let e3 = AggregationError::InvalidSequence {
-            object_id: ObjectId::new(1),
+            object_id: ObjectId::new(0, 1),
             expected: 5,
             received: 10,
         };
