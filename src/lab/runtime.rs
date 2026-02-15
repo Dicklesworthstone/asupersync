@@ -1396,6 +1396,12 @@ impl LabRuntime {
             // Task lost (should not happen if consistent)
             return;
         };
+
+        // Record the poll so futurelock detection uses the correct idle step count.
+        if let Some(record) = self.state.task_mut(task_id) {
+            record.mark_polled(self.steps);
+        }
+
         let cancel_ack = self.consume_cancel_ack(task_id);
 
         // 5. Handle result
@@ -2787,6 +2793,54 @@ mod tests {
         for _ in 0..3 {
             runtime.step();
         }
+    }
+
+    /// Regression test: actively polled tasks must NOT be flagged as futurelocked.
+    ///
+    /// Before the fix, `mark_polled()` was never called from `step()`, so
+    /// `last_polled_step` stayed at 0. After threshold+1 steps, even a
+    /// task polled every single step would be falsely flagged.
+    #[test]
+    fn polled_task_not_flagged_as_futurelocked() {
+        init_test("polled_task_not_flagged_as_futurelocked");
+        let config = LabConfig::new(42)
+            .futurelock_max_idle_steps(5)
+            .panic_on_futurelock(false);
+        let mut runtime = LabRuntime::new(config);
+
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        // Create a task with a stored future that always yields (Pending).
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                loop {
+                    crate::runtime::yield_now::yield_now().await;
+                }
+            })
+            .expect("create task");
+
+        // Give the task a pending obligation so it's eligible for futurelock.
+        let _obl = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+
+        // Schedule and run well past the threshold.
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        for _ in 0..20 {
+            runtime.step();
+        }
+
+        // The task was polled every step, so no futurelock should fire.
+        let violations = runtime.futurelock_violations();
+        crate::assert_with_log!(
+            violations.is_empty(),
+            "no futurelock for actively polled task",
+            true,
+            violations.is_empty()
+        );
+        crate::test_complete!("polled_task_not_flagged_as_futurelocked");
     }
 
     #[test]
