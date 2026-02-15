@@ -777,9 +777,9 @@ mod property_tests {
         }
     }
 
-    /// Property: different seeds produce different repair symbols.
+    /// Property: encoding is deterministic regardless of seed (seed is reserved for future use).
     #[test]
-    fn property_different_seeds_different_output() {
+    fn property_seed_independent_encoding() {
         let k = 8;
         let symbol_size = 32;
         let source = make_source_data(k, symbol_size, 0);
@@ -790,16 +790,11 @@ mod property_tests {
         let repair1: Vec<Vec<u8>> = (0..10u32).map(|esi| enc1.repair_symbol(esi)).collect();
         let repair2: Vec<Vec<u8>> = (0..10u32).map(|esi| enc2.repair_symbol(esi)).collect();
 
-        // At least some repair symbols should differ
-        let differences = repair1
-            .iter()
-            .zip(repair2.iter())
-            .filter(|(a, b)| a != b)
-            .count();
-
-        assert!(
-            differences > 0,
-            "different seeds should produce different repair symbols"
+        // The constraint matrix and repair equations are fully determined
+        // by the RFC 6330 systematic index table, not by the seed.
+        assert_eq!(
+            repair1, repair2,
+            "same source data should produce identical repair output"
         );
     }
 

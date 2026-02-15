@@ -171,10 +171,9 @@ impl SystematicParams {
 // Degree distribution (Robust Soliton)
 // ============================================================================
 
-/// Robust soliton degree distribution for LT encoding.
-///
-/// Combines the ideal soliton distribution with a perturbation τ to
-/// ensure the intermediate symbols can be recovered with high probability.
+/// Legacy robust-soliton degree distribution model retained for unit-test
+/// diagnostics only. Production repair generation is RFC 6330 tuple-driven.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct RobustSoliton {
     /// Cumulative distribution function (CDF) scaled to u32::MAX.
@@ -183,6 +182,7 @@ pub struct RobustSoliton {
     k: usize,
 }
 
+#[cfg(test)]
 impl RobustSoliton {
     /// Build the robust soliton CDF for `k` input symbols.
     ///
@@ -1119,23 +1119,20 @@ mod tests {
         SystematicEncoder::new(&source, symbol_size, seed)
     }
 
-    /// Create an encoder with parameters known to produce a non-singular matrix,
-    /// or skip the test if no working configuration is found.
-    /// Tries the given (k, symbol_size, seed) first, then fallback values.
+    /// Create an encoder for the requested `(k, symbol_size)` and retry with
+    /// alternate seeds if the initial seed yields a singular matrix.
+    ///
+    /// Keeping `k` fixed avoids tests silently validating a different
+    /// source-block size than the scenario under test.
     fn require_encoder(k: usize, symbol_size: usize, seed: u64) -> SystematicEncoder {
-        if let Some(enc) = try_encoder(k, symbol_size, seed) {
-            return enc;
-        }
-        // Fallback: try larger K values that have better rank coverage
-        for try_k in [k, 16, 32, 64, 128] {
-            for &try_seed in &[seed, 42, 99, 7777] {
-                if let Some(enc) = try_encoder(try_k, symbol_size, try_seed) {
-                    return enc;
-                }
+        for &try_seed in &[seed, 42, 99, 7777, 2024, 12345] {
+            if let Some(enc) = try_encoder(k, symbol_size, try_seed) {
+                return enc;
             }
         }
         panic!(
-            "could not create encoder for any tested (k, seed) combination; \
+            "could not create encoder for requested k={k}, symbol_size={symbol_size} \
+             across tested seeds [{seed}, 42, 99, 7777, 2024, 12345]; \
              matrix singularity issue (bd-uix9)"
         );
     }
@@ -1441,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn different_seeds_different_repair() {
+    fn same_source_same_repair_across_seeds() {
         let k = 4;
         let symbol_size = 32;
         let source = make_source_symbols(k, symbol_size);
@@ -1449,14 +1446,15 @@ mod tests {
         let enc1 = SystematicEncoder::new(&source, symbol_size, 1).unwrap();
         let enc2 = SystematicEncoder::new(&source, symbol_size, 2).unwrap();
 
-        // Intermediate symbols are determined solely by the constraint matrix
-        // and source data, so they are seed-independent. Repair symbols use
-        // the seed, so those must differ.
+        // The constraint matrix and repair equations are fully determined
+        // by the RFC 6330 systematic index table (K' → J, S, H, W).
+        // The seed parameter is reserved for future use but currently
+        // does not affect encoding. Both encoders produce identical output.
         let esi = k as u32; // first repair ESI
-        assert_ne!(
+        assert_eq!(
             enc1.repair_symbol(esi),
             enc2.repair_symbol(esi),
-            "different seeds should produce different repair symbols"
+            "same source data should produce identical repair symbols"
         );
     }
 
@@ -1636,9 +1634,10 @@ mod tests {
         let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
 
         let ratio = enc.stats().overhead_ratio();
-        // L = K' + S + H, so ratio > 1.0
+        // L = K' + S + H, so ratio > 1.0. For small K (e.g., 20), S and H
+        // dominate, pushing ratio above 2.0 (e.g., L=41, K=20 → 2.05).
         assert!(ratio > 1.0, "overhead ratio should be > 1");
-        assert!(ratio < 2.0, "overhead ratio should be reasonable");
+        assert!(ratio < 3.0, "overhead ratio should be reasonable");
     }
 
     #[test]
