@@ -804,4 +804,58 @@ mod tests {
         crate::assert_with_log!(after.is_some(), "start after drain", true, after.is_some());
         crate::test_complete!("drain_start_tracking");
     }
+
+    #[test]
+    fn concurrent_begin_drain_only_one_wins() {
+        init_test("concurrent_begin_drain_only_one_wins");
+        let signal = ShutdownSignal::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let winners = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let sig = signal.clone();
+            let b = std::sync::Arc::clone(&barrier);
+            let w = std::sync::Arc::clone(&winners);
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                if sig.begin_drain(Duration::from_secs(30)) {
+                    w.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }));
+        }
+
+        barrier.wait();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let winner_count = winners.load(std::sync::atomic::Ordering::Relaxed);
+        crate::assert_with_log!(winner_count == 1, "exactly one winner", 1, winner_count);
+        crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::Draining,
+            "phase is draining",
+            ShutdownPhase::Draining,
+            signal.phase()
+        );
+        crate::test_complete!("concurrent_begin_drain_only_one_wins");
+    }
+
+    #[test]
+    fn mark_stopped_from_draining_skips_force_close() {
+        init_test("mark_stopped_from_draining_skips_force_close");
+        let signal = ShutdownSignal::new();
+        let began = signal.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "begin drain", true, began);
+
+        // Directly mark stopped without going through ForceClosing
+        signal.mark_stopped();
+        crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::Stopped,
+            "stopped from draining",
+            ShutdownPhase::Stopped,
+            signal.phase()
+        );
+        crate::test_complete!("mark_stopped_from_draining_skips_force_close");
+    }
 }
