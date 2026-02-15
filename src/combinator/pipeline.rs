@@ -1301,7 +1301,7 @@ mod tests {
     #[should_panic(expected = "outcomes must not be empty")]
     fn pipeline_n_empty_outcomes_panics() {
         let outcomes: Vec<Outcome<i32, &str>> = vec![];
-        pipeline_n_outcomes(outcomes, 3);
+        let _ = pipeline_n_outcomes(outcomes, 3);
     }
 
     #[test]
@@ -1309,7 +1309,7 @@ mod tests {
     fn pipeline_n_too_many_outcomes_panics() {
         let outcomes: Vec<Outcome<i32, &str>> =
             vec![Outcome::Ok(1), Outcome::Ok(2), Outcome::Ok(3)];
-        pipeline_n_outcomes(outcomes, 2);
+        let _ = pipeline_n_outcomes(outcomes, 2);
     }
 
     // =========================================================================
@@ -1320,7 +1320,7 @@ mod tests {
     #[should_panic(expected = "total_stages must be positive")]
     fn pipeline_with_final_zero_stages_panics() {
         let intermediates: Vec<Outcome<i32, &str>> = vec![];
-        pipeline_with_final(intermediates, Outcome::Ok(42), 0);
+        let _ = pipeline_with_final(intermediates, Outcome::Ok(42), 0);
     }
 
     #[test]
@@ -1328,7 +1328,7 @@ mod tests {
     fn pipeline_with_final_mismatched_stages_panics() {
         let intermediates: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1)];
         // 1 intermediate + 1 final = 2, but total_stages = 5
-        pipeline_with_final(intermediates, Outcome::Ok(42), 5);
+        let _ = pipeline_with_final(intermediates, Outcome::Ok(42), 5);
     }
 
     #[test]

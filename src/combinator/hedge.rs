@@ -420,7 +420,7 @@ pub fn hedge_to_result<T, E>(result: HedgeResult<T, E>) -> Result<T, HedgeError<
     }
 }
 
-/// Macro for hedging an operation (placeholder).
+/// Macro for hedging an operation (not yet implemented).
 ///
 /// In the full implementation, this spawns the primary, waits for the deadline,
 /// and races with the backup if needed.
@@ -435,12 +435,11 @@ pub fn hedge_to_result<T, E>(result: HedgeResult<T, E>) -> Result<T, HedgeError<
 /// ```
 #[macro_export]
 macro_rules! hedge {
-    ($delay:expr, $primary:expr, $backup:expr) => {{
-        // Placeholder: in real implementation, this spawns and hedges
-        drop($delay);
-        drop($primary);
-        drop($backup);
-    }};
+    ($delay:expr, $primary:expr, $backup:expr) => {
+        compile_error!(
+            "hedge! macro not yet implemented; use hedge_outcomes or hedge_to_result instead"
+        )
+    };
 }
 
 #[cfg(test)]
