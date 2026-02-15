@@ -2295,4 +2295,170 @@ mod tests {
         assert_eq!(sched.scheduled.dense[idx as usize], expected_tag);
         assert!(!sched.scheduled.overflow.contains(&g0));
     }
+
+    // ── Audit regression tests (asupersync-10x0x.78) ─────────────────────
+
+    #[test]
+    fn schedule_timed_does_not_move_existing_ready_task() {
+        init_test("schedule_timed_does_not_move_existing_ready_task");
+        let mut sched = Scheduler::new();
+
+        // Schedule task in ready lane first.
+        sched.schedule(task(1), 100);
+        assert!(sched.has_ready_work());
+
+        // Attempt to schedule the same task in timed lane — should be a no-op.
+        sched.schedule_timed(task(1), Time::from_secs(50));
+        crate::assert_with_log!(sched.len() == 1, "still one task", 1usize, sched.len());
+        crate::assert_with_log!(
+            sched.has_ready_work(),
+            "task remains in ready lane",
+            true,
+            sched.has_ready_work()
+        );
+        crate::assert_with_log!(
+            !sched.has_timed_work(),
+            "timed lane stays empty",
+            true,
+            !sched.has_timed_work()
+        );
+
+        // Pop should come from ready lane, not timed.
+        let (popped, lane) = sched.pop_with_lane(0).unwrap();
+        crate::assert_with_log!(popped == task(1), "correct task", task(1), popped);
+        crate::assert_with_log!(
+            matches!(lane, DispatchLane::Ready),
+            "dispatched from ready lane",
+            true,
+            true
+        );
+        crate::test_complete!("schedule_timed_does_not_move_existing_ready_task");
+    }
+
+    #[test]
+    fn steal_ready_batch_maintains_scheduled_set_invariant() {
+        init_test("steal_ready_batch_maintains_scheduled_set_invariant");
+        let mut sched = Scheduler::new();
+        for i in 0..6 {
+            sched.schedule(task(i), 50);
+        }
+        let before = sched.len();
+        crate::assert_with_log!(before == 6, "6 tasks before steal", 6usize, before);
+
+        let stolen = sched.steal_ready_batch(3);
+        let after = sched.len();
+
+        // len must decrease by exactly the number stolen.
+        crate::assert_with_log!(
+            before - after == stolen.len(),
+            "len decreases by stolen count",
+            stolen.len(),
+            before - after
+        );
+
+        // None of the stolen tasks should be in the scheduler anymore.
+        for (t, _) in &stolen {
+            crate::assert_with_log!(
+                !sched.is_in_cancel_lane(*t),
+                "stolen task not in cancel",
+                true,
+                true
+            );
+        }
+
+        // Remaining tasks should still pop correctly.
+        let mut remaining = 0;
+        while sched.pop().is_some() {
+            remaining += 1;
+        }
+        crate::assert_with_log!(
+            remaining == after,
+            "remaining tasks pop correctly",
+            after,
+            remaining
+        );
+        crate::test_complete!("steal_ready_batch_maintains_scheduled_set_invariant");
+    }
+
+    #[test]
+    fn dense_tag_at_max_generation_does_not_collide_with_sentinel() {
+        init_test("dense_tag_at_max_generation_does_not_collide_with_sentinel");
+        let mut sched = Scheduler::new();
+        let max_gen = u32::MAX;
+        let t = TaskId::from_arena(ArenaIndex::new(0, max_gen));
+
+        // The tag for u32::MAX generation is u32::MAX + 1 = 4294967296.
+        // This must NOT equal DENSE_COLLISION (u64::MAX).
+        let tag = u64::from(max_gen) + 1;
+        assert_ne!(tag, ScheduledSet::DENSE_COLLISION, "tag != sentinel");
+
+        sched.schedule(t, 100);
+        crate::assert_with_log!(sched.len() == 1, "inserted", 1usize, sched.len());
+
+        let popped = sched.pop();
+        crate::assert_with_log!(popped == Some(t), "popped correctly", Some(t), popped);
+        crate::assert_with_log!(sched.is_empty(), "empty after pop", true, sched.is_empty());
+        crate::test_complete!("dense_tag_at_max_generation_does_not_collide_with_sentinel");
+    }
+
+    #[test]
+    fn move_to_cancel_lower_priority_is_noop() {
+        init_test("move_to_cancel_lower_priority_is_noop");
+        let mut sched = Scheduler::new();
+
+        // Place task in cancel lane with high priority.
+        sched.schedule_cancel(task(1), 200);
+        sched.schedule_cancel(task(2), 50);
+
+        // Try to "promote" task(1) with lower priority — should be a no-op.
+        sched.move_to_cancel_lane(task(1), 100);
+
+        // Task(1) should still come first (higher original priority).
+        let first = sched.pop().unwrap();
+        let second = sched.pop().unwrap();
+        crate::assert_with_log!(
+            first == task(1),
+            "original high-priority task first",
+            task(1),
+            first
+        );
+        crate::assert_with_log!(
+            second == task(2),
+            "lower-priority task second",
+            task(2),
+            second
+        );
+        crate::test_complete!("move_to_cancel_lower_priority_is_noop");
+    }
+
+    #[test]
+    fn pop_timed_only_with_hint_groups_by_deadline_not_now() {
+        init_test("pop_timed_only_with_hint_groups_by_deadline_not_now");
+        let mut sched = Scheduler::new();
+        let deadline = Time::from_secs(10);
+
+        // Schedule 3 tasks with the same deadline.
+        sched.schedule_timed(task(1), deadline);
+        sched.schedule_timed(task(2), deadline);
+        sched.schedule_timed(task(3), deadline);
+
+        let now = Time::from_secs(100); // well past deadline
+
+        // Pop all three with different rng hints.
+        let mut popped = Vec::new();
+        for hint in 0..3 {
+            if let Some(t) = sched.pop_timed_only_with_hint(hint, now) {
+                popped.push(t);
+            }
+        }
+
+        crate::assert_with_log!(
+            popped.len() == 3,
+            "all three dispatched",
+            3usize,
+            popped.len()
+        );
+        crate::assert_with_log!(sched.is_empty(), "empty after all pops", true, sched.is_empty());
+        crate::test_complete!("pop_timed_only_with_hint_groups_by_deadline_not_now");
+    }
 }
