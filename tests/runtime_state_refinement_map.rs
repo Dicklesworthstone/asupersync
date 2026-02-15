@@ -147,6 +147,29 @@ fn runtime_state_refinement_map_links_valid_rules_and_theorems() {
             "rust_method.line must be positive for {operation_id}"
         );
 
+        let owner = mapping.get("owner").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            !owner.trim().is_empty(),
+            "owner must be non-empty for {operation_id}"
+        );
+
+        let update_trigger_conditions = mapping
+            .get("update_trigger_conditions")
+            .and_then(Value::as_array)
+            .expect("update_trigger_conditions must be an array");
+        assert!(
+            !update_trigger_conditions.is_empty(),
+            "update_trigger_conditions must be non-empty for {operation_id}"
+        );
+        for trigger in update_trigger_conditions {
+            assert!(
+                trigger
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "update_trigger_conditions entries must be non-empty for {operation_id}"
+            );
+        }
+
         let formal_labels = mapping
             .get("formal_labels")
             .and_then(Value::as_array)
@@ -341,6 +364,68 @@ fn runtime_state_refinement_map_has_deterministic_divergence_routing_policy() {
             !patch_targets.is_empty(),
             "patch_targets must be non-empty for {route_id}"
         );
+        let fix_direction = route
+            .get("fix_direction")
+            .and_then(Value::as_str)
+            .expect("fix_direction must be a string");
+        assert!(
+            matches!(
+                fix_direction,
+                "runtime-code" | "formal-model" | "assumption-harness"
+            ),
+            "fix_direction must be canonical for {route_id}"
+        );
+
+        let owner_assignment = route
+            .get("owner_assignment")
+            .expect("owner_assignment must exist");
+        for key in [
+            "primary_owner_role",
+            "secondary_owner_role",
+            "escalation_owner_role",
+        ] {
+            assert!(
+                owner_assignment
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "owner_assignment.{key} must be non-empty for {route_id}"
+            );
+        }
+
+        let required_artifact_updates = route
+            .get("required_artifact_updates")
+            .and_then(Value::as_array)
+            .expect("required_artifact_updates must be array");
+        assert!(
+            !required_artifact_updates.is_empty(),
+            "required_artifact_updates must be non-empty for {route_id}"
+        );
+        for artifact in required_artifact_updates {
+            assert!(
+                artifact
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "required_artifact_updates entries must be non-empty for {route_id}"
+            );
+        }
+
+        let ci_refs = route
+            .get("ci_conformance_failure_references")
+            .and_then(Value::as_array)
+            .expect("ci_conformance_failure_references must be array");
+        assert!(
+            !ci_refs.is_empty(),
+            "ci_conformance_failure_references must be non-empty for {route_id}"
+        );
+        for ci_ref in ci_refs {
+            assert!(
+                ci_ref
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "ci_conformance_failure_references entries must be non-empty for {route_id}"
+            );
+        }
 
         let sign_off_roles = route
             .get("sign_off_roles")
@@ -394,6 +479,28 @@ fn runtime_state_refinement_map_has_deterministic_divergence_routing_policy() {
             has_model_first_example = true;
         }
 
+        let rejected_routes = example
+            .get("rejected_routes")
+            .and_then(Value::as_array)
+            .expect("example rejected_routes must be array");
+        assert!(
+            !rejected_routes.is_empty(),
+            "rejected_routes must be non-empty for route {route}"
+        );
+        for rejected in rejected_routes {
+            let rejected_route = rejected
+                .as_str()
+                .expect("rejected_routes values must be strings");
+            assert!(
+                expected_routes.contains(rejected_route),
+                "rejected route must be canonical: {rejected_route}"
+            );
+            assert_ne!(
+                rejected_route, route,
+                "selected route cannot appear in rejected_routes"
+            );
+        }
+
         let bead_id = example
             .get("bead_id")
             .and_then(Value::as_str)
@@ -402,6 +509,23 @@ fn runtime_state_refinement_map_has_deterministic_divergence_routing_policy() {
             bead_id.starts_with("bd-"),
             "example bead_id should be a canonical bead id: {bead_id}"
         );
+
+        let owner_assignment_decision = example
+            .get("owner_assignment_decision")
+            .expect("owner_assignment_decision must exist");
+        for key in [
+            "primary_owner_role",
+            "assigned_bead_owner",
+            "escalation_owner_role",
+        ] {
+            assert!(
+                owner_assignment_decision
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "owner_assignment_decision.{key} must be non-empty for bead {bead_id}"
+            );
+        }
 
         let rationale = example
             .get("decision_rationale")
@@ -427,6 +551,36 @@ fn runtime_state_refinement_map_has_deterministic_divergence_routing_policy() {
                     .and_then(Value::as_str)
                     .is_some_and(|artifact| !artifact.trim().is_empty()),
                 "evidence artifact must be non-empty for bead {bead_id}"
+            );
+        }
+
+        let artifact_updates = example
+            .get("artifact_updates")
+            .and_then(Value::as_array)
+            .expect("artifact_updates must be array");
+        assert!(
+            !artifact_updates.is_empty(),
+            "artifact_updates must be non-empty for bead {bead_id}"
+        );
+        for artifact in artifact_updates {
+            assert!(
+                artifact
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "artifact_updates entries must be non-empty for bead {bead_id}"
+            );
+        }
+
+        let ci_reference = example
+            .get("ci_conformance_reference")
+            .expect("ci_conformance_reference must exist");
+        for key in ["profile", "failure_bucket", "conformance_test"] {
+            assert!(
+                ci_reference
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "ci_conformance_reference.{key} must be non-empty for bead {bead_id}"
             );
         }
 

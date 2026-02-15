@@ -37,6 +37,21 @@
           "src/runtime/**",
           "tests/refinement_conformance.rs"
         ],
+        "fix_direction": "runtime-code",
+        "owner_assignment": {
+          "primary_owner_role": "Rust runtime owner",
+          "secondary_owner_role": "Conformance owner",
+          "escalation_owner_role": "CI/governance owner"
+        },
+        "required_artifact_updates": [
+          "formal/lean/coverage/runtime_state_refinement_map.json",
+          "formal/lean/coverage/theorem_rule_traceability_ledger.json",
+          "formal/lean/coverage/baseline_report_v1.json"
+        ],
+        "ci_conformance_failure_references": [
+          "tests/refinement_conformance.rs",
+          "formal/lean/coverage/ci_verification_profiles.json"
+        ],
         "sign_off_roles": [
           "Rust runtime owner",
           "Formal owner",
@@ -57,6 +72,21 @@
         "patch_targets": [
           "formal/lean/Asupersync.lean",
           "formal/lean/coverage/*.json"
+        ],
+        "fix_direction": "formal-model",
+        "owner_assignment": {
+          "primary_owner_role": "Formal owner",
+          "secondary_owner_role": "Rust runtime owner",
+          "escalation_owner_role": "CI/governance owner"
+        },
+        "required_artifact_updates": [
+          "formal/lean/Asupersync.lean",
+          "formal/lean/coverage/lean_frontier_buckets_v1.json",
+          "formal/lean/coverage/baseline_report_v1.json"
+        ],
+        "ci_conformance_failure_references": [
+          "target/lean-e2e/*_lake_build.log",
+          "formal/lean/coverage/ci_verification_profiles.json"
         ],
         "sign_off_roles": [
           "Formal owner",
@@ -80,6 +110,21 @@
           "tests/*refinement*",
           "docs/replay-debugging.md"
         ],
+        "fix_direction": "assumption-harness",
+        "owner_assignment": {
+          "primary_owner_role": "Conformance owner",
+          "secondary_owner_role": "Formal owner",
+          "escalation_owner_role": "Runtime owner"
+        },
+        "required_artifact_updates": [
+          "formal/lean/coverage/ci_verification_profiles.json",
+          "formal/lean/coverage/runtime_state_refinement_map.json",
+          "formal/lean/coverage/baseline_report_v1.json"
+        ],
+        "ci_conformance_failure_references": [
+          "tests/refinement_conformance.rs",
+          "formal/lean/coverage/ci_verification_profiles.json"
+        ],
         "sign_off_roles": [
           "Conformance owner",
           "Formal owner",
@@ -99,11 +144,30 @@
       "bead_id": "bd-cspxm",
       "summary": "Lean preservation proofs failed due to proof-shape/declaration-order issues in setTask/setRegion cancellation branches.",
       "selected_route": "model-first",
+      "rejected_routes": [
+        "code-first",
+        "assumptions-or-harness-first"
+      ],
+      "owner_assignment_decision": {
+        "primary_owner_role": "Formal owner",
+        "assigned_bead_owner": "bd-cspxm owner",
+        "escalation_owner_role": "CI/governance owner"
+      },
       "decision_rationale": [
         "Failure frontier was concentrated in Lean theorem proof-shape errors, not runtime behavior drift.",
         "Rust conformance behavior for mapped operations remained consistent during the same window.",
         "Fixes were localized to Lean helper ordering and branch proof structure."
       ],
+      "artifact_updates": [
+        "formal/lean/Asupersync.lean",
+        "formal/lean/coverage/lean_frontier_buckets_v1.json",
+        "formal/lean/coverage/baseline_report_v1.json"
+      ],
+      "ci_conformance_reference": {
+        "profile": "frontier",
+        "failure_bucket": "proof-shape.type-mismatch",
+        "conformance_test": "refinement_trace_equivalence_detects_semantic_mismatch"
+      },
       "evidence": [
         {
           "artifact": "target/lean-e2e/bd-cspxm_frontier.json",
@@ -137,6 +201,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 1129
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any semantic change to create_obligation input/output behavior or region admission policy.",
+        "Any change to obligation creation bookkeeping fields or ownership invariants in RuntimeState."
+      ],
       "formal_labels": [
         "step.reserve"
       ],
@@ -163,6 +232,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 1197
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any semantic change to commit_obligation state transitions, error handling, or resolution side effects.",
+        "Any change to commit-related ledger counters, region-progress propagation, or post-commit cleanup."
+      ],
       "formal_labels": [
         "step.commit"
       ],
@@ -198,6 +272,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 1245
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any semantic change to abort_obligation behavior, reason classification, or abort-path side effects.",
+        "Any change to abort-related ledger accounting or region-state progression hooks."
+      ],
       "formal_labels": [
         "step.abort"
       ],
@@ -233,6 +312,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 1300
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any change to leak detection policy, leak marking semantics, or leak-state transitions.",
+        "Any change to runtime leak response behavior that affects close/quiescence progress assumptions."
+      ],
       "formal_labels": [
         "step.leak"
       ],
@@ -264,6 +348,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 1530
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any change to cancel propagation order, descendant traversal strategy, or cause-chain strengthening behavior.",
+        "Any change to cancel request staging that affects acknowledge/finalize/complete handoff assumptions."
+      ],
       "formal_labels": [
         "step.cancelRequest",
         "step.cancelPropagate",
@@ -304,6 +393,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 1805
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any semantic change to task completion cleanup, obligation abort policy, or membership removal ordering.",
+        "Any change to task_completed interactions with advance_region_state and close-progress signaling."
+      ],
       "formal_labels": [
         "step.complete",
         "step.abort",
@@ -345,6 +439,11 @@
         "file_path": "src/runtime/state.rs",
         "line": 2120
       },
+      "owner": "runtime-state-owner",
+      "update_trigger_conditions": [
+        "Any change to close-phase transition ordering or termination conditions in advance_region_state.",
+        "Any change to finalizer progress barriers, quiescence checks, or pending-obligation close requirements."
+      ],
       "formal_labels": [
         "step.closeBegin",
         "step.closeCancelChildren",
@@ -403,6 +502,11 @@
         "file_path": "src/runtime/scheduler/three_lane.rs",
         "line": 1161
       },
+      "owner": "scheduler-owner",
+      "update_trigger_conditions": [
+        "Any change to cancel/timed/ready lane priority semantics, fairness yield policy, or deterministic tie-breaking.",
+        "Any change to scheduler dispatch/stuttering trace signatures or related conformance harness expectations."
+      ],
       "formal_labels": [
         "step.scheduleStep",
         "step.schedule",
@@ -453,6 +557,11 @@
         "file_path": "src/cx/scope.rs",
         "line": 1044
       },
+      "owner": "scope-combinator-owner",
+      "update_trigger_conditions": [
+        "Any change to race winner selection determinism, loser cancellation policy, or drain-before-return guarantee.",
+        "Any change to scope.race_all cancellation/finalization sequencing that impacts quiescence observability."
+      ],
       "formal_labels": [
         "step.cancelRequest",
         "step.cancelAcknowledge",
