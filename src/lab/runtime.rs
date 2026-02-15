@@ -1453,14 +1453,13 @@ impl LabRuntime {
                 // record. Must happen AFTER state finalization above because
                 // create_task wraps user futures to always return Outcome::Ok(())
                 // — the real severity comes from the cancel protocol state machine.
-                let final_severity = self
-                    .state
-                    .task(task_id)
-                    .map(|record| match &record.state {
-                        TaskState::Completed(outcome) => outcome.severity(),
-                        _ => crate::types::Severity::Ok,
-                    })
-                    .unwrap_or(crate::types::Severity::Ok);
+                let final_severity =
+                    self.state
+                        .task(task_id)
+                        .map_or(crate::types::Severity::Ok, |record| match &record.state {
+                            TaskState::Completed(outcome) => outcome.severity(),
+                            _ => crate::types::Severity::Ok,
+                        });
                 self.replay_recorder
                     .record_task_completed(task_id, final_severity);
 
