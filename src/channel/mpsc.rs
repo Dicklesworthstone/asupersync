@@ -1449,4 +1449,142 @@ mod tests {
         drop(permit);
         crate::test_complete!("send_permit_drop_on_poisoned_mutex_does_not_panic");
     }
+
+    // --- Audit tests (SapphireHill, 2026-02-15) ---
+
+    #[test]
+    fn send_evict_oldest_wakes_receiver() {
+        // Verify send_evict_oldest wakes a pending receiver.
+        init_test("send_evict_oldest_wakes_receiver");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>(2);
+
+        block_on(tx.send(&cx, 1)).expect("send 1");
+        block_on(tx.send(&cx, 2)).expect("send 2");
+
+        // Evict oldest and send new value.
+        let result = tx.send_evict_oldest(3);
+        let evicted_ok = matches!(result, Ok(Some(1)));
+        crate::assert_with_log!(evicted_ok, "evicted 1", true, evicted_ok);
+
+        // Receiver should get 2, then 3.
+        let v1 = block_on(rx.recv(&cx)).expect("recv 1");
+        let v2 = block_on(rx.recv(&cx)).expect("recv 2");
+        crate::assert_with_log!(v1 == 2, "first recv after evict", 2, v1);
+        crate::assert_with_log!(v2 == 3, "second recv after evict", 3, v2);
+        crate::test_complete!("send_evict_oldest_wakes_receiver");
+    }
+
+    #[test]
+    fn weak_sender_upgrade_increments_sender_count() {
+        // Verify upgrade correctly tracks sender_count.
+        init_test("weak_sender_upgrade_increments_sender_count");
+        let (tx, rx) = channel::<i32>(1);
+        let weak = tx.downgrade();
+
+        let tx2 = weak.upgrade().expect("upgrade while sender alive");
+        drop(tx);
+
+        // Channel should NOT be closed — tx2 is still alive.
+        let closed = rx.is_closed();
+        crate::assert_with_log!(!closed, "not closed", false, closed);
+
+        drop(tx2);
+        let closed = rx.is_closed();
+        crate::assert_with_log!(closed, "closed after all senders dropped", true, closed);
+        crate::test_complete!("weak_sender_upgrade_increments_sender_count");
+    }
+
+    #[test]
+    fn capacity_invariant_across_reserve_send_abort() {
+        // Verify used_slots never exceeds capacity through mixed operations.
+        init_test("capacity_invariant_across_reserve_send_abort");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>(3);
+
+        // Reserve 2 slots.
+        let p1 = block_on(tx.reserve(&cx)).expect("reserve 1");
+        let p2 = block_on(tx.reserve(&cx)).expect("reserve 2");
+
+        // Check: reserved=2, queue=0, used=2
+        {
+            let inner = tx.shared.inner.lock().expect("lock");
+            let used = inner.used_slots();
+            crate::assert_with_log!(used == 2, "used after 2 reserves", 2, used);
+        }
+
+        // Commit one, abort one.
+        p1.send(10);
+        p2.abort();
+
+        // Check: reserved=0, queue=1, used=1
+        {
+            let inner = tx.shared.inner.lock().expect("lock");
+            let used = inner.used_slots();
+            let reserved = inner.reserved;
+            crate::assert_with_log!(used == 1, "used after send+abort", 1, used);
+            crate::assert_with_log!(reserved == 0, "reserved cleared", 0, reserved);
+        }
+
+        let v = block_on(rx.recv(&cx)).expect("recv");
+        crate::assert_with_log!(v == 10, "received committed value", 10, v);
+        crate::test_complete!("capacity_invariant_across_reserve_send_abort");
+    }
+
+    #[test]
+    fn try_reserve_respects_fifo_over_capacity() {
+        // try_reserve must return Full when waiters exist, even if capacity
+        // is available (FIFO fairness).
+        init_test("try_reserve_respects_fifo_over_capacity");
+        let (tx, rx) = channel::<i32>(1);
+        let cx = test_cx();
+
+        // Fill the channel.
+        let _permit = block_on(tx.reserve(&cx)).expect("reserve fills channel");
+
+        // Create a pending reserve future (adds to send_wakers).
+        let mut reserve_fut = Box::pin(tx.reserve(&cx));
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+        let poll = reserve_fut.as_mut().poll(&mut cx_task);
+        assert!(matches!(poll, Poll::Pending));
+
+        // Free capacity by aborting the first permit.
+        _permit.abort();
+
+        // Now capacity exists, but a waiter is queued. try_reserve must
+        // refuse to jump the queue.
+        let try_result = tx.try_reserve();
+        crate::assert_with_log!(
+            matches!(try_result, Err(SendError::Full(()))),
+            "try_reserve respects FIFO",
+            "Err(Full)",
+            format!("{:?}", try_result)
+        );
+
+        // The queued waiter should succeed on next poll.
+        let poll2 = reserve_fut.as_mut().poll(&mut cx_task);
+        let ready = matches!(poll2, Poll::Ready(Ok(_)));
+        crate::assert_with_log!(ready, "waiter acquires", true, ready);
+
+        drop(reserve_fut);
+        drop(rx);
+        crate::test_complete!("try_reserve_respects_fifo_over_capacity");
+    }
+
+    #[test]
+    fn send_evict_oldest_disconnected_after_receiver_drop() {
+        init_test("send_evict_oldest_disconnected_after_receiver_drop");
+        let (tx, rx) = channel::<i32>(1);
+        drop(rx);
+
+        let result = tx.send_evict_oldest(42);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Disconnected(42))),
+            "evict after rx drop",
+            "Err(Disconnected(42))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("send_evict_oldest_disconnected_after_receiver_drop");
+    }
 }
