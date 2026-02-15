@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
+      - "release-*"
   pull_request:
     branches: [main]
 
@@ -109,30 +112,83 @@ jobs:
 
           failed_cmd="$(cat lean-smoke/failed_command.txt 2>/dev/null || echo "unknown")"
           frontier_file="formal/lean/coverage/lean_frontier_buckets_v1.json"
+          issues_file=".beads/issues.jsonl"
+          ttfr_target_minutes=30
 
           if [[ -f "$frontier_file" ]]; then
-            jq --arg failed_command "$failed_cmd" '{
+            jq \
+              --arg failed_command "$failed_cmd" \
+              --argjson ttfr_target_minutes "$ttfr_target_minutes" \
+              --slurpfile issues "$issues_file" '
+              def owners_for_bead($id):
+                [ $issues[] | select((.id == $id) or (.external_ref == $id))
+                  | (.assignee // .owner // .created_by // "unassigned")
+                ];
+              def owner_for_bead($id):
+                (owners_for_bead($id) | last) // "unassigned";
+              def routed_owners_for_bucket($bead_ids):
+                ($bead_ids // [])
+                | map(owner_for_bead(.))
+                | map(select(. != "unassigned"))
+                | unique
+                | sort;
+              def owner_candidates_for_bucket($bead_ids):
+                ($bead_ids // [])
+                | map({
+                    bead_id: .,
+                    owner: owner_for_bead(.)
+                  });
+              {
               profile: "smoke",
+              routing_policy: "bead-owner-v1",
+              ttfr_target_minutes: $ttfr_target_minutes,
               failed_command: $failed_command,
+              first_action_checklist: [
+                "Open lean-smoke/failure_payload.json and identify bucket_id + primary_owner",
+                "Run the failed command locally in the same commit to confirm repro",
+                "Route to primary_owner and linked_bead_ids with artifact path + repro command",
+                "If owner is unassigned, claim the top linked bead and post triage note"
+              ],
               source_frontier: .source_log,
               diagnostics_total: .diagnostics_total,
               errors_total: .errors_total,
               warnings_total: .warnings_total,
               buckets: [
-                .buckets[] | {
+                .buckets[] | . as $bucket | {
                   bucket_id,
                   failure_mode,
                   error_code,
                   count,
                   linked_gap_ids,
-                  linked_bead_ids
+                  linked_bead_ids,
+                  owner_candidates: owner_candidates_for_bucket($bucket.linked_bead_ids),
+                  routed_owners: routed_owners_for_bucket($bucket.linked_bead_ids),
+                  primary_owner: (
+                    (routed_owners_for_bucket($bucket.linked_bead_ids) | first)
+                    // "unassigned"
+                  ),
+                  first_action_checklist: [
+                    "Inspect linked_bead_ids and notify primary_owner",
+                    "Attach failed_command and frontier bucket in the owner handoff",
+                    "Escalate to failure_triage_bead if no response before ttfr_target_minutes"
+                  ]
                 }
               ]
             }' "$frontier_file" > lean-smoke/failure_payload.json
           else
-            jq -n --arg failed_command "$failed_cmd" '{
+            jq -n \
+              --arg failed_command "$failed_cmd" \
+              --argjson ttfr_target_minutes "$ttfr_target_minutes" \
+              '{
               profile: "smoke",
+              routing_policy: "bead-owner-v1",
+              ttfr_target_minutes: $ttfr_target_minutes,
               failed_command: $failed_command,
+              first_action_checklist: [
+                "Run failed command locally to verify repro",
+                "Generate formal/lean/coverage/lean_frontier_buckets_v1.json",
+                "Route manually to owning bead(s) based on failure mode"
+              ],
               error: "missing formal/lean/coverage/lean_frontier_buckets_v1.json"
             }' > lean-smoke/failure_payload.json
           fi
@@ -156,6 +212,198 @@ jobs:
         with:
           name: lean-smoke-artifacts
           path: lean-smoke/
+          retention-days: 30
+
+  lean-full:
+    name: Lean Full Gate (Main/Release)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lean-full-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Lean full profile commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lean-full
+
+          profile_file="formal/lean/coverage/ci_verification_profiles.json"
+          if [[ ! -f "$profile_file" ]]; then
+            echo "::error::Missing $profile_file"
+            exit 1
+          fi
+
+          mapfile -t full_commands < <(jq -r '.profiles[] | select(.name == "full") | .commands[]' "$profile_file")
+          if [[ "${#full_commands[@]}" -eq 0 ]]; then
+            echo "::error::Full profile has no commands"
+            exit 1
+          fi
+
+          printf '%s\n' "${full_commands[@]}" > lean-full/commands.txt
+
+          run_status="success"
+          : > lean-full/run.log
+
+          for cmd in "${full_commands[@]}"; do
+            echo ">>> $cmd" | tee -a lean-full/run.log
+            if ! bash -lc "$cmd" >> lean-full/run.log 2>&1; then
+              printf '%s\n' "$cmd" > lean-full/failed_command.txt
+              run_status="failure"
+              break
+            fi
+          done
+
+          printf '%s\n' "$run_status" > lean-full/status.txt
+          if [[ "$run_status" != "success" ]]; then
+            exit 1
+          fi
+
+      - name: Build Lean full repro bundle manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lean-full
+
+          profile_file="formal/lean/coverage/ci_verification_profiles.json"
+          failed_cmd="$(cat lean-full/failed_command.txt 2>/dev/null || echo "unknown")"
+          run_status="$(cat lean-full/status.txt 2>/dev/null || echo "unknown")"
+
+          mapfile -t full_artifacts < <(jq -r '.profiles[] | select(.name == "full") | .output_artifacts[]' "$profile_file")
+          : > lean-full/artifacts.jsonl
+          for artifact in "${full_artifacts[@]}"; do
+            if [[ -f "$artifact" ]]; then
+              sha256="$(sha256sum "$artifact" | awk '{print $1}')"
+              size_bytes="$(wc -c < "$artifact" | tr -d ' ')"
+              jq -cn \
+                --arg path "$artifact" \
+                --arg sha256 "$sha256" \
+                --argjson size_bytes "$size_bytes" \
+                '{path: $path, exists: true, sha256: $sha256, size_bytes: $size_bytes}' \
+                >> lean-full/artifacts.jsonl
+            else
+              jq -cn \
+                --arg path "$artifact" \
+                '{path: $path, exists: false, sha256: null, size_bytes: null}' \
+                >> lean-full/artifacts.jsonl
+            fi
+          done
+
+          jq -s '.' lean-full/artifacts.jsonl > lean-full/artifacts.json
+
+          {
+            echo "#!/usr/bin/env bash"
+            echo "set -euo pipefail"
+            while IFS= read -r cmd; do
+              [[ -n \"$cmd\" ]] || continue
+              printf '%s\n' \"$cmd\"
+            done < lean-full/commands.txt
+          } > lean-full/repro_commands.sh
+          chmod +x lean-full/repro_commands.sh
+
+          jq -n \
+            --arg schema_version "lean.full.repro.bundle.v1" \
+            --arg generated_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg profile "full" \
+            --arg status "$run_status" \
+            --arg failed_command "$failed_cmd" \
+            --arg profile_source "$profile_file" \
+            --arg repro_script "lean-full/repro_commands.sh" \
+            --arg workflow_name "${GITHUB_WORKFLOW}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg event_name "${GITHUB_EVENT_NAME}" \
+            --arg git_ref "${GITHUB_REF}" \
+            --arg git_commit "${GITHUB_SHA}" \
+            --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
+            --arg comparison_keys_json "$(jq -c '.profiles[] | select(.name == "full") | .comparison_keys' "$profile_file")" \
+            --argjson expected_runtime_seconds "$(jq '.profiles[] | select(.name == "full") | .expected_runtime_seconds' "$profile_file")" \
+            --argjson commands "$(jq -Rsc 'split(\"\\n\")[:-1]' lean-full/commands.txt)" \
+            --argjson artifacts "$(cat lean-full/artifacts.json)" \
+            '{
+              schema_version: $schema_version,
+              generated_at_utc: $generated_at_utc,
+              profile: $profile,
+              status: $status,
+              failed_command: (if $failed_command == "unknown" then null else $failed_command end),
+              profile_source: $profile_source,
+              repro_script: $repro_script,
+              ci_context: {
+                workflow: $workflow_name,
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                event_name: $event_name,
+                git_ref: $git_ref,
+                git_commit: $git_commit
+              },
+              ownership: ($ownership_json | fromjson),
+              comparison_keys: ($comparison_keys_json | fromjson),
+              expected_runtime_seconds: $expected_runtime_seconds,
+              commands: $commands,
+              artifacts: $artifacts
+            }' > lean-full/repro_bundle_manifest.json
+
+      - name: Emit full failure payload
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lean-full
+
+          profile_file="formal/lean/coverage/ci_verification_profiles.json"
+          failed_cmd="$(cat lean-full/failed_command.txt 2>/dev/null || echo "unknown")"
+
+          jq -n \
+            --arg profile "full" \
+            --arg failed_command "$failed_cmd" \
+            --arg repro_bundle_manifest "lean-full/repro_bundle_manifest.json" \
+            --arg repro_script "lean-full/repro_commands.sh" \
+            --arg routing_policy "bead-owner-v1" \
+            --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
+            --argjson ttfr_target_minutes 60 \
+            '{
+              profile: $profile,
+              routing_policy: $routing_policy,
+              ttfr_target_minutes: $ttfr_target_minutes,
+              failed_command: $failed_command,
+              repro_bundle_manifest: $repro_bundle_manifest,
+              repro_script: $repro_script,
+              ownership: ($ownership_json | fromjson),
+              first_action_checklist: [
+                "Download lean-full-artifacts and open lean-full/repro_bundle_manifest.json",
+                "Run lean-full/repro_commands.sh on the same commit to reproduce deterministically",
+                "Route to ownership.primary_bead and failure_triage_bead with manifest + failed command",
+                "Escalate to ownership.escalation_bead if TTFR exceeds ttfr_target_minutes"
+              ]
+            }' > lean-full/failure_payload.json
+
+          {
+            echo "## Lean Full Failure Payload"
+            echo
+            echo "- Failed command: \`$failed_cmd\`"
+            echo "- Repro bundle: \`lean-full/repro_bundle_manifest.json\`"
+            echo "- Repro script: \`lean-full/repro_commands.sh\`"
+            echo "- Failure payload: \`lean-full/failure_payload.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Lean full artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-full-artifacts
+          path: lean-full/
           retention-days: 30
 
   test:
