@@ -193,6 +193,263 @@
       "outcome": "Route held as model-first; Track-2 frontier buckets moved from 8 to 7 while keeping runtime mapping intact."
     }
   ],
+  "conformance_harness_contract": {
+    "contract_id": "lean.runtime_state_refinement_conformance.v1",
+    "artifact_schema_version": "1.0.0",
+    "determinism_requirements": {
+      "seed_source": "lab_config.seed",
+      "trace_normalization": "trace_fingerprint + canonicalized event tuples",
+      "clock_source": "virtual_time_only",
+      "forbidden_entropy_sources": [
+        "system_time",
+        "ambient_rng",
+        "unstable_iteration_order"
+      ]
+    },
+    "mismatch_payload_fields": [
+      "harness_id",
+      "scenario_id",
+      "first_divergence_index",
+      "expected_signature",
+      "observed_signature",
+      "counterexample_event_window",
+      "route_candidates",
+      "recommended_route"
+    ],
+    "repro_manifest_fields": [
+      "command",
+      "toolchain",
+      "seed",
+      "input_artifacts",
+      "output_artifacts",
+      "comparison_keys"
+    ],
+    "harnesses": [
+      {
+        "harness_id": "harness.cancellation_obligation",
+        "purpose": "Validate cancellation protocol and obligation-resolution behavior against mapped Step labels.",
+        "scenario_ids": [
+          "refinement.cancel_protocol_terminates",
+          "refinement.obligation_commit_lifecycle",
+          "refinement.semantics_spawn_cancel_close_obligation"
+        ],
+        "formal_expectations": [
+          "cancel_protocol_terminates",
+          "cancel_steps_testable_bound",
+          "commit_resolves_obligation",
+          "abort_resolves_obligation"
+        ],
+        "normalized_trace_artifact": "target/refinement-conformance/cancellation_obligation/normalized_trace.json",
+        "mismatch_payload_artifact": "target/refinement-conformance/cancellation_obligation/mismatch_payload.json",
+        "repro_manifest_artifact": "target/refinement-conformance/cancellation_obligation/repro_manifest.json",
+        "conformance_test_links": [
+          "tests/refinement_conformance.rs:194",
+          "tests/refinement_conformance.rs:410",
+          "tests/refinement_conformance.rs:487"
+        ]
+      },
+      {
+        "harness_id": "harness.race_loser_drain",
+        "purpose": "Validate race winner determinism plus loser-cancellation/drain completion before return.",
+        "scenario_ids": [
+          "refinement.trace_equivalence_schedule_noise",
+          "refinement.trace_equivalence_semantic_mismatch"
+        ],
+        "formal_expectations": [
+          "race_losers_drained",
+          "stuttering_preserves_wellformed"
+        ],
+        "normalized_trace_artifact": "target/refinement-conformance/race_loser_drain/normalized_trace.json",
+        "mismatch_payload_artifact": "target/refinement-conformance/race_loser_drain/mismatch_payload.json",
+        "repro_manifest_artifact": "target/refinement-conformance/race_loser_drain/repro_manifest.json",
+        "conformance_test_links": [
+          "tests/refinement_conformance.rs:652",
+          "tests/refinement_conformance.rs:702"
+        ]
+      }
+    ],
+    "ci_consumers": [
+      {
+        "profile": "frontier",
+        "required_harness_ids": [
+          "harness.cancellation_obligation",
+          "harness.race_loser_drain"
+        ],
+        "required_artifacts": [
+          "normalized_trace_artifact",
+          "mismatch_payload_artifact",
+          "repro_manifest_artifact"
+        ],
+        "triage_route_reference": "assumptions-or-harness-first"
+      },
+      {
+        "profile": "full",
+        "required_harness_ids": [
+          "harness.cancellation_obligation",
+          "harness.race_loser_drain"
+        ],
+        "required_artifacts": [
+          "normalized_trace_artifact",
+          "mismatch_payload_artifact",
+          "repro_manifest_artifact"
+        ],
+        "triage_route_reference": "code-first"
+      }
+    ]
+  },
+  "reporting_and_signoff_contract": {
+    "contract_id": "lean.refinement_conformance_reporting_signoff.v1",
+    "artifact_schema_version": "1.0.0",
+    "report_cadence": [
+      {
+        "cadence_id": "weekly",
+        "max_interval_days": 7,
+        "required_participants": [
+          "Conformance owner",
+          "Formal owner",
+          "Runtime owner"
+        ],
+        "governance_record_thread": "bd-3gnw9"
+      },
+      {
+        "cadence_id": "phase-exit",
+        "phase": "track-4-refinement-signoff",
+        "required_participants": [
+          "Conformance owner",
+          "Formal owner",
+          "Runtime owner",
+          "CI/governance owner"
+        ],
+        "governance_record_thread": "bd-3gnw9"
+      }
+    ],
+    "ownership_roles": {
+      "report_owner_role": "Conformance owner",
+      "signoff_approver_roles": [
+        "Formal owner",
+        "Runtime owner",
+        "CI/governance owner"
+      ],
+      "escalation_owner_role": "Track-5 governance owner"
+    },
+    "governance_links": [
+      "asupersync-38g6z",
+      "bd-3gnw9",
+      "formal/lean/coverage/ci_verification_profiles.json"
+    ],
+    "required_report_fields": [
+      "coverage_percent",
+      "mismatch_trend",
+      "unresolved_blockers",
+      "confidence_statement",
+      "generated_at",
+      "evidence_artifacts",
+      "required_tests",
+      "next_actions"
+    ],
+    "required_artifact_refs": [
+      "formal/lean/coverage/runtime_state_refinement_map.json",
+      "formal/lean/coverage/invariant_theorem_test_link_map.json",
+      "formal/lean/coverage/ci_verification_profiles.json",
+      "formal/lean/coverage/baseline_report_v1.json"
+    ],
+    "required_test_refs": [
+      "tests/refinement_conformance.rs",
+      "tests/runtime_state_refinement_map.rs"
+    ],
+    "signoff_checklist": [
+      {
+        "check_id": "check.coverage_report_complete",
+        "description": "Report contains coverage %, mismatch trend, unresolved blockers, and confidence statement.",
+        "required_artifacts": [
+          "formal/lean/coverage/runtime_state_refinement_map.json"
+        ],
+        "required_tests": [
+          "tests/runtime_state_refinement_map.rs"
+        ],
+        "pass_criteria": "All required_report_fields are present and machine-validated."
+      },
+      {
+        "check_id": "check.regression_conformance_green",
+        "description": "Deterministic conformance suites pass with mapped diagnostics.",
+        "required_artifacts": [
+          "target/refinement-conformance/cancellation_obligation/mismatch_payload.json",
+          "target/refinement-conformance/race_loser_drain/mismatch_payload.json"
+        ],
+        "required_tests": [
+          "tests/refinement_conformance.rs",
+          "tests/runtime_state_refinement_map.rs"
+        ],
+        "pass_criteria": "No untriaged mismatches; diagnostics include route candidates and recommended route."
+      },
+      {
+        "check_id": "check.governance_record_linked",
+        "description": "Sign-off decision is linked to governance review cadence and bead updates.",
+        "required_artifacts": [
+          "formal/lean/coverage/ci_verification_profiles.json"
+        ],
+        "required_tests": [
+          "tests/runtime_state_refinement_map.rs"
+        ],
+        "pass_criteria": "Governance thread references and ownership roles are present and non-empty."
+      }
+    ],
+    "latest_report": {
+      "report_id": "refinement-signoff-2026-02-15",
+      "generated_at": "2026-02-15T17:00:00Z",
+      "coverage_percent": {
+        "mapped_operations": 100.0,
+        "conformance_harnesses": 100.0,
+        "invariant_test_links": 100.0
+      },
+      "mismatch_trend": {
+        "window": "rolling-7d",
+        "new_mismatches": 0,
+        "resolved_mismatches": 1,
+        "trend": "improving"
+      },
+      "unresolved_blockers": [
+        {
+          "bead_id": "asupersync-ktf3v",
+          "title": "[LEAN-COVERAGE][T3] Build invariant witness bundle for all non-negotiable invariants",
+          "status": "open",
+          "owner_role": "Track-3 invariant owner",
+          "next_action": "Finalize invariant witness rows and dependent Track-6 assumption links."
+        }
+      ],
+      "confidence_statement": {
+        "level": "medium",
+        "rationale": "Track-4 executable conformance and reporting contracts are fully wired; confidence remains bounded by outstanding Track-3 invariant witness closure."
+      },
+      "evidence_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "formal/lean/coverage/invariant_theorem_test_link_map.json",
+        "formal/lean/coverage/ci_verification_profiles.json"
+      ],
+      "required_tests": [
+        "tests/refinement_conformance.rs",
+        "tests/runtime_state_refinement_map.rs"
+      ],
+      "next_actions": [
+        "Close Track-3 invariant witness blocker asupersync-ktf3v.",
+        "Run phase-exit sign-off after blocker closure and attach governance thread note."
+      ]
+    },
+    "track6_input_contract": {
+      "consumer_beads": [
+        "asupersync-2izu4",
+        "asupersync-3gf4i"
+      ],
+      "export_fields": [
+        "coverage_percent",
+        "mismatch_trend",
+        "unresolved_blockers",
+        "confidence_statement",
+        "next_actions"
+      ],
+      "handoff_rule": "Track-6 planning must consume latest_report and unresolved_blockers before closing reliability/performance impact beads."
+    }
+  },
   "mappings": [
     {
       "operation_id": "runtime_state.create_obligation",
