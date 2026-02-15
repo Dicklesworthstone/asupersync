@@ -2,7 +2,7 @@
   "schema_version": "raptorq-replay-catalog-v1",
   "owner_bead": "bd-26pqk",
   "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
-  "generated_at_utc": "2026-02-15T16:49:00Z",
+  "generated_at_utc": "2026-02-15T17:32:00Z",
   "catalog_notes": [
     "Stable replay identifiers must never be rotated or reused without migration notes.",
     "Each replay entry links at least one unit test and one deterministic E2E script.",
@@ -545,6 +545,186 @@
       ],
       "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
       "repro_cmd": "rch exec -- cargo test --lib send_symbols_directly -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-known-vector-small-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-KNOWN-VECTOR-SMALL",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "repair_hash_deterministic_for_known_vector",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::conformance::known_vector_small_block"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib known_vector_small_block -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-rfc-projection-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-RFC-PROJECTION",
+      "seed": 123,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "repair_symbol_matches_rfc_repair_equation_projection",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::conformance::repair_symbol_matches_rfc_equation_projection"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib repair_symbol_matches_rfc_equation_projection -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-known-vector-medium-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-KNOWN-VECTOR-MEDIUM",
+      "seed": 12345,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_success_matches_source_hash",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::conformance::known_vector_medium_block"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib known_vector_medium_block -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-determinism-proof-vector-v1",
+      "scenario_id": "RQ-U-DETERMINISM-PROOF-VECTOR",
+      "seed": 99,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "proof_content_hash_stable_across_replays",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::conformance::known_vector_proof_determinism"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib known_vector_proof_determinism -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-encoder-determinism-v1",
+      "scenario_id": "RQ-U-DETERMINISM-SEED",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "intermediate_and_repair_symbols_deterministic",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::conformance::known_vector_encoder_determinism"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib known_vector_encoder_determinism -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-property-roundtrip-v1",
+      "scenario_id": "RQ-U-HAPPY-SYSTEMATIC",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "property_roundtrip_succeeds_with_symbols_to_l",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::property_tests::property_roundtrip_known_good_params"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib property_roundtrip_known_good_params -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-property-overhead-v1",
+      "scenario_id": "RQ-U-HAPPY-REPAIR",
+      "seed": 42,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "property_roundtrip_with_overhead_succeeds",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::property_tests::property_roundtrip_with_overhead"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib property_roundtrip_with_overhead -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-property-symbol-sizes-v1",
+      "scenario_id": "RQ-U-SYSTEMATIC-PROPERTY-SIZES",
+      "seed": "set:[1,2,3,4]",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "intermediate_and_repair_symbols_match_declared_size",
+      "profile_tags": [
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::property_tests::property_encoder_symbol_sizes"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib property_encoder_symbol_sizes -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-property-seed-independent-v1",
+      "scenario_id": "RQ-U-DETERMINISM-SEED",
+      "seed": "compare:[111,222]",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "seed_independent_repair_output_for_same_source",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::property_tests::property_seed_independent_encoding"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib property_seed_independent_encoding -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-property-determinism-runs-v1",
+      "scenario_id": "RQ-U-DETERMINISM-SEED",
+      "seed": 77777,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "determinism_holds_across_repeated_runs",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::property_tests::property_determinism_across_runs"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib property_determinism_across_runs -- --nocapture"
     }
   ]
 }
