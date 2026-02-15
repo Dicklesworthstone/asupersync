@@ -1405,10 +1405,6 @@ impl LabRuntime {
                 self.state.remove_stored_future(task_id);
                 self.scheduler.lock().unwrap().forget_task(task_id);
 
-                // Record task completion with actual severity from the outcome
-                self.replay_recorder
-                    .record_task_completed(task_id, outcome.severity());
-
                 // Update state to Completed if not already terminal
                 if let Some(record) = self.state.task_mut(task_id) {
                     if !record.state.is_terminal() {
@@ -1452,6 +1448,21 @@ impl LabRuntime {
                         }
                     }
                 }
+
+                // Record task completion with severity from the finalized task
+                // record. Must happen AFTER state finalization above because
+                // create_task wraps user futures to always return Outcome::Ok(())
+                // — the real severity comes from the cancel protocol state machine.
+                let final_severity = self
+                    .state
+                    .task(task_id)
+                    .map(|record| match &record.state {
+                        TaskState::Completed(outcome) => outcome.severity(),
+                        _ => crate::types::Severity::Ok,
+                    })
+                    .unwrap_or(crate::types::Severity::Ok);
+                self.replay_recorder
+                    .record_task_completed(task_id, final_severity);
 
                 if let Some(monitor) = &mut self.deadline_monitor {
                     if let Some(record) = self.state.task(task_id) {
@@ -3692,10 +3703,16 @@ mod tests {
     // =========================================================================
 
     /// Regression test: replay recorder must capture the actual completion
-    /// severity, not always `Severity::Ok`.
+    /// severity from the finalized task record, not always `Severity::Ok`.
+    ///
+    /// `create_task` wraps futures to always return `Outcome::Ok(())` — the
+    /// real severity is determined by the cancel protocol state machine. This
+    /// test puts a task through the cancel protocol and verifies the replay
+    /// trace records the correct `Cancelled` severity.
     #[test]
     fn replay_records_correct_severity_for_cancelled_task() {
         init_test("replay_records_correct_severity_for_cancelled_task");
+        use crate::record::task::TaskState;
         use crate::trace::replay::ReplayEvent;
         use crate::types::{Budget, CancelReason};
 
@@ -3705,15 +3722,46 @@ mod tests {
         let mut runtime = LabRuntime::new(config);
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        // Create a task that returns Cancelled
+        // Create a task that yields once then completes with Ok.
+        // The yield allows us to cancel the task before it finishes.
         let (task_id, _) = runtime
             .state
             .create_task(root, Budget::INFINITE, async {
-                crate::types::Outcome::<(), ()>::Cancelled(CancelReason::default())
+                crate::runtime::yield_now::yield_now().await;
             })
             .expect("create task");
         runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+
+        // Step once: task yields (Pending)
+        runtime.step();
+
+        // Put the task through cancel protocol: CancelRequested → Cancelling
+        if let Some(record) = runtime.state.task_mut(task_id) {
+            record.request_cancel(CancelReason::user("test-cancel"));
+            let _ = record.acknowledge_cancel();
+            // Task is now in Cancelling state
+            assert!(
+                matches!(record.state, TaskState::Cancelling { .. }),
+                "task should be in Cancelling state"
+            );
+        }
+
+        // Reschedule and run to completion: the cancel protocol will
+        // complete it as Cancelled when the wrapped future returns Ok.
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
         runtime.run_until_quiescent();
+
+        // Verify the task completed as Cancelled
+        if let Some(record) = runtime.state.task(task_id) {
+            assert!(
+                matches!(
+                    record.state,
+                    TaskState::Completed(crate::types::Outcome::Cancelled(_))
+                ),
+                "task should be Completed(Cancelled), got {:?}",
+                record.state
+            );
+        }
 
         // Check the replay trace for the TaskCompleted event
         let replay = runtime
