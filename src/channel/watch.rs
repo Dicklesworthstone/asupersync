@@ -256,7 +256,7 @@ impl<T> Sender<T> {
         {
             let mut guard = self.inner.value.write().expect("watch lock poisoned");
             guard.0 = value;
-            guard.1 += 1;
+            guard.1 = guard.1.wrapping_add(1);
         }
 
         self.inner.wake_all_waiters();
@@ -289,7 +289,7 @@ impl<T> Sender<T> {
         {
             let mut guard = self.inner.value.write().expect("watch lock poisoned");
             f(&mut guard.0);
-            guard.1 += 1;
+            guard.1 = guard.1.wrapping_add(1);
         }
 
         self.inner.wake_all_waiters();
@@ -394,7 +394,7 @@ pub struct Receiver<T> {
 impl<T> Receiver<T> {
     /// Waits until a new value is available.
     ///
-    /// Returns a future that resolves when the channel's version exceeds
+    /// Returns a future that resolves when the channel's version differs from
     /// `seen_version`, then updates `seen_version` to the current version.
     ///
     /// # Cancel Safety
@@ -448,7 +448,7 @@ impl<T> Receiver<T> {
     /// Returns true if there's a new value since last seen.
     #[must_use]
     pub fn has_changed(&self) -> bool {
-        self.inner.current_version() > self.seen_version
+        self.inner.current_version() != self.seen_version
     }
 
     /// Returns true if the sender has been dropped.
@@ -487,7 +487,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
         // Check sender dropped
         if this.receiver.inner.is_sender_dropped() {
             let current = this.receiver.inner.current_version();
-            if current > this.receiver.seen_version {
+            if current != this.receiver.seen_version {
                 this.receiver.seen_version = current;
                 return Poll::Ready(Ok(()));
             }
@@ -497,7 +497,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 
         // Check version
         let current = this.receiver.inner.current_version();
-        if current > this.receiver.seen_version {
+        if current != this.receiver.seen_version {
             this.receiver.seen_version = current;
             this.cx.trace("watch::changed received update");
             return Poll::Ready(Ok(()));
@@ -541,7 +541,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 
         // Re-check after registration to close the race window
         let current = this.receiver.inner.current_version();
-        if current > this.receiver.seen_version {
+        if current != this.receiver.seen_version {
             this.receiver.seen_version = current;
             this.cx.trace("watch::changed received update");
             return Poll::Ready(Ok(()));
@@ -549,7 +549,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 
         if this.receiver.inner.is_sender_dropped() {
             let current = this.receiver.inner.current_version();
-            if current > this.receiver.seen_version {
+            if current != this.receiver.seen_version {
                 this.receiver.seen_version = current;
                 return Poll::Ready(Ok(()));
             }
@@ -899,6 +899,37 @@ mod tests {
         let version = rx.seen_version();
         crate::assert_with_log!(version == 0, "seen_version", 0, version);
         crate::test_complete!("version_tracking");
+    }
+
+    #[test]
+    fn version_wraparound_still_detects_changes() {
+        init_test("version_wraparound_still_detects_changes");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0_u8);
+
+        {
+            let mut guard = tx.inner.value.write().expect("watch lock poisoned");
+            guard.1 = u64::MAX - 1;
+        }
+        rx.seen_version = u64::MAX - 1;
+
+        tx.send(1).expect("send failed");
+        let changed = rx.has_changed();
+        crate::assert_with_log!(changed, "has_changed at u64::MAX", true, changed);
+        poll_ready(&mut rx.changed(&cx)).expect("changed at u64::MAX failed");
+        let first = *rx.borrow();
+        crate::assert_with_log!(first == 1, "value at u64::MAX", 1, first);
+
+        tx.send(2).expect("send failed");
+        let changed = rx.has_changed();
+        crate::assert_with_log!(changed, "has_changed after wrap", true, changed);
+        poll_ready(&mut rx.changed(&cx)).expect("changed after wrap failed");
+        let second = *rx.borrow();
+        crate::assert_with_log!(second == 2, "value after wrap", 2, second);
+
+        let seen = rx.seen_version();
+        crate::assert_with_log!(seen == 0, "seen_version wrapped", 0, seen);
+        crate::test_complete!("version_wraparound_still_detects_changes");
     }
 
     #[test]
