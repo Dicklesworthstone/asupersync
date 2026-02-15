@@ -60,9 +60,10 @@
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
-use polling::{Event as PollEvent, Poller};
+use polling::{Event as PollEvent, Events as PollEvents, Poller};
 use std::collections::HashMap;
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
@@ -98,7 +99,11 @@ pub struct EpollReactor {
     poller: Poller,
     /// Maps tokens to registration info for bookkeeping.
     registrations: Mutex<HashMap<Token, RegistrationInfo>>,
+    /// Reusable polling event buffer to avoid per-poll allocations.
+    poll_events: Mutex<PollEvents>,
 }
+
+const DEFAULT_POLL_EVENTS_CAPACITY: usize = 64;
 
 impl EpollReactor {
     /// Creates a new epoll-based reactor.
@@ -122,6 +127,9 @@ impl EpollReactor {
         Ok(Self {
             poller,
             registrations: Mutex::new(HashMap::new()),
+            poll_events: Mutex::new(PollEvents::with_capacity(
+                NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
+            )),
         })
     }
 
@@ -181,8 +189,11 @@ impl Reactor for EpollReactor {
         // The BorrowedFd is only used for the duration of this call.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
-        // Add to epoll via the polling crate
-        self.poller.add(&borrowed_fd, event)?;
+        // SAFETY: `borrowed_fd` remains valid for the duration of registration and
+        // is explicitly removed in `deregister`.
+        unsafe {
+            self.poller.add(&borrowed_fd, event)?;
+        }
 
         // Track the registration for modify/deregister
         regs.insert(token, RegistrationInfo { raw_fd, interest });
@@ -205,7 +216,7 @@ impl Reactor for EpollReactor {
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
 
         // Modify the epoll registration
-        self.poller.modify(&borrowed_fd, event)?;
+        self.poller.modify(borrowed_fd, event)?;
 
         // Update our bookkeeping
         info.interest = interest;
@@ -226,7 +237,7 @@ impl Reactor for EpollReactor {
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
 
         // Remove from epoll
-        self.poller.delete(&borrowed_fd)?;
+        self.poller.delete(borrowed_fd)?;
 
         Ok(())
     }
@@ -234,17 +245,22 @@ impl Reactor for EpollReactor {
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         events.clear();
 
-        // Allocate buffer for polling events (polling 2.x uses Vec<Event>)
-        let capacity = events.capacity().max(1);
-        let mut poll_events: Vec<PollEvent> = Vec::with_capacity(capacity);
+        let requested_capacity =
+            NonZeroUsize::new(events.capacity().max(1)).expect("capacity >= 1");
+        let mut poll_events = self.poll_events.lock();
+        if poll_events.capacity().get() < requested_capacity.get() {
+            *poll_events = PollEvents::with_capacity(requested_capacity);
+        } else {
+            poll_events.clear();
+        }
 
         self.poller.wait(&mut poll_events, timeout)?;
 
         // Convert polling events to our Event type
         let mut count = 0;
-        for poll_event in &poll_events {
+        for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
-            let interest = Self::poll_event_to_interest(poll_event);
+            let interest = Self::poll_event_to_interest(&poll_event);
             events.push(Event::new(token, interest));
             count += 1;
         }
