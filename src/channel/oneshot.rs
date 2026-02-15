@@ -1090,4 +1090,96 @@ mod tests {
 
         crate::test_complete!("recv_future_drop_clears_stale_waker");
     }
+
+    // --- Audit tests (SapphireHill, 2026-02-15) ---
+
+    #[test]
+    fn recv_returns_value_even_when_cancelled() {
+        // Value-ready takes priority over cancellation.
+        init_test("recv_returns_value_even_when_cancelled");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        tx.send(&cx, 77).unwrap();
+        cx.set_cancel_requested(true);
+
+        // Value is already available → should return Ok, not Cancelled.
+        let result = block_on(rx.recv(&cx));
+        let ok = matches!(result, Ok(77));
+        crate::assert_with_log!(ok, "value over cancel", true, ok);
+        crate::test_complete!("recv_returns_value_even_when_cancelled");
+    }
+
+    #[test]
+    fn is_closed_after_permit_abort() {
+        // After reserve + abort, is_closed should be true (no sender, no permit, no value).
+        init_test("is_closed_after_permit_abort");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let permit = tx.reserve(&cx);
+        // At this point: sender_consumed=true, permit_outstanding=true
+        let closed_during_permit = rx.is_closed();
+        crate::assert_with_log!(!closed_during_permit, "not closed during permit", false, closed_during_permit);
+
+        permit.abort();
+        // Now: sender_consumed=true, permit_outstanding=false, value=None → closed
+        let closed_after_abort = rx.is_closed();
+        crate::assert_with_log!(closed_after_abort, "closed after abort", true, closed_after_abort);
+        crate::test_complete!("is_closed_after_permit_abort");
+    }
+
+    #[test]
+    fn try_recv_returns_empty_while_permit_outstanding() {
+        // With permit outstanding but no value, try_recv should return Empty (not Closed).
+        init_test("try_recv_returns_empty_while_permit_outstanding");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let permit = tx.reserve(&cx);
+
+        let result = rx.try_recv();
+        let empty_ok = matches!(result, Err(TryRecvError::Empty));
+        crate::assert_with_log!(empty_ok, "empty while permit outstanding", true, empty_ok);
+
+        permit.send(42).unwrap();
+        let value = rx.try_recv().unwrap();
+        crate::assert_with_log!(value == 42, "value after send", 42, value);
+        crate::test_complete!("try_recv_returns_empty_while_permit_outstanding");
+    }
+
+    #[test]
+    fn sender_drop_wakes_pending_receiver() {
+        // Dropping the sender should wake a pending receiver.
+        init_test("sender_drop_wakes_pending_receiver");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let waker_state = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker_state2 = std::sync::Arc::clone(&waker_state);
+
+        struct CountWaker(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl std::task::Wake for CountWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let waker = Waker::from(std::sync::Arc::new(CountWaker(waker_state2)));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let poll = fut.as_mut().poll(&mut task_cx);
+        assert!(matches!(poll, Poll::Pending));
+
+        drop(tx); // Should wake the receiver.
+
+        let wakes = waker_state.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(wakes == 1, "woken once", 1usize, wakes);
+
+        let result = fut.as_mut().poll(&mut task_cx);
+        let closed_ok = matches!(result, Poll::Ready(Err(RecvError::Closed)));
+        crate::assert_with_log!(closed_ok, "closed after sender drop", true, closed_ok);
+        crate::test_complete!("sender_drop_wakes_pending_receiver");
+    }
 }
