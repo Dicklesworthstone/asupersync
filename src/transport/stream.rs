@@ -348,6 +348,18 @@ impl ChannelStream {
     }
 }
 
+impl Drop for ChannelStream {
+    fn drop(&mut self) {
+        let Some(waiter) = self.waiter.as_ref() else {
+            return;
+        };
+
+        waiter.store(false, Ordering::Release);
+        let mut wakers = self.shared.recv_wakers.lock().unwrap();
+        wakers.retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
+    }
+}
+
 impl SymbolStream for ChannelStream {
     fn poll_next(
         self: Pin<&mut Self>,
@@ -387,8 +399,8 @@ impl SymbolStream for ChannelStream {
         }
 
         // Only register waiter once to prevent unbounded queue growth.
-        // If the waker changes between polls, we accept the stale waker -
-        // another waiter will be woken instead, which is harmless.
+        // If the same waiter is still queued, refresh its waker to avoid
+        // stale wakeups after task context/executor migration.
         let mut new_waiter = None;
         let mut closed = false;
         {
@@ -405,7 +417,19 @@ impl SymbolStream for ChannelStream {
                             queued: Arc::clone(waiter),
                         });
                     }
-                    Some(_) => {} // Still queued, no need to re-register
+                    Some(waiter) => {
+                        if let Some(existing) = wakers
+                            .iter_mut()
+                            .find(|entry| Arc::ptr_eq(&entry.queued, waiter))
+                        {
+                            existing.waker.clone_from(cx.waker());
+                        } else {
+                            wakers.push(ChannelWaiter {
+                                waker: cx.waker().clone(),
+                                queued: Arc::clone(waiter),
+                            });
+                        }
+                    }
                     None => {
                         // First time waiting - create new waiter
                         let waiter = Arc::new(AtomicBool::new(true));
@@ -530,7 +554,7 @@ mod tests {
     use crate::transport::{channel, SymbolStreamExt};
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -554,6 +578,20 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWake))
+    }
+
+    struct FlagWake {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Wake for FlagWake {
+        fn wake(self: Arc<Self>) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn flagged_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(FlagWake { flag }))
     }
 
     struct PendingStream;
@@ -865,6 +903,86 @@ mod tests {
         crate::assert_with_log!(!queued_after, "waiter cleared", false, queued_after);
 
         crate::test_complete!("test_channel_stream_registers_waiter_and_receives");
+    }
+
+    #[test]
+    fn test_channel_stream_drop_removes_queued_waiter() {
+        init_test("test_channel_stream_drop_removes_queued_waiter");
+        let shared = Arc::new(SharedChannel::new(1));
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut stream = ChannelStream::new(Arc::clone(&shared));
+
+        let pending = Pin::new(&mut stream).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(pending, Poll::Pending),
+            "pending when queue empty",
+            true,
+            matches!(pending, Poll::Pending)
+        );
+        let queued_before = shared.recv_wakers.lock().unwrap().len();
+        crate::assert_with_log!(
+            queued_before == 1,
+            "one waiter registered",
+            1usize,
+            queued_before
+        );
+
+        drop(stream);
+
+        let queued_after = shared.recv_wakers.lock().unwrap().len();
+        crate::assert_with_log!(
+            queued_after == 0,
+            "queued waiter removed on drop",
+            0usize,
+            queued_after
+        );
+        crate::test_complete!("test_channel_stream_drop_removes_queued_waiter");
+    }
+
+    #[test]
+    fn test_channel_stream_refreshes_queued_waker_on_repoll() {
+        init_test("test_channel_stream_refreshes_queued_waker_on_repoll");
+        let (mut sink, mut stream) = channel(1);
+
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first_waker = flagged_waker(Arc::clone(&first_flag));
+        let second_waker = flagged_waker(Arc::clone(&second_flag));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut second_context = Context::from_waker(&second_waker);
+
+        let first_pending = Pin::new(&mut stream).poll_next(&mut first_context);
+        crate::assert_with_log!(
+            matches!(first_pending, Poll::Pending),
+            "first poll pending",
+            true,
+            matches!(first_pending, Poll::Pending)
+        );
+
+        let second_pending = Pin::new(&mut stream).poll_next(&mut second_context);
+        crate::assert_with_log!(
+            matches!(second_pending, Poll::Pending),
+            "second poll pending",
+            true,
+            matches!(second_pending, Poll::Pending)
+        );
+
+        let ready_waker = noop_waker();
+        let mut ready_context = Context::from_waker(&ready_waker);
+        let sent = Pin::new(&mut sink).poll_send(&mut ready_context, create_symbol(77));
+        crate::assert_with_log!(
+            matches!(sent, Poll::Ready(Ok(()))),
+            "send wakes waiting stream",
+            true,
+            matches!(sent, Poll::Ready(Ok(())))
+        );
+
+        let first_woke = first_flag.load(Ordering::Acquire);
+        let second_woke = second_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(!first_woke, "stale waker not used", false, first_woke);
+        crate::assert_with_log!(second_woke, "latest waker used", true, second_woke);
+        crate::test_complete!("test_channel_stream_refreshes_queued_waker_on_repoll");
     }
 
     #[test]

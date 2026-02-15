@@ -306,6 +306,18 @@ impl ChannelSink {
     }
 }
 
+impl Drop for ChannelSink {
+    fn drop(&mut self) {
+        let Some(waiter) = self.waiter.as_ref() else {
+            return;
+        };
+
+        waiter.store(false, Ordering::Release);
+        let mut wakers = self.shared.send_wakers.lock().unwrap();
+        wakers.retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
+    }
+}
+
 impl SymbolSink for ChannelSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
@@ -328,8 +340,8 @@ impl SymbolSink for ChannelSink {
             }
 
             // Only register waiter once to prevent unbounded queue growth.
-            // If the waker changes between polls, we accept the stale waker -
-            // another waiter will be woken instead, which is harmless.
+            // If the same waiter is still queued, refresh its waker to avoid
+            // stale wakeups after task context/executor migration.
             let mut new_waiter = None;
             let mut closed = false;
             {
@@ -346,7 +358,19 @@ impl SymbolSink for ChannelSink {
                                 queued: Arc::clone(waiter),
                             });
                         }
-                        Some(_) => {} // Still queued, no need to re-register
+                        Some(waiter) => {
+                            if let Some(existing) = wakers
+                                .iter_mut()
+                                .find(|entry| Arc::ptr_eq(&entry.queued, waiter))
+                            {
+                                existing.waker.clone_from(cx.waker());
+                            } else {
+                                wakers.push(ChannelWaiter {
+                                    waker: cx.waker().clone(),
+                                    queued: Arc::clone(waiter),
+                                });
+                            }
+                        }
                         None => {
                             // First time waiting - create new waiter
                             let waiter = Arc::new(AtomicBool::new(true));
@@ -476,10 +500,12 @@ mod tests {
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
     use crate::transport::channel;
+    use crate::transport::stream::SymbolStream;
     use crate::transport::stream::SymbolStreamExt;
+    use crate::transport::SharedChannel;
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Wake, Waker};
 
@@ -503,6 +529,20 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWake))
+    }
+
+    struct FlagWake {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Wake for FlagWake {
+        fn wake(self: Arc<Self>) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn flagged_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(FlagWake { flag }))
     }
 
     #[allow(clippy::struct_excessive_bools)]
@@ -844,6 +884,85 @@ mod tests {
         crate::assert_with_log!(!queued_after, "waiter cleared", false, queued_after);
 
         crate::test_complete!("test_channel_sink_pending_when_full_and_ready_after_recv");
+    }
+
+    #[test]
+    fn test_channel_sink_drop_removes_queued_waiter() {
+        init_test("test_channel_sink_drop_removes_queued_waiter");
+        let shared = Arc::new(SharedChannel::new(1));
+        {
+            let mut queue = shared.queue.lock().unwrap();
+            queue.push_back(create_symbol(1));
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut sink = ChannelSink::new(Arc::clone(&shared));
+        let pending = Pin::new(&mut sink).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(pending, Poll::Pending),
+            "ready pending when full",
+            true,
+            matches!(pending, Poll::Pending)
+        );
+        let queued_before = shared.send_wakers.lock().unwrap().len();
+        crate::assert_with_log!(
+            queued_before == 1,
+            "one waiter registered",
+            1usize,
+            queued_before
+        );
+
+        drop(sink);
+
+        let queued_after = shared.send_wakers.lock().unwrap().len();
+        crate::assert_with_log!(
+            queued_after == 0,
+            "queued waiter removed on drop",
+            0usize,
+            queued_after
+        );
+        crate::test_complete!("test_channel_sink_drop_removes_queued_waiter");
+    }
+
+    #[test]
+    fn test_channel_sink_refreshes_queued_waker_on_repoll() {
+        init_test("test_channel_sink_refreshes_queued_waker_on_repoll");
+        let (mut sink, mut stream) = channel(1);
+        let ready_waker = noop_waker();
+        let mut ready_context = Context::from_waker(&ready_waker);
+        let _ = Pin::new(&mut sink).poll_send(&mut ready_context, create_symbol(1));
+
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first_waker = flagged_waker(Arc::clone(&first_flag));
+        let second_waker = flagged_waker(Arc::clone(&second_flag));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut second_context = Context::from_waker(&second_waker);
+
+        let first_pending = Pin::new(&mut sink).poll_ready(&mut first_context);
+        crate::assert_with_log!(
+            matches!(first_pending, Poll::Pending),
+            "first poll pending",
+            true,
+            matches!(first_pending, Poll::Pending)
+        );
+
+        let second_pending = Pin::new(&mut sink).poll_ready(&mut second_context);
+        crate::assert_with_log!(
+            matches!(second_pending, Poll::Pending),
+            "second poll pending",
+            true,
+            matches!(second_pending, Poll::Pending)
+        );
+
+        let _ = SymbolStream::poll_next(Pin::new(&mut stream), &mut ready_context);
+
+        let first_woke = first_flag.load(Ordering::Acquire);
+        let second_woke = second_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(!first_woke, "stale waker not used", false, first_woke);
+        crate::assert_with_log!(second_woke, "latest waker used", true, second_woke);
+        crate::test_complete!("test_channel_sink_refreshes_queued_waker_on_repoll");
     }
 
     #[test]
