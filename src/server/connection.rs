@@ -40,12 +40,6 @@ pub struct ConnectionInfo {
     pub connected_at: Instant,
 }
 
-/// Internal state for the connection registry.
-struct RegistryState {
-    connections: HashMap<ConnectionId, ConnectionInfo>,
-    next_id: AtomicU64,
-}
-
 /// Tracks active connections and enforces capacity limits.
 ///
 /// The connection manager provides:
@@ -809,5 +803,64 @@ mod tests {
             handle.join().expect("thread panicked");
         });
         crate::test_complete!("drain_with_stats_timeout_force_close");
+    }
+
+    #[test]
+    fn concurrent_register_respects_capacity() {
+        init_test("concurrent_register_respects_capacity");
+        let signal = ShutdownSignal::new();
+        let manager = Arc::new(ConnectionManager::new(Some(5), signal));
+
+        let barrier = Arc::new(std::sync::Barrier::new(11));
+        let successes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let m = Arc::clone(&manager);
+            let b = Arc::clone(&barrier);
+            let s = Arc::clone(&successes);
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                if m.register(test_addr(9000 + i)).is_some() {
+                    s.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Hold the guard alive until thread exits
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }));
+        }
+
+        barrier.wait();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let total = successes.load(std::sync::atomic::Ordering::Relaxed);
+        crate::assert_with_log!(
+            total <= 5,
+            "capacity not exceeded",
+            "<=5",
+            total
+        );
+        crate::test_complete!("concurrent_register_respects_capacity");
+    }
+
+    #[test]
+    fn guard_drop_notifies_all_closed() {
+        init_test("guard_drop_notifies_all_closed");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(None, signal);
+
+        let guard = manager.register(test_addr(1)).expect("register");
+        let count_before = manager.active_count();
+        crate::assert_with_log!(count_before == 1, "one active", 1, count_before);
+
+        // Drop guard - this should remove from HashMap and notify
+        drop(guard);
+
+        let count_after = manager.active_count();
+        crate::assert_with_log!(count_after == 0, "none after drop", 0, count_after);
+        let empty = manager.is_empty();
+        crate::assert_with_log!(empty, "is empty", true, empty);
+        crate::test_complete!("guard_drop_notifies_all_closed");
     }
 }

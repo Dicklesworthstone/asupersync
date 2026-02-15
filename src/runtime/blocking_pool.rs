@@ -1403,6 +1403,44 @@ mod tests {
         );
     }
 
+    // ── Audit regression tests ──────────────────────────────────────
+
+    #[test]
+    fn spawn_thread_on_inner_rollback_on_overflow() {
+        // When active_threads == max_threads, spawn_thread_on_inner
+        // must be a no-op (no CAS increment, no OS thread spawned).
+        let inner = Arc::new(BlockingPoolInner {
+            min_threads: 0,
+            max_threads: 1,
+            active_threads: AtomicUsize::new(1),
+            busy_threads: AtomicUsize::new(0),
+            pending_count: AtomicUsize::new(0),
+            next_task_id: AtomicU64::new(1),
+            queue: SegQueue::new(),
+            shutdown: AtomicBool::new(false),
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+            idle_timeout: Duration::from_millis(10),
+            thread_name_prefix: "overflow".to_string(),
+            on_thread_start: None,
+            on_thread_stop: None,
+            thread_handles: Mutex::new(Vec::new()),
+        });
+
+        // Try to spawn when already at max
+        spawn_thread_on_inner(&inner);
+        assert_eq!(inner.active_threads.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.thread_handles.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn completion_wait_after_signal_returns_immediately() {
+        let comp = BlockingTaskCompletion::new();
+        comp.signal_done();
+        // Must return immediately, not block
+        assert!(comp.wait_timeout(Duration::from_millis(0)));
+    }
+
     #[test]
     fn shutdown_drains_pending_tasks() {
         let pool = BlockingPool::new(1, 1);
