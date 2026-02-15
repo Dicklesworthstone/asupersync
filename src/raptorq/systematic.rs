@@ -379,48 +379,58 @@ impl ConstraintMatrix {
         let mut pivot_col = vec![usize::MAX; self.rows];
         let mut used_col = vec![false; cols];
 
-        // Forward elimination with full pivoting (row + column).
+        // Forward elimination with minimum-degree row selection.
         //
-        // RFC 6330 Section 5.4 uses inactivation decoding which relies on
-        // careful row/column permutations. This implementation uses full
-        // pivoting: when the current row has no nonzero entry in an unused
-        // column, we search remaining rows and swap to find one.
-        for row in 0..self.rows.min(n) {
-            // Find an unused column with a nonzero entry in this row.
-            let mut pivot = None;
-            for col in 0..cols {
-                if !used_col[col] && !a[row * cols + col].is_zero() {
-                    pivot = Some((row, col));
-                    break;
+        // At each step, select the unprocessed row with the fewest nonzero
+        // entries in unused columns (minimum degree). This preferentially
+        // pivots on identity rows (degree 1), preventing them from losing
+        // their column to denser rows. This strategy is a simplified form
+        // of RFC 6330 Section 5.4's inactivation decoding heuristic.
+        let mut used_row = vec![false; self.rows];
+        for step in 0..self.rows.min(n) {
+            // Find unprocessed row with minimum degree in unused columns.
+            let mut best: Option<(usize, usize, usize)> = None; // (row, col, degree)
+            for r in 0..self.rows {
+                if used_row[r] {
+                    continue;
                 }
-            }
-
-            // If the current row is all zeros in unused columns, search
-            // remaining rows for any nonzero entry and swap.
-            if pivot.is_none() {
-                'outer: for swap_row in (row + 1)..self.rows {
-                    for col in 0..cols {
-                        if !used_col[col] && !a[swap_row * cols + col].is_zero() {
-                            // Swap rows in the matrix
-                            for c in 0..cols {
-                                let idx_a = row * cols + c;
-                                let idx_b = swap_row * cols + c;
-                                a.swap(idx_a, idx_b);
-                            }
-                            // Swap RHS
-                            b.swap(row, swap_row);
-                            // Swap any already-assigned pivot info
-                            pivot_col.swap(row, swap_row);
-                            pivot = Some((row, col));
-                            break 'outer;
+                let mut deg = 0usize;
+                let mut first_col = None;
+                for c in 0..cols {
+                    if !used_col[c] && !a[r * cols + c].is_zero() {
+                        if first_col.is_none() {
+                            first_col = Some(c);
+                        }
+                        deg += 1;
+                    }
+                }
+                if let Some(fc) = first_col {
+                    if best.is_none() || deg < best.unwrap().2 {
+                        best = Some((r, fc, deg));
+                        if deg == 1 {
+                            break; // Can't do better than degree 1
                         }
                     }
                 }
             }
 
-            let Some((_, col)) = pivot else {
-                continue; // genuinely zero row, skip
+            let Some((pivot_row, col, _)) = best else {
+                continue; // no more rows with nonzeros
             };
+            used_row[pivot_row] = true;
+
+            // Swap the chosen row into position `step` for clean output ordering.
+            if pivot_row != step {
+                for c in 0..cols {
+                    let idx_a = step * cols + c;
+                    let idx_b = pivot_row * cols + c;
+                    a.swap(idx_a, idx_b);
+                }
+                b.swap(step, pivot_row);
+                pivot_col.swap(step, pivot_row);
+                used_row.swap(step, pivot_row);
+            }
+            let row = step;
 
             used_col[col] = true;
             pivot_col[row] = col;
@@ -489,27 +499,25 @@ fn gf256_mul_slice_inplace(data: &mut [u8], c: Gf256) {
 /// RFC 6330 Section 5.3.3.3: LDPC pre-coding relationships.
 ///
 /// Two parts:
-/// 1. For i = 0..B-1: each source-like intermediate symbol C[i] participates
+/// 1. For i = 0..K'-1: each intermediate symbol C[i] participates
 ///    in 3 LDPC rows via a circulant pattern with step a = 1 + floor(i/S).
-/// 2. Identity block: row i has coefficient 1 in column B+i, tying
-///    each LDPC row to its check symbol C[B+i].
+/// 2. Identity block: row i has coefficient 1 in column K'+i, tying
+///    each LDPC row to its check symbol C[K'+i].
 ///
-/// This produces a block structure where LDPC rows span columns 0..W-1
-/// (non-PI symbols) but never touch PI columns, keeping the
-/// overall constraint matrix lower block-triangular with identity diagonal
-/// blocks (LT -> LDPC -> HDPC).
+/// Identity blocks are placed at non-overlapping column ranges:
+///   LT: 0..K'-1, LDPC: K'..K'+S-1, HDPC: K'+S..L-1
 fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
-    let b = params.b;
+    let k_prime = params.k_prime;
 
-    // Part 1: Circulant connections to source-like symbols.
-    // RFC 6330: For i = 0, ..., B-1
+    // Part 1: Circulant connections over all K' intermediate symbols.
+    // RFC 6330 Section 5.3.3.3: For i = 0, ..., K'-1
     //   a = 1 + floor(i/S)
-    //   b = i % S
-    //   D[b] = D[b] + C[i]; b = (b + a) % S
-    //   D[b] = D[b] + C[i]; b = (b + a) % S
-    //   D[b] = D[b] + C[i]
-    for i in 0..b {
+    //   b_val = i % S
+    //   D[b_val] = D[b_val] + C[i]; b_val = (b_val + a) % S
+    //   D[b_val] = D[b_val] + C[i]; b_val = (b_val + a) % S
+    //   D[b_val] = D[b_val] + C[i]
+    for i in 0..k_prime {
         let a = 1 + i / s.max(1);
         let mut row = i % s;
         matrix.add_assign(row, i, Gf256::ONE);
@@ -520,11 +528,11 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
     }
 
     // Part 2: LDPC check symbol identity block.
-    // RFC 6330: For i = 0, ..., S-1: A[i][B+i] = 1
-    // Each LDPC row i is tied to check symbol C[B+i].
-    let b = params.b;
+    // Each LDPC row i is tied to check symbol C[K'+i], placed at column K'+i
+    // so that identity blocks (LT: 0..K'-1, LDPC: K'..K'+S-1, HDPC: K'+S..L-1)
+    // are non-overlapping and cover all L columns.
     for i in 0..s {
-        matrix.set(i, b + i, Gf256::ONE);
+        matrix.set(i, k_prime + i, Gf256::ONE);
     }
 }
 
@@ -532,27 +540,29 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 ///
 /// RFC 6330 Section 5.3.3.3: HDPC pre-coding relationships.
 ///
-/// The HDPC constraint is: GAMMA x MT x C[0..W-1] + C[W..W+H-1] = 0
+/// The HDPC constraint is: GAMMA x MT x C[0..K'+S-1] + C[K'+S..L-1] = 0
 ///
 /// Where:
-/// - MT is an H x W matrix built from the RFC 6330 Rand function
+/// - MT is an H x (K'+S) matrix built from the RFC 6330 Rand function
 /// - GAMMA is an H x H lower-triangular matrix with GAMMA[i][j] = alpha^(i-j)
-/// - Each HDPC row r also has a 1 in column W+r (PI symbol identity block)
+/// - Each HDPC row r has a 1 in column K'+S+r (identity block)
 fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     use crate::raptorq::rfc6330::rand;
 
     let s = params.s;
     let h = params.h;
-    let w = params.w;
+    let k_prime = params.k_prime;
+    // MT covers all non-HDPC intermediate symbols: K'+S columns (RFC 6330 Section 5.3.3.3).
+    let ks = k_prime + s;
 
     if h == 0 {
         return;
     }
 
-    // Step 1: Build MT matrix (H x W) in a temporary buffer.
-    let mut mt = vec![Gf256::ZERO; h * w];
+    // Step 1: Build MT matrix (H x (K'+S)) in a temporary buffer.
+    let mut mt = vec![Gf256::ZERO; h * ks];
 
-    for j in 0..w.saturating_sub(1) {
+    for j in 0..ks.saturating_sub(1) {
         let rand1 = rand((j + 1) as u32, 6, h as u32) as usize;
         let rand2 = if h > 1 {
             rand((j + 1) as u32, 7, (h - 1) as u32) as usize
@@ -561,27 +571,27 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
         };
         let i2 = (rand1 + rand2 + 1) % h;
 
-        mt[rand1 * w + j] += Gf256::ONE;
+        mt[rand1 * ks + j] += Gf256::ONE;
         if i2 != rand1 {
-            mt[i2 * w + j] += Gf256::ONE;
+            mt[i2 * ks + j] += Gf256::ONE;
         }
     }
 
-    // Last column: MT[i, W-1] = alpha^i (Vandermonde column)
-    if w > 0 {
-        let last_col = w - 1;
+    // Last column: MT[i, K'+S-1] = alpha^i (Vandermonde column)
+    if ks > 0 {
+        let last_col = ks - 1;
         for i in 0..h {
-            mt[i * w + last_col] = Gf256::ALPHA.pow((i % 255) as u8);
+            mt[i * ks + last_col] = Gf256::ALPHA.pow((i % 255) as u8);
         }
     }
 
     // Step 2: Compute GAMMA x MT and write into the constraint matrix.
     // GAMMA[i][j] = alpha^(i-j) for j <= i, 0 otherwise (lower triangular).
     for r in 0..h {
-        for c in 0..w {
+        for c in 0..ks {
             let mut val = Gf256::ZERO;
             for t in 0..=r {
-                let mt_val = mt[t * w + c];
+                let mt_val = mt[t * ks + c];
                 if !mt_val.is_zero() {
                     let gamma_coeff = Gf256::ALPHA.pow(((r - t) % 255) as u8);
                     val += gamma_coeff * mt_val;
@@ -593,23 +603,27 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
         }
     }
 
-    // Step 3: PI symbol identity block -- column W+r for HDPC row r.
-    // In GF(2^8), -1 = 1, so the constraint GAMMA*MT*C + C_PI = 0
-    // means column W+r gets coefficient 1.
+    // Step 3: HDPC identity block at columns K'+S..L-1.
+    // Placed after the LT (0..K'-1) and LDPC (K'..K'+S-1) identity blocks
+    // so all three are non-overlapping, covering all L columns.
     for r in 0..h {
-        matrix.set(s + r, w + r, Gf256::ONE);
+        matrix.set(s + r, ks + r, Gf256::ONE);
     }
 }
 
 /// Build LT constraint rows for systematic symbols (rows S+H..S+H+K').
 ///
-/// For the systematic encoding, source symbol i corresponds to
-/// intermediate symbol i. Each LT row i has exactly a 1 in column i,
-/// ensuring that C[i] = source[i] after solving the constraint matrix.
+/// For systematic encoding, source symbol i maps directly to intermediate
+/// symbol i. Each LT row i has exactly a 1 in column i, creating an
+/// identity block. Combined with the LDPC and HDPC identity blocks,
+/// the column coverage is:
 ///
-/// Note: Redundancy comes from the LDPC and HDPC constraints, not from
-/// additional connections in the LT rows. Adding extra connections here
-/// would break the systematic property (intermediate[i] ≠ source[i]).
+///   LT identity:   columns 0..K'-1
+///   LDPC identity:  columns K'..K'+S-1
+///   HDPC identity:  columns K'+S..L-1
+///
+/// This ensures all L columns are covered by non-overlapping identity
+/// entries, making the matrix structurally full rank.
 fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
     let h = params.h;
@@ -617,9 +631,6 @@ fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed
 
     for i in 0..k_prime {
         let row = s + h + i;
-        // Systematic constraints over K' rows:
-        // - i < K: source symbol i maps directly to intermediate symbol i
-        // - i >= K: padded source symbols are constrained to zero via RHS
         matrix.set(row, i, Gf256::ONE);
     }
 }
