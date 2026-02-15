@@ -262,25 +262,29 @@ fn interaction_to_steps(interaction: &Interaction, participant: &str, steps: &mu
             forward,
             compensate,
         } => {
-            // Forward steps get Reserve semantics
+            // Collect forward-participant steps first.
             let forward_start = steps.len();
             interaction_to_steps(forward, participant, steps);
             let forward_end = steps.len();
 
-            // If this participant had forward steps, add compensation steps
-            if forward_end > forward_start {
-                // Mark the forward block with a reserve at the boundary
-                steps.push(SagaStep::new(
-                    SagaOpKind::Reserve,
-                    "compensation_boundary".to_string(),
-                ));
+            // Collect compensation-participant steps independently so participants
+            // that only appear in compensation are still represented.
+            let mut compensation_steps = Vec::new();
+            interaction_to_steps(compensate, participant, &mut compensation_steps);
 
-                // Compensation steps get Abort semantics
-                let comp_start = steps.len();
-                interaction_to_steps(compensate, participant, steps);
+            if !compensation_steps.is_empty() {
+                // Add reserve/abort boundary markers only when this participant
+                // has both forward work and compensation work.
+                if forward_end > forward_start {
+                    steps.push(SagaStep::new(
+                        SagaOpKind::Reserve,
+                        "compensation_boundary".to_string(),
+                    ));
+                }
 
-                // If compensation produced steps, add an abort marker
-                if steps.len() > comp_start {
+                steps.extend(compensation_steps);
+
+                if forward_end > forward_start {
                     steps.push(SagaStep::new(
                         SagaOpKind::Abort,
                         "compensation_abort".to_string(),
@@ -1055,6 +1059,59 @@ mod tests {
         assert!(
             has_reserve || has_abort,
             "compensation protocol should have reserve/abort boundary steps"
+        );
+    }
+
+    #[test]
+    fn compensate_keeps_compensation_only_participants_without_spurious_boundaries() {
+        let protocol = GlobalProtocol::builder("compensation_partial_roles")
+            .participant("coordinator", "saga-coordinator")
+            .participant("worker", "saga-worker")
+            .participant("undoer", "saga-undoer")
+            .interaction(Interaction::compensate(
+                Interaction::comm("coordinator", "reserve_work", "ReserveMsg", "worker"),
+                Interaction::comm("coordinator", "undo_work", "UndoMsg", "undoer"),
+            ))
+            .build();
+
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        let worker = &output.participants["worker"];
+        assert!(
+            worker
+                .saga_plan
+                .steps
+                .iter()
+                .any(|s| s.label == "recv_reserve_work"),
+            "forward-only participant should keep forward step"
+        );
+        assert!(
+            !worker
+                .saga_plan
+                .steps
+                .iter()
+                .any(|s| s.label == "compensation_boundary" || s.label == "compensation_abort"),
+            "forward-only participant should not get compensation boundary markers"
+        );
+
+        let undoer = &output.participants["undoer"];
+        assert!(
+            undoer
+                .saga_plan
+                .steps
+                .iter()
+                .any(|s| s.label == "recv_undo_work"),
+            "compensation-only participant should keep compensation step"
+        );
+        assert!(
+            !undoer
+                .saga_plan
+                .steps
+                .iter()
+                .any(|s| s.label == "compensation_boundary" || s.label == "compensation_abort"),
+            "compensation-only participant should not get compensation boundary markers"
         );
     }
 
