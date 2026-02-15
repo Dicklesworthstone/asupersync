@@ -142,12 +142,16 @@ impl PartitionController {
     /// This is a directed partition: `src` cannot reach `dst`, but
     /// `dst` can still reach `src` (unless a reverse partition exists).
     pub fn partition(&self, src: ActorId, dst: ActorId) {
-        let mut partitions = self.partitions.lock().expect("partition lock poisoned");
-        if partitions.insert((src.0, dst.0)) {
+        let created = {
+            let mut partitions = self.partitions.lock().expect("partition lock poisoned");
+            partitions.insert((src.0, dst.0))
+        };
+
+        if created {
             if let Ok(mut stats) = self.stats.lock() {
                 stats.partitions_created += 1;
             }
-            emit_partition_evidence(&self.evidence_sink, "partition_create", src, dst);
+            emit_partition_evidence(&self.evidence_sink, "create", src, dst);
         }
     }
 
@@ -161,12 +165,16 @@ impl PartitionController {
 
     /// Heal a directed partition from `src` to `dst`.
     pub fn heal(&self, src: ActorId, dst: ActorId) {
-        let mut partitions = self.partitions.lock().expect("partition lock poisoned");
-        if partitions.remove(&(src.0, dst.0)) {
+        let healed = {
+            let mut partitions = self.partitions.lock().expect("partition lock poisoned");
+            partitions.remove(&(src.0, dst.0))
+        };
+
+        if healed {
             if let Ok(mut stats) = self.stats.lock() {
                 stats.partitions_healed += 1;
             }
-            emit_partition_evidence(&self.evidence_sink, "partition_heal", src, dst);
+            emit_partition_evidence(&self.evidence_sink, "heal", src, dst);
         }
     }
 
@@ -477,9 +485,12 @@ mod tests {
         let entries = collector.entries();
         let drop_entries = entries
             .iter()
-            .filter(|e| e.action.contains("message_dropped"))
+            .filter(|e| e.action == "partition_message_dropped")
             .count();
         assert_eq!(drop_entries, 5);
+        assert!(!entries
+            .iter()
+            .any(|e| e.action.starts_with("partition_partition_")));
     }
 
     #[test]
@@ -505,8 +516,10 @@ mod tests {
         let entries = collector.entries();
         assert!(entries
             .iter()
-            .any(|e| e.action.contains("message_rejected")));
-        assert!(!entries.iter().any(|e| e.action.contains("message_dropped")));
+            .any(|e| e.action == "partition_message_rejected"));
+        assert!(!entries
+            .iter()
+            .any(|e| e.action == "partition_message_dropped"));
     }
 
     #[test]
@@ -622,7 +635,7 @@ mod tests {
         let entries = collector.entries();
         let heal_entries = entries
             .iter()
-            .filter(|e| e.action.contains("partition_heal"))
+            .filter(|e| e.action == "partition_heal")
             .count();
         assert_eq!(heal_entries, 4);
     }
@@ -638,15 +651,16 @@ mod tests {
 
         let entries = collector.entries();
         assert!(
-            entries
-                .iter()
-                .any(|e| e.action.contains("partition_create")),
+            entries.iter().any(|e| e.action == "partition_create"),
             "should log partition creation"
         );
         assert!(
-            entries.iter().any(|e| e.action.contains("partition_heal")),
+            entries.iter().any(|e| e.action == "partition_heal"),
             "should log partition heal"
         );
+        assert!(!entries
+            .iter()
+            .any(|e| e.action.starts_with("partition_partition_")));
         for entry in &entries {
             assert_eq!(entry.component, "channel_partition");
             assert!(entry.is_valid());
