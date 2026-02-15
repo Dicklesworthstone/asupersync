@@ -1047,12 +1047,12 @@ impl MultipathAggregator {
     pub fn flush(&self, now: Time) -> Vec<Symbol> {
         // Check flush interval
         {
-            let last = *self.last_flush.read().expect("lock poisoned");
+            let mut last = self.last_flush.write().expect("lock poisoned");
             let interval_nanos = self.config.flush_interval.as_nanos();
             if now.as_nanos().saturating_sub(last.as_nanos()) < interval_nanos {
                 return vec![];
             }
-            *self.last_flush.write().expect("lock poisoned") = now;
+            *last = now;
         }
 
         // Flush reorderer timeouts
