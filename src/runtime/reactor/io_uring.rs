@@ -158,23 +158,36 @@ mod imp {
         }
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
-            {
-                let mut regs = self.registrations.lock();
-                let info = regs.get_mut(&token).ok_or_else(|| {
+            let (raw_fd, old_interest) = {
+                let regs = self.registrations.lock();
+                let info = regs.get(&token).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotFound, "token not registered")
                 })?;
-                info.interest = interest;
-            }
+                (info.raw_fd, info.interest)
+            };
 
             // Best-effort remove existing poll, then re-add with new interest.
             let _ = self.submit_poll_remove(token);
-            let raw_fd = {
-                let regs = self.registrations.lock();
-                regs.get(&token).map(|info| info.raw_fd).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "token not registered")
-                })?
-            };
-            self.submit_poll_add(token, raw_fd, interest)
+            match self.submit_poll_add(token, raw_fd, interest) {
+                Ok(()) => {
+                    let mut regs = self.registrations.lock();
+                    let info = regs.get_mut(&token).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "token not registered")
+                    })?;
+                    info.interest = interest;
+                    Ok(())
+                }
+                Err(err) => {
+                    if interest != old_interest {
+                        let _ = self.submit_poll_add(token, raw_fd, old_interest);
+                    }
+                    if matches!(err.raw_os_error(), Some(libc::EBADF | libc::ENOENT)) {
+                        let mut regs = self.registrations.lock();
+                        regs.remove(&token);
+                    }
+                    Err(err)
+                }
+            }
         }
 
         fn deregister(&self, token: Token) -> io::Result<()> {
@@ -475,6 +488,39 @@ mod imp {
             let err = reactor
                 .deregister(Token::new(999))
                 .expect_err("unknown token should error");
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+
+        #[test]
+        fn test_modify_closed_fd_prunes_stale_registration() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let key = Token::new(505);
+            reactor
+                .register(&left, key, Interest::READABLE)
+                .expect("register should succeed");
+            assert_eq!(reactor.registration_count(), 1);
+
+            drop(left);
+            let err = reactor
+                .modify(key, Interest::WRITABLE)
+                .expect_err("modify should fail for closed fd");
+            assert!(matches!(
+                err.raw_os_error(),
+                Some(libc::EBADF | libc::ENOENT)
+            ));
+            assert_eq!(
+                reactor.registration_count(),
+                0,
+                "closed fd should be pruned from bookkeeping after failed modify"
+            );
+
+            let err = reactor
+                .deregister(key)
+                .expect_err("pruned registration should be absent");
             assert_eq!(err.kind(), io::ErrorKind::NotFound);
         }
     }
