@@ -29,8 +29,8 @@ use crate::trace::scoring::seed_fingerprint;
 use crate::trace::TraceBufferHandle;
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::trace::{TraceData, TraceEvent};
+use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
-use crate::types::{Severity, Time};
 use crate::util::{DetEntropy, DetRng};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -1592,7 +1592,7 @@ impl LabRuntime {
 
         if let Some(d) = delay {
             self.chaos_stats.record_delay(d);
-            self.advance_time(d.as_nanos() as u64);
+            self.advance_time(Self::duration_nanos_saturating(d));
         }
 
         if budget_exhaust {
@@ -1607,6 +1607,11 @@ impl LabRuntime {
         }
 
         skip_poll
+    }
+
+    #[inline]
+    fn duration_nanos_saturating(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
 
     /// Injects chaos after polling a task that returned Pending.
@@ -2332,6 +2337,24 @@ mod tests {
             now
         );
         crate::test_complete!("advance_time");
+    }
+
+    #[test]
+    fn duration_nanos_saturating_clamps_large_duration() {
+        init_test("duration_nanos_saturating_clamps_large_duration");
+        let huge = Duration::from_secs(u64::MAX);
+        let saturated = LabRuntime::duration_nanos_saturating(huge);
+        crate::assert_with_log!(
+            saturated == u64::MAX,
+            "huge duration saturates",
+            u64::MAX,
+            saturated
+        );
+
+        let small = Duration::from_nanos(123);
+        let exact = LabRuntime::duration_nanos_saturating(small);
+        crate::assert_with_log!(exact == 123, "small duration exact", 123u64, exact);
+        crate::test_complete!("duration_nanos_saturating_clamps_large_duration");
     }
 
     #[cfg(unix)]

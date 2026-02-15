@@ -1000,9 +1000,12 @@ impl<P: Policy> Scope<'_, P> {
             }
             Either::Right(()) => {
                 // Timeout fired. Spawn backup.
-                let h2 = self
-                    .spawn_registered(state, cx, backup)
-                    .map_err(|_| JoinError::Cancelled(CancelReason::resource_unavailable()))?;
+                let Ok(h2) = self.spawn_registered(state, cx, backup) else {
+                    // Backup admission failed after primary already started.
+                    // Request cancellation on primary to avoid orphaned work.
+                    h1.abort_with_reason(CancelReason::resource_unavailable());
+                    return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));
+                };
 
                 // Now race h1 and h2
                 // We reuse f1_pinned which is still pending.
@@ -1210,8 +1213,9 @@ impl<P: Policy> std::fmt::Debug for Scope<'_, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::RegionLimits;
     use crate::runtime::RuntimeState;
-    use crate::types::Outcome;
+    use crate::types::{CancelKind, Outcome};
     use crate::util::ArenaIndex;
     use futures_lite::future::block_on;
     use std::sync::{Arc, Mutex};
@@ -1608,6 +1612,58 @@ mod tests {
             Poll::Ready(Err(e)) => unreachable!("Task failed unexpectedly: {e}"),
             Poll::Pending => unreachable!("Join should be ready"),
         }
+    }
+
+    #[test]
+    fn hedge_backup_spawn_failure_aborts_primary() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let limits = RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::unlimited()
+        };
+        assert!(state.set_region_limits(region, limits));
+
+        let result = block_on(scope.hedge(
+            &mut state,
+            &cx,
+            std::time::Duration::ZERO,
+            |_| async { 1_u8 },
+            |_| async { 2_u8 },
+        ));
+
+        assert!(matches!(
+            result,
+            Err(JoinError::Cancelled(reason))
+                if reason.kind == CancelKind::ResourceUnavailable
+        ));
+
+        let task_id = *state
+            .region(region)
+            .expect("region missing")
+            .task_ids()
+            .first()
+            .expect("primary task should remain tracked");
+
+        let task = state.task(task_id).expect("primary task record missing");
+        let inner = task
+            .cx_inner
+            .as_ref()
+            .expect("primary task must have shared Cx inner")
+            .read()
+            .expect("lock poisoned");
+
+        assert!(
+            inner.cancel_requested,
+            "primary task must be cancellation-requested when backup spawn fails"
+        );
+        assert_eq!(
+            inner.cancel_reason.as_ref().map(|r| r.kind),
+            Some(CancelKind::ResourceUnavailable)
+        );
     }
 
     #[test]
