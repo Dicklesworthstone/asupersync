@@ -2,8 +2,8 @@
 //!
 //! [`Http1Client`] sends a single HTTP/1.1 request and reads the response.
 
-use crate::bytes::{BytesCursor, BytesMut};
-use crate::codec::{Encoder, Framed};
+use crate::bytes::{Buf, BytesCursor, BytesMut};
+use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
     parse_header_line, require_transfer_encoding_chunked, unique_header_value,
@@ -11,7 +11,6 @@ use crate::http::h1::codec::{
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
-use crate::stream::Stream;
 use std::fmt::Write;
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -453,27 +452,41 @@ impl Http1Client {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let codec = Http1ClientCodec::new();
-        let mut framed = Framed::new(io, codec);
+        // Reuse the method-aware streaming implementation so HEAD responses
+        // correctly ignore Content-Length/Transfer-Encoding bodies.
+        let mut streaming = Self::request_streaming(io, req).await?;
 
-        // Encode and buffer the request
-        framed.send(req)?;
+        let mut response = Response {
+            version: streaming.head.version,
+            status: streaming.head.status,
+            reason: streaming.head.reason,
+            headers: streaming.head.headers,
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
 
-        // IMPORTANT: `Framed::send` only buffers. We must flush before waiting on a response,
-        // otherwise the server may never receive the request (and we hang until timeout).
-        poll_fn(|cx| framed.poll_flush(cx))
-            .await
-            .map_err(HttpError::Io)?;
-
-        // Read response
-        match poll_fn(|cx| Pin::new(&mut framed).poll_next(cx)).await {
-            Some(Ok(resp)) => Ok(resp),
-            Some(Err(e)) => Err(e),
-            None => Err(HttpError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "connection closed before response",
-            ))),
+        while let Some(frame) = poll_fn(|cx| Pin::new(&mut streaming.body).poll_frame(cx)).await {
+            match frame? {
+                Frame::Data(mut buf) => {
+                    while buf.has_remaining() {
+                        let chunk = buf.chunk();
+                        response.body.extend_from_slice(chunk);
+                        buf.advance(chunk.len());
+                    }
+                }
+                Frame::Trailers(trailers) => {
+                    for (name, value) in trailers.iter() {
+                        let value = value.to_str().map_or_else(
+                            |_| String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                            std::borrow::ToOwned::to_owned,
+                        );
+                        response.trailers.push((name.as_str().to_string(), value));
+                    }
+                }
+            }
         }
+
+        Ok(response)
     }
 
     /// Send a request and return a streaming response body.
@@ -501,6 +514,7 @@ impl Http1Client {
 
         // Write request bytes.
         io.write_all(write_buf.as_ref()).await?;
+        io.flush().await?;
 
         // Read response head (status line + headers).
         let mut read_buf = BytesMut::with_capacity(8192);
@@ -1133,6 +1147,27 @@ mod tests {
 
         assert_eq!(data, b"hello");
         assert!(saw_trailers);
+    }
+
+    #[test]
+    fn request_head_response_ignores_content_length_body() {
+        let response_bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Head,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let resp = block_on(Http1Client::request(io, req)).expect("head response");
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.is_empty());
+        assert!(resp.trailers.is_empty());
     }
 
     #[test]
