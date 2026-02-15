@@ -2209,10 +2209,10 @@ mod tests {
         let mut decoder = Decoder::new();
         decoder.set_allowed_table_size(256);
         let mut src = buf.freeze();
-        let decoded = decoder.decode(&mut src).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].name, ":method");
-        assert_eq!(decoded[0].value, "GET");
+        let decoded_headers = decoder.decode(&mut src).unwrap();
+        assert_eq!(decoded_headers.len(), 1);
+        assert_eq!(decoded_headers[0].name, ":method");
+        assert_eq!(decoded_headers[0].value, "GET");
     }
 
     #[test]
