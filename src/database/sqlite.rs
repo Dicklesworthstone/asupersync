@@ -42,15 +42,16 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global blocking pool for SQLite operations.
-static SQLITE_POOL: OnceLock<BlockingPoolHandle> = OnceLock::new();
+///
+/// Keep the pool itself alive for the process lifetime. Storing only
+/// `BlockingPoolHandle` would drop the pool immediately and put the
+/// handle into permanent shutdown state.
+static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL
-        .get_or_init(|| {
-            let pool = BlockingPool::new(1, 4);
-            pool.handle()
-        })
-        .clone()
+        .get_or_init(|| BlockingPool::new(1, 4))
+        .handle()
 }
 
 /// Error type for SQLite operations.
@@ -793,9 +794,11 @@ impl rusqlite::ToSql for SqliteValue {
 mod tests {
     use super::*;
     use crate::cx::Cx;
+    use crate::types::Outcome;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use futures_lite::future::block_on;
 
     fn create_test_cx() -> Cx {
         Cx::new(
@@ -858,5 +861,45 @@ mod tests {
         assert_eq!(row.get_i64("id").unwrap(), 1);
         assert_eq!(row.get_str("name").unwrap(), "Alice");
         assert!(row.get("missing").is_err());
+    }
+
+    #[test]
+    fn test_open_in_memory_exec_query_round_trip() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(&cx, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            match conn
+                .execute(
+                    &cx,
+                    "INSERT INTO t(name) VALUES (?1)",
+                    &[SqliteValue::Text("alice".to_string())],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("insert failed: {other:?}"),
+            }
+
+            let rows = match conn.query(&cx, "SELECT name FROM t", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query failed: {other:?}"),
+            };
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get_str("name").unwrap(), "alice");
+        });
     }
 }
