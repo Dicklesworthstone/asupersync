@@ -223,9 +223,9 @@ where
             // Send any pending pongs (under lock)
             {
                 let shared = &mut *self.shared.lock();
+                shared.write_buf.clear();
                 while let Some(payload) = shared.pending_pongs.pop() {
                     let pong = Frame::pong(payload);
-                    shared.write_buf.clear();
                     let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
                     codec.encode(pong, write_buf)?;
                 }
@@ -377,21 +377,16 @@ where
     /// Internal: flush the write buffer.
     async fn flush_write_buf(&self) -> Result<(), WsError> {
         let data = {
-            let shared = self.shared.lock();
+            let mut shared = self.shared.lock();
             if shared.write_buf.is_empty() {
                 return Ok(());
             }
-            shared.write_buf.to_vec()
+            let data = shared.write_buf.to_vec();
+            shared.write_buf.clear();
+            data
         };
 
-        self.write_all(&data).await?;
-
-        {
-            let mut shared = self.shared.lock();
-            shared.write_buf.clear();
-        }
-
-        Ok(())
+        self.write_all(&data).await
     }
 
     /// Internal: write all bytes.
@@ -740,5 +735,118 @@ mod tests {
         // Just verify the message format is correct
         assert!(err_msg.contains("reunite"));
         assert!(err_msg.contains("mismatched"));
+    }
+
+    #[test]
+    fn flush_write_buf_clears_eagerly_for_cancel_safety() {
+        // Verifies that write_buf is cleared before writing, so a cancel
+        // during write_all won't leave stale data for the next flush.
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+
+            // Manually inject data into write_buf
+            {
+                let mut shared = read.shared.lock();
+                shared.write_buf.extend_from_slice(b"stale-pong-data");
+            }
+
+            // flush_write_buf should clear write_buf before writing
+            let result = read.flush_write_buf().await;
+            assert!(result.is_ok());
+
+            // write_buf must be empty after flush regardless of outcome
+            let shared = read.shared.lock();
+            assert!(
+                shared.write_buf.is_empty(),
+                "write_buf must be cleared eagerly, not after write completes"
+            );
+        });
+    }
+
+    #[test]
+    fn multiple_pong_payloads_all_encoded() {
+        // Verifies that when multiple pongs are pending, all are encoded
+        // (not just the last one).
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+
+            // Push multiple pong payloads
+            {
+                let mut shared = read.shared.lock();
+                shared.pending_pongs.push(Bytes::from_static(b"pong-a"));
+                shared.pending_pongs.push(Bytes::from_static(b"pong-b"));
+                shared.pending_pongs.push(Bytes::from_static(b"pong-c"));
+            }
+
+            // Encode pongs (same block as recv() does)
+            {
+                let shared = &mut *read.shared.lock();
+                shared.write_buf.clear();
+                while let Some(payload) = shared.pending_pongs.pop() {
+                    let pong = Frame::pong(payload);
+                    let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
+                    codec.encode(pong, write_buf).unwrap();
+                }
+            }
+
+            let shared = read.shared.lock();
+            // All three pong frames must be present in write_buf.
+            // Each pong frame has at least 2-byte header + payload, so minimum
+            // 8 + 8 + 8 = 24 bytes for 6-byte payloads.
+            assert!(
+                shared.write_buf.len() >= 24,
+                "write_buf must contain all three pong frames, got {} bytes",
+                shared.write_buf.len()
+            );
+        });
+    }
+
+    #[test]
+    fn reunite_mismatched_halves_returns_error() {
+        let ws1 = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let ws2 = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read1, _write1) = ws1.split();
+        let (_read2, write2) = ws2.split();
+
+        let result = read1.reunite(write2);
+        assert!(result.is_err(), "mismatched halves must fail reunite");
+    }
+
+    #[test]
+    fn reunite_matching_halves_succeeds() {
+        let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+        let (read, write) = ws.split();
+
+        let result = read.reunite(write);
+        assert!(result.is_ok(), "matching halves must reunite successfully");
+    }
+
+    #[test]
+    fn writer_permit_serializes_access() {
+        // Verifies that the write permit prevents concurrent access.
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+
+            // Acquire write permit
+            let permit = acquire_write_permit(&read.shared).await;
+
+            // Verify writer_active is true
+            assert!(
+                read.shared.lock().writer_active,
+                "writer_active must be true while permit is held"
+            );
+
+            // Drop permit
+            drop(permit);
+
+            // Verify writer_active is false
+            assert!(
+                !read.shared.lock().writer_active,
+                "writer_active must be false after permit is dropped"
+            );
+        });
     }
 }
