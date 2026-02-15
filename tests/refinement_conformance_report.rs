@@ -8,15 +8,21 @@ const REPORT_JSON: &str =
 const MAP_JSON: &str = include_str!("../formal/lean/coverage/runtime_state_refinement_map.json");
 
 fn object<'a>(value: &'a Value, ctx: &str) -> &'a serde_json::Map<String, Value> {
-    value.as_object().unwrap_or_else(|| panic!("{ctx} must be object"))
+    value
+        .as_object()
+        .unwrap_or_else(|| panic!("{ctx} must be object"))
 }
 
 fn as_array<'a>(value: &'a Value, ctx: &str) -> &'a [Value] {
-    value.as_array().unwrap_or_else(|| panic!("{ctx} must be array"))
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("{ctx} must be array"))
 }
 
 fn as_str<'a>(value: &'a Value, ctx: &str) -> &'a str {
-    value.as_str().unwrap_or_else(|| panic!("{ctx} must be string"))
+    value
+        .as_str()
+        .unwrap_or_else(|| panic!("{ctx} must be string"))
 }
 
 fn str_set(values: &[Value], ctx: &str) -> BTreeSet<String> {
@@ -61,7 +67,10 @@ fn refinement_report_has_required_shape_and_signal_fields() {
         "cadence_and_ownership",
         "track6_input",
     ] {
-        assert!(report_obj.contains_key(required), "missing report field {required}");
+        assert!(
+            report_obj.contains_key(required),
+            "missing report field {required}"
+        );
     }
 
     let coverage = object(
@@ -70,12 +79,19 @@ fn refinement_report_has_required_shape_and_signal_fields() {
             .expect("coverage_percent required"),
         "coverage_percent",
     );
-    for key in ["mapped_operations", "conformance_harnesses", "invariant_test_links"] {
+    for key in [
+        "mapped_operations",
+        "conformance_harnesses",
+        "invariant_test_links",
+    ] {
         let pct = coverage
             .get(key)
             .and_then(Value::as_f64)
             .unwrap_or_else(|| panic!("coverage_percent.{key} must be number"));
-        assert!((0.0..=100.0).contains(&pct), "coverage_percent.{key} out of range");
+        assert!(
+            (0.0..=100.0).contains(&pct),
+            "coverage_percent.{key} out of range"
+        );
     }
 
     let mismatch = object(
@@ -86,7 +102,10 @@ fn refinement_report_has_required_shape_and_signal_fields() {
     );
     assert!(
         matches!(
-            as_str(mismatch.get("trend").expect("mismatch trend required"), "mismatch_trend.trend"),
+            as_str(
+                mismatch.get("trend").expect("mismatch trend required"),
+                "mismatch_trend.trend"
+            ),
             "improving" | "flat" | "regressing"
         ),
         "mismatch_trend.trend must be known enum"
@@ -111,10 +130,9 @@ fn refinement_report_has_required_shape_and_signal_fields() {
 }
 
 #[test]
-fn refinement_report_is_consistent_with_runtime_state_contract() {
+fn report_includes_runtime_state_contract_required_fields() {
     let report: Value = serde_json::from_str(REPORT_JSON).expect("report JSON must parse");
     let map: Value = serde_json::from_str(MAP_JSON).expect("map JSON must parse");
-
     let report_obj = object(&report, "report");
     let map_contract = object(
         map.get("reporting_and_signoff_contract")
@@ -137,6 +155,18 @@ fn refinement_report_is_consistent_with_runtime_state_contract() {
             "report missing contract-required field {field}"
         );
     }
+}
+
+#[test]
+fn report_artifacts_match_runtime_state_contract() {
+    let report: Value = serde_json::from_str(REPORT_JSON).expect("report JSON must parse");
+    let map: Value = serde_json::from_str(MAP_JSON).expect("map JSON must parse");
+    let report_obj = object(&report, "report");
+    let map_contract = object(
+        map.get("reporting_and_signoff_contract")
+            .expect("reporting_and_signoff_contract required"),
+        "reporting_and_signoff_contract",
+    );
 
     let report_artifacts = str_set(
         as_array(
@@ -160,6 +190,18 @@ fn refinement_report_is_consistent_with_runtime_state_contract() {
         report_artifacts, contract_artifacts,
         "required_artifacts must match map contract"
     );
+}
+
+#[test]
+fn report_tests_and_signoff_ids_match_runtime_state_contract() {
+    let report: Value = serde_json::from_str(REPORT_JSON).expect("report JSON must parse");
+    let map: Value = serde_json::from_str(MAP_JSON).expect("map JSON must parse");
+    let report_obj = object(&report, "report");
+    let map_contract = object(
+        map.get("reporting_and_signoff_contract")
+            .expect("reporting_and_signoff_contract required"),
+        "reporting_and_signoff_contract",
+    );
 
     let report_tests = str_set(
         as_array(
@@ -179,7 +221,10 @@ fn refinement_report_is_consistent_with_runtime_state_contract() {
         ),
         "required_test_refs[]",
     );
-    assert_eq!(report_tests, contract_tests, "required_tests must match map contract");
+    assert_eq!(
+        report_tests, contract_tests,
+        "required_tests must match map contract"
+    );
 
     let report_check_ids = as_array(
         report_obj
@@ -190,12 +235,12 @@ fn refinement_report_is_consistent_with_runtime_state_contract() {
     .iter()
     .map(|item| {
         as_str(
-            item.get("check_id").expect("signoff checklist check_id required"),
+            item.get("check_id")
+                .expect("signoff checklist check_id required"),
             "signoff_checklist[].check_id",
         )
     })
     .collect::<BTreeSet<_>>();
-
     let contract_check_ids = as_array(
         map_contract
             .get("signoff_checklist")
@@ -211,10 +256,21 @@ fn refinement_report_is_consistent_with_runtime_state_contract() {
         )
     })
     .collect::<BTreeSet<_>>();
-
     assert_eq!(
         report_check_ids, contract_check_ids,
         "signoff checklist IDs must match runtime_state_refinement_map contract"
+    );
+}
+
+#[test]
+fn report_governance_links_match_runtime_state_contract() {
+    let report: Value = serde_json::from_str(REPORT_JSON).expect("report JSON must parse");
+    let map: Value = serde_json::from_str(MAP_JSON).expect("map JSON must parse");
+    let report_obj = object(&report, "report");
+    let map_contract = object(
+        map.get("reporting_and_signoff_contract")
+            .expect("reporting_and_signoff_contract required"),
+        "reporting_and_signoff_contract",
     );
 
     let cadence_and_ownership = object(
@@ -244,6 +300,18 @@ fn refinement_report_is_consistent_with_runtime_state_contract() {
     assert_eq!(
         governance_links, contract_governance_links,
         "governance links must match contract"
+    );
+}
+
+#[test]
+fn report_track6_export_fields_match_runtime_state_contract() {
+    let report: Value = serde_json::from_str(REPORT_JSON).expect("report JSON must parse");
+    let map: Value = serde_json::from_str(MAP_JSON).expect("map JSON must parse");
+    let report_obj = object(&report, "report");
+    let map_contract = object(
+        map.get("reporting_and_signoff_contract")
+            .expect("reporting_and_signoff_contract required"),
+        "reporting_and_signoff_contract",
     );
 
     let track6_report = object(

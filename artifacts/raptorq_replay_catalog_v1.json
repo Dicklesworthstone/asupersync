@@ -2,7 +2,7 @@
   "schema_version": "raptorq-replay-catalog-v1",
   "owner_bead": "bd-26pqk",
   "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
-  "generated_at_utc": "2026-02-15T17:32:00Z",
+  "generated_at_utc": "2026-02-15T17:50:00Z",
   "catalog_notes": [
     "Stable replay identifiers must never be rotated or reused without migration notes.",
     "Each replay entry links at least one unit test and one deterministic E2E script.",
@@ -725,6 +725,78 @@
       ],
       "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
       "repro_cmd": "rch exec -- cargo test --lib property_determinism_across_runs -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-property-drops-v1",
+      "scenario_id": "RQ-U-ADVERSARIAL-LOSS",
+      "seed": "range:1000-1009",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "decode_matches_source_when_drop_pattern_is_solvable",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::property_tests::property_roundtrip_with_drops"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib property_roundtrip_with_drops -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-fuzz-varied-v1",
+      "scenario_id": "RQ-U-ADVERSARIAL-LOSS",
+      "seed": "set:[1,2,3,4,5,6,7,8,9,10]",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "varied_fuzz_matrix_meets_success_and_acceptable_failure_bounds",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::fuzz::fuzz_varied_parameters"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib fuzz_varied_parameters -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-fuzz-encoder-determinism-v1",
+      "scenario_id": "RQ-U-DETERMINISM-SEED",
+      "seed": "range:0-19",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "fuzz_encoder_outputs_are_deterministic_per_seed",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::fuzz::fuzz_encoder_determinism"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib fuzz_encoder_determinism -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-systematic-fuzz-seed-sweep-v1",
+      "scenario_id": "RQ-U-SEED-SWEEP-STRUCTURED",
+      "seed": "range:10000-10099",
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "seed_sweep_meets_minimum_success_threshold",
+      "profile_tags": [
+        "forensics"
+      ],
+      "unit_tests": [
+        "src/raptorq/tests.rs::fuzz::fuzz_seed_sweep"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib fuzz_seed_sweep -- --nocapture"
     }
   ]
 }

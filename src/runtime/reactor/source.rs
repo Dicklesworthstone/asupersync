@@ -33,9 +33,26 @@ static SOURCE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// Each call returns a monotonically increasing value, starting from 1.
 /// This is useful for debugging and tracing I/O operations.
+///
+/// # Panics
+///
+/// Panics if the source ID counter overflows.
 #[must_use]
 pub fn next_source_id() -> u64 {
-    SOURCE_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    next_source_id_from(&SOURCE_ID_COUNTER)
+}
+
+fn next_source_id_from(counter: &AtomicU64) -> u64 {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        let next = current.checked_add(1).expect("source ID counter overflow");
+        if counter
+            .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
 }
 
 // Unix implementation
@@ -274,6 +291,14 @@ mod tests {
         crate::assert_with_log!(id1 < id2, "id1 < id2", true, id1 < id2);
         crate::assert_with_log!(id2 < id3, "id2 < id3", true, id2 < id3);
         crate::test_complete!("source_id_generates_unique_ids");
+    }
+
+    #[test]
+    #[should_panic(expected = "source ID counter overflow")]
+    fn source_id_overflow_panics() {
+        init_test("source_id_overflow_panics");
+        let counter = AtomicU64::new(u64::MAX);
+        let _ = next_source_id_from(&counter);
     }
 
     #[cfg(unix)]

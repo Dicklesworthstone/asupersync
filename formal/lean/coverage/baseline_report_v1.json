@@ -10,7 +10,7 @@
     "invariant_theorem_test_link_map": "18eb87e32c05041d26b5d6039c6e81a749d49b7b6bec1be608a4217ed402ef3f",
     "gap_risk_sequencing_plan": "f80eaef4a7d959d2e5c31d82cd3f5648c9c78340d8fa8c1f745cd0fc423a3b01",
     "ci_verification_profiles": "edc7029e1cfedee2ef8e2d6edea0ab6dd39472e1c1457e38d2be5e8f9398eff5",
-    "lean_frontier_buckets": "5d76eba5bbc38c3c8824ddbd0166a2c516ff77d8f9d43bd47bbd6f365f1ee082",
+    "lean_frontier_buckets": "ef22ceb4dc4c6b6934cb12a5d200cafa314e5449707ba507ac12f34f0ddaa529",
     "lean_coverage_matrix_schema": "f1eea982a084ed96199bead1627c776b939b5dda4f676b851107e3848ba7b5eb",
     "lean_coverage_matrix_sample": "5ef5d2f0f1867a535e76320ed2e1bbc131421c05ced2bcee3605f44fd1a0c6c8"
   },
@@ -64,11 +64,11 @@
       ]
     },
     "frontier_buckets": {
-      "diagnostics_total": 86,
-      "errors_total": 32,
+      "diagnostics_total": 54,
+      "errors_total": 0,
       "warnings_total": 54,
-      "bucket_count": 7,
-      "largest_bucket": "proof-shape.type-mismatch"
+      "bucket_count": 0,
+      "largest_bucket": null
     }
   },
   "track2_frontier_burndown_dashboard": {
@@ -84,14 +84,31 @@
     "runs": [
       {
         "run_index": 1,
-        "run_id": "track2.frontier.baseline.2026-02-15",
-        "source_log": "target/lean-e2e/bd-cspxm_lake_build.log",
+        "run_id": "track2.frontier.stability.2026-02-15.run1",
+        "source_log": "formal/lean/coverage/bd-366fd_lake_build.log",
+        "toolchain_key": "lean4+rust-nightly-2026-02-05",
+        "frontier_artifact": "formal/lean/coverage/bd-366fd_frontier_run1.json",
+        "diagnostics_total": 54,
+        "errors_total": 0,
+        "warnings_total": 54,
+        "bucket_count": 0,
+        "delta_vs_previous": {
+          "diagnostics_total": 0,
+          "errors_total": 0,
+          "warnings_total": 0,
+          "bucket_count": 0
+        }
+      },
+      {
+        "run_index": 2,
+        "run_id": "track2.frontier.stability.2026-02-15.run2",
+        "source_log": "formal/lean/coverage/bd-200ok_lake_build.log",
         "toolchain_key": "lean4+rust-nightly-2026-02-05",
         "frontier_artifact": "formal/lean/coverage/lean_frontier_buckets_v1.json",
-        "diagnostics_total": 86,
-        "errors_total": 32,
+        "diagnostics_total": 54,
+        "errors_total": 0,
         "warnings_total": 54,
-        "bucket_count": 7,
+        "bucket_count": 0,
         "delta_vs_previous": {
           "diagnostics_total": 0,
           "errors_total": 0,
@@ -100,71 +117,14 @@
         }
       }
     ],
-    "bucket_trends": [
-      {
-        "bucket_id": "proof-shape.application-type-mismatch",
-        "failure_mode": "proof-shape",
-        "error_code": "application-type-mismatch",
-        "current_count": 1,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      },
-      {
-        "bucket_id": "proof-shape.omega-goal-not-proved",
-        "failure_mode": "proof-shape",
-        "error_code": "omega-goal-not-proved",
-        "current_count": 1,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      },
-      {
-        "bucket_id": "proof-shape.other",
-        "failure_mode": "proof-shape",
-        "error_code": "other",
-        "current_count": 1,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      },
-      {
-        "bucket_id": "proof-shape.rewrite-failed",
-        "failure_mode": "proof-shape",
-        "error_code": "rewrite-failed",
-        "current_count": 3,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      },
-      {
-        "bucket_id": "proof-shape.subst-failed",
-        "failure_mode": "proof-shape",
-        "error_code": "subst-failed",
-        "current_count": 9,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      },
-      {
-        "bucket_id": "proof-shape.type-mismatch",
-        "failure_mode": "proof-shape",
-        "error_code": "type-mismatch",
-        "current_count": 14,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      },
-      {
-        "bucket_id": "proof-shape.unsolved-goals",
-        "failure_mode": "proof-shape",
-        "error_code": "unsolved-goals",
-        "current_count": 3,
-        "delta_from_previous": 0,
-        "trend": "baseline"
-      }
-    ]
+    "bucket_trends": []
   },
   "track2_closure_gate": {
     "policy_version": "1.0.0",
     "policy_id": "lean.track2.closure_gate.v1",
     "decision_owner_bead": "bd-5wwbm",
     "track2_parent_bead": "bd-k6fj1",
-    "status": "not-satisfied",
+    "status": "satisfied",
     "blocking_classes_must_be_zero": [
       "declaration-order.unknown-identifier",
       "declaration-order.helper-availability",

@@ -34,6 +34,11 @@
     "formal/lean/coverage/ci_verification_profiles.json",
     "formal/lean/coverage/baseline_report_v1.json"
   ],
+  "evidence_artifacts": [
+    "formal/lean/coverage/runtime_state_refinement_map.json",
+    "formal/lean/coverage/invariant_theorem_test_link_map.json",
+    "formal/lean/coverage/ci_verification_profiles.json"
+  ],
   "required_tests": [
     "tests/refinement_conformance.rs",
     "tests/runtime_state_refinement_map.rs"

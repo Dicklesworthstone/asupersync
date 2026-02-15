@@ -258,6 +258,9 @@ mod imp {
                     let _ = ring.submit();
                     continue;
                 }
+                if user_data == REMOVE_USER_DATA {
+                    continue;
+                }
 
                 let key = Token::new(user_data as usize);
                 let interest = if res >= 0 {
@@ -528,6 +531,26 @@ mod imp {
                 .deregister(key)
                 .expect_err("pruned registration should be absent");
             assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        }
+
+        #[test]
+        fn test_poll_ignores_internal_poll_remove_completions() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            reactor
+                .submit_poll_remove(Token::new(9090))
+                .expect("poll remove submission should succeed");
+
+            let mut events = Events::with_capacity(4);
+            reactor
+                .poll(&mut events, Some(Duration::ZERO))
+                .expect("poll should succeed");
+            assert!(
+                events.is_empty(),
+                "internal poll-remove completion must not surface as a user event"
+            );
         }
     }
 }

@@ -943,6 +943,7 @@ mod property_tests {
         let k = 16;
         let symbol_size = 48;
         let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-property-drops-v1";
 
         let source = make_source_data(k, symbol_size, seed);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -968,6 +969,13 @@ mod property_tests {
 
         // Run multiple drop patterns with deterministic RNG
         for drop_seed in 0..10u64 {
+            let effective_seed = drop_seed + 1000;
+            let context = failure_context(
+                "RQ-U-ADVERSARIAL-LOSS",
+                effective_seed,
+                &format!("k={k},symbol_size={symbol_size},truncate_to_l=true"),
+                replay_ref,
+            );
             let mut rng = DetRng::new(drop_seed + 1000);
 
             // Randomly drop symbols but keep at least L
@@ -1004,13 +1012,13 @@ mod property_tests {
                 Ok(decoded_result) => {
                     assert_eq!(
                         decoded_result.source, source,
-                        "decoded source must match for drop_seed={drop_seed}"
+                        "{context} decoded source must match for drop_seed={drop_seed}"
                     );
                 }
                 Err(e) => {
                     // Some drop patterns may create singular matrices - that's acceptable
                     // as long as we don't panic
-                    let _ = e;
+                    let _ = (e, &context);
                 }
             }
         }
@@ -1108,8 +1116,20 @@ mod fuzz {
         drop_percent: usize,
     }
 
+    fn failure_context(config: &FuzzConfig, scenario_id: &str, replay_ref: &str) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={} parameter_set=k={},symbol_size={},overhead_percent={},drop_percent={} replay_ref={replay_ref}",
+            config.seed, config.k, config.symbol_size, config.overhead_percent, config.drop_percent
+        )
+    }
+
     /// Run a single fuzz iteration.
-    fn run_fuzz_iteration(config: &FuzzConfig) -> Result<(), String> {
+    fn run_fuzz_iteration(
+        config: &FuzzConfig,
+        scenario_id: &str,
+        replay_ref: &str,
+    ) -> Result<(), String> {
+        let context = failure_context(config, scenario_id, replay_ref);
         let FuzzConfig {
             k,
             symbol_size,
@@ -1125,7 +1145,7 @@ mod fuzz {
             .collect();
 
         let Some(encoder) = SystematicEncoder::new(&source, symbol_size, seed) else {
-            return Err("encoder creation failed".to_string());
+            return Err(format!("{context} encoder creation failed"));
         };
 
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -1179,7 +1199,7 @@ mod fuzz {
             Ok(result) => {
                 if result.source != source {
                     return Err(format!(
-                        "decoded source mismatch: got {} symbols, expected {}",
+                        "{context} decoded source mismatch: got {} symbols, expected {}",
                         result.source.len(),
                         source.len()
                     ));
@@ -1189,7 +1209,7 @@ mod fuzz {
             Err(e) => {
                 // Some configurations may legitimately fail (singular matrix)
                 // This is not a bug, just a limitation of the received symbol set
-                Err(format!("decode error (may be acceptable): {e:?}"))
+                Err(format!("{context} decode error (may be acceptable): {e:?}"))
             }
         }
     }
@@ -1197,6 +1217,7 @@ mod fuzz {
     /// Deterministic fuzz with varied parameters.
     #[test]
     fn fuzz_varied_parameters() {
+        let replay_ref = "replay:rq-u-systematic-fuzz-varied-v1";
         let mut successes = 0;
         let mut acceptable_failures = 0;
 
@@ -1279,7 +1300,7 @@ mod fuzz {
         ];
 
         for config in &configs {
-            match run_fuzz_iteration(config) {
+            match run_fuzz_iteration(config, "RQ-U-ADVERSARIAL-LOSS", replay_ref) {
                 Ok(()) => successes += 1,
                 Err(e) => {
                     if e.contains("acceptable") {
@@ -1305,25 +1326,31 @@ mod fuzz {
     /// Fuzz encoder determinism (works without decoder).
     #[test]
     fn fuzz_encoder_determinism() {
+        let replay_ref = "replay:rq-u-systematic-fuzz-encoder-determinism-v1";
         // Test that same inputs always produce same outputs
         for seed in 0..20u64 {
             let k = 8 + (seed % 8) as usize;
             let symbol_size = 16 + (seed % 32) as usize;
+            let context = format!(
+                "scenario_id=RQ-U-DETERMINISM-SEED seed={seed} parameter_set=k={k},symbol_size={symbol_size},esi_range=[0,9] replay_ref={replay_ref}"
+            );
 
             let mut rng = DetRng::new(seed);
             let source: Vec<Vec<u8>> = (0..k)
                 .map(|_| (0..symbol_size).map(|_| rng.next_u64() as u8).collect())
                 .collect();
 
-            let enc1 = SystematicEncoder::new(&source, symbol_size, seed * 1000).unwrap();
-            let enc2 = SystematicEncoder::new(&source, symbol_size, seed * 1000).unwrap();
+            let enc1 = SystematicEncoder::new(&source, symbol_size, seed * 1000)
+                .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
+            let enc2 = SystematicEncoder::new(&source, symbol_size, seed * 1000)
+                .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
 
             // Verify repair symbols match
             for esi in 0..10u32 {
                 assert_eq!(
                     enc1.repair_symbol(esi),
                     enc2.repair_symbol(esi),
-                    "repair symbol {esi} must be deterministic for seed={seed}"
+                    "{context} repair symbol {esi} must be deterministic for seed={seed}"
                 );
             }
         }
@@ -1332,6 +1359,7 @@ mod fuzz {
     /// Deterministic fuzz with random seed sweep (for CI regression).
     #[test]
     fn fuzz_seed_sweep() {
+        let replay_ref = "replay:rq-u-systematic-fuzz-seed-sweep-v1";
         let k = 16;
         let symbol_size = 32;
 
@@ -1347,7 +1375,7 @@ mod fuzz {
                 drop_percent: 10,
             };
 
-            if run_fuzz_iteration(&config).is_ok() {
+            if run_fuzz_iteration(&config, "RQ-U-SEED-SWEEP-STRUCTURED", replay_ref).is_ok() {
                 successes += 1;
             }
         }
