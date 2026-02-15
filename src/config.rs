@@ -1054,7 +1054,7 @@ default_timeout_ms = 5000
         let config = parse_config(input, base).unwrap();
         assert_eq!(config.encoding.symbol_size, 512);
         assert!((config.encoding.repair_overhead - 1.2).abs() < f64::EPSILON);
-        assert_eq!(config.timeouts.default_timeout, Duration::from_millis(5000));
+        assert_eq!(config.timeouts.default_timeout, Duration::from_secs(5));
     }
 
     #[test]
