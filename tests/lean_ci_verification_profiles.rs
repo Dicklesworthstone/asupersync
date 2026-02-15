@@ -388,6 +388,23 @@ fn lean_smoke_failure_payload_routes_to_owners_deterministically() {
 }
 
 #[test]
+fn lean_smoke_gate_is_pr_scoped_and_profile_driven() {
+    for required_snippet in [
+        "Lean Smoke Gate (PR)",
+        "if: github.event_name == 'pull_request'",
+        "select(.name == \"smoke\")",
+        "Run Lean smoke profile commands",
+        "Upload Lean smoke artifacts",
+        "lean-smoke-artifacts",
+    ] {
+        assert!(
+            CI_WORKFLOW_YML.contains(required_snippet),
+            "ci workflow must include `{required_snippet}` in lean-smoke gate contract"
+        );
+    }
+}
+
+#[test]
 fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
     for required_snippet in [
         "Lean Full Gate (Main/Release)",

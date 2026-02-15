@@ -103,3 +103,54 @@ fn traceability_links_resolve_to_existing_theorems_and_rules() {
         );
     }
 }
+
+#[test]
+fn progress_and_canonical_ladder_rules_are_trace_linked() {
+    let ledger: Value =
+        serde_json::from_str(TRACEABILITY_LEDGER_JSON).expect("traceability ledger must parse");
+    let rows = ledger
+        .get("rows")
+        .and_then(Value::as_array)
+        .expect("rows must be an array");
+
+    let mut rule_to_theorems = std::collections::BTreeMap::<String, BTreeSet<String>>::new();
+    for row in rows {
+        let rule_id = row
+            .get("rule_id")
+            .and_then(Value::as_str)
+            .expect("row rule_id must be a string")
+            .to_string();
+        let theorem = row
+            .get("theorem")
+            .and_then(Value::as_str)
+            .expect("row theorem must be a string")
+            .to_string();
+        rule_to_theorems.entry(rule_id).or_default().insert(theorem);
+    }
+
+    let required_rule_theorem_pairs = [
+        ("step.cancelMasked", "cancel_masked_step"),
+        ("step.cancelAcknowledge", "cancel_ack_step"),
+        ("step.cancelFinalize", "cancel_finalize_step"),
+        ("step.cancelComplete", "cancel_complete_step"),
+        ("step.closeBegin", "close_begin_step"),
+        ("step.closeCancelChildren", "close_cancel_children_step"),
+        ("step.closeChildrenDone", "close_children_done_step"),
+        ("step.closeRunFinalizer", "close_run_finalizer_step"),
+        ("step.close", "close_complete_step"),
+        ("step.reserve", "reserve_creates_reserved"),
+        ("step.commit", "commit_resolves"),
+        ("step.abort", "abort_resolves"),
+        ("step.leak", "leak_marks_leaked"),
+    ];
+
+    for (rule, theorem) in required_rule_theorem_pairs {
+        let mapped = rule_to_theorems
+            .get(rule)
+            .unwrap_or_else(|| panic!("missing rule in traceability ledger: {rule}"));
+        assert!(
+            mapped.contains(theorem),
+            "traceability ledger missing required theorem {theorem} for rule {rule}"
+        );
+    }
+}
