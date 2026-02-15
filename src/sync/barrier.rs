@@ -70,9 +70,24 @@ impl Barrier {
     pub fn wait(&self, cx: &Cx) -> Result<BarrierWaitResult, BarrierWaitError> {
         cx.trace("barrier::wait starting");
 
+        if cx.checkpoint().is_err() {
+            cx.trace("barrier::wait cancelled before arrival");
+            return Err(BarrierWaitError::Cancelled);
+        }
+
         let mut state = self.state.lock().expect("barrier lock poisoned");
         let local_gen = state.generation;
         state.arrived += 1;
+
+        // Cancellation may race with arrival registration. If cancellation is now requested,
+        // roll back the arrival so cancelled callers never trip the barrier.
+        if cx.checkpoint().is_err() {
+            if state.arrived > 0 {
+                state.arrived -= 1;
+            }
+            cx.trace("barrier::wait cancelled at arrival");
+            return Err(BarrierWaitError::Cancelled);
+        }
 
         if state.arrived == self.parties {
             // Trip the barrier and advance the generation.
@@ -99,11 +114,6 @@ impl Barrier {
                 if state.arrived > 0 {
                     state.arrived -= 1;
                 }
-                // Notify others in case they are waiting for this arrival (which is now gone)
-                // Actually, decreasing arrived means we are further from target.
-                // We typically don't need to notify because nobody is waiting for *less* people.
-                // However, if we were the last one and we leave, we aren't the last one anymore.
-
                 cx.trace("barrier::wait cancelled");
                 return Err(BarrierWaitError::Cancelled);
             }
@@ -136,6 +146,7 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::Arc;
 
     fn init_test(name: &str) {
@@ -328,6 +339,64 @@ mod tests {
             leader_count
         );
         crate::test_complete!("barrier_cancel_does_not_trip");
+    }
+
+    #[test]
+    fn barrier_cancelled_last_arrival_does_not_trip_generation() {
+        init_test("barrier_cancelled_last_arrival_does_not_trip_generation");
+        let barrier = Arc::new(Barrier::new(2));
+        let (tx, rx) = mpsc::channel();
+
+        let worker_barrier = Arc::clone(&barrier);
+        let worker = std::thread::spawn(move || {
+            let cx: Cx = Cx::for_testing();
+            let result = worker_barrier.wait(&cx);
+            tx.send(result).expect("result send should succeed");
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let cx_cancel: Cx = Cx::for_testing();
+        cx_cancel.set_cancel_requested(true);
+        let err = barrier
+            .wait(&cx_cancel)
+            .expect_err("cancelled final arrival should not trip barrier");
+        crate::assert_with_log!(
+            err == BarrierWaitError::Cancelled,
+            "cancelled result for final arrival",
+            BarrierWaitError::Cancelled,
+            err
+        );
+
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            Ok(result) => {
+                panic!("barrier tripped unexpectedly after cancelled arrival: {result:?}")
+            }
+            Err(RecvTimeoutError::Disconnected) => panic!("worker result channel disconnected"),
+        }
+
+        let cx: Cx = Cx::for_testing();
+        let main_result = barrier
+            .wait(&cx)
+            .expect("barrier should trip on real arrival");
+        let worker_result = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should complete after real arrival")
+            .expect("worker wait should succeed");
+
+        worker.join().expect("worker thread failed");
+
+        let leader_count =
+            usize::from(main_result.is_leader()) + usize::from(worker_result.is_leader());
+        crate::assert_with_log!(
+            leader_count == 1,
+            "single leader after cancelled final arrival",
+            1usize,
+            leader_count
+        );
+
+        crate::test_complete!("barrier_cancelled_last_arrival_does_not_trip_generation");
     }
 
     #[test]

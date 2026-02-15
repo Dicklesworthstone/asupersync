@@ -375,7 +375,36 @@ impl Notified<'_> {
 impl Drop for Notified<'_> {
     fn drop(&mut self) {
         if self.state == NotifiedState::Waiting {
-            self.cleanup();
+            if let Some(index) = self.waiter_index.take() {
+                let mut waiters = self.notify.waiters.lock();
+
+                // Check if notify_one() selected us before we remove the entry.
+                let was_notified = index < waiters.entries.len() && waiters.entries[index].notified;
+
+                waiters.remove(index);
+
+                if was_notified {
+                    // We were marked notified by notify_one() but the future was
+                    // dropped before consuming it (e.g. cancelled by select!).
+                    // Pass the notification to the next waiter to prevent a lost
+                    // wakeup — same baton-passing pattern as LockFuture::drop.
+                    for entry in &mut waiters.entries {
+                        if !entry.notified && entry.waker.is_some() {
+                            entry.notified = true;
+                            if let Some(waker) = entry.waker.take() {
+                                drop(waiters);
+                                waker.wake();
+                                return;
+                            }
+                        }
+                    }
+                    // No active waiter found — re-store the notification so the
+                    // next call to notified().await receives it.
+                    self.notify
+                        .stored_notifications
+                        .fetch_add(1, Ordering::Release);
+                }
+            }
         }
     }
 }
